@@ -44,7 +44,7 @@
     "@deepseek-ai/dsh-brand": "workspace:^",
     "@deepseek-ai/dsh-util-values": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",
-    "eventsource-parser": "^3.1.0"
+    "eventsource-parser": "^4.0.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
