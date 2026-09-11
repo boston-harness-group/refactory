@@ -23,7 +23,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@shikijs/langs": "^4.3.1",
+    "@shikijs/langs": "^4.4.3",
     "@types/mdast": "^4.0.4",
     "anser": "^2.3.5",
     "clsx": "^2.0.0",
