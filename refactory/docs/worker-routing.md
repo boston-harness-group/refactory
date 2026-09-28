@@ -32,6 +32,36 @@ those fields. Use `refactory help --topic <package/mode>` to inspect actual node
 IDs and roles; custom modes may not call their coder `emit`. `role_routes` uses
 the same objects keyed by declared worker role. Node beats role beats run.
 
+A DSH worker runs a nested `dsh --profile headless` runtime, which cannot see
+provider profiles declared in another profile's patch (a gateway configured only
+on the web profile, say). Declare such provider routes with **`provider_config`**,
+an object keyed by provider name whose values are the nonsecret profiles the
+nested runtime's `llm-pi-ai` adapter accepts — endpoint, protocol, model catalog.
+Credentials are never values here: name the native-store reference with
+`apiKeyEnv`, exactly as the session's own provider configuration does.
+
+```json
+{
+  "worker_backend": "dsh",
+  "provider": "litellm",
+  "model": "rits/zai-org/glm-5-3",
+  "provider_config": {
+    "litellm": {
+      "apiKeyEnv": "LITELLM_API_KEY",
+      "api": "anthropic-messages",
+      "baseURL": "https://gateway.example/v1",
+      "models": [{"id": "rits/zai-org/glm-5-3", "name": "rits/zai-org/glm-5-3"}]
+    }
+  }
+}
+```
+
+`provider_config` follows the route-map replacement rule: an explicit empty object
+clears it, and a saved run or inherited child context keeps the map it was created
+with. The same field is accepted by CLI `open --provider-config`, and a GUI chat
+session passes its own selected provider/model to a run it opens, so the run's
+workers inherit the conversation's route instead of the nested runtime's default.
+
 For a new run the precedence is built-in defaults, environment selection, project
 file, selected immutable profile, then explicit launch options. Route maps replace
 the lower map as a whole, so explicit `{}` clears project role/node overrides.

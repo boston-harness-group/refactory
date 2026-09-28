@@ -131,6 +131,7 @@ class DshModelClient:
         permission_mode: str = "",
         role_routes: dict[str, Any] | None = None,
         node_routes: dict[str, Any] | None = None,
+        provider_config: dict[str, Any] | None = None,
         budget_ledger: str | Path | None = None,
         python_bin: str | Path | None = None,
         project: Path | None = None,
@@ -147,11 +148,13 @@ class DshModelClient:
                 "worker_backend": worker_backend, "provider": provider, "model": model,
                 "effort": effort, "permission_mode": permission_mode,
                 "role_routes": role_routes, "node_routes": node_routes,
+                "provider_config": provider_config,
             }.items() if value is not None and value != ""}, inherited=inherited)
             route = selected["settings"]
             worker_backend, provider, model, effort, permission_mode = (route[key] for key in
                 ("worker_backend", "provider", "model", "effort", "permission_mode"))
             role_routes, node_routes = route["role_routes"], route["node_routes"]
+            provider_config = route.get("provider_config") or None
             routing_provenance = inherited.get("routing_provenance", selected["provenance"])
             routes_resolved = True
         routing_provenance = routing_provenance or inherited.get("routing_provenance")
@@ -168,6 +171,7 @@ class DshModelClient:
         permission_mode = permission_mode or inherited_permission or "skip"
         role_routes = role_routes if role_routes is not None else inherited.get("role_routes")
         node_routes = node_routes if node_routes is not None else inherited.get("node_routes")
+        provider_config = provider_config if provider_config is not None else inherited.get("provider_config")
         runtime_root = runtime_root or inherited.get("runtime_root")
         dsh_cli = dsh_cli if dsh_cli is not None else inherited.get("dsh_cli")
         dsh_home = dsh_home or inherited.get("dsh_home")
@@ -181,6 +185,7 @@ class DshModelClient:
         self._permission_mode = permission_mode
         self._role_routes = copy.deepcopy(role_routes or {})
         self._node_routes = copy.deepcopy(node_routes or {})
+        self._provider_config = copy.deepcopy(provider_config or {})
         self._routing_provenance = copy.deepcopy(routing_provenance or {})
         self._node_id = ""
         self._role = "worker"
@@ -257,6 +262,7 @@ class DshModelClient:
             "worker_backend": self._worker_backend, "effort": self._effort,
             "permission_mode": self._permission_mode,
             "role_routes": copy.deepcopy(self._role_routes), "node_routes": copy.deepcopy(self._node_routes),
+            "provider_config": copy.deepcopy(self._provider_config),
             "budget_ledger": str(self._budget.path) if self._budget is not None else "",
         }
 
@@ -400,7 +406,7 @@ class DshModelClient:
         if self._worker_receipt is not None:
             from refactory_dsh.workers import write_patch
             patch = self._worker_receipt.with_suffix(".patch.yml")
-            write_patch(patch, self._runtime_root, self.route())
+            write_patch(patch, self._runtime_root, self.route(), provider_config=self._provider_config)
             cmd += ["--patch", str(patch)]
         if self._worker_backend == "dsh":
             if self._provider:

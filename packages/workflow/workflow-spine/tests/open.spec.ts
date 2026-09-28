@@ -241,9 +241,31 @@ function stepShell(workdir: string, log: string[], items: Array<Record<string, u
   }
 }
 
-/** The execution facts a tool call is made with: the session that owns it. */
+/**
+ * The execution facts a tool call is made with: the session that owns it. A real
+ * Session always folds `request/header` events, so the stub answers `undefined`
+ * (no header folded yet) rather than omitting the method the spine calls.
+ */
 function as(session: string): unknown {
-  return { agent: { session: { id: session } } as unknown as Agent }
+  return { agent: { session: { id: session, requestHeader: () => undefined } } as unknown as Agent }
+}
+
+/**
+ * The execution facts of a session whose model selection the run's workers
+ * should inherit: the folded request header, exactly as a live session folds
+ * `request/header` events, with the agent options as the fallback source.
+ */
+function asModel(session: string, selection: { provider?: string; model?: string } | undefined,
+                 options?: { provider?: string; model?: string }): unknown {
+  return {
+    agent: {
+      session: {
+        id: session,
+        requestHeader: () => (selection === undefined ? undefined : { config: selection }),
+      },
+      ...(options === undefined ? {} : { options }),
+    } as unknown as Agent,
+  }
 }
 
 async function call(ctx: Context, name: string, args: unknown = {}, exec: unknown = {}): Promise<unknown> {
@@ -264,6 +286,36 @@ describe('opening a graph at run time', () => {
     // The claim is live: the same session's next call works on the opened run.
     expect(await call(ctx, 'wf_next', {}, as('session-1')))
       .toMatchObject({ status: 'ready', nodes: [{ id: 'a' }] })
+  })
+
+  it('passes the session model selection to the open command, from the header first', async () => {
+    const run = scratch()
+    const graph = lower(run)
+    const log = join(scratch(), 'argv')
+    const ctx = await mount({ openCommand: openStub(run, graph, log) })
+
+    await call(ctx, 'wf_open', { mode: 'pkg/t', workdir: run }, asModel('session-1',
+      { provider: 'litellm', model: 'rits/zai-org/glm-5-3' }, { provider: 'stale', model: 'stale' }))
+
+    const argv = readFileSync(log, 'utf8').split('\n').filter(Boolean)
+    expect(argv).toContain('--provider')
+    expect(argv[argv.indexOf('--provider') + 1]).toBe('litellm')
+    expect(argv[argv.indexOf('--model') + 1]).toBe('rits/zai-org/glm-5-3')
+    // The agent's own options are the fallback when no header has been folded.
+    const fallback = join(scratch(), 'argv')
+    const ctx2 = await mount({ openCommand: openStub(run, graph, fallback) })
+    await call(ctx2, 'wf_open', { mode: 'pkg/t', workdir: run }, asModel('session-2', undefined,
+      { provider: 'litellm', model: 'rits/zai-org/glm-5-3' }))
+    const fallbackArgv = readFileSync(fallback, 'utf8').split('\n').filter(Boolean)
+    expect(fallbackArgv[fallbackArgv.indexOf('--provider') + 1]).toBe('litellm')
+    expect(fallbackArgv[fallbackArgv.indexOf('--model') + 1]).toBe('rits/zai-org/glm-5-3')
+    // A session with no selection at all passes neither flag, so the run keeps
+    // the console's own defaults.
+    const bare = join(scratch(), 'argv')
+    const ctx3 = await mount({ openCommand: openStub(run, graph, bare) })
+    await call(ctx3, 'wf_open', { mode: 'pkg/t', workdir: run }, as('session-3'))
+    expect(readFileSync(bare, 'utf8')).not.toContain('--provider')
+    expect(readFileSync(bare, 'utf8')).not.toContain('--model')
   })
 
   it('refuses a call before any run is open, naming the tool to call', async () => {

@@ -1092,6 +1092,15 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
         argv.push('--workdir', requestedPath)
+        // The run's workers inherit this session's model selection, so the person's
+        // choice follows the run instead of the nested runtimes' own defaults. The
+        // same selection the node-command `runEnv` reads, from the same sources:
+        // the request header the next request will compare against, then the
+        // agent's own options. An explicit project `refactory.workers.json` or
+        // launch override still outranks this in the console's own precedence.
+        const selection = session.requestHeader()?.config ?? exec.agent?.options
+        if (typeof selection?.provider === 'string' && selection.provider !== '') argv.push('--provider', selection.provider)
+        if (typeof selection?.model === 'string' && selection.model !== '') argv.push('--model', selection.model)
         for (const knob of args.knobs ?? []) argv.push('--knob', knob)
         if (args.intent !== undefined) argv.push(`--intent=${args.intent}`)
         const result = spawnSync(config.openCommand, argv, { encoding: 'utf8' })

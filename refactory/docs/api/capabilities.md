@@ -1671,6 +1671,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "provider_config": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--provider-config"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "object"
+    },
     "role_routes": {
       "default": null,
       "description": "",
@@ -1750,7 +1761,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Prepare a mode and resolved project worker context for graph execution. Chat uses wf_open with knobs, intent and an absolute workdir, then workflow tools drive the graph.",
-  "reviewed_schema": "f74c0d7281f3f46500118949e608c4f16c07e9b8a675c2a79baee970b19a78eb"
+  "reviewed_schema": "a7943a841396507067d718a2e348763e028db58edc79c140d0fbb48884aaf7e3"
 }
 ```
 
@@ -1804,6 +1815,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
+    "provider_config": {},
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
@@ -2265,7 +2277,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search.",
-  "reviewed_schema": "ce3053cdd05577c7558f8faafc3329f90c6851d2b10aeba2080dfd09a0a0d541"
+  "reviewed_schema": "17102bf328d155cddd7605188e1ee9e6239d15c594ccff3971225ed817bb3141"
 }
 ```
 
@@ -3047,6 +3059,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
+    "provider_config": {},
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
@@ -3522,7 +3535,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch.",
-  "reviewed_schema": "c6a0ba3a32bee7d3bd157bbdc028ea5d4b5919aa367c51c2c6723555d57dc7ed"
+  "reviewed_schema": "a0c76da2ae709ffa0528074d032f87c16435e3a380ecee6651608ed7302dc21e"
 }
 ```
 
@@ -4096,7 +4109,8 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
       "effort",
       "permission_mode",
       "role_routes",
-      "node_routes"
+      "node_routes",
+      "provider_config"
     ],
     "filename": "refactory.workers.json"
   },
@@ -4149,7 +4163,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
     }
   },
   "purpose": "Inspect effective project worker routing and provenance. Configure refactory.workers.json, CLI or panel; this read-only action never changes workers or the CEO model.",
-  "reviewed_schema": "84a551289daca9ed2f17696415b1bfb3943b6eb0f8521f3ee191b0ef02b7409a"
+  "reviewed_schema": "1266cac069beb590e7b5bd7861ed7d5f9dfc3c507ebb342c737186e7cffff9a9"
 }
 ```
 
@@ -4626,6 +4640,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
+    "provider_config": {},
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
@@ -5078,7 +5093,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity.",
-  "reviewed_schema": "045bce71b5c93b704b9c4afab3b023261340e41aaff22a9241dc3b261f76d779"
+  "reviewed_schema": "385980db8e51c67b856129633060a390a7d6487f55bda54639ba73670c44fd43"
 }
 ```
 

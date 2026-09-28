@@ -1152,7 +1152,7 @@ def _parser() -> argparse.ArgumentParser:
         opened.add_argument("--" + key.replace("_", "-"), default="")
     for key in ("max_elapsed_s", "max_tokens", "validation_reserve_s", "validation_reserve_tokens"):
         opened.add_argument("--" + key.replace("_", "-"), type=int if "tokens" in key else float, default=None)
-    for key in ("role_routes", "node_routes"):
+    for key in ("role_routes", "node_routes", "provider_config"):
         opened.add_argument("--" + key.replace("_", "-"), type=json.loads, default=None)
     opened.add_argument("--intent", default="", help="the user's purpose for this run's ledger")
     opened.add_argument(
@@ -1660,7 +1660,7 @@ def main(argv: list[str] | None = None) -> int:
                 workdir=args.workdir,
                 knobs=args.knob,
                 intent=args.intent,
-                model_context={key: getattr(args, key) for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes") if getattr(args, key)},
+                model_context={key: getattr(args, key) for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes", "provider_config") if getattr(args, key)},
                 resource_limits={key: getattr(args, key) for key in ("max_elapsed_s", "max_tokens", "validation_reserve_s", "validation_reserve_tokens") if getattr(args, key) is not None},
             )
         elif args.verb == "create":

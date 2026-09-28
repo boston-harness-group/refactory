@@ -120,6 +120,27 @@ def test_observer_keeps_nested_external_usage_incomplete_without_model_calls():
     subprocess.run(['node', str(Path(__file__).with_name('worker_observer_test.mjs'))], check=True)
 
 
+def test_worker_patch_carries_declared_provider_profiles(tmp_path):
+    """A declared provider route must ride the patch into the nested runtime."""
+    gateway = {"apiKeyEnv": "LITELLM_API_KEY", "api": "anthropic-messages",
+               "baseURL": "https://gateway.example/v1",
+               "models": [{"id": "gateway-model", "name": "gateway-model"}]}
+    route = DshModelClient(provider='gateway', model='gateway-model',
+                           provider_config={'gateway': gateway}).route()
+    workers.write_patch(tmp_path / 'with-provider.json', tmp_path, route, provider_config={'gateway': gateway})
+    rows = json.loads((tmp_path / 'with-provider.json').read_text())
+    row = next(entry for entry in rows if entry.get('id') == 'llm-pi-ai')
+    assert row['config'] == {'providers': {'gateway': gateway}}
+    # Without a declaration the patch composes exactly what it did before.
+    workers.write_patch(tmp_path / 'without-provider.json', tmp_path, DshModelClient().route())
+    assert not any(entry.get('id') == 'llm-pi-ai'
+                   for entry in json.loads((tmp_path / 'without-provider.json').read_text()))
+    # The composed real headless tree resolves the declared route, not NO_ADAPTER.
+    root = Path(__file__).resolve().parents[2]
+    subprocess.run(['node', str(Path(__file__).with_name('worker_provider_config_test.mjs')),
+                    str(root), str(tmp_path)], check=True)
+
+
 def test_partial_nested_usage_retains_known_total_but_refuses_token_work(tmp_path):
     budget = RunBudget.open(tmp_path, ResourceLimits(max_tokens=200))
     receipt = {'worker_id': 'dsh-one', 'usage': {'status': 'unavailable', 'tokens': None,

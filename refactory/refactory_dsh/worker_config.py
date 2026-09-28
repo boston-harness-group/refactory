@@ -11,7 +11,28 @@ from refactory_dsh.workers import resolve_route, validate_route
 
 FILENAME = "refactory.workers.json"
 ROUTE_FIELDS = ("worker_backend", "provider", "model", "effort", "permission_mode")
-FIELDS = (*ROUTE_FIELDS, "role_routes", "node_routes")
+FIELDS = (*ROUTE_FIELDS, "role_routes", "node_routes", "provider_config")
+
+
+def validate_provider_config(config: Any, *, origin: str = FILENAME) -> dict[str, Any]:
+    """Validate a nonsecret provider-profile map: provider route name to profile.
+
+    A profile is what a nested DSH runtime's ``llm-pi-ai`` row accepts: endpoint,
+    protocol and model catalog, with credentials named by ``apiKeyEnv`` reference
+    and never carried as values. Whole-shape validation stays with the nested
+    runtime, which fails loud on a malformed row; this rejects what cannot be a
+    route map at all and anything that looks like a pasted credential.
+    """
+    if not isinstance(config, dict) or any(not isinstance(k, str) or not k for k in config):
+        raise ValueError(f"{origin}: provider_config must be an object keyed by nonempty provider names")
+    for name, profile in config.items():
+        if not isinstance(profile, dict):
+            raise ValueError(f"{origin}: provider_config.{name} must be an object")
+        if "apiKey" in profile or "api_key" in profile:
+            raise ValueError(
+                f"{origin}: provider_config.{name} carries a credential value; "
+                "name the native-store reference with apiKeyEnv instead")
+    return config
 
 
 def validate(settings: dict[str, Any]) -> None:
@@ -29,6 +50,8 @@ def validate(settings: dict[str, Any]) -> None:
                 resolve_route(base, node=name, node_routes={name: override})
             except ValueError as error:
                 raise ValueError(f"{FILENAME}: {field}.{name}: {error}") from error
+    if "provider_config" in settings:
+        validate_provider_config(settings["provider_config"])
 
 
 def resolve(project: Path, overrides: dict[str, Any] | None = None, *,
@@ -46,7 +69,7 @@ def resolve(project: Path, overrides: dict[str, Any] | None = None, *,
         raise ValueError("REFACTORY_WORKER_CONTEXT must contain an object")
     route: dict[str, Any] = {"worker_backend": "dsh", "provider": "", "model": "",
                             "effort": "", "permission_mode": "skip"}
-    maps: dict[str, Any] = {"role_routes": {}, "node_routes": {}}
+    maps: dict[str, Any] = {"role_routes": {}, "node_routes": {}, "provider_config": {}}
     sources = {key: "default" for key in FIELDS}
     layers: list[tuple[str, dict[str, Any]]] = []
     file_info: dict[str, Any] = {"path": str(project / FILENAME), "loaded": False}

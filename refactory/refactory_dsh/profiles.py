@@ -83,6 +83,11 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     for key in ("knobs", "role_routes", "node_routes"):
         if not isinstance(result[key], dict):
             raise ProfileError(f"{key} must be an object")
+    from refactory_dsh.worker_config import validate_provider_config
+    try:
+        validate_provider_config(result.get("provider_config") or {}, origin="profile")
+    except ValueError as error:
+        raise ProfileError(str(error)) from error
     from refactory_dsh.workers import resolve_route, validate_route
     route = {key: result[key] for key in ("worker_backend", "provider", "model", "effort")}
     route["permission_mode"] = result["permission_mode"]
@@ -269,7 +274,9 @@ def add_arguments(parser: Any) -> None:
     """All launch surfaces parse this same optional configuration vocabulary."""
     for key, value in defaults().items():
         flag = "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
-        if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes"):
+        # provider_config travels in the project file and saved profile
+        # snapshots, not as a command-line object.
+        if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config"):
             continue
         kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key == "max_tokens" else str
         parser.add_argument(flag, dest=key, type=kind, default=None)

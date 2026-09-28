@@ -118,12 +118,21 @@ def permission_patch(route: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def write_patch(path: Path, runtime_root: Path, route: dict[str, Any]) -> None:
+def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
+                provider_config: dict[str, Any] | None = None) -> None:
     """Compose installed DSH services, never a parallel agent wire protocol."""
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
     rows.extend(permission_patch(route))
+    if route.get('worker_backend', 'dsh') == 'dsh' and provider_config:
+        # A nested runtime boots the headless profile, which cannot see provider
+        # profiles declared in another profile's patch (the web session's, say).
+        # Declared provider routes ride the worker patch so the same selection is
+        # resolvable in the nested composition; credentials stay in the native
+        # store their apiKeyEnv names. The row targets the dormant base llm-pi-ai
+        # entry the way a user's own profile patch does.
+        rows.append({'id': 'llm-pi-ai', 'config': {'providers': provider_config}})
     if route['worker_backend'] != 'dsh':
         package = PACKAGES[route['worker_backend']]
         provider = runtime_root / 'node_modules' / package

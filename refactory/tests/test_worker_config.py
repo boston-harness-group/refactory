@@ -140,3 +140,55 @@ def test_direct_mode_resume_uses_recorded_route_not_a_changed_file(tmp_path, mon
     FixedStep.resume(run, model=DshModelClient(project=tmp_path))
     assert seen[0]['worker_backend'] == 'codex'
     assert seen[0]['permission_mode'] == 'default'
+
+
+GATEWAY = {"apiKeyEnv": "LITELLM_API_KEY", "api": "anthropic-messages",
+           "baseURL": "https://gateway.example/v1",
+           "models": [{"id": "gateway-model", "name": "gateway-model"}]}
+
+
+def test_provider_config_flows_to_context_and_worker_specs(tmp_path):
+    write(tmp_path, {'provider': 'gateway', 'model': 'gateway-model',
+                     'provider_config': {'gateway': GATEWAY}})
+    client = DshModelClient(project=tmp_path)
+    assert client.context()['provider_config'] == {'gateway': GATEWAY}
+    assert client.context()['routing_provenance']['fields']['provider_config'] == 'project-file'
+    # The declared route survives the subprocess boundary: a worker spec rebuilt
+    # from the saved context resolves the same provider profile.
+    rebuilt = DshModelClient(**client.context())
+    assert rebuilt.context()['provider_config'] == {'gateway': GATEWAY}
+
+
+def test_provider_config_survives_saved_and_nested_contexts(tmp_path, monkeypatch):
+    project, elsewhere = tmp_path / 'project', tmp_path / 'artifact'
+    write(project, {'provider_config': {'gateway': GATEWAY}})
+    saved = DshModelClient(project=project).context()
+    write(project, {'provider_config': {'other': GATEWAY}})
+    write(elsewhere, {'provider_config': {'wrong': GATEWAY}})
+    monkeypatch.setenv('REFACTORY_WORKER_CONTEXT', json.dumps(saved))
+    assert DshModelClient().context()['provider_config'] == {'gateway': GATEWAY}
+    monkeypatch.delenv('REFACTORY_WORKER_CONTEXT')
+    assert DshModelClient(project=project).context()['provider_config'] == {'other': GATEWAY}
+
+
+def test_explicit_launch_clears_project_provider_config(tmp_path):
+    write(tmp_path, {'provider_config': {'gateway': GATEWAY}})
+    # Route maps replace their lower layer as a whole, and so does the
+    # provider-profile map: an explicit empty object is a real choice.
+    explicit = DshModelClient(project=tmp_path, provider_config={})
+    assert explicit.context()['provider_config'] == {}
+    assert DshModelClient(project=tmp_path, provider_config={'launch': GATEWAY}).context() \
+        ['provider_config'] == {'launch': GATEWAY}
+
+
+@pytest.mark.parametrize('settings, match', [
+    ({'provider_config': []}, 'must be an object keyed by nonempty provider names'),
+    ({'provider_config': {'': GATEWAY}}, 'must be an object keyed by nonempty provider names'),
+    ({'provider_config': {'gateway': 'https://gateway.example'}}, 'provider_config.gateway must be an object'),
+    ({'provider_config': {'gateway': {'apiKey': 'not-a-real-key'}}}, 'credential value'),
+    ({'provider_config': {'gateway': {'api_key': 'not-a-real-key'}}}, 'credential value'),
+])
+def test_invalid_provider_config_never_falls_back(tmp_path, settings, match):
+    write(tmp_path, settings)
+    with pytest.raises(ValueError, match=match):
+        DshModelClient(project=tmp_path)

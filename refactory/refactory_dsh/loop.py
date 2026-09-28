@@ -183,6 +183,7 @@ class LoopConfig:
     permission_mode: str = "skip"
     role_routes: dict[str, Any] = dataclasses.field(default_factory=dict)
     node_routes: dict[str, Any] = dataclasses.field(default_factory=dict)
+    provider_config: dict[str, Any] = dataclasses.field(default_factory=dict)
     max_elapsed_s: float | None = None
     max_tokens: int | None = None
     validation_reserve_s: float = 0
@@ -317,7 +318,7 @@ class Loop(OuterLoop):
         # clients constructed by the CLI do.
         if callable(getattr(model, "context", None)):
             client_context = model.context()
-            for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes"):
+            for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes", "provider_config"):
                 if key in client_context:
                     setattr(self.config, key, client_context[key])
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
@@ -2575,7 +2576,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = snapshot["settings"]
         from refactory_dsh.model import DshModelClient
         model = DshModelClient(routes_resolved=True, routing_provenance=(snapshot.get("worker_configuration") or {}).get("provenance"), **{key: settings[key] for key in
-            ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes")
+            ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes", "provider_config")
             })
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
