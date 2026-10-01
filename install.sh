@@ -21,8 +21,8 @@
 #   * `.venv` from the root `pyproject.toml` — the default (`dev`) dependency
 #     group only;
 #   * the two DSH profiles this checkout owns — `graph`, which the Python glue
-#     runs modes on, and `web`, which the GUI boots and which needs both the `ceo`
-#     preset bundle and the web-surface bundle — idempotently
+#     runs modes on, and `refactory-web`, which the GUI boots over the harness's
+#     own `web` template (the harness's `web` is never written to) — idempotently
 #     (`REFACTORY_SKIP_DSH_PROFILE=1` skips both).
 #
 # It deliberately leaves out the two opt-in, non-shipping pieces, and the CI gate in
@@ -156,43 +156,40 @@ fi
 #    the bundle — so a fresh clone that skips this can run every mode through the
 #    walker and still fail the first time anything reaches DSH. The launcher is
 #    the pinned harness the root manifest installed, not a copy in this repo.
-#    Two profiles are owned here: `graph`, which the Python glue runs modes on,
-#    and `web`, which the GUI boots and which needs both the `ceo` preset bundle
-#    and the web-surface bundle — without the preset every session it creates
-#    without naming one stops with `agent-preset/not-found`, and without the
-#    surface the console and picker rows never mount. Idempotent: a profile that
-#    already carries a bundle is left alone, so a user's own profile is never
-#    overwritten. `REFACTORY_SKIP_DSH_PROFILE=1` skips both for someone who only
-#    wants the Python side and does not want ~/.dsh touched.
+#    This checkout owns two profiles: `graph`, which the Python glue runs modes
+#    on, and `refactory-web`, which the GUI boots over the harness's own `web`
+#    template. The harness's `web` profile is never written to. Without the
+#    preset layer every session the GUI creates without naming one stops with
+#    `agent-preset/not-found`, and without the surface layer the console and
+#    picker rows never mount. The plan comes from `dsh_profile`, so this script
+#    cannot drift from the check `doctor` makes. Idempotent: a profile that
+#    already carries a layer is left alone. `REFACTORY_SKIP_DSH_PROFILE=1` skips
+#    it for someone who only wants the Python side and does not want ~/.dsh touched.
 DSH="$HERE/node_modules/.bin/dsh"
 if [ "${REFACTORY_SKIP_DSH_PROFILE:-}" = "1" ]; then
-  echo "  DSH profiles 'graph'/'web': skipped (REFACTORY_SKIP_DSH_PROFILE=1)"
+  echo "  DSH profiles: skipped (REFACTORY_SKIP_DSH_PROFILE=1)"
 else
-  # Which profile bundles are short, and which bundle directory supplies each,
-  # both come from `dsh_profile` so this script cannot drift from the check
-  # `doctor` and the runner make. The bundle directory is derived from the bundle
-  # NAME, not from the profile name: `web` is a shipped harness template, and its
-  # bundles are `refactory-presets` and `refactory-web`. A profile may be short
-  # more than one bundle, so the rows are grouped into one line per profile and
-  # its bundles are installed under a single announcement.
-  MISSING="$("$VENV/bin/python" -c '
-from refactory_dsh import dsh_profile
-short = {}
-for profile, bundle, _ in dsh_profile.missing_bundles():
-    short.setdefault(profile, []).append(dsh_profile.bundle_directory(bundle))
-for profile, directories in short.items():
-    print(profile, *directories)
-')"
-  if [ -z "$MISSING" ]; then
-    echo "  DSH profiles 'graph'/'web': already present"
+  # The plan is `dsh_profile.provision_plan()`: `init` copies a shipped template's
+  # bundle list, `add` installs one bundle from the checkout. Executing its rows
+  # rather than iterating a second copy of the profile list in shell is what keeps
+  # the composition in one place.
+  PLAN="$("$VENV/bin/python" -c 'from refactory_dsh import dsh_profile; print(dsh_profile.render_plan(), end="")')"
+  if [ -z "$PLAN" ]; then
+    echo "  DSH profiles: already present"
   else
-    while read -r profile directories; do
-      [ -n "$profile" ] || continue
-      echo "  DSH profile '$profile': creating (machine state, once per machine)"
-      for directory in $directories; do
-        "$DSH" plugin --profile "$profile" add "$HERE/packages/bundle/$directory"
-      done
-    done <<<"$MISSING"
+    while IFS=$'\t' read -r kind profile value; do
+      [ -n "$kind" ] || continue
+      case "$kind" in
+        init)
+          echo "  DSH profile '$profile': creating from the '$value' template (machine state, once per machine)"
+          "$DSH" --profile "$profile" --from-default-profile "$value" --dump-config >/dev/null
+          ;;
+        add)
+          echo "  DSH profile '$profile': adding the '$value' layer"
+          "$DSH" plugin --profile "$profile" add "$HERE/packages/bundle/$value"
+          ;;
+      esac
+    done <<<"$PLAN"
   fi
 fi
 

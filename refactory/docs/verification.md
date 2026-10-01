@@ -43,9 +43,10 @@ a contributor reads rather than a gate that fails.
 
 ## The web surface and the pins it needs
 
-`refactory ui` runs the pinned harness's `web` profile. The web surface is a
-refactory-owned bundle, and one pnpm patch in `patches/` supplies a model-route
-change, declared under `patchedDependencies` in `pnpm-workspace.yaml`:
+`refactory ui` boots the re:factory-owned `refactory-web` profile, which is initialized
+from the pinned harness's `web` template. The web surface is a refactory-owned bundle, and
+one pnpm patch in `patches/` supplies a model-route change, declared under
+`patchedDependencies` in `pnpm-workspace.yaml`:
 
 - `@deepseek-ai/dsh-refactory-web` is the browser surface layer. It mounts the
   `refactory-console` Host service, the `ui-refactory` right-sidebar picker and the
@@ -81,18 +82,40 @@ not this checkout.
 
 Two DSH profiles are machine state this checkout owns, and both are created by
 `./install.sh` (or healed on boot by `./refactory-dsh`): `graph`, which the Python glue
-runs modes on, and `web`, the pinned harness's own template plus its two refactory
-bundles. `refactory doctor` reports one row per profile and names the exact
-`dsh plugin add` command for whichever bundle is short — the web profile without the
-preset bundle has no `ceo` preset while the composition still names `ceo` as the roster
-default, so every session the GUI creates without naming one would stop with
-`agent-preset/not-found`; without the web bundle the console and picker rows never
-mount, so the GUI boots with no refactory panel.
-`pnpm run test:acceptance` boots a throwaway web profile with both checkout bundles
-and checks that the preset reaches the roster through configured roots, including that
-the installed `@deepseek-ai/dsh-agent-presets` tree ships no `ceo` of its own, and that
-the web bundle mounts the console, picker and brand rows with a `repoRoot` resolved to
-the checkout (`refactoryConsole/project`) and a live mode catalogue
+runs modes on, and `refactory-web`, which the GUI boots. `refactory-web` is **not** the
+harness's `web`: it is initialized from that shipped template with `dsh --profile
+refactory-web --from-default-profile web --dump-config`, so the harness's own `web`
+profile keeps exactly its template bundle list and a plain `dsh --profile web` session
+sees none of re:factory's preset, console or brand rows.
+
+`dsh_profile.py` owns a layer table (`graph`, the surface-independent `presets`, the
+browser `web`) and a target table over it (`graph`, `refactory-web`, and the attached
+`martty`), emits the ordered `init`/`add` plan that `install.sh` and `./refactory-dsh`
+both execute, and detects a harness profile an older install mutated. `refactory doctor`
+reports one row per target and names the exact command for whichever layer is short —
+`refactory-web` without the preset layer has no `ceo` preset while the composition still
+names `ceo` as the roster default, so every session the GUI creates without naming one
+would stop with `agent-preset/not-found`; without the web layer the console and picker
+rows never mount, so the GUI boots with no refactory panel. A profile an older install
+polluted is reported with its migration, `dsh plugin --profile web remove
+@deepseek-ai/dsh-refactory-presets @deepseek-ai/dsh-refactory-web`; doctor states it
+rather than rewriting machine state.
+
+The second surface is **attached**, not owned. re:factory cannot recreate Martty's stack
+(`dsh-base` + `martty` + `martty-balance`, the last a machine-local link), so it never
+creates or mutates that profile. The documented path is to add the surface-independent
+layer to the profile the operator already has: `dsh plugin --profile martty add
+<checkout>/packages/bundle/refactory-presets`. That is the preset and the workflow tools
+only; `@deepseek-ai/dsh-refactory-web` is a browser surface and is not mounted under
+Martty. `refactory doctor` reports the missing layer once `martty` exists, and stays
+silent about the profile otherwise.
+
+`pnpm run test:acceptance` runs that plan into a throwaway home, checks the harness's own
+`web` template is exactly as the template defines it and mounts none of re:factory's rows,
+then boots `refactory-web` and checks the preset reaches the roster through configured
+roots, including that the installed `@deepseek-ai/dsh-agent-presets` tree ships no `ceo`
+of its own, and that the web bundle mounts the console, picker and brand rows with a
+`repoRoot` resolved to the checkout (`refactoryConsole/project`) and a live mode catalogue
 (`refactoryConsole/modes`).
 
 The gateway discovers the console at runtime from the `@Remote` markers on the mounted

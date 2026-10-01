@@ -1,10 +1,16 @@
-"""The DSH profile a mode runs on is machine state, and its absence is legible.
+"""The DSH profiles this checkout composes are machine state, and a gap is legible.
 
 Issue #45: `dsh plugin --profile graph add <package>` creates the profile, nothing
 in the install path did, and the first mode run on DSH stopped with a message about
 a missing *profile* that reads as a packaging bug. These assert the three states a
-caller has to tell apart -- absent, present without the bundle, ready -- and that a
+caller has to tell apart -- absent, present without a layer, ready -- and that a
 run refuses before spawning rather than letting the child produce the bare error.
+
+Issue #277: the install path appended re:factory's bundles to the harness's shipped
+`web` profile. These also assert the redesign: the GUI profile is a re:factory-owned
+`refactory-web` initialized from the `web` template, the harness's `web` is never a
+target, and the plan `install.sh`, the launcher and `doctor` share is emitted from
+one table rather than a second copy in shell.
 """
 
 from __future__ import annotations
@@ -27,6 +33,21 @@ def _profile(home: Path, name: str, bundles: list[str]) -> Path:
         json.dumps({"name": f"dsh-profile-{name}", "dsh": {"profile": {"bundles": bundles}}})
     )
     return directory
+
+
+def _ready(home: Path) -> None:
+    """Every owned target ready: graph and a fully layered refactory-web."""
+    _profile(home, "graph", ["@deepseek-ai/dsh-base", dsh_profile.GRAPH_BUNDLE])
+    _profile(
+        home,
+        dsh_profile.GUI_PROFILE,
+        [
+            "@deepseek-ai/dsh-base",
+            "@deepseek-ai/dsh-web-app",
+            dsh_profile.PRESETS_BUNDLE,
+            dsh_profile.WEB_SURFACE_BUNDLE,
+        ],
+    )
 
 
 def test_a_missing_profile_names_the_command_and_the_reason(tmp_path, monkeypatch):
@@ -70,16 +91,50 @@ def test_a_blank_dsh_home_falls_back_to_the_default(monkeypatch):
     assert dsh_profile.dsh_home() == Path.home() / ".dsh"
 
 
-def test_the_web_profile_names_the_preset_bundle_not_a_directory_called_web():
+def test_the_gui_profile_names_the_preset_bundle_not_a_directory_called_web():
     """The bundle directory is derived from the bundle NAME, not the profile name.
 
-    `graph` and its bundle happened to line up, so the old code derived the path
-    from the profile name and got away with it. The web profile's bundle is
-    `refactory-presets`; deriving `packages/bundle/web` would point at nothing.
+    The GUI profile is `refactory-web` but its first layer is `refactory-presets`;
+    deriving `packages/bundle/refactory-web` from the profile name would install
+    the wrong bundle under the right label.
     """
-    command = dsh_profile.add_command(dsh_profile.WEB_PROFILE)
-    assert command.startswith("dsh plugin --profile web add ")
+    command = dsh_profile.add_command(dsh_profile.GUI_PROFILE)
+    assert command.startswith("dsh plugin --profile refactory-web add ")
     assert command.endswith(str(REPO_ROOT / "packages" / "bundle" / "refactory-presets"))
+
+
+def test_the_gui_profile_initializes_from_the_harness_web_template():
+    """The owned GUI profile copies the template; it does not replace it.
+
+    `dsh plugin add` alone would initialize a bare profile with none of the
+    harness's `web` bundles, so the template init has to come first and name the
+    shipped template. The harness's own `web` profile is never written to.
+    """
+    command = dsh_profile.init_command(dsh_profile.GUI_PROFILE)
+    assert command == "dsh --profile refactory-web --from-default-profile web --dump-config"
+
+
+def test_a_template_backed_target_without_a_template_initializes_from_add():
+    """`graph` has no shipped template, so its first `dsh plugin add` creates it."""
+    assert dsh_profile.init_command(dsh_profile.GRAPH_PROFILE) == dsh_profile.add_command(
+        dsh_profile.GRAPH_PROFILE
+    )
+
+
+def test_the_harness_web_template_is_not_a_target():
+    """The profile the old install mutated is not composed by this checkout."""
+    assert dsh_profile.WEB_TEMPLATE not in {entry.profile for entry in dsh_profile.TARGETS}
+    with pytest.raises(KeyError):
+        dsh_profile.add_command(dsh_profile.WEB_TEMPLATE)
+
+
+def test_a_missing_owned_profile_names_the_template_init(tmp_path, monkeypatch):
+    """Absent-and-template-backed is fixed by `init` first, then the layer add."""
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "home"))
+    problem = dsh_profile.requirement(dsh_profile.GUI_PROFILE, dsh_profile.PRESETS_BUNDLE)
+    assert problem is not None
+    assert dsh_profile.init_command(dsh_profile.GUI_PROFILE) in problem
+    assert "--from-default-profile web" in problem
 
 
 def test_an_unowned_profile_is_an_error_not_a_guess():
@@ -92,91 +147,179 @@ def test_an_unowned_profile_is_an_error_not_a_guess():
     with pytest.raises(KeyError):
         dsh_profile.add_command("integration")
     with pytest.raises(KeyError):
-        # A bundle the profile does not own is refused too, not turned into a path.
-        dsh_profile.add_command(dsh_profile.WEB_PROFILE, dsh_profile.GRAPH_BUNDLE)
-    assert dsh_profile.bundle_directory(dsh_profile.WEB_BUNDLE) == "refactory-presets"
+        # A bundle the profile does not compose is refused too, not turned into a path.
+        dsh_profile.add_command(dsh_profile.GUI_PROFILE, dsh_profile.GRAPH_BUNDLE)
+    assert dsh_profile.bundle_directory(dsh_profile.PRESETS_BUNDLE) == "refactory-presets"
     assert dsh_profile.bundle_directory(dsh_profile.WEB_SURFACE_BUNDLE) == "refactory-web"
     assert dsh_profile.bundle_directory(dsh_profile.GRAPH_BUNDLE) == "graph"
 
 
-def test_the_web_profile_owns_both_of_its_bundles():
+def test_the_gui_target_composes_both_of_its_layers():
     """The preset and the surface are separate layers, and both are installed."""
-    graph = dsh_profile.add_command(dsh_profile.WEB_PROFILE, dsh_profile.WEB_BUNDLE)
-    surface = dsh_profile.add_command(dsh_profile.WEB_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE)
-    assert graph.endswith(str(REPO_ROOT / "packages" / "bundle" / "refactory-presets"))
+    presets = dsh_profile.add_command(dsh_profile.GUI_PROFILE, dsh_profile.PRESETS_BUNDLE)
+    surface = dsh_profile.add_command(dsh_profile.GUI_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE)
+    assert presets.endswith(str(REPO_ROOT / "packages" / "bundle" / "refactory-presets"))
     assert surface.endswith(str(REPO_ROOT / "packages" / "bundle" / "refactory-web"))
-    assert dsh_profile.add_command(dsh_profile.WEB_PROFILE) == graph, (
-        "omitting the bundle keeps the long-standing command for the first owned bundle"
+    assert dsh_profile.add_command(dsh_profile.GUI_PROFILE) == presets, (
+        "omitting the layer keeps the long-standing command for the first layer"
     )
 
 
-def test_the_web_profile_without_the_preset_bundle_is_reported(tmp_path, monkeypatch):
-    """A `web` profile that exists but lacks the preset bundle is a gap, not ready.
+def test_the_gui_profile_without_the_preset_layer_is_reported(tmp_path, monkeypatch):
+    """A profile that exists but lacks the preset layer is a gap, not ready.
 
-    This is the state a GUI lands in when the bundle is never installed: the
+    This is the state a GUI lands in when the layer is never installed: the
     composition still names `ceo` as the roster default and the profile has no
     `ceo` preset, so every session created without naming one stops.
     """
     home = tmp_path / "home"
-    _profile(home, "web", ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"])
+    _profile(home, dsh_profile.GUI_PROFILE, ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"])
     monkeypatch.setenv("DSH_HOME", str(home))
-    problem = dsh_profile.requirement(dsh_profile.WEB_PROFILE, dsh_profile.WEB_BUNDLE)
+    problem = dsh_profile.requirement(dsh_profile.GUI_PROFILE, dsh_profile.PRESETS_BUNDLE)
     assert problem is not None
-    assert dsh_profile.WEB_BUNDLE in problem
-    assert not dsh_profile.is_ready(dsh_profile.WEB_PROFILE, dsh_profile.WEB_BUNDLE)
+    assert dsh_profile.PRESETS_BUNDLE in problem
+    assert not dsh_profile.is_ready(dsh_profile.GUI_PROFILE, dsh_profile.PRESETS_BUNDLE)
 
 
-def test_missing_bundles_reports_each_profile_that_is_short(tmp_path, monkeypatch):
-    """Both profiles are owned here, and the answer says which one is unready.
+def test_the_gui_profile_without_the_surface_layer_is_reported(tmp_path, monkeypatch):
+    """The preset alone is not a ready GUI profile.
 
-    The web profile owns two bundles — the preset and the web surface — so an
-    absent profile yields one gap per bundle it will need, in declaration order.
-    """
-    home = tmp_path / "home"
-    _profile(home, "graph", ["@deepseek-ai/dsh-base", dsh_profile.GRAPH_BUNDLE])
-    monkeypatch.setenv("DSH_HOME", str(home))
-    gaps = dsh_profile.missing_bundles()
-    assert [profile for profile, _bundle, _why in gaps] == ["web", "web"], gaps
-    assert [bundle for _profile, bundle, _why in gaps] == [
-        dsh_profile.WEB_BUNDLE,
-        dsh_profile.WEB_SURFACE_BUNDLE,
-    ], "each gap names the bundle it needs"
-
-
-def test_missing_bundles_is_empty_when_both_profiles_are_ready(tmp_path, monkeypatch):
-    """Ready means no work: `install.sh` and the launcher both branch on this."""
-    home = tmp_path / "home"
-    _profile(home, "graph", ["@deepseek-ai/dsh-base", dsh_profile.GRAPH_BUNDLE])
-    _profile(
-        home,
-        "web",
-        ["@deepseek-ai/dsh-base", dsh_profile.WEB_BUNDLE, dsh_profile.WEB_SURFACE_BUNDLE],
-    )
-    monkeypatch.setenv("DSH_HOME", str(home))
-    assert dsh_profile.missing_bundles() == []
-
-
-def test_the_web_profile_without_the_surface_bundle_is_reported(tmp_path, monkeypatch):
-    """The preset alone is not a ready web profile.
-
-    Without the surface bundle the console and picker rows never mount, so the GUI
+    Without the surface layer the console and picker rows never mount, so the GUI
     boots with no refactory panel even though the `ceo` preset resolves. The gap
     must name that bundle and the command that installs exactly it.
     """
     home = tmp_path / "home"
     _profile(home, "graph", ["@deepseek-ai/dsh-base", dsh_profile.GRAPH_BUNDLE])
-    _profile(home, "web", ["@deepseek-ai/dsh-base", dsh_profile.WEB_BUNDLE])
+    _profile(
+        home,
+        dsh_profile.GUI_PROFILE,
+        ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", dsh_profile.PRESETS_BUNDLE],
+    )
     monkeypatch.setenv("DSH_HOME", str(home))
     gaps = dsh_profile.missing_bundles()
     assert [(profile, bundle) for profile, bundle, _why in gaps] == [
-        ("web", dsh_profile.WEB_SURFACE_BUNDLE)
+        (dsh_profile.GUI_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE)
     ], gaps
     assert dsh_profile.add_command(
-        dsh_profile.WEB_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE
+        dsh_profile.GUI_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE
     ) in gaps[0][2]
+
+
+def test_missing_bundles_reports_each_owned_target_that_is_short(tmp_path, monkeypatch):
+    """Ready targets stay out, and every owned layer a target needs is a row."""
+    home = tmp_path / "home"
+    _profile(home, "graph", ["@deepseek-ai/dsh-base", dsh_profile.GRAPH_BUNDLE])
+    monkeypatch.setenv("DSH_HOME", str(home))
+    gaps = dsh_profile.missing_bundles()
+    assert [(profile, bundle) for profile, bundle, _why in gaps] == [
+        (dsh_profile.GUI_PROFILE, dsh_profile.PRESETS_BUNDLE),
+        (dsh_profile.GUI_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE),
+    ], gaps
+
+
+def test_missing_bundles_is_empty_when_every_owned_target_is_ready(tmp_path, monkeypatch):
+    """Ready means no work: `install.sh` and the launcher both branch on this."""
+    home = tmp_path / "home"
+    _ready(home)
+    monkeypatch.setenv("DSH_HOME", str(home))
+    assert dsh_profile.missing_bundles() == []
+
+
+def test_the_provision_plan_initializes_the_template_before_adding_layers(tmp_path, monkeypatch):
+    """A fresh machine gets the template init before the GUI layers, graph after.
+
+    The order is the plan's contract: `dsh plugin add` on a profile with no
+    directory initializes a *bare* profile, so the template init has to precede
+    the layer adds or `dsh-web-app` would never be listed and the console and
+    picker rows would not mount.
+    """
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "home"))
+    plan = dsh_profile.provision_plan()
+    assert [tuple(step) for step in plan] == [
+        ("add", "graph", "graph"),
+        ("init", "refactory-web", "web"),
+        ("add", "refactory-web", "refactory-presets"),
+        ("add", "refactory-web", "refactory-web"),
+    ], plan
+    assert dsh_profile.render_plan(plan).splitlines() == [
+        "add\tgraph\tgraph",
+        "init\trefactory-web\tweb",
+        "add\trefactory-web\trefactory-presets",
+        "add\trefactory-web\trefactory-web",
+    ]
+
+
+def test_the_provision_plan_is_empty_when_every_owned_target_is_ready(tmp_path, monkeypatch):
+    """A provisioned machine must not be touched at boot."""
+    home = tmp_path / "home"
+    _ready(home)
+    monkeypatch.setenv("DSH_HOME", str(home))
+    assert dsh_profile.provision_plan() == []
+    assert dsh_profile.render_plan() == ""
+
+
+def test_readiness_gaps_reports_an_installed_attached_target_but_not_an_absent_one(
+    tmp_path, monkeypatch
+):
+    """An attached target is the operator's; a profile that is absent is not a gap.
+
+    re:factory does not create or mutate a profile it does not own, so an absent
+    Martty profile must not read as a broken install while an installed one that
+    lacks the layer must be reported with the command that adds it.
+    """
+    home = tmp_path / "home"
+    _ready(home)
+    monkeypatch.setenv("DSH_HOME", str(home))
+    assert dsh_profile.readiness_gaps() == []
+    _profile(home, dsh_profile.MARTTY_PROFILE, ["@deepseek-ai/dsh-base"])
+    gaps = dsh_profile.readiness_gaps()
+    assert [(profile, bundle) for profile, bundle, _why in gaps] == [
+        (dsh_profile.MARTTY_PROFILE, dsh_profile.PRESETS_BUNDLE)
+    ]
     assert dsh_profile.add_command(
-        dsh_profile.WEB_PROFILE, dsh_profile.WEB_SURFACE_BUNDLE
-    ).endswith(str(REPO_ROOT / "packages" / "bundle" / "refactory-web"))
+        dsh_profile.MARTTY_PROFILE, dsh_profile.PRESETS_BUNDLE
+    ) in gaps[0][2]
+    assert all(
+        step.profile != dsh_profile.MARTTY_PROFILE for step in dsh_profile.provision_plan()
+    ), "install.sh must not create an attached profile"
+
+    # An attached profile that is *absent* is not a gap at all, and asking about
+    # it directly must say who owns creating it rather than falling back to a
+    # copy-pasteable command that would create the operator's stack for them.
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "empty"))
+    assert all(
+        profile != dsh_profile.MARTTY_PROFILE
+        for profile, _bundle, _why in dsh_profile.readiness_gaps()
+    ), "an absent attached profile is not a gap"
+    absent = dsh_profile.requirement(dsh_profile.MARTTY_PROFILE, dsh_profile.PRESETS_BUNDLE)
+    assert absent is not None
+    assert "does not create a profile it does not own" in absent
+
+
+def test_stale_mutations_finds_a_harness_profile_an_old_install_mutated(tmp_path, monkeypatch):
+    """The migration is stated, not performed: old installs polluted `web`."""
+    home = tmp_path / "home"
+    _profile(
+        home,
+        dsh_profile.WEB_TEMPLATE,
+        [
+            "@deepseek-ai/dsh-base",
+            "@deepseek-ai/dsh-web-app",
+            dsh_profile.PRESETS_BUNDLE,
+            dsh_profile.WEB_SURFACE_BUNDLE,
+        ],
+    )
+    monkeypatch.setenv("DSH_HOME", str(home))
+    assert dsh_profile.stale_mutations() == [
+        (dsh_profile.WEB_TEMPLATE, [dsh_profile.PRESETS_BUNDLE, dsh_profile.WEB_SURFACE_BUNDLE])
+    ]
+    assert dsh_profile.migration_command(dsh_profile.WEB_TEMPLATE, [dsh_profile.PRESETS_BUNDLE]) == (
+        f"dsh plugin --profile web remove {dsh_profile.PRESETS_BUNDLE}"
+    )
+    pristine = tmp_path / "pristine"
+    _profile(pristine, dsh_profile.WEB_TEMPLATE, ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"])
+    monkeypatch.setenv("DSH_HOME", str(pristine))
+    assert dsh_profile.stale_mutations() == [], "a pristine template is not a mutation"
 
 
 def test_run_on_dsh_hands_the_runner_an_absolute_workdir(tmp_path, monkeypatch):

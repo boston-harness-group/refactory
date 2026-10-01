@@ -8,15 +8,14 @@
 # The checkout-owned bundles are **machine state**: a DSH profile is created by
 # `dsh plugin --profile <name> add <package>`, never derived from the bundle's
 # name. `./install.sh` creates them, and this script heals a missing one rather
-# than booting into the failure it causes. The `web` profile owns two: without
-# `packages/bundle/refactory-presets` it has no `ceo` preset while the composition
-# still names `ceo` as the roster default, so every session created without naming
-# one stops with `agent-preset/not-found`; without
-# `packages/bundle/refactory-web` the console and picker rows never mount, so the
-# GUI boots without the refactory panel.
+# than booting into the failure it causes. The GUI profile is `refactory-web`, a
+# re:factory-owned profile over the harness's `web` template; the harness's own
+# `web` profile is never written to. Without `refactory-presets` the profile has
+# no `ceo` preset while the composition still names `ceo` as the roster default,
+# so every session created without naming one stops with `agent-preset/not-found`;
+# without `refactory-web` the console and picker rows never mount.
 #
-# The graph profile is what the Python glue runs modes on. The web profile is the
-# pinned harness's own template plus its two refactory bundles.
+# The graph profile is what the Python glue runs modes on.
 #
 # The meta-modes are Python entry points, not presets:
 #   python -m refactory_dsh.create   create a mode
@@ -39,10 +38,11 @@ if [ ! -x "$DSH" ]; then
   exit 1
 fi
 
-# One `dsh plugin add` per owned profile bundle that is not installed yet. The
-# decision is `dsh_profile`'s, so this script cannot drift from the check
-# `refactory doctor` and the runner make; the loop only runs when there is a gap,
-# so a provisioned machine boots without invoking pnpm at all.
+# One template init (for an owned profile with no directory yet) and one
+# `dsh plugin add` per layer that is not installed. The plan is `dsh_profile`'s,
+# so this script cannot drift from the check `refactory doctor` and the runner
+# make; the loop only runs when there is a gap, so a provisioned machine boots
+# without invoking pnpm at all.
 #
 # A missing interpreter is NOT treated as "nothing missing": failing open here
 # would boot the GUI into the failures this block exists to prevent, so it is a
@@ -54,22 +54,20 @@ if [ ! -x "$PYTHON" ]; then
   exit 1
 fi
 
-gaps() {
-  "$PYTHON" -c '
+PLAN="$("$PYTHON" -c '
 from refactory_dsh import dsh_profile
-for profile, bundle, _ in dsh_profile.missing_bundles():
-    print(profile, dsh_profile.bundle_directory(bundle))
-'
-}
-
-missing="$(gaps)"
-if [ -n "$missing" ]; then
-  echo "refactory-dsh: a DSH profile is missing its checkout bundle; adding it (machine state, once per machine)" >&2
-  while read -r profile bundle_dir; do
-    [ -n "$profile" ] || continue
-    "$DSH" plugin --profile "$profile" add "$DSH_ROOT/packages/bundle/$bundle_dir"
-  done <<<"$missing"
+print(dsh_profile.render_plan(), end="")
+')"
+if [ -n "$PLAN" ]; then
+  echo "refactory-dsh: a DSH profile is missing a layer; adding it (machine state, once per machine)" >&2
+  while IFS=$'\t' read -r kind profile value; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      init) "$DSH" --profile "$profile" --from-default-profile "$value" --dump-config >/dev/null ;;
+      add)  "$DSH" plugin --profile "$profile" add "$DSH_ROOT/packages/bundle/$value" ;;
+    esac
+  done <<<"$PLAN"
 fi
 
 cd "$DSH_ROOT"
-exec "$DSH" --profile web "$@"
+exec "$DSH" --profile refactory-web "$@"

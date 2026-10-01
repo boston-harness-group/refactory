@@ -250,20 +250,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         from refactory_dsh import dsh_profile
 
-        # One row per profile this checkout owns a bundle for. Both matter for a
-        # different reason: `graph` is what a mode runs on, `web` is what the GUI
-        # boots — without the preset bundle its sessions stop at
-        # `agent-preset/not-found`, and without the web bundle the console and
-        # picker rows never mount. A profile may own more than one bundle, so the
-        # row aggregates every gap it still has. A per-profile row says which one
-        # is short.
-        gaps = dsh_profile.missing_bundles()
-        for profile in dict.fromkeys(profile for profile, _bundle in dsh_profile.PROFILE_BUNDLES):
-            problems = [reason for name, _bundle, reason in gaps if name == profile]
+        # One row per target. `graph` is what a mode runs on; `refactory-web` is
+        # what the GUI boots over the harness's own `web` template, whose rows are
+        # never written into the harness profile. A target may carry more than one
+        # layer, so the row aggregates every gap it still has. The attached Martty
+        # target is shown only once the operator has that profile: a profile that
+        # does not exist has not chosen a re:factory path and must not read as a
+        # broken install.
+        gaps = dsh_profile.readiness_gaps()
+        for entry in dsh_profile.TARGETS:
+            if not entry.owned and not (
+                dsh_profile.profile_dir(entry.profile) / "package.json"
+            ).exists():
+                continue
+            problems = [reason for name, _bundle, reason in gaps if name == entry.profile]
             checks.append((
-                f"DSH profile {profile!r}",
+                f"DSH profile {entry.profile!r}",
                 not problems,
-                " | ".join(problems) or str(dsh_profile.profile_dir(profile)),
+                " | ".join(problems)
+                or f"{dsh_profile.profile_dir(entry.profile)} — {entry.why}",
+            ))
+        # A harness-owned profile an older install mutated. The migration is
+        # stated, not performed: it is the operator's machine state, so the row
+        # fails with the exact command and the operator decides when to run it.
+        for profile, bundles in dsh_profile.stale_mutations():
+            checks.append((
+                f"DSH profile {profile!r} (harness-owned)",
+                False,
+                "carries re:factory layers from the old install; migrate with "
+                f"`{dsh_profile.migration_command(profile, bundles)}`",
             ))
     except Exception as exc:
         checks.append(("DSH profiles", False, str(exc)))

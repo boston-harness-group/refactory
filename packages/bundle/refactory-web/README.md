@@ -17,17 +17,20 @@ client-module system discovers a browser plugin by scanning already-mounted Load
 entries, so a package that declares `dsh.client` and is an active entry is picked
 up without the upstream manifest listing it.
 
-Install it into the `web` profile so the GUI shows the refactory console and
-picker. `@deepseek-ai/dsh-refactory-presets`, the sibling bundle, ships the `ceo`
-preset; the two are independent layers and a full web install carries both.
+Install it into the re:factory-owned `refactory-web` profile, which is initialized
+from the harness's `web` template, so the GUI shows the refactory console and
+picker. It is a **browser** surface and is not mounted under a TUI profile such as
+Martty; `@deepseek-ai/dsh-refactory-presets`, the sibling bundle, ships the `ceo`
+preset and is the surface-independent layer. The two are independent layers and a
+full web install carries both.
 
 ## Use this package
 
 ### Install into a profile
 
 ```text
-dsh plugin --profile web add <checkout>/packages/bundle/refactory-web
-dsh plugin --profile web remove @deepseek-ai/dsh-refactory-web
+dsh plugin --profile refactory-web add <checkout>/packages/bundle/refactory-web
+dsh plugin --profile refactory-web remove @deepseek-ai/dsh-refactory-web
 ```
 
 `@deepseek-ai/dsh-refactory-web` is not published to the npm registry, so `add`
@@ -57,8 +60,8 @@ hand-edited bundle list needs to keep the order.
 
 ```bash
 pnpm test packages/bundle/refactory-web        # the startup provider and the layer
-dsh plugin --profile web add <checkout>/packages/bundle/refactory-web
-dsh plugin --profile web --dump-config         # the rows above are present, no skipped patch
+dsh plugin --profile refactory-web add <checkout>/packages/bundle/refactory-web
+dsh plugin --profile refactory-web --dump-config   # the rows above are present, no skipped patch
 ```
 
 `tests/startup.spec.ts` checks that the provider publishes the checkout holding

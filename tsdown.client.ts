@@ -17,9 +17,9 @@ import { transform } from 'lightningcss'
 
 /**
  * The browser shell's frozen module table: specifiers the page shares into every
- * plugin bundle. It is the browser side's contract with `dsh --profile web`, so
- * the list is stated here rather than imported from a harness package the fork no
- * longer owns.
+ * plugin bundle. It is the browser side's contract with the harness web app the
+ * re:factory `refactory-web` profile mounts, so the list is stated here rather
+ * than imported from a harness package the fork no longer owns.
  */
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',

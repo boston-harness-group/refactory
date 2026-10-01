@@ -16,7 +16,7 @@ the console refuses something, the panel shows the console's own reason.
 
 ## Start the GUI from this checkout
 
-The repository's patched web profile composes the panel built at
+The repository's `refactory-web` profile composes the panel built at
 `packages/client/ui-refactory/lib/client.js`:
 
 ```bash
@@ -211,9 +211,12 @@ uv run refactory modes | head -14
 ## When the panel is not there
 
 - **Nothing appears in the Sidebar.** The profile in force does not compose
-  `@deepseek-ai/dsh-client-ui-refactory`, which is the state of the pinned harness's own
-  `web` profile; rebuilding with `pnpm run build` refreshes the artifact but does not
-  change the composition.
+  `@deepseek-ai/dsh-client-ui-refactory` — for example a plain `dsh --profile web`
+  session, which the harness owns and re:factory never writes to. Start the GUI with
+  `uv run refactory ui` (or `./refactory-dsh`) to boot the re:factory-owned
+  `refactory-web` profile; `refactory doctor` names the layer to add if it is short.
+  Rebuilding with `pnpm run build` refreshes the artifact but does not change the
+  composition.
 - **The panel loads but every read fails.** The console could not be reached: the
   message the Host reports carries the console's own words and the argv it ran, so
   `uv run refactory modes` by hand from the same directory reproduces it.

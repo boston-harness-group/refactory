@@ -7,15 +7,18 @@ kind: "package-bundle"
 
 ## Summary
 
-This bundle is one patch layer plus a startup plugin. The patch points the agent-presets roster at the `presets/` directory beside this package's own `lib/`, using the roster's configured-roots mechanism — a deployment-supplied `system` root — and sets `ceo` as the default preset. Nothing here edits `@deepseek-ai/dsh-agent-presets`: the `ceo` composition and its `preset.yml` display metadata live in this package and are read from it. Install it into the `web` profile so the browser's preset picker and every session created without a named preset resolve `CEO` from this checkout.
+This bundle is one patch layer plus a startup plugin. The patch points the agent-presets roster at the `presets/` directory beside this package's own `lib/`, using the roster's configured-roots mechanism — a deployment-supplied `system` root — and sets `ceo` as the default preset. Nothing here edits `@deepseek-ai/dsh-agent-presets`: the `ceo` composition and its `preset.yml` display metadata live in this package and are read from it. The layer is **surface-independent**: install it into any profile whose sessions should resolve `CEO` from this checkout, browser or TUI. The browser console is a separate layer, `@deepseek-ai/dsh-refactory-web`.
 
 ## Use this package
 
 ### Install into a profile
 
 ```text
-dsh plugin --profile web add <checkout>/packages/bundle/refactory-presets
-dsh plugin --profile web remove @deepseek-ai/dsh-refactory-presets
+# the re:factory-owned GUI profile (harness web surface + this layer)
+dsh plugin --profile refactory-web add <checkout>/packages/bundle/refactory-presets
+# or attach the surface-independent layer to a profile you already have (e.g. Martty)
+dsh plugin --profile martty add <checkout>/packages/bundle/refactory-presets
+dsh plugin --profile refactory-web remove @deepseek-ai/dsh-refactory-presets
 ```
 
 `@deepseek-ai/dsh-refactory-presets` is not published to the npm registry, so `add` takes a path into a checkout, and the profile links it. The manifest declares `dsh.bundle.patch`, so the reconcile step appends `@deepseek-ai/dsh-refactory-presets` to `dsh.profile.bundles` and the layer activates on the next boot.
@@ -36,7 +39,7 @@ The `agent-presets` row this patch overrides is inserted by the `dsh-web-app` la
 pnpm run test:acceptance     # packages/bundle/refactory-presets/tests/verify-ceo-root.mjs
 ```
 
-`tests/startup.spec.ts` is the fast unit check; the acceptance run is the one that proves the mechanism, because only it can see the layer order and the roster the harness actually builds. It installs both checkout bundles into a throwaway `DSH_HOME`, boots a real web profile, and asks its live services: the roster row (`ceo`, `trust: system`, name `CEO`, not broken), `session/create` without a preset, and the composed agent's own tool catalog (`wf_*` present, the preset's `ceoDeny` absent). It also reads the **installed** `@deepseek-ai/dsh-agent-presets` tree and fails if that tree still ships a `ceo` directory — without that check a stale patched `node_modules` would satisfy every live assertion with the configured root doing nothing. CI runs it as the `Web profile acceptance` step.
+`tests/startup.spec.ts` is the fast unit check; the acceptance run is the one that proves the mechanism, because only it can see the layer order and the roster the harness actually builds. It runs `dsh_profile`'s provisioning plan into a throwaway `DSH_HOME`, composes the owned `refactory-web` profile from the harness's `web` template, checks the harness's own `web` template keeps exactly its template bundles and mounts none of re:factory's rows, then boots `refactory-web` and asks its live services: the roster row (`ceo`, `trust: system`, name `CEO`, not broken), `session/create` without a preset, and the composed agent's own tool catalog (`wf_*` present, the preset's `ceoDeny` absent). It also reads the **installed** `@deepseek-ai/dsh-agent-presets` tree and fails if that tree still ships a `ceo` directory — without that check a stale patched `node_modules` would satisfy every live assertion with the configured root doing nothing. CI runs it as the `Web profile acceptance` step.
 
 ## Understand the implementation
 
@@ -64,7 +67,7 @@ That replacement rule makes this row's `config` **single-owner**. A layer applie
 
 - **The bundle carries the `ceo` composition only.** Any other refactory-owned preset added later belongs in the same `presets/` tree; the startup provider publishes the directory, not a preset.
 - **The composition's plugin packages must resolve from the profile.** The roster resolves a preset row's package names against the base the harness was loaded from, not against this package, so the profile's install must carry the packages `ceo` names.
-- **Layer order is a precondition, not an assertion.** A patch only reaches a row an earlier layer created, so a profile that lists this bundle *before* `@deepseek-ai/dsh-web-app` gets a `patch: entry "agent-presets" not found` warning and no default is set at all — not a fallback to a shipped preset. On the `web` profile the composition still names `ceo` as the roster default, so a session created without naming one then stops with `agent-preset/not-found`; on a profile with no `agent-presets` row at all there is simply no default. `dsh plugin add` appends bundles in dependency order, so an ordinary profile install gets the order right, and `dsh_profile.missing_bundles()` is what `./install.sh`, `./refactory-dsh` and `refactory doctor` use to notice a profile that lacks the bundle entirely.
+- **Layer order is a precondition, not an assertion.** A patch only reaches a row an earlier layer created, so a profile that lists this bundle *before* `@deepseek-ai/dsh-web-app` gets a `patch: entry "agent-presets" not found` warning and no default is set at all — not a fallback to a shipped preset. On a profile that carries this layer but no `agent-presets` row, the composition still names `ceo` as the roster default, so a session created without naming one then stops with `agent-preset/not-found`; on a profile with no `agent-presets` row at all there is simply no default. `dsh plugin add` appends bundles in dependency order, so an ordinary profile install gets the order right, and `dsh_profile`'s target table is what `./install.sh`, `./refactory-dsh` and `refactory doctor` use to notice a profile that lacks the layer entirely.
 
 ## Dev Note
 

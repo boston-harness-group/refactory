@@ -1,13 +1,15 @@
 /**
- * The acceptance check for the web profile's refactory layers.
+ * The acceptance check for the re:factory GUI profile's layers.
  *
- * It is a script, not a spec, because what it proves is a whole-profile fact:
- * with the pinned `dsh` binary and both checkout bundles installed into a
- * profile, the roster still shows `CEO` from `refactory-presets`' own tree, a
- * session created without a preset records `ceo`, the agent that session
- * composes sees the workflow tools and none of the denied ones, and
- * `refactory-web` mounts the console, picker and brand rows with a `repoRoot`
- * resolved from the checkout rather than the caller's working directory.
+ * It is a script, not a spec, because what it proves is a whole-profile fact: an
+ * owned `refactory-web` profile, provisioned from the harness's `web` template
+ * by `dsh_profile.provision_plan()` and carrying both checkout bundles, shows
+ * `CEO` from `refactory-presets`' own tree, records `ceo` for a session created
+ * without a preset, gives that session's agent the workflow tools and none of
+ * the denied ones, and mounts `refactory-web`'s console, picker and brand rows
+ * with a `repoRoot` resolved from the checkout rather than the caller's working
+ * directory. The harness's own `web` profile is checked alongside it: it must
+ * keep exactly the template's bundle list and mount none of re:factory's rows.
  *
  * It drives the *real* services rather than re-reading files: the same
  * `agentPresets.list()` the picker calls, the same `agents.create()` path
@@ -18,14 +20,15 @@
  * The composition is the real `ceo` preset, which requires the whole host
  * composition it is normally mounted inside. The script therefore composes a
  * bootstrap `cordis.yml` from the profile's own layers over the installed
- * harness anchor and boots the profile's real `dsh --profile web` against it.
+ * harness anchor and boots the profile's real `dsh --profile refactory-web`
+ * against it.
  *
  * Usage (from the repository root, after `pnpm run build`):
  *
  *   node packages/bundle/refactory-presets/tests/verify-ceo-root.mjs
  *
- * It boots a web profile on a spare port, checks the facts, and exits nonzero on
- * the first one that does not hold.
+ * It boots the owned GUI profile on a spare port, checks the facts, and exits
+ * nonzero on the first one that does not hold.
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -37,8 +40,14 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..', '..', '..', '..')
 const BUNDLE = resolve(HERE, '..')
 
-/** The sibling web-surface bundle: the console, the picker and the brand rows. */
-const WEB_BUNDLE = resolve(REPO, 'packages', 'bundle', 'refactory-web')
+/** The re:factory-owned GUI profile the provisioning plan composes. */
+const PROFILE = 'refactory-web'
+
+/** The harness's own template the owned profile is initialized from. */
+const WEB_TEMPLATE = 'web'
+
+/** The interpreter that renders `dsh_profile`'s plan, from the repo's venv. */
+const PYTHON = join(REPO, '.venv', 'bin', 'python')
 
 /** Every fact the issue's acceptance criteria name, in the order it states them. */
 const failures = []
@@ -81,6 +90,16 @@ function listedPresets(root) {
       .filter(entry => entry.isDirectory())
       .map(entry => entry.name)
       .sort()
+  } catch {
+    return []
+  }
+}
+
+/** The bundle list a profile's manifest declares, or [] when it is absent. */
+function bundlesOf(home, name) {
+  try {
+    const manifest = JSON.parse(readFileSync(join(home, 'profiles', name, 'package.json'), 'utf8'))
+    return manifest.dsh?.profile?.bundles ?? []
   } catch {
     return []
   }
@@ -154,35 +173,72 @@ check(
   `installed shipped root holds: ${shippedPresets.join(', ') || '(unresolved)'}`,
 )
 
-// 2. A clean profile installs both bundles and composes their rows.
+// 2. The install path composes a re:factory-OWNED profile from the harness's
+//    `web` template instead of appending re:factory's layers to the harness's
+//    `web` profile. These checks drive `dsh_profile.provision_plan()` — the same
+//    table `install.sh`, `./refactory-dsh` and `refactory doctor` use — so the
+//    composition that ships is what is checked, not a copy of it made here.
 const home = mkdtempSync(join(tmpdir(), 'dsh-refactory-presets-'))
 let web
 try {
-  const added = run(dsh, ['plugin', '--profile', 'web', 'add', BUNDLE], {
+  // The harness's own `web` profile, created by the harness from its template
+  // before the plan runs. Its bundle list must be exactly what it started as.
+  const template = run(dsh, ['--profile', WEB_TEMPLATE, '--dump-config'], {
     env: { ...process.env, DSH_HOME: home },
   })
-  check(added.code === 0, 'a clean profile installs the preset bundle', added.out.trim())
+  check(template.code === 0, 'the harness web template loads', template.out.slice(0, 400))
+  const templateBundles = bundlesOf(home, WEB_TEMPLATE)
+  check(
+    templateBundles.length > 0 && !templateBundles.some(entry => entry.includes('refactory')),
+    'the harness web template starts with no re:factory layers',
+    `bundles: ${templateBundles.join(', ')}`,
+  )
 
-  const addedWeb = run(dsh, ['plugin', '--profile', 'web', 'add', WEB_BUNDLE], {
+  const plan = run(PYTHON, [
+    '-c',
+    'from refactory_dsh import dsh_profile; print(dsh_profile.render_plan(), end="")',
+  ], {
     env: { ...process.env, DSH_HOME: home },
   })
-  check(addedWeb.code === 0, 'a clean profile installs the web-surface bundle', addedWeb.out.trim())
+  check(plan.code === 0, 'the provisioning plan renders', plan.out.trim())
+  const steps = plan.out.split('\n').filter(Boolean).map(line => line.split('\t'))
+  check(steps.length > 0, 'a fresh home needs provisioning', plan.out.trim())
+  for (const [kind, profile, value] of steps) {
+    const step = kind === 'init'
+      ? run(dsh, ['--profile', profile, '--from-default-profile', value, '--dump-config'], {
+        env: { ...process.env, DSH_HOME: home },
+      })
+      : run(dsh, ['plugin', '--profile', profile, 'add', join(REPO, 'packages', 'bundle', value)], {
+        env: { ...process.env, DSH_HOME: home },
+      })
+    check(step.code === 0, `the plan ${kind}s ${value} into ${profile}`, step.out.slice(0, 400))
+  }
 
-  const profile = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8'))
-  const bundles = profile.dsh?.profile?.bundles ?? []
+  check(
+    JSON.stringify(bundlesOf(home, WEB_TEMPLATE)) === JSON.stringify(templateBundles),
+    'the plan leaves the harness web template exactly as the template defines it',
+    `after: ${bundlesOf(home, WEB_TEMPLATE).join(', ')}`,
+  )
+
+  const bundles = bundlesOf(home, PROFILE)
   const webApp = bundles.indexOf('@deepseek-ai/dsh-web-app')
   check(
+    webApp >= 0,
+    'the owned profile was initialized from the web template',
+    `bundles: ${bundles.join(', ')}`,
+  )
+  check(
     bundles.indexOf('@deepseek-ai/dsh-refactory-presets') > webApp,
-    'the preset bundle is applied after dsh-web-app, which inserts the agent-presets row',
+    'the preset layer is applied after dsh-web-app, which inserts the agent-presets row',
     `bundles: ${bundles.join(', ')}`,
   )
   check(
     bundles.indexOf('@deepseek-ai/dsh-refactory-web') > webApp,
-    'the web-surface bundle is applied after dsh-web-app, whose rows it overrides',
+    'the web-surface layer is applied after dsh-web-app, whose rows it overrides',
     `bundles: ${bundles.join(', ')}`,
   )
 
-  const dump = run(dsh, ['--profile', 'web', '--dump-config'], {
+  const dump = run(dsh, ['--profile', PROFILE, '--dump-config'], {
     env: { ...process.env, DSH_HOME: home },
   })
   check(dump.code === 0, 'the composed profile dumps without a skipped-patch warning', dump.out.slice(0, 400))
@@ -203,9 +259,28 @@ try {
     check(dump.out.includes(row), `the composed profile mounts ${row}`)
   }
 
+  // The harness's own `web` profile, re-read after the plan: a session a person
+  // starts with `dsh --profile web` must find none of re:factory's rows.
+  const templateAfter = run(dsh, ['--profile', WEB_TEMPLATE, '--dump-config'], {
+    env: { ...process.env, DSH_HOME: home },
+  })
+  for (const row of [
+    'refactoryPresetsStartup',
+    'refactoryWebStartup',
+    'refactory-console',
+    'ui-refactory',
+    'ui-brand-refactory',
+    'default: ceo',
+  ]) {
+    check(
+      !templateAfter.out.includes(row),
+      `a session on the harness web template mounts no ${row}`,
+    )
+  }
+
   // 3. Boot the profile and ask its live services.
   const port = 3099 + Math.floor(Math.random() * 400)
-  web = spawn(dsh, ['--profile', 'web', '--port', String(port), '--no-open', '--host', '127.0.0.1'], {
+  web = spawn(dsh, ['--profile', PROFILE, '--port', String(port), '--no-open', '--host', '127.0.0.1'], {
     env: { ...process.env, DSH_HOME: home },
     // Run the server from somewhere that is not the checkout. `refactory-web`
     // resolves `repoRoot` from its own module location, and when the child
@@ -326,7 +401,7 @@ async function waitForToken(read, child) {
     if (match !== null) return match[1]
     // A signal death leaves `exitCode` null, so ask `stopped`, not `exitCode`:
     // otherwise an early kill spins the full two minutes before reporting.
-    if (stopped(child)) throw new Error(`the web profile exited before readiness:\n${read()}`)
+    if (stopped(child)) throw new Error(`the GUI profile exited before readiness:\n${read()}`)
     await new Promise(resolveDelay => setTimeout(resolveDelay, 500))
   }
   throw new Error(`the web profile never printed a launch URL:\n${read()}`)
