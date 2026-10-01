@@ -268,6 +268,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:
         checks.append(("DSH profiles", False, str(exc)))
     try:
+        from refactory_dsh import harness_check
+
+        outcome = harness_check.check()
+        if outcome.serving is None:
+            checks.append((
+                "harness pin vs serving dsh", True,
+                f"pinned {outcome.pinned.version or 'unknown version'}; no separate dsh on "
+                f"PATH, so the pinned launcher is the serving harness",
+            ))
+        else:
+            checks.append((
+                "harness pin vs serving dsh", outcome.ok,
+                outcome.reason or (
+                    f"pinned and serving both report {outcome.pinned.version} "
+                    f"({outcome.serving.launcher})"
+                ),
+            ))
+    except Exception as exc:
+        checks.append(("harness pin vs serving dsh", False, str(exc)))
+    try:
         from refactory_dsh import registry
 
         count = len(registry.installed_names(REPO_ROOT))

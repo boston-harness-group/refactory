@@ -72,3 +72,12 @@ jobs:
       # all.
       - name: Web profile acceptance
         run: pnpm run test:acceptance
+
+      # The harness this repository pins and the `dsh` that boots the profile
+      # must agree on the version and on the strict TypertCodec contract. CI has
+      # no separate dsh on PATH, so this run proves the plain-clone case stays
+      # green; the mismatch it reports is the one a development machine has when
+      # PATH resolves to a different harness tree. `uv run` is the same venv the
+      # install created.
+      - name: Harness pin vs serving dsh
+        run: uv run python -m refactory_dsh.harness_check

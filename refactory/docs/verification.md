@@ -107,6 +107,24 @@ harness's own packages; `ui-refactory` therefore injects `connection`, not
 published Typert generator emits the artifacts only when its own protocol package is a
 workspace project, which a pinned install does not have.
 
+### The harness that serves the profile
+
+`refactory doctor` compares the harness this repository pins with the `dsh` on `PATH`
+(`REFACTORY_DSH` overrides the resolved launcher) and names both versions when they
+disagree. When the versions match it also compares the strict `TypertCodec` face each
+harness's `@deepseek-ai/dsh-typert-protocol` declares. That second comparison is the
+point: the harness fork's tree and the published `0.1.6-alpha.1` both report
+`0.1.6-alpha.1`, so a version check alone was blind to `e459e32637` changing `schema`
+to `create()`. `pnpm run test:acceptance` boots the pinned launcher; this check is what
+notices that the operator's `dsh` is a different tree. `python -m
+refactory_dsh.harness_check` runs it on its own and is the CI step on a plain clone,
+where no separate `dsh` exists and the check is green.
+
+The loader's boot audit reports a failed activation as a count and a package name
+(`1 entry did not activate`) without the cause, which is how the incident stayed
+invisible until the browser console was read. That is upstream loader behavior and is
+out of scope here; this check is the downstream alternative. Recorded on #279.
+
 ## The stream, the live session and control
 
 A run says what it is doing while it does it, and that single stream is what every
