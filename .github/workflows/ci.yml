@@ -62,14 +62,15 @@ jobs:
       - name: TypeScript suite
         run: pnpm test
 
-      # The whole-web-profile acceptance run: it installs both checkout bundles
-      # into a throwaway DSH_HOME, boots a real web profile and asks its live
-      # services. It belongs in CI because it is the only thing that proves the
-      # `ceo` preset reaches the roster through configured roots instead of a
-      # patched agent-presets tree, and that the refactory-web layer mounts the
-      # console and picker with a checkout-resolved `repoRoot` — a unit test
-      # cannot see the layer order that decides whether a patch finds its row at
-      # all.
+      # The whole-profile acceptance run: it runs `dsh_profile`'s provisioning
+      # plan into a throwaway DSH_HOME, composes the owned `refactory-web` profile
+      # from the harness's own `web` template, checks that template is left exactly
+      # as it was, boots `refactory-web` and asks its live services. It belongs in
+      # CI because it is the only thing that proves the `ceo` preset reaches the
+      # roster through configured roots instead of a patched agent-presets tree,
+      # and that the refactory-web layer mounts the console and picker with a
+      # checkout-resolved `repoRoot` — a unit test cannot see the layer order that
+      # decides whether a patch finds its row at all.
       - name: Web profile acceptance
         run: pnpm run test:acceptance
 
