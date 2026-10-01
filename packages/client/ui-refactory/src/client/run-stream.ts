@@ -22,9 +22,15 @@ function request(value: unknown): RefactorySingleRunRequest {
 
 /**
  * One strict codec for this hand-written contribution. It carries both the
- * released `schema.parse` face (the pinned harness contract) and the current
- * `create()` factory (newer harnesses materialize generated schemas behind the
- * factory), so the same descriptor mounts under either harness.
+ * `schema.parse` face of the pinned harness and the `create()` factory that
+ * `e459e32637` introduced, so the same descriptor mounts under either harness.
+ *
+ * Exit condition: drop the `schema` face only once **both** the harness this
+ * repository pins and the harness serving the profile are `0.1.6-alpha.2` or
+ * later — `e459e32637` shipped in `0.1.6-alpha.2`, so "when it is released" is
+ * already past. #276 (the pin bump) plus `boston-harness-group/dsh-tauri#25`
+ * (the serving harness) are what reach that state; until both land, the bridge
+ * is load-bearing.
  * @param typeSymbol - generated type symbol used for diagnostics.
  * @param parse - boundary validator for the wire value.
  * @returns the strict codec accepted by both the pinned and current harness.
