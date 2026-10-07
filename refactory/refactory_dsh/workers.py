@@ -195,11 +195,20 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         serialized = json.dumps(payload, indent=2, sort_keys=True) + '\n'
         spec = directory / (hashlib.sha256(serialized.encode()).hexdigest() + '.json')
         spec.write_text(serialized)
+        # The dispatch command wraps one model completion with its declared retry
+        # budget, and the spine must outlast that budget or the node dies at the
+        # host shell's default clamp with the work still running (#289). A node
+        # timeout left unset derives from the selected route, the same shape the
+        # smoke operations use: attempts times one completion plus overhead.
+        from refactory_dsh.model import DEFAULT_TIMEOUT_S
+        attempts = max(1, int(selected_context.get('attempts') or 1))
+        per_completion = int(selected_context.get('timeout_s') or DEFAULT_TIMEOUT_S)
+        command_timeout_s = node.timeout if node.timeout is not None else attempts * per_completion + 600
         result.nodes[name] = FnNode(id=name, reads=node.reads, writes=node.writes, blocking=node.blocking,
                                     resource_role=node.resource_role,
                                     command='python -m refactory_dsh.worker_node ' + shlex.quote(str(spec)),
                                     notes=f'Graph-owned {selected.route()["worker_backend"]} worker dispatch',
-                                    command_timeout_s=node.timeout)
+                                    command_timeout_s=command_timeout_s)
     return result
 
 

@@ -91,6 +91,33 @@ def test_lowered_bridge_preserves_edges_and_declared_outputs(tmp_path):
     assert spec['writes'] == ['result.txt']
 
 
+def test_lowered_node_timeout_covers_the_declared_completion_budget(tmp_path):
+    from refactory_dsh.ir import AgentNode, AgentRole, Workflow
+    from refactory_dsh.model import DEFAULT_TIMEOUT_S
+
+    def graph(timeout=None):
+        return Workflow(name='tiny', nodes={'build': AgentNode(id='build', role=AgentRole.BUILDER,
+                    prompt_template='write result.txt', writes={'result.txt'}, timeout=timeout)},
+                        edges=[], start_node='build')
+
+    # An unset node timeout derives from the route's declared budget, so the
+    # spine's node envelope outlasts the retries the model client may take
+    # instead of dying at the host shell's default clamp (#289).
+    dsh = workers.lower_workflow(graph(), tmp_path / 'dsh', DshModelClient().context())
+    attempts = DshModelClient().context()['attempts']
+    assert dsh.nodes['build'].command_timeout_s == attempts * DEFAULT_TIMEOUT_S + 600
+
+    # A native backend reports a single attempt, so its envelope is one
+    # completion plus overhead.
+    codex = workers.lower_workflow(graph(), tmp_path / 'codex',
+                                   DshModelClient(worker_backend='codex', model='m').context())
+    assert codex.nodes['build'].command_timeout_s == DEFAULT_TIMEOUT_S + 600
+
+    # An explicit node timeout is the author's own bound and passes through.
+    explicit = workers.lower_workflow(graph(timeout=123), tmp_path / 'explicit', DshModelClient().context())
+    assert explicit.nodes['build'].command_timeout_s == 123
+
+
 def test_graph_checks_worker_outputs_not_success_sentence(monkeypatch, tmp_path):
     from refactory_dsh.worker_node import execute
     monkeypatch.setattr(DshModelClient, 'complete', lambda *args, **kwargs: 'I succeeded')
