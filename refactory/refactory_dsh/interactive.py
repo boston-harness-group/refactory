@@ -249,10 +249,6 @@ def run(
             else:
                 model_context = {**model_context, 'permission_mode': model_context.get('permission_mode') or 'default'}
             resource_limits = effective_limits
-            if model_context:
-                provider = model_context.get('provider', '')
-                model = model_context.get('model', '')
-                worker_backend = model_context.get('worker_backend', 'dsh')
         if source:
             from refactory_dsh.items import write_source
 
@@ -264,6 +260,15 @@ def run(
             model_context = DshModelClient(project=Path(project or project_root()), provider=provider, model=model, worker_backend=worker_backend,
                                            effort=effort, permission_mode=permission_mode,
                                            role_routes=role_routes, node_routes=node_routes).context()
+        # The graph's own argv names the CEO route, and it must be the route the
+        # resolved context selected -- from a project file, a saved run or a
+        # caller's model_context -- not the empty CLI flags a person left unset.
+        # Without this the CEO ran the runtime's default provider while every
+        # node dispatch honored the project's selection.
+        if model_context is not None:
+            provider = model_context.get('provider', '')
+            model = model_context.get('model', '')
+            worker_backend = model_context.get('worker_backend', 'dsh')
         if not resume:
             name, graphs = prepare(
                 identifier, workdir=workdir, intent=intent, project=project, knobs=knobs, model_context=model_context, resource_limits=resource_limits,

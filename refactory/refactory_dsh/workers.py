@@ -118,6 +118,21 @@ def permission_patch(route: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Declare selected provider routes to a runtime that cannot see profiles.
+
+    A nested runtime boots the headless profile, which cannot see provider
+    profiles declared in another profile's patch (the web session's, say).
+    Declared provider routes ride the worker patch so the same selection is
+    resolvable in the nested composition; credentials stay in the native
+    store their apiKeyEnv names. The row targets the dormant base llm-pi-ai
+    entry the way a user's own profile patch does.
+    """
+    if route.get('worker_backend', 'dsh') == 'dsh' and provider_config:
+        return [{'id': 'llm-pi-ai', 'config': {'providers': provider_config}}]
+    return []
+
+
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None) -> None:
     """Compose installed DSH services, never a parallel agent wire protocol."""
@@ -125,14 +140,7 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
     rows.extend(permission_patch(route))
-    if route.get('worker_backend', 'dsh') == 'dsh' and provider_config:
-        # A nested runtime boots the headless profile, which cannot see provider
-        # profiles declared in another profile's patch (the web session's, say).
-        # Declared provider routes ride the worker patch so the same selection is
-        # resolvable in the nested composition; credentials stay in the native
-        # store their apiKeyEnv names. The row targets the dormant base llm-pi-ai
-        # entry the way a user's own profile patch does.
-        rows.append({'id': 'llm-pi-ai', 'config': {'providers': provider_config}})
+    rows.extend(provider_rows(route, provider_config))
     if route['worker_backend'] != 'dsh':
         package = PACKAGES[route['worker_backend']]
         provider = runtime_root / 'node_modules' / package
@@ -233,10 +241,15 @@ def environment(context: dict[str, Any] | None) -> dict[str, str]:
     return result
 
 
-def observer_patch(path: Path, route: dict[str, Any]) -> None:
+def observer_patch(path: Path, route: dict[str, Any],
+                   provider_config: dict[str, Any] | None = None) -> None:
     rows = [{'insert': [{'id': 'refactory-worker-observer',
                         'name': str(Path(__file__).with_name('worker_observer.mjs'))}]}]
     rows.extend(permission_patch(route))
+    # The coordinator's runtime is as nested as a node's: without this row the
+    # graph profile cannot resolve the selected provider and silently dispatches
+    # its own default instead.
+    rows.extend(provider_rows(route, provider_config))
     path.write_text(json.dumps(rows) + '\n')
 
 
@@ -261,7 +274,7 @@ class GraphTelemetry:
             route['permission_mode'] = context.get('permission_mode') or 'default'
         self.path = begin(workdir, route, role='coordinator')
         self.patch = self.path.with_suffix('.patch.yml')
-        observer_patch(self.patch, route)
+        observer_patch(self.patch, route, provider_config=context.get('provider_config'))
         self.context = context
 
     def command(self, argv: list[str]) -> list[str]:

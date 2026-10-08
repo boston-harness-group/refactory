@@ -168,6 +168,28 @@ def test_worker_patch_carries_declared_provider_profiles(tmp_path):
                     str(root), str(tmp_path)], check=True)
 
 
+def test_coordinator_patch_carries_declared_provider_profiles(tmp_path):
+    """The coordinator's graph runtime is as nested as a node's headless one.
+
+    Its patch omitted the declared provider routes, so a run selected to use a
+    gateway provider dispatched the graph profile's own default instead — a
+    project routed to a litellm gateway silently billed a DeepSeek account.
+    """
+    gateway = {"apiKeyEnv": "LITELLM_API_KEY", "api": "anthropic-messages",
+               "baseURL": "https://gateway.example/v1",
+               "models": [{"id": "gateway-model", "name": "gateway-model"}]}
+    context = DshModelClient(provider='gateway', model='gateway-model',
+                             provider_config={'gateway': gateway}).context()
+    telemetry = workers.GraphTelemetry(tmp_path, context, None)
+    rows = json.loads(telemetry.patch.read_text())
+    row = next(entry for entry in rows if entry.get('id') == 'llm-pi-ai')
+    assert row['config'] == {'providers': {'gateway': gateway}}
+    # Without a declaration the coordinator patch composes exactly what it did.
+    telemetry = workers.GraphTelemetry(tmp_path, DshModelClient().context(), None)
+    rows = json.loads(telemetry.patch.read_text())
+    assert not any(entry.get('id') == 'llm-pi-ai' for entry in rows)
+
+
 def test_partial_nested_usage_retains_known_total_but_refuses_token_work(tmp_path):
     budget = RunBudget.open(tmp_path, ResourceLimits(max_tokens=200))
     receipt = {'worker_id': 'dsh-one', 'usage': {'status': 'unavailable', 'tokens': None,

@@ -804,8 +804,9 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `finish` | `(path: 'Path', state: 'str', *, error: 'str \| None' = None) -> 'dict[str, Any]'` |
 | function | `lower_workflow` | `(workflow: 'Any', workdir: 'Path', model_context: 'dict[str, Any] \| None', declarations: 'dict[str, Any] \| None' = None) -> 'Any'` |
 | function | `now` | `() -> 'str'` |
-| function | `observer_patch` | `(path: 'Path', route: 'dict[str, Any]') -> 'None'` |
+| function | `observer_patch` | `(path: 'Path', route: 'dict[str, Any]', provider_config: 'dict[str, Any] \| None' = None) -> 'None'` |
 | function | `permission_patch` | `(route: 'dict[str, Any]') -> 'list[dict[str, Any]]'` |
+| function | `provider_rows` | `(route: 'dict[str, Any]', provider_config: 'dict[str, Any] \| None') -> 'list[dict[str, Any]]'` |
 | function | `resolve_route` | `(base: 'dict[str, Any]', *, role: 'str' = 'worker', node: 'str' = '', role_routes: 'dict[str, Any] \| None' = None, node_routes: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
 | function | `run_graph_command` | `(argv: 'list[str]', *, workdir: 'Path', context: 'dict[str, Any]', timeout: 'float \| None' = None, env: 'dict[str, str] \| None' = None, **kwargs: 'Any') -> 'Any'` |
 | function | `validate_route` | `(route: 'dict[str, Any]') -> 'dict[str, Any]'` |
@@ -816,6 +817,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 - **`environment`** — Nonsecret resolved context for graph-owned deterministic nested calls.
 - **`lower_workflow`** — Resolve explicit node workers before graph dispatch, preserving all edges.
 - **`permission_patch`** — Scope DSH bypass to this runtime, without leaking through child env.
+- **`provider_rows`** — Declare selected provider routes to a runtime that cannot see profiles.
 - **`resolve_route`** — Explicit node overrides role overrides run; runtime supplies empty fields.
 - **`run_graph_command`** — Inherit terminal IO while polling graph resource and coordinator receipts.
 - **`write_patch`** — Compose installed DSH services, never a parallel agent wire protocol.

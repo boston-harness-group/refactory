@@ -151,3 +151,49 @@ def test_main_forwards_headless_to_the_run(monkeypatch):
     assert seen[-1]["headless"] is True
     assert interactive.main([WITH_A_GATE]) == 0
     assert seen[-1]["headless"] is False
+
+
+def test_the_graph_argv_names_the_route_the_context_resolved(monkeypatch, tmp_path):
+    """The CEO's own argv must carry the route the resolved context selected.
+
+    The fresh-run path resolved a project file's provider into ``model_context``
+    but built the graph argv from the untouched CLI flags, so the CEO ran the
+    runtime's default provider while every node dispatch honored the project's
+    selection: a project routed to a litellm gateway silently billed the
+    runtime default's account.
+    """
+    from refactory_dsh import model as model_module
+    from refactory_dsh import workers
+
+    class RoutedClient:
+        def __init__(self, **kwargs):
+            self._given = kwargs
+
+        def context(self):
+            return {**self._resolved, "budget_ledger": ""}
+
+        #: What a project file's ``refactory.workers.json`` would resolve to.
+        _resolved = {
+            "routes_resolved": True, "routing_provenance": {},
+            "dsh_home": str(tmp_path), "provider": "gateway", "model": "gateway-model",
+            "timeout_s": 1800, "attempts": 3, "backoff_s": 1.0,
+            "runtime_root": str(ROOT), "dsh_cli": "", "python_bin": str(ROOT / ".venv/bin"),
+            "worker_backend": "dsh", "effort": "", "permission_mode": "skip",
+            "role_routes": {}, "node_routes": {}, "provider_config": {},
+        }
+
+    monkeypatch.setattr(model_module, "DshModelClient", RoutedClient)
+    seen: list[list[str]] = []
+
+    class _Run:
+        returncode = 0
+
+    def _capture(argv, **kwargs):
+        seen.append(argv)
+        return _Run()
+
+    monkeypatch.setattr(workers, "run_graph_command", _capture)
+    interactive.run(WITH_A_GATE, workdir=tmp_path / "run", project=ROOT, headless=True)
+    argv = seen[-1]
+    assert argv[argv.index("--provider") + 1] == "gateway"
+    assert argv[argv.index("--model") + 1] == "gateway-model"
