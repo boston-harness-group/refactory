@@ -877,3 +877,27 @@ def test_runtime_real_child_receives_preflight_home(tmp_path, monkeypatch, expli
     received = json.loads(record.read_text())
     assert received["HOME"] == str(tmp_path / "contained")
     assert received["DSH_HOME"] == received["REFACTORY_MODEL_DSH_HOME"] == str(selected)
+
+
+def test_additive_profile_is_composed_and_not_retired(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("DSH_HOME", str(home))
+    assert [tuple(step) for step in dsh_profile.provision_plan(additive=True)] == [
+        ("add", "graph", "graph"),
+        ("init", "refactory-web", "web"),
+        ("add", "refactory-web", "refactory"),
+        ("add", "refactory-web", "refactory-web"),
+    ]
+    _ready(home)
+    directory = _profile(home, "refactory-web", [
+        "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app",
+        dsh_profile.PRESETS_BUNDLE, dsh_profile.WEB_SURFACE_BUNDLE,
+    ])
+    _declare(directory, [dsh_profile.PRESETS_BUNDLE, dsh_profile.WEB_SURFACE_BUNDLE])
+    manifest_path = directory / "package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["dsh"]["profile"]["refactoryAdditive"] = True
+    manifest_path.write_text(json.dumps(manifest))
+    assert dsh_profile.provision_plan(additive=True) == []
+    assert dsh_profile.provision_plan() == [], "standalone launch must not retire the additive profile"
+    assert dsh_profile.obsolete_selections("refactory-web") == []

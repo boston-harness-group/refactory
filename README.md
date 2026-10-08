@@ -74,6 +74,16 @@ The original package remains available. [Continue the walkthrough →](refactory
 uv run refactory ui --port 3081
 ```
 
+For all native web presets plus CEO and the Refactory Modes panel:
+
+```bash
+./refactory-dsh --additive --port 3081
+```
+
+This creates and reuses `refactory-web`, declaring the web and Refactory bundles
+in `$DSH_HOME/profiles/refactory-web/package.json`. CEO is the default, and the
+existing `web` profile stays unchanged.
+
 Open the exact URL printed by the server, select the checkout as your workspace, then create a session. Open the right sidebar's **Modes** tab; no introductory chat message is required.
 
 Before model-backed work, save a provider key in **Settings → Models**. Nested workers and validation use the managed credential store; a checkout `.env` or exported key alone is insufficient for those scrubbed processes. `uv run refactory doctor` checks configuration, not authentication or quota. [Model setup →](refactory/docs/models.md)

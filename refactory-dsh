@@ -15,6 +15,9 @@
 # so every session created without naming one stops with `agent-preset/not-found`;
 # without `refactory-web` the console and picker rows never mount.
 #
+# --additive creates and launches refactory-web: the normal web template plus
+# the two Refactory bundles, with the full native preset picker and Modes panel.
+#
 # The graph profile is what the Python glue runs modes on.
 #
 # The meta-modes are Python entry points, not presets:
@@ -25,6 +28,28 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DSH_ROOT="${DSH_ROOT:-$HERE}"
+
+ADDITIVE=0
+PROFILE="refactory"
+FORWARDED=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --additive) ADDITIVE=1; PROFILE="refactory-web"; shift ;;
+    --help|-h)
+      cat <<'HELP'
+Usage: ./refactory-dsh [--additive] [DSH options]
+
+Default: launch the standalone Refactory GUI with CEO and Minimal.
+--additive: create and launch refactory-web, composing the web template with
+            Refactory, including all native presets and the Modes panel.
+
+Other DSH options, such as --port and --no-open, pass through unchanged.
+HELP
+      exit 0 ;;
+    --) FORWARDED+=("$@"); break ;;
+    *) FORWARDED+=("$1"); shift ;;
+  esac
+done
 
 # Node 22 is required; prefer the nvm version when present, else trust PATH.
 if [ -x "$HOME/.nvm/versions/node/v22.23.2/bin/node" ]; then
@@ -54,9 +79,15 @@ if [ ! -x "$PYTHON" ]; then
   exit 1
 fi
 
-PLAN="$("$PYTHON" -c '
+if [ "$ADDITIVE" -eq 1 ]; then
+  node "$HERE/refactory/refactory_dsh/additive.mjs" "$DSH_ROOT"
+fi
+
+PLAN="$(REFACTORY_ADDITIVE="$ADDITIVE" "$PYTHON" -c '
 from refactory_dsh import dsh_profile
-print(dsh_profile.render_plan(), end="")
+import os
+steps = dsh_profile.provision_plan(additive=os.environ.get("REFACTORY_ADDITIVE") == "1")
+print(dsh_profile.render_plan(steps), end="")
 ')"
 if [ -n "$PLAN" ]; then
   echo "refactory-dsh: provisioning owned DSH profiles" >&2
@@ -86,4 +117,4 @@ if [ -n "$PLAN" ]; then
 fi
 
 cd "$DSH_ROOT"
-exec "$DSH" --profile refactory "$@"
+exec "$DSH" --profile "$PROFILE" "${FORWARDED[@]}"

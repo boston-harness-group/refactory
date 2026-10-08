@@ -52,6 +52,9 @@ WEB_TEMPLATE = "web"
 #: re:factory's rows appear in every unrelated `dsh --profile web` session.
 GUI_PROFILE = "refactory"
 
+#: The opt-in composition: the ordinary web bundles plus Refactory.
+ADDITIVE_PROFILE = "refactory-web"
+
 #: The surface-independent layer: the `ceo` preset and the roster composition.
 #: It is wanted under every surface, so both the GUI and the attached Martty
 #: target carry it.
@@ -80,6 +83,8 @@ RETIRED_BUNDLES: dict[str, str] = {
 #: retires re:factory's layers from the old directory, which leaves it an inert
 #: copy of the shipped template it was initialized from rather than a profile
 #: whose bundle entries dangle.
+#: An explicitly configured additive profile with this name is active, not
+#: retired; its refactoryAdditive flag keeps the legacy migration distinct.
 RETIRED_PROFILES: dict[str, str] = {"refactory-web": GUI_PROFILE}
 
 #: The harness's shipped profile templates, read for the stale-mutation check.
@@ -202,8 +207,24 @@ def profile_dir(name: str = GRAPH_PROFILE, *, home: str | Path | None = None) ->
     return dsh_home(home) / "profiles" / name
 
 
+def is_additive_profile(name: str) -> bool:
+    """Distinguish the new opt-in profile from the old renamed standalone GUI."""
+    try:
+        manifest = json.loads((profile_dir(name) / "package.json").read_text())
+        return manifest.get("dsh", {}).get("profile", {}).get("refactoryAdditive") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def additive_target() -> Target:
+    return Target(ADDITIVE_PROFILE, WEB_TEMPLATE, ("presets", "web"), True,
+                  "the complete native web interface with Refactory added")
+
+
 def target(name: str = GRAPH_PROFILE) -> Target:
     """The target a profile name names. Raises :class:`KeyError` when unowned."""
+    if name == ADDITIVE_PROFILE and is_additive_profile(name):
+        return additive_target()
     for entry in TARGETS:
         if entry.profile == name:
             return entry
@@ -297,6 +318,8 @@ def wanted_layers(name: str) -> set[str]:
     rename left behind, and the plan retires re:factory's layers out of it rather
     than leaving it a profile whose bundle entries dangle.
     """
+    if name == ADDITIVE_PROFILE and is_additive_profile(name):
+        return {PRESETS_BUNDLE, WEB_SURFACE_BUNDLE}
     if name in RETIRED_PROFILES:
         return set()
     entry = target(name)
@@ -384,13 +407,14 @@ def init_command(name: str, *, checkout: Path | None = None) -> str:
     )
 
 
-def provision_plan() -> list[ProvisionStep]:
+def provision_plan(*, additive: bool = False) -> list[ProvisionStep]:
     """The ordered steps that make every owned target ready.
 
     ``install.sh`` and ``./refactory-dsh`` both execute this rather than keeping
     their own copy of the profile list, so the composition has one owner.
-    Attached targets are never part of the plan: re:factory does not create or
-    mutate a profile it does not own.
+    With ``additive=True``, provision graph and the opt-in additive web target
+    instead of the standalone GUI. Attached targets are never part of the plan:
+    re:factory does not create or mutate a profile it does not own.
 
     A target's ``remove`` rows precede its ``add`` rows, so a rename retires the
     old entry before the replacement is appended. ``RETIRED_PROFILES`` is the
@@ -409,7 +433,8 @@ def provision_plan() -> list[ProvisionStep]:
     run already cleared their selections and stopped before removing them.
     """
     steps: list[ProvisionStep] = []
-    for entry in TARGETS:
+    targets = (target(GRAPH_PROFILE), additive_target()) if additive else TARGETS
+    for entry in targets:
         if not entry.owned:
             continue
         present = (profile_dir(entry.profile) / "package.json").exists()
@@ -417,7 +442,10 @@ def provision_plan() -> list[ProvisionStep]:
             steps.append(ProvisionStep("init", entry.profile, entry.base_template))
         steps.extend(_retirement_steps(entry.profile, entry.layers))
     for retired in RETIRED_PROFILES:
-        steps.extend(_retirement_steps(retired, ()))
+        if additive and retired == ADDITIVE_PROFILE:
+            continue
+        layers = additive_target().layers if is_additive_profile(retired) else ()
+        steps.extend(_retirement_steps(retired, layers))
     return steps
 
 
