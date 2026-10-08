@@ -172,6 +172,22 @@ def test_audit_rejects_directory_reference_with_actionable_path(tmp_path):
     assert "individual file" in evidence.audit_problems(ctx)[0]
 
 
+def test_audit_instructions_tell_probing_reviewers_to_stage_fixtures_in_the_run():
+    """A reviewer told to probe but not where to put fixtures cites /tmp and loses the cycle.
+
+    The audit validator accepts only files inside the run directory or the delivered
+    artifact; without staging instructions a spot-check fixture written to /tmp is
+    uncitable, and its evidence dies with the gate verdict.
+    """
+    from refactory_dsh.design import DesignMode
+
+    overwatch = DesignMode().build().nodes["overwatch"]
+    prompt = overwatch.prompt_template
+    assert "Write intent-audit.json as" in prompt
+    assert "scratch/" in prompt
+    assert "never /tmp" in prompt
+
+
 def test_waiver_requires_user_quote_and_runtime_output_cannot_be_replaced(tmp_path):
     ctx = audit_context(tmp_path)
     deliver_audit(ctx)
