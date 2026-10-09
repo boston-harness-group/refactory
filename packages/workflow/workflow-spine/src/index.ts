@@ -135,6 +135,15 @@ export interface Config {
   steerArgs: string[]
   /** Foreground timeout for one node command. */
   commandTimeoutMs: number
+  /**
+   * How many node commands one dispatch boundary may hold in flight at once.
+   * A fork's peers are concurrent by the graph's own declaration, but the
+   * resources they share — one model gateway, one host — are not free: this is
+   * the composition's ceiling on that fan, with peers beyond it queued in cursor
+   * order until a slot frees. Zero (the default) is unbounded, which keeps every
+   * peer of a boundary running at once.
+   */
+  maxConcurrentNodes?: number
   /** Sandbox mode for node commands; graph commands are trusted ops, so full access. */
   commandSandboxMode: string
   /**
@@ -178,6 +187,7 @@ export const Config = z.object({
   steerCommand: z.string().default(''),
   steerArgs: z.array(z.string()).default([]),
   commandTimeoutMs: z.natural().default(600_000),
+  maxConcurrentNodes: z.natural().default(0),
   commandSandboxMode: z.string().default('danger-full-access'),
   ceoDeny: z.array(z.string()).default(DEFAULT_CEO_DENY),
 })
@@ -824,8 +834,29 @@ export function apply(ctx: Context, config: Config): void {
       // children. A queued stop/pause takes effect between dispatch boundaries,
       // not inside one. A node that fails is reported after its peers land: their
       // cursor positions complete, and the failure names the node that did not.
+      // `maxConcurrentNodes` bounds how many of those peers hold a slot at once:
+      // the shared resources behind the commands — one model gateway, one host —
+      // are not free, so a composition caps the fan and queues the rest in cursor
+      // order, a slot freeing as each command settles rather than in waves.
       recordStatus(spine, workdir, 'executing')
-      const outcomes = await Promise.all(automatic.map(node => runDeterministic(shell, node, runner)))
+      const cap = config.maxConcurrentNodes ?? 0
+      const ceiling = cap > 0 ? cap : Number.POSITIVE_INFINITY
+      let inFlight = 0
+      const waiters: Array<() => void> = []
+      const outcomes = await Promise.all(automatic.map(async node => {
+        // A finishing command hands its slot straight to the first waiter rather
+        // than returning it to the pool, so a fresh starter cannot slip in
+        // between the release and the waiter's wakeup and overshoot the ceiling.
+        if (inFlight >= ceiling) await new Promise<void>(resolve => waiters.push(resolve))
+        else inFlight += 1
+        try {
+          return await runDeterministic(shell, node, runner)
+        } finally {
+          const next = waiters.shift()
+          if (next === undefined) inFlight -= 1
+          else next()
+        }
+      }))
       let failure: CommandFailure | undefined
       for (let index = 0; index < automatic.length; index += 1) {
         const node = automatic[index]!

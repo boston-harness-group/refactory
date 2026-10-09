@@ -540,6 +540,69 @@ describe('one dispatch boundary per call when the run is opened interactively', 
     expect((last as { ran?: { peers?: string[] } }).ran?.peers).toBeUndefined()
   })
 
+  it('caps concurrent fork peers at maxConcurrentNodes without stranding the rest', async () => {
+    const run = scratch()
+    const graph = lower(run, {
+      name: 'fancap',
+      start_node: 'fork',
+      nodes: {
+        fork: { _type: 'ForkNode', id: 'fork', targets: ['c1', 'c2', 'c3'] },
+        c1: { _type: 'FnNode', id: 'c1', command: 'run-c1', reads: [], writes: [] },
+        c2: { _type: 'FnNode', id: 'c2', command: 'run-c2', reads: [], writes: [] },
+        c3: { _type: 'FnNode', id: 'c3', command: 'run-c3', reads: [], writes: [] },
+        join: { _type: 'JoinNode', id: 'join', sources: ['c1', 'c2', 'c3'] },
+        end: { _type: 'FnNode', id: 'end', command: 'run-end', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'fork', target: 'join' },
+        { source: 'join', target: 'end' },
+      ],
+    })
+    const starts: string[] = []
+    let inFlight = 0
+    let peak = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? run,
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          if (spec.command.startsWith('run-')) {
+            starts.push(spec.command)
+            inFlight += 1
+            peak = Math.max(peak, inFlight)
+            // Interleave, so a queued peer is visibly waiting while two hold slots.
+            await new Promise(resolve => setImmediate(resolve))
+            await new Promise(resolve => setImmediate(resolve))
+            inFlight -= 1
+          }
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text: '', truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const ctx = await mount({ openCommand: openStub(run, graph), executeCommands: true, maxConcurrentNodes: 2 }, shell)
+
+    const view = await call(ctx, 'wf_open', { mode: 'pkg/t', workdir: run }, as('session-1'))
+    // Two peers hold the two slots, the third waits for one to free, and the
+    // whole boundary still settles before `end` is due.
+    expect(peak).toBe(2)
+    expect(starts).toEqual(['run-c1', 'run-c2', 'run-c3'])
+    expect(view).toMatchObject({
+      status: 'ready',
+      nodes: [{ id: 'end' }],
+      ran: { node: 'c3', peers: ['c1', 'c2', 'c3'] },
+    })
+  })
+
   it('reports a failed fan peer after its successful peers complete, naming the failure', async () => {
     const run = scratch()
     const graph = lower(run, {
