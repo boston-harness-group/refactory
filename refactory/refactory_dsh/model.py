@@ -43,6 +43,25 @@ NODE_PATCH = Path(__file__).resolve().parent / "patches" / "agent-node.yml"
 #: set `timeout_s`; the default has to cover the slowest node a shipped mode declares.
 DEFAULT_TIMEOUT_S = 1800
 
+#: Overhead a node's dispatch reserves beyond its completion attempts, for process
+#: startup, sandbox discovery and delivery bookkeeping. `workers.lower_workflow`
+#: adds it to the declared budget when reserving the spine's node envelope, and the
+#: session inside the dispatch runs under the same wall (#307).
+NODE_DISPATCH_OVERHEAD_S = 600
+
+
+def node_session_budget_s(attempts: int, timeout_s: int) -> int:
+    """The wall a node's dispatch reserves: attempts sessions plus overhead.
+
+    One wall, computed one way, so the spine's `command_timeout_s` and the model
+    client's session deadline cannot disagree about when a node's work ends. A
+    deadline is never retried — replaying a tool-using session can duplicate real
+    work — so the session inside the dispatch gets the whole envelope rather than
+    the per-completion `timeout_s` alone.
+    """
+    return max(1, int(attempts)) * int(timeout_s) + NODE_DISPATCH_OVERHEAD_S
+
+
 
 #: How many times one completion may be attempted before it is called failed.
 #:
@@ -420,17 +439,29 @@ class DshModelClient:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         last = ""
+        # A node's dispatch is one session whose deadline is never retried, so it
+        # runs under the whole envelope `workers.lower_workflow` reserved for it —
+        # attempts sessions plus overhead — rather than the per-completion
+        # `timeout_s` alone (#307). A CEO turn or a console call keeps the plain
+        # completion deadline. The wall is absolute across attempts: a transport
+        # retry spends whatever remains of the same envelope.
+        if self._worker_backend == "dsh" and self._node_id:
+            budget_s = node_session_budget_s(self._attempts, self._timeout_s)
+            stop_at = time.monotonic() + budget_s
+        else:
+            budget_s = self._timeout_s
+            stop_at = None
         for attempt in range(1, self._attempts + 1):
             self._raise_if_cancelled()
             self._checkpoint()
             try:
-                proc = self._run_completion(cmd, run_dir)
+                proc = self._run_completion(cmd, run_dir, stop_at, budget_s)
             except subprocess.TimeoutExpired as exc:
                 # A tool-using completion may already have changed its workdir.
                 # A deadline is not a transport failure: replaying the prompt can
                 # duplicate real work even after its subprocesses have shut down.
                 raise RuntimeError(
-                    f"model completion timed out after {self._timeout_s}s; "
+                    f"model completion timed out after {budget_s}s; "
                     "requested runtime shutdown; not retried"
                 ) from exc
             else:
@@ -464,13 +495,19 @@ class DshModelClient:
             f"model completion failed on the wire {self._attempts} time(s); last cause: {last}"
         )
 
-    def _run_completion(self, cmd: list[str], run_dir: Path) -> subprocess.CompletedProcess[str]:
+    def _run_completion(
+        self, cmd: list[str], run_dir: Path, stop_at: float | None = None, budget_s: int | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Keep the CLI alive long enough to dispose its managed tool processes.
 
         ``subprocess.run(timeout=...)`` kills the immediate child before raising,
         bypassing the DSH CLI's SIGTERM handler and stranding detached tool jobs.
         Do not signal process names, inferred descendants, or unrelated groups.
+        ``stop_at`` is an absolute monotonic deadline shared across a node's
+        attempts; without one, the call is a plain completion bounded by
+        ``timeout_s``.
         """
+        timeout_s = budget_s if budget_s is not None else self._timeout_s
         with _termination_as_exit():
             self._raise_if_cancelled()
             proc = subprocess.Popen(
@@ -481,13 +518,13 @@ class DshModelClient:
                 start_new_session=os.name == "posix",
             )
             try:
-                deadline = time.monotonic() + self._timeout_s
+                deadline = stop_at if stop_at is not None else time.monotonic() + self._timeout_s
                 while True:
                     self._raise_if_cancelled()
                     self._checkpoint()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise subprocess.TimeoutExpired(cmd, self._timeout_s)
+                        raise subprocess.TimeoutExpired(cmd, timeout_s)
                     try:
                         stdout, stderr = proc.communicate(
                             timeout=min(remaining, 0.1)

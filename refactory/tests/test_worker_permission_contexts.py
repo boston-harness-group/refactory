@@ -22,7 +22,7 @@ def test_dsh_worker_and_coordinator_overlay_do_not_change_child_environment(tmp_
     monkeypatch.setenv('DSH_PERMISSION_MODE', 'workspace-write')
     seen = []
 
-    def inspect_completion(client, argv, _workdir):
+    def inspect_completion(client, argv, _workdir, _stop_at=None, _budget_s=None):
         # Read the actual generated launch overlay, not only its helper output.
         index = len(argv) - 1 - argv[::-1].index('--patch')
         seen.extend(json.loads(Path(argv[index + 1]).read_text()))

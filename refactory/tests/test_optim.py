@@ -348,6 +348,41 @@ def test_the_model_client_reports_a_timeout_instead_of_hanging(monkeypatch):
         DshModelClient(timeout_s=1).complete("hello")
 
 
+def test_a_node_session_runs_under_the_whole_dispatch_envelope(monkeypatch):
+    """A dispatched node's session deadline is the envelope the spine reserved.
+
+    One completion's `timeout_s` cannot bound a tool-using agent session doing a
+    node's work: a deadline kill is never retried, so the session gets the whole
+    `attempts`-plus-overhead envelope `workers.lower_workflow` reserves — the same
+    wall both layers compute, so neither can end the node before the other (#307).
+    A plain completion with no node keeps the per-completion deadline.
+    """
+    import subprocess
+
+    from refactory_dsh.model import DshModelClient, node_session_budget_s
+
+    seen: dict[str, object] = {}
+
+    def explode(self, cmd, run_dir, stop_at=None, budget_s=None):
+        seen["stop_at"], seen["budget_s"] = stop_at, budget_s
+        raise subprocess.TimeoutExpired(cmd="dsh", timeout=budget_s or 1)
+
+    monkeypatch.setattr(DshModelClient, "_run_completion", explode)
+    node = DshModelClient(timeout_s=1, attempts=3).for_node("research_director")
+    budget = node_session_budget_s(3, 1)
+    with pytest.raises(RuntimeError, match=f"timed out after {budget}s"):
+        node.complete("hello")
+    # The wall is absolute and shared across attempts, not per-completion.
+    assert seen["stop_at"] is not None
+    assert seen["budget_s"] == budget
+
+    seen.clear()
+    with pytest.raises(RuntimeError, match="timed out after 1s"):
+        DshModelClient(timeout_s=1).complete("hello")
+    assert seen["stop_at"] is None
+    assert seen["budget_s"] == 1
+
+
 def test_the_model_client_reports_a_failed_run(monkeypatch):
     import subprocess
 

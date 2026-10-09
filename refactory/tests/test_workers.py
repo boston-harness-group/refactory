@@ -32,7 +32,7 @@ def test_unsupported_routes_fail_before_launch(route):
 
 
 def test_receipt_preserves_unavailable_usage_and_request_is_not_actual(monkeypatch, tmp_path):
-    def complete(self, cmd, run_dir):
+    def complete(self, cmd, run_dir, stop_at=None, budget_s=None):
         assert '--patch' in cmd
         assert self._environment()['REFACTORY_WORKER_RECEIPT']
         return subprocess.CompletedProcess(cmd, 0, 'done', '')
@@ -56,7 +56,7 @@ def test_external_token_budget_fails_without_launch(tmp_path):
 
 def test_measured_nested_usage_is_counted_once(monkeypatch, tmp_path):
     budget = RunBudget.open(tmp_path, ResourceLimits(max_tokens=100))
-    def complete(self, cmd, run_dir):
+    def complete(self, cmd, run_dir, stop_at=None, budget_s=None):
         receipt = json.loads(self._worker_receipt.read_text())
         receipt['usage'] = {'status': 'measured', 'tokens': 80, 'calls': [{'tokens': 30}, {'tokens': 50}]}
         self._worker_receipt.write_text(json.dumps(receipt))
@@ -70,7 +70,7 @@ def test_measured_nested_usage_is_counted_once(monkeypatch, tmp_path):
 
 def test_unknown_usage_cannot_complete_token_limited_run(monkeypatch, tmp_path):
     budget = RunBudget.open(tmp_path, ResourceLimits(max_tokens=100))
-    monkeypatch.setattr(DshModelClient, '_run_completion', lambda self, cmd, run_dir: subprocess.CompletedProcess(cmd, 0, 'done', ''))
+    monkeypatch.setattr(DshModelClient, '_run_completion', lambda self, cmd, run_dir, stop_at=None, budget_s=None: subprocess.CompletedProcess(cmd, 0, 'done', ''))
     with pytest.raises(BudgetExhausted, match='unavailable'):
         DshModelClient().with_budget(budget).complete('task', workdir=tmp_path)
     assert json.loads(next((tmp_path / '.refactory/workers').glob('*.json')).read_text())['state'] == 'budget_exhausted'
@@ -259,7 +259,7 @@ def test_cancellation_receipt_does_not_cancel_another_client(monkeypatch, tmp_pa
     first = DshModelClient().with_cancellation(event)
     second = DshModelClient()
     event.set()
-    monkeypatch.setattr(DshModelClient, '_run_completion', lambda self, cmd, run_dir: subprocess.CompletedProcess(cmd, 0, 'done', ''))
+    monkeypatch.setattr(DshModelClient, '_run_completion', lambda self, cmd, run_dir, stop_at=None, budget_s=None: subprocess.CompletedProcess(cmd, 0, 'done', ''))
     with pytest.raises(CancelledError):
         first.complete('first', workdir=tmp_path/'first')
     assert second.complete('second', workdir=tmp_path/'second') == 'done'
