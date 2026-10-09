@@ -466,6 +466,128 @@ describe('opening a graph at run time', () => {
   })
 })
 
+describe('one dispatch boundary per call when the run is opened interactively', () => {
+  it('dispatches concurrent fork peers together and names the batch under `ran`', async () => {
+    const run = scratch()
+    const graph = lower(run, {
+      name: 'fan',
+      start_node: 'fork',
+      nodes: {
+        fork: { _type: 'ForkNode', id: 'fork', targets: ['c1', 'c2', 'c3'] },
+        c1: { _type: 'FnNode', id: 'c1', command: 'run-c1', reads: [], writes: ['c1.out'] },
+        c2: { _type: 'FnNode', id: 'c2', command: 'run-c2', reads: [], writes: ['c2.out'] },
+        c3: { _type: 'FnNode', id: 'c3', command: 'run-c3', reads: [], writes: ['c3.out'] },
+        join: { _type: 'JoinNode', id: 'join', sources: ['c1', 'c2', 'c3'] },
+        end: { _type: 'FnNode', id: 'end', command: 'run-end', reads: [], writes: ['end.out'] },
+      },
+      edges: [
+        { source: 'fork', target: 'join' },
+        { source: 'join', target: 'end' },
+      ],
+    })
+
+    // A shell that tracks how many node commands are in flight at once, so the
+    // test can tell concurrent dispatch from three commands in a row.
+    const log: string[] = []
+    let inFlight = 0
+    let peak = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? run,
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        result: async () => {
+          if (spec.command.startsWith('run-')) {
+            inFlight += 1
+            peak = Math.max(peak, inFlight)
+            log.push(spec.command)
+            const manifest = JSON.parse(spec.env?.DSH_WORKFLOW_NODE ?? '{}') as { id?: string; writes?: string[] }
+            for (const rel of manifest.writes ?? []) writeFileSync(join(run, rel), String(spec.command))
+            // Let the scheduler interleave: a peer must still be pending when
+            // the next one starts, or the dispatch was serial.
+            await new Promise(resolve => setImmediate(resolve))
+            inFlight -= 1
+          }
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text: '', truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const ctx = await mount({ openCommand: openStub(run, graph), executeCommands: true }, shell)
+
+    // The fan's three peers cross the sole fork, run as one dispatch boundary,
+    // and the sole join behind them settles too: `end` is what is due next.
+    const first = await call(ctx, 'wf_open', { mode: 'pkg/t', workdir: run }, as('session-1'))
+    expect(log).toEqual(['run-c1', 'run-c2', 'run-c3'])
+    expect(peak).toBe(3)
+    expect(first).toMatchObject({
+      status: 'ready',
+      nodes: [{ id: 'end' }],
+      ran: { node: 'c3', type: 'FnNode', peers: ['c1', 'c2', 'c3'], outputs: ['c3.out'] },
+    })
+
+    const last = await call(ctx, 'wf_next', {}, as('session-1'))
+    expect(log).toEqual(['run-c1', 'run-c2', 'run-c3', 'run-end'])
+    expect(last).toMatchObject({ status: 'done', ran: { node: 'end' } })
+    expect((last as { ran?: { peers?: string[] } }).ran?.peers).toBeUndefined()
+  })
+
+  it('reports a failed fan peer after its successful peers complete, naming the failure', async () => {
+    const run = scratch()
+    const graph = lower(run, {
+      name: 'fanfail',
+      start_node: 'fork',
+      nodes: {
+        fork: { _type: 'ForkNode', id: 'fork', targets: ['good', 'bad'] },
+        good: { _type: 'FnNode', id: 'good', command: 'run-good', reads: [], writes: [] },
+        bad: { _type: 'FnNode', id: 'bad', command: 'run-bad', reads: [], writes: [] },
+        join: { _type: 'JoinNode', id: 'join', sources: ['good', 'bad'] },
+        end: { _type: 'FnNode', id: 'end', command: 'run-end', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'fork', target: 'join' },
+        { source: 'join', target: 'end' },
+      ],
+    })
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? run,
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => ({
+          exitCode: spec.command === 'run-bad' ? 1 : 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+          stdout: { text: '', truncated: false },
+          stderr: { text: 'boom', truncated: false },
+        }),
+      }),
+    }
+    const ctx = await mount({ openCommand: openStub(run, graph), executeCommands: true }, shell)
+
+    const view = await call(ctx, 'wf_open', { mode: 'pkg/t', workdir: run }, as('session-1'))
+    expect(view).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/bad exited with code 1/),
+    })
+    // The peer that ran and succeeded completed; the run did not strand it.
+    const state = await call(ctx, 'wf_state', {}, as('session-1')) as { completed: string[] }
+    expect(state.completed).toContain('good')
+    expect(state.completed).not.toContain('bad')
+  })
+})
+
 describe('one deterministic node per call when the run is opened interactively', () => {
   it('runs a single node per wf_next, with wf_open running the first', async () => {
     const run = scratch()

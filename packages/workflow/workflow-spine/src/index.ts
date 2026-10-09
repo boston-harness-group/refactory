@@ -216,10 +216,13 @@ function lastLine(text: string | null | undefined): string {
  * which is empty when no command has run yet.
  * @param node - the node that just ran.
  * @param workdir - the run directory its command ran in.
+ * @param peers - every node this dispatch boundary ran, when the cursor held
+ * more than one; the boundary's last peer in cursor order is the named node.
  * @returns the node's id and type, plus the outputs and facts that exist.
  */
-function recordedStep(node: NodeView, workdir: string | undefined): RanStep {
+function recordedStep(node: NodeView, workdir: string | undefined, peers?: NodeView[]): RanStep {
   const step: RanStep = { node: node.id, type: node._type }
+  if (peers !== undefined && peers.length > 1) step.peers = peers.map(peer => peer.id)
   if (workdir === undefined) return step
   const outputs = (node.writes ?? []).filter(rel => rel !== '' && existsSync(resolve(workdir, rel)))
   if (outputs.length > 0) step.outputs = outputs
@@ -276,20 +279,24 @@ interface ToolExec {
 }
 
 /**
- * One deterministic node a `wf_next` (or `wf_open`) ran for the CEO.
+ * One dispatch boundary a `wf_next` (or `wf_open`) ran for the CEO.
  *
- * With `interactiveOpen` a call runs exactly one deterministic node, so the
- * result can name the node that just ran and what it left in the run directory
- * alongside the nodes still due. Neither field is invented when the run
+ * With `interactiveOpen` a call runs exactly one dispatch boundary — every
+ * deterministic node the cursor holds at once, dispatched together as fork
+ * peers (#306) — so the result can name a node that just ran and what it left
+ * in the run directory alongside the nodes still due; `peers` names the whole
+ * boundary when more than one ran. Neither field is invented when the run
  * directory does not carry it: a node that declares no artifact has no
  * `outputs`, and a run whose commands have not written `facts.json` has no
  * `facts`.
  */
 interface RanStep {
-  /** The node that just ran. */
+  /** A node that just ran: the boundary's last peer in cursor order. */
   node: string
   /** Its node type, so a reader can tell an op from a gate. */
   type: string
+  /** Every node this boundary dispatched, when the cursor held more than one. */
+  peers?: string[]
   /** The node's declared writes that now exist in the run directory, relative to it. */
   outputs?: string[]
   /** The run's `facts.json` as the node's command left it. */
@@ -638,13 +645,16 @@ export function apply(ctx: Context, config: Config): void {
    * completes — which is what makes one pass land per item on this runtime, the way
    * the walking executor gives it.
    *
-   * With `interactiveOpen` the loop stops after **one** deterministic node and
-   * returns, so each `wf_next` is one node the CEO can watch and steer between.
-   * Static fork/join boundaries and opening/closing a data pass are bookkeeping,
-   * not executable nodes, so they do not consume that one-node budget. A pass
+   * With `interactiveOpen` the loop stops after **one dispatch boundary** and
+   * returns, so each `wf_next` is one step the CEO can watch and steer between.
+   * Every deterministic node the cursor holds at once is a fork peer the graph
+   * declared concurrent, so one boundary dispatches the whole ready set together
+   * (#306) rather than one node at a time. Static fork/join boundaries and
+   * opening/closing a data pass are bookkeeping,
+   * not executable nodes, so they do not consume that one-boundary budget. A pass
    * that begins always continues on
    * the calls that follow. A configured graph (`interactiveOpen: false`) keeps
-   * draining every deterministic node in one call.
+   * draining every automatic node in one call.
    * @param spine - the run to advance.
    * @param workdir - the run directory node commands run in.
    * @param commandEnv - the run's own environment for node commands.
@@ -803,21 +813,36 @@ export function apply(ctx: Context, config: Config): void {
       }
       const automatic = state.nodes.filter(isDeterministic)
       if (automatic.length === 0 || (interactiveOpen && ran !== undefined)) return { next: state, item, ran }
-      // One node per call is the interactive contract; the configured graph keeps
-      // walking every automatic node the cursor is sitting on.
+      // One dispatch boundary per call is the interactive contract; the configured
+      // graph keeps walking every automatic node the cursor is sitting on.
       // Re-enter the boundary after each command, including concurrent cursors:
       // a queued stop/pause must take effect before any later node dispatch.
-      const node = automatic[0]!
+      //
+      // Every node the cursor holds at once is a fork peer the graph declared
+      // concurrent, so the whole ready set is dispatched together rather than one
+      // at a time (#306): a serial fan pays the summed wall of independent
+      // children. A queued stop/pause takes effect between dispatch boundaries,
+      // not inside one. A node that fails is reported after its peers land: their
+      // cursor positions complete, and the failure names the node that did not.
       recordStatus(spine, workdir, 'executing')
-      const outcome = await runDeterministic(shell, node, runner)
-      if (!outcome.ok) return { next: state, failure: outcome, ran }
-      if (outcome.verdict === undefined) spine.complete(node.id)
-      else spine.verdict(node.id, outcome.verdict)
+      const outcomes = await Promise.all(automatic.map(node => runDeterministic(shell, node, runner)))
+      let failure: CommandFailure | undefined
+      for (let index = 0; index < automatic.length; index += 1) {
+        const node = automatic[index]!
+        const outcome = outcomes[index]!
+        if (!outcome.ok) {
+          if (failure === undefined) failure = outcome
+          continue
+        }
+        if (outcome.verdict === undefined) spine.complete(node.id)
+        else spine.verdict(node.id, outcome.verdict)
+      }
       recordBoundary()
+      if (failure !== undefined) return { next: spine.next(), failure, ran }
       if (interactiveOpen) {
-        // Preserve the one-command budget while allowing structural boundaries
+        // Preserve the one-boundary budget while allowing structural boundaries
         // and data-pass grading to settle before exposing the next ready work.
-        ran = recordedStep(node, workdir)
+        ran = recordedStep(automatic[automatic.length - 1]!, workdir, automatic)
       }
     }
   }
@@ -1019,8 +1044,10 @@ export function apply(ctx: Context, config: Config): void {
   const openInstruction = interactiveOpen
     ? ` When the person asks you to run a mode and see each step, open it with ${toolPrefix}_open `
       + '(pass the mode as <package>/<name>), then drive it with '
-      + `${toolPrefix}_next, reporting each node as it completes: each call runs exactly one `
-      + 'deterministic node and names it under `ran` with the outputs and facts it left in the run '
+      + `${toolPrefix}_next, reporting each node as it completes: each call runs one dispatch `
+      + 'boundary — every deterministic node the cursor holds at once is a fork peer the graph '
+      + 'declared concurrent, dispatched together — and names one under `ran` (with `peers` for '
+      + 'the whole boundary) with the outputs and facts it left in the run '
       + `directory, so say what it produced before acting on what is due next. Open any mode this way, `
       + 'including an authoring one (create/edit/design): it is the route where a person is present, and '
       + 'a gate marked `(user)` is put to them. For create/edit/design, include the full user brief as '
@@ -1189,7 +1216,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: `${toolPrefix}_next`,
-    description: 'Get the next node(s) the workflow graph says are due now. Deterministic nodes (a command an `fn` gate or an `FnNode` runs) and a data node\'s item passes are executed for you and do not appear, except that when a mode is open interactively exactly one deterministic node runs per call: that node is named under `ran` (with its id, declared outputs and the run\'s facts), and `nodes` then names what is due next — which may itself be deterministic, in which case call this tool again rather than running it or calling `wf_done`. Returns `{ status, nodes }`: for `ready`, the node views you must act on (agent task / one-shot LLM / user gate / fork) with the fields you need, plus `item` while a data node is iterating; for `done`, the run is complete; for `failed`, a deterministic node failed and the cursor has not moved. With automatic execution, sole static ForkNode/JoinNode boundaries are crossed for you and returned branch prompts already have their delivery contexts. Dispatch only returned AgentNode/LLMNode prompts, never fork target ids from a state view. Pass each returned prompt in full; coordination notes must not weaken its requirements or waive the original brief/approved design without explicit user steering. A documented limitation is not a waiver. If a control node is explicitly returned (manual execution or a mixed cursor), acknowledge it with `wf_done`, then call this tool before dispatching branches. Always call this first and act only on what it returns — never skip or reorder.',
+    description: 'Get the next node(s) the workflow graph says are due now. Deterministic nodes (a command an `fn` gate or an `FnNode` runs) and a data node\'s item passes are executed for you and do not appear, except that when a mode is open interactively one dispatch boundary runs per call: every deterministic node the cursor holds at once is a fork peer the graph declared concurrent, so they are dispatched together and a node that ran is named under `ran` (with its id, declared outputs, the run\'s facts, and `peers` naming the whole boundary when more than one ran), and `nodes` then names what is due next — which may itself be deterministic, in which case call this tool again rather than running it or calling `wf_done`. Returns `{ status, nodes }`: for `ready`, the node views you must act on (agent task / one-shot LLM / user gate / fork) with the fields you need, plus `item` while a data node is iterating; for `done`, the run is complete; for `failed`, a deterministic node failed; its fork peers that did run have completed, and the failure names the node that did not. With automatic execution, sole static ForkNode/JoinNode boundaries are crossed for you and returned branch prompts already have their delivery contexts. Dispatch only returned AgentNode/LLMNode prompts, never fork target ids from a state view. Pass each returned prompt in full; coordination notes must not weaken its requirements or waive the original brief/approved design without explicit user steering. A documented limitation is not a waiver. If a control node is explicitly returned (manual execution or a mixed cursor), acknowledge it with `wf_done`, then call this tool before dispatching branches. Always call this first and act only on what it returns — never skip or reorder.',
     parameters: {},
     output: { schema: { type: 'json' }, render: (_args, value) => [text(value)] },
     execute(_args, exec) {
