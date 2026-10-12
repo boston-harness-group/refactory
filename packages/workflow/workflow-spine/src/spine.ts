@@ -16,6 +16,7 @@ export interface NodeView {
   _type: string
   role?: string
   resource_role?: 'work' | 'final_validation'
+  blocking?: boolean
   evaluator_type?: string
   /** For an `fn` gate: the command whose last stdout line is the verdict. */
   evaluator_command?: string
@@ -413,6 +414,7 @@ export class Spine {
     const node = this.nodes.get(nid)
     if (node === undefined) throw new Error(`unknown node ${nid}`)
     const view: NodeView = { id: nid, _type: node._type }
+    if (typeof node.blocking === 'boolean') view.blocking = node.blocking
     if (node.role !== undefined) view.role = node.role
     if (node._type === 'GateNode') {
       if (node.evaluator_type !== undefined) view.evaluator_type = node.evaluator_type
@@ -438,12 +440,12 @@ export class Spine {
       view.temperature = node.temperature ?? 0
     }
     if (node.resource_role !== undefined) view.resource_role = node.resource_role
+    if (node.command_timeout_s !== undefined) view.command_timeout_s = node.command_timeout_s
     if (node._type === 'ForkNode') view.targets = node.targets ?? []
     if (node._type === 'JoinNode') view.sources = node.sources ?? []
     if (node._type === 'FnNode' || node._type === 'Study') {
       view.writes = node.writes ?? []
       view.command = node.command ?? ''
-      if (node.command_timeout_s !== undefined) view.command_timeout_s = node.command_timeout_s
       if (node.content !== undefined) view.content = node.content
     }
     if (node._type === 'DataNode') {
@@ -577,6 +579,13 @@ export class Spine {
   /** Whether a gate stopped the run before its remaining work completed. */
   isHalted(): boolean {
     return this.halted !== undefined
+  }
+
+  /** Retain advanced cursor ownership without certifying a failed advisory node. */
+  retireAdvisoryFailure(node: string): void {
+    if (this.nodes.get(node)?.blocking !== false) throw new Error(`${node} is not advisory work`)
+    this.completed = this.completed.filter(entry => entry !== node)
+    this.log.push(`advisory ${node}: failed after dispatch`)
   }
 
   /**

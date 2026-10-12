@@ -7,6 +7,15 @@ function ids(spine: Spine): string[] {
   return next.nodes?.map(node => node.id) ?? []
 }
 
+it('preserves a native model gate stage timeout in the dispatched view', () => {
+  const spine = new Spine({ name: 'candidate', start_node: 'ceo_gate', nodes: {
+    ceo_gate: { id: 'ceo_gate', _type: 'GateNode', evaluator_type: 'agent', command_timeout_s: 3600,
+      evaluator_command: 'python -m refactory_dsh.run refactory_dsh.create_fidelity_gates:evaluate_native' },
+    done: { id: 'done', _type: 'FnNode', command: 'true' },
+  }, edges: [{ source: 'ceo_gate', target: 'done', condition: 'proceed' }] })
+  expect(spine.next().nodes?.[0]).toMatchObject({ evaluator_type: 'agent', command_timeout_s: 3600 })
+})
+
 describe('linear + gate', () => {
   const graph: WorkflowGraph = {
     name: 't',

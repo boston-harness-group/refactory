@@ -119,6 +119,20 @@
       "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
       "reviewed_schema": "7b2557e667506b09ea5c76f8cb26c3a9610d5288ace452ac027b8d94eae10417"
     },
+    "default_pack/create_fidelity": {
+      "doc": "refactory/docs/create-fidelity.md",
+      "examples": [{
+        "explanation": "Opt-in portable authoring candidate; review the produced strategy at its human gate. Live fidelity has not yet been established.",
+        "knobs": {"name": "tiny_example", "brief": "Write a reusable deterministic counter package", "variant": "portable"}
+      }],
+      "interfaces": {
+        "chat": "wf_open mode=default_pack/create_fidelity; review refactory help topic=default_pack/create_fidelity before launch",
+        "cli": "refactory ceo \"a reusable package\" --mode create_fidelity --name my_package",
+        "panel": "Discoverable in the mode picker; opt-in candidate only. Use a reviewed DSH route and fresh human strategy approval; optimization is unavailable because authoring is unscored."
+      },
+      "purpose": "Opt-in 29-stage Create-v2 fidelity candidate with DSH directors and independent children, human strategy approval, complete QA reports, repair and native portable package admission. Update/plugin variants and live fidelity remain unsupported or unverified.",
+      "reviewed_schema": "58ed2bdae73cda3757870b77aba2ac2eeb243062437674140ab6c53ed08399bc"
+    },
     "default_pack/create_fast": {
       "doc": "refactory/docs/authoring-validation.md",
       "examples": [
@@ -475,7 +489,7 @@
         "panel": "Unavailable as a dedicated panel control; use the documented CLI or chat route."
       },
       "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct.",
-      "reviewed_schema": "452a64059dc07d4794e43907c69da6cdafa7ecf1d3dda18271e4fa5709de44ad"
+      "reviewed_schema": "88af0540e66eb6568afd1a38b267b6a6699e8d48415a07a8f8f4b9e3b79823f8"
     },
     "cli:doctor": {
       "doc": "refactory/docs/cli.md",

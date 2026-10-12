@@ -44,7 +44,10 @@ def shutdown(proc: subprocess.Popen, *, label: str = 'model runtime') -> None:
     try:
         proc.communicate(timeout=SHUTDOWN_GRACE_S)
     except subprocess.TimeoutExpired as exc:
-        proc.kill()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
         # Escaped descendants may retain pipes; never wait on them indefinitely.
         try:
             proc.communicate(timeout=1)

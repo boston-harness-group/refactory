@@ -18,8 +18,15 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from refactory_dsh.nn.executor import RunContext, render
     from refactory_dsh.run import _knobs, _read_facts
     context = RunContext(workdir, knobs=_knobs(), facts=_read_facts(workdir))
-    client = DshModelClient(**spec['model_context']).for_node(node)
-    delivery = begin(workdir, node, render(spec['prompt'], context), spec['writes'],
+    client = DshModelClient(**spec['model_context']).for_node(node, role=spec.get('role', 'worker'))
+    if context.facts.get('create_fidelity') and spec.get('role', 'worker') != 'builder' and client.route()['worker_backend'] != 'dsh':
+        raise ValueError('Create fidelity research/review/archive roles require DSH execution')
+    prompt = render(spec['prompt'], context)
+    if context.facts.get('create_fidelity'):
+        from refactory_dsh.create_fidelity_ops import agent_prompt
+        from refactory_dsh.nn.graph import Node
+        prompt = agent_prompt(context, Node(node, 'agent', prompt_template=spec['prompt'], reads=tuple(spec['reads'])))
+    delivery = begin(workdir, node, prompt, spec['writes'],
                      reads=spec['reads'], model_context=client.context())
     output = client.complete(delivery['prompt'], workdir=workdir)
     receipt = finish(workdir, node, final_response=output, capture_final=client.route()["worker_backend"] == "dsh")
@@ -47,6 +54,9 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         facts = _read_facts(workdir)
         facts[produces[0]] = value
         (workdir / FACTS).write_text(json.dumps(facts, indent=2) + '\n')
+    final_facts = _read_facts(workdir)
+    if node == 'archivist_build' and final_facts.get('create_fidelity') and final_facts.get('create_fidelity_precheck_ok') is False:
+        raise ValueError('Create fidelity final precheck failed; diagnostic archive delivered')
     return receipt
 
 

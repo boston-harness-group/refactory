@@ -115,6 +115,18 @@ def test_the_authoring_modes_are_the_ones_the_catalogue_offers():
         )
 
 
+def test_fidelity_candidate_forwards_portable_brief_without_task_or_single(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_forward", lambda module, args: calls.append((module, args)) or 0)
+    assert cli.main(["ceo", "A reusable deterministic package", "--mode", "create_fidelity",
+                     "--name", "portable_example", "--model", "gpt-6.1-sol", "--effort", "high"]) == 0
+    assert calls[0][0] == "refactory_dsh.interactive"
+    assert calls[0][1][0] == "default_pack/create_fidelity"
+    assert "brief=A reusable deterministic package" in calls[0][1]
+    assert "name=portable_example" in calls[0][1]
+    assert "single_shot=1" not in calls[0][1]
+
+
 @pytest.mark.parametrize("argv", [["--help"], ["ceo", "--help"], ["optimize", "--help"], ["package", "--help"], ["graph-control", "--help"]])
 def test_help_is_available_for_every_verb_a_person_starts_with(argv):
     result = _run(*argv)

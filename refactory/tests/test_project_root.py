@@ -90,7 +90,11 @@ def test_no_shipped_mode_has_left_its_artifacts_in_the_checkout():
         for name in tuple(getattr(node, "writes", ()) or ())
     }
     assert declared, "no shipped mode declares a write, so this test proves nothing"
-    stray = sorted(name for name in declared if (REPO_ROOT / name).exists())
+    # Directory write contracts describe a workspace namespace. An empty
+    # registry directory contains no delivered artifact; a file or any actual
+    # directory contents still indicate a leak into the checkout.
+    stray = sorted(name for name in declared if (REPO_ROOT / name).is_file()
+                   or ((REPO_ROOT / name).is_dir() and any((REPO_ROOT / name).iterdir())))
     assert stray == [], f"these are a run's output files, not the repository's: {stray}"
 
 

@@ -31,6 +31,8 @@ export interface NodeManifest {
 
 /** Per-run settings for node commands: where they run, and with what. */
 export interface CommandRunnerConfig {
+  /** Caller-owned cancellation for advisory commands. */
+  signal?: AbortSignal
   /** Working directory for every node command; absent uses the executor's own. */
   workdir?: string
   /** Extra environment entries merged into each node command. */
@@ -88,7 +90,8 @@ export function commandOf(node: NodeView): string | undefined {
   if (node._type === 'FnNode' || node._type === 'Study') {
     return node.command === undefined || node.command === '' ? undefined : node.command
   }
-  if (node._type === 'GateNode' && node.evaluator_type === 'fn') {
+  if (node._type === 'GateNode' && (node.evaluator_type === 'fn'
+      || (node.evaluator_type === 'agent' && node.evaluator_command?.startsWith('python -m refactory_dsh.run refactory_dsh.create_fidelity_gates:evaluate_native')))) {
     const command = node.evaluator_command
     return command === undefined || command === '' ? undefined : command
   }
@@ -133,6 +136,7 @@ function requestFor(node: NodeView, command: string, config: CommandRunnerConfig
     command,
     env: { ...config.env, [NODE_ENV_KEY]: JSON.stringify(manifestOf(node, command)) },
     timeoutMs: seconds === undefined ? config.timeoutMs : seconds * 1000,
+    ...(config.signal === undefined ? {} : { signal: config.signal }),
     ...(config.workdir === undefined ? {} : { workdir: config.workdir }),
     ...(config.sandboxPolicy === undefined ? {} : { sandboxPolicy: config.sandboxPolicy }),
   }

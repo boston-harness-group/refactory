@@ -9,8 +9,11 @@ try {
   const directory = join(root, '.refactory', 'workers')
   mkdirSync(directory, { recursive: true })
   const path = join(directory, 'one.json')
-  writeFileSync(path, JSON.stringify({ requested_route: { worker_backend: 'dsh' }, worker_id: 'one', run_id: root,
-    usage: { status: 'unavailable', tokens: null } }))
+  const deadlines = { dispatches: [{ attempt: 1, sampled_at: '2026-10-12T12:00:00+00:00',
+    stage_remaining_s: 60, run_remaining_s: 40, effective_remaining_s: 40,
+    idle_timer: { status: 'inactive', timeout_s: null } }] }
+  writeFileSync(path, JSON.stringify({ requested_route: { worker_backend: 'dsh', effort: 'high' }, worker_id: 'one', run_id: root,
+    usage: { status: 'unavailable', tokens: null }, effective_deadlines: deadlines }))
   process.env.REFACTORY_WORKER_RECEIPT = path
   const events = new Map()
   let providers = ['spawn', 'fork']
@@ -18,7 +21,18 @@ try {
   const agent = { session: { id: 'dsh-parent' } }
   const request = events.get('agent/request')
   const stream = events.get('agent/assistant-stream')
-  await request({ agent }, async () => ({ provider: 'dsh-p', model: 'dsh-model' }))
+  const child = { session: { id: 'dsh-child' } }
+  let childRoute
+  const rootRoute = await request({ agent }, async () => {
+    // Nested request middleware can resolve before the root's next() returns.
+    childRoute = await request({ agent: child }, async () => ({ provider: 'child-p', model: 'child-model', reasoningEffort: 'low' }))
+    return { provider: 'dsh-p', model: 'dsh-model', reasoningEffort: 'medium' }
+  })
+  assert.equal(rootRoute.reasoningEffort, 'high')
+  assert.equal(childRoute.reasoningEffort, 'low', 'root effort must not replace a descendant override')
+  const defaultChild = { session: { id: 'dsh-default-child' } }
+  const defaultRoute = await request({ agent: defaultChild }, async () => ({ provider: 'child-p', model: 'child-model' }))
+  assert.equal(defaultRoute.reasoningEffort, undefined, 'root effort must not fabricate a descendant setting')
   stream({ agent, frame: { type: 'start' } })
   stream({ agent, frame: { type: 'chunk', chunk: { type: 'usage', usage: { totalTokens: 11 } } } })
   stream({ agent, frame: { type: 'end' } })
@@ -28,7 +42,11 @@ try {
   stream({ agent, frame: { type: 'chunk', chunk: { type: 'usage', usage: { totalTokens: 13 } } } })
   stream({ agent, frame: { type: 'end' } })
   const receipt = JSON.parse(readFileSync(path))
+  assert.deepEqual(receipt.effective_deadlines, deadlines, 'runtime observations must retain owner deadline samples')
   assert.equal(receipt.actual_route.model, 'dsh-model')
+  assert.equal(receipt.actual_route.effort, 'high')
+  assert.equal(receipt.sessions['dsh-child'].effort, 'low')
+  assert.equal(receipt.sessions['dsh-default-child'].effort, null)
   assert.equal(receipt.usage.status, 'unavailable')
   assert.equal(receipt.usage.tokens, null)
   assert.equal(receipt.usage.known_tokens, 24)

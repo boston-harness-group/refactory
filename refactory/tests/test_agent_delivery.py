@@ -20,6 +20,7 @@ def test_contract_keeps_task_steering_and_exact_paths_without_exposing_settings(
     assert 'never-in-a-prompt' not in prompt and 'permission_mode' not in prompt
     assert first['execution'] == {
         'node': 'check', 'workdir': str(tmp_path), 'inputs': [str(tmp_path / 'input.py')],
+        'input_fingerprints': {'input.py': None},
         'outputs': [str(tmp_path / 'result.json')], 'python': str(Path(sys.executable).parent / 'python'),
         'refactory_source': str(Path(agent_delivery.__file__).parent), 'runtime_root': '/selected/runtime',
     }

@@ -28,4 +28,4 @@ include = ["refactory_dsh*", "refactory_packages*"]
 py-modules = []
 
 [tool.setuptools.package-data]
-refactory_dsh = ["*.mjs", "patches/*.yml", "data/*.json"]
+refactory_dsh = ["*.mjs", "patches/*.yml", "data/*.json", "data/create_fidelity/v1/*.json"]

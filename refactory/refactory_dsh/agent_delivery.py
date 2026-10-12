@@ -30,6 +30,16 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
         'outputs': [str(_path(workdir, name)) for name in writes],
         'python': python, 'refactory_source': str(Path(__file__).resolve().parent),
     }
+    # The exact bytes a report consumed are evidence for a later gate. Paths alone
+    # cannot distinguish a fresh review from one written against an old strategy.
+    execution['input_fingerprints'] = {}
+    for name in reads:
+        target = _path(workdir, name)
+        execution['input_fingerprints'][name] = (
+            {str(p.relative_to(target)): hashlib.sha256(p.read_bytes()).hexdigest()
+             for p in sorted(target.rglob('*')) if p.is_file()} if target.is_dir()
+            else hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+        )
     if context.get('runtime_root'):
         execution['runtime_root'] = str(context['runtime_root'])
     from refactory_dsh.authoring_evidence import REVIEWERS, delivery_identity

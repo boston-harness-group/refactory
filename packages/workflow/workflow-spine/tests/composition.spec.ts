@@ -5,9 +5,10 @@
  *
  * These are the parts a run depends on but a single tool call does not reach.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -108,6 +109,59 @@ async function call(ctx: Context, name: string, args: unknown = {}): Promise<unk
   if (definition === undefined) throw new Error(`tool ${name} not registered`)
   return definition.execute(args, {} as never)
 }
+
+/** Real asynchronous shell I/O for the advisory lifecycle regression. */
+function processShell(): object {
+  return {
+    resolve: (request: ShellRequest) => ({ ...request, workdir: request.workdir ?? process.cwd(), timeoutMs: 1_000 }),
+    execute: async (spec: ShellRequest) => {
+      const child = spawn('/bin/sh', ['-c', spec.command], { cwd: spec.workdir, env: { ...process.env, ...spec.env } })
+      let stdout = '', stderr = '', timedOut = false
+      child.stdout.on('data', bytes => { stdout += String(bytes) })
+      child.stderr.on('data', bytes => { stderr += String(bytes) })
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, spec.timeoutMs ?? 1_000)
+      const result = new Promise(resolve => child.on('close', (exitCode, signal) => {
+        clearTimeout(timer)
+        resolve({ exitCode, signal, timedOut, aborted: false, timeoutMs: spec.timeoutMs,
+          stdout: { text: stdout, truncated: false }, stderr: { text: stderr, truncated: false } })
+      }))
+      return { result: async () => result }
+    },
+  }
+}
+
+describe('owned advisory commands', () => {
+  it('starts the builder before archive settlement and records unfinished ownership', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = { name: 'advisory', start_node: 'archive', nodes: {
+      archive: { id: 'archive', _type: 'FnNode', blocking: false,
+        command: 'while [ ! -f builder-started ]; do sleep 0.02; done; printf archived > archive.txt' },
+      builder: { id: 'builder', _type: 'FnNode', command: 'cp .refactory/spine-checkpoint.json builder-checkpoint.json; touch builder-started' },
+    }, edges: [{ source: 'archive', target: 'builder' }] }
+    const { ctx } = await mount({ graph, executeCommands: true, workdir })
+    ctx.provide('shell', processShell() as never)
+    await expect(call(ctx, 'wf_next')).resolves.toMatchObject({ status: 'done' })
+    expect(readFileSync(join(workdir, 'archive.txt'), 'utf8')).toBe('archived')
+    expect(JSON.parse(readFileSync(join(workdir, 'builder-checkpoint.json'), 'utf8')).advisory_pending).toEqual(['archive'])
+    expect(JSON.parse(readFileSync(join(workdir, '.refactory/spine-status.json'), 'utf8')).advisory_pending).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
+  it('reports archive failure even after the builder completes', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = { name: 'advisory', start_node: 'archive', nodes: {
+      archive: { id: 'archive', _type: 'FnNode', blocking: false, command: 'sleep 0.05; exit 7' },
+      builder: { id: 'builder', _type: 'FnNode', command: 'touch builder-completed' },
+    }, edges: [{ source: 'archive', target: 'builder' }] }
+    const { ctx } = await mount({ graph, executeCommands: true, workdir })
+    ctx.provide('shell', processShell() as never)
+    await expect(call(ctx, 'wf_next')).resolves.toMatchObject({ status: 'failed', exit_code: 7 })
+    expect(readFileSync(join(workdir, 'builder-completed'), 'utf8')).toBe('')
+    expect(JSON.parse(readFileSync(join(workdir, '.refactory/spine-status.json'), 'utf8')).status).toBe('failed')
+    expect(JSON.parse(readFileSync(join(workdir, '.refactory/spine-status.json'), 'utf8')).completed).not.toContain('archive')
+    await ctx.fiber.dispose()
+  })
+})
 
 describe('mounting a graph', () => {
   it('refuses an invalid graph at load, naming the problem', async () => {
@@ -294,6 +348,58 @@ describe('tool presentation', () => {
 })
 
 describe('asking a person', () => {
+  it.each(['native', 'pending'])('consumes a %s candidate revision once through the real Ledger bridge', async (channel) => {
+    const workdir = scratch()
+    const reads = ['.factory/strategy/current.md', '.factory/strategy/user-intent.md']
+    mkdirSync(join(workdir, '.factory/strategy'), { recursive: true })
+    for (const name of reads) writeFileSync(join(workdir, name), 'Original human requirements.')
+    writeFileSync(join(workdir, 'facts.json'), JSON.stringify({ create_fidelity: true }))
+    const python = resolve('.venv/bin/python')
+    const commandEnv = { PYTHONPATH: resolve('refactory') }
+    const feedback = 'Preserve every original requirement; test both invocations.'
+    const root = new Context()
+    await root.plugin(SystemPrompt)
+    await root.plugin(ToolRuntime)
+    await root.plugin(UserQuestionService)
+    const questions: string[] = []
+    root.on('user-questions/request', (request: { questions: Array<{ id: string; question: string }>; signal?: AbortSignal }) => {
+      const question = request.questions[0]!
+      questions.push(question.question)
+      if (channel === 'pending') {
+        const queued = spawnSync(python, ['-c',
+          'from pathlib import Path; from refactory_dsh.steering import Ledger; import json; '
+          + 'l=Ledger(Path.cwd()); r=json.loads(' + JSON.stringify(JSON.stringify(reads)) + '); '
+          + 'l.note("correction", ' + JSON.stringify(feedback) + '); '
+          + 'l.verdict("gate_strategy","reloop",review=l.review("gate_strategy",r))'],
+        { cwd: workdir, env: { ...process.env, ...commandEnv }, encoding: 'utf8', timeout: 10_000 })
+        expect(queued.status, queued.stderr).toBe(0)
+        return new Promise<never>((_resolve, reject) => request.signal?.addEventListener('abort',
+          () => reject(new Error('pending question released after Ledger answer')), { once: true }))
+      }
+      return Promise.resolve({ answers: [{ id: question.id, selected: question.id === 'gate_strategy' ? ['reloop'] : [],
+        custom: question.id === 'gate_strategy' ? '' : feedback }] })
+    })
+    await root.plugin(spinePlugin, config({ workdir, gateCommand: `'${python}' -m refactory_dsh.steering`, commandEnv,
+      graph: { name: 'candidate-revision', start_node: 'gate_strategy', nodes: {
+        gate_strategy: { id: 'gate_strategy', _type: 'GateNode', evaluator_type: 'user', reads,
+          gate_prompt: 'INTENT FIDELITY CHECK: preserve the original asks and Graph Topology.', max_iterations: 3 },
+        strategy: { id: 'strategy', _type: 'AgentNode', prompt_template: 'Revise from the human feedback.' },
+        builder: { id: 'builder', _type: 'AgentNode', prompt_template: 'Build the approved strategy.' },
+      }, edges: [{ source: 'gate_strategy', target: 'strategy', condition: 'reloop' },
+        { source: 'strategy', target: 'gate_strategy' }, { source: 'gate_strategy', target: 'builder', condition: 'proceed' }] },
+    }))
+    await expect(call(root, 'wf_verdict', { gate: 'gate_strategy' }))
+      .resolves.toMatchObject({ status: 'routed', verdict: 'reloop', answered_by: 'user' })
+    expect(questions[0]).toContain('INTENT FIDELITY CHECK')
+    expect(questions).toHaveLength(channel === 'native' ? 2 : 1)
+    expect((readFileSync(join(workdir, reads[1]!), 'utf8').match(/Preserve every original requirement/g) ?? [])).toHaveLength(1)
+    const receipts = readdirSync(join(workdir, '.refactory/create-fidelity-gates'))
+      .map(id => JSON.parse(readFileSync(join(workdir, '.refactory/create-fidelity-gates', id, 'verdict.json'), 'utf8')))
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]).toMatchObject({ owner: 'human', gate_id: 'gate_strategy', verdict: 'reloop', status: 'answered' })
+    expect(await call(root, 'wf_state')).toMatchObject({ cursor: ['strategy'], gate_verdicts: { gate_strategy: 'reloop' } })
+  })
+
   it.each(['pause', 'stop'])('applies %s while a gate question is pending without recording a verdict', async (action) => {
     const workdir = scratch()
     const root = new Context()

@@ -354,6 +354,12 @@ class Executor:
     _gate_iterations: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _outcome: str = field(default="pending", init=False, repr=False)
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
+    _background: list[Any] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Fresh contexts used by resume still need the logical declarations of
+        # gates that completed before the saved boundary.
+        self.ctx._gate_nodes = {node.id: node for node in self.graph.nodes.values() if node.kind == "gate"}
 
     def _record(
         self, node: str, *, error: str | None = None,
@@ -390,6 +396,67 @@ class Executor:
             pass
 
     def run(self, *, start: str | None = None) -> RunResult:
+        """Finish owned advisory work before publishing the terminal result."""
+        from refactory_dsh.owned_process import _termination_as_exit
+
+        # Branch model/director calls run in threads and cannot install signal
+        # handlers. The main owner must unwind through run_fork's cancellation
+        # and join before exiting on its default SIGTERM path.
+        with _termination_as_exit():
+            return self._run_owned(start=start)
+
+    def _run_owned(self, *, start: str | None = None) -> RunResult:
+        prior_workers = set((self.ctx.workdir / ".refactory/workers").glob("*.json"))
+        try:
+            result = self._run(start=start)
+        except BaseException:
+            self._settle_background(cancel=True)
+            raise
+        original_error = result.error
+        background_error = self._settle_background(cancel=not result.exit_ok)
+        if background_error:
+            result.error = f"{result.error}; {background_error}" if result.error else background_error
+        if self.ctx.facts.get("create_fidelity") and self.ctx.facts.get("create_fidelity_precheck_ok") is False and result.error is None:
+            result.error = str(self.ctx.facts.get("create_fidelity_precheck_error") or "Create fidelity final precheck failed")
+        result.facts = dict(self.ctx.facts)
+        result.exit_ok = result.error is None
+        result.model_calls = self.model_calls
+        if self.ctx.facts.get("create_fidelity"):
+            result.model_calls = max(result.model_calls, len(set((self.ctx.workdir / ".refactory/workers").glob("*.json")) - prior_workers))
+            if result.exit_ok:
+                self._record("", outcome="completed")
+            elif original_error is None or background_error is not None:
+                # A foreground refusal already recorded its resumable node.
+                # Only failures discovered while settling terminal work need a
+                # new marker; an empty node would destroy approval/resume state.
+                node = self.steps[-1].node if self.steps else (start or self.graph.start)
+                self._record(node, error=result.error,
+                             outcome="unknown" if "cleanup unconfirmed" in result.error else "failed")
+        return result
+
+    def _settle_background(self, *, cancel: bool = False) -> str | None:
+        from concurrent.futures import TimeoutError
+
+        errors = []
+        for future, pool, child, stopped, deadline in self._background:
+            if cancel:
+                stopped.set()
+            try:
+                future.result(timeout=max(0.01, deadline - time.monotonic()))
+                for name in child.ctx._produced:
+                    self.ctx.facts[name] = child.ctx.facts[name]
+            except TimeoutError:
+                stopped.set()
+                errors.append("advisory worker did not settle within its stage allowance; child cleanup unconfirmed")
+            except Exception as exc:
+                errors.append(f"advisory worker failed: {type(exc).__name__}: {exc}")
+            finally:
+                self.model_calls += child.model_calls
+                pool.shutdown(wait=False, cancel_futures=True)
+        self._background.clear()
+        return "; ".join(errors) if errors else None
+
+    def _run(self, *, start: str | None = None) -> RunResult:
         started = time.time()
         visits = self._gate_iterations
         current: str | None = start or self.graph.start or None
@@ -609,6 +676,40 @@ class Executor:
         """Run one node and return ``(next node id, verdict)``."""
         from refactory_dsh.live import emit
 
+        if self.ctx.facts.get("create_fidelity") and not node.blocking and node.kind == "agent":
+            import copy
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            from refactory_dsh.model import DEFAULT_TIMEOUT_S
+            from refactory_dsh.owned_process import SHUTDOWN_GRACE_S
+
+            stopped = threading.Event()
+            model = self.ctx.model
+            if callable(getattr(model, "with_cancellation", None)):
+                model = model.with_cancellation(stopped)
+            child_ctx = RunContext(self.ctx.workdir, knobs=copy.deepcopy(self.ctx.knobs),
+                                   facts=copy.deepcopy(self.ctx.facts), model=model,
+                                   task=copy.deepcopy(self.ctx.task), memory=self.ctx.memory,
+                                   enforce_writes=self.ctx.enforce_writes)
+            child_ctx.node_id = node.id
+            child_ctx._declared, child_ctx._declared_facts = node.writes, node.produces
+            child_ctx.budget = self.ctx.budget
+            child = Executor(self.graph, child_ctx)
+            child._reserve_step = lambda: True  # the owner alone writes progress
+            def archive() -> None:
+                child._visit(node.with_field("blocking", True))
+                child_ctx._check_produces()
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="refactory-archive")
+            future = pool.submit(archive)
+            allowance = node.timeout_s or DEFAULT_TIMEOUT_S
+            if callable(getattr(model, "effective_deadlines", None)):
+                selected = model.for_node(node.id, role=node.role).with_node_timeout(node.timeout_s)
+                allowance = selected.effective_deadlines()["stage_timeout_s"]
+            self._background.append((future, pool, child, stopped,
+                                     time.monotonic() + allowance + SHUTDOWN_GRACE_S + 2))
+            out = self.graph.out_edges(node.id)
+            return (out[0].target if out else None), None
+
         self._outcome = "pending"
         if self.ctx.budget is not None:
             self.ctx.budget.checkpoint_node(node.resource_phase)
@@ -632,7 +733,13 @@ class Executor:
         """Execute a node after resource admission and the durable start marker."""
         if node.kind == "op":
             fn = resolve(node.call)
-            produced = fn(self.ctx)
+            previous = self.ctx.model
+            if callable(getattr(previous, "with_node_timeout", None)):
+                self.ctx.model = previous.with_node_timeout(node.timeout_s)
+            try:
+                produced = fn(self.ctx)
+            finally:
+                self.ctx.model = previous
             if isinstance(produced, dict):
                 for key, value in produced.items():
                     self.ctx.set_fact(key, value)
@@ -651,7 +758,16 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
-        delivery = begin(self.ctx.workdir, node.id, render(node.prompt_template, self.ctx), list(node.writes),
+        if callable(getattr(client, "with_node_timeout", None)):
+            client = client.with_node_timeout(node.timeout_s)
+        route = client.route() if callable(getattr(client, "route", None)) else {}
+        if self.ctx.facts.get("create_fidelity") and node.role != "builder" and route.get("worker_backend", "dsh") != "dsh":
+            raise ExecutionError(f"Create fidelity role {node.role!r} requires DSH execution")
+        prompt = render(node.prompt_template, self.ctx)
+        if self.ctx.facts.get("create_fidelity"):
+            from refactory_dsh.create_fidelity_ops import agent_prompt
+            prompt = agent_prompt(self.ctx, node)
+        delivery = begin(self.ctx.workdir, node.id, prompt, list(node.writes),
                          reads=list(node.reads),
                          model_context=client.context() if callable(getattr(client, "context", None)) else None)
         self.model_calls += 1
@@ -660,7 +776,6 @@ class Executor:
         output = _ask_model(
             client, delivery["prompt"], system=node.notes, workdir=self.ctx.workdir
         )
-        route = client.route() if callable(getattr(client, "route", None)) else {}
         finish(self.ctx.workdir, node.id, final_response=output,
                capture_final=route.get("worker_backend", "dsh") == "dsh")
         if node.produces:
@@ -703,7 +818,16 @@ class Executor:
         return str(verdict)
 
     def _visit_gate(self, node: Node) -> tuple[str, str]:
-        if node.gate_kind != "fn":
+        if self.ctx.facts.get("create_fidelity") and node.gate_kind in ("agent", "user"):
+            from refactory_dsh.create_fidelity_gates import evaluate
+            self.ctx._gate_labels = [str(edge.condition) for edge in self.graph.out_edges(node.id)]
+            if not hasattr(self.ctx, "_gate_nodes"):
+                self.ctx._gate_nodes = {}
+            self.ctx._gate_nodes[node.id] = node
+            if node.gate_kind == "agent":
+                self.model_calls += 1
+            verdict = evaluate(self.ctx, node)
+        elif node.gate_kind != "fn":
             verdict = self._answered_verdict(node)
         else:
             fn: Callable[[RunContext], Any] = resolve(node.evaluator)

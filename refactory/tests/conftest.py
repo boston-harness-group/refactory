@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+# Benchmark controllers are repository-only test infrastructure, deliberately
+# excluded from the installed runtime package. Make them importable under the
+# documented pytest command without requiring a caller-supplied PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 # Ops declared by a mode are resolved by module name at run time, so the test ops
 # have to be importable by name rather than only by path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))

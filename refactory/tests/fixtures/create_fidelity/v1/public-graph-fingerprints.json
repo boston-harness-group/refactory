@@ -1,0 +1,12 @@
+{
+  "source_commit": "ec99b4ec129b6440378079cf2226ce5470952b09",
+  "algorithm": "sha256(json.dumps(mode.graph().to_state(), sort_keys=True))",
+  "graphs": {
+    "create": "e53ddfc4e62d94aae341c731a05bac4e37fd253a8363973a487b3c59ccc3b374",
+    "edit": "e53ddfc4e62d94aae341c731a05bac4e37fd253a8363973a487b3c59ccc3b374",
+    "design": "29f26757f0739083f91f2b65cd3c62db4d1b992917c134497f6512821d95c689",
+    "create_fast": "4d3c8ee57097e042b843715c1b16c8b1fc9e0d803518b30de494d6eba2905870",
+    "edit_fast": "e74df6bad044724202bf482bd8a01ff644ca4e01c4d62a61051e62e8bcebaa90",
+    "design_fast": "259176f0f1009fce25c7392012fa576b5435452a374059ea2e2769dc41086779"
+  }
+}

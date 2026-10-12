@@ -55,6 +55,7 @@ _NODE_FIELDS = frozenset(
         "source_format",
         "inline_items",
         "limit",
+        "timeout_s",
     }
 )
 
@@ -116,6 +117,8 @@ class Node:
     #: Resource phase is independent of worker routing. Unset preserves the
     #: enclosing phase, except the legacy validation role enters validation.
     resource_role: str | None = None
+    #: An explicit stage wall. Omitted legacy nodes retain their historical limits.
+    timeout_s: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in NODE_KINDS:
@@ -164,6 +167,8 @@ class Node:
             )
         if self.resource_role not in (None, "work", "final_validation"):
             raise GraphError(f"node {self.id!r}: unknown resource_role {self.resource_role!r}")
+        if self.timeout_s is not None and (type(self.timeout_s) is not int or not 1 <= self.timeout_s <= 2_147_483):
+            raise GraphError(f"node {self.id!r}: timeout_s must be a positive integer <= 2147483")
 
     @property
     def resource_phase(self) -> str | None:
@@ -188,6 +193,7 @@ class Node:
             "prompt_template": self.prompt_template,
             "role": self.role,
             **({"resource_role": self.resource_role} if self.resource_role is not None else {}),
+            **({"timeout_s": self.timeout_s} if self.timeout_s is not None else {}),
             "tools": list(self.tools),
             "max_iterations": self.max_iterations,
             "notes": self.notes,
@@ -225,6 +231,7 @@ class Node:
             prompt_template=str(state.get("prompt_template", "")),
             role=str(state.get("role", "ceo")),
             resource_role=state.get("resource_role"),
+            timeout_s=state.get("timeout_s"),
             tools=tuple(state.get("tools") or ()),
             max_iterations=int(state.get("max_iterations", 1)),
             notes=str(state.get("notes", "")),

@@ -77,13 +77,13 @@ export function apply(ctx) {
       const unsupported = ctx.subagents.list().filter(name => !['spawn', 'fork'].includes(name))
       if (unsupported.length) throw new Error(`Token-limited DSH requires in-process spawn/fork providers; unmetered providers: ${unsupported.join(', ')}`)
     }
+    rootSessionId ??= agent.session.id
     let route = await next()
-    if (backend === 'dsh' && initial.requested_route.effort) {
+    if (agent.session.id === rootSessionId && initial.requested_route.effort) {
       route = { ...route, reasoningEffort: initial.requested_route.effort }
     }
     const actual = { worker_backend: 'dsh', provider: route.provider, model: route.model,
       effort: route.reasoningEffort ?? null, source: 'runtime-request' }
-    rootSessionId ??= agent.session.id
     sessions.set(agent.session.id, actual)
     save({ ...(agent.session.id === rootSessionId ? { actual_route: actual, runtime_session_id: rootSessionId } : {}),
       sessions: Object.fromEntries(sessions) }, 'running',

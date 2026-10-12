@@ -17,7 +17,7 @@ from refactory_dsh import nn, registry
 from refactory_dsh.loop import Loop, LoopConfig
 
 PACKAGE = "default_pack"
-MODES = ("create", "edit", "design", "create_fast", "edit_fast", "design_fast")
+MODES = ("create", "edit", "design", "create_fast", "edit_fast", "design_fast", "create_fidelity")
 
 
 def _mode(identifier: str):
@@ -67,7 +67,7 @@ def test_the_package_names_the_operations_it_uses():
 # ── the exceptions the package needs, stated ───────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["create", "design"])
+@pytest.mark.parametrize("name", ["create", "design", "create_fidelity"])
 def test_an_unscored_mode_declares_why(name):
     """Unscored on purpose is a declaration, not an inference.
 

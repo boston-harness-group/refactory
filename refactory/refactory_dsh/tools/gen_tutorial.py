@@ -761,11 +761,15 @@ TEMPLATE = """<!DOCTYPE html>
     </section>
 
     <section id="create">
-      <h2>create-v2</h2>
-      <p class="lede"><code>default_pack/create</code> is remote-factory's create-v2, ported node for node: a
+      <h2>Create</h2>
+      <p class="lede"><code>default_pack/create</code> is the current public authoring pipeline, with a
       research phase, a strategy phase a <strong>person</strong> approves, a build, three reviews in parallel, an
       audit of their evidence, then registration and a smoke run. Its output is a package of modes, written as
       Python.</p>
+      <p><code>default_pack/create_fidelity</code> is an opt-in candidate restoring the pinned
+      remote-factory create-v2 graph and director protocol. Its controlled tests do not establish live
+      model fidelity. It supports portable packages; update and plugin variants remain unsupported.
+      Public Create retains its existing behavior until the paired live benchmark is complete.</p>
       <h3>The pipeline, as the graph declares it</h3>
       {create_pipeline}
       <h3>What it produces</h3>

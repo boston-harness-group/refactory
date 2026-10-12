@@ -1,7 +1,9 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import type { ShellExecution, ShellExecRequest, ShellExecSpec, ShellExecutor, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import { commandOf, isDeterministic, NODE_ENV_KEY, runDeterministic, verdictOf } from '../src/execute.ts'
@@ -71,6 +73,15 @@ function gate(id: string, evaluatorCommand?: string): NodeView {
 }
 
 describe('which nodes the plugin runs itself', () => {
+  it('executes the candidate CEO adapter while retaining logical agent ownership', async () => {
+    const view: NodeView = { id: 'gate_build', _type: 'GateNode', evaluator_type: 'agent',
+      evaluator_command: 'python -m refactory_dsh.run refactory_dsh.create_fidelity_gates:evaluate_native',
+      gate_prompt: 'Original CEO criteria' }
+    expect(commandOf(view)).toBe(view.evaluator_command)
+    expect(view.evaluator_type).toBe('agent')
+    expect(commandOf({ ...view, evaluator_command: 'echo proceed' })).toBeUndefined()
+    expect(commandOf({ ...view, evaluator_type: 'user' })).toBeUndefined()
+  })
   it('claims an FnNode with a command and an fn gate with an evaluator', () => {
     expect(isDeterministic(fn('a', 'true'))).toBe(true)
     expect(isDeterministic(gate('g', 'echo proceed'))).toBe(true)
@@ -92,6 +103,25 @@ describe('which nodes the plugin runs itself', () => {
 })
 
 describe('running a deterministic node', () => {
+  it('carries a declared stage wall through the real pinned DSH shell clamp and subprocess', async () => {
+    const store = resolve('node_modules/.pnpm')
+    const installed = async (name: string): Promise<{ default: new (context: Context, config?: Record<string, unknown>) => object }> => {
+      const directory = readdirSync(store).find(entry => entry.startsWith(`@deepseek-ai+${name}@`))
+      if (directory === undefined) throw new Error(`pinned ${name} runtime is unavailable`)
+      return import(pathToFileURL(resolve(store, directory, `node_modules/@deepseek-ai/${name}/lib/index.js`)).href)
+    }
+    const subprocess = await installed('dsh-subprocess-local')
+    const bash = await installed('dsh-bash-local')
+    const ctx = new Context()
+    await ctx.plugin(subprocess.default)
+    await ctx.plugin(bash.default, { timeoutMs: 20, maxTimeoutMs: 20, graceMs: 100 })
+    try {
+      const shell = ctx.get('shell') as ShellExecutor
+      expect(shell.resolve({ command: 'true', timeoutMs: 1_000 }).timeoutMs).toBe(20)
+      const outcome = await runDeterministic(shell, { ...gate('original_stage', 'sleep 0.05; printf proceed'), command_timeout_s: 1 }, config)
+      expect(completed(outcome).verdict).toBe('proceed')
+    } finally { await ctx.fiber.dispose() }
+  })
   it('runs an FnNode command and reports success', async () => {
     const outcome = await runDeterministic(localShell, fn('a', 'printf done'), config)
     expect(outcome.ok).toBe(true)

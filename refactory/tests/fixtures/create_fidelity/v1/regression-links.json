@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "interpretation": "Source and regression links explain candidate fixes; only each trial's scorecards establish live status.",
+  "issue": "https://github.com/boston-harness-group/refactory-dsh/issues/310",
+  "rows": [
+    {
+      "requirements": ["F.children.qa_director", "F.consumption", "F.completion"],
+      "owner": "DSH prompt transport",
+      "fix": "Send large DSH prompts through the installed headless CLI's supported stdin task, preserving exact full report bytes, transport hashes, deadlines and owned-process cleanup instead of exceeding OS argv limits.",
+      "source": "refactory/refactory_dsh/model.py",
+      "regression": "refactory/tests/test_large_prompt_transport.py"
+    },
+    {
+      "requirements": ["F.stage.create_factory_md", "F.obligations.semantic"],
+      "owner": "native bootstrap mapping",
+      "fix": "Supply the exact pinned configuration template and provenance, bind copied input and filled output, and resolve only the bootstrap stage's declared configuration-write duty.",
+      "source": "refactory/refactory_dsh/create_fidelity_prompts.py",
+      "regression": "refactory/tests/test_create_fidelity_graph_ops.py"
+    },
+    {
+      "requirements": ["F.stage.health_checker", "F.stage.gate_qa", "F.completion"],
+      "owner": "benchmark verification ownership",
+      "fix": "Give every lane the same versioned authoring context distinguishing actual local Create checks from mandatory hidden operator acceptance after delivery; preserve all public requirements and checker bytes.",
+      "source": "refactory/benchmarks/create_fidelity/harness.py",
+      "regression": "refactory/tests/test_create_fidelity_harness.py"
+    },
+    {
+      "requirements": ["F.stage.", "F.qa_barrier", "F.completion"],
+      "owner": "graph and orchestration",
+      "fix": "Restore source stage responsibilities, joins, repair routes and truthful completion.",
+      "source": "refactory/refactory_dsh/create_fidelity.py",
+      "regression": "refactory/tests/test_create_fidelity_orchestration.py"
+    },
+    {
+      "requirements": ["F.children.", "F.obligations", "F.consumption"],
+      "owner": "directors",
+      "fix": "Dispatch every planned child and consume complete typed, digest-bound reports; preserve original requirement IDs such as B01.",
+      "source": "refactory/refactory_dsh/create_fidelity_directors.py",
+      "regression": "refactory/tests/test_create_fidelity_directors.py"
+    },
+    {
+      "requirements": ["F.approval", "F.repair"],
+      "owner": "gates and runtime",
+      "fix": "Consume fresh human answers for exact strategy/intent inputs; retain AI gate ownership and repair feedback.",
+      "source": "refactory/refactory_dsh/create_fidelity_gates.py",
+      "regression": "refactory/tests/test_create_fidelity_runtime.py"
+    },
+    {
+      "requirements": ["F.approval", "F.stage.gate_strategy"],
+      "owner": "runtime recovery",
+      "fix": "Resume the certified gate checkpoint while allowing newly supplied ledger context and still rejecting changed source instructions.",
+      "source": "refactory/refactory_dsh/nn/mode.py",
+      "regression": "refactory/tests/test_create_fidelity_orchestration.py"
+    },
+    {
+      "requirements": ["F.approval", "F.stage.gate_strategy"],
+      "owner": "benchmark adapter",
+      "fix": "Use each framework's actual strategy/intent files and the pinned baseline's documented start/facts recovery API.",
+      "source": "refactory/benchmarks/create_fidelity/lane.py",
+      "regression": "refactory/tests/test_create_fidelity_approval_adapter.py"
+    },
+    {
+      "requirements": ["F.route", "F.stage."],
+      "owner": "independent evidence scorer",
+      "fix": "Require served routes to match explicit requests; normalize remote dotted event names and score the latest visit while preserving failed attempts.",
+      "source": "refactory/benchmarks/create_fidelity/evidence.py",
+      "regression": "refactory/tests/test_create_fidelity_score_visits.py"
+    },
+    {
+      "requirements": ["F.deadlines", "F.deadlines.expiry"],
+      "owner": "runtime lifecycle",
+      "fix": "Honor declared stage allowances, cancel owned children and keep unknown cleanup distinct from confirmed completion.",
+      "source": "refactory/refactory_dsh/nn/executor.py",
+      "regression": "refactory/tests/test_create_fidelity_runtime.py"
+    },
+    {
+      "requirements": ["F.deadlines.remaining"],
+      "owner": "dispatch telemetry",
+      "fix": "Observe actual pre-dispatch worker, run-budget and enclosing composite clocks without changing timers; leave old receipts unavailable.",
+      "source": "refactory/refactory_dsh/workers.py",
+      "regression": "refactory/tests/test_worker_deadline_telemetry.py"
+    },
+    {
+      "requirements": ["F.obligations.semantic", "F.approval.identity", "B10"],
+      "owner": "independent operator review",
+      "fix": "Bind scoped source-duty reviews, actual user decisions and authored README executions to current raw bytes outside every lane-writable project.",
+      "source": "refactory/benchmarks/create_fidelity/operator_evidence.py",
+      "regression": "refactory/tests/test_create_fidelity_operator_evidence.py"
+    },
+    {
+      "requirements": ["B08", "B09", "B10", "F.stage.final_precheck"],
+      "owner": "native artifact mapping",
+      "fix": "Validate and admit portable native packages without a Task or score requirement; bind authored bytes and expose native invocation.",
+      "source": "refactory/refactory_dsh/create_fidelity_ops.py",
+      "regression": "refactory/tests/test_create_fidelity_graph_ops.py"
+    },
+    {
+      "requirements": ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B09"],
+      "owner": "independent capability harness",
+      "fix": "Run the unchanged 56-case checker and native invocations under a kernel-verified model-free boundary; never count absent cases as success.",
+      "source": "refactory/benchmarks/create_fidelity/lane.py",
+      "regression": "refactory/tests/test_create_fidelity_native_lane.py"
+    }
+  ]
+}

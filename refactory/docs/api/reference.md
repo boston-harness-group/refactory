@@ -26,7 +26,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Knob` | `(default: 'Any', kind: 'str' = 'float', lo: 'float \| None' = None, hi: 'float \| None' = None, enum: 'tuple[Any, ...]' = (), values: 'tuple[str, ...]' = (), frozen: 'bool' = False, description: 'str' = '') -> None` |
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None, timeout_s: 'int \| None' = None) -> None` |
 | class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '') -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
@@ -52,7 +52,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `Edge` | `(source: 'str', target: 'str', condition: 'str \| None' = None) -> None` |
 | class | `Graph` | `(*, auto_start: 'bool' = True) -> 'None'` |
 | class | `GraphError` | `` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None, timeout_s: 'int \| None' = None) -> None` |
 
 - **`Edge`** — One connection between two nodes, and the verdict that selects it.
 - **`Graph`** — A mutable graph. Edits mutate it; serialization canonicalizes it.
@@ -435,6 +435,7 @@ Lower a mode state to refactory's IR, so DSH can run it.
 | kind | name | signature |
 |---|---|---|
 | class | `LoweringError` | `` |
+| function | `is_create_fidelity` | `(graph: 'Graph') -> 'bool'` |
 | function | `knob_environment` | `(state: 'dict[str, Any]', *, extra: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
 | function | `knob_specs` | `(state: 'dict[str, Any]') -> 'dict[str, Knob]'` |
 | function | `node_declarations` | `(state: 'dict[str, Any]') -> 'dict[str, dict[str, Any]]'` |
@@ -797,8 +798,9 @@ Worker routes and durable receipts over DSH's named-provider registry.
 |---|---|---|
 | class | `GraphTelemetry` | `(workdir: 'Path', context: 'dict[str, Any]', budget: 'Any' = None)` |
 | function | `account_usage` | `(budget: 'Any', receipt: 'dict[str, Any]', *, final: 'bool' = False) -> 'None'` |
-| function | `begin` | `(workdir: 'Path', route: 'dict[str, Any]', *, node: 'str' = '', role: 'str' = 'worker') -> 'Path'` |
+| function | `begin` | `(workdir: 'Path', route: 'dict[str, Any]', *, node: 'str' = '', role: 'str' = 'worker', effective_deadlines: 'dict[str, Any] \| None' = None) -> 'Path'` |
 | function | `capabilities` | `(backend: 'str') -> 'dict[str, Any]'` |
+| function | `dispatch_deadlines` | `(path: 'Path', *, budget: 'Any' = None, stage_stop_at: 'float \| None', stage_timeout_s: 'float', attempt: 'int', enclosing_deadlines: 'tuple[tuple[str, float], ...]' = ()) -> 'dict[str, Any]'` |
 | function | `environment` | `(context: 'dict[str, Any] \| None') -> 'dict[str, str]'` |
 | function | `event` | `(workdir: 'Path', record: 'dict[str, Any]', state: 'str', summary: 'str') -> 'None'` |
 | function | `finish` | `(path: 'Path', state: 'str', *, error: 'str \| None' = None) -> 'dict[str, Any]'` |
@@ -814,6 +816,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 
 - **`GraphTelemetry`** — One coordinator receipt; node subprocesses own distinct worker receipts.
 - **`account_usage`** — Keep measured DSH calls while exposing incomplete delegated coverage.
+- **`dispatch_deadlines`** — Observe the existing clocks immediately before one transport dispatch.
 - **`environment`** — Nonsecret resolved context for graph-owned deterministic nested calls.
 - **`lower_workflow`** — Resolve explicit node workers before graph dispatch, preserving all edges.
 - **`permission_patch`** — Scope DSH bypass to this runtime, without leaking through child env.

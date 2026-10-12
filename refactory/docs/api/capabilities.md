@@ -4277,7 +4277,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     },
     "mode": {
       "default": "",
-      "description": "design (the default), create, edit, their _fast variants, or <package>/<mode>",
+      "description": "design (the default), create, edit, their _fast variants, opt-in create_fidelity, or <package>/<mode>",
       "flags": [
         "--mode"
       ],
@@ -4494,7 +4494,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct.",
-  "reviewed_schema": "452a64059dc07d4794e43907c69da6cdafa7ecf1d3dda18271e4fa5709de44ad"
+  "reviewed_schema": "88af0540e66eb6568afd1a38b267b6a6699e8d48415a07a8f8f4b9e3b79823f8"
 }
 ```
 
@@ -6944,6 +6944,604 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
     "reviewed_schema": "4105c13aaa04a3ae327cf03784e123dd585275c00bc34a310e3ff70a6a4271fb"
+  }
+}
+```
+
+## default_pack/create_fidelity
+
+Opt-in 29-stage Create-v2 fidelity candidate with DSH directors and independent children, human strategy approval, complete QA reports, repair and native portable package admission. Update/plugin variants and live fidelity remain unsupported or unverified.
+
+```json
+{
+  "description": "source-faithful Create with native portable package authoring",
+  "edges": [
+    {
+      "condition": null,
+      "source": "archivist_plan",
+      "target": "builder"
+    },
+    {
+      "condition": null,
+      "source": "builder",
+      "target": "gate_build"
+    },
+    {
+      "condition": null,
+      "source": "concat_study",
+      "target": "research_director"
+    },
+    {
+      "condition": null,
+      "source": "create_factory_md",
+      "target": "factory_init"
+    },
+    {
+      "condition": null,
+      "source": "discover",
+      "target": "gate_factory_md_exists"
+    },
+    {
+      "condition": null,
+      "source": "factory_init",
+      "target": "graph_update"
+    },
+    {
+      "condition": null,
+      "source": "fork_qa",
+      "target": "join_qa"
+    },
+    {
+      "condition": "reloop",
+      "source": "gate_build",
+      "target": "builder"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_build",
+      "target": "fork_qa"
+    },
+    {
+      "condition": "reloop",
+      "source": "gate_doc_freshness",
+      "target": "builder"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_doc_freshness",
+      "target": "gate_precheck"
+    },
+    {
+      "condition": "halt",
+      "source": "gate_factory_md_exists",
+      "target": "create_factory_md"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_factory_md_exists",
+      "target": "factory_init"
+    },
+    {
+      "condition": "halt",
+      "source": "gate_has_factory",
+      "target": "discover"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_has_factory",
+      "target": "graph_update"
+    },
+    {
+      "condition": "reloop",
+      "source": "gate_overwatch",
+      "target": "builder"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_overwatch",
+      "target": "gate_doc_freshness"
+    },
+    {
+      "condition": "halt",
+      "source": "gate_precheck",
+      "target": "archivist_build"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_precheck",
+      "target": "archivist_build"
+    },
+    {
+      "condition": "reloop",
+      "source": "gate_qa",
+      "target": "builder"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_qa",
+      "target": "overwatch"
+    },
+    {
+      "condition": "proceed",
+      "source": "gate_strategy",
+      "target": "archivist_plan"
+    },
+    {
+      "condition": "reloop",
+      "source": "gate_strategy",
+      "target": "strategy_director"
+    },
+    {
+      "condition": null,
+      "source": "graph_explorer",
+      "target": "concat_study"
+    },
+    {
+      "condition": null,
+      "source": "graph_update",
+      "target": "study"
+    },
+    {
+      "condition": null,
+      "source": "init_user_intent",
+      "target": "gate_has_factory"
+    },
+    {
+      "condition": null,
+      "source": "join_qa",
+      "target": "synthesize_qa"
+    },
+    {
+      "condition": null,
+      "source": "overwatch",
+      "target": "gate_overwatch"
+    },
+    {
+      "condition": null,
+      "source": "research_director",
+      "target": "strategy_director"
+    },
+    {
+      "condition": null,
+      "source": "strategy_director",
+      "target": "synthesize_strategy"
+    },
+    {
+      "condition": null,
+      "source": "study",
+      "target": "graph_explorer"
+    },
+    {
+      "condition": null,
+      "source": "synthesize_qa",
+      "target": "gate_qa"
+    },
+    {
+      "condition": null,
+      "source": "synthesize_strategy",
+      "target": "gate_strategy"
+    }
+  ],
+  "gates": [
+    {
+      "id": "gate_build",
+      "user": false
+    },
+    {
+      "id": "gate_doc_freshness",
+      "user": false
+    },
+    {
+      "id": "gate_factory_md_exists",
+      "user": false
+    },
+    {
+      "id": "gate_has_factory",
+      "user": false
+    },
+    {
+      "id": "gate_overwatch",
+      "user": false
+    },
+    {
+      "id": "gate_precheck",
+      "user": false
+    },
+    {
+      "id": "gate_qa",
+      "user": false
+    },
+    {
+      "id": "gate_strategy",
+      "user": true
+    }
+  ],
+  "guidance": "",
+  "id": "default_pack/create_fidelity",
+  "nodes": [
+    {
+      "call": "",
+      "id": "archivist_build",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "archivist"
+    },
+    {
+      "call": "",
+      "id": "archivist_plan",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "archivist"
+    },
+    {
+      "call": "",
+      "id": "builder",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "builder"
+    },
+    {
+      "call": "",
+      "id": "code_reviewer",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "code_reviewer"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:concat_study",
+      "id": "concat_study",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "create_factory_md",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:discover",
+      "id": "discover",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:factory_init",
+      "id": "factory_init",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "fork_qa",
+      "kind": "fork",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "gate_kind": "agent",
+      "id": "gate_build",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "Preserve source CEO gate ownership and strict current evidence verdicts.",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "gate_kind": "agent",
+      "id": "gate_doc_freshness",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "Preserve source CEO gate ownership and strict current evidence verdicts.",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:gate_factory_md_exists",
+      "gate_kind": "fn",
+      "id": "gate_factory_md_exists",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:gate_has_factory",
+      "gate_kind": "fn",
+      "id": "gate_has_factory",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "gate_kind": "agent",
+      "id": "gate_overwatch",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "Preserve source CEO gate ownership and strict current evidence verdicts.",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:gate_precheck",
+      "gate_kind": "fn",
+      "id": "gate_precheck",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "gate_kind": "agent",
+      "id": "gate_qa",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "Preserve source CEO gate ownership and strict current evidence verdicts.",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "gate_kind": "user",
+      "id": "gate_strategy",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "Review the actual current strategy and intent; approval must bind its digest.",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "graph_explorer",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "researcher"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:graph_update",
+      "id": "graph_update",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "health_checker",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "health_checker"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:init_user_intent",
+      "id": "init_user_intent",
+      "kind": "op",
+      "knobs": [
+        "name",
+        "brief",
+        "variant",
+        "output_folder",
+        "project_path",
+        "requires_input"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "join_qa",
+      "kind": "join",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "overwatch",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_directors:qa_director",
+      "id": "qa_director",
+      "kind": "op",
+      "knobs": [
+        "child_attempts",
+        "director_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_directors:research_director",
+      "id": "research_director",
+      "kind": "op",
+      "knobs": [
+        "child_attempts",
+        "director_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_directors:strategy_director",
+      "id": "strategy_director",
+      "kind": "op",
+      "knobs": [
+        "child_attempts",
+        "director_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:study",
+      "id": "study",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.create_fidelity_ops:synthesize_qa",
+      "id": "synthesize_qa",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "synthesize_strategy",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "strategist"
+    }
+  ],
+  "parameters": {
+    "brief": {
+      "default": "",
+      "description": "complete original authoring request",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "child_attempts": {
+      "default": 2,
+      "description": "quality review attempts for each director child",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        5
+      ],
+      "value": 2,
+      "values": []
+    },
+    "director_parallelism": {
+      "default": 7,
+      "description": "maximum concurrently dispatched DSH director children",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        7
+      ],
+      "value": 7,
+      "values": []
+    },
+    "name": {
+      "default": "",
+      "description": "name of the reusable native package",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "output_folder": {
+      "default": "",
+      "description": "package output folder; defaults to this run's native package workspace",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "project_path": {
+      "default": "",
+      "description": "read-only source project to study; defaults to the invocation project",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "requires_input": {
+      "default": "",
+      "description": "comma-separated runtime input parameter names required by the brief",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "variant": {
+      "default": "portable",
+      "description": "portable is supported; unsupported variants fail before dispatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "portable",
+      "values": []
+    }
+  },
+  "ports": [
+    {
+      "description": "",
+      "media_type": "text/markdown",
+      "name": "archive",
+      "path": ".factory/archive/create-build.md"
+    }
+  ],
+  "scored": false,
+  "usage": {
+    "doc": "refactory/docs/create-fidelity.md",
+    "examples": [
+      {
+        "explanation": "Opt-in portable authoring candidate; review the produced strategy at its human gate. Live fidelity has not yet been established.",
+        "knobs": {
+          "brief": "Write a reusable deterministic counter package",
+          "name": "tiny_example",
+          "variant": "portable"
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=default_pack/create_fidelity; review refactory help topic=default_pack/create_fidelity before launch",
+      "cli": "refactory ceo \"a reusable package\" --mode create_fidelity --name my_package",
+      "panel": "Discoverable in the mode picker; opt-in candidate only. Use a reviewed DSH route and fresh human strategy approval; optimization is unavailable because authoring is unscored."
+    },
+    "purpose": "Opt-in 29-stage Create-v2 fidelity candidate with DSH directors and independent children, human strategy approval, complete QA reports, repair and native portable package admission. Update/plugin variants and live fidelity remain unsupported or unverified.",
+    "reviewed_schema": "58ed2bdae73cda3757870b77aba2ac2eeb243062437674140ab6c53ed08399bc"
   }
 }
 ```

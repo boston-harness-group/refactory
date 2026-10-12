@@ -63,6 +63,10 @@ DECLARATIONS = ".refactory/declarations.json"
 MEMORY_KEY = "memory"
 
 
+def is_create_fidelity(graph: Graph) -> bool:
+    return any(node.call.startswith("refactory_dsh.create_fidelity_ops:") for node in graph.nodes.values())
+
+
 def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Every node's kind and declared reads, writes and facts, keyed by node id.
 
@@ -77,6 +81,7 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     the DSH path re-deriving it from an environment variable it cannot see.
     """
     graph = Graph.from_state(state.get("graph") or {})
+    candidate = is_create_fidelity(graph)
     declarations: dict[str, dict[str, Any]] = {}
     for node_id, node in graph.nodes.items():
         entry: dict[str, Any] = {
@@ -86,6 +91,13 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "produces": sorted(node.produces),
             "resource_role": node.resource_phase,
         }
+        if candidate:
+            entry["create_fidelity"] = True
+        if node.timeout_s is not None:
+            entry["timeout_s"] = node.timeout_s
+        if candidate and node.kind == "gate":
+            entry["logical_node"] = node.to_state()
+            entry["gate_labels"] = [str(e.condition) for e in graph.out_edges(node_id)]
         if node.kind == "data":
             entry["data"] = {
                 "subgraph_entry": node.subgraph_entry,
@@ -157,6 +169,7 @@ class LoweringError(ValueError):
 def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "") -> Workflow:
     """The refactory `Workflow` for a mode state."""
     graph = Graph.from_state(state.get("graph") or {})
+    candidate = is_create_fidelity(graph)
     nodes: dict[str, Any] = {}
     for node_id in sorted(graph.nodes):
         node = graph.nodes[node_id]
@@ -168,7 +181,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
             "resource_role": node.resource_phase,
         }
         if node.kind == "op":
-            command_timeout_s = None
+            command_timeout_s = node.timeout_s
             if node.call in ("refactory_dsh.create_ops:smoke", "refactory_dsh.fast_ops:smoke"):
                 # Resolve from the final state, after command-line/GUI knobs.
                 # The operation owns up to three bounded passes plus sandbox
@@ -211,6 +224,16 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
             # between labels with no statement of what they are choosing about.
             if node.notes:
                 gate["gate_prompt"] = node.notes
+            if candidate and node.gate_kind == "user":
+                gate["gate_prompt"] = node.prompt_template
+            if node.timeout_s is not None:
+                gate["command_timeout_s"] = node.timeout_s
+            if candidate and node.gate_kind == "agent":
+                # The command dispatches the original CEO model and fresh guards;
+                # evaluator_type remains agent so receipts preserve ownership.
+                gate["evaluator_role"] = AgentRole(node.role)
+                gate["gate_prompt"] = node.prompt_template
+                gate["evaluator_command"] = f"{RUNNER} refactory_dsh.create_fidelity_gates:evaluate_native"
             if node.gate_kind == "fn":
                 gate["evaluator_command"] = f"{RUNNER} {node.evaluator}"
                 if node.evaluator == "refactory_dsh.create_ops:gate_smoke":
@@ -258,6 +281,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 prompt_template=node.prompt_template,
                 tools=list(node.tools),
                 max_iterations=node.max_iterations,
+                timeout=node.timeout_s,
             )
 
     edges = [

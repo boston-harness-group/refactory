@@ -31,7 +31,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { Spine, validateGraph } from './spine.ts'
 import type { NodeView, SpineNext } from './spine.ts'
 import { commandOf, isDeterministic, runDataCommand, runDeterministic } from './execute.ts'
-import type { CommandFailure } from './execute.ts'
+import type { CommandFailure, CommandOutcome } from './execute.ts'
 import type { WorkflowGraph } from './types.ts'
 
 export { Spine, validateGraph } from './spine.ts'
@@ -382,6 +382,15 @@ export function apply(ctx: Context, config: Config): void {
   const { toolPrefix, maxIterations, ceoDeny, interactiveOpen } = config
   // This is initialized before an explicit checkpoint restore at mount time.
   const materialised = new WeakMap<Spine, Materialised>()
+  const advisory = new WeakMap<Spine, Array<{ node: string; controller: AbortController; result: Promise<CommandOutcome> }>>()
+  const settleOwnedAdvisory = async (spine: Spine, cancel = false): Promise<CommandFailure | undefined> => {
+    const tasks = advisory.get(spine) ?? []
+    if (cancel) for (const task of tasks) task.controller.abort()
+    const outcomes = await Promise.all(tasks.map(task => task.result))
+    outcomes.forEach((outcome, index) => { if (!outcome.ok) spine.retireAdvisoryFailure(tasks[index]!.node) })
+    advisory.delete(spine)
+    return outcomes.find((outcome): outcome is CommandFailure => !outcome.ok)
+  }
 
   // The composition's one spine, when the graph was a mount-time constant. When
   // `interactiveOpen` is true there is none yet: a session opens a mode through
@@ -508,6 +517,7 @@ export function apply(ctx: Context, config: Config): void {
     const bytes = readFileSync(join(workdir, '.refactory', 'spine-checkpoint.json'))
     if (createHash('sha256').update(bytes).digest('hex') !== request.checkpoint_sha256) throw new Error('checkpoint changed after recovery was requested')
     const saved = JSON.parse(bytes.toString())
+    if (saved.advisory_pending?.length) throw new Error('advisory work has unknown side-effect outcome; automatic replay refused')
     if (saved.status === 'executing' || saved.status === 'failed') throw new Error('unknown side-effect outcome; automatic replay refused')
     if (saved.state.halted?.reason === 'cancelled') delete saved.state.halted
     saved.state.pause_before = []
@@ -567,7 +577,9 @@ export function apply(ctx: Context, config: Config): void {
             : status === 'executing' ? 'running a graph check' : undefined
       const record = {
         schema_version: 1, run_id: resolve(workdir), at: new Date().toISOString(),
-        status, nodes: state.cursor, completed: state.completed,
+        status: (status === 'done' || status === 'halted') && (advisory.get(spine)?.length ?? 0) > 0 ? 'executing' : status,
+        nodes: state.cursor, completed: state.completed,
+        advisory_pending: (advisory.get(spine) ?? []).map(task => task.node),
         ...(detail === undefined ? {} : { error: detail }),
         ...(wait === undefined ? {} : { wait_reason: wait }),
         ...(status === 'paused' ? { paused_before: spine.pausedAt() } : {}),
@@ -581,7 +593,8 @@ export function apply(ctx: Context, config: Config): void {
       const paths = new Set(Object.values(graph.nodes).flatMap(node => [...node.reads ?? [], ...node.writes ?? []]))
       if (existsSync(join(dir, 'run-config.json'))) paths.add('.refactory/run-config.json')
       const file_fingerprints = Object.fromEntries([...paths].map(path => [path, fingerprint(resolve(workdir, path))]))
-      writeFileSync(`${checkpoint}.tmp`, JSON.stringify({ ...saved, status, owner_pid: process.pid,
+      writeFileSync(`${checkpoint}.tmp`, JSON.stringify({ ...saved, status: record.status, owner_pid: process.pid,
+        advisory_pending: (advisory.get(spine) ?? []).map(task => task.node),
         file_fingerprints, materialised: materialised.get(spine) ?? null, run_id: resolve(workdir) }))
       renameSync(`${checkpoint}.tmp`, checkpoint)
       appendFileSync(join(dir, 'events.jsonl'), JSON.stringify({ ...record, kind: 'graph_state' }) + '\n')
@@ -728,6 +741,9 @@ export function apply(ctx: Context, config: Config): void {
     // graph runs many per call and reports none of them individually.
     let ran: RanStep | undefined
     let item: unknown
+    const settleAdvisory = async (cancel = false): Promise<CommandFailure | undefined> => {
+      return settleOwnedAdvisory(spine, cancel)
+    }
 
     const recordBoundary = (): void => recordStatus(spine, workdir,
       spine.isHalted() ? 'halted' : spine.isPaused() ? 'paused' : spine.next().status)
@@ -801,24 +817,57 @@ export function apply(ctx: Context, config: Config): void {
 
     for (;;) {
       applyControls(spine, workdir, commandEnv, dataCommand)
-      if (spine.isHalted() || spine.isPaused()) return { next: spine.next(), item, ran }
+      if (spine.isHalted()) {
+        await settleAdvisory(true)
+        return { next: spine.next(), item, ran }
+      }
+      if (spine.isPaused()) return { next: spine.next(), item, ran }
       const closed = await close()
       if (closed.failure !== undefined) return { next: spine.next(), failure: closed.failure, ran }
       let state = spine.next()
-      if (state.status === 'done' || spine.isPaused()) return { next: state, item, ran }
+      if (state.status === 'done') {
+        const failure = await settleAdvisory()
+        return { next: state, item, ran, ...(failure === undefined ? {} : { failure }) }
+      }
+      if (spine.isPaused()) return { next: state, item, ran }
       const started = await beginItem()
       if (started.failure !== undefined) return { next: state, failure: started.failure, ran }
       applyControls(spine, workdir, commandEnv, dataCommand)
       state = spine.next()
-      if (spine.isHalted() || spine.isPaused()) return { next: state, item, ran }
+      if (spine.isHalted()) {
+        await settleAdvisory(true)
+        return { next: spine.next(), item, ran }
+      }
+      if (spine.isPaused()) return { next: state, item, ran }
       // Normalizing a standing skip can exhaust the next item immediately too.
       if (spine.passOf()?.finished) continue
-      if (state.status === 'done') return { next: state, item, ran }
+      if (state.status === 'done') {
+        const failure = await settleAdvisory()
+        return { next: state, item, ran, ...(failure === undefined ? {} : { failure }) }
+      }
       if (advanceControl(state)) continue
       const data = state.nodes.find(node => node._type === 'DataNode')
       if (data !== undefined) {
         const openedPass = await openPass(data)
         if (openedPass.failure !== undefined) return { next: state, failure: openedPass.failure, ran }
+        continue
+      }
+      const background = state.nodes.filter(node => isDeterministic(node) && node.blocking === false && node._type === 'FnNode')
+      if (background.length) {
+        const tasks = advisory.get(spine) ?? []
+        for (const node of background) {
+          // Advance the dependency cursor now; terminal publication still awaits
+          // every owned command, and recovery records unfinished advisory work.
+          const controller = new AbortController()
+          const result = runDeterministic(shell, node, { ...runner, signal: controller.signal }).catch(error => ({
+            ok: false as const, command: commandOf(node) ?? '', exitCode: null,
+            stdout: '', stderr: '', error: `${node.id}: ${String(error)}`,
+          }))
+          tasks.push({ node: node.id, controller, result })
+          spine.complete(node.id)
+        }
+        advisory.set(spine, tasks)
+        recordBoundary()
         continue
       }
       const automatic = state.nodes.filter(isDeterministic)
@@ -869,7 +918,10 @@ export function apply(ctx: Context, config: Config): void {
         else spine.verdict(node.id, outcome.verdict)
       }
       recordBoundary()
-      if (failure !== undefined) return { next: spine.next(), failure, ran }
+      if (failure !== undefined) {
+        await settleAdvisory()
+        return { next: spine.next(), failure, ran }
+      }
       if (interactiveOpen) {
         // Preserve the one-boundary budget while allowing structural boundaries
         // and data-pass grading to settle before exposing the next ready work.
@@ -896,6 +948,7 @@ export function apply(ctx: Context, config: Config): void {
     let drained: Awaited<ReturnType<typeof drain>>
     try { drained = await drain(spine, workdir, commandEnv, dataCommand) }
     catch (error) {
+      await settleOwnedAdvisory(spine, true)
       recordStatus(spine, workdir, 'failed', error instanceof Error ? error.message : String(error))
       throw error
     }
@@ -1005,6 +1058,7 @@ export function apply(ctx: Context, config: Config): void {
       throw new Error(message)
     }
     let answer
+    let appliedPending: { review: string; receipt_id: string; verdict: string } | undefined
     const questionLifetime = new AbortController()
     const questionSignal = exec.signal === undefined ? questionLifetime.signal : AbortSignal.any([exec.signal, questionLifetime.signal])
     try {
@@ -1028,6 +1082,9 @@ export function apply(ctx: Context, config: Config): void {
           if (gateCommand === '') continue
           const polled = runtimeBridge(gateCommand, workdir, commandEnv, { ...request, action: 'poll', review: prior?.review })
           if (typeof polled.verdict === 'string' && polled.verdict !== '') {
+            if (polled.protocol === 'create_fidelity_human_v1' && typeof polled.current_review === 'string' && typeof polled.receipt_id === 'string') {
+              appliedPending = { review: polled.current_review, receipt_id: polled.receipt_id, verdict: polled.verdict }
+            }
             return { answers: [{ id: gate, selected: [polled.verdict], custom: '' }] } as Awaited<typeof nativeAnswer>
           }
         }
@@ -1050,10 +1107,38 @@ export function apply(ctx: Context, config: Config): void {
       throw new Error(`gate ${gate} changed while awaiting the answer; ask again`)
     }
     if (labels.length > 0 && !labels.includes(verdict)) throw new Error(`gate ${gate} does not accept ${verdict}`)
+    let feedback: string | undefined
+    if (verdict === 'reloop' && prior?.protocol === 'create_fidelity_human_v1' && appliedPending === undefined) {
+      const lifetime = new AbortController()
+      const signal = exec.signal === undefined ? lifetime.signal : AbortSignal.any([exec.signal, lifetime.signal])
+      try {
+        const asked = userQuestions.ask({ questions: [{ id: `${gate}:feedback`, header: 'Revision',
+          question: 'Which user requirements need revision, and what should the strategy say? Give the feedback for this review.' }],
+          ...(exec.agent === undefined ? {} : { agent: exec.agent }), signal })
+        const interrupted = async (): Promise<undefined> => {
+          while (!signal.aborted) {
+            await wait(500, undefined, { signal })
+            applyControls(spine, workdir, commandEnv, dataCommand)
+            if (spine.isPaused() || spine.isHalted() || JSON.stringify(spine.state()) !== stateBefore) return undefined
+          }
+          throw new Error('revision feedback cancelled')
+        }
+        const response = await Promise.race([asked, interrupted()])
+        if (response === undefined) return undefined
+        const entry = response.answers.find(item => item.id === `${gate}:feedback`)
+        feedback = (entry?.custom || entry?.selected[0] || '').trim()
+        if (!feedback) throw new Error(`gate ${gate} revision needs the person's feedback`)
+      } finally { lifetime.abort() }
+    }
     if (gateCommand !== '' && workdir !== undefined) {
-      runtimeBridge(gateCommand, workdir, commandEnv, {
-        ...request, action: 'answer', review: prior?.review, verdict,
-      })
+      if (appliedPending !== undefined) {
+        runtimeBridge(gateCommand, workdir, commandEnv, { ...request, action: 'confirm',
+          review: appliedPending.review, receipt_id: appliedPending.receipt_id, verdict })
+      } else {
+        runtimeBridge(gateCommand, workdir, commandEnv, {
+          ...request, action: 'answer', review: prior?.review, verdict, ...(feedback === undefined ? {} : { feedback }),
+        })
+      }
     }
     return verdict
   }
@@ -1294,6 +1379,7 @@ export function apply(ctx: Context, config: Config): void {
       if (config.executeCommands && isDeterministic(view)) {
         if (args.verdict === 'halt' && !spine.acceptedVerdicts(args.gate).includes('halt')) {
           spine.cancel(args.gate)
+          await settleOwnedAdvisory(spine, true)
           recordStatus(spine, workdir, 'halted')
           return json({ status: 'cancelled', gate: args.gate })
         }
@@ -1320,6 +1406,7 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(`gate ${args.gate} routes on a verdict: pass one of ${offered || 'the verdicts the gate view lists'}`)
       }
       spine.verdict(args.gate, args.verdict, args.feedback ?? '')
+      if (spine.isHalted()) await settleOwnedAdvisory(spine, true)
       return json({ status: 'routed', gate: args.gate, verdict: args.verdict })
     },
   }))

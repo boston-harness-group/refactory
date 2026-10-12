@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "dsh_baseline_commit": "ec99b4ec129b6440378079cf2226ce5470952b09",
+  "reference_commit": "3ab6f8f7ca792c874f2654574d7f7fd6dd18b896",
+  "dirty_checkout_head": "39e156c45122919812fe6bab1d31c86c52c08a07",
+  "selected_patch_digests": [],
+  "local_patch_inventory": [
+    {
+      "path": "refactory/refactory_dsh/create.py",
+      "sha256": "c692991f824f881550328961cb4e5cc76a6a5168ce0ea0b4e453cce36dbb5810",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    },
+    {
+      "path": "refactory/refactory_dsh/create_ops.py",
+      "sha256": "2567e64a7e9cbd79d7ef919587ed91503b70ca56675af4617ac53806cd8245d6",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    },
+    {
+      "path": "refactory/refactory_dsh/fast.py",
+      "sha256": "32843be837ce72f998b8acf840bca6efb160b10c7e6ce2f410f1f373951ffd4a",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    },
+    {
+      "path": "refactory/tests/test_create.py",
+      "sha256": "f36d5cfcc9a968a7f6bf1f3cbe51a317b2e2013c4603796185cb7e87676075b1",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    },
+    {
+      "path": "packages/workflow/workflow-spine/src/spine.ts",
+      "sha256": "1951ffd593e300fe8a8652e38769518531529b333b7f44965ef3c9ff5c40ca4e",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    },
+    {
+      "path": "packages/workflow/workflow-spine/tests/execute.spec.ts",
+      "sha256": "aaf2dd413d9ac9ddf175433ea09c954978b9b0db5f2a37a13c1655ac0dc5fc73",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    },
+    {
+      "path": "packages/workflow/workflow-spine/tests/spine.spec.ts",
+      "sha256": "44a5d33bb186e26193f668558fd871f7f843b5acb71b99be342b10610157132d",
+      "selected": false,
+      "disposition": "Preserved in original checkout. Candidate implementation starts from upstream; equivalent behavior will be considered against pinned contract, not blindly transplanted."
+    }
+  ],
+  "candidate_identifier": "create_fidelity",
+  "public_create_unchanged": true,
+  "checker_sha256": "de75dabaf55d338991cbaffaa03bb78603de898b4e4ecd76e7504d7e2cf95e7c",
+  "expected_checker_cases": 56,
+  "dependency_lock_sha256": {
+    "uv.lock": "077b349f3bb2b27b0d992745d13655d02498203e065975556c690d47545c1b0f",
+    "pnpm-lock.yaml": "314621846c52dfaa0d3a85c9dceb08648cddb21a82513b8a42f862ab83543e58"
+  }
+}

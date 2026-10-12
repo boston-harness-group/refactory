@@ -49,6 +49,10 @@ DEFAULT_TIMEOUT_S = 1800
 #: session inside the dispatch runs under the same wall (#307).
 NODE_DISPATCH_OVERHEAD_S = 600
 
+# Stay below common per-argument limits as well as the process-wide ARG_MAX.
+# DSH headless explicitly supports '-' as a byte-preserving stdin task.
+PROMPT_ARGV_LIMIT_BYTES = 64 * 1024
+
 
 def node_session_budget_s(attempts: int, timeout_s: int) -> int:
     """The wall a node's dispatch reserves: attempts sessions plus overhead.
@@ -148,6 +152,7 @@ class DshModelClient:
         worker_backend: str = "",
         effort: str = "",
         permission_mode: str = "",
+        node_timeout_s: int | None = None,
         role_routes: dict[str, Any] | None = None,
         node_routes: dict[str, Any] | None = None,
         provider_config: dict[str, Any] | None = None,
@@ -199,6 +204,7 @@ class DshModelClient:
         timeout_s = inherited.get("timeout_s", timeout_s) if timeout_s == DEFAULT_TIMEOUT_S else timeout_s
         attempts = inherited.get("attempts", attempts) if attempts == DEFAULT_ATTEMPTS else attempts
         self._timeout_s = timeout_s
+        self._node_timeout_s = node_timeout_s or inherited.get("node_timeout_s")
         self._worker_backend = worker_backend or os.environ.get("REFACTORY_WORKER_BACKEND", "dsh")
         self._effort = effort or (os.environ.get("REFACTORY_MODEL_EFFORT", "") if self._worker_backend == "dsh" and not routes_resolved else "")
         self._permission_mode = permission_mode
@@ -225,6 +231,7 @@ class DshModelClient:
         self._attempts = max(1, int(attempts)) if self._worker_backend == "dsh" else 1
         self._backoff_s = max(0.0, float(backoff_s))
         self._cancellations: tuple[threading.Event, ...] = ()
+        self._deadline_observations: tuple[tuple[str, float], ...] = ()
         validate_route(self.route())
 
     def route(self) -> dict[str, str]:
@@ -247,6 +254,12 @@ class DshModelClient:
         client._budget = budget
         return client
 
+    def with_identity(self, node: str, role: str = "worker") -> DshModelClient:
+        """Retain a resolved route while assigning one execution's receipt ID."""
+        client = copy.copy(self)
+        client._node_id, client._role = node, role
+        return client
+
     def _checkpoint(self, *, final: bool = False) -> None:
         if self._budget is None:
             return
@@ -266,6 +279,41 @@ class DshModelClient:
         client._cancellations = (*self._cancellations, event)
         return client
 
+    def with_node_timeout(self, timeout_s: int | None) -> DshModelClient:
+        """Bind the author's stage wall without multiplying it by retry count."""
+        client = copy.copy(self)
+        if timeout_s is not None:
+            if type(timeout_s) is not int or timeout_s <= 0:
+                raise ValueError("node timeout must be a positive integer")
+            client._node_timeout_s = timeout_s
+        return client
+
+    def with_deadline_observation(self, scope: str, stop_at: float) -> DshModelClient:
+        """Carry an already enforced caller timer into dispatch telemetry only.
+
+        This never installs, extends or resets a clock. The caller must retain
+        its existing cancellation timer; monotonic timestamps stay process-local
+        and are intentionally absent from the serialized worker context.
+        """
+        import math
+        if (not isinstance(scope, str) or not scope or scope in ("stage", "run_budget")
+                or type(stop_at) not in (int, float) or not math.isfinite(stop_at)):
+            raise ValueError("deadline observation needs a named scope and finite monotonic timestamp")
+        client = copy.copy(self)
+        client._deadline_observations = tuple((name, value) for name, value in self._deadline_observations
+                                             if name != scope) + ((scope, stop_at),)
+        return client
+
+    def effective_deadlines(self) -> dict[str, Any]:
+        wall = self._node_timeout_s
+        if wall is None:
+            wall = (node_session_budget_s(self._attempts, self._timeout_s)
+                    if self._worker_backend == "dsh" and self._node_id else self._timeout_s)
+        return {"completion_timeout_s": self._timeout_s, "stage_timeout_s": wall,
+                "declared_stage_timeout_s": self._node_timeout_s,
+                "shutdown_grace_s": SHUTDOWN_GRACE_S,
+                "run_budget": str(self._budget.path) if self._budget is not None else None}
+
     def _raise_if_cancelled(self) -> None:
         if any(event.is_set() for event in self._cancellations):
             raise CancelledError("model completion cancelled; not retried")
@@ -276,6 +324,7 @@ class DshModelClient:
             "routes_resolved": True, "routing_provenance": copy.deepcopy(self._routing_provenance),
             "dsh_home": str(self._dsh_home), "provider": self._provider, "model": self._model,
             "timeout_s": self._timeout_s, "attempts": self._attempts, "backoff_s": self._backoff_s,
+            **({"node_timeout_s": self._node_timeout_s} if self._node_timeout_s is not None else {}),
             "runtime_root": str(self._runtime_root), "dsh_cli": self._dsh_cli,
             "python_bin": str(self._python_bin),
             "worker_backend": self._worker_backend, "effort": self._effort,
@@ -364,13 +413,16 @@ class DshModelClient:
         client._checkpoint()
         if client._budget is not None:
             client._budget.require_usage_capability(self._worker_backend == "dsh")
-        client._worker_receipt = workers.begin(run_dir, self.route(), node=self._node_id, role=self._role)
+        client._worker_receipt = workers.begin(run_dir, self.route(), node=self._node_id, role=self._role,
+                                               effective_deadlines=client.effective_deadlines())
         try:
             result = client._complete(prompt, system=system, workdir=run_dir)
             client._checkpoint(final=True)
         except BaseException as error:
             state = "failed"
-            if isinstance(error, (CancelledError, KeyboardInterrupt, SystemExit)):
+            if "cleanup unconfirmed" in str(error):
+                state = "unknown"
+            elif isinstance(error, (CancelledError, KeyboardInterrupt, SystemExit)):
                 state = "cancelled"
             elif "timed out" in str(error):
                 state = "timed_out"
@@ -445,7 +497,10 @@ class DshModelClient:
         # `timeout_s` alone (#307). A CEO turn or a console call keeps the plain
         # completion deadline. The wall is absolute across attempts: a transport
         # retry spends whatever remains of the same envelope.
-        if self._worker_backend == "dsh" and self._node_id:
+        if self._node_timeout_s is not None:
+            budget_s = self._node_timeout_s
+            stop_at = time.monotonic() + budget_s
+        elif self._worker_backend == "dsh" and self._node_id:
             budget_s = node_session_budget_s(self._attempts, self._timeout_s)
             stop_at = time.monotonic() + budget_s
         else:
@@ -455,6 +510,11 @@ class DshModelClient:
             self._raise_if_cancelled()
             self._checkpoint()
             try:
+                if self._worker_receipt is not None:
+                    from refactory_dsh.workers import dispatch_deadlines
+                    dispatch_deadlines(self._worker_receipt, budget=self._budget,
+                                       stage_stop_at=stop_at, stage_timeout_s=budget_s,
+                                       attempt=attempt, enclosing_deadlines=self._deadline_observations)
                 proc = self._run_completion(cmd, run_dir, stop_at, budget_s)
             except subprocess.TimeoutExpired as exc:
                 # A tool-using completion may already have changed its workdir.
@@ -507,12 +567,46 @@ class DshModelClient:
         attempts; without one, the call is a plain completion bounded by
         ``timeout_s``.
         """
+        from contextlib import ExitStack
+        import hashlib
+        import tempfile
+
         timeout_s = budget_s if budget_s is not None else self._timeout_s
-        with _termination_as_exit():
+        with _termination_as_exit(), ExitStack() as transport:
             self._raise_if_cancelled()
+            launch = cmd
+            stdin = None
+            task_bytes = cmd[-1].encode('utf-8')
+            transport_kind = 'argv'
+            if self._worker_backend == 'dsh' and len(task_bytes) > PROMPT_ARGV_LIMIT_BYTES:
+                # Installed dsh-headless resolves '-' by reading all stdin as
+                # UTF-8, without trimming task content. File-backed stdin avoids
+                # both argv limits and a blocking parent write before polling.
+                # Anonymous/private storage remains inside this worker's cwd;
+                # ExitStack closes it on success, failed spawn, timeout or stop.
+                stdin = transport.enter_context(tempfile.TemporaryFile(dir=run_dir))
+                stdin.write(task_bytes)
+                stdin.seek(0)
+                launch = [*cmd[:-1], '-']
+                transport_kind = 'stdin_file'
+            if self._worker_receipt is not None:
+                from refactory_dsh.workers import _write_receipt
+                record = json.loads(self._worker_receipt.read_text())
+                record['prompt_transport'] = {'kind': transport_kind, 'encoding': 'utf-8',
+                                              'bytes': len(task_bytes),
+                                              'sha256': hashlib.sha256(task_bytes).hexdigest()}
+                _write_receipt(self._worker_receipt, record)
+            environment = self._environment()
+            # File preparation, hashing, receipt writes and environment setup
+            # spend the existing absolute allowance. Recheck immediately at the
+            # spawn boundary so expired/cancelled work never starts a runtime.
+            self._checkpoint()
+            self._raise_if_cancelled()
+            if stop_at is not None and time.monotonic() >= stop_at:
+                raise subprocess.TimeoutExpired(launch, timeout_s)
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                cwd=str(run_dir), env=self._environment(),
+                launch, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=str(run_dir), env=environment,
                 # A terminal Ctrl-C reaches the Python caller only. Forward one
                 # shutdown request: DSH escalates a second signal to immediate exit.
                 start_new_session=os.name == "posix",
@@ -540,4 +634,4 @@ class DshModelClient:
                 # runtime-owned cleanup before propagating failure.
                 shutdown(proc)
                 raise
-            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            return subprocess.CompletedProcess(launch, proc.returncode, stdout, stderr)

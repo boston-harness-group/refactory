@@ -223,6 +223,8 @@ def run(
     """
     if workdir is None:
         workdir = default_workdir(identifier)
+    if identifier.endswith('/create_fidelity') and approve:
+        raise ValueError('Create fidelity strategy approval must be bound to its current review digest; --approve standing answers are refused')
     workdir = Path(workdir).expanduser().resolve()
     with ownership(workdir) as owner:
         if resume:

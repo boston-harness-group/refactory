@@ -34,6 +34,7 @@ from refactory_dsh.paths import REPO_ROOT, node_bin, venv_bin
 
 #: The authoring modes, by the verb a person names them with.
 AUTHORING: dict[str, str] = {
+    "create_fidelity": "default_pack/create_fidelity",
     "create_fast": "default_pack/create_fast",
     "edit_fast": "default_pack/edit_fast",
     "design_fast": "default_pack/design_fast",
@@ -410,7 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
     ceo.add_argument("what", help="what you want, or <package>/<mode> to run")
     ceo.add_argument(
         "--mode", default="",
-        help="design (the default), create, edit, their _fast variants, or <package>/<mode>",
+        help="design (the default), create, edit, their _fast variants, opt-in create_fidelity, or <package>/<mode>",
     )
     ceo.add_argument("--name", default="", help="the package or artifact name (default: from what you said)")
     ceo.add_argument("--check", default="", help="required for design; optional focused check for create_fast/edit_fast")

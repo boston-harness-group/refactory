@@ -1,0 +1,25 @@
+{
+  "historical_commit": "3a74443e2b53dd55e847cea6d7af4b8d4865e279",
+  "current_commit": "3ab6f8f7ca792c874f2654574d7f7fd6dd18b896",
+  "historical_counts": [
+    29,
+    33
+  ],
+  "materialized_counts": [
+    29,
+    33
+  ],
+  "graph_equal": false,
+  "changed_sources": [
+    "factory/workflow/definitions.py",
+    "factory/workflow/primitives.py",
+    "factory/agents/prompts/health_checker.md",
+    "factory/agents/prompts/builder.md",
+    "factory/agents/prompts/strategist.md",
+    "factory/agents/prompts/code_reviewer.md"
+  ],
+  "node_changes": [
+    "health_checker",
+    "code_reviewer"
+  ]
+}

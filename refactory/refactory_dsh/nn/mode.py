@@ -286,7 +286,13 @@ class Mode:
         from refactory_dsh.steering import for_run
 
         graph = for_run(mode.graph(), Path(workdir))
-        if record.get("graph") is not None and record["graph"] != graph.to_state():
+        expected_graph = record.get("graph")
+        current_graph = graph.to_state()
+        if record.get("facts", {}).get("create_fidelity") and expected_graph is not None:
+            from refactory_dsh.steering import authored_graph_state
+            expected_graph = authored_graph_state(expected_graph)
+            current_graph = authored_graph_state(current_graph)
+        if expected_graph is not None and expected_graph != current_graph:
             raise ValueError("graph or instructions changed; dependent results are invalid; start a new run")
         source_manifest = Path(workdir) / "source-manifest.json"
         if source_manifest.exists():
