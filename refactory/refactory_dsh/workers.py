@@ -156,6 +156,12 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
     if route.get('worker_backend', 'dsh') != 'dsh':
         return []
     providers = _ensure_opencode_session(dict(provider_config or {}), route.get('provider', ''))
+    for name, cfg in list(providers.items()):
+        cfg = dict(cfg)
+        # Agent-node completions can think for minutes before streaming
+        # tokens; disable the idle timeout so long reasoning isn't killed.
+        cfg.setdefault('streamIdleTimeoutMs', None)
+        providers[name] = cfg
     if providers:
         return [{'id': 'llm-pi-ai', 'config': {'providers': providers}}]
     return []
