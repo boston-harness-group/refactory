@@ -25,7 +25,7 @@ for (const name of ['with-provider.json', 'without-provider.json']) {
   const adapter = entries.find(row => row.id === 'llm-pi-ai' && !row.disabled)
   assert.ok(adapter, 'the dormant base llm-pi-ai row must survive composition')
   if (name === 'with-provider.json') {
-    assert.deepEqual(adapter.config.providers, { gateway })
+    assert.deepEqual(adapter.config.providers, { gateway: { ...gateway, streamIdleTimeoutMs: null } })
     // The row the worker patch targets is the same row the nested runtime mounts:
     // mounting the real adapter with the composed config must accept the route.
     const { apply, Config } = await import(pathToFileURL(installed.resolve('@deepseek-ai/dsh-llm-pi-ai/package.json')).href

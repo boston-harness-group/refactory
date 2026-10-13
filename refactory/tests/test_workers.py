@@ -157,7 +157,8 @@ def test_worker_patch_carries_declared_provider_profiles(tmp_path):
     workers.write_patch(tmp_path / 'with-provider.json', tmp_path, route, provider_config={'gateway': gateway})
     rows = json.loads((tmp_path / 'with-provider.json').read_text())
     row = next(entry for entry in rows if entry.get('id') == 'llm-pi-ai')
-    assert row['config'] == {'providers': {'gateway': gateway}}
+    patched_gateway = {**gateway, 'streamIdleTimeoutMs': None}
+    assert row['config'] == {'providers': {'gateway': patched_gateway}}
     # Without a declaration the patch composes exactly what it did before.
     workers.write_patch(tmp_path / 'without-provider.json', tmp_path, DshModelClient().route())
     assert not any(entry.get('id') == 'llm-pi-ai'
@@ -197,9 +198,10 @@ def test_opencode_session_header_injection(case, route_provider, provider_config
         assert header == "custom", f"{case}: user-supplied header must be preserved exactly"
     else:
         assert "opencode-go" not in providers, f"{case}: opencode-go should not appear"
-        # Other provider entries must pass through unchanged.
+        # Other provider entries must pass through with only the idle timeout added.
         for name, entry in provider_config.items():
-            assert providers[name] == entry, f"{case}: {name} entry should be unchanged"
+            expected = {**entry, 'streamIdleTimeoutMs': None}
+            assert providers[name] == expected, f"{case}: {name} entry should only add timeout default"
 
 
 def test_opencode_session_header_uses_correct_credential_name():
@@ -236,11 +238,33 @@ def test_coordinator_patch_carries_declared_provider_profiles(tmp_path):
     telemetry = workers.GraphTelemetry(tmp_path, context, None)
     rows = json.loads(telemetry.patch.read_text())
     row = next(entry for entry in rows if entry.get('id') == 'llm-pi-ai')
-    assert row['config'] == {'providers': {'gateway': gateway}}
+    patched_gateway = {**gateway, 'streamIdleTimeoutMs': None}
+    assert row['config'] == {'providers': {'gateway': patched_gateway}}
     # Without a declaration the coordinator patch composes exactly what it did.
     telemetry = workers.GraphTelemetry(tmp_path, DshModelClient().context(), None)
     rows = json.loads(telemetry.patch.read_text())
     assert not any(entry.get('id') == 'llm-pi-ai' for entry in rows)
+
+
+def test_provider_rows_disables_stream_idle_timeout_by_default():
+    cfg = {"apiKeyEnv": "KEY", "baseURL": "https://example.com"}
+    rows = workers.provider_rows({'worker_backend': 'dsh'}, {'myProvider': cfg})
+    providers = rows[0]['config']['providers']
+    assert providers['myProvider']['streamIdleTimeoutMs'] is None
+    assert providers['myProvider']['apiKeyEnv'] == 'KEY'
+
+
+def test_provider_rows_preserves_explicit_stream_idle_timeout():
+    cfg = {"apiKeyEnv": "KEY", "streamIdleTimeoutMs": 600000}
+    rows = workers.provider_rows({'worker_backend': 'dsh'}, {'myProvider': cfg})
+    assert rows[0]['config']['providers']['myProvider']['streamIdleTimeoutMs'] == 600000
+
+
+def test_provider_rows_does_not_mutate_caller_config():
+    cfg = {"apiKeyEnv": "KEY"}
+    original = dict(cfg)
+    workers.provider_rows({'worker_backend': 'dsh'}, {'myProvider': cfg})
+    assert cfg == original
 
 
 def test_partial_nested_usage_retains_known_total_but_refuses_token_work(tmp_path):
