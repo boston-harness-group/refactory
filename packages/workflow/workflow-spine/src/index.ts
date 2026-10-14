@@ -1085,21 +1085,25 @@ export function apply(ctx: Context, config: Config): void {
     } else if (labels.length === 0) {
       // No labels constrain the gate; accept any text as the verdict
       verdict = rawText
-    } else if (labels.includes(rawText)) {
-      // Custom text exactly matches an accepted label → route as that verdict
-      verdict = rawText
     } else {
-      // Check for "label: feedback" pattern (longest label first to avoid prefix ambiguity)
-      const sortedLabels = [...labels].sort((a, b) => b.length - a.length)
-      const matchedLabel = sortedLabels.find(label =>
-        rawText.toLowerCase().startsWith(label.toLowerCase() + ':'),
-      )
-      if (matchedLabel === undefined) {
-        // Unrecognized free text → gate stays open, return non-error reply
-        return { status: 'replied', gate, text: rawText }
+      // Case-insensitive exact match, then "label: feedback" prefix match
+      const exactMatch = labels.find(l => l.toLowerCase() === rawText.toLowerCase())
+      if (exactMatch !== undefined) {
+        verdict = exactMatch
+      } else {
+        // Check for "label: feedback" pattern (longest label first to avoid prefix ambiguity)
+        const sortedLabels = [...labels].sort((a, b) => b.length - a.length)
+        const matchedLabel = sortedLabels.find(label =>
+          rawText.toLowerCase().startsWith(label.toLowerCase() + ':'),
+        )
+        if (matchedLabel === undefined) {
+          // Unrecognized free text → gate stays open, return non-error reply
+          recordStatus(spine, workdir, 'ready')
+          return { status: 'replied', gate, text: rawText }
+        }
+        verdict = matchedLabel
+        feedback = rawText.slice(matchedLabel.length + 1).trim()
       }
-      verdict = matchedLabel
-      feedback = rawText.slice(matchedLabel.length + 1).trim()
     }
 
     if (gateCommand !== '' && workdir !== undefined) {
