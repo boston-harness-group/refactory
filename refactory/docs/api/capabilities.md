@@ -4444,6 +4444,23 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "steering": "next-node-boundary",
         "usage": true,
         "user_questions": false
+      },
+      "openshell": {
+        "cancel": true,
+        "images": false,
+        "inflight_steering": false,
+        "model_selection": true,
+        "permissions": [
+          "skip",
+          "default"
+        ],
+        "progress": "lifecycle",
+        "provider_selection": false,
+        "reasoning_effort": false,
+        "resume": false,
+        "steering": "next-node-boundary",
+        "usage": false,
+        "user_questions": false
       }
     },
     "fields": [
@@ -4507,7 +4524,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
     }
   },
   "purpose": "Inspect effective project worker routing and provenance. Configure refactory.workers.json, CLI or panel; this read-only action never changes workers or the CEO model.",
-  "reviewed_schema": "1266cac069beb590e7b5bd7861ed7d5f9dfc3c507ebb342c737186e7cffff9a9"
+  "reviewed_schema": "692ce1f7788eebe4cc670f7f8955f8156fbe546da85f0fec5d74b438b5c93c5c"
 }
 ```
 

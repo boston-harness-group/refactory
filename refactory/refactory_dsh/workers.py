@@ -12,11 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-BACKENDS = ('dsh', 'codex', 'claude_code')
+BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
     'codex': ('skip', 'default', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'),
     'claude_code': ('skip', 'default', 'dontAsk', 'acceptEdits', 'auto', 'plan', 'bypassPermissions'),
+    'openshell': ('skip', 'default'),
 }
 SKIP_PERMISSIONS = {'codex': 'dangerously-bypass-approvals-and-sandbox',
                     'claude_code': 'bypassPermissions'}
@@ -42,7 +43,8 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
     route = {**route}
     backend = route.setdefault('worker_backend', 'dsh')
     capabilities(backend)
-    unknown = set(route) - {'worker_backend', 'provider', 'model', 'effort', 'permission_mode'}
+    unknown = set(route) - {'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
+                             'openshell_gateway', 'openshell_image'}
     if unknown:
         raise ValueError(f'unknown worker route fields: {sorted(unknown)}')
     if any(not isinstance(value, str) for value in route.values()):
@@ -366,6 +368,11 @@ def run_graph_command(argv: list[str], *, workdir: Path, context: dict[str, Any]
                       stop_condition: Any | None = None,
                       **kwargs: Any) -> Any:
     """Inherit terminal IO while polling graph resource and coordinator receipts."""
+    if context.get('worker_backend') == 'openshell':
+        from refactory_dsh.openshell_backend import run_in_openshell
+        return run_in_openshell(argv, workdir=workdir, context=context,
+                                timeout=timeout, env=env,
+                                stop_condition=stop_condition, **kwargs)
     import os
     import subprocess
     import time

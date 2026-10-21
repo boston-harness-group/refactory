@@ -1,6 +1,7 @@
 {
   "core": [
     "refactory_dsh",
+    "refactory_dsh._v1_compat",
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
     "refactory_dsh.budgets",
@@ -9,13 +10,12 @@
     "refactory_dsh.dsh_runtime",
     "refactory_dsh.evaluators",
     "refactory_dsh.events",
-    "refactory_dsh.git_hooks",
     "refactory_dsh.finished_control",
+    "refactory_dsh.git_hooks",
     "refactory_dsh.graph_control",
     "refactory_dsh.harness_check",
     "refactory_dsh.history",
     "refactory_dsh.invocations",
-    "refactory_dsh._v1_compat",
     "refactory_dsh.ir",
     "refactory_dsh.items",
     "refactory_dsh.live",
@@ -36,6 +36,7 @@
     "refactory_dsh.nn.resolve",
     "refactory_dsh.nn.validate",
     "refactory_dsh.observe",
+    "refactory_dsh.openshell_backend",
     "refactory_dsh.optim",
     "refactory_dsh.optim.base",
     "refactory_dsh.optim.policies",
@@ -51,6 +52,7 @@
     "refactory_dsh.run",
     "refactory_dsh.run_artifacts",
     "refactory_dsh.run_ownership",
+    "refactory_dsh.run_preparation",
     "refactory_dsh.run_state",
     "refactory_dsh.sandbox",
     "refactory_dsh.steer_probe",
@@ -63,8 +65,7 @@
     "refactory_dsh.tools",
     "refactory_dsh.worker_config",
     "refactory_dsh.worker_node",
-    "refactory_dsh.workers",
-    "refactory_dsh.run_preparation"
+    "refactory_dsh.workers"
   ],
   "product": [
     "refactory_dsh.authoring_evidence",
@@ -115,9 +116,27 @@
     ]
   },
   "references": [
-    {"source": "packages/workflow/workflow-spine/src/index.ts", "target": "refactory_dsh.console", "kind": "string-ref", "reason": "error message mentioning console open command — documentation only", "until": "the split"},
-    {"source": "refactory/refactory_dsh/invocations.py", "target": "refactory_dsh.delivery", "kind": "string-ref", "reason": "DELIVER_ENTRY_POINTS names the product callable as a string", "until": "the split — the string becomes a cross-repo entry point identifier"},
-    {"source": "refactory/refactory_dsh/registry.py", "target": "refactory_packages", "kind": "discovery", "reason": "imports every refactory_packages.<name> including product default_pack and fix_pack; refuses namespace package, so packs cannot live in two repos as they stand", "until": "the split — registry must support namespace packages or packs move to a shared plugin system"}
+    {
+      "source": "packages/workflow/workflow-spine/src/index.ts",
+      "target": "refactory_dsh.console",
+      "kind": "string-ref",
+      "reason": "error message mentioning console open command \u2014 documentation only",
+      "until": "the split"
+    },
+    {
+      "source": "refactory/refactory_dsh/invocations.py",
+      "target": "refactory_dsh.delivery",
+      "kind": "string-ref",
+      "reason": "DELIVER_ENTRY_POINTS names the product callable as a string",
+      "until": "the split \u2014 the string becomes a cross-repo entry point identifier"
+    },
+    {
+      "source": "refactory/refactory_dsh/registry.py",
+      "target": "refactory_packages",
+      "kind": "discovery",
+      "reason": "imports every refactory_packages.<name> including product default_pack and fix_pack; refuses namespace package, so packs cannot live in two repos as they stand",
+      "until": "the split \u2014 registry must support namespace packages or packs move to a shared plugin system"
+    }
   ],
   "refactory_packages": {
     "default_pack": "product",
@@ -132,7 +151,10 @@
     "review_pack": "core",
     "sympy_pack": "core"
   },
-  "typescript_core_packages": ["@deepseek-ai/dsh-workflow-spine", "@deepseek-ai/dsh-graph"],
+  "typescript_core_packages": [
+    "@deepseek-ai/dsh-workflow-spine",
+    "@deepseek-ai/dsh-graph"
+  ],
   "typescript_product_packages": [
     "@deepseek-ai/dsh-refactory",
     "@deepseek-ai/dsh-refactory-web",
@@ -142,16 +164,60 @@
     "@deepseek-ai/dsh-tool-refactory"
   ],
   "non_python_files": [
-    {"path": "refactory_dsh/additive.mjs", "classification": "core", "reason": "additive profile launcher used by dsh_profile"},
-    {"path": "refactory_dsh/model_readiness.mjs", "classification": "core", "reason": "model readiness probe used by model"},
-    {"path": "refactory_dsh/profile_manifest.mjs", "classification": "core", "reason": "profile manifest helper used by dsh_profile"},
-    {"path": "refactory_dsh/source_bootstrap.mjs", "classification": "core", "reason": "source bootstrap preload used by paths"},
-    {"path": "refactory_dsh/worker_bridge.mjs", "classification": "core", "reason": "worker bridge plugin used by workers"},
-    {"path": "refactory_dsh/worker_observer.mjs", "classification": "core", "reason": "worker observer plugin used by workers"},
-    {"path": "refactory_dsh/patches/agent-node.yml", "classification": "core", "reason": "agent node patch used by model"},
-    {"path": "refactory_dsh/data/coverage.json", "classification": "product", "reason": "capability coverage data used by discovery and gen_discovery"},
-    {"path": "refactory_dsh/data/documentation.json", "classification": "product", "reason": "documentation data used by discovery and gen_discovery"},
-    {"path": "refactory_dsh/data/boundary.json", "classification": "core", "reason": "module classification data used by test_boundary.py"},
-    {"path": "refactory_dsh/data/verdict-routing-cases.json", "classification": "core", "reason": "verdict routing shared test cases used by test_route_verdict.py and verdict-routing.test.ts"}
+    {
+      "path": "refactory_dsh/additive.mjs",
+      "classification": "core",
+      "reason": "additive profile launcher used by dsh_profile"
+    },
+    {
+      "path": "refactory_dsh/model_readiness.mjs",
+      "classification": "core",
+      "reason": "model readiness probe used by model"
+    },
+    {
+      "path": "refactory_dsh/profile_manifest.mjs",
+      "classification": "core",
+      "reason": "profile manifest helper used by dsh_profile"
+    },
+    {
+      "path": "refactory_dsh/source_bootstrap.mjs",
+      "classification": "core",
+      "reason": "source bootstrap preload used by paths"
+    },
+    {
+      "path": "refactory_dsh/worker_bridge.mjs",
+      "classification": "core",
+      "reason": "worker bridge plugin used by workers"
+    },
+    {
+      "path": "refactory_dsh/worker_observer.mjs",
+      "classification": "core",
+      "reason": "worker observer plugin used by workers"
+    },
+    {
+      "path": "refactory_dsh/patches/agent-node.yml",
+      "classification": "core",
+      "reason": "agent node patch used by model"
+    },
+    {
+      "path": "refactory_dsh/data/coverage.json",
+      "classification": "product",
+      "reason": "capability coverage data used by discovery and gen_discovery"
+    },
+    {
+      "path": "refactory_dsh/data/documentation.json",
+      "classification": "product",
+      "reason": "documentation data used by discovery and gen_discovery"
+    },
+    {
+      "path": "refactory_dsh/data/boundary.json",
+      "classification": "core",
+      "reason": "module classification data used by test_boundary.py"
+    },
+    {
+      "path": "refactory_dsh/data/verdict-routing-cases.json",
+      "classification": "core",
+      "reason": "verdict routing shared test cases used by test_route_verdict.py and verdict-routing.test.ts"
+    }
   ]
 }
