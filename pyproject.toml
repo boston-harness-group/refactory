@@ -13,18 +13,11 @@ dependencies = ["refactory-dsh"]
 
 [tool.uv.sources]
 refactory-dsh = { path = "refactory", editable = true }
-# The reference graph language, used only by the tests as an oracle. It stays out
-# of `dependencies` because its own pyproject pulls in fastapi, uvicorn, mcp,
-# langfuse, anthropic[vertex] and more; the shipping install must not pay for them.
-remote-factory = { git = "https://github.com/akashgit/remote-factory.git", rev = "e7eb24906a8ddcecd341c577bd669579ee31a21c" }
 
 [dependency-groups]
 # What the test suite needs. `uv sync` installs these by default, so a clone can run
 # the tests without a second install step — the suite is part of the product here.
-dev = ["pytest>=8", "sympy>=1.12"]
-# The oracle group is not installed by default: `uv sync --group reference` adds it,
-# and the parity tests skip with a reason on a machine that does not have it.
-reference = ["remote-factory"]
+dev = ["pytest>=8", "sympy>=1.12", "networkx>=3.1"]
 
 [tool.uv]
 package = false

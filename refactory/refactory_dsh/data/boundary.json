@@ -15,6 +15,7 @@
     "refactory_dsh.harness_check",
     "refactory_dsh.history",
     "refactory_dsh.invocations",
+    "refactory_dsh._v1_compat",
     "refactory_dsh.ir",
     "refactory_dsh.items",
     "refactory_dsh.live",

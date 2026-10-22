@@ -1,0 +1,148 @@
+"""On-the-fly workflow skill generation with checksum-based caching."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from factory.workflow.primitives import Workflow
+
+log = structlog.get_logger()
+
+
+def _sort_recursive(obj: object) -> Any:
+    """Recursively sort dicts by key and lists by value for deterministic serialization."""
+    if isinstance(obj, dict):
+        return {k: _sort_recursive(v) for k, v in sorted(obj.items())}
+    if isinstance(obj, list):
+        try:
+            return sorted(_sort_recursive(item) for item in obj)
+        except TypeError:
+            return [_sort_recursive(item) for item in obj]
+    return obj
+
+
+def _compute_checksum(
+    workflows: dict[str, Workflow],
+    source_files: dict[str, str] | None = None,
+) -> str:
+    """Deterministic checksum from workflow Pydantic models + source files.
+
+    Serialises all workflows via model_dump(mode='json'), sorts by name,
+    then SHA-256 hashes the canonical JSON.  Returns the first 16 hex chars.
+
+    When *source_files* maps workflow name → path of the .py file it was
+    discovered from, the SHA-256 of each file's bytes is folded into the
+    checksum.  This makes the cache key cover everything the skill export
+    reads: the exported SKILL.md depends on entry-level data (e.g. the
+    ``meta`` description) that is not a field on the Workflow model, so
+    hashing models alone can serve stale skills after a file edit.
+    """
+    payload = {name: wf.model_dump(mode="json") for name, wf in sorted(workflows.items())}
+    payload = _sort_recursive(payload)
+    blob = json.dumps(payload, sort_keys=True).encode()
+    h = hashlib.sha256(blob)
+    for name, path_str in sorted((source_files or {}).items()):
+        try:
+            h.update(name.encode())
+            h.update(Path(path_str).read_bytes())
+        except OSError as exc:
+            log.debug("skill_cache.checksum_read_failed", path=path_str, error=str(exc))
+    return h.hexdigest()[:16]
+
+
+def ensure_skills(project_dir: Path, *, mode: str | None = None) -> list[Path]:
+    """Generate workflow skills into *project_dir*/skills/, using a local cache.
+
+    Cache location: ``~/.factory/cache/skills/{checksum}/``.
+    Only ``workflow-*`` subdirectories are copied — hand-written skills are
+    never touched.  Returns an empty list on any I/O error (non-fatal).
+
+    If *mode* is given, also generates PostToolUse verification hooks for that
+    workflow into *project_dir*/.factory/hooks/.
+    """
+    try:
+        return _ensure_skills_inner(project_dir, mode=mode)
+    except Exception as exc:
+        log.warning("skill_cache.error", error=str(exc))
+        return []
+
+
+def _ensure_skills_inner(project_dir: Path, *, mode: str | None = None) -> list[Path]:
+    from factory.workflow.registry import WorkflowRegistry
+    from factory.workflow.skill_export import export_all_skills
+
+    entries = WorkflowRegistry.discover(project_dir)
+
+    builtin_workflows: dict[str, Workflow] = {}
+    project_workflows: dict[str, Workflow] = {}
+    source_files: dict[str, str] = {}
+
+    for name, entry in entries.items():
+        wf = WorkflowRegistry.get_workflow(name, project_dir)
+        if wf is None:
+            continue
+        if entry.source == "project":
+            project_workflows[name] = wf
+        else:
+            builtin_workflows[name] = wf
+            if entry.path != "<builtin>":
+                source_files[name] = entry.path
+
+    log.info("skill_cache.project_workflows_discovered", count=len(project_workflows))
+
+    checksum = _compute_checksum(builtin_workflows, source_files)
+
+    cache_dir = Path.home() / ".factory" / "cache" / "skills" / checksum
+    skills_target = project_dir / "skills"
+    skills_target.mkdir(parents=True, exist_ok=True)
+
+    workflow_dirs = sorted(cache_dir.glob("workflow-*")) if cache_dir.exists() else []
+
+    if workflow_dirs:
+        log.info("skill_cache.hit", checksum=checksum, cached_skills=len(workflow_dirs))
+    else:
+        log.info("skill_cache.miss", checksum=checksum)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        export_all_skills(cache_dir, builtin_workflows)
+        workflow_dirs = sorted(cache_dir.glob("workflow-*"))
+
+        cache_parent = cache_dir.parent
+        evicted = 0
+        for sibling in cache_parent.iterdir():
+            if sibling != cache_dir and sibling.is_dir():
+                shutil.rmtree(sibling, ignore_errors=True)
+                evicted += 1
+        if evicted:
+            log.info("skill_cache.evicted", count=evicted)
+
+    generated: list[Path] = []
+    for src in workflow_dirs:
+        dst = skills_target / src.name
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        skill_md = dst / "SKILL.md"
+        if skill_md.exists():
+            generated.append(skill_md)
+
+    log.info("skill_cache.copied", count=len(generated), target=str(skills_target))
+
+    if project_workflows:
+        project_generated = export_all_skills(skills_target, project_workflows)
+        generated.extend(project_generated)
+        log.info("skill_cache.project_skills_generated", count=len(project_generated))
+
+    all_workflows = {**builtin_workflows, **project_workflows}
+
+    if mode and mode in all_workflows:
+        from factory.workflow.verification import write_verification_hooks
+
+        settings_path = write_verification_hooks(all_workflows[mode], project_dir)
+        if settings_path:
+            log.info("skill_cache.hooks_generated", mode=mode, settings=str(settings_path))
+
+    return generated

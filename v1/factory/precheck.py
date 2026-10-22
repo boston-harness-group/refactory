@@ -1,0 +1,364 @@
+"""Pre-check gate — hard, non-overridable checks before keep/revert decisions.
+
+The CEO CANNOT override a failed precheck. A failure means mandatory revert.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import structlog
+
+from factory.models import HardConstraint
+from factory.strategy import find_anti_patterns
+
+log = structlog.get_logger()
+
+
+@dataclass
+class CheckResult:
+    """Result of a single precheck."""
+
+    name: str
+    passed: bool
+    detail: str
+
+
+@dataclass
+class PreCheckResult:
+    """Aggregate result of all prechecks."""
+
+    passed: bool
+    checks: list[CheckResult] = field(default_factory=list)
+    blocking_failures: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        lines = []
+        for c in self.checks:
+            icon = "PASS" if c.passed else "FAIL"
+            lines.append(f"  {icon}: {c.name} — {c.detail}")
+        if self.blocking_failures:
+            lines.append(f"\nBLOCKING: {', '.join(self.blocking_failures)}")
+        return "\n".join(lines)
+
+
+def check_score_direction(
+    score_before: float | None,
+    score_after: float | None,
+    threshold: float,
+) -> CheckResult:
+    """Verify score did not regress and meets threshold."""
+    if score_before is None or score_after is None:
+        return CheckResult(
+            name="score_direction",
+            passed=False,
+            detail="Missing score data (before or after is None)",
+        )
+
+    if score_after < score_before:
+        return CheckResult(
+            name="score_direction",
+            passed=False,
+            detail=f"Score regressed: {score_before:.4f} → {score_after:.4f} (delta={score_after - score_before:+.4f})",
+        )
+
+    if score_after < threshold:
+        return CheckResult(
+            name="score_direction",
+            passed=False,
+            detail=f"Below threshold: {score_after:.4f} < {threshold:.4f}",
+        )
+
+    return CheckResult(
+        name="score_direction",
+        passed=True,
+        detail=f"Score OK: {score_before:.4f} → {score_after:.4f} (delta={score_after - score_before:+.4f}, threshold={threshold:.4f})",
+    )
+
+
+def check_scope(
+    project_path: Path,
+    baseline_sha: str,
+    allowed_scope: list[str] | None = None,
+) -> CheckResult:
+    """Run factory guard --check-scope and report pass/fail."""
+    cmd = ["uv", "run", "python", "-m", "factory", "guard", str(project_path), "--baseline", baseline_sha]
+    if allowed_scope:
+        cmd.append("--check-scope")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=project_path,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(name="scope", passed=False, detail="Guard check timed out")
+    except FileNotFoundError:
+        return CheckResult(name="scope", passed=False, detail="Guard command not found")
+
+    if result.returncode == 0:
+        return CheckResult(name="scope", passed=True, detail="Guard check clean")
+
+    violations = [
+        line.replace("VIOLATION: ", "").strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("VIOLATION:")
+    ]
+    return CheckResult(
+        name="scope",
+        passed=False,
+        detail=f"Guard violations: {'; '.join(violations) or result.stdout.strip()[:200]}",
+    )
+
+
+def check_anti_pattern(
+    hypothesis: str,
+    history: list[dict],
+    similarity_threshold: float = 0.6,
+) -> CheckResult:
+    """Check if hypothesis is too similar to a previously reverted experiment."""
+    matches = find_anti_patterns(hypothesis, history, similarity_threshold)
+    if not matches:
+        return CheckResult(
+            name="anti_pattern",
+            passed=True,
+            detail="No similar reverted experiments found",
+        )
+
+    best = max(matches, key=lambda m: m["similarity"])
+    return CheckResult(
+        name="anti_pattern",
+        passed=False,
+        detail=(
+            f"Similar to reverted experiment #{best.get('id', '?')}: "
+            f"'{best.get('hypothesis', '')[:60]}' "
+            f"(similarity={best['similarity']:.2f})"
+        ),
+    )
+
+
+def check_surfaces(
+    project_path: Path,
+    baseline_sha: str,
+) -> CheckResult:
+    """Run factory guard --check-surfaces and report pass/fail.
+
+    This is a hard gate — the CEO cannot override a failed surface check.
+    Any modification to a fixed surface file is a mandatory revert.
+    """
+    cmd = [
+        "uv", "run", "python", "-m", "factory", "guard",
+        str(project_path), "--baseline", baseline_sha, "--check-surfaces",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=project_path,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(name="fixed_surfaces", passed=False, detail="Surface guard check timed out")
+    except FileNotFoundError:
+        return CheckResult(name="fixed_surfaces", passed=False, detail="Guard command not found")
+
+    if result.returncode == 0:
+        return CheckResult(name="fixed_surfaces", passed=True, detail="No fixed surfaces modified")
+
+    violations = [
+        line.replace("VIOLATION: ", "").strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("VIOLATION:")
+    ]
+    return CheckResult(
+        name="fixed_surfaces",
+        passed=False,
+        detail=f"Fixed surface violations: {'; '.join(violations) or result.stdout.strip()[:200]}",
+    )
+
+
+def check_hard_constraints(
+    constraints: list[HardConstraint],
+    project_path: Path,
+    timeout: float = 120,
+) -> list[CheckResult]:
+    """Run user-defined hard constraint checks. Each must exit 0 to pass."""
+    log.info("hard_constraints_start", count=len(constraints))
+    results: list[CheckResult] = []
+    for constraint in constraints:
+        try:
+            result = subprocess.run(
+                constraint.check,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=project_path,
+            )
+        except subprocess.TimeoutExpired:
+            results.append(CheckResult(
+                name=f"hard_constraint:{constraint.name}",
+                passed=False,
+                detail=f"Hard constraint '{constraint.name}' timed out after {timeout}s",
+            ))
+            continue
+        except Exception as e:
+            results.append(CheckResult(
+                name=f"hard_constraint:{constraint.name}",
+                passed=False,
+                detail=f"Hard constraint '{constraint.name}' error: {e}",
+            ))
+            continue
+
+        if result.returncode == 0:
+            log.info("hard_constraint_result", name=constraint.name, passed=True)
+            results.append(CheckResult(
+                name=f"hard_constraint:{constraint.name}",
+                passed=True,
+                detail=f"Hard constraint '{constraint.name}' passed",
+            ))
+        else:
+            stderr_snippet = result.stderr.strip()[:200] if result.stderr else ""
+            stdout_snippet = result.stdout.strip()[:200] if result.stdout else ""
+            output = stderr_snippet or stdout_snippet or f"exit code {result.returncode}"
+            log.info("hard_constraint_result", name=constraint.name, passed=False, detail=output)
+            results.append(CheckResult(
+                name=f"hard_constraint:{constraint.name}",
+                passed=False,
+                detail=f"Hard constraint '{constraint.name}' failed: {output}",
+            ))
+    return results
+
+
+def check_qa_execution(
+    project_path: Path,
+    exp_id: int,
+) -> CheckResult:
+    """Verify QA verification was invoked for this experiment — Sacred Rule 9.
+
+    Matches both the old monolithic QA agent events and the new deep-QA
+    specialist events (health_checker, code_reviewer, adversarial_tester).
+    """
+    from factory.events import load_events
+
+    events = load_events(project_path)
+
+    exp_start_ts: datetime | None = None
+    for ev in reversed(events):
+        if ev.get("type") == "experiment.begin":
+            ev_data = ev.get("data", {})
+            if ev_data.get("exp_id") == exp_id:
+                ts_str = ev.get("timestamp")
+                if ts_str:
+                    exp_start_ts = datetime.fromisoformat(ts_str)
+                break
+
+    if exp_start_ts is None:
+        return CheckResult(
+            name="qa_execution",
+            passed=True,
+            detail=f"No experiment.begin event found for exp_id={exp_id} — skipping QA check",
+        )
+
+    qa_roles = {"qa", "health_checker", "code_reviewer", "adversarial_tester"}
+
+    for ev in events:
+        ts_str = ev.get("timestamp")
+        if not ts_str:
+            continue
+        ev_ts = datetime.fromisoformat(ts_str)
+        if ev_ts <= exp_start_ts:
+            continue
+
+        ev_type = ev.get("type", "")
+        if ev_type == "qa.completed":
+            return CheckResult(
+                name="qa_execution",
+                passed=True,
+                detail="QA verification completed for this experiment",
+            )
+        if ev_type == "agent.completed" and ev.get("agent") in qa_roles:
+            return CheckResult(
+                name="qa_execution",
+                passed=True,
+                detail=f"QA verification completed for this experiment ({ev.get('agent')})",
+            )
+
+    return CheckResult(
+        name="qa_execution",
+        passed=False,
+        detail="QA verification not invoked — Sacred Rule 9 violation",
+    )
+
+
+def run_precheck(
+    *,
+    score_before: float | None,
+    score_after: float | None,
+    threshold: float,
+    hypothesis: str,
+    history: list[dict],
+    project_path: Path,
+    baseline_sha: str | None = None,
+    allowed_scope: list[str] | None = None,
+    similarity_threshold: float = 0.6,
+    fixed_surfaces: list[str] | None = None,
+    hard_constraints: list[HardConstraint] | None = None,
+    exp_id: int | None = None,
+) -> PreCheckResult:
+    """Run all prechecks and return aggregate result.
+
+    A single failure makes the whole precheck fail. The CEO cannot override this.
+
+    Smoke test and ground truth leakage checks have been moved to the QA Agent,
+    which runs them as part of its adversarial QA and code review sections.
+    """
+    checks: list[CheckResult] = []
+
+    # 1. Score direction
+    checks.append(check_score_direction(score_before, score_after, threshold))
+
+    # 2. Scope / guard check (only if baseline SHA provided)
+    if baseline_sha:
+        checks.append(check_scope(project_path, baseline_sha, allowed_scope))
+
+    # 3. Fixed surface guard (only if baseline + fixed_surfaces provided)
+    if baseline_sha and fixed_surfaces:
+        checks.append(check_surfaces(project_path, baseline_sha))
+
+    # 4. Anti-pattern detection
+    checks.append(check_anti_pattern(hypothesis, history, similarity_threshold))
+
+    # 5. Hard constraints (user-defined checks from factory.md)
+    if hard_constraints:
+        checks.extend(check_hard_constraints(hard_constraints, project_path))
+
+    # 6. QA execution check (only when exp_id is provided)
+    if exp_id is not None:
+        checks.append(check_qa_execution(project_path, exp_id))
+
+    # Aggregate
+    failures = [c.name for c in checks if not c.passed]
+    passed = len(failures) == 0
+
+    result = PreCheckResult(
+        passed=passed,
+        checks=checks,
+        blocking_failures=failures,
+    )
+
+    log.info(
+        "precheck_complete",
+        passed=passed,
+        checks_run=len(checks),
+        failures=failures,
+    )
+    return result

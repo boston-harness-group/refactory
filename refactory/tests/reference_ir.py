@@ -1,25 +1,20 @@
 """The reference graph language, used by the tests as an oracle.
 
-The nine node and workflow types this package lowers into live in
-`refactory_dsh.ir`. The reference they were copied from, remote-factory's
-`factory`, is no longer a runtime dependency: it lives in the non-default
-`reference` dependency group and is reached only from tests, where it answers the
-questions a copy cannot answer about itself.
+The reference lives in the v1 subtree at ``v1/`` and is
+imported through ``refactory_dsh._v1_compat``, which adds it to ``sys.path``.
+No separate ``uv sync --group reference`` step is needed.
 
-`EXTENSION_FIELDS` names the fields `refactory_dsh.ir` added that the reference
-never had. The oracle boundary strips them: `reference_lowering` filters them from
-constructor kwargs so the reference classes accept the lowering's output,
-`reference_workflow` strips them from the serialized dict before the reference reads
-it, and `strip_extension_keys` lets the byte-parity test compare only the shared
-vocabulary. A field added to the IR without being named here or present in the
-reference fails the parity-guard test.
+``EXTENSION_FIELDS`` names the fields ``refactory_dsh.ir`` added that the
+reference never had.  The oracle boundary strips them:
+``reference_lowering`` filters them from constructor kwargs so the reference
+classes accept the lowering's output, ``reference_workflow`` strips them from
+the serialized dict before the reference reads it, and
+``strip_extension_keys`` lets the byte-parity test compare only the shared
+vocabulary.
 
-`reference_lowering` runs the real `lowering.to_workflow` with the reference's own
-classes bound in place of ours, so one lowering produces the two graphs the parity
-test compares. `validate_reference` asks the reference's NetworkX validator whether
-a lowered graph is well formed. `needs_factory` skips a test with a reason when the
-reference is not installed, and the `toolchain` marker beside it makes
-`--toolchain-gate` report that skip instead of counting it as verified.
+``validate_reference`` asks the reference's NetworkX validator whether a
+lowered graph is well formed.  This requires ``networkx`` — tests that call
+it use the ``needs_networkx`` marker to skip when it is not installed.
 """
 
 from __future__ import annotations
@@ -29,9 +24,10 @@ from typing import Any
 
 import pytest
 
+import refactory_dsh._v1_compat  # noqa: F401 — registers sys.path for v1 imports
 from refactory_dsh import lowering
 
-#: The names `lowering` binds to the IR. Swapping them for the reference's own
+#: The names ``lowering`` binds to the IR. Swapping them for the reference's own
 #: classes runs the same lowering code against the reference implementation.
 IR_NAMES = (
     "AgentNode",
@@ -53,19 +49,25 @@ EXTENSION_FIELDS: frozenset[str] = frozenset({
     "command_timeout_s",
     "dispatch_command",
     "optional_targets",
+    "split",
+    "subgraph_entry",
+    "subgraph_exit",
 })
 
-#: Whether the dev-only reference is importable by this interpreter.
-HAS_FACTORY = importlib.util.find_spec("factory") is not None
+#: Whether networkx is available (needed by v1's validate_graph).
+HAS_NETWORKX = importlib.util.find_spec("networkx") is not None
 
-needs_factory = pytest.mark.skipif(
-    not HAS_FACTORY,
+needs_networkx = pytest.mark.skipif(
+    not HAS_NETWORKX,
     reason=(
-        "the reference graph language ('factory', remote-factory) is not installed; "
-        "it is a test-time oracle, so run `uv sync --group reference` to verify "
-        "this path"
+        "networkx is not installed; it is needed by v1's graph validator. "
+        "Install it to verify this path."
     ),
 )
+
+# Keep the old name as an alias so existing test files that import
+# needs_factory continue to work without modification.
+needs_factory = needs_networkx
 
 
 def strip_extension_keys(workflow_dict: dict[str, Any]) -> dict[str, Any]:
@@ -88,8 +90,9 @@ def strip_extension_keys(workflow_dict: dict[str, Any]) -> dict[str, Any]:
 def _wrap_reference_class(ref_cls: type) -> type:
     """A subclass of *ref_cls* whose __init__ silently drops EXTENSION_FIELDS kwargs.
 
-    A subclass, not a function, because `to_dict()` writes `type(node).__name__` as
-    the `_type` discriminator, so the wrapper must carry the reference class's name.
+    A subclass, not a function, because ``to_dict()`` writes
+    ``type(node).__name__`` as the ``_type`` discriminator, so the wrapper must
+    carry the reference class's name.
     """
     def __init__(self: Any, **kwargs: Any) -> None:
         for field_name in EXTENSION_FIELDS:
@@ -100,7 +103,7 @@ def _wrap_reference_class(ref_cls: type) -> type:
 
 
 def reference_lowering(state: dict[str, Any], *, name: str = "") -> Any:
-    """Lower a mode state through `lowering`, but building the reference's IR."""
+    """Lower a mode state through ``lowering``, but building the reference's IR."""
     import factory.workflow.primitives as reference
 
     saved = {attribute: getattr(lowering, attribute) for attribute in IR_NAMES}

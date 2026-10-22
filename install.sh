@@ -25,16 +25,16 @@
 #     own `web` template (the harness's `web` is never written to) — idempotently
 #     (`REFACTORY_SKIP_DSH_PROFILE=1` skips both).
 #
-# It deliberately leaves out the two opt-in, non-shipping pieces. CI runs
-# `install.sh` for this default install, then adds the reference group so the IR
-# parity tests run on every pull request; the reference stays out of the default:
+# It deliberately leaves out one opt-in, non-shipping piece:
 #
-#   * the non-default `reference` group (remote-factory, providing `factory`/`srf`),
-#     a test-time oracle added with `uv sync --group reference`.
 #   * `refactory/vendor/srf/graphs`, the legacy graph directory for the low-level
 #     `dsh --profile graph run` path. The public `uv run refactory ceo
 #     <package>/<mode>` route lowers the mode and supplies its own graph directory,
-#     so a fresh checkout needs neither.
+#     so a fresh checkout does not need it.
+#
+# The IR parity tests use the v1 subtree at `v1/` (part of this
+# repo, no submodule init needed) instead of a separate `uv sync --group reference`
+# step.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,75 +1,47 @@
 """The workflow IR this package owns and lowers a mode state into.
 
-``Workflow.to_dict()`` is the JSON the shipped runtime reads, so its serialization is behavior rather than a rendering detail: ``reads`` and ``writes`` are sorted for byte stability, every node carries a ``_type`` discriminator, and a key is emitted only when its value is non-empty. The types below are the node kinds, edges and workflow document that ``refactory_dsh.lowering`` produces; the equivalence and parity tests compare this output byte for byte against the reference that was copied from.
+Re-exports the canonical IR types from remote-factory (v1) via the subtree
+at ``v1/``, extending three node classes with fields v2 needs
+that v1 does not yet carry: ``resource_role``, ``command_timeout_s``, and
+``dispatch_command``.
 
-Copied from ``factory/workflow/primitives.py`` in remote-factory at commit ``e7eb24906a8ddcecd341c577bd669579ee31a21c`` (https://github.com/akashgit/remote-factory), keeping the types and fields this package uses. The source is MIT licensed:
+The v1 types are imported through ``_v1_compat``, which adds the subtree
+root to ``sys.path``.  v1's only transitive dependency beyond stdlib is
+``structlog``, which v2 already depends on.
 
-    MIT License
-
-    Copyright (c) 2025 Akash Srivastava
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-    SOFTWARE.
+``Workflow.to_dict()`` is the JSON the shipped runtime reads, so its
+serialization is behavior rather than a rendering detail: ``reads`` and
+``writes`` are sorted for byte stability, every node carries a ``_type``
+discriminator, and a key is emitted only when its value is non-empty.
 """
 
 from __future__ import annotations
+
+import refactory_dsh._v1_compat  # noqa: F401 — registers sys.path for v1 imports
 
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Re-export v1 types that v2 uses without modification.
+from factory.workflow.primitives import (  # type: ignore[import-untyped]
+    AgentRole,
+    AgentConfig,
+    VerdictType,
+    Edge,
+)
 
-class AgentRole(str, Enum):
-    """Every role an agent node may declare."""
-
-    RESEARCHER = "researcher"
-    STRATEGIST = "strategist"
-    BUILDER = "builder"
-    HEALTH_CHECKER = "health_checker"
-    CODE_REVIEWER = "code_reviewer"
-    ADVERSARIAL_TESTER = "adversarial_tester"
-    FAILURE_ANALYST = "failure_analyst"
-    CEO = "ceo"
-    ARCHIVIST = "archivist"
-    REFINER = "refiner"
-
-
-class AgentConfig(BaseModel):
-    """Configuration for an agent in the pool."""
-
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-    role: AgentRole
-    model: str
-    timeout: int = 600
-
-
-class VerdictType(str, Enum):
-    """The three labels a gate verdict uses."""
-
-    PROCEED = "proceed"
-    RELOOP = "reloop"
-    HALT = "halt"
+# ── v2 extension fields ────────────────────────────────────────────
+#
+# v1's Node base and three node types lack fields v2 needs.  Rather than
+# forking the entire class hierarchy, we subclass only the types that gain
+# fields, keeping the same class names so ``_type`` discriminators and
+# ``isinstance`` checks work unchanged.
 
 
 class Node(BaseModel):
-    """Base node in the workflow graph."""
+    """Base node in the workflow graph, with v2 extension fields."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -77,8 +49,6 @@ class Node(BaseModel):
     reads: set[str] = Field(default_factory=set)
     writes: set[str] = Field(default_factory=set)
     blocking: bool = True
-    # Omitted legacy nodes inherit their enclosing phase. Explicit work must
-    # survive serialization so a repair cannot inherit validation's reserve.
     resource_role: Literal["work", "final_validation"] | None = None
 
 
@@ -117,7 +87,6 @@ class FnNode(Node):
     command: str = ""
     callable_name: str | None = None
     notes: str = ""
-    # An operation with its own bounded subprocesses may need a longer envelope.
     command_timeout_s: int | None = Field(default=None, gt=0, le=2_147_483)
 
 
@@ -133,6 +102,11 @@ class GateNode(Node):
     gate_prompt: str = ""
     max_iterations: int | None = None
     """Cap for this gate's reloop edge. ``None`` leaves the cap to the runtime."""
+
+
+# ForkNode, JoinNode, DataNode need v2's Node base (which carries resource_role)
+# even though v2 never sets resource_role on them — the lowering passes it in
+# common kwargs and extra="forbid" would reject it without the field.
 
 
 class ForkNode(Node):
@@ -197,28 +171,6 @@ class DataNode(Node):
         return self
 
 
-class Edge(BaseModel):
-    """Directed edge in the workflow graph with an optional labelled condition.
-
-    ``condition`` is normally one of the three ``VerdictType`` labels, but a gate
-    may name its own forward outcomes. Arbitrary labels are stored verbatim and
-    lowercased by consumers before matching.
-    """
-
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-    source: str
-    target: str
-    condition: VerdictType | str | None = None
-
-    @property
-    def condition_label(self) -> str | None:
-        """The condition as a plain string, or ``None``."""
-        if self.condition is None:
-            return None
-        return self.condition.value if isinstance(self.condition, VerdictType) else self.condition
-
-
 NodeType = AgentNode | FnNode | GateNode | ForkNode | JoinNode | DataNode
 
 
@@ -236,8 +188,6 @@ class Workflow(BaseModel):
     knob_values: dict[str, str | float] = Field(default_factory=dict)
     knob_bounds: dict[str, list[str | float]] = Field(default_factory=dict)
     knob_expandable: dict[str, str] = Field(default_factory=dict)
-    # Full OptKnob metadata (kind, node_id, description, …) so the IR carries what
-    # each knob tunes and what kind of mutation is legal, not just the value.
     knob_specs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     declared_capabilities: frozenset[str] = frozenset()
 

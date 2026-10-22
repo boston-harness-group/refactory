@@ -10,9 +10,9 @@
 #
 # Scope: the TypeScript suite (`pnpm test`), the whole-profile acceptance run and
 # the Python suite under `refactory/tests/` all run here. The IR parity tests
-# (`test_ir_parity.py`) compare refactory's IR against the reference graph language;
-# CI installs the reference (`uv sync --group reference`) so these tests run on
-# every pull request. The Python suite was red for pre-existing reasons (issue #272)
+# (`test_ir_parity.py`) compare refactory's IR against the reference graph language
+# in the v1 subtree at `v1/`; the code is part of this repo so
+# these tests run on every pull request. The Python suite was red for pre-existing reasons (issue #272)
 # and is now gated: a failing test fails the job. A test that needs an external tool
 # or a model credential is marked (`toolchain` plus a `needs_*` skip) and the
 # terminal summary names every one that did not run, so a green suite cannot hide a
@@ -70,11 +70,6 @@ jobs:
       - name: Install (fresh-checkout path)
         run: ./install.sh
 
-      # The IR parity oracle is a test-time dependency, not a runtime one.
-      # install.sh provisions the default install; this adds the reference
-      # so test_ir_parity.py runs rather than skipping.
-      - name: Install reference oracle
-        run: uv sync --group reference
 
       # The TypeScript suite (`pnpm test`). Its 32 stale expectations are why
       # this job exists; a red suite here is the gate working.

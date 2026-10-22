@@ -401,34 +401,26 @@ The workflow IR this package owns and lowers a mode state into.
 
 | kind | name | signature |
 |---|---|---|
-| class | `AgentConfig` | `(*, role: refactory_dsh.ir.AgentRole, model: str, timeout: int = 600) -> None` |
-| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None) -> None` |
-| class | `AgentRole` | `(*values)` |
+| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: factory.workflow.primitives.AgentRole, model: str = '', prompt_template: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None) -> None` |
 | class | `ArtifactCheck` | `(*, path: str, must_exist: bool = True, min_size: int = 0, must_contain: list[str] = <factory>) -> None` |
 | class | `DataItem` | `(*, id: str, path: str \| None = None, metadata: dict[str, typing.Any] = <factory>, prompt: str = '') -> None` |
 | class | `DataNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, task_ref: str \| None = None, source_path: str \| None = None, source_format: Literal['directory', 'jsonl', 'csv'] \| None = None, inline_items: list[refactory_dsh.ir.DataItem] = <factory>, subgraph_entry: str, subgraph_exit: str, parallelism: Annotated[int, Ge(ge=1)] = 1, split: Literal['train', 'val', 'test', 'all'] = 'all', shuffle: bool = False, shuffle_seed: int \| None = None, limit: int \| None = None, max_items: int = 500) -> None` |
-| class | `Edge` | `(*, source: str, target: str, condition: refactory_dsh.ir.VerdictType \| str \| None = None) -> None` |
 | class | `FnNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, command: str = '', callable_name: str \| None = None, notes: str = '', command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None) -> None` |
 | class | `ForkNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, targets: list[str], optional_targets: list[str] = <factory>) -> None` |
-| class | `GateNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, evaluator_type: Literal['agent', 'fn', 'user'] = 'agent', evaluator_role: refactory_dsh.ir.AgentRole \| None = None, evaluator_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, gate_prompt: str = '', max_iterations: int \| None = None) -> None` |
+| class | `GateNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, evaluator_type: Literal['agent', 'fn', 'user'] = 'agent', evaluator_role: factory.workflow.primitives.AgentRole \| None = None, evaluator_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, gate_prompt: str = '', max_iterations: int \| None = None) -> None` |
 | class | `JoinNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, sources: list[str]) -> None` |
 | class | `Node` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None) -> None` |
-| class | `VerdictType` | `(*values)` |
-| class | `Workflow` | `(*, name: str, nodes: dict[str, refactory_dsh.ir.AgentNode \| refactory_dsh.ir.FnNode \| refactory_dsh.ir.GateNode \| refactory_dsh.ir.ForkNode \| refactory_dsh.ir.JoinNode \| refactory_dsh.ir.DataNode], edges: list[refactory_dsh.ir.Edge], start_node: str, terminal: bool = False, task: str \| None = None, knob_values: dict[str, str \| float] = <factory>, knob_bounds: dict[str, list[str \| float]] = <factory>, knob_expandable: dict[str, str] = <factory>, knob_specs: dict[str, dict[str, typing.Any]] = <factory>, declared_capabilities: frozenset[str] = frozenset()) -> None` |
+| class | `Workflow` | `(*, name: str, nodes: dict[str, refactory_dsh.ir.AgentNode \| refactory_dsh.ir.FnNode \| refactory_dsh.ir.GateNode \| refactory_dsh.ir.ForkNode \| refactory_dsh.ir.JoinNode \| refactory_dsh.ir.DataNode], edges: list[factory.workflow.primitives.Edge], start_node: str, terminal: bool = False, task: str \| None = None, knob_values: dict[str, str \| float] = <factory>, knob_bounds: dict[str, list[str \| float]] = <factory>, knob_expandable: dict[str, str] = <factory>, knob_specs: dict[str, dict[str, typing.Any]] = <factory>, declared_capabilities: frozenset[str] = frozenset()) -> None` |
 
-- **`AgentConfig`** — Configuration for an agent in the pool.
 - **`AgentNode`** — Node that invokes an agent.
-- **`AgentRole`** — Every role an agent node may declare.
 - **`ArtifactCheck`** — Validation rule for an agent-produced artifact.
 - **`DataItem`** — Standardized data payload for per-item workflow iteration.
 - **`DataNode`** — Node that loads data items and drives per-item execution of a subgraph.
-- **`Edge`** — Directed edge in the workflow graph with an optional labelled condition.
 - **`FnNode`** — Node that runs a deterministic shell command or Python callable.
 - **`ForkNode`** — Parallel execution node that launches all targets concurrently.
 - **`GateNode`** — Decision node that produces a verdict.
 - **`JoinNode`** — Barrier node that waits for all sources to complete.
-- **`Node`** — Base node in the workflow graph.
-- **`VerdictType`** — The three labels a gate verdict uses.
+- **`Node`** — Base node in the workflow graph, with v2 extension fields.
 - **`Workflow`** — A directed graph of typed nodes with labeled edges.
 
 

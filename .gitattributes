@@ -13,6 +13,9 @@
 # the format itself, not a defect in the patched source.
 patches/*.patch -whitespace
 
+# The v1 subtree is imported as-is; its whitespace is not ours to fix.
+v1/** -whitespace
+
 # Pairing records are generated from the three confirmed owner-blob pairs.
 # The worktree-local installer registers the fail-closed driver command.
 *.i18n.yaml merge=dsh-translation-pairing

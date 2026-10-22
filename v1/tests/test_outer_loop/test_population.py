@@ -1,0 +1,316 @@
+"""Tests for Population and MAPElitesArchive."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from factory.outer_loop.models import Individual
+from factory.outer_loop.population import MAPElitesArchive, Population
+from factory.workflow.primitives import Workflow
+
+
+class TestPopulation:
+    def test_add_and_size(self) -> None:
+        pop = Population()
+        assert pop.size == 0
+        ind = Individual(id="a", workflow_data={"name": "w"}, score=0.5, features=(1, 0, 2, 1))
+        pop.add(ind)
+        assert pop.size == 1
+
+    def test_remove(self) -> None:
+        pop = Population()
+        ind = Individual(id="a", workflow_data={"name": "w"}, score=0.5, features=(1, 0, 2, 1))
+        pop.add(ind)
+        removed = pop.remove("a")
+        assert removed is not None
+        assert pop.size == 0
+        assert pop.remove("nonexistent") is None
+
+    def test_get(self) -> None:
+        pop = Population()
+        ind = Individual(id="a", workflow_data={"name": "w"}, score=0.5, features=(1, 0, 2, 1))
+        pop.add(ind)
+        assert pop.get("a") is not None
+        assert pop.get("b") is None
+
+    def test_best(self) -> None:
+        pop = Population()
+        assert pop.best() is None
+        pop.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        pop.add(Individual(id="b", workflow_data={}, score=0.9, features=(2, 1, 3, 2)))
+        pop.add(Individual(id="c", workflow_data={}, score=0.7, features=(1, 1, 2, 1)))
+        best = pop.best()
+        assert best is not None
+        assert best.id == "b"
+
+    def test_mean_score(self) -> None:
+        pop = Population()
+        assert pop.mean_score() == 0.0
+        pop.add(Individual(id="a", workflow_data={}, score=0.4, features=()))
+        pop.add(Individual(id="b", workflow_data={}, score=0.8, features=()))
+        assert pop.mean_score() == pytest.approx(0.6)
+
+    def test_individuals_list(self) -> None:
+        pop = Population()
+        pop.add(Individual(id="a", workflow_data={}, score=0.5, features=()))
+        pop.add(Individual(id="b", workflow_data={}, score=0.7, features=()))
+        assert len(pop.individuals) == 2
+
+    def test_make_individual(self, simple_workflow: Workflow) -> None:
+        ind = Population.make_individual(simple_workflow, generation=1, score=0.8)
+        assert ind.generation == 1
+        assert ind.score == 0.8
+        assert len(ind.features) == 9
+        assert ind.parent_id is None
+
+    def test_serialization_round_trip(self, simple_workflow: Workflow, tmp_path: Path) -> None:
+        pop = Population()
+        ind = Population.make_individual(simple_workflow, generation=0, score=0.7)
+        pop.add(ind)
+
+        pop.save(tmp_path / "pop")
+        loaded = Population.load(tmp_path / "pop")
+
+        assert loaded.size == 1
+        loaded_ind = loaded.individuals[0]
+        assert loaded_ind.id == ind.id
+        assert loaded_ind.score == ind.score
+
+
+class TestMAPElitesArchive:
+    def test_add_and_size(self) -> None:
+        archive = MAPElitesArchive()
+        assert archive.size == 0
+        ind = Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1))
+        assert archive.add(ind) is True
+        assert archive.size == 1
+
+    def test_add_replaces_lower_score(self) -> None:
+        archive = MAPElitesArchive()
+        ind1 = Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1))
+        ind2 = Individual(id="b", workflow_data={}, score=0.9, features=(1, 0, 2, 1))
+        archive.add(ind1)
+        assert archive.add(ind2) is True
+        assert archive.size == 1
+        assert archive.best().id == "b"  # type: ignore[union-attr]
+
+    def test_add_keeps_higher_score(self) -> None:
+        archive = MAPElitesArchive()
+        ind1 = Individual(id="a", workflow_data={}, score=0.9, features=(1, 0, 2, 1))
+        ind2 = Individual(id="b", workflow_data={}, score=0.5, features=(1, 0, 2, 1))
+        archive.add(ind1)
+        assert archive.add(ind2) is False
+        assert archive.best().id == "a"  # type: ignore[union-attr]
+
+    def test_best_empty(self) -> None:
+        assert MAPElitesArchive().best() is None
+
+    def test_best(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        archive.add(Individual(id="b", workflow_data={}, score=0.9, features=(2, 1, 3, 2)))
+        best = archive.best()
+        assert best is not None
+        assert best.id == "b"
+
+    def test_sample_parent_returns_something(self) -> None:
+        archive = MAPElitesArchive()
+        assert archive.sample_parent() is None
+        archive.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        result = archive.sample_parent(tournament_size=1)
+        assert result is not None
+        assert result.id == "a"
+
+    def test_tournament_selection(self) -> None:
+        archive = MAPElitesArchive()
+        for i in range(10):
+            archive.add(
+                Individual(id=f"i{i}", workflow_data={}, score=i * 0.1, features=(i, 0, i, 0))
+            )
+        results = [archive.sample_parent(tournament_size=3) for _ in range(20)]
+        scores = [r.score for r in results if r is not None]
+        assert all(s >= 0.0 for s in scores)
+
+    def test_pareto_front_single(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        front = archive.pareto_front()
+        assert len(front) == 1
+
+    def test_pareto_front_dominated(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        archive.add(Individual(id="b", workflow_data={}, score=0.9, features=(2, 1, 3, 2)))
+        front = archive.pareto_front()
+        assert len(front) == 1
+        assert front[0].id == "b"
+
+    def test_pareto_front_non_dominated(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=0.9, features=(1, 0, 5, 0)))
+        archive.add(Individual(id="b", workflow_data={}, score=0.5, features=(5, 3, 1, 3)))
+        front = archive.pareto_front()
+        assert len(front) == 2
+
+    def test_diversity_metric_empty(self) -> None:
+        assert MAPElitesArchive().diversity_metric() == 0.0
+
+    def test_diversity_metric_nonzero(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        archive.add(Individual(id="b", workflow_data={}, score=0.7, features=(2, 1, 3, 2)))
+        d = archive.diversity_metric()
+        assert 0.0 < d <= 1.0
+
+    def test_serialization_round_trip(self, tmp_path: Path) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=0.5, features=(1, 0, 2, 1)))
+        archive.add(Individual(id="b", workflow_data={}, score=0.9, features=(2, 1, 3, 2)))
+
+        archive.save(tmp_path / "archive")
+        loaded = MAPElitesArchive.load(tmp_path / "archive")
+
+        assert loaded.size == 2
+        assert loaded.best() is not None
+        assert loaded.best().id == "b"  # type: ignore[union-attr]
+
+
+class TestRankWeightedSelection:
+    def test_rank_weighted_biases_toward_best(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="bad", workflow_data={}, score=-100.0, features=(0, 0, 1, 0)))
+        archive.add(Individual(id="ok", workflow_data={}, score=0.0, features=(1, 0, 1, 0)))
+        archive.add(Individual(id="good", workflow_data={}, score=100.0, features=(2, 0, 1, 0)))
+        counts: dict[str, int] = {"bad": 0, "ok": 0, "good": 0}
+        for _ in range(300):
+            p = archive.sample_parent(tournament_size=1, rank_weighted=True)
+            assert p is not None
+            counts[p.id] += 1
+        # With rank weighting (weights 1,2,3), "good" should be picked ~50% of the time
+        assert counts["good"] > counts["bad"]
+        assert counts["good"] > 100  # at least ~33%
+
+    def test_rank_weighted_false_is_uniform(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=-1000.0, features=(0, 0, 1, 0)))
+        archive.add(Individual(id="b", workflow_data={}, score=1000.0, features=(1, 0, 1, 0)))
+        counts: dict[str, int] = {"a": 0, "b": 0}
+        for _ in range(200):
+            p = archive.sample_parent(tournament_size=1, rank_weighted=False, auto_rank_weighted=False)
+            assert p is not None
+            counts[p.id] += 1
+        # Uniform: both should be roughly 50/50
+        assert counts["a"] > 50
+        assert counts["b"] > 50
+
+
+class TestNoneScoreHandling:
+    """Tests for None-score sentinel (issue #1536)."""
+
+    def test_best_with_none_scores(self) -> None:
+        """best() should ignore None-scored individuals."""
+        pop = Population()
+        pop.add(Individual(id="a", workflow_data={}, score=None, features=(1, 0, 2, 1)))
+        pop.add(Individual(id="b", workflow_data={}, score=0.5, features=(2, 1, 3, 2)))
+        pop.add(Individual(id="c", workflow_data={}, score=None, features=(3, 0, 1, 0)))
+        best = pop.best()
+        assert best is not None
+        assert best.id == "b"
+
+    def test_best_all_none_scores(self) -> None:
+        """best() returns None when all individuals have None scores."""
+        pop = Population()
+        pop.add(Individual(id="a", workflow_data={}, features=(1, 0, 2, 1)))
+        pop.add(Individual(id="b", workflow_data={}, features=(2, 1, 3, 2)))
+        assert pop.best() is None
+
+    def test_mean_score_with_none_scores(self) -> None:
+        """mean_score() should exclude None-scored individuals."""
+        pop = Population()
+        pop.add(Individual(id="a", workflow_data={}, score=None, features=()))
+        pop.add(Individual(id="b", workflow_data={}, score=0.4, features=()))
+        pop.add(Individual(id="c", workflow_data={}, score=0.8, features=()))
+        assert pop.mean_score() == pytest.approx(0.6)
+
+    def test_mean_score_all_none(self) -> None:
+        """mean_score() returns 0.0 when all scores are None."""
+        pop = Population()
+        pop.add(Individual(id="a", workflow_data={}, features=()))
+        pop.add(Individual(id="b", workflow_data={}, features=()))
+        assert pop.mean_score() == 0.0
+
+    def test_archive_rejects_none_score(self) -> None:
+        """Archive must reject individuals with None score."""
+        archive = MAPElitesArchive()
+        ind = Individual(id="a", workflow_data={}, score=None, features=(1, 0, 2, 1))
+        assert archive.add(ind) is False
+        assert archive.size == 0
+
+    def test_archive_accepts_zero_score(self) -> None:
+        """Archive must accept individuals with score=0.0 (legitimate zero)."""
+        archive = MAPElitesArchive()
+        ind = Individual(id="a", workflow_data={}, score=0.0, features=(1, 0, 2, 1))
+        assert archive.add(ind) is True
+        assert archive.size == 1
+
+    def test_make_individual_default_none_score(self, simple_workflow: Workflow) -> None:
+        """make_individual() should default to score=None."""
+        ind = Population.make_individual(simple_workflow, generation=0)
+        assert ind.score is None
+
+    def test_serialization_round_trip_with_none_score(self, tmp_path: Path) -> None:
+        """Population with None-scored individuals should serialize/deserialize correctly."""
+        pop = Population()
+        pop.add(Individual(id="a", workflow_data={"name": "w"}, score=None, features=(1, 0)))
+        pop.add(Individual(id="b", workflow_data={"name": "w"}, score=0.5, features=(2, 1)))
+
+        pop.save(tmp_path / "pop")
+        loaded = Population.load(tmp_path / "pop")
+
+        assert loaded.size == 2
+        a = loaded.get("a")
+        b = loaded.get("b")
+        assert a is not None and a.score is None
+        assert b is not None and b.score == 0.5
+
+
+class TestAutoRankWeighted:
+    def test_auto_activates_by_cell_count(self) -> None:
+        archive = MAPElitesArchive()
+        for i in range(10):
+            archive.add(Individual(id=f"i{i}", workflow_data={}, score=i * 10.0, features=(i,)))
+        counts: dict[str, int] = {}
+        for _ in range(300):
+            p = archive.sample_parent(tournament_size=1, auto_rank_cell_threshold=8)
+            assert p is not None
+            counts[p.id] = counts.get(p.id, 0) + 1
+        # With auto rank-weighted, best should be picked more often
+        assert counts.get("i9", 0) > counts.get("i0", 0)
+
+    def test_auto_stays_uniform_below_thresholds(self) -> None:
+        archive = MAPElitesArchive()
+        archive.add(Individual(id="a", workflow_data={}, score=10.0, features=(0,)))
+        archive.add(Individual(id="b", workflow_data={}, score=11.0, features=(1,)))
+        # 2 cells < 8 threshold, variance ~0.25 < 1000 threshold
+        counts: dict[str, int] = {"a": 0, "b": 0}
+        for _ in range(200):
+            p = archive.sample_parent(tournament_size=1)
+            assert p is not None
+            counts[p.id] += 1
+        assert counts["a"] > 50
+        assert counts["b"] > 50
+
+    def test_auto_disabled(self) -> None:
+        archive = MAPElitesArchive()
+        for i in range(10):
+            archive.add(Individual(id=f"i{i}", workflow_data={}, score=i * 100.0, features=(i,)))
+        counts: dict[str, int] = {}
+        for _ in range(300):
+            p = archive.sample_parent(tournament_size=1, auto_rank_weighted=False)
+            assert p is not None
+            counts[p.id] = counts.get(p.id, 0) + 1
+        # Without auto, uniform sampling — worst should get ~10% (1/10)
+        assert counts.get("i0", 0) > 10
+

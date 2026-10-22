@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --all-groups
+      - name: Run smoke tests
+        run: uv run pytest -m smoke -v --tb=short
+
+  test:
+    needs: smoke
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --all-groups
+      - name: Run tests with coverage
+        run: uv run pytest -n auto -v --tb=short --cov=factory --cov-report=xml
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  # The openshell SDK is an optional extra, so the main matrix runs its tests against fakes.
+  # Every hard create-time rejection found in live verification (names, labels, endpoint
+  # ambiguity, GID 0) was drift the fakes accepted — this job installs the real SDK and runs
+  # the same suite, so the skip-if-absent contract test actually exercises real protos.
+  openshell-sdk:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies (with the contained-openshell extra)
+        run: uv sync --all-groups --extra contained-openshell
+      - name: Run the openshell suite against the real SDK
+        run: uv run pytest tests/test_contained_openshell.py -v --tb=short
+
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      SENTRUX_VERSION: v0.5.7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cache Sentrux
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/sentrux
+            ~/.local/bin/sentrux
+            ~/.sentrux/plugins
+          key: sentrux-${{ env.SENTRUX_VERSION }}-standard-plugins
+      - name: Install Sentrux
+        run: ./scripts/sentrux-check.sh --install-only 2>&1 || true
+      - name: Save baseline from base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          sentrux gate --save . 2>&1 | tee sentrux-baseline.txt || true
+          git checkout ${{ github.sha }}
+      - name: Run Sentrux diff (gate)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: sentrux gate . 2>&1 | tee sentrux-diff.txt || true
+      - name: Run Sentrux absolute check
+        continue-on-error: true
+        run: sentrux check . 2>&1 | tee sentrux-output.txt
+      - name: Post Sentrux results as PR comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "<!-- sentrux-report -->"
+            echo "## Sentrux Quality Report"
+            echo ""
+            echo "### Absolute"
+            echo '```'
+            cat sentrux-output.txt
+            echo '```'
+            echo ""
+            echo "### Diff (vs base branch)"
+            echo '```'
+            if [ -f sentrux-diff.txt ]; then
+              cat sentrux-diff.txt
+            else
+              echo "No diff available"
+            fi
+            echo '```'
+          } > comment-body.txt
+
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '.[] | select(.body | startswith("<!-- sentrux-report -->")) | .id' | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -X PATCH -f body="$(cat comment-body.txt)"
+          else
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file comment-body.txt
+          fi
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: |
+          uv sync --all-groups
+          uv tool install -e .
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Mypy
+        run: uv run mypy factory/
+      - name: Lint contributed workflows
+        run: factory workflow lint-contributed
+      - name: Check plugin agents in sync
+        if: hashFiles('agents/') != ''
+        run: uv run python scripts/sync_agents.py --check
+      - name: Check no generated workflow skills committed
+        run: |
+          tracked=$(git ls-files 'skills/workflow-*/SKILL.md' 'skills/workflow-*/SKILL.annotations.yaml')
+          if [ -n "$tracked" ]; then
+            echo 'ERROR: Generated workflow skills should not be committed'
+            echo "$tracked"
+            exit 1
+          fi

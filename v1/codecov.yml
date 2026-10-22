@@ -1,0 +1,15 @@
+coverage:
+  status:
+    project:
+      default:
+        threshold: 2%
+    patch:
+      default:
+        target: 79%
+
+ignore:
+  - "factory/telemetry.py"
+  - "eval/"
+  - "docs/"
+  - "factory/outer_loop/evaluators/"
+  - "factory/outer_loop/featurebench_inner_loop.py"

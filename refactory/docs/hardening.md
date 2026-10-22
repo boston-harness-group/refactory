@@ -345,9 +345,8 @@ completed with status 0. The build was then checked for the damage a build can d
 doc gates pass — because "it exited 0" and "it left the tree working" are different
 claims and only the second one matters.
 
-**What this still does not prove.** It is not a clean clone: the submodules were
-already initialised and the venv already existed, so the script's fresh-clone branches
-were not exercised. A machine with neither was not available here.
+**What this still does not prove.** It is not a clean clone: the venv already existed,
+so the script's fresh-clone branches were not exercised. A machine with neither was not available here.
 
 ---
 
