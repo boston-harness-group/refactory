@@ -10,7 +10,8 @@ from typing import Any
 from refactory_dsh.workers import resolve_route, validate_route
 
 FILENAME = "refactory.workers.json"
-ROUTE_FIELDS = ("worker_backend", "provider", "model", "effort", "permission_mode")
+ROUTE_FIELDS = ("worker_backend", "provider", "model", "effort", "permission_mode",
+                 "openshell_gateway", "openshell_image")
 FIELDS = (*ROUTE_FIELDS, "role_routes", "node_routes", "provider_config")
 
 

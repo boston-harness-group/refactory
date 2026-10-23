@@ -24,6 +24,7 @@ to gateway state.
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import tarfile
@@ -39,6 +40,8 @@ from factory.contained.openshell import (
     PROVIDER_FIX,
     WORKSPACE_ROOT,
     build_download_argv,
+    build_profile_export_argv,
+    build_provider_list_argv,
     build_run_launch,
     build_upload_argv,
     connect,
@@ -59,41 +62,169 @@ PROVIDER_NAME = "claude-code"
 PACK_EXCLUDES = frozenset({
     ".venv", "node_modules", "__pycache__", ".pytest_cache",
     ".ruff_cache", ".mypy_cache", ".factory-worktrees",
+    ".env", ".env.local", ".env.production",
 })
 
 RUN_ARTIFACTS = frozenset({"run.log", "run.pid", "run.exit"})
 
-_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
+REQUIRED_DOWNLOADS = (
+    ".refactory",
+    "facts.json",
+    "spine-status.json",
+)
+
+_ENV_ALLOWLIST = frozenset({
+    "PYTHONUNBUFFERED",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "REFACTORY_WORKER_CONTEXT",
+    "REFACTORY_BUDGET_LEDGER",
+    "REFACTORY_WORKER_RECEIPT",
+    "REFACTORY_RUNTIME_ROOT",
+    "DSH_HOME",
+    "VENV_BIN",
+    "VIRTUAL_ENV",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TERM",
+    "HOME",
+})
 
 
-def _is_secret_key(name: str) -> bool:
-    upper = name.upper()
-    return any(marker in upper for marker in _SECRET_MARKERS)
+def _sandbox_env(caller_env: dict[str, str] | None) -> dict[str, str]:
+    """Build the sandbox environment from an explicit allowlist.
+
+    The sandbox receives only nonsecret configuration variables.
+    Inference credentials are held by the gateway's provider attachment
+    and never placed in the sandbox environment.
+    """
+    source = caller_env or {}
+    result: dict[str, str] = {}
+    for key, value in source.items():
+        if key in _ENV_ALLOWLIST or key.startswith("REFACTORY_"):
+            result[key] = value
+    result.setdefault("PYTHONUNBUFFERED", "1")
+    result.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    return result
 
 
 def verify_gateway_provider(gateway: str | None = None) -> None:
     """Check that the gateway has the expected claude-code provider.
 
+    Uses the CLI (``openshell provider list`` and ``openshell profile
+    export``) rather than the SDK, following v1's verification path.
     Fails with a ``ContainedError`` carrying the fix command when the
     provider is missing or its profile diverges from the shipped
-    expectation.  This is the verify-only credential design (Option C):
-    the gateway and DSH maintain independent registries, and this check
-    is the only bridge between them.
+    expectation.
     """
-    client = connect(gateway)
+    result = subprocess.run(
+        build_provider_list_argv(gateway),
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise ContainedError(
+            f"cannot list gateway providers (rc={result.returncode}): "
+            f"{result.stderr.strip()[:200]}\n"
+            f"register with:\n  {PROVIDER_FIX}"
+        )
+
     try:
-        registered = client.get_provider(PROVIDER_NAME)
-    except Exception:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        payload = []
+
+    entries = payload if isinstance(payload, list) else payload.get("providers", [])
+    profile_id = None
+    for entry in entries:
+        if isinstance(entry, dict) and str(entry.get("name", "")) == PROVIDER_NAME:
+            profile_id = str(entry.get("type", "")) or None
+            break
+
+    if profile_id is None:
         raise ContainedError(
             f"the gateway has no '{PROVIDER_NAME}' provider — register it with:\n"
             f"  {PROVIDER_FIX}"
         )
-    expected = load_provider_profile()
-    if registered.get("endpoints") != expected.get("endpoints"):
+
+    _verify_profile_shape(gateway, profile_id)
+
+
+def _verify_profile_shape(gateway: str | None, profile_id: str) -> None:
+    """Compare the gateway's profile against the shipped expectation.
+
+    Checks both endpoints (the egress allowlist) and binaries (the
+    kernel's process match list).  A divergence in either is a security
+    concern, not just a configuration mismatch.
+    """
+    result = subprocess.run(
+        build_profile_export_argv(profile_id, gateway),
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
         raise ContainedError(
-            f"the gateway's '{PROVIDER_NAME}' provider profile diverges from "
-            f"the shipped expectation — update it with:\n  {PROVIDER_FIX}"
+            f"provider '{PROVIDER_NAME}' exists but its profile {profile_id!r} "
+            f"could not be read back — update with:\n  {PROVIDER_FIX}"
         )
+
+    try:
+        live = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        live = {}
+
+    expected = load_provider_profile()
+    problems: list[str] = []
+
+    expected_endpoints = {
+        (str(e.get("host")), int(e.get("port", 0)))
+        for e in expected.get("endpoints", [])
+    }
+    live_endpoints = {
+        (str(e.get("host")), int(e.get("port", 0)))
+        for e in live.get("endpoints", [])
+    }
+    if live_endpoints != expected_endpoints:
+        extra = sorted(live_endpoints - expected_endpoints)
+        missing = sorted(expected_endpoints - live_endpoints)
+        detail = f"profile {profile_id!r} differs from the factory's"
+        if extra:
+            detail += f" (allows {', '.join(f'{h}:{p}' for h, p in extra)})"
+        if missing:
+            detail += f" (missing {', '.join(f'{h}:{p}' for h, p in missing)})"
+        problems.append(detail)
+
+    expected_binaries = set(expected.get("binaries", []))
+    live_binaries = set(live.get("binaries", []))
+    if not expected_binaries <= live_binaries:
+        problems.append(
+            f"profile {profile_id!r} binaries do not include the runtime "
+            f"image's claude path ({', '.join(sorted(expected_binaries))})"
+        )
+
+    if problems:
+        raise ContainedError(
+            f"{'; '.join(problems)} — update with:\n  {PROVIDER_FIX}"
+        )
+
+
+def _translate_argv(argv: list[str], workdir: Path, project_dir: str) -> list[str]:
+    """Translate host-absolute paths in the command argv to sandbox paths.
+
+    The sandbox mounts the uploaded workspace at ``project_dir``.  Any
+    argv token that starts with the host workdir is rewritten to its
+    sandbox equivalent.  The host Python interpreter is replaced with
+    the image's default.
+    """
+    workdir_str = str(workdir.resolve())
+    translated: list[str] = []
+    for token in argv:
+        if token.startswith(workdir_str):
+            suffix = token[len(workdir_str):]
+            translated.append(f"{project_dir}{suffix}")
+        elif token.startswith("/") and ("python" in token or "dsh" in token):
+            translated.append(Path(token).name)
+        else:
+            translated.append(token)
+    return translated
 
 
 def compose_plan(
@@ -114,19 +245,10 @@ def compose_plan(
     run_id = validate_sandbox_name(name) if name else sandbox_name(workdir)
     project_dir = f"{WORKSPACE_ROOT}/{workdir.name}"
 
-    sandbox_env: dict[str, str] = {}
-    warnings: list[str] = []
-    for key, value in (env or {}).items():
-        if _is_secret_key(key):
-            warnings.append(
-                f"credential-looking variable {key!r} is being placed in the sandbox "
-                "environment; the provider is the supported route for inference credentials"
-            )
-        sandbox_env[key] = value
-    sandbox_env.setdefault("PYTHONUNBUFFERED", "1")
-    sandbox_env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    sandbox_env = _sandbox_env(env)
 
-    inner = " ".join(shlex.quote(token) for token in argv)
+    translated = _translate_argv(argv, workdir, project_dir)
+    inner = " ".join(shlex.quote(token) for token in translated)
     run_command = f"cd {shlex.quote(project_dir)} && {inner}"
 
     return OpenShellPlan(
@@ -144,7 +266,6 @@ def compose_plan(
         run_command=run_command,
         factory_command=inner,
         gateway=gateway,
-        warnings=tuple(warnings),
     )
 
 
@@ -178,17 +299,39 @@ def provenance_checks(plan: OpenShellPlan, workdir: Path) -> list[Probe]:
     )
 
 
+def _terminate_remote(session: Any, plan: OpenShellPlan) -> None:
+    """Kill the detached remote process so it stops consuming resources."""
+    try:
+        exec_argv(
+            session,
+            ["sh", "-c", "cat /workspace/.factory/run.pid 2>/dev/null | xargs -r kill -9"],
+            workdir=plan.project_dir, timeout=10,
+        )
+    except (ContainedError, OSError):
+        pass
+
+
 def download_artifacts(
     plan: OpenShellPlan, dest: Path, *, paths: list[str] | None = None,
-) -> None:
-    """Download workspace artifacts from the sandbox back to the host."""
-    for sandbox_path in (paths or [f"{plan.project_dir}/.refactory"]):
+) -> list[str]:
+    """Download workspace artifacts from the sandbox back to the host.
+
+    Returns a list of paths that failed to download.  The caller
+    decides which failures are fatal.
+    """
+    download_paths = paths or [
+        f"{plan.project_dir}/{name}" for name in REQUIRED_DOWNLOADS
+    ]
+    failures: list[str] = []
+    for sandbox_path in download_paths:
         argv = build_download_argv(plan.name, sandbox_path, dest, gateway=plan.gateway)
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=600)
-        if result.returncode != 0:
-            raise ContainedError(
-                f"downloading {sandbox_path} failed: {result.stderr.strip()[:300]}"
-            )
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                failures.append(sandbox_path)
+        except (subprocess.TimeoutExpired, OSError):
+            failures.append(sandbox_path)
+    return failures
 
 
 def run_in_openshell(
@@ -215,21 +358,24 @@ def run_in_openshell(
     7. Poll the run's exit file until it completes or times out
     8. Download artifacts
 
+    On timeout, stop, or cancellation the remote process is terminated
+    before returning.
+
     Steps 3-8 require the OpenShell SDK and a configured gateway with
     the ``claude-code`` provider.  The verify-only credential design
     checks the gateway's provider at dispatch time and fails with a fix
     command if it is missing or stale.
     """
-    import json
-    import os
     from refactory_dsh.budgets import RunBudget
     from refactory_dsh.workers import GraphTelemetry
 
-    environment_values = {**os.environ, **(env or {})}
-    ledger = context.get('budget_ledger') or environment_values.get('REFACTORY_BUDGET_LEDGER')
+    telemetry_env = GraphTelemetry.env_from_context(context) if hasattr(GraphTelemetry, 'env_from_context') else {}
+    caller_env = {**(env or {}), **telemetry_env}
+
+    ledger = context.get('budget_ledger') or caller_env.get('REFACTORY_BUDGET_LEDGER')
     budget = RunBudget.from_path(ledger) if ledger else None
     telemetry = GraphTelemetry(workdir, context, budget)
-    environment_values.update(telemetry.environment())
+    caller_env.update(telemetry.environment())
 
     try:
         telemetry.checkpoint()
@@ -238,7 +384,7 @@ def run_in_openshell(
         raise
 
     plan = compose_plan(
-        workdir, argv, env=environment_values,
+        workdir, argv, env=caller_env,
         gateway=context.get('openshell_gateway'),
         image=context.get('openshell_image'),
     )
@@ -269,49 +415,59 @@ def run_in_openshell(
         run_probes(session, plan, probes)
         start_run(session, plan)
 
-        exit_code = _poll_run(
+        exit_code, reason = _poll_run(
             session, plan, timeout=timeout,
             stop_condition=stop_condition, telemetry=telemetry,
         )
     except ContainedError as exc:
+        _terminate_remote(session, plan)
         telemetry.finish('failed', str(exc))
         return subprocess.CompletedProcess(argv, 1)
     except BaseException as error:
+        _terminate_remote(session, plan)
         telemetry.finish('cancelled', str(error))
         raise
 
-    try:
-        download_artifacts(plan, workdir)
-    except ContainedError:
-        pass
+    failures = download_artifacts(plan, workdir)
+    required_missing = [
+        f for f in failures
+        if f.endswith(".refactory") or f.endswith("facts.json")
+    ]
+    if required_missing:
+        telemetry.finish('failed', f"required artifacts missing: {required_missing}")
+        return subprocess.CompletedProcess(argv, 1)
 
-    telemetry.finish('completed' if exit_code == 0 else 'failed')
+    telemetry.finish(reason or ('completed' if exit_code == 0 else 'failed'))
     return subprocess.CompletedProcess(argv, exit_code)
 
 
 def _poll_run(
-    session,
+    session: Any,
     plan: OpenShellPlan,
     *,
     timeout: float | None,
     stop_condition: Any | None,
     telemetry: Any,
-) -> int:
-    """Poll the run's exit file until it completes, times out, or is stopped."""
-    from factory.contained.openshell import RUN_EXIT, exec_argv
+) -> tuple[int, str | None]:
+    """Poll the run's exit file until it completes, times out, or is stopped.
+
+    Returns (exit_code, reason).  On timeout or stop the remote process
+    is terminated before returning.
+    """
+    from factory.contained.openshell import RUN_EXIT
 
     deadline = time.monotonic() + timeout if timeout else None
     while True:
         telemetry.checkpoint()
         if deadline is not None and time.monotonic() >= deadline:
-            telemetry.finish('timed_out', f'timeout after {timeout}s')
-            return 1
+            _terminate_remote(session, plan)
+            return 1, 'timed_out'
 
         if stop_condition is not None:
             try:
                 if stop_condition():
-                    telemetry.finish('stopped', 'stop condition')
-                    return 1
+                    _terminate_remote(session, plan)
+                    return 1, 'stopped'
             except Exception:
                 pass
 
@@ -321,7 +477,8 @@ def _poll_run(
                 workdir=plan.project_dir, timeout=10,
             )
             if result.exit_code == 0 and result.stdout.strip():
-                return int(result.stdout.strip())
+                code = int(result.stdout.strip())
+                return code, None
         except (ContainedError, ValueError):
             pass
 

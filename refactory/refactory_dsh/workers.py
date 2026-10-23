@@ -176,8 +176,11 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
     rows.extend(permission_patch(route))
     rows.extend(provider_rows(route, provider_config))
-    if route['worker_backend'] != 'dsh':
-        package = PACKAGES[route['worker_backend']]
+    inner_backend = route['worker_backend']
+    if inner_backend == 'openshell':
+        inner_backend = 'dsh'
+    if inner_backend != 'dsh':
+        package = PACKAGES[inner_backend]
         provider = runtime_root / 'node_modules' / package
         if not (provider / 'package.json').exists():
             raise ValueError(f'{package} is not installed; install optional worker dependencies in {runtime_root}')
