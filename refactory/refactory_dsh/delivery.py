@@ -1827,39 +1827,11 @@ def _push(path: Path, slug: str, commit: str, branch: str, *, default: str, firs
     """
     if branch == default and not first:
         raise NotDelivered(f"{branch} is {slug}'s default branch, which delivery never pushes to")
-    before = _tracking(path)
-    try:
-        _git(path, "push", "-q", _url(slug), f"{commit}:refs/heads/{branch}")
-    finally:
-        if before is not None:
-            _keep_tracking(path, before)
-
-
-def _tracking(path: Path) -> dict[str, str] | None:
-    """The repository's remote-tracking refs, by name; None when git cannot list them (the
-    push then reports why)."""
-    try:
-        listed = worktree.git(path, "for-each-ref", "--format=%(refname) %(objectname)",
-                              "refs/remotes")
-    except ValueError:
-        return None
-    return dict(line.split(" ", 1) for line in listed.splitlines() if " " in line)
-
-
-def _keep_tracking(path: Path, before: dict[str, str]) -> None:
-    """Put the person's remote-tracking refs back as they were before delivery pushed.
-
-    Delivery pushes to GitHub by URL. From git 2.56, a push to a URL that matches a
-    configured remote updates that remote's tracking refs too, so the person's repository
-    would gain ``origin/<run branch>`` (and move any it had): delivery's only change to it
-    is the run's own branch.
-    """
-    after = _tracking(path)
-    for name, value in after.items():
-        if name not in before:
-            worktree.git(path, "update-ref", "-d", name, value)
-        elif before[name] != value:
-            worktree.git(path, "update-ref", name, before[name], value)
+    # Through a remote of its own with no fetch refspec: from git 2.56 a push to a URL
+    # that matches a configured remote also updates that remote's tracking refs, and
+    # delivery's only change to the person's repository is the run's own branch.
+    _git(path, "-c", f"remote.refactory-delivery.url={_url(slug)}", "push", "-q",
+         "refactory-delivery", f"{commit}:refs/heads/{branch}")
 
 
 def _verified(url: str, head: str) -> str:
