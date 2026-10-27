@@ -350,14 +350,16 @@ def test_create_research_gate_is_unchanged(tmp_path):
 def test_only_design_modes_builder_checks_each_correction_fails_without_its_change():
     """Every extra build round the QA judge caused was a gate correction no test exercised,
     or a fix whose test still passed with the fix reverted (approved 2026-10-26). Design
-    mode's builder is told to probe each test with its change undone; no other mode is."""
-    from refactory_dsh.design import EMIT_CHECKLIST
+    mode's builder is told to run each test with its change reverted in its workspace (it
+    works in a clone of the attempt, so it reverts there, not in a draft emit.txt); no other
+    mode is."""
+    from refactory_dsh.design import EMIT_CHECKLIST, WORKSPACE_BRIEFING
     from test_lowering_smoke import _mode_classes
 
     emit = DesignMode().build().nodes["emit"].prompt_template
-    assert EMIT_CHECKLIST in emit and emit.index("{{probe_instruction}}") < emit.index(EMIT_CHECKLIST)
+    assert EMIT_CHECKLIST in emit and emit.index(WORKSPACE_BRIEFING) < emit.index(EMIT_CHECKLIST)
     for line in ("each correction made at the design gate and each ask in the brief",
-                 "undo that change in your draft emit.txt and probe the same test again: it must fail",
+                 "revert that change in the workspace and run the same test again: it must fail",
                  "A correction counts as met only if a test fails without it",
                  "calls the helper under test", "a verdict list nothing consumes",
                  "results the test built by hand"):
@@ -365,4 +367,36 @@ def test_only_design_modes_builder_checks_each_correction_fails_without_its_chan
     others = {key: cls().build().nodes.get("emit") for key, cls in _mode_classes() if cls is not DesignMode}
     assert "default_pack-design_fast" in others
     assert [key for key, node in others.items()
-            if node is not None and "## Before you answer" in node.prompt_template] == []
+            if node is not None and "## Before you stop" in node.prompt_template] == []
+
+
+def test_the_workspace_builder_runs_the_tests_its_change_touches_not_the_full_suite():
+    """In the live trial (dm-149) the workspace builder ran the full suites several times:
+    11.6 of its 27 minutes, before the self-check and the check ran them again. Design's and
+    design_fast's builders are told to run the tests their change touches and the brief's
+    own example, and that the check runs the full suite after they answer (approved
+    2026-10-27); design's still reverts each change and reruns its test. No other mode's
+    builder is told this."""
+    from refactory_dsh.design import EMIT_CHECKLIST, WORKSPACE_BRIEFING
+    from test_lowering_smoke import _mode_classes
+
+    modes = dict(_mode_classes())
+    told = {key: cls().build().nodes.get("emit") for key, cls in modes.items()}
+    assert sorted(key for key, node in told.items()
+                  if node is not None and WORKSPACE_BRIEFING in node.prompt_template) == [
+        "default_pack-design", "default_pack-design_fast"]
+    for key in ("default_pack-design", "default_pack-design_fast"):
+        emit = told[key].prompt_template
+        for line in ("Run there, as often as you need, the tests your change touches",
+                     "the test files you changed or added",
+                     "the tests that import the modules you changed",
+                     "Run the brief's own example or CLI path there too",
+                     "Do not run the full suite yourself: the check runs it for you after "
+                     "you answer."):
+            assert line in emit, (key, line)
+        # The only mention of the full suite is the one telling the builder not to run it.
+        assert emit.count("full suite") == 1, key
+        assert "check command runs there" not in emit, key
+    assert "revert that change in the workspace and run the same test again: it must fail" in (
+        EMIT_CHECKLIST)
+    assert EMIT_CHECKLIST in told["default_pack-design"].prompt_template

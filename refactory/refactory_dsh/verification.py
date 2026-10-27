@@ -5,10 +5,12 @@ It applies the evidence log's design-blind methods and reports each finding with
 runnable counterexample or a cited file:line. For a change to an existing repository
 the code reviewers already apply M2, M3, M11 and M12 to every changed function
 (`REPO_CHANGE_REVIEW_INSTRUCTIONS`), so there the verifier applies only the ones no
-reviewer does (M1, M2, M13, M15) within its bound (`VERIFIER_TIMEOUT_S`); for a new
-artifact, and in fix_pack, which has no reviewers, it applies all of them. In the
-review fork it is an optional branch: a verifier that fails or runs out of time is
-missing, and its findings never get a builder round of their own.
+reviewer does (M1, M2, M13, M15) within its bound (`DESIGN_VERIFIER_TIMEOUT_S` in
+design mode, `VERIFIER_TIMEOUT_S` in design_fast); for a new artifact, and in fix_pack,
+which has no reviewers, it applies all of them. In the review fork it is an optional
+branch: a verifier that fails, or in design mode runs out of time twice (its declared
+retry, `design.TIMEOUT_RETRY`), is missing, and its findings never get a builder round
+of their own.
 
 See docs/hardening.md §15 for why the verifier is design-blind.
 """
@@ -24,6 +26,16 @@ from refactory_dsh.create_ops import MARKER_RULE
 #: inside this bound adds little or nothing to the round. Its prompt asks for less,
 #: because a session stopped at the wall leaves nothing behind.
 VERIFIER_TIMEOUT_S = 600
+
+#: Design mode's own verifier bound, which a medium change fits. Measured from the worker
+#: receipts of the lab's design runs. Before any bound (2026-10-21 and 22), 22 of the 23
+#: verifier sessions on changes of 500 diff lines or more finished within 1,200 s: median
+#: 740 s, longest 1,467 s. Under the 600 s bound, 45 of the 88 sessions since timed out (45
+#: of 73 on changes of 100 lines or more; 7 of 8 such sessions on 2026-10-27). A session
+#: that still runs out is retried once with twice the limit (`design.TIMEOUT_RETRY`), so
+#: the verifier is missing only after 3,600 s in all.
+#: design_fast keeps `VERIFIER_TIMEOUT_S`, and no retry.
+DESIGN_VERIFIER_TIMEOUT_S = 1200
 
 _METHODS_HEADER = """
 Apply each of these design-blind verification methods to the brief, the diff

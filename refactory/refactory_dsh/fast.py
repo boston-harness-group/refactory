@@ -141,7 +141,8 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
     gate_qa_reads = (
         ("focused-qa.json", "focused-check.json", "focused-source.json",
          "authoring-evidence.json", "intent-audit.json")
-        + (("changed-functions.json", "reviews/verification.md", "emit.txt") if design else ())
+        + (("changed-functions.json", "reviews/verification.md", "emit.txt", "verifier-response.md")
+           if design else ())
     )
     gate_qa_produces = ("repair_feedback", "repairs_used", "check_repairs_used",
                         "review_repairs_used", "qa_passed")
@@ -367,31 +368,31 @@ class DesignFastMode(DesignMode):
             notes="read the artifact brief, and say where the run works",
         ))
         _strategy_node(graph, artifact=True)
+        from refactory_dsh.design import BUILDER_WORKSPACE, WORKSPACE_BRIEFING
+        from refactory_dsh.create_ops import VERIFIER_RESPONSE_FILE
         graph.add(Node(
             "emit", "agent", role="builder", resource_role="work",
             prompt_template=(
-                "Current stage: emit the changed files into emit.txt.\n"
+                "Current stage: make the change in your workspace.\n"
                 "Build artifact {{name}}. Brief: {{brief}}\n"
                 "Implementation plan: {{implementation_plan}}\n"
-                "Required check, run from {{check_root}}: {{check}}\n"
+                "Required check: {{check}}\n"
                 "Repair feedback: {{repair_feedback}}\n"
                 "Implement the smallest complete change. Read the relevant project files to make "
-                "the change. The block contract below is complete: do not read framework internals, "
-                "worker receipts, graph configuration or prior acceptance histories to rediscover it. "
-                "Do not delegate or launch research, reviewer agents or an optimizer.\n"
-                "{{emit_scope}}\n"
-                "Write those blocks into emit.txt, with no prose outside them. Write nothing "
-                "but emit.txt: do not apply or test your change anywhere — the target, the "
-                "run's worktree or a copy — because materialise and the check do that after "
-                "you answer and send you the result. The runtime runs the requested check "
-                "and one focused QA review next. Preserve all requested behavior. After "
-                "writing emit.txt, return a short completion message. Do not invoke "
-                "downstream graph operations yourself.\n"
-                "{{probe_instruction}}\n"
+                "the change. Do not read framework internals, worker receipts, graph configuration "
+                "or prior acceptance histories. Do not delegate or launch research, reviewer agents "
+                "or an optimizer.\n"
+                + WORKSPACE_BRIEFING
+                + "The runtime runs the requested check and one focused QA review next. Preserve all "
+                "requested behavior. Do not invoke downstream graph operations yourself. When the "
+                "repair feedback names verifier findings, answer each in your final message: the "
+                "finding, then fixed, or rebutted: <reason> <file:line>. The final message is saved "
+                f"as {VERIFIER_RESPONSE_FILE}.\n"
             ), reads=("brief.json", "source-manifest.json", "implementation-plan.txt", "repair.txt", "check-record.json"),
-            writes=(repo_change.EMIT_FILE,), produces=("emit",),
+            writes=(repo_change.EMIT_FILE, VERIFIER_RESPONSE_FILE), produces=("emit",),
             feedback_keys=("repair_feedback",),
-            notes="implement the small artifact/change directly",
+            workspace=dict(BUILDER_WORKSPACE),
+            notes="make the change in a clone of the last attempt; its diff is the emission",
         ))
         graph.add(repo_change.materialise_node(
             call=f"{OPS}:materialise_artifact", resource_role="work",

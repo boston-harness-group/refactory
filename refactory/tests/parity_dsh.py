@@ -17,7 +17,10 @@ handed to OWNER (`graph-owner.mjs`), the spine mounted as that profile mounts it
 n-th answer (and the last one again after that). An answer is either text, which is the
 completion, or an object:
 
-- ``text``: the completion;
+- ``text``: the completion. A node that works in a workspace collected as a diff
+  (design's ``emit``, #516) makes an emission's ``===FILE:``/``===EDIT:``/``===DELETE:``
+  changes in that workspace, as `tests_support.FakeModel` does
+  (`tests_support.apply_in_workspace`), and the runtime derives its output from them;
 - ``files``: ``{path: text}`` written relative to the completion's working directory
   first, as an agent with tools writes beside its answer;
 - ``judge``: a judgment built from what the run holds — ``early_asks`` (every ask built,
@@ -134,6 +137,26 @@ def _repo_questions(cwd: Path, answer: str) -> str:
     return answer.rstrip() + "\n\n" + record
 
 
+def _contract(prompt: str) -> dict:
+    """The execution contract the runtime put at the top of the prompt (`agent_delivery`),
+    which names the node's workspace as the agent reads it; ``{}`` without one."""
+    from refactory_dsh.agent_delivery import CONTRACT_END, CONTRACT_START
+
+    if CONTRACT_START not in prompt:
+        return {}
+    block = prompt.split(CONTRACT_START, 1)[1].split(CONTRACT_END, 1)[0]
+    start = block.rfind("\n{\n")
+    try:
+        found = json.loads(block[start + 1:]) if start >= 0 else {}
+    except ValueError:
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _is_emission(text: str) -> bool:
+    return any(marker in text for marker in ("===FILE:", "===EDIT:", "===DELETE:"))
+
+
 def _option(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
 
@@ -176,6 +199,17 @@ def main(argv: list[str]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
     text = answer.get("text", "")
+    workspace = _contract(prompt).get("workspace") or {}
+    if workspace.get("collect") == "diff" and _is_emission(text):
+        from tests_support import apply_in_workspace
+
+        # The agent runs in the workspace its contract names: a runtime that starts it
+        # anywhere else fails here rather than having its changes made for it.
+        if cwd.resolve() != Path(workspace["path"]).resolve():
+            print(f"parity_dsh: node {node!r} ran in {cwd}, not in its workspace {workspace['path']}",
+                  file=sys.stderr)
+            return 4
+        apply_in_workspace(text, Path(workspace["path"]))
     judge = answer.get("judge")
     if judge == "early_asks":
         text = _early_asks(prompt)

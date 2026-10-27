@@ -23,6 +23,14 @@ from refactory_dsh.design_ops import (EARLY_ASKS_JUDGE_MARK, EARLY_ASKS_VERDICT,
 
 OPS = "refactory_dsh.design_ops"
 
+#: The verifier's recovery (`Node.retry`): a session that times out is run once more,
+#: fresh, with twice its `timeout_s`. Remote-factory's CEO did this by judgment; here it
+#: is the graph's rule, on both runtimes. Only the verifier declares it: across about
+#: 1,900 lab sessions of design's other agents there were no timeouts, so a node is
+#: added when it is seen to time out. A node that declares it writes only its own report
+#: files (`outputs_only`); the builder (`emit`) never can until agent workspaces.
+TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
+
 #: Design mode's verifier runs beside the check, in the review fork.
 BESIDE_CHECK_VERIFIER_NOTE = (
     "\n\n## The check runs beside this review\n"
@@ -32,18 +40,53 @@ BESIDE_CHECK_VERIFIER_NOTE = (
 
 #: What design mode's builder checks before it answers (approved 2026-10-26): every extra
 #: build round the QA judge caused was a gate correction with no test that exercises it,
-#: or a fix whose test still passes with the fix reverted. Design mode only.
+#: or a fix whose test still passes with the fix reverted. Design mode only. The builder
+#: works in a clone of the attempt (`BUILDER_WORKSPACE`), so it reverts and reruns there.
 EMIT_CHECKLIST = (
-    "\n## Before you answer\n"
+    "\n## Before you stop\n"
     "- For each correction made at the design gate and each ask in the brief, find the test "
-    "that proves it and run it with the builder probe, when you have one.\n"
-    "- Then undo that change in your draft emit.txt and probe the same test again: it must "
-    "fail. If it still passes, the test does not prove the change: fix the test, then "
-    "restore the change.\n"
+    "that proves it and run it in your workspace.\n"
+    "- Then revert that change in the workspace and run the same test again: it must fail. "
+    "If it still passes, the test does not prove the change: fix the test, then restore "
+    "the change and run the test once more.\n"
     "- A correction counts as met only if a test fails without it. The reviewers check this.\n"
     "- Avoid a test that calls the helper under test instead of driving the real path the "
     "brief names, test inputs nothing uses (such as a verdict list nothing consumes), and "
     "assertions on results the test built by hand.\n"
+)
+
+#: Where design mode's builder works (`workspace.py`): a prepared clone of the last
+#: attempt, whose diff the runtime writes into emit.txt. design_fast's builder too.
+BUILDER_WORKSPACE = {"kind": "clone", "of": "attempt", "collect": "diff"}
+
+#: How design mode's builder is told to work in its workspace, which tests to run there,
+#: and when to stop. It runs the tests its change touches and the brief's own example, not
+#: the full suite (approved 2026-10-27): in the live trial (dm-149) the builder's full-suite
+#: runs took 11.6 of its 27 minutes, and the check runs the full suite after it anyway (in
+#: design, an attempt's first self-check runs the whole check: `first_self_check`).
+WORKSPACE_BRIEFING = (
+    "## Your workspace\n"
+    "Your workspace is a prepared clone of the last attempt, with its dependencies "
+    "installed and its setup and generate commands run; its path is in the execution "
+    "block above. Make the change there. `git diff HEAD` there shows what you changed "
+    "since the last attempt; the run's base commit is {{base}}.\n"
+    "Run there, as often as you need, the tests your change touches: the test files you "
+    "changed or added, and the tests that import the modules you changed. Run the brief's "
+    "own example or CLI path there too. They run there as they run in the check.\n"
+    "Do not run the full suite yourself: the check runs it for you after you answer.\n"
+    "When you are done, stop: the workspace's diff is your answer. The runtime turns it "
+    "into the next attempt, which the check and the reviews then judge. Return a short "
+    "completion message.\n"
+)
+
+#: How design's builder names the tests it updated (dm-270): the last line of its completion
+#: message, which `design_ops.note_updated_tests` reads from the emit receipt's final
+#: response. Design only: nothing reads it in design_fast, whose final message is its
+#: verifier response.
+UPDATED_TESTS_COMPLETION = (
+    "When you updated an existing test because the brief or a correction changes what it "
+    "pins, end the message with one line: `Updated tests: <test id> (follows "
+    "<the ask or correction>), ...`.\n"
 )
 
 _ACCEPTANCE_BASELINE = (
@@ -681,22 +724,16 @@ class DesignMode(Mode):
                 "## What went wrong last time\n{{validation}}\n\n"
                 "## What the reviews refused\n{{qa_gate}}\n{{overwatch_review}}\n\n"
                 + _ACCEPTANCE_BASELINE
-                + "{{emit_scope}}\n\n"
-                "Write those blocks into emit.txt, with no prose outside them. Write nothing "
-                "but emit.txt: do not apply or test your change anywhere — the target, the "
-                "run's worktree or a copy — because materialise and the check do that after "
-                "you answer and send you the result. Then return a short completion message; "
-                "when you updated an existing test because the brief or a correction changes "
-                "what it pins, end the message with one line: `Updated tests: <test id> "
-                "(follows <the ask or correction>), ...`.\n"
-                "{{probe_instruction}}\n"
+                + WORKSPACE_BRIEFING
+                + UPDATED_TESTS_COMPLETION
                 + EMIT_CHECKLIST
             ),
             reads=("brief.json", "design.md", "check.txt", "check-record.json"),
             writes=(repo_change.EMIT_FILE,),
             produces=("emit",),
             feedback_keys=("validation", "qa_gate", "overwatch_review"),
-            notes="write the artifact's files",
+            workspace=dict(BUILDER_WORKSPACE),
+            notes="make the change in a clone of the last attempt; its diff is the emission",
         ))
         graph.add(repo_change.materialise_node(
             call=f"{OPS}:design_materialise",
@@ -806,11 +843,12 @@ class DesignMode(Mode):
         ))
 
         # ── design-v2's three reviews, in parallel, and the overwatch pass ──
-        from refactory_dsh.verification import VERIFIER_PROMPT, VERIFIER_TIMEOUT_S
+        from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, VERIFIER_PROMPT
         graph.add(Node(
             "verifier", "agent",
+            retry=TIMEOUT_RETRY, outputs_only=True,
             prompt_template=VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
-            timeout_s=VERIFIER_TIMEOUT_S,
+            timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
             reads=("brief.json", "changes.diff"),
             writes=("reviews/verification.md",),

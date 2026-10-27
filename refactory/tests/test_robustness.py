@@ -1286,9 +1286,10 @@ def test_design_fast_base_double_crash_continues_with_note(tmp_path, monkeypatch
     """A design_fast run whose base preparation crashes twice continues and
     its check record carries the note (correction 2).
 
-    The stub uv crashes on calls 2-5 (the base install: two _try_base attempts,
-    each with run_command's retry).  Call 1 (attempt install) passes.  Calls 6+
-    (second attempt install) pass.  focused_check sets base_unavailable and
+    The stub uv crashes on calls 3-6 (the base install: two _try_base attempts,
+    each with run_command's retry).  Call 1 (the builder's workspace, prepared once)
+    and call 2 (attempt install) pass.  Calls 7+ (second attempt install) pass; the
+    workspace, its manifests unchanged, installs nothing the second time.  focused_check sets base_unavailable and
     writes the note into check.txt, which the focused_check node now declares.
     """
     from refactory_dsh.fast import DesignFastMode
@@ -1303,9 +1304,9 @@ def test_design_fast_base_double_crash_continues_with_note(tmp_path, monkeypatch
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "manifest"],
                    capture_output=True, check=True)
 
-    # Stub uv: passes on call 1 (attempt install), crashes on calls 2-5
-    # (base install: 2 calls per _try_base x 2 _try_base attempts = 4 calls),
-    # then passes on calls 6+ (second attempt install).
+    # Stub uv: passes on call 1 (the builder's workspace) and call 2 (attempt install),
+    # crashes on calls 3-6 (base install: 2 calls per _try_base x 2 _try_base attempts =
+    # 4 calls), then passes on calls 7+ (second attempt install).
     stub_bin = tmp_path / "stub_bin"
     stub_bin.mkdir()
     uv_script = stub_bin / "uv"
@@ -1318,7 +1319,7 @@ def test_design_fast_base_double_crash_continues_with_note(tmp_path, monkeypatch
         f'f="{counter_file}"\n'
         f'n=0; [ -f "$f" ] && n=$(cat "$f")\n'
         f'n=$((n + 1)); echo $n > "$f"\n'
-        f'if [ $n -ge 2 ] && [ $n -le 5 ]; then exit 134; fi\n'
+        f'if [ $n -ge 3 ] && [ $n -le 6 ]; then exit 134; fi\n'
         f'mkdir -p .venv/bin\n'
         f'ln -sf "{sys.executable}" .venv/bin/python\n'
     )

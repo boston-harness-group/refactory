@@ -34,6 +34,12 @@ from refactory_dsh.invocations import HOOK_SUPPRESS, WORKTREE_RECORD
 from refactory_dsh.owned_process import SHUTDOWN_GRACE_S, shutdown, _termination_as_exit
 
 
+class CompletionTimeout(RuntimeError):
+    """A model session ran out of its time. The client never replays it: a tool-using
+    session may already have changed its workdir. A node that declares a retry on
+    ``timeout`` gets a fresh session instead (`refactory_dsh.node_retry`)."""
+
+
 class ModelChoiceError(Exception):
     """A run has no model: no flag, no route and no stored choice (dm-258).
 
@@ -113,7 +119,13 @@ NODE_PATCH = Path(__file__).resolve().parent / "patches" / "agent-node.yml"
 #: of them (`qa_director`, which builds and runs an adversarial probe) exceeded a
 #: five-minute ceiling in a live create run. A caller that knows its own nodes can
 #: set `timeout_s`; the default has to cover the slowest node a shipped mode declares.
-DEFAULT_TIMEOUT_S = 1800
+#:
+#: Overridable via ``REFACTORY_MODEL_TIMEOUT_S`` for workloads whose nodes run much
+#: longer than the authoring modes — e.g. a node that builds a container (podman)
+#: inside its own session can exceed 30 minutes. The default stays conservative;
+#: such a workload exports the env var rather than every consumer inheriting a high
+#: ceiling. (Same env-driven pattern as REFACTORY_WORKER_BACKEND / REFACTORY_MODEL_EFFORT.)
+DEFAULT_TIMEOUT_S = int(os.environ.get("REFACTORY_MODEL_TIMEOUT_S", "1800"))
 
 #: Overhead a node's dispatch reserves beyond its completion attempts, for process
 #: startup, sandbox discovery and delivery bookkeeping. `workers.lower_workflow`
@@ -323,7 +335,16 @@ class DshModelClient:
         #: A node's own bound on its whole model session (`Node.timeout_s`), when
         #: it declares one: the session stops there whatever the route allows.
         self._node_wall_s = int(node_wall_s) if node_wall_s is not None else None
+        #: Whether that wall is the session's limit even beyond the route's envelope: a
+        #: declared retry's longer session (`with_retry_wall`). Otherwise it only lowers it.
+        self._node_wall_exact = False
         self._worker_receipt: Path | None = None
+        #: Set per completion on the copy `complete` makes, as the receipt is: where the
+        #: agent works when that is not the run directory, what its environment
+        #: overrides, and whether its tools are confined there (`workspace.py`).
+        self._cwd: Path | None = None
+        self._env_overrides: dict[str, str | None] = {}
+        self._confine = False
         ledger = budget_ledger or os.environ.get("REFACTORY_BUDGET_LEDGER")
         self._budget = None
         if ledger:
@@ -377,6 +398,13 @@ class DshModelClient:
         """A copy whose node session ends after ``seconds``, however the route is set."""
         client = copy.copy(self)
         client._node_wall_s = int(seconds)
+        return client
+
+    def with_retry_wall(self, seconds: int) -> DshModelClient:
+        """A copy whose node session runs for exactly ``seconds``: a declared retry's
+        longer limit (`node_retry.deliver`), which may exceed the route's envelope."""
+        client = self.with_wall(seconds)
+        client._node_wall_exact = True
         return client
 
     def with_budget(self, budget: Any) -> DshModelClient:
@@ -462,6 +490,13 @@ class DshModelClient:
         # An agent's own shell can run install commands that would rewrite the
         # target's hooks; suppress hook managers there too (#347).
         result.update(HOOK_SUPPRESS)
+        # Last: an agent workspace's own environment (its PATH, HOME and virtual
+        # environment) replaces the run worktree's, and None removes a name.
+        for name, value in (getattr(self, "_env_overrides", None) or {}).items():
+            if value is None:
+                result.pop(name, None)
+            else:
+                result[name] = value
         return result
 
     def _readiness_unavailable(self, reason: str) -> dict[str, object]:
@@ -517,14 +552,26 @@ class DshModelClient:
         return result
 
     def complete(
-        self, prompt: str, *, system: str = "", workdir: Path | None = None
+        self, prompt: str, *, system: str = "", workdir: Path | None = None,
+        cwd: Path | None = None, env: dict[str, str | None] | None = None,
+        confine: bool = False,
     ) -> str:
+        """One completion. ``workdir`` is the run directory: the worker's receipt and
+        patch are written there, and the run's worktree environment is found from it.
+        ``cwd`` is where the agent works, the run directory unless given (an agent
+        workspace, `workspace.py`); ``env`` overrides its environment last, a None value
+        removing the name; ``confine`` makes DSH's sandbox policy workspace-write, rooted
+        at ``cwd`` (`workers.permission_patch`).
+        """
         from refactory_dsh import workers
         scratch = Path(os.environ.get("REFACTORY_MODEL_SCRATCH", "/tmp")) / "refactory-model"
         original_workdir = workdir
         run_dir = Path(workdir).expanduser().resolve() if workdir is not None else scratch
         run_dir.mkdir(parents=True, exist_ok=True)
         client = copy.copy(self)
+        client._cwd = Path(cwd).expanduser().resolve() if cwd is not None else None
+        client._env_overrides = dict(env or {})
+        client._confine = bool(confine and cwd is not None)
         client._checkpoint()
         if client._budget is not None:
             client._budget.require_usage_capability(self._worker_backend == "dsh")
@@ -594,7 +641,11 @@ class DshModelClient:
         if self._worker_receipt is not None:
             from refactory_dsh.workers import write_patch
             patch = self._worker_receipt.with_suffix(".patch.yml")
-            write_patch(patch, self._runtime_root, self.route(), provider_config=self._provider_config)
+            cwd = getattr(self, "_cwd", None)
+            from refactory_dsh.workspace import tool_dsh_home
+            write_patch(patch, self._runtime_root, self.route(), provider_config=self._provider_config,
+                        workspace_root=cwd if getattr(self, "_confine", False) else None,
+                        tool_home=tool_dsh_home(cwd) if cwd is not None else None)
             cmd += ["--patch", str(patch)]
         if self._worker_backend == "dsh":
             if self._provider:
@@ -621,7 +672,7 @@ class DshModelClient:
             budget_s = self._timeout_s
             stop_at = None
         wall = getattr(self, "_node_wall_s", None)
-        if wall is not None and wall < budget_s:
+        if wall is not None and (wall < budget_s or getattr(self, "_node_wall_exact", False)):
             budget_s = wall
             stop_at = time.monotonic() + budget_s
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
@@ -635,9 +686,9 @@ class DshModelClient:
                 # A tool-using completion may already have changed its workdir.
                 # A deadline is not a transport failure: replaying the prompt can
                 # duplicate real work even after its subprocesses have shut down.
-                raise RuntimeError(
+                raise CompletionTimeout(
                     f"model completion timed out after {budget_s}s; "
-                    "requested runtime shutdown; not retried"
+                    "requested runtime shutdown; the client does not replay a deadline"
                 ) from exc
             else:
                 self._raise_if_cancelled()
@@ -699,7 +750,8 @@ class DshModelClient:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     stdin=task_file if task_file is not None else None,
-                    cwd=str(run_dir), env=self._environment(target_workdir=target_workdir),
+                    cwd=str(getattr(self, "_cwd", None) or run_dir),
+                    env=self._environment(target_workdir=target_workdir),
                     # A terminal Ctrl-C reaches the Python caller only. Forward one
                     # shutdown request: DSH escalates a second signal to immediate exit.
                     start_new_session=os.name == "posix",

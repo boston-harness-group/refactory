@@ -296,16 +296,76 @@ def test_a_retry_edits_the_file_its_last_attempt_wrote(tmp_path):
     assert git(Path(payload["target"]), "show", f"{payload['branch']}:tool.py") == "x = 1\nprint('fixed', x)"
 
 
-@pytest.mark.parametrize("emission, reason", [
-    (_edit("app.py", ("print('not there')\n", "print('x')\n")), "is not in the file the edit applies to"),
-    (render({"tool.py": "x = 'long'  # ... (line truncated to 2000 chars)\n"}), "the read tool's note that it cut"),
-    ("===EDIT: app.py===\nprint('no pairs')\n", "has text outside its"),
-    ("===FILE: ../outside.py===\nx = 1\n", "is not a file inside the artifact directory"),
-    ("===FILE: tool\u202e.py===\nx = 1\n", "U+202E RIGHT-TO-LEFT OVERRIDE"),
-], ids=["edit-not-found", "truncated-read", "malformed-edit", "outside-path", "bidi-path"])
-def test_an_emission_materialise_cannot_apply_goes_back_to_emit_with_the_reason(repo, tmp_path, emission, reason):
+class _WorkspaceBuilder(FakeModel):
+    """A builder at work in its workspace: ``first`` and ``retry`` are what it does there
+    on its first and second dispatch, beside its scripted emission's changes."""
+
+    def __init__(self, answers: list[str], first: Callable[[Path], object],
+                 retry: Callable[[Path], object] = lambda _: None) -> None:
+        super().__init__(answers)
+        self.steps = [first, retry]
+
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, cwd: object = None,
+                 env: object = None, confine: bool = False) -> str:
+        answer = super().complete(prompt, system=system, workdir=workdir, cwd=cwd, env=env, confine=confine)
+        if cwd is not None and "Write the artifact `" in prompt and self.steps:
+            self.steps.pop(0)(Path(str(cwd)))
+        return answer
+
+
+def _binary(clone: Path) -> None:
+    (clone / "logo.png").write_bytes(b"\x89PNG\0\0")
+
+
+def _symlink(clone: Path) -> None:
+    (clone / "link.py").symlink_to("app.py")
+
+
+def _executable(clone: Path) -> None:
+    (clone / "app.py").chmod(0o755)
+
+
+def _bidi(clone: Path) -> None:
+    (clone / "tool\u202e.py").write_text("x = 1\n")
+
+
+def _undo(*names: str) -> Callable[[Path], None]:
+    def undo(clone: Path) -> None:
+        for name in names:
+            path = clone / name
+            if path.is_symlink() or not path.exists():
+                path.unlink(missing_ok=True)
+            elif name == "app.py":
+                path.chmod(0o644)
+            else:
+                path.unlink()
+    return undo
+
+
+# The builder works in a clone of the attempt and its emission is derived from the clone's
+# diff (`workspace.py`), so a malformed block cannot reach materialise from design mode any
+# more. What can: a change the blocks cannot carry (refused by the collect step), a
+# workspace with no change, and a file whose text materialise itself refuses.
+@pytest.mark.parametrize("emission, first, retry, reason", [
+    (render({"tool.py": "x = 'long'  # ... (line truncated to 2000 chars)\n"}), lambda _: None,
+     lambda _: None, "the read tool's note that it cut"),
+    (_edit("app.py", ("print('not there')\n", "print('x')\n")), lambda _: None, lambda _: None,
+     "has no change from the last attempt"),
+    (render({"tool.py": "print('built')\n"}), _binary, _undo("logo.png"), "logo.png is a binary file"),
+    (render({"tool.py": "print('built')\n"}), _symlink, _undo("link.py"), "link.py is a symlink"),
+    (render({"tool.py": "print('built')\n"}), _executable, _undo("app.py"),
+     "app.py changes its file mode (100644 to 100755)"),
+    # A name a terminal or a review misshows is refused by name, as an emitted block's is
+    # (`repo_change.unprintable_refusal`, dm-208), and by collect itself, before materialise
+    # sees it (dm-278): the reason carries collect's own prefix.
+    (render({"tool.py": "print('built')\n"}), _bidi, _undo("tool\u202e.py"),
+     "cannot be carried as text files, so nothing of it was applied: the emitted path "
+     "'tool\\u202e.py' holds U+202E RIGHT-TO-LEFT OVERRIDE"),
+], ids=["truncated-read", "no-change", "binary", "symlink", "mode-change", "bidi-path"])
+def test_an_emission_materialise_cannot_apply_goes_back_to_emit_with_the_reason(repo, tmp_path, emission,
+                                                                               first, retry, reason):
     """It once ended the run (#330 E5); now the retry is told why, and nothing of it is committed."""
-    model = FakeModel(_answers(emission, render({"tool.py": "print('built')\n"})))
+    model = _WorkspaceBuilder(_answers(emission, render({"tool.py": "print('built')\n"})), first, retry)
     result = _design(tmp_path / "run", model, target=str(repo))
     assert result.exit_ok, result.error
     retry = [prompt for prompt in model.prompts if "Write the artifact `" in prompt][1]
@@ -420,7 +480,13 @@ def test_an_empty_emission_is_refused_and_the_worktree_is_unchanged(repo, tmp_pa
 
 
 def test_an_edit_sent_again_is_skipped_rather_than_applied_twice(repo, tmp_path, capsys):
-    """Models re-send an earlier attempt's edits beside new work; an insertion must not land twice."""
+    """Models re-send an earlier attempt's edits beside new work; an insertion must not land twice.
+
+    Design's builder works in a clone of the attempt, which already holds the insertion,
+    so the retry's change is only what is new: the emission derived from it never re-sends
+    app.py. Materialise's own repeat handling, for a mode that still writes its blocks,
+    is `test_an_edit_whose_result_is_already_in_place_is_counted_as_applied`'s.
+    """
     tool = ("import os, pathlib\n"
             "marker = pathlib.Path(os.environ['HOME']) / 'second-attempt'\n"
             "if not marker.exists():\n"
@@ -433,7 +499,7 @@ def test_an_edit_sent_again_is_skipped_rather_than_applied_twice(repo, tmp_path,
     assert result.exit_ok, result.error
     branch = _report(tmp_path / "run")["branch"]
     assert git(repo, "show", f"{branch}:app.py") == "print('app')\nprint('inserted')"
-    assert "re-sent edits the last attempt already holds, so they were skipped" in capsys.readouterr().err
+    assert (tmp_path / "run" / "emit.txt").read_text() == "===FILE: extra.py===\nx = 1\n"
 
 
 @pytest.mark.parametrize("text, pair", [
@@ -453,13 +519,21 @@ def test_an_edit_that_removes_lines_is_never_taken_as_already_applied(pair):
 
 
 def test_without_a_worktree_a_run_takes_whole_files_only(repo, tmp_path, monkeypatch):
+    """Without a worktree the builder works in a folder of its own, and its files are the artifact.
+
+    The builder no longer writes blocks, so it is told where it works rather than which
+    blocks a run without a worktree takes; a deletion, which such a run cannot make, is
+    refused by the collect step instead of by materialise.
+    """
     monkeypatch.setenv("REFACTORY_PROJECT", str(repo))
     model = FakeModel(_answers(_edit("tool.py", ("x\n", "y\n")), render({"tool.py": "print('built')\n"})))
     result = _design(tmp_path / "run", model, _mode(worktree=False))
     assert result.exit_ok, result.error
     emits = [prompt for prompt in model.prompts if "Write the artifact `" in prompt]
-    assert "===FILE: <relative path>===" in emits[0] and "===EDIT:" not in emits[0]
-    assert "has no worktree, so its artifact directory holds only whole files" in emits[1]
+    folder = tmp_path / "run" / ".refactory" / "workspaces" / "emit" / "repo"
+    assert f"Your workspace is {folder}" in emits[0] and "===EDIT:" not in emits[0]
+    assert "has no change from the last attempt" in emits[1]
+    assert (Path(result.facts["artifact"]) / "tool.py").read_text() == "print('built')\n"
 
 
 @pytest.mark.parametrize("answer, reason", [
@@ -469,7 +543,10 @@ def test_without_a_worktree_a_run_takes_whole_files_only(repo, tmp_path, monkeyp
     ("===DELETE: a.py===\nleftover\n", "a deletion takes none"),
     (f"===EDIT: a.py===\n{repo_change.SEARCH}\nx\n{repo_change.DIVIDER}\ny\n", "missing its"),
     (_edit("a.py", ("\n", "y\n")), "nothing to search for"),
-], ids=["no-blocks", "bad-header", "two-blocks", "delete-with-text", "unclosed-edit", "empty-search"])
+    # A builder that writes its own blocks (create, edit, fast-create) can still send this.
+    ("===EDIT: a.py===\nprint('no pairs')\n", "has text outside its"),
+], ids=["no-blocks", "bad-header", "two-blocks", "delete-with-text", "unclosed-edit", "empty-search",
+        "text-outside-pairs"])
 def test_an_emission_whose_blocks_are_malformed_is_refused_with_the_reason(answer, reason):
     with pytest.raises(worktree.AttemptRefused, match=reason):
         repo_change._emitted(answer, edits=True)
@@ -669,8 +746,8 @@ class _EditingModel(FakeModel):
         super().__init__(answers)
         self.edit = edit
 
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
-        answer = super().complete(prompt, system=system, workdir=workdir)
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
+        answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
         if "Write the artifact `" in prompt:
             (self.edit() / "app.py").write_text("print('edited in place')\n")
         return answer
@@ -725,7 +802,8 @@ def test_a_refused_emit_is_redone_from_a_fresh_emit_txt(repo, tmp_path):
                                                           VERIFICATION_ANSWER,
                                                           REVIEW_ANSWERS[3]]))
     assert redone.error is None
-    assert (run / "emit.txt").read_text() == render({"tool.py": "print('redone')\n"})
+    # The redo's emission is derived from its workspace's diff: the file it wrote, whole.
+    assert (run / "emit.txt").read_text() == "===FILE: tool.py===\nprint('redone')\n"
     assert git(repo, "show", f"{_report(run)['branch']}:tool.py") == "print('redone')"
 
 
@@ -736,8 +814,8 @@ class _HookChangingModel(FakeModel):
         super().__init__(answers)
         self._target_fn = target_fn
 
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
-        answer = super().complete(prompt, system=system, workdir=workdir)
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
+        answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
         if "You are the research director" in prompt:
             import subprocess
             target = self._target_fn()
@@ -995,10 +1073,10 @@ def test_a_worktree_run_does_not_warn_that_the_persons_checkout_moved(repo, tmp_
     set-aside copy of app.py exists.
     """
     class Moving(FakeModel):
-        def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
+        def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
             if "You are the research director" in prompt:
                 (repo / "app.py").write_text("print('the person kept working')\n")
-            return super().complete(prompt, system=system, workdir=workdir)
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
 
     result = _design(tmp_path / "run", Moving(_answers(render({"tool.py": "print(1)\n"}))), target=str(repo))
     assert result.exit_ok is False
@@ -1017,9 +1095,12 @@ def test_the_agents_are_told_the_worktree_and_the_reviewers_the_diff_and_the_wra
     assert result.exit_ok, result.error
     found = worktree.recorded(tmp_path / "run")
     assert any(f"answerable by reading {found.path}" in prompt for prompt in model.prompts)
+    # The builder works in a clone of the last attempt, and is told the worktree is not its to change.
     emit = next(prompt for prompt in model.prompts if "Write the artifact `" in prompt)
-    assert f"relative to the root of this run's worktree, {found.path}" in emit
-    assert "Each attempt builds on the last" in emit and "===EDIT: <relative path>===" in emit
+    clone = tmp_path / "run" / ".refactory" / "workspaces" / "emit" / "repo"
+    assert f"Your workspace is {clone}: a clone of the run's worktree at its last attempt" in emit
+    assert f"The run's worktree at {found.path} holds the attempts as committed; do not change it" in emit
+    assert "the workspace's diff is your answer" in emit and "===EDIT: <relative path>===" not in emit
     reviews = [prompt for prompt in model.prompts if "do not infer it from your working directory" in prompt]
     assert reviews
     for prompt in reviews:
@@ -1567,7 +1648,8 @@ def test_design_fast_changes_a_repository_in_a_worktree_and_delivers_nothing(rep
         "name": NAME, "brief": "a tool", "check": "python tool.py", "target": str(repo),
         "setup": "python -c \"open('built.txt', 'w').write('built')\""})
     assert result.exit_ok, result.error
-    assert "===EDIT: <relative path>===" in model.prompts[1], "emit is told it may edit the last attempt"
+    assert "a clone of the run's worktree at its last attempt" in model.prompts[1], \
+        "emit is told it works in a clone of the last attempt"
     assert str(worktree.WRAPPER) in model.prompts[2], "focused QA is told how to run a command in the worktree"
     assert (git(repo, "rev-parse", "HEAD"), (repo / "app.py").read_text()) == (head, "print('mine, not committed')\n")
     payload = _report(tmp_path / "run")
@@ -1627,7 +1709,11 @@ def test_design_fast_carries_generate_changes(repo, tmp_path):
 
 
 def test_design_fast_sends_an_emission_it_cannot_apply_back_to_emit(tmp_path):
-    """A refused emission does not spend a repair attempt; the gate's iteration limit bounds retries."""
+    """A refused emission does not spend a repair attempt; the gate's iteration limit bounds retries.
+
+    The builder's file holds text copied from a truncated read: the derived emission
+    carries it, and materialise refuses it as it refused the block.
+    """
     truncated = "===FILE: tool.py===\nx = 1  # ... (line truncated to 2000 chars)\n"
     result = _fast(tmp_path / "run", truncated, render({"tool.py": "print('whole')\n"}), refused=1)
     assert result.exit_ok, result.error
@@ -1931,8 +2017,8 @@ def test_design_named_failure_not_excused(tmp_path):
 
     class DesignNamingModel(FakeModel):
         """Intercepts the design_doc prompt to write a design.md that names the test."""
-        def complete(self, prompt, *, system="", workdir=None):
-            answer = super().complete(prompt, system=system, workdir=workdir)
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
+            answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
             if "Write the design document" in prompt and workdir is not None:
                 design_path = Path(workdir) / "design.md"
                 if design_path.exists():

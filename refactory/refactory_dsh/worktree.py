@@ -1317,7 +1317,8 @@ def _installs(found: Worktree) -> list[list[str]]:
 
 
 def ensure_environment(found: Worktree, run: Path, budget: Any = None, *,
-                       commit_lockfiles: bool = True) -> tuple[Worktree, list[str], dict[str, Any] | None]:
+                       commit_lockfiles: bool = True,
+                       record: Path | None = None) -> tuple[Worktree, list[str], dict[str, Any] | None]:
     """Install what the worktree's manifests declare, once per their content; say what went wrong.
 
     Lazily: before the first check, and again only when a manifest changed, the last
@@ -1337,14 +1338,17 @@ def ensure_environment(found: Worktree, run: Path, budget: Any = None, *,
     amended into the attempt.  Delivery uses this for the merged tree, where amending
     would corrupt the worktree record, and base preparation
     (`base_check._ensure_base_worktree`) for the base, whose commit must not move (dm-188).
+
+    ``record`` keeps the record somewhere else than the target's record of the run: an
+    agent workspace (`clones.prepare`) keeps its own, so its installs are skipped while
+    its manifests are unchanged without it touching the run's.
     """
     from refactory_dsh import sandbox
 
     path = Path(found.path)
-    manifests = {name: hashlib.sha256((path / name).read_bytes()).hexdigest()
-                 for name in MANIFESTS if (path / name).is_file()}
+    manifests = _manifests(path)
     key = hashlib.sha256(json.dumps(manifests, sort_keys=True).encode()).hexdigest()
-    record_path = _record_path(found)
+    record_path = record if record is not None else _record_path(found)
     done = _json(record_path).get("environment") or {}
     if (done.get("key") == key and not done.get("problems")
             and all((path / name).exists() for name in done.get("made", []))):
@@ -1390,6 +1394,20 @@ def ensure_environment(found: Worktree, run: Path, budget: Any = None, *,
                         "at": datetime.now(timezone.utc).isoformat()},
     })
     return found, problems, prep_fail
+
+
+def _manifests(path: Path) -> dict[str, str]:
+    return {name: hashlib.sha256((Path(path) / name).read_bytes()).hexdigest()
+            for name in MANIFESTS if (Path(path) / name).is_file()}
+
+
+def manifest_key(path: Path) -> str:
+    """A digest of the dependency manifests and lockfiles at ``path``: what installs depend on.
+
+    The key `ensure_environment` records its installs under, so a caller can tell
+    whether they would run again.
+    """
+    return hashlib.sha256(json.dumps(_manifests(path), sort_keys=True).encode()).hexdigest()
 
 
 def amend(found: Worktree, run: Path, paths: list[str], message: str) -> Worktree:

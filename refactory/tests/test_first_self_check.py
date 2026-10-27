@@ -587,11 +587,11 @@ def test_a_judge_that_still_fails_is_a_warning_on_record_never_everything_built(
     T._Chunks(monkeypatch, fails=set())
 
     class Failing(FakeModel):
-        def complete(self, prompt, *, system="", workdir=None):
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
             if JUDGE in prompt and not any(JUDGE in seen for seen in self.prompts):
                 self.prompts.append(prompt)
                 raise RuntimeError("the judge's session ended")
-            return super().complete(prompt, system=system, workdir=workdir)
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
 
     model = Failing(T._answers(CLEAN), early_asks=["{}"])
     result = T._design(tmp_path / "run", model, T._target(tmp_path / "repo", PINNED))
@@ -898,17 +898,18 @@ def test_the_fixup_carries_the_corrections_whole_and_the_brief_to_6000_character
 
 
 class _Builder(FakeModel):
-    """A builder that writes emit.txt itself and answers with a completion message of its
-    own: ``said``, one per emission."""
+    """A builder that makes its scripted emission's changes in its workspace, as every
+    `FakeModel` does (the runtime derives emit.txt from them), and answers with a
+    completion message of its own: ``said``, one per emission."""
 
     def __init__(self, answers: list[str], said: list[str]) -> None:
         super().__init__(answers)
         self.said = list(said)
 
-    def complete(self, prompt, *, system="", workdir=None):
-        answer = super().complete(prompt, system=system, workdir=workdir)
-        if EMIT in prompt and workdir is not None:
-            (Path(str(workdir)) / "emit.txt").write_text(answer)
+    def complete(self, prompt, *, system="", workdir=None, **workspace):
+        answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
+        if EMIT in prompt:
+            assert workspace.get("cwd") is not None, "design's builder works in its workspace"
             return self.said.pop(0) if self.said else "Done."
         return answer
 

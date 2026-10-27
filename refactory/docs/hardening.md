@@ -33,17 +33,106 @@ following the same pattern as `refactory.environment_overlay`.  Core modules
 (`agent_delivery`, `worker_node`, `nn.executor`) import nothing from the product;
 they reach the refill logic only through the entry point.
 
+### Agent workspaces
+
+An agent node can declare where it works: `workspace` on the node (`nn.graph`,
+saved only when it is not the default, `none`), carried by the IR, the run's
+declarations and the worker spec. `scratch` is a fresh empty folder per dispatch;
+`clone` (`of: attempt` or `base`) is a prepared clone of the run's worktree.
+`collect: files` copies the node's declared writes out of the workspace;
+`collect: diff` writes the clone's diff into the node's first write. Both runtimes
+run it through one module, `refactory_dsh/workspace.py`: the spine's worker
+(`worker_node.execute`) and the walker (`Executor._visit_agent`) prepare the
+workspace before the delivery bracket opens and collect from it before it closes, so
+`agent_delivery.finish` checks what the workspace produced. A workspace is refused on
+the CEO-subagent route (`workers.lower_workflow` with no worker model context): nothing
+there could give the node a workspace or collect from it. The spine only passes the
+declaration through.
+
+Design mode's builder (`emit`, in design and design_fast) works in a clone of the
+last attempt and collects its diff: it edits the repository there, runs the tests its
+change touches (the test files it changed or added, and the tests importing the modules
+it changed) and the brief's own example or CLI path as often as it needs, and stops. Its
+prompt says the check runs the full suite after it answers, so it does not run the full
+suite itself: in the live trial (dm-149) its full-suite runs took 11.6 of its 27
+minutes, and the self-check and the check ran the suite again. Materialise,
+the check, the reviews and the target guard read the derived `emit.txt` as they read
+an emitted one. create, edit and fast-create keep the emission-only builder.
+
+- **Prepared once per run.** The clone (`clones.prepare`, the product's half,
+  reached through the `refactory.workspace_clone` entry point) shares the target's
+  objects (`git clone --shared`), keeps its own refs and index, and has no remote and
+  no hooks. It persists across commands, fix-ups and attempts. When materialise has
+  committed what it derived, the clone already holds the new head: the next dispatch
+  verifies that (the clone's change from the new head, less what its preparation
+  made, is empty) and only moves its base (`verified`). A head that did not move keeps
+  the clone as the agent left it (`kept`), so a refused emission's work is still there
+  to fix; any other head resets the clone to it (`reset`). A file the agent added counts
+  as held when its content and mode are the commit's. Installs run again only when a
+  dependency manifest or lockfile anywhere in the clone changes
+  (`clones.dependency_fingerprint`), setup with them or after a reset, and generate on
+  every dispatch. A step that fails does not stop the node: the agent is told, and the
+  check runs the same steps. A pending merge from delivery is started in the clone, its
+  generated conflicts resolved to main's side as materialise resolves them; a merge the
+  agent finished is kept across a refused round, and one materialise gave up is
+  dropped, so main's changes never come back as the agent's own.
+- **Run.** The model's working directory is the workspace; its receipt and patch stay
+  in the run directory (`DshModelClient.complete(cwd=...)`). Its environment is the
+  clone's (`worktree.check_environment`): the clone's own `.venv` and
+  `node_modules/.bin` first, the run worktree's taken off PATH, and HOME at the
+  clone's `.refactory/home`, with pnpm's store, uv's cache and the XDG cache inside it
+  (the person's are read-only to it). Its shell is told a DSH home of its own inside the
+  workspace (`workers.write_patch`'s `shell-env` row), and its `BASH_ENV` file unsets the
+  run's variables (`REFACTORY_*`, `SRF_*`, `VENV_BIN`, `PYTHONPATH`) before each command,
+  as the check never has them; the DSH process keeps them for its observer. Its DSH
+  sandbox policy is `workspace-write` rooted at the workspace, with approval `never`
+  (`workers.permission_patch`), where a DSH runner works here (bubblewrap or Landlock on
+  Linux, Seatbelt on macOS; probed once). Where none does, a workspace node on the dsh
+  backend is refused, since its shell would have full access while it is asked to install
+  and run things, unless `REFACTORY_WORKSPACE_SANDBOX=unconfined` chooses that; the
+  dispatch record and a warning then say so. A native backend (codex, Claude Code) runs
+  under its own sandbox and keeps the person's HOME, where its CLI finds its login.
+- **Collect.** `derive_emission` writes whole-file `===FILE:` and `===DELETE:` blocks
+  from `git diff --raw --no-renames <base>` and the untracked files, leaving out
+  `.refactory/`, the environments and tool caches, and what the preparation made while
+  the agent left it as made. A binary file, a symlink, a mode change, a new executable,
+  a submodule, a line the emission would read as a block header, or (without a
+  worktree) a deletion is refused, as is a path an emission header cannot carry (with
+  whitespace, `=`, a quote, a backtick or a backslash) or one holding a control or hidden
+  format character (the same `unprintable_refusal` an emitted block gets, dm-278), a
+  file over 50 MB, a change over 200 MB in all, and a workspace with no change: the
+  refusal is left beside the emission
+  (`.refactory/workspace-refusal.json`, keyed by its digest) and materialise sends it
+  back to the builder like any refused emission. Line endings and end-of-file newlines
+  are normalised by the blocks, with a warning, and the next dispatch tells the agent
+  which files. Only the repository's own ignore rules apply: the clone ignores a
+  person's global ignore file.
+- **Clean-up.** At the run's end, however it ended: the walker and the DSH evaluator
+  (the `refactory.run_end` entry point) and a spine run's owner. A workspace a
+  dispatch holds is left.
+- **OpenShell (experimental).** On the `openshell` worker backend the same workspace is
+  packed (`openshell_backend.pack_workspace`, after the clone takes its own copy of the
+  objects it borrowed), the agent (Claude Code, the binary the gateway's provider admits)
+  runs inside the sandbox, and the folder comes back (`download_artifacts`) to the same
+  collect step (`workspace.sync_back`, which refuses a folder that is not the workspace's
+  copy). It has had no live run, so it is refused unless
+  `REFACTORY_OPENSHELL_WORKSPACE=1` opts in. Not yet: packing `.venv` and
+  `node_modules`, the node's model and usage for `claude -p`, and the remote stop's PID
+  path.
+
 ### The builder probe
 
-The emit prompt's "do not apply or test your change anywhere" exists because
-direct edits to the worktree bypass materialise and the check.  The builder probe
-gives a safe alternative.  Since dm-133, the probe is also available to
-`design_doc` via `--command` (no `--emission`); the clone
+The emit prompt's "do not apply or test your change anywhere", which create, edit
+and fast-create still carry, exists because direct edits to the worktree bypass
+materialise and the check. The builder probe gave design's builder a safe way to test
+before its workspace did; its prompt no longer names it. Since dm-133, the probe is
+also available to `design_doc` via `--command` (no `--emission`); the clone
 runs at the run's base with `emission=None`, and the same isolation guarantees
 apply:
 
-- **Standalone clone** (`git clone --no-local --depth 1`): not a linked worktree.
-  No `.git` registration.  `origin` removed after clone.
+- **Standalone clone** (`clones.clone_shared`, `git clone --shared`): not a linked
+  worktree, so no `.git` registration; its own refs and index, the target's objects
+  shared.  `origin` removed after clone.
 - **Hooks off**: `core.hooksPath=/dev/null`, `LEFTHOOK=0`, `HUSKY=0`.
 - **Isolated HOME and DSH_HOME**: per-probe directories under `probe-<id>/`.
 - **PATH stripped**: the run worktree's `.venv/bin` and `node_modules/.bin` are
@@ -848,9 +937,12 @@ zero-width space (U+200B), a word joiner (U+2060) or a byte-order mark (U+FEFF) 
 refused, naming the character, for example `U+202E RIGHT-TO-LEFT OVERRIDE`. A terminal,
 a diff or a review hides such a character or shows the name as something else, so the
 file a reviewer reads about would not be the file written. Other format characters are
-allowed: U+200C and U+200D join letters in Persian names and emoji sequences.
-`repo_change.unprintable_refusal` is the one check, for any place that takes a path
-from an agent.
+allowed: U+200C and U+200D join letters in Persian names and emoji sequences. A name
+that is not UTF-8 (a workspace file such as `tool\xff.py`, which git decodes to a lone
+surrogate) is refused the same way, naming the byte, rather than crashing collect (dm-278).
+`unprintable_refusal` (in the core module `emitted_paths`, re-exported by `repo_change`)
+is the one check, for any place that takes a path from an agent: materialise, create
+mode, and a workspace's collect step (dm-278).
 
 **A malformed header goes back to the builder in every mode (dm-215).** In create and
 the fast modes, as in design mode, `materialise` records a malformed header as
@@ -1426,12 +1518,18 @@ fix_pack has no reviewers, so in those the verifier applies all seven.
 
 The verifier is given the brief, the diff and the repository — never
 design.md. It runs in parallel with the reviews as an optional branch of
-the review fork, bounded at `VERIFIER_TIMEOUT_S` (600 s) on both runtimes: the
-node declares `timeout_s`, the spine gives its dispatched session that wall
-(`node_wall_s`) plus the usual dispatch overhead, and the walker gives its model
-client the same wall. Its prompt asks it to finish in about seven minutes and to write
-each finding as it finds it, since a session stopped at the wall leaves nothing. A
-verifier that fails, returns nothing or runs out of time is recorded as missing.
+the review fork, bounded at `DESIGN_VERIFIER_TIMEOUT_S` (1,200 s) in design mode and
+`VERIFIER_TIMEOUT_S` (600 s) in design_fast, on both runtimes: the node declares
+`timeout_s`, the spine gives its dispatched session that wall (`node_wall_s`) plus the
+usual dispatch overhead, and the walker gives its model client the same wall. Its
+prompt asks it to finish in about seven minutes and to write each finding as it finds
+it, since a session stopped at the wall leaves nothing. 1,200 s is what a medium change
+needs: before any bound, 22 of 23 verifier sessions on changes of 500 diff lines or
+more finished within it (median 740 s), while under 600 s, 45 of 88 sessions timed out.
+In design mode a verifier that times out is retried once with twice the limit
+(`Node.retry`, `refactory_dsh.node_retry`). A verifier that fails, returns nothing or
+runs out of time again is recorded as missing, and the QA synthesis both judges read
+says so, with the reason (`VERIFIER MISSING (timed out twice)`).
 fix_pack's verifier is inline on the main path, where running out of time would fail
 the run, so it keeps the route's envelope.
 
@@ -2053,8 +2151,8 @@ In a self-targeting run, a pull or commit in the driver checkout during an
 output-only node now refuses that node. The driver checkout must stay still
 while runs are in flight.
 
-The driver or pin checkout is not watched when it is not the target. That is
-tracker dm-164, a follow-up, not this run.
+The driver or pin checkout, when it is not the target, is watched too: see
+[Refactory's own checkout](#32-refactorys-own-checkout-dm-164).
 
 ### Behaviour changes
 
@@ -3183,3 +3281,79 @@ design mode, because nothing reads them; validation V7 refuses an unused knob.
 - `test_design_contract_extensions.py::test_prompt_contract_requires_only_summary_changes_and_tests`
 - `test_design_contract_extensions.py::test_an_optional_section_left_out_is_not_checked`
 - `spine.spec.ts`: "a scoped change skips the perspectives step, and no reviewer runs at either scale"
+
+
+## 32. Refactory's own checkout (dm-164)
+
+### The problem
+
+An agent that runs a refactory tool with the contract's Python imports refactory from
+the checkout that Python belongs to: the driver, or for a pinned run the pin. The tool
+writes there from any directory. On 2026-10-21 (b32l) an emit builder ran a generator
+that way and wrote into the driver checkout. The target guard watched only the target
+and the run's worktree, and gave the launcher checkout a warning, so nothing refused it.
+
+### The rule
+
+Every agent node of a run that recorded a target (`target_guard.record`) gets a
+snapshot of refactory's own checkout when that checkout is not the target, on every
+route (walker, the spine's worker bridge, the CEO subagent), because the snapshot is
+taken in `agent_delivery.begin`. A change there fails the node, and the message names
+the checkout.
+
+The snapshot holds the checkout's **tracked** files that differ from HEAD, and HEAD
+itself (`_checkout_state`, one `git status --porcelain=v2 --branch -uno`). Untracked
+files are not watched: an editor's swap or lock file, a log appended through an open
+handle, a new notes file and a copied tree were where false refusals came from, and a
+generator rewrites tracked files. The target guard's own snapshot is unchanged.
+
+`target_guard.checkouts` finds the checkouts:
+
+- **The contract's own import root.** `refactory_source`, the directory
+  `agent_delivery` is imported from, is what the contract's Python imports. On the
+  walker (`python -m refactory_dsh.design` and the outer loop) that is the driver. On
+  the spine, a pinned run's worker re-executes under the pin's Python
+  (`worker_node.main`), so it is the pin.
+- **The run's record.** `refactory ceo` records the driver in
+  `.refactory/run-config.json` (`pin.record_driver`), and a pinned resume adds
+  `pin_checkout` (`pin.resolve_pin`). The pin is watched when the run is pinned, the
+  driver otherwise.
+
+Only git checkouts count, and not a package a checkout ignores. A checkout that is,
+holds or lies in the target or the run's worktree is left to the target guard, so a run
+on refactory itself is unchanged. Nor is a checkout `REFACTORY_GUARD_UNWATCHED` names,
+but only inside a pytest test (`PYTEST_CURRENT_TEST`, which the processes a test starts
+inherit): the suite names its own checkout there (`tests/conftest.py`), so its scripted
+agents never snapshot it. Anywhere else the variable is ignored, with one
+`refactory: warning:` line, because it would switch the guard off without a word.
+
+### What a refusal does to the files
+
+One setting decides, `target_guard.CHECKOUT_POLICY`; the user chose `restore-if-clean` on 2026-10-27:
+
+| Policy | What it does |
+|---|---|
+| `restore` (A) | Puts the changed files back as they were before the node (`restore_target`); the changed copies are kept under the delivery's `checkouts/` folder |
+| `report` (B) | Leaves the files as they are and names them with what the node changed: a diff from their bytes at the node's start, not from HEAD |
+| `restore-if-clean` (C, the default) | Restores when the checkout had no uncommitted tracked change when the node began, and reports otherwise |
+
+Either way the person is told: a run warning, and a line in the checkout's own log,
+`~/.refactory/target-guard/<checkout hash>/restores.log`, naming the files and where
+their changed bytes went. A file whose pre-node bytes were not kept (larger than a
+baseline holds) is never moved away: `restore_target` decides how a path is given back
+before it moves anything, and leaves it in place when nothing can. A commit is not
+undone; the message prints the `git -C <checkout> reset --keep <head>` that undoes it.
+A checkout git cannot read after the node is named in a warning, not refused.
+
+### Cost
+
+One `git status` per snapshot, two per agent node: 54 ms median on the lab driver, of
+which git's index refresh is 44 ms, and about 11 ms in a fresh worktree.
+
+### Tests that hold it
+
+`test_target_guard_checkouts.py`: the walker and spine refusals of a driver and a pin
+write, a commit, a run on refactory itself, legitimate writes, untracked files, a file
+whose bytes were not kept, an unreadable checkout, a parallel stray, both retry routes,
+the launcher that is the driver, which checkouts are watched, the suite's own checkout,
+and each policy.

@@ -2540,6 +2540,9 @@ DESIGN_QA_REVIEWS = (
 #: The design-blind verifier's report: an optional branch of the fork, so a verifier
 #: that times out has none, and the QA judge reads the round without it.
 VERIFICATION = "reviews/verification.md"
+#: What the runtime leaves when the optional verifier gives nothing: the worker
+#: (`worker_node.main`) and the walker's fork (`nn.fork._record_missing`) write the error.
+VERIFIER_MISSING = "reviews/verifier-missing.txt"
 
 QA_SYNTHESIS = "reviews/qa-synthesized.md"
 
@@ -2623,8 +2626,21 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
             sections.append(f"## {name} (the {who})\n\nNO REPORT: the {who} left nothing "
                             "for this attempt. An absent review is not a passed one.")
     verification = ctx.read_text(VERIFICATION).strip() if ctx.exists(VERIFICATION) else ""
+    verifier_missing = ""
     if verification:
         sections.append(f"## {VERIFICATION} (the design-blind verifier)\n\n{verification}")
+    elif ctx.exists(VERIFIER_MISSING):
+        # The verifier is optional, so a missing one does not stop the round, but the judges
+        # weigh the change knowing its checks did not run, and why (a timeout is retried
+        # once first: `design.TIMEOUT_RETRY`).
+        why = ctx.read_text(VERIFIER_MISSING).strip()
+        verifier_missing = ("timed out twice" if "timed out twice" in why
+                            else "timed out" if "timed out" in why else "failed")
+        sections.append(
+            f"## {VERIFICATION} (the design-blind verifier)\n\nVERIFIER MISSING "
+            f"({verifier_missing}): the design-blind verifier left no report for this "
+            "attempt, so none of its checks ran. Weigh the change without them; an absent "
+            f"verification is not a passed one.\n\nWhy: {why[:800]}")
     record = ctx.read_json("check-record.json", {}) if ctx.exists("check-record.json") else {}
     status = record.get("status") if isinstance(record, dict) else None
     check = (f"## The check\n\n`{ctx.facts.get('check') or ''}` "
@@ -2635,7 +2651,9 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
     body = (
         "# QA synthesis\n\n"
         f"{len(DESIGN_QA_REVIEWS) - len(missing)} of {len(DESIGN_QA_REVIEWS)} reviews reported"
-        + (", and the design-blind verifier" if verification else "") + ".\n\n"
+        + (", and the design-blind verifier" if verification else
+           f"; the design-blind verifier is missing ({verifier_missing})" if verifier_missing
+           else "") + ".\n\n"
         + "\n\n".join(sections) + "\n\n"
         + check.rstrip() + "\n\n"
         + "## The diff stat\n\n```\n" + _diff_stat(ctx) + "\n```\n\n"

@@ -527,6 +527,55 @@ def _is_emission(answer: str) -> bool:
     return any(marker in answer for marker in ("===FILE:", "===EDIT:", "===DELETE:"))
 
 
+def apply_in_workspace(answer: str, workspace) -> bool:
+    """What a scripted builder does in its workspace: the emission's changes, made there.
+
+    A builder that works in a workspace (design mode's) changes files rather than
+    writing blocks, and the runtime derives the blocks from its diff. A test scripts it
+    with the blocks it used to emit: each whole file is written as given (text copied
+    from a truncated read included, as a builder would write it), each edit is applied to
+    the workspace's file as it is, each deletion made. A block a builder could not have
+    made in its workspace -- malformed, an edit whose text is not there, a path outside
+    it -- changes nothing, as a builder that made no change would. Returns whether
+    anything changed.
+    """
+    from pathlib import Path
+
+    from refactory_dsh import repo_change
+    from refactory_dsh.worktree import AttemptRefused
+
+    root = Path(str(workspace))
+    matches = list(repo_change.BLOCK.finditer(answer))
+    changed = False
+    for index, match in enumerate(matches):
+        kind, relative = match.group(1), Path(match.group(2))
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(answer)
+        body = answer[match.end():end].strip("\n")
+        target = root / relative
+        if kind == "DELETE":
+            if target.is_file():
+                target.unlink()
+                changed = True
+            continue
+        if kind == "FILE":
+            text = body + "\n"
+        else:
+            if not target.is_file():
+                continue
+            try:
+                text, _ = repo_change._edited(relative, target.read_text(),
+                                              repo_change._pairs(relative, body), str(relative))
+            except AttemptRefused:
+                continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_file() or target.read_text() != text:
+            target.write_text(text)
+            changed = True
+    return changed
+
+
 #: Design mode's two judges (`refactory_dsh.judges`), keyed by a line of each prompt.
 QA_JUDGE_MARK = "You are the QA judge."
 OVERWATCH_JUDGE_MARK = "Write `overwatch-verdict.json`"
@@ -645,10 +694,25 @@ class FakeModel:
         self.prompts: list[str] = []
         #: The directory each completion was told to run in; see the walker's `_ask_model`.
         self.workdirs: list[object] = []
+        #: Where each completion's agent worked: its workspace (`workspace.py`), or None
+        #: when it worked in the run directory.
+        self.cwds: list[object] = []
+        self.envs: list[object] = []
 
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, cwd: object = None,
+                 env: object = None, confine: bool = False) -> str:
         self.prompts.append(prompt)
         self.workdirs.append(workdir)
+        self.cwds.append(cwd)
+        self.envs.append(env)
+        answer = self._answer(prompt, workdir)
+        # A builder that works in a workspace makes its scripted emission's changes there;
+        # the runtime derives emit.txt from them (`apply_in_workspace`).
+        if cwd is not None and _is_emission(answer):
+            apply_in_workspace(answer, cwd)
+        return answer
+
+    def _answer(self, prompt: str, workdir: object) -> str:
         if EARLY_ASKS_JUDGE_MARK in prompt:
             queue = getattr(self, "early_asks", None)
             return queue.pop(0) if queue else early_asks_judgment(prompt=prompt)
@@ -791,10 +855,11 @@ class FakeModel:
 class StaleEmitModel(FakeModel):
     """The redo's emit worker: an emit.txt already in its run reads to it as the work done."""
 
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, cwd: object = None,
+                 env: object = None, confine: bool = False) -> str:
         from pathlib import Path
 
-        answer = super().complete(prompt, system=system, workdir=workdir)
+        answer = super().complete(prompt, system=system, workdir=workdir, cwd=cwd, env=env, confine=confine)
         if "Write the artifact `" in prompt and (Path(str(workdir)) / "emit.txt").exists():
             return "emit.txt already contains the correct content."
         return answer

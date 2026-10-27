@@ -48,10 +48,12 @@ EXTENSION_FIELDS: frozenset[str] = frozenset({
     "resource_role",
     "command_timeout_s",
     "dispatch_command",
+    "retry",
     "optional_targets",
     "split",
     "subgraph_entry",
     "subgraph_exit",
+    "workspace",
 })
 
 #: Whether networkx is available (needed by v1's validate_graph).

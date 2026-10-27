@@ -2559,24 +2559,8 @@ def _finding_description(finding: str) -> str:
 
 
 def _parse_verifier_rebuttals_full(ctx: Any) -> list[str]:
-    """Parse ## Verifier findings section from emit.txt for rebuttals."""
-    if not ctx.exists("emit.txt"):
-        return []
-    text = ctx.read_text("emit.txt")
-    lines = text.splitlines()
-    in_section = False
-    rebuttals: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("## Verifier findings"):
-            in_section = True
-            continue
-        if in_section:
-            if stripped.startswith("## ") or stripped.startswith("===FILE:"):
-                break
-            if "rebutted:" in stripped.lower() or "fixed" in stripped.lower():
-                rebuttals.append(stripped)
-    return rebuttals
+    """The builder's rebuttals of the verifier's findings (`verifier_rebuttals`)."""
+    return verifier_rebuttals(ctx)
 
 
 _FULL_REVIEW_FILE_TO_NODE = {
@@ -2660,11 +2644,52 @@ def classify_finding_sources(entries: list[dict[str, Any]], round_num: int,
     return entries
 
 
+#: Where a builder answers the verifier's findings: its own output file, since a builder
+#: that works in a workspace no longer writes emit.txt (`workspace.collect` derives it).
+VERIFIER_RESPONSE_FILE = "verifier-response.md"
+
 #: What a builder sent back for a core defect is told about the verifier's findings
-#: that ride along with it.
+#: that ride along with it, when it writes its own emission (create, edit, fast-create):
+#: its answers go in emit.txt.
 VERIFIER_RESPONSE = ("For each verifier finding, respond in emit.txt under "
                      "## Verifier findings with the finding, then: fixed, or "
                      "rebutted: <reason> <file:line>")
+
+#: The same, for a builder that works in a workspace (design_fast's), whose emit.txt is
+#: derived from its diff: its answers are its final message, saved as their own file.
+VERIFIER_RESPONSE_WORKSPACE = ("For each verifier finding, answer in your final message, which is saved as "
+                               f"{VERIFIER_RESPONSE_FILE}: the finding, then fixed, or "
+                               "rebutted: <reason> <file:line>")
+
+
+def verifier_rebuttals(ctx: Any) -> list[str]:
+    """The builder's answers to the verifier: its ``fixed`` and ``rebutted:`` lines.
+
+    Read from `VERIFIER_RESPONSE_FILE`, the builder's final message: the lines of its
+    ``## Verifier findings`` section when it has one, else every line. From that section
+    of emit.txt for a builder that still writes its emission itself.
+    """
+    if ctx.exists(VERIFIER_RESPONSE_FILE):
+        lines = ctx.read_text(VERIFIER_RESPONSE_FILE).splitlines()
+        sectioned = any(line.strip().startswith("## Verifier findings") for line in lines)
+    elif ctx.exists("emit.txt"):
+        lines = ctx.read_text("emit.txt").splitlines()
+        sectioned = True
+    else:
+        return []
+    in_section = not sectioned
+    rebuttals: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if sectioned and stripped.startswith("## Verifier findings"):
+            in_section = True
+            continue
+        if in_section:
+            if sectioned and (stripped.startswith("## ") or stripped.startswith("===FILE:")):
+                break
+            if "rebutted:" in stripped.lower() or "fixed" in stripped.lower():
+                rebuttals.append(stripped)
+    return rebuttals
 
 
 def record_verification_unresolved(ctx: Any, findings: list[str], rebuttals: list[str]) -> None:
