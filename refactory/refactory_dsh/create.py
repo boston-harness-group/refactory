@@ -761,7 +761,6 @@ def create(config: CreateConfig, client: Any = None, *, enable_recovery: bool = 
             project=project_root(),
             knobs=list(config.knobs),
             model_context=walker_context(client),
-            owner_argv=["-m", "refactory_dsh.create", "--resume", str(workdir)],
         )
 
         # Persist up-front verdicts as run-scoped ledger entries.

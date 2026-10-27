@@ -430,19 +430,21 @@ CONFIG = ".refactory/run-config.json"
 
 
 def _config_identity(artifacts: dict[str, str], world: World, runtime: str) -> dict[str, str]:
-    """`run-config.json` with the four fields that name the runtime that runs it -- the
-    runtime, the command that started it, the one that continues it and the owner a
-    continuation runs -- checked and set aside, as the status file's are. Every other
-    field (mode, project, knobs, model route, limits, fingerprints, driver) is compared."""
+    """`run-config.json` with the fields that name the runtime that runs it -- the
+    runtime, the command that started it, the one that continues it, and on the spine
+    the supervisor's owner fragment, which a walked run has no supervisor for -- checked
+    and set aside, as the status file's are. Every other field (mode, project, knobs,
+    model route, limits, fingerprints, driver) is compared."""
     config = json.loads(artifacts[CONFIG])
     expected = ({"runtime": "walker", "command": "python -m refactory_dsh.design",
                  "resume_command": f"python -m refactory_dsh.design --resume {world.run}",
-                 "owner_argv": ["-m", "refactory_dsh.design", "--resume", str(world.run)]}
+                 "owner_argv": None}
                 if runtime == "walker" else
                 {"runtime": "spine", "command": "refactory ceo",
                  "resume_command": f"refactory graph-control resume --run {world.run}",
                  "owner_argv": ["-m", "refactory_dsh.interactive", "default_pack/design"]})
     assert {key: config.get(key) for key in expected} == expected, config
+    assert runtime == "spine" or "owner_argv" not in config, config
     config.update({key: f"<{key.upper()}>" for key in expected})
     return {**artifacts, CONFIG: json.dumps(config)}
 

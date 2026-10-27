@@ -40,10 +40,11 @@ def prepare_run(
     3. Write ``run-config.json``, the same record on both runtimes (dm-160): the mode,
        the project, the run's knobs as its flags gave them, its model route, its
        resource limits, the configuration fingerprints a resume checks, and the
-       driver checkout (`pin.record_driver`). Four fields name the runtime that runs
+       driver checkout (`pin.record_driver`). Three fields name the runtime that runs
        it: ``runtime`` (``walker`` or ``spine``, as the status file says), the
-       ``command`` that started it, the ``resume_command`` that continues it, and the
-       ``owner_argv`` a process continuing it runs.
+       ``command`` that started it and the ``resume_command`` that continues it. A
+       spine run also records ``owner_argv``, the fragment its supervisor restarts the
+       owner with; a walked run has no supervisor and records none.
 
     Returns the installed graphs directory.
     """
@@ -85,7 +86,9 @@ def prepare_run(
         "runtime": runtime,
         "command": command,
         "resume_command": resume_command,
-        "owner_argv": list(owner_argv or []),
+        # The supervisor's fragment (`supervisor._build_owner_argv`), on the spine only: a
+        # walked run has no supervisor, and its main's `--resume` takes the run directory.
+        **({"owner_argv": list(owner_argv)} if owner_argv is not None else {}),
         "fast": fast,
         "project": str(Path(project).resolve()) if project else None,
         "knobs": list(knobs or []),
@@ -198,11 +201,11 @@ def resume_walked(workdir: Path, family: str, modes: tuple[type, type], *, model
     fast = bool(saved_run_config(workdir).get("fast"))
     full, quick = modes
     mode_class = quick if fast else full
+    mode_id = f"default_pack/{family}{'_fast' if fast else ''}"
     with ownership(workdir):
         if acknowledge_failure:
-            recovery.acknowledge_walked(workdir)
-        recovery.prepare_walked(workdir, f"default_pack/{family}{'_fast' if fast else ''}",
-                                acknowledge_failed=acknowledge_failure)
+            recovery.acknowledge_walked(workdir, mode_id)
+        recovery.prepare_walked(workdir, mode_id, acknowledge_failed=acknowledge_failure)
         run = mode_class.resume(workdir, model=model, resource_limits=resource_limits, enable_recovery=True,
                                 acknowledged=acknowledge_failure, **kwargs)
     return mode_class, run

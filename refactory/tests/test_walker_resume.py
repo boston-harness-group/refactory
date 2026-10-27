@@ -110,14 +110,14 @@ def test_an_acknowledged_failure_sets_aside_what_it_cannot_vouch_for_and_goes_on
 def test_an_acknowledgement_is_bound_to_its_boundary_and_spent_once(tmp_path, monkeypatch):
     run, _ = _stopped(tmp_path, monkeypatch)
     _rewrite(run, outcome="running")
-    assert recovery.acknowledge_walked(run)["checkpoint_status_before"] == "executing"
+    assert recovery.acknowledge_walked(run, "default_pack/design")["checkpoint_status_before"] == "executing"
     request = json.loads((run / recovery.RESUME_REQUEST).read_text())
     assert request == {"checkpoint_sha256": hashlib.sha256((run / PROGRESS).read_bytes()).hexdigest(),
                        "acknowledge_executing": True}
     recovery.prepare_walked(run, "default_pack/design")
     with pytest.raises(ValueError, match="last node outcome is unknown"):
         recovery.prepare_walked(run, "default_pack/design")
-    assert recovery.acknowledge_walked(run) is not None
+    assert recovery.acknowledge_walked(run, "default_pack/design") is not None
     _rewrite(run, steps=99)  # the boundary moved on: the old acknowledgement is for another
     with pytest.raises(ValueError, match="last node outcome is unknown"):
         recovery.prepare_walked(run, "default_pack/design")
@@ -213,13 +213,15 @@ def test_a_finished_run_resumes_to_its_result(tmp_path, monkeypatch, capsys):
 
 def test_the_walkers_run_config_is_the_spines_record(tmp_path, monkeypatch):
     """The same fields as the spine's (`interactive.prepare` writes them through the same
-    `prepare_run`), four of which name the runtime."""
+    `prepare_run`), three of which name the runtime. No supervisor restarts a walked run,
+    so it records no `owner_argv`, the fragment the supervisor completes
+    (`supervisor._build_owner_argv` appends `--workdir`, `--headless` and `--resume`)."""
     run, _ = _stopped(tmp_path, monkeypatch)
     config = json.loads((run / ".refactory/run-config.json").read_text())
-    assert set(config) == {"mode", "runtime", "command", "resume_command", "owner_argv", "fast", "project",
+    assert set(config) == {"mode", "runtime", "command", "resume_command", "fast", "project",
                            "knobs", "model_context", "resource_limits", "configuration_fingerprints", "driver"}
-    assert config["runtime"] == "walker" and config["owner_argv"] == ["-m", "refactory_dsh.design", "--resume",
-                                                                       str(run)]
+    assert config["runtime"] == "walker"
+    assert config["resume_command"] == f"python -m refactory_dsh.design --resume {run}"
     assert config["knobs"] == ["brief=a tool", "name=probe_tool", "check=python tool.py", "worktree=0"]
     assert config["configuration_fingerprints"] and config["driver"]["checkout"]
 
@@ -240,3 +242,60 @@ def test_the_console_resumes_with_only_what_it_was_given(monkeypatch, tmp_path):
     for verb in ("design", "create", "edit"):
         assert console.main([verb, "--resume", str(tmp_path), "--acknowledge-failure"]) == 0
     assert seen == [["--resume", str(tmp_path), "--acknowledge-failure"]] * 3
+
+
+def test_a_changed_run_configuration_is_refused(tmp_path, monkeypatch, capsys):
+    """`run-config.json` is fingerprinted with the declared files, as the spine's
+    checkpoint fingerprints it: a run whose configuration was edited is not resumed."""
+    run, _ = _stopped(tmp_path, monkeypatch)
+    path = run / ".refactory/run-config.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "knobs": ["brief=something else"]}))
+    capsys.readouterr()
+    assert _resume(run) == 2
+    assert ("input/output '.refactory/run-config.json' changed; dependent results need explicit invalidation"
+            in capsys.readouterr().err)
+
+
+def test_a_changed_checkout_does_not_strand_a_stopped_run(tmp_path, monkeypatch, capsys):
+    """The walker has no pin: a stopped run resumes on the code checked out now, as it did
+    before, rather than being refused once the driver checkout's source moves on. The
+    run's own prepared files are still held to their fingerprints
+    (`test_a_changed_configuration_is_refused`)."""
+    from refactory_dsh import design_ops
+
+    run, fake = _stopped(tmp_path, monkeypatch)
+    source = Path(design_ops.__file__)
+    config = json.loads((run / ".refactory/run-config.json").read_text())
+    assert str(source.resolve()) in config["configuration_fingerprints"], "a driver source file is pinned"
+    real_fingerprint = recovery._configuration_fingerprint
+
+    def moved_on(path):
+        found = real_fingerprint(path)
+        return "a later commit" if Path(path).resolve() == source.resolve() else found
+
+    monkeypatch.setattr(recovery, "_configuration_fingerprint", moved_on)
+    assert console.main(["steer", "--run", str(run), "--verdict", "gate_strategy=proceed"]) == 0
+    fake.answers = [DESIGN_DOC_ANSWER, *POST_GATE_PROCEED]
+    capsys.readouterr()
+    assert _resume(run) == 0, capsys.readouterr().err
+
+
+def test_an_acknowledgement_given_to_the_wrong_main_changes_nothing(tmp_path, monkeypatch, capsys):
+    """`create --resume --acknowledge-failure` on a design run is refused before anything
+    is set aside, and leaves no acknowledgement a later plain resume would take."""
+    from refactory_dsh import create
+
+    run, _ = _stopped(tmp_path, monkeypatch)
+    _rewrite(run, outcome="failed", error="gate_strategy: boom")
+    stray = next(name for name, value in _progress(run)["file_fingerprints"].items()
+                 if value is None and "." in Path(name).name)
+    (run / stray).parent.mkdir(parents=True, exist_ok=True)
+    (run / stray).write_text("half written\n")
+    capsys.readouterr()
+    assert create.main(["--resume", str(run), "--acknowledge-failure"]) == 2
+    assert "checkpoint belongs to a different run or mode" in capsys.readouterr().err
+    assert (run / stray).read_text() == "half written\n"
+    assert not (run / ".refactory/set-aside").exists()
+    assert not (run / recovery.RESUME_REQUEST).exists()
+    assert _resume(run) == 2
+    assert "checkpoint status is failed" in capsys.readouterr().err

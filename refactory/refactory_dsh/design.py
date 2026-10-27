@@ -1256,7 +1256,6 @@ def main(argv: list[str] | None = None) -> int:
                 project=project_root(),
                 knobs=knobs,
                 model_context=walker_context(client),
-                owner_argv=["-m", "refactory_dsh.design", "--resume", str(workdir)],
             )
 
             # Persist up-front verdicts as run-scoped ledger entries.

@@ -307,8 +307,10 @@ What the two share, rather than each doing its own way:
   knob a mode does not declare is refused by name on both.
 - **One run configuration** (dm-160). Both write `.refactory/run-config.json` through
   `run_preparation.prepare_run`: the mode, project, knobs, model route, resource
-  limits, configuration fingerprints and driver record. Four fields name the runtime
-  (`runtime`, `command`, `resume_command`, `owner_argv`).
+  limits, configuration fingerprints and driver record. Three fields name the runtime
+  (`runtime`, `command`, `resume_command`); a spine run also records `owner_argv`, the
+  fragment its supervisor restarts the owner with, and a walked run, which has no
+  supervisor, records none.
 - **One resume check** (dm-160). The walker's progress outcome is read as the spine's
   status (`recovery.WALKER_STATUSES`: pending→ready, completed→done, failed→failed,
   running or unknown→executing), and `recovery.resume_status_check` decides with the
@@ -316,7 +318,9 @@ What the two share, rather than each doing its own way:
   walked run is refused, as the spine's is, while a dispatched worker's outcome is
   unknown, when a declared input or output changed since its progress record
   fingerprinted it (at every boundary, as the spine's checkpoint does), or when its
-  prepared configuration changed. `--acknowledge-failure` on the walker's mains is the
+  prepared configuration changed. The driver checkout's own files are not held to their
+  launch fingerprints on either: the spine re-runs under its pin, and the walker, which
+  has none, goes on with the code checked out now, as it always has. `--acknowledge-failure` on the walker's mains is the
   spine's `graph-control acknowledge` plus `resume --acknowledge-failure` in one: it
   sets aside what the boundary cannot vouch for (`recovery.set_aside`, shared with
   graph-control), records the acknowledgement bound to the progress record, and the

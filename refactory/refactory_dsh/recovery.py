@@ -348,7 +348,22 @@ def set_aside(root: Path, *, fingerprints: dict[str, Any], markers: list[Path], 
     return directory, files
 
 
-def acknowledge_walked(root: Path) -> dict[str, Any] | None:
+def _walked_config(root: Path, mode_id: str) -> dict[str, Any]:
+    """The walked run's ``run-config.json``, refused when it is missing or belongs to
+    another mode: nothing about a run is acknowledged or resumed by the wrong main."""
+    config_path = Path(root) / '.refactory/run-config.json'
+    try:
+        config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    if not isinstance(config, dict) or not config:
+        raise ValueError('saved run has no configuration fingerprints; automatic recovery cannot verify its source')
+    if config.get('mode') != mode_id:
+        raise ValueError('checkpoint belongs to a different run or mode')
+    return config
+
+
+def acknowledge_walked(root: Path, mode_id: str) -> dict[str, Any] | None:
     """Acknowledge a walked run's failed or unknown boundary, as `graph-control
     acknowledge` acknowledges the spine's: set aside what it cannot vouch for, then
     record the acknowledgement bound to the progress record in ``resume-request.json``.
@@ -362,6 +377,9 @@ def acknowledge_walked(root: Path) -> dict[str, Any] | None:
     path = root / PROGRESS
     if not path.is_file():
         return None
+    # Before anything is moved: an acknowledgement given to the wrong main must leave
+    # the run as it was, with no request a later plain resume could use.
+    _walked_config(root, mode_id)
     payload = path.read_bytes()
     saved = json.loads(payload)
     status = walker_status(saved)
@@ -394,8 +412,9 @@ def prepare_walked(root: Path, mode_id: str, *, acknowledge_failed: bool = False
     the boundary is a known stopped one or acknowledged, no dispatched worker's outcome
     is unknown, no declared input or output changed since the progress record
     fingerprinted it, and the prepared configuration in ``run-config.json`` is
-    unchanged. Only the commands named differ: a walked run's resume is its main's
-    ``--resume``, given ``--acknowledge-failure``. The walker's ownership lock, which its
+    unchanged, but for the driver checkout's own files: the walker has no pin, and goes
+    on with the code checked out now. Only the commands named differ: a walked run's
+    resume is its main's ``--resume``, given ``--acknowledge-failure``. The walker's ownership lock, which its
     caller holds, is what refuses a live owner.
 
     The acknowledgement is consumed here: a later resume of the same boundary needs a
@@ -407,17 +426,18 @@ def prepare_walked(root: Path, mode_id: str, *, acknowledge_failed: bool = False
         return  # nothing to resume; `Mode.resume` says so by name
     payload = path.read_bytes()
     saved = json.loads(payload)
-    config_path = root / '.refactory/run-config.json'
-    config = json.loads(config_path.read_text()) if config_path.is_file() else {}
-    if not config:
-        raise ValueError('saved run has no configuration fingerprints; automatic recovery cannot verify its source')
-    if config.get('mode') != mode_id:
-        raise ValueError('checkpoint belongs to a different run or mode')
+    config = _walked_config(root, mode_id)
     command = _walker_acknowledge_command(config, root)
     resume_status_check(walker_status(saved),
                         acknowledge_failed=acknowledge_failed or _acknowledged(root, payload, 'acknowledge_failed'),
                         acknowledge_executing=_acknowledged(root, payload, 'acknowledge_executing'),
                         acknowledge_command=command, failed_command=command)
     _require_settled(root, saved, acknowledge_command=command)
-    check_configuration(root, config)
+    # The walker has no pin: it resumes on the checkout as it is now, as it always has.
+    # So the driver checkout's own files are not held to their launch fingerprints (the
+    # spine skips them too, and re-runs under its pin); the run's graphs, declarations
+    # and any project package outside the checkout still are.
+    from refactory_dsh.paths import REPO_ROOT
+    check_configuration(root, config,
+                        skip_driver_paths=(config.get('driver') or {}).get('checkout') or str(REPO_ROOT))
     (root / RESUME_REQUEST).unlink(missing_ok=True)

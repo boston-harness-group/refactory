@@ -305,3 +305,13 @@ def _patch_client(monkeypatch) -> None:
             return {}
 
     monkeypatch.setattr("refactory_dsh.model.DshModelClient", Client)
+
+
+def test_a_persons_own_knob_wins_over_the_one_a_flag_derives(monkeypatch, tmp_path):
+    """`--knob` comes last on both runtimes, so `--knob check_attempts=5` beats `--attempts 2`."""
+    monkeypatch.chdir(tmp_path)
+    flags = ["--attempts", "2", "--knob", "check_attempts=5"]
+    spine = _spine(monkeypatch, False, flags)
+    walker = _walker(monkeypatch, tmp_path, False, flags)
+    assert spine["knobs"][-2:] == walker["prepared"]["knobs"][-2:] == ["check_attempts=2", "check_attempts=5"]
+    assert walker["walked"]["knobs"]["check_attempts"] == 5

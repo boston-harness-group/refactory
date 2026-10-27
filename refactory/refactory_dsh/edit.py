@@ -129,7 +129,6 @@ def edit(config: EditConfig, client: Any = None, *, enable_recovery: bool = Fals
             project=project_root(),
             knobs=list(config.knobs),
             model_context=walker_context(client),
-            owner_argv=["-m", "refactory_dsh.edit", "--resume", str(run_workdir)],
         )
 
         # Persist up-front verdicts as run-scoped ledger entries.
