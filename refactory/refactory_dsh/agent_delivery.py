@@ -328,7 +328,7 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
             ' The python above is for nested dispatch only.'
             f' It imports refactory from {real_refactory_source},'
             ' so a refactory tool run with it writes there from any directory,'
-            ' and such a write is refused when that is the target.'
+            ' and such a write is refused.'
         )
         if is_output_only:
             instructions += (
@@ -487,6 +487,30 @@ def _pending(workdir: Path, node: str) -> Path:
     return workdir / ROOT / 'pending' / (hashlib.sha256(node.encode()).hexdigest() + '.json')
 
 
+def _watch_checkouts(workdir: Path) -> dict[str, Any]:
+    """Snapshot refactory's own checkouts that are not the run's target (dm-164).
+
+    Found from the directory this module, and so the contract's Python, imports
+    refactory from -- the contract's ``refactory_source`` -- and from the run's record.
+    """
+    return target_guard.watch_checkouts(workdir, target_guard.checkouts(workdir, Path(__file__).resolve().parent))
+
+
+def _save_checkout_baselines(directory: Path, checkouts: dict[str, Any] | None) -> None:
+    """Keep each watched checkout's uncommitted bytes for a lossless restore; a redo's replace the last."""
+    if (directory / 'checkouts').exists():
+        (directory / 'checkouts').rename(directory / f'checkouts-{uuid.uuid4().hex[:8]}')
+    for path, snapshot in (checkouts or {}).items():
+        if snapshot.get('changes'):
+            unsaved = target_guard.save_baseline(Path(path), snapshot['changes'],
+                                                 target_guard.checkout_baseline(directory, path))
+            if unsaved:
+                # A refusal leaves these where they are (`restore_target`), so say so now.
+                target_guard.warn(f"refactory's own checkout {path} has uncommitted files whose bytes could "
+                                  f"not be kept, so they cannot be put back if this node changes them: "
+                                  f"{target_guard._named(unsaved)}")
+
+
 def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bool = False,
           reads: list[str] | None = None, model_context: dict[str, Any] | None = None,
           workspace: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -512,7 +536,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         previous = json.loads(pending.read_text())
         if previous['writes'] != writes:
             raise ValueError(f'agent {node!r} output declarations changed during delivery')
-        if previous.get('target') is not None and _attempt_failed(workdir, previous):
+        if ((previous.get('target') is not None or previous.get('checkouts'))
+                and _attempt_failed(workdir, previous)):
             # A refused attempt keeps its record for the retry. Judging the retry against
             # the snapshot from before the first attempt would refuse it for changes the
             # person already saw, and chose to keep, every time.
@@ -523,6 +548,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
                 if baseline_dir.exists():
                     baseline_dir.rename(baseline_dir.with_name(f"target-baseline-{uuid.uuid4().hex[:8]}"))
                 target_guard.save_baseline(Path(rewatched['root']), rewatched['changes'], baseline_dir)
+            previous['checkouts'] = _watch_checkouts(workdir)
+            _save_checkout_baselines(workdir / ROOT / previous['id'], previous['checkouts'])
             pending.write_text(json.dumps(previous, indent=2) + '\n')
     ledger = Ledger(workdir)
     ledger_text = ledger.path.read_text() if ledger.exists() else ""
@@ -539,6 +566,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     # the target is attributed to that node alone, not to whatever ran since
     # prepare (#319, dm-159).
     target = previous.get('target') if previous is not None else target_guard.watch(workdir, node)
+    # Refactory's own checkout, when it is not the target: every agent node, any route (dm-164).
+    checkouts = previous.get('checkouts') if previous is not None else _watch_checkouts(workdir)
     identifier = previous['id'] if previous is not None else uuid.uuid4().hex
     directory = workdir / ROOT / identifier
     directory.mkdir(parents=True, exist_ok=True)
@@ -549,6 +578,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
             and (target.get('also') or 'also' not in target)):
         baseline_dir = directory / 'target-baseline'
         target_guard.save_baseline(Path(target['root']), target['changes'], baseline_dir)
+    if previous is None:
+        _save_checkout_baselines(directory, checkouts)
     contexts = list(previous.get('contexts', [])) if previous is not None else []
     context = {'at': _now(), 'entries': entries, 'execution': execution,
                'prompt': str(ROOT / identifier / f'context-{len(contexts)}.prompt.txt'),
@@ -563,10 +594,10 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     record = {'id': identifier, 'node': node,
               'started': previous['started'] if previous is not None else context['at'], 'writes': writes,
               'before': before, 'prompt': annotated, 'entries': entries, 'contexts': contexts,
-              'execution': execution, 'target': target, 'prompt_hash': prompt_hash,
+              'execution': execution, 'target': target, 'checkouts': checkouts, 'prompt_hash': prompt_hash,
               'receipt': str(ROOT / identifier / 'receipt.json')}
     (directory / 'receipt.json').write_text(json.dumps({
-        **{key: value for key, value in record.items() if key not in ('prompt', 'target')},
+        **{key: value for key, value in record.items() if key not in ('prompt', 'target', 'checkouts')},
         'status': 'pending', 'artifacts': before,
     }, indent=2) + '\n')
     pending.parent.mkdir(parents=True, exist_ok=True)
@@ -615,9 +646,16 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
     missing = [name for name in writes if name not in fresh]
     fail_changes, warn_changes = target_guard.strayed(
         workdir, record.get('target'))
+    # Refactory's own checkout, where it is not the target, is refused for every agent
+    # node, a run with or without a worktree alike; `target_guard.CHECKOUT_POLICY` says
+    # what happens to its files (dm-164).
+    checkout_changes = target_guard.strayed_checkouts(workdir, record.get('checkouts'))
+    # A launcher checkout that is also refactory's is refused below, not only warned about.
+    warn_changes = [change for change in warn_changes
+                    if not any(change.startswith(f"in {path}, ") for path in checkout_changes)]
     set_aside = (_set_aside(workdir, record,
                             [name for name in writes if name in fresh])
-                 if fail_changes else None)
+                 if fail_changes or checkout_changes else None)
     # Restore the target losslessly on refusal (dm-159).
     restored_info = None
     wt_path = None
@@ -637,8 +675,11 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
         restored_info = target_guard.restore_target(
             Path(target_before['root']), target_before,
             baseline_dir, workdir)
+    checkouts_settled = {path: target_guard.settle_checkout(path, record['checkouts'][path], directory, workdir,
+                                                             node=record['node'])
+                         for path in checkout_changes}
     all_changes = fail_changes + warn_changes
-    receipt = {key: value for key, value in record.items() if key not in ('prompt', 'target')}
+    receipt = {key: value for key, value in record.items() if key not in ('prompt', 'target', 'checkouts')}
     receipt['prompt_hash'] = record.get('prompt_hash')
     receipt['prompt_path'] = str(ROOT / record['id'] / 'prompt.txt')
     if sent_prompt_hash is not None:
@@ -649,11 +690,12 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
         receipt['sent_prompt_path'] = str(ROOT / record['id'] / 'sent-prompt.txt')
     if unresolved_keys:
         receipt['unresolved_keys'] = unresolved_keys
-    receipt.update(finished=_now(), status='failed' if missing or fail_changes else 'delivered',
+    receipt.update(finished=_now(), status='failed' if missing or fail_changes or checkout_changes else 'delivered',
                    delivery='context supplied; semantic compliance not verified',
                    artifacts=after, captured_final=captured,
                    final_response=str(ROOT / record['id'] / 'final-response.txt') if final_response is not None else None,
                    missing_or_unchanged=missing, **({'target_changes': all_changes} if all_changes else {}),
+                   **({'checkout_changes': checkout_changes} if checkout_changes else {}),
                    **({'set_aside': set_aside} if set_aside else {}))
     (directory / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     pending.unlink()
@@ -665,15 +707,22 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
             "check whether another session or person made them.")
     # Refused even when the declared output arrived: the output may be a summary of
     # edits that never pass through the step that writes the artifact.
-    if fail_changes:
+    if fail_changes or checkout_changes:
         tg_bl = target_guard._read(workdir)
-        is_oo = (restored_info is not None and tg_bl is not None
-                 and record['node'] in tg_bl.get('output_only', ()))
-        raise ValueError(target_guard.refusal(
-            record['node'], record['target']['root'],
-            fail_changes, writes, set_aside=set_aside,
-            worktree_path=wt_path, restored=restored_info,
-            is_output_only=is_oo))
+        reasons = []
+        if fail_changes:
+            is_oo = (restored_info is not None and tg_bl is not None
+                     and record['node'] in tg_bl.get('output_only', ()))
+            reasons.append(target_guard.refusal(
+                record['node'], record['target']['root'],
+                fail_changes, writes, set_aside=set_aside,
+                worktree_path=wt_path, restored=restored_info,
+                is_output_only=is_oo))
+        if checkout_changes:
+            reasons.append(target_guard.checkout_refusal(
+                record['node'], (tg_bl or {}).get('root'), checkout_changes, checkouts_settled,
+                set_aside=None if fail_changes else set_aside))
+        raise ValueError(' '.join(reasons))
     if missing:
         raise ValueError(
             f'agent {record["node"]!r} did not deliver required outputs: '

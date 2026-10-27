@@ -2145,8 +2145,8 @@ In a self-targeting run, a pull or commit in the driver checkout during an
 output-only node now refuses that node. The driver checkout must stay still
 while runs are in flight.
 
-The driver or pin checkout is not watched when it is not the target. That is
-tracker dm-164, a follow-up, not this run.
+The driver or pin checkout, when it is not the target, is watched too: see
+[Refactory's own checkout](#32-refactorys-own-checkout-dm-164).
 
 ### Behaviour changes
 
@@ -3275,3 +3275,79 @@ design mode, because nothing reads them; validation V7 refuses an unused knob.
 - `test_design_contract_extensions.py::test_prompt_contract_requires_only_summary_changes_and_tests`
 - `test_design_contract_extensions.py::test_an_optional_section_left_out_is_not_checked`
 - `spine.spec.ts`: "a scoped change skips the perspectives step, and no reviewer runs at either scale"
+
+
+## 32. Refactory's own checkout (dm-164)
+
+### The problem
+
+An agent that runs a refactory tool with the contract's Python imports refactory from
+the checkout that Python belongs to: the driver, or for a pinned run the pin. The tool
+writes there from any directory. On 2026-10-21 (b32l) an emit builder ran a generator
+that way and wrote into the driver checkout. The target guard watched only the target
+and the run's worktree, and gave the launcher checkout a warning, so nothing refused it.
+
+### The rule
+
+Every agent node of a run that recorded a target (`target_guard.record`) gets a
+snapshot of refactory's own checkout when that checkout is not the target, on every
+route (walker, the spine's worker bridge, the CEO subagent), because the snapshot is
+taken in `agent_delivery.begin`. A change there fails the node, and the message names
+the checkout.
+
+The snapshot holds the checkout's **tracked** files that differ from HEAD, and HEAD
+itself (`_checkout_state`, one `git status --porcelain=v2 --branch -uno`). Untracked
+files are not watched: an editor's swap or lock file, a log appended through an open
+handle, a new notes file and a copied tree were where false refusals came from, and a
+generator rewrites tracked files. The target guard's own snapshot is unchanged.
+
+`target_guard.checkouts` finds the checkouts:
+
+- **The contract's own import root.** `refactory_source`, the directory
+  `agent_delivery` is imported from, is what the contract's Python imports. On the
+  walker (`python -m refactory_dsh.design` and the outer loop) that is the driver. On
+  the spine, a pinned run's worker re-executes under the pin's Python
+  (`worker_node.main`), so it is the pin.
+- **The run's record.** `refactory ceo` records the driver in
+  `.refactory/run-config.json` (`pin.record_driver`), and a pinned resume adds
+  `pin_checkout` (`pin.resolve_pin`). The pin is watched when the run is pinned, the
+  driver otherwise.
+
+Only git checkouts count, and not a package a checkout ignores. A checkout that is,
+holds or lies in the target or the run's worktree is left to the target guard, so a run
+on refactory itself is unchanged. Nor is a checkout `REFACTORY_GUARD_UNWATCHED` names,
+but only inside a pytest test (`PYTEST_CURRENT_TEST`, which the processes a test starts
+inherit): the suite names its own checkout there (`tests/conftest.py`), so its scripted
+agents never snapshot it. Anywhere else the variable is ignored, with one
+`refactory: warning:` line, because it would switch the guard off without a word.
+
+### What a refusal does to the files
+
+One setting decides, `target_guard.CHECKOUT_POLICY`; the user chose `restore-if-clean` on 2026-10-27:
+
+| Policy | What it does |
+|---|---|
+| `restore` (A) | Puts the changed files back as they were before the node (`restore_target`); the changed copies are kept under the delivery's `checkouts/` folder |
+| `report` (B) | Leaves the files as they are and names them with what the node changed: a diff from their bytes at the node's start, not from HEAD |
+| `restore-if-clean` (C, the default) | Restores when the checkout had no uncommitted tracked change when the node began, and reports otherwise |
+
+Either way the person is told: a run warning, and a line in the checkout's own log,
+`~/.refactory/target-guard/<checkout hash>/restores.log`, naming the files and where
+their changed bytes went. A file whose pre-node bytes were not kept (larger than a
+baseline holds) is never moved away: `restore_target` decides how a path is given back
+before it moves anything, and leaves it in place when nothing can. A commit is not
+undone; the message prints the `git -C <checkout> reset --keep <head>` that undoes it.
+A checkout git cannot read after the node is named in a warning, not refused.
+
+### Cost
+
+One `git status` per snapshot, two per agent node: 54 ms median on the lab driver, of
+which git's index refresh is 44 ms, and about 11 ms in a fresh worktree.
+
+### Tests that hold it
+
+`test_target_guard_checkouts.py`: the walker and spine refusals of a driver and a pin
+write, a commit, a run on refactory itself, legitimate writes, untracked files, a file
+whose bytes were not kept, an unreadable checkout, a parallel stray, both retry routes,
+the launcher that is the driver, which checkouts are watched, the suite's own checkout,
+and each policy.

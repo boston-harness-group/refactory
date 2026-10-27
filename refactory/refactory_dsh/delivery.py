@@ -1827,7 +1827,11 @@ def _push(path: Path, slug: str, commit: str, branch: str, *, default: str, firs
     """
     if branch == default and not first:
         raise NotDelivered(f"{branch} is {slug}'s default branch, which delivery never pushes to")
-    _git(path, "push", "-q", _url(slug), f"{commit}:refs/heads/{branch}")
+    # Through a remote of its own with no fetch refspec: from git 2.56 a push to a URL
+    # that matches a configured remote also updates that remote's tracking refs, and
+    # delivery's only change to the person's repository is the run's own branch.
+    _git(path, "-c", f"remote.refactory-delivery.url={_url(slug)}", "push", "-q",
+         "refactory-delivery", f"{commit}:refs/heads/{branch}")
 
 
 def _verified(url: str, head: str) -> str:
