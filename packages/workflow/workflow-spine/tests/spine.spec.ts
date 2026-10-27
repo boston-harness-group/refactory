@@ -433,11 +433,16 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     s.verdict('H2', 'a')
     s.complete('A')
     s.complete('B')
-    s.verdict('X', 'reloop', 'again')
-    const completed = s.state().completed as string[]
+    // E, reachable from H but outside the cycle (it cannot reach X), completed before.
+    const saved = JSON.parse(JSON.stringify(s.checkpoint()))
+    saved.state.completed = [...saved.state.completed, 'E']
+    const t = new Spine(nested)
+    t.restore(saved)
+    t.verdict('X', 'reloop', 'again')
+    const completed = t.state().completed as string[]
     for (const n of ['H', 'H2', 'A', 'B']) expect(completed).not.toContain(n)
-    expect(completed).toContain('S')
-    expect(ids(s)).toEqual(['H'])
+    expect(completed).toEqual(expect.arrayContaining(['S', 'E']))
+    expect(ids(t)).toEqual(['H'])
   })
 
   /** One build round from emit to the gate after the first self-check's fork (b48a). */

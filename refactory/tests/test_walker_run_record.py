@@ -270,7 +270,8 @@ def test_a_reloop_goes_back_over_a_fork_and_its_branches(tmp_path):
 
 def test_a_reloop_forgets_the_verdict_of_a_gate_it_goes_back_over(tmp_path):
     """A gate between the reloop's target and its gate is un-completed and its verdict
-    dropped, as the spine drops it; the walk back stops at that gate's own edges."""
+    dropped, as the spine drops it, and so is every node of the cycle past that gate's own
+    edges (dm-226 review: a reloop reopens exactly its cycle on both runtimes)."""
     graph = nn.Graph()
     graph.add(nn.Node("pre", "op", call="loop_ops:fail_on_second_visit", writes=("visits.json",)))
     graph.add(nn.Node("inner", "gate", evaluator="loop_ops:always_proceed"))
@@ -285,7 +286,7 @@ def test_a_reloop_forgets_the_verdict_of_a_gate_it_goes_back_over(tmp_path):
     result = nn.execute(graph, tmp_path)
     assert result.exit_ok is False and "second visit" in (result.error or "")
     progress = _progress(tmp_path)
-    assert (progress["completed"], progress["gate_verdicts"]) == (["mid", "outer"], {"outer": "reloop"})
+    assert (progress["completed"], progress["gate_verdicts"]) == (["outer"], {"outer": "reloop"})
 
 
 class FailsSecondCall(FakeModel):
