@@ -3231,13 +3231,13 @@ agents never snapshot it. Anywhere else the variable is ignored, with one
 
 ### What a refusal does to the files
 
-One setting decides, `target_guard.CHECKOUT_POLICY`, and the person has not chosen yet:
+One setting decides, `target_guard.CHECKOUT_POLICY`; the user chose `restore-if-clean` on 2026-10-27:
 
 | Policy | What it does |
 |---|---|
-| `restore` (A, the default) | Puts the changed files back as they were before the node (`restore_target`); the changed copies are kept under the delivery's `checkouts/` folder |
+| `restore` (A) | Puts the changed files back as they were before the node (`restore_target`); the changed copies are kept under the delivery's `checkouts/` folder |
 | `report` (B) | Leaves the files as they are and names them with what the node changed: a diff from their bytes at the node's start, not from HEAD |
-| `restore-if-clean` (C) | Restores when the checkout had no uncommitted tracked change when the node began, and reports otherwise |
+| `restore-if-clean` (C, the default) | Restores when the checkout had no uncommitted tracked change when the node began, and reports otherwise |
 
 Either way the person is told: a run warning, and a line in the checkout's own log,
 `~/.refactory/target-guard/<checkout hash>/restores.log`, naming the files and where

@@ -27,6 +27,19 @@ from tests_support import FakeModel, git, git_repo, render
 #: A design run plans its delivery by asking gh for its login, so it asks the fake (dm-271).
 pytestmark = pytest.mark.usefixtures("fake_gh")
 
+@pytest.fixture(autouse=True)
+def _restore_policy(monkeypatch):
+    """The refusal tests below use the restore policy; the policy tests set their own."""
+    monkeypatch.setattr(target_guard, "CHECKOUT_POLICY", "restore")
+
+
+def test_the_default_policy_is_restore_if_clean():
+    source = Path(target_guard.__file__).read_text()
+    assert "
+CHECKOUT_POLICY = "restore-if-clean"
+" in source
+
+
 #: A refactory tool that, like the generators, writes beside the package it is imported from.
 GENERATOR = ("from pathlib import Path\n"
              "here = Path(__file__).resolve().parent\n"

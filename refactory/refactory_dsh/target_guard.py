@@ -837,15 +837,15 @@ def checkout_baseline(directory: Path, path: str | Path) -> Path:
 
 # ── what a refused checkout change does to the files: one decision, one place ──
 
-#: Restore policy for a refused change to refactory's own checkout. The person's
-#: decision is open (dm-164); each is tested:
+#: Restore policy for a refused change to refactory's own checkout; the user chose
+#: restore-if-clean on 2026-10-27 (dm-164). Each is tested:
 #:
-#: - ``"restore"`` (A, the default): put the changed files back as they were, keeping the
+#: - ``"restore"`` (A): put the changed files back as they were, keeping the
 #:   changed copies aside;
 #: - ``"report"`` (B): leave the files as they are, and name them with their diff;
-#: - ``"restore-if-clean"`` (C): restore when the checkout had no uncommitted tracked
+#: - ``"restore-if-clean"`` (C, the default): restore when the checkout had no uncommitted tracked
 #:   change when the node began, and report otherwise.
-CHECKOUT_POLICY = "restore"
+CHECKOUT_POLICY = "restore-if-clean"
 POLICIES = ("restore", "report", "restore-if-clean")
 
 #: How much of a reported change's diff one warning carries.
