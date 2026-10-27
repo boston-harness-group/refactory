@@ -542,11 +542,11 @@ def test_on_the_walker_a_correction_given_during_the_reviews_is_built_before_del
     class Steered(FakeModel):
         steered = False
 
-        def complete(self, prompt, *, system="", workdir=None):
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
             if T.EMIT in prompt and not self.steered:
                 self.steered = True
                 Ledger(run).note("correction", LATE)
-            return super().complete(prompt, system=system, workdir=workdir)
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
 
     second = render({"tool.py": "VERSION = 1\nNAME = 'tool'\nreconnects = 0\n"})
     first = render({"tool.py": "VERSION = 1\nNAME = 'tool'\n"})
