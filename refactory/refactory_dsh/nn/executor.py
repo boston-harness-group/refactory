@@ -1113,10 +1113,10 @@ class Executor:
         from refactory_dsh import workspace as workspaces
         from refactory_dsh.node_retry import deliver
 
-        def dispatch_workspace():
+        def dispatch_workspace(retrying: bool):
             return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
-                route=route, budget=self.ctx.budget,
+                route=route, budget=self.ctx.budget, fresh=retrying,
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 

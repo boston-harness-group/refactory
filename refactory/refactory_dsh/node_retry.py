@@ -175,11 +175,11 @@ def deliver(
     rule: dict[str, Any] | None,
     timeout_s: int | None,
     budget: Any = None,
-    workspace: Callable[[], AbstractContextManager[Any]] | None = None,
+    workspace: Callable[[bool], AbstractContextManager[Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
 
-    ``workspace()`` prepares and locks a workspace afresh for each attempt; without
+    ``workspace(retrying)`` prepares and locks a workspace afresh for each attempt; without
     it the node works in the run directory. ``ask(client, prompt, place)`` makes one
     completion, where ``place`` is that workspace or None. Collection happens before
     the delivery bracket closes. ``timeout_s`` is the node's own bound,
@@ -202,17 +202,18 @@ def deliver(
     attempt_client = client
     for index in range(tries):
         worktree = _worktree_state(workdir) if rule else None
-        started = time.monotonic()
+        started = None
         try:
-            with workspace() if workspace is not None else nullcontext(None) as place:
+            with workspace(index > 0) if workspace is not None else nullcontext(None) as place:
                 delivery = begin(workdir, node, prompt, list(writes), reads=list(reads),
                                  model_context=_context(attempt_client),
                                  **({"workspace": place.describe()} if place is not None else {}))
+                started = time.monotonic()
                 output = ask(attempt_client, delivery["prompt"], place)
                 if place is not None:
                     workspaces.collect(place, workdir, writes, final_response=output)
         except Exception as error:
-            if rule is None or failure_kind(error) not in rule["on"]:
+            if started is None or rule is None or failure_kind(error) not in rule["on"]:
                 raise
             ran.append(int(round(time.monotonic() - started)))
             spent = ", then ".join(f"{seconds}s" for seconds in ran)

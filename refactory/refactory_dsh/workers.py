@@ -322,9 +322,9 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if node.workspace:
             # The workspace is prepared before the session starts -- a clone, its
             # installs, generate and setup -- so the dispatch outlasts the session by
-            # that much more, or the spine stops a node still preparing.
+            # that much more per attempt, or the spine stops a retry still preparing.
             from refactory_dsh.workspace import preparation_budget_s
-            command_timeout_s += preparation_budget_s(
+            command_timeout_s += (1 + int(retry["times"]) if retry else 1) * preparation_budget_s(
                 node.workspace, workflow.knob_values.get('check_timeout_s'))
         node.dispatch_command = f'{sys.executable} -m refactory_dsh.worker_node ' + shlex.quote(str(spec))
         node.command_timeout_s = command_timeout_s

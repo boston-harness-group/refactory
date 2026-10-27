@@ -121,10 +121,10 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from refactory_dsh.node_retry import deliver
     runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
 
-    def dispatch_workspace():
+    def dispatch_workspace(retrying: bool):
         return workspaces.dispatched(
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
-            route=client.route(), runtime_root=Path(runtime_root) if runtime_root else None)
+            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None)
 
     def ask(attempt, sent, place):
         if place is None:

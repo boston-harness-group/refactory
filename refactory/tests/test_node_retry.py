@@ -551,8 +551,9 @@ def test_a_timed_out_attempt_that_changed_the_worktree_is_not_retried(tmp_path, 
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_each_retry_prepares_a_fresh_workspace_and_collects_its_outputs(tmp_path, runtime, monkeypatch):
-    # The first attempt leaves a report and another file in scratch. Only a new
+@pytest.mark.parametrize("kind", ["scratch", "clone"])
+def test_each_retry_prepares_a_fresh_workspace_and_collects_its_outputs(tmp_path, runtime, kind, monkeypatch):
+    # The first attempt leaves a report and another file in its workspace. Only a new
     # dispatched workspace lets the second session prove neither survived. Drive
     # both actual runtime entry points so a hook around the whole retry loop fails.
     monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
@@ -561,7 +562,12 @@ def test_each_retry_prepares_a_fresh_workspace_and_collects_its_outputs(tmp_path
         {"fresh": True, "write": {REPORT: "collected whole report"}, "answer": "summary"},
     ])
     workdir = tmp_path / "run"
-    ok, error = _run(runtime, workdir, _graph(_node(workspace="scratch", timeout_s=1)), dsh.client())
+    if kind == "clone":
+        from refactory_dsh import worktree
+        from tests_support import git_repo
+        workdir.mkdir()
+        worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
+    ok, error = _run(runtime, workdir, _graph(_node(workspace=kind, timeout_s=1)), dsh.client())
     assert ok, error
     assert dsh.calls == 2
     assert (workdir / REPORT).read_text() == "collected whole report"
@@ -570,3 +576,17 @@ def test_each_retry_prepares_a_fresh_workspace_and_collects_its_outputs(tmp_path
     receipts = [json.loads(p.read_text()) for p in
                 (workdir / ".refactory/agent-delivery").glob("*/receipt.json")]
     assert sorted(r["status"] for r in receipts) == ["delivered", "superseded"]
+
+
+@pytest.mark.parametrize("kind", ["scratch", "clone"])
+def test_workspace_preparation_is_reserved_for_every_retry_attempt(tmp_path, kind):
+    from refactory_dsh.workspace import preparation_budget_s
+
+    node = _node(workspace=kind, timeout_s=10)
+    graph = _graph(node)
+    client = Scripted(tmp_path / "dsh", []).client()
+    state = {"graph": graph.to_state(), "knobs": {}}
+    lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path / "run", client.context(),
+                                     lowering.node_declarations(state))
+    assert lowered.nodes[node.id].command_timeout_s == (
+        30 + NODE_DISPATCH_OVERHEAD_S + 2 * preparation_budget_s(node.workspace))

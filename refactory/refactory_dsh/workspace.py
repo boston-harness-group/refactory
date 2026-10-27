@@ -215,11 +215,14 @@ def _slug(node: str) -> str:
 @contextmanager
 def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any] | None = None,
                facts: dict[str, Any] | None = None, route: dict[str, Any] | None = None,
-               runtime_root: Path | None = None, budget: Any = None) -> Iterator[Workspace | None]:
+               runtime_root: Path | None = None, budget: Any = None,
+               fresh: bool = False) -> Iterator[Workspace | None]:
     """Prepare ``node``'s workspace for one dispatch and hold it until the block ends.
 
     Yields None when the node declares none, and the caller dispatches as before. The
     node's workspace is locked for the block: one dispatch at a time works in it.
+    ``fresh`` discards only this node's previous workspace under that same lock, for
+    a retry after a settled timeout. Ordinary dispatches retain their clone reuse.
     """
     declared = workspace_declaration(declaration)
     if declared is None:
@@ -231,6 +234,18 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
     with open(root / "lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
+            if fresh:
+                # Keep the lock inode: removing it would let another dispatch acquire
+                # a new lock while this one is still preparing the replacement.
+                for entry in root.iterdir():
+                    if entry.name == "lock":
+                        continue
+                    if entry.is_dir() and not entry.is_symlink():
+                        failures = _remove_tree(entry)
+                        if failures:
+                            raise WorkspaceError(f"cannot discard timed-out workspace {entry}: {failures[0]}")
+                    else:
+                        entry.unlink()
             yield prepare(workdir, node, declared, knobs=knobs, facts=facts, route=route,
                           runtime_root=runtime_root, budget=budget)
         finally:
