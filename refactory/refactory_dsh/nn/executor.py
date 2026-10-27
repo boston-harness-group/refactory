@@ -15,11 +15,13 @@ are.
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import multiprocessing
 import os
 import signal
 import sys
+import threading
 import time
 import traceback as traceback_mod
 from dataclasses import dataclass, field
@@ -474,6 +476,15 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
 
     # Restore parent's sys.path so resolve() finds the same modules.
     sys.path[:] = args_dict["sys_path"]
+    # Restore extended package __path__ entries (e.g. workspace packages added
+    # by registry.install_workspace after the forkserver started).
+    for _pkg_name, _pkg_path in args_dict.get("_package_paths", {}).items():
+        _pkg = sys.modules.get(_pkg_name)
+        if _pkg is not None and hasattr(_pkg, "__path__"):
+            for _p in _pkg_path:
+                if _p not in _pkg.__path__:
+                    _pkg.__path__.append(_p)
+    importlib.invalidate_caches()
 
     try:
         from refactory_dsh.run import build_op_context
@@ -514,6 +525,14 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             ctx.model = model
         elif model is not None:
             ctx.model = model
+
+        # Reconstruct the shared RunBudget from the forwarded ledger path so
+        # ctx.budget.record_usage / remaining_s / snapshot work identically
+        # in the child process (dm-173 / PC-3).
+        budget_ledger = args_dict.get("budget_ledger")
+        if budget_ledger:
+            from refactory_dsh.budgets import RunBudget
+            ctx.budget = RunBudget.from_path(budget_ledger)
 
         fn = resolve(args_dict["callable_target"])
         result = fn(ctx)
@@ -948,7 +967,35 @@ class Executor:
 
     # ── effective timeout ──────────────────────────────────────────────────
     def _effective_timeout(self, node: Node) -> float | None:
-        """Derive per-op timeout from the shared formula and clamp to budget."""
+        """Derive per-op timeout from the shared formula and clamp to budget.
+
+        When ``enable_recovery`` is ``True``, every op and fn gate receives a
+        deadline.  Classified ops (smoke, check, deliver) use the shared timeout
+        formula from ``lowering.command_timeout_s()``.  Unclassified ops receive
+        a 3600-second default, aligned with the TypeScript spine's production
+        configuration (``ceo.patch.yml`` ``commandTimeoutMs: 3600000``).  All
+        deadlines are clamped to the remaining run wall budget
+        (``budget.remaining_s()``) with a 1-second floor.
+
+        Enforcement uses two mechanisms depending on path:
+
+        - **Sequential path (main thread):** unclassified ops run in-process
+          with ``SIGALRM`` via ``_run_op_alarmed`` — near-zero overhead.
+        - **Fork branches and classified ops:** run in a forkserver child
+          process via ``_run_op_timed`` — the child and its process group are
+          killed (SIGTERM → 5 s grace → SIGKILL).
+
+        Both raise ``OpTimeoutError`` with the node id and deadline.
+        Timeouts are never silently retried.
+
+        Limitation: the in-process ``SIGALRM`` path does not kill subprocesses
+        spawned by the op itself.  Classified ops that spawn subprocesses
+        (e.g. check ops using ``sandbox.run_command``) use the child-process
+        path, which does kill them.  fcntl file locking under the child-process
+        path has higher latency than in-memory access; under extreme contention
+        lock wait time could approach the timeout; in practice contention is
+        minimal.
+        """
         if not self.enable_recovery:
             return None
         if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
@@ -957,15 +1004,42 @@ class Executor:
             state = {"knobs": {n: {"value": v} for n, v in self.ctx.knobs.items()}}
             raw = _cmd_timeout_s(node, state)
             if raw is None:
-                # Unclassified ops stay in-process, with the run's budget: an op that
-                # records usage through ctx.budget needs it, and a child gets none.
-                # Giving them DSH's 3600 s default needs budget forwarding (dm-173).
-                return None
+                # Unclassified ops get the spine's 3600 s default (dm-173).
+                # Budget forwarding (PC-2/PC-3) ensures ctx.budget works in
+                # the child process.
+                raw = 3600.0
             remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
             if remaining is not None:
                 raw = min(raw, remaining)
             return max(1.0, float(raw))
         return None
+
+    def _has_derived_timeout(self, node: Node) -> bool:
+        """True if the node has a timeout from the shared formula (classified op)."""
+        from refactory_dsh.lowering import command_timeout_s as _cmd_timeout_s
+        state = {"knobs": {n: {"value": v} for n, v in self.ctx.knobs.items()}}
+        return _cmd_timeout_s(node, state) is not None
+
+    # ── in-process signal-based op timeout ─────────────────────────────────
+    def _run_op_alarmed(self, callable_target: str, node: Node, timeout: float) -> Any:
+        """Run a callable in-process with ``SIGALRM``; main thread only.
+
+        Used for unclassified ops with the default 3600 s deadline so
+        the fast-path cost stays near zero.  Classified ops and fork-branch
+        ops go through ``_run_op_timed`` (child process) instead.
+        """
+        fn = resolve(callable_target)
+
+        def _alarm(signum: int, frame: Any) -> None:
+            raise OpTimeoutError(node.id, timeout)
+
+        old = signal.signal(signal.SIGALRM, _alarm)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            return fn(self.ctx)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
 
     # ── child-process-based op timeout ─────────────────────────────────────
     def _run_op_timed(self, callable_target: str, node: Node, timeout: float) -> Any:
@@ -995,6 +1069,15 @@ class Executor:
             "produces": tuple(node.produces),
             "model_info": model_info,
         }
+        # Forward the budget ledger path so the child process can open the
+        # same shared RunBudget file (dm-173 / PC-2).
+        if self.ctx.budget is not None:
+            args_dict["budget_ledger"] = str(self.ctx.budget.path)
+        # Forward extended package __path__ entries so the child can import
+        # workspace packages that were installed after the forkserver started.
+        _pkg = sys.modules.get("refactory_packages")
+        if _pkg is not None and hasattr(_pkg, "__path__"):
+            args_dict["_package_paths"] = {"refactory_packages": list(_pkg.__path__)}
 
         child = _forkserver_ctx.Process(target=_op_child_target, args=(child_conn, args_dict))
         child.start()
@@ -1093,7 +1176,13 @@ class Executor:
         if node.kind == "op":
             timeout = self._effective_timeout(node)
             if timeout is not None:
-                produced = self._run_op_timed(node.call, node, timeout)
+                if (not self._has_derived_timeout(node)
+                        and threading.current_thread() is threading.main_thread()):
+                    # Unclassified ops on the sequential path: in-process with
+                    # SIGALRM so the fast-path cost stays near zero (dm-173).
+                    produced = self._run_op_alarmed(node.call, node, timeout)
+                else:
+                    produced = self._run_op_timed(node.call, node, timeout)
             else:
                 fn = resolve(node.call)
                 produced = fn(self.ctx)
@@ -1208,7 +1297,11 @@ class Executor:
         else:
             timeout = self._effective_timeout(node)
             if timeout is not None:
-                verdict = self._run_op_timed(node.evaluator, node, timeout)
+                if (not self._has_derived_timeout(node)
+                        and threading.current_thread() is threading.main_thread()):
+                    verdict = self._run_op_alarmed(node.evaluator, node, timeout)
+                else:
+                    verdict = self._run_op_timed(node.evaluator, node, timeout)
             else:
                 fn: Callable[[RunContext], Any] = resolve(node.evaluator)
                 verdict = fn(self.ctx)

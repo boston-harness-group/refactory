@@ -95,3 +95,20 @@ def sandbox_sleep_op(ctx: Any) -> dict[str, Any]:
     pid_file = ctx.workdir / "_sleep_pid.txt"
     sandbox.run_command(f"echo $$ > {pid_file}; exec sleep 600", workdir=ctx.workdir, timeout_s=900)
     return {}
+
+
+def classified_succeed_op(ctx: Any) -> dict[str, Any]:
+    """An op that succeeds and produces check-like facts."""
+    return {"commit": "abc123", "files": [], "inherited_failures": [], "changed_functions": []}
+
+
+def budget_spend_op(ctx: Any) -> dict[str, Any]:
+    """Record usage through ctx.budget in a child process (dm-173 test)."""
+    ctx.budget.record_usage(str(ctx.workdir), 5)
+    return {"spent": True}
+
+
+def budget_snapshot_op(ctx: Any) -> dict[str, Any]:
+    """Return budget.snapshot() as a fact to prove it works in a child (dm-173 test)."""
+    snap = ctx.budget.snapshot()
+    return {"budget_snapshot": snap}
