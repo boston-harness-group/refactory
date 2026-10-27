@@ -93,36 +93,54 @@ def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
     person's word on the same design. ``approval`` names the latest gate_strategy verdict,
     so a design approved again is corrected from scratch. Each correction is
     ``(key, text)``, keyed by its ledger entry.
+
+    Only a verdict the run went on from counts once one has: answered at the gate, given
+    up front, or a steered answer the gate used (a ``used`` verdict-use). A steered answer
+    still pending after that -- a ``proceed`` or a stray ``reloop`` given mid-build -- is
+    not a new approval, and neither drops nor re-applies the corrections. Before any is
+    used, a pending answer stands for the approval it is about to be.
     """
     from refactory_dsh.steering import LEDGER, parse_entries
 
     ledger_path = Path(workdir) / LEDGER
     if not ledger_path.exists():
         return "", []
+    entries = parse_entries(ledger_path.read_text())
+    used = {_field(entry, "id") for entry in entries
+            if entry.get("kind") == "verdict-use" and _field(entry, "result") == "used"}
     corrections: list[tuple[str, str]] = []
     said: dict[str, int] = {}
     approval = ""
+    approved = False
     collecting = False
-    for entry in parse_entries(ledger_path.read_text()):
+    for entry in entries:
         kind = entry.get("kind", "")
         # A verdict for gate_strategy=proceed starts collecting; any other verdict stops it.
         if kind == "verdict":
-            gate_match = _re.search(r'^gate:\s*(.+)$', entry["text"], _re.MULTILINE)
-            verdict_match = _re.search(r'^verdict:\s*(.+)$', entry["text"], _re.MULTILINE)
-            if gate_match and verdict_match:
-                gate = gate_match.group(1).strip()
-                verdict = verdict_match.group(1).strip().lower()
+            gate, verdict = _field(entry, "gate"), _field(entry, "verdict").lower()
+            if gate and verdict:
+                # Its id, not its text: using the answer marks it consumed in place.
+                named = _field(entry, "id")
+                went_on = (_field(entry, "source") in ("upfront", "interactive")
+                           or (bool(named) and named in used))
+                if approved and not went_on:
+                    continue  # a pending answer after the run went on decides nothing
                 collecting = (gate == "gate_strategy" and verdict == "proceed")
                 if gate == "gate_strategy":
-                    # Its id, not its text: using the answer marks it consumed in place.
-                    named = _re.search(r'^id:\s*(.+)$', entry["text"], _re.MULTILINE)
-                    approval = named.group(1).strip() if named else str(entry.get("at"))
+                    approval = named or str(entry.get("at"))
+                    approved = approved or went_on
             continue
         if collecting and kind in ("correction", "constraint"):
             if entry.get("scope") == "product" and entry.get("source") == "user-relayed":
                 said[entry["text"]] = occurrence = said.get(entry["text"], 0) + 1
                 corrections.append((_entry_key(entry, occurrence), entry["text"]))
     return approval, corrections
+
+
+def _field(entry: dict[str, Any], name: str) -> str:
+    """One ``name: value`` line of a ledger decision entry, or ``""``."""
+    found = _re.search(rf'^{name}:\s*(.+)$', str(entry.get("text") or ""), _re.MULTILINE)
+    return found.group(1).strip() if found else ""
 
 
 def _picked(facts: dict[str, Any], approval: str) -> set[str]:
@@ -164,7 +182,10 @@ def late_correction_notice(run_root: Path) -> dict[str, Any] | None:
         spine = json.loads((root / ".refactory/spine-status.json").read_text())
     except (OSError, ValueError):
         spine = {}
-    reached = {str(node) for key in ("completed", "nodes") if isinstance(spine, dict)
+    # Where the run is: what it completed, what it is due at, and what is running. A
+    # send-back from delivery_gate reopens report and deliver, so they are not in it then.
+    reached = {str(node.get("id") if isinstance(node, dict) else node)
+               for key in ("completed", "nodes", "running_nodes") if isinstance(spine, dict)
                and isinstance(spine.get(key), list) for node in spine[key]}
     finished = isinstance(spine, dict) and (spine.get("status") == "done"
                                             or bool({"report", "deliver"} & reached))

@@ -472,7 +472,10 @@ and a gate's reloop reason) once, for any graph and any mode: under a heading
 "## Feedback for this visit" ahead of the prompt, unless the rendered prompt
 already says it as whole lines (a template that renders the gate's reason, as
 design mode's `emit` does; for a reason clipped to the runner's limit, its head
-and its tail). A note found only inside a longer line is not said. `agent_delivery.with_feedback` decides, on both runtimes: the
+and its tail). A note found only inside a longer line is not said. In design mode
+a send-back reloops to `pick_corrections` (dm-226), so the gate's reason is that
+gate's visit feedback, cleared when it decides; emit gets the reason only through
+the facts its prompt renders (`validation`, `qa_gate`, `overwatch_review`). `agent_delivery.with_feedback` decides, on both runtimes: the
 walker hands it its gate's reason for the reloop target's next visit. The
 feedback sidecar is written atomically by
 the spine's `drain()` and read by the worker node before dispatch. It is

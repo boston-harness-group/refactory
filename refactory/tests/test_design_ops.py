@@ -472,6 +472,9 @@ def test_a_design_approved_again_has_every_correction_applied_again(tmp_path):
 
 @pytest.mark.parametrize("where, applies", [({"status": "executing", "nodes": ["qa_director"]}, True),
                                             ({"status": "executing", "nodes": ["deliver"]}, False),
+                                            ({"status": "executing", "nodes": [],
+                                              "running_nodes": [{"id": "deliver", "kind": "operation"}]},
+                                             False),
                                             ({"status": "done"}, False)])
 def test_steer_says_what_becomes_of_a_correction_given_after_the_gate(tmp_path, where, applies):
     """Steer no longer answers a bare "Note recorded" for a correction the gate's pick has
@@ -602,3 +605,119 @@ def test_on_the_spine_steer_then_the_overwatch_gate_then_pick_corrections_apply_
                              monkeypatch)
     assert code == 0 and T._label(out) == "proceed", err
     assert T._facts(run)["gate_corrections"] == f"- {LATE}"
+
+
+# ── a send-back reopens exactly its cycle, on both runtimes (dm-226 review) ──
+
+
+def _nested():
+    """``S → H{proceed: H2, skip: B, reloop: S}``, ``H2{a: A, b: B}``, ``A → B → X{reloop: H,
+    proceed: E}``: a send-back from X onto the gate H, which routes through another gate."""
+    from refactory_dsh import nn
+
+    graph = nn.Graph()
+    for node in ("S", "A", "B", "E"):
+        graph.add(nn.Node(node, "op", call="m:f"))
+    for gate in ("H", "H2", "X"):
+        graph.add(nn.Node(gate, "gate", evaluator="m:g", max_iterations=3))
+    for source, target, condition in [("S", "H", None), ("H", "H2", "proceed"), ("H", "B", "skip"),
+                                      ("H", "S", "reloop"), ("H2", "A", "a"), ("H2", "B", "b"),
+                                      ("A", "B", None), ("B", "X", None), ("X", "H", "reloop"),
+                                      ("X", "E", "proceed")]:
+        graph.connect(source, target, condition)
+    return graph
+
+
+def _reopened(graph, completed: list[str], gate: str, target: str) -> list[str]:
+    from refactory_dsh.nn.record import RunRecord
+
+    record = RunRecord(completed=list(completed))
+    record.gate(graph, gate, "reloop", target=target, retry=True, reason="why")
+    return [node for node in completed if node not in record.completed]
+
+
+def test_on_the_walker_a_send_back_reopens_the_cycle_through_nested_gates_and_nothing_else():
+    """A, behind the head gate's route through H2, is reopened; S, which the head gate's
+    own retry reaches, and E, outside the cycle, are not."""
+    graph = _nested()
+    done = ["S", "H", "H2", "A", "B", "E"]
+    assert sorted(_reopened(graph, done, "X", "H")) == ["A", "B", "H", "H2"]
+
+
+def test_on_the_walker_design_send_backs_reopen_the_whole_round_and_only_it():
+    from refactory_dsh.design import DesignMode
+
+    graph = DesignMode().build()
+    before = ["gate_strategy", "pick_corrections", "apply_corrections", "emit", "materialise",
+              "prepare_check", "fork_qa", "code_reviewer", "check", "join_qa", "gate_check",
+              "synthesize_qa", "qa_judge", "gate_qa", "audit_corrections", "overwatch",
+              "gate_overwatch", "report", "deliver"]
+    after_check = _reopened(graph, before, "gate_check", "pick_corrections")
+    assert {"fork_qa", "code_reviewer", "check", "join_qa", "emit"} <= set(after_check)
+    assert not {"gate_strategy", "report", "deliver", "synthesize_qa"} & set(after_check)
+    after_delivery = _reopened(graph, before, "delivery_gate", "pick_corrections")
+    assert {"report", "deliver", "emit", "gate_overwatch"} <= set(after_delivery)
+    assert "gate_strategy" not in after_delivery
+
+
+def test_a_gates_visit_feedback_is_spent_when_it_decides_on_the_walker():
+    from refactory_dsh.nn.record import RunRecord
+
+    graph = _nested()
+    record = RunRecord(completed=["S", "H", "H2", "A", "B"])
+    record.gate(graph, "X", "reloop", target="H", retry=True, reason="sent back")
+    assert record.feedback == {"H": "sent back"}
+    record.gate(graph, "H", "skip", target="B", retry=False)
+    assert record.feedback == {}
+
+
+def test_a_pending_verdict_after_the_approval_neither_unapplies_nor_drops_corrections(tmp_path):
+    """A steered gate_strategy answer given mid-build, never used by the gate, is not a new
+    approval: proceed does not re-apply the corrections (or overwrite the backup), and a
+    stray reloop does not drop the ones given after it."""
+    from refactory_dsh.design_ops import pick_gate_corrections, unapplied_corrections
+    from refactory_dsh.steering import Ledger
+
+    run, ctx = _approved(tmp_path, "use websockets")
+    (run / "design.md").write_text("# corrected\n")
+    Ledger(run).verdict("gate_strategy", "proceed")
+    assert unapplied_corrections(run, ctx.facts) == []
+    assert pick_gate_corrections(ctx) == "skip"
+    assert (run / "design.md.pre_corrections").read_text() == "# placeholder\n"
+    Ledger(run).verdict("gate_strategy", "reloop")
+    Ledger(run).note("correction", "log every reconnect")
+    assert unapplied_corrections(run, ctx.facts) == ["log every reconnect"]
+    assert pick_gate_corrections(ctx) == "proceed"
+    assert ctx.facts["gate_corrections"] == "- use websockets\n\n- log every reconnect"
+
+
+def test_the_same_correction_given_again_is_applied_again(tmp_path):
+    from refactory_dsh.design_ops import pick_gate_corrections
+    from refactory_dsh.steering import Ledger
+
+    run, ctx = _approved(tmp_path, "use websockets")
+    Ledger(run).note("correction", "use websockets")
+    assert pick_gate_corrections(ctx) == "proceed"
+    assert ctx.facts["gate_corrections"] == "- use websockets\n\n- use websockets"
+
+
+@pytest.mark.usefixtures("fake_gh")
+def test_steer_on_a_finished_walker_run_says_it_will_not_build_the_correction(tmp_path, monkeypatch):
+    """The walker records where it stands as the spine does, so steer answers alike."""
+    import test_self_check as T
+    from refactory_dsh import readable
+    from refactory_dsh.console import _steer
+    from refactory_dsh.steering import Ledger
+    from tests_support import FakeModel, render
+
+    T._Chunks(monkeypatch, fails=set())
+    run = tmp_path / "run"
+    run.mkdir()
+    Ledger.seed(run, "a tool")
+    Ledger(run).verdict("gate_strategy", "proceed", approval=True)
+    model = FakeModel(T._answers(render({"tool.py": "VERSION = 1\nNAME = 'tool'\n"})))
+    assert T._design(run, model, T._target(tmp_path / "repo", T.PINNED)).exit_ok
+    payload = _steer(run, kind="correction", note=LATE)
+    payload["recorded_note"], payload["recorded_kind"] = LATE, "correction"
+    assert payload["late_correction"]["applied"] is False
+    assert "will not build this correction" in readable.format_steer(payload)

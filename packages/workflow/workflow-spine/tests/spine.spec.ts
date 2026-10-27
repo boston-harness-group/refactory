@@ -390,6 +390,56 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     expect(ids(s)).toEqual(['emit'])
   })
 
+  it('a gate_check send-back reopens the whole round, and a delivery_gate one the report and delivery', () => {
+    const s = new Spine(graph)
+    advance(s, 'fork_qa', 'proceed')
+    s.complete('fork_qa')
+    for (const n of ['check', 'health_checker', 'code_reviewer', 'qa_director', 'verifier']) s.complete(n)
+    s.complete('join_qa')
+    s.verdict('gate_check', 'reloop', 'the check failed')
+    const reopened = s.state().completed as string[]
+    for (const n of ['fork_qa', 'code_reviewer', 'check', 'join_qa', 'emit', 'materialise']) {
+      expect(reopened).not.toContain(n)
+    }
+    expect(reopened).toContain('gate_strategy')
+    // The send-back's reason is pick_corrections' visit feedback until it decides.
+    expect(s.state().feedback).toEqual(expect.objectContaining({ pick_corrections: 'the check failed' }))
+    s.verdict('pick_corrections', 'skip')
+    expect(s.state().feedback).not.toHaveProperty('pick_corrections')
+
+    const d = new Spine(graph)
+    advance(d, 'delivery_gate', 'proceed')
+    expect(d.state().completed).toEqual(expect.arrayContaining(['report', 'deliver']))
+    d.verdict('delivery_gate', 'reloop', 'conflicts with main')
+    expect(d.state().completed).not.toContain('report')
+    expect(d.state().completed).not.toContain('deliver')
+    expect(d.state().completed).toContain('gate_strategy')
+  })
+
+  it('a send-back onto a gate reopens its cycle through nested gates, but not what its own retry reaches', () => {
+    const nested = {
+      name: 'nested', start_node: 'S',
+      nodes: Object.fromEntries([
+        ...['S', 'A', 'B', 'E'].map(id => [id, { _type: 'FnNode', id, command: 'true' }]),
+        ...['H', 'H2', 'X'].map(id => [id, { _type: 'GateNode', id, evaluator_type: 'fn', evaluator_command: 'true', max_iterations: 3 }]),
+      ]),
+      edges: [['S', 'H'], ['H', 'H2', 'proceed'], ['H', 'B', 'skip'], ['H', 'S', 'reloop'], ['H2', 'A', 'a'],
+        ['H2', 'B', 'b'], ['A', 'B'], ['B', 'X'], ['X', 'H', 'reloop'], ['X', 'E', 'proceed']]
+        .map(([source, target, condition]) => ({ source, target, ...(condition ? { condition } : {}) })),
+    } as unknown as WorkflowGraph
+    const s = new Spine(nested)
+    s.complete('S')
+    s.verdict('H', 'proceed')
+    s.verdict('H2', 'a')
+    s.complete('A')
+    s.complete('B')
+    s.verdict('X', 'reloop', 'again')
+    const completed = s.state().completed as string[]
+    for (const n of ['H', 'H2', 'A', 'B']) expect(completed).not.toContain(n)
+    expect(completed).toContain('S')
+    expect(ids(s)).toEqual(['H'])
+  })
+
   /** One build round from emit to the gate after the first self-check's fork (b48a). */
   function firstSelfCheck(s: Spine): void {
     s.complete('emit')
