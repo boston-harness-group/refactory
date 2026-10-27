@@ -81,6 +81,10 @@ class AgentNode(Node):
     #: is no retry, and is left out of the serialized graph, so a graph that declares
     #: none is byte-identical to one lowered before the field existed.
     retry: dict[str, Any] | None = None
+    #: Where the node works (`nn.graph.workspace_declaration`'s canonical form). None is
+    #: the run directory, and is left out of the serialized graph, so a graph that
+    #: declares no workspace is byte-identical to one lowered before the field existed.
+    workspace: dict[str, str] | None = None
 
 
 class FnNode(Node):
@@ -213,6 +217,8 @@ class Workflow(BaseModel):
                 d.pop("dispatch_command", None)
             if "retry" in d and d["retry"] is None:
                 d.pop("retry")
+            if "workspace" in d and d["workspace"] is None:
+                d.pop("workspace")
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

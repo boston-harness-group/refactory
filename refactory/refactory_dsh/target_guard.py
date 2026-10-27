@@ -8,11 +8,14 @@ through its declared output (#319). A run with its own worktree (`worktree.py`, 
 never works in the target, so this module is its backstop rather than its isolation:
 the baseline is recorded at `prepare`, and every agent node of a worktree run fails
 when it changes the target while it ran (dm-159). An output-only agent also fails
-when the run's own worktree changed.
+when the run's own worktree changed. Every agent node of a recorded run also fails
+when it changes refactory's own checkout -- the driver, or the run's pin -- where that
+is not the target (:func:`checkouts`, dm-164).
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -475,13 +478,47 @@ def _read_stray_record(root: Path) -> dict[str, Any]:
         return {}
 
 
+def _restore_plan(root: Path, path: str, before: dict[str, Any],
+                  baseline_dir: Path) -> tuple[str, Any] | None:
+    """How ``path`` gets its pre-node content back, or None when nothing can give it back.
+
+    ``("symlink", target)``, ``("copy", saved file)``, ``("git", (ls-tree line, content))``,
+    or ``("absent", None)`` when the path did not exist before the node, so moving it
+    aside is the restore. Decided before anything is moved, so a file whose earlier
+    bytes were never kept is left where it is rather than moved away for good.
+    """
+    symlink_marker = baseline_dir / (path + ".symlink.json")
+    if symlink_marker.exists():
+        return "symlink", json.loads(symlink_marker.read_text()).get("target", "")
+    if (baseline_dir / path).exists():
+        return "copy", baseline_dir / path
+    pre_digest = before.get("changes", {}).get(path, "-")
+    if before.get("git") and path not in before.get("changes", {}):
+        # Not in git status before the node: a clean tracked file, or no file at all.
+        prefix = ""
+        top = Path((_git(root, "rev-parse", "--show-toplevel") or str(root)).strip()).resolve()
+        if root.resolve() != top:
+            prefix = str(root.resolve().relative_to(top)) + "/"
+        ls = _git(root, "ls-tree", "HEAD", f"{prefix}{path}")
+        if not ls:
+            return "absent", None
+        content = _git(root, "show", f"HEAD:{prefix}{path}")
+        return ("git", (ls, content)) if content is not None else None
+    if pre_digest == "-":
+        return "absent", None
+    return None
+
+
 def restore_target(root: Path, before: dict[str, Any],
-                   baseline_dir: Path, workdir: Path) -> dict[str, Any]:
+                   baseline_dir: Path, workdir: Path, *,
+                   now: dict[str, Any] | None = None) -> dict[str, Any]:
     """Restore the target to its pre-node state on refusal.
 
     Moves current target files to ``target-set-aside/``, writes pre-node bytes back.
     Uses a per-target stray record under ``fcntl`` lock to prevent parallel agents
-    from undoing each other's restores (dm-159).
+    from undoing each other's restores (dm-159). ``now`` is the state to compare with
+    ``before``, read the way ``before`` was; by default, :func:`state`. A file whose
+    pre-node content cannot be put back is left in place and named in ``errors``.
 
     Returns ``{'restored': [paths], 'set_aside': str, 'errors': [msgs], 'head_moved': bool}``.
     """
@@ -496,7 +533,7 @@ def restore_target(root: Path, before: dict[str, Any],
         result["errors"].append("too many paths to compare")
         return result
 
-    after = state(root, exclude=(Path(workdir),))
+    after = now if now is not None else state(root, exclude=(Path(workdir),))
     if after.get("changes") is None:
         result["errors"].append("too many paths to compare")
         return result
@@ -536,78 +573,53 @@ def restore_target(root: Path, before: dict[str, Any],
         for path in effective:
             try:
                 full = root / path
-                # (a) Set aside the current file
-                if full.exists() or full.is_symlink():
-                    if full.is_dir() and not full.is_symlink():
-                        result["errors"].append(f"{path} (directory, not restorable)")
+                if full.is_dir() and not full.is_symlink():
+                    result["errors"].append(f"{path} (directory, not restorable)")
+                    continue
+                if path in undone:
+                    # Another node's refusal restored this path; what it held before is
+                    # that refusal's to give back, and only an absent one is given back here.
+                    plan = ("absent", None) if undone[path] == "-" else None
+                    if plan is None:
+                        result["errors"].append(f"{path} (another node's refusal restored it; left as it is)")
                         continue
+                else:
+                    plan = _restore_plan(root, path, before, baseline_dir)
+                    if plan is None:
+                        result["errors"].append(f"{path} (its content before the node was not kept; "
+                                                "left as it is)")
+                        continue
+                # (a) Set aside the current file, now that it can be given back.
+                if full.exists() or full.is_symlink():
                     dest = set_aside_dir / path
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     full.rename(dest)
-
-                # Record the stray
-                pre_digest = before.get("changes", {}).get(path, "-")
                 strays[path] = {
                     "digest": after.get("changes", {}).get(path, "-"),
-                    "pre_digest": pre_digest,
+                    "pre_digest": before.get("changes", {}).get(path, "-"),
                     "at": datetime.now(timezone.utc).isoformat(),
                 }
-
-                if path in undone:
-                    if undone[path] == "-":
-                        result["restored"].append(path)
-                    else:
-                        result["errors"].append(f"{path} (another node's refusal restored it)")
-                    continue
-
                 # (b) Restore pre-node content
-                symlink_marker = baseline_dir / (path + ".symlink.json")
-                baseline_copy = baseline_dir / path
-
-                if symlink_marker.exists():
-                    target_link = json.loads(symlink_marker.read_text()).get("target", "")
+                kind, value = plan
+                if kind == "symlink":
                     full.parent.mkdir(parents=True, exist_ok=True)
-                    os.symlink(target_link, full)
-                    result["restored"].append(path)
-                elif baseline_copy.exists():
+                    os.symlink(value, full)
+                elif kind == "copy":
                     full.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(baseline_copy, full)
-                    result["restored"].append(path)
-                elif before.get("git") and path not in before.get("changes", {}):
-                    # Path was not in git status before the node: either a clean
-                    # tracked file, or a path that did not exist at all.
-                    prefix = ""
-                    top_str = (_git(root, "rev-parse", "--show-toplevel") or str(root)).strip()
-                    top = Path(top_str).resolve()
-                    if root.resolve() != top:
-                        prefix = str(root.resolve().relative_to(top)) + "/"
-                    ls = _git(root, "ls-tree", "HEAD", f"{prefix}{path}")
-                    if not ls:
-                        # Not tracked in git: the file did not exist before the
-                        # node.  The set-aside in (a) already removed it.
-                        result["restored"].append(path)
+                    shutil.copy2(value, full)
+                elif kind == "git":
+                    ls, content = value
+                    full.parent.mkdir(parents=True, exist_ok=True)
+                    if ls.startswith("120000"):
+                        os.symlink(content, full)
                     else:
-                        # Clean tracked file: restore from git.
-                        content = _git(root, "show", f"HEAD:{prefix}{path}")
-                        if content is not None:
-                            full.parent.mkdir(parents=True, exist_ok=True)
-                            if ls.startswith("120000"):
-                                os.symlink(content, full)
-                            else:
-                                full.write_bytes(content.encode("utf-8", "surrogateescape"))
-                            # Restore mode from git ls-tree
-                            if ls.startswith("100755"):
-                                full.chmod(0o755)
-                            elif ls.startswith("100644"):
-                                full.chmod(0o644)
-                            result["restored"].append(path)
-                        else:
-                            result["errors"].append(f"{path} (git show failed)")
-                elif pre_digest == "-":
-                    # Path did not exist before the node; set-aside is the restore.
-                    result["restored"].append(path)
-                else:
-                    result["errors"].append(f"{path} (no baseline copy)")
+                        full.write_bytes(content.encode("utf-8", "surrogateescape"))
+                    # Restore mode from git ls-tree
+                    if ls.startswith("100755"):
+                        full.chmod(0o755)
+                    elif ls.startswith("100644"):
+                        full.chmod(0o644)
+                result["restored"].append(path)
             except OSError as error:
                 result["errors"].append(f"{path} ({error})")
 
@@ -619,3 +631,348 @@ def restore_target(root: Path, before: dict[str, Any],
         lock_fd.close()
 
     return result
+
+
+# ── refactory's own checkouts (dm-164) ───────────────────────────────────────
+#
+# An agent that runs a refactory tool with the contract's Python imports refactory from
+# the checkout that Python belongs to -- the driver the run launched from, or the pin it
+# moved to when the driver moved -- and the tool writes there from any directory: an emit
+# builder ran a generator that way and wrote into the driver (b32l, 2026-10-21). When that
+# checkout is not the run's target, nothing above watches it, so every agent node of a
+# recorded run gets a snapshot of its tracked files, and a change there is refused; what
+# happens to the files is :data:`CHECKOUT_POLICY`'s.
+
+#: Where a run's launch is recorded: `refactory ceo` writes the ``driver`` (`pin.record_driver`)
+#: and a pinned resume adds its ``pin_checkout`` (`pin.resolve_pin`).
+RUN_CONFIG = Path(".refactory/run-config.json")
+
+#: Checkouts never watched as refactory's own, separated like PATH, honoured only inside a
+#: pytest test (``PYTEST_CURRENT_TEST``, which the processes a test starts inherit and a
+#: person's shell never has). The test suite names its own checkout here
+#: (`tests/conftest.py`): its tests dispatch thousands of scripted agents, and a person
+#: editing that checkout while they run is not a stray write. Anywhere else the variable
+#: would switch the guard off without a word, so it is ignored, with a warning.
+UNWATCHED_ENV = "REFACTORY_GUARD_UNWATCHED"
+
+#: Whether this process has said it ignores :data:`UNWATCHED_ENV`; once is enough.
+_IGNORED_UNWATCHED: list[bool] = []
+
+
+def _unwatched() -> set[Path]:
+    """The checkouts :data:`UNWATCHED_ENV` names, when a test is running; otherwise none."""
+    named = [path for path in os.environ.get(UNWATCHED_ENV, "").split(os.pathsep) if path]
+    if not named:
+        return set()
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        if not _IGNORED_UNWATCHED:
+            _IGNORED_UNWATCHED.append(True)
+            print(f"refactory: warning: {UNWATCHED_ENV} is set, but it is only for refactory's own test "
+                  "suite, so it is ignored: refactory's own checkout is watched as usual", file=sys.stderr)
+        return set()
+    return {Path(path).expanduser().resolve() for path in named}
+
+
+def _overlaps(one: Path, other: Path) -> bool:
+    return one == other or one.is_relative_to(other) or other.is_relative_to(one)
+
+
+def _recorded_driver(workdir: Path) -> Path | None:
+    """The checkout the run's record says its workers import refactory from: the pin, else the driver."""
+    try:
+        driver = json.loads((Path(workdir) / RUN_CONFIG).read_text()).get("driver")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(driver, dict):
+        return None
+    found = driver.get("pin_checkout") or driver.get("checkout")
+    return Path(found) if isinstance(found, str) and found else None
+
+
+def checkouts(workdir: Path, source: Path) -> list[Path]:
+    """The refactory checkouts an agent node of this run must leave alone, besides its target.
+
+    ``source`` is the directory the contract's Python imports refactory from (the
+    contract's ``refactory_source``): the driver on the walker, and the pin on a pinned
+    run's spine worker, which re-executes under the pin's Python. The run's record
+    (:data:`RUN_CONFIG`) adds the pin when the run is pinned and the driver otherwise,
+    for a dispatch whose own Python is not the run's. Only git checkouts count (not an
+    install a checkout ignores, such as one in its .venv), and none that is, holds or
+    lies in the run's target or its worktree: those are the target
+    guard's own, so a run on refactory itself is watched exactly as before. Nor are the
+    checkouts :data:`UNWATCHED_ENV` names. A run that recorded no target (no `record`)
+    is not watched here either.
+    """
+    baseline = _read(workdir)
+    if baseline is None:
+        return []
+    candidates: list[Path] = []
+    top = _source_checkout(str(source))
+    if top is not None:
+        candidates.append(Path(top))
+    recorded = _recorded_driver(workdir)
+    if recorded is not None:
+        candidates.append(recorded)
+    own = [Path(baseline["root"]).resolve(), *(Path(path).resolve() for path in baseline.get("also") or ())]
+    unwatched = _unwatched()
+    found: list[Path] = []
+    for candidate in candidates:
+        path = candidate.expanduser().resolve()
+        if (path in found or path in unwatched or not (path / ".git").exists()
+                or any(_overlaps(path, mine) for mine in own)):
+            continue
+        found.append(path)
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def _source_checkout(source: str) -> str | None:
+    """The checkout a package directory belongs to, asked once per process: it never moves under one.
+
+    A package a checkout ignores (an install in its .venv) is not that checkout's code.
+    """
+    top = _git(Path(source), "rev-parse", "--show-toplevel")
+    if not top or not top.strip() or _git(Path(source), "check-ignore", "-q", source) is not None:
+        return None
+    return top.strip()
+
+
+#: How many space-separated fields come before the path in each `git status --porcelain=v2`
+#: entry of a tracked file: changed, renamed or copied (whose old path follows as a field of
+#: its own), unmerged.
+_V2_FIELDS = {"1": 8, "2": 9, "u": 10}
+
+
+def _porcelain_v2(listing: str) -> tuple[str | None, list[str]]:
+    """The HEAD commit and the paths `git status --porcelain=v2 --branch -z` names.
+
+    As :func:`_porcelain` reads v1, a rename's old path is skipped.
+    """
+    fields = listing.split("\0")
+    head: str | None = None
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if entry.startswith("# branch.oid "):
+            oid = entry.removeprefix("# branch.oid ").strip()
+            head = None if oid == "(initial)" else oid
+            continue
+        count = _V2_FIELDS.get(entry[:1])
+        if count is None:
+            continue
+        parts = entry.split(" ", count)
+        if len(parts) > count:
+            paths.append(parts[count])
+        if entry.startswith("2 "):
+            index += 1
+    return head, paths
+
+
+def _checkout_state(root: Path) -> dict[str, Any]:
+    """A checkout's tracked files that differ from HEAD, and HEAD itself, in one git call.
+
+    Untracked files are not watched: an editor's swap or lock file, a log, a person's new
+    notes or a copied tree are where false refusals came from, and a generator run with
+    the contract's Python rewrites tracked files, which is what b32l did. HEAD stands for
+    the committed content, so a commit there is a change. The root is the checkout's top
+    (:func:`checkouts` takes only those). Every agent node takes two of these.
+    """
+    root = Path(root).resolve()
+    listing = _git(root, "status", "--porcelain=v2", "--branch", "--no-ahead-behind", "-z",
+                   "--untracked-files=no")
+    if listing is None:
+        raise ValueError(f"git cannot report the state of {root}")
+    head, paths = _porcelain_v2(listing)
+    found: dict[str, Any] = {"root": str(root), "git": True, "head": head, "branch": None, "tree": head}
+    if len(paths) > LIMIT:
+        return {**found, "changes": None}
+    return {**found, "changes": {path: _digest(root / path) for path in sorted(paths)}}
+
+
+def watch_checkouts(workdir: Path, paths: list[Path]) -> dict[str, dict[str, Any]]:
+    """Each checkout's state before an agent node runs, keyed by its path.
+
+    A checkout git cannot report on is left unwatched with a warning, not a refusal: the
+    node has done nothing yet, and the target's own guard still holds.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        try:
+            snapshot = _checkout_state(path)
+        except (OSError, ValueError) as error:
+            warn(f"refactory's own checkout {path} cannot be watched during this node: {error}")
+            continue
+        found[str(path)] = {**snapshot, "watched_at": datetime.now(timezone.utc).isoformat()}
+    return found
+
+
+def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -> dict[str, list[str]]:
+    """What changed in each watched checkout since :func:`watch_checkouts`; unchanged ones are left out.
+
+    Read like the target of a worktree run: its tracked files and its committed content,
+    and a change another node's refusal already undid is not this node's
+    (:func:`_discount_strays`). A checkout git cannot report on afterwards is unknown, not
+    changed: it is named in a warning, and the node is not refused for it.
+    """
+    changed: dict[str, list[str]] = {}
+    for path, earlier in (before or {}).items():
+        try:
+            now = _discount_strays(earlier, _checkout_state(Path(path)))
+        except (OSError, ValueError) as error:
+            warn(f"refactory's own checkout {path} could not be compared with its state before "
+                 f"this node, so whether the node changed it is unknown: {error}")
+            continue
+        differences = _compare(earlier, now, commits=False)
+        if differences:
+            changed[path] = differences
+    return changed
+
+
+def checkout_baseline(directory: Path, path: str | Path) -> Path:
+    """Where one dispatch keeps a checkout's pre-node bytes; its set-aside copies go beside it."""
+    return Path(directory) / "checkouts" / _target_slot(Path(path)) / "target-baseline"
+
+
+# ── what a refused checkout change does to the files: one decision, one place ──
+
+#: Restore policy for a refused change to refactory's own checkout; the user chose
+#: restore-if-clean on 2026-10-27 (dm-164). Each is tested:
+#:
+#: - ``"restore"`` (A): put the changed files back as they were, keeping the
+#:   changed copies aside;
+#: - ``"report"`` (B): leave the files as they are, and name them with their diff;
+#: - ``"restore-if-clean"`` (C, the default): restore when the checkout had no uncommitted tracked
+#:   change when the node began, and report otherwise.
+CHECKOUT_POLICY = "restore-if-clean"
+POLICIES = ("restore", "report", "restore-if-clean")
+
+#: How much of a reported change's diff one warning carries.
+DIFF_SHOWN = 4000
+
+
+def restores(before: dict[str, Any]) -> bool:
+    """Whether :data:`CHECKOUT_POLICY` puts a checkout back, given its state when the node began."""
+    if CHECKOUT_POLICY not in POLICIES:
+        raise ValueError(f"CHECKOUT_POLICY is {CHECKOUT_POLICY!r}; it must be one of {', '.join(POLICIES)}")
+    if CHECKOUT_POLICY == "restore-if-clean":
+        return before.get("changes") == {}
+    return CHECKOUT_POLICY == "restore"
+
+
+def _node_diff(root: Path, path: str, before: dict[str, Any], baseline_dir: Path) -> str:
+    """What the node changed in one file: from its bytes at `begin` (the saved baseline, or
+    HEAD for a file that was clean), not from HEAD, so a person's earlier edit is not shown."""
+    import difflib
+
+    def text(data: bytes | None) -> list[str]:
+        return [] if data is None else data.decode("utf-8", "replace").splitlines(keepends=True)
+
+    plan = _restore_plan(root, path, before, baseline_dir)
+    if plan is None:
+        return f"{path}: its content at the node's start was not kept, so no diff\n"
+    kind, value = plan
+    earlier: bytes | None
+    if kind == "copy":
+        earlier = Path(value).read_bytes()
+    elif kind == "git":
+        earlier = value[1].encode("utf-8", "surrogateescape")
+    elif kind == "symlink":
+        earlier = f"symlink to {value}\n".encode()
+    else:
+        earlier = None
+    full = root / path
+    try:
+        now = (f"symlink to {os.readlink(full)}\n".encode() if full.is_symlink()
+               else full.read_bytes() if full.exists() else None)
+    except OSError as error:
+        return f"{path}: unreadable now ({error})\n"
+    return "".join(difflib.unified_diff(text(earlier), text(now), f"a/{path}", f"b/{path}"))
+
+
+def restore_log(root: Path) -> Path:
+    """The checkout's own log of what refusals did to it, under refactory's home."""
+    return _stray_record_path(Path(root)) / "restores.log"
+
+
+def _settled(path: str, node: str, result: dict[str, Any]) -> str:
+    """One line on what a refusal did to a checkout's files, for the person and the log."""
+    text = f"agent {node!r} changed refactory's own checkout {path}"
+    if result.get("restored"):
+        text += (f"; put back as before the node: {_named(result['restored'])}; the changed copies "
+                 f"are in {result['set_aside']}")
+    if result.get("left"):
+        text += f"; left as they are: {_named(result['left'])}"
+    if result.get("errors"):
+        text += f"; could not restore: {'; '.join(result['errors'])}"
+    if result.get("head_moved"):
+        text += (f"; HEAD moved from {_commit(result.get('before_head'))} to {_commit(result.get('head'))}, "
+                 f"and commits are not undone: run `git -C {path} reset --keep {result.get('before_head')}`"
+                 " to undo them")
+    return text
+
+
+def settle_checkout(path: str, before: dict[str, Any], directory: Path, workdir: Path, *,
+                    node: str) -> dict[str, Any]:
+    """Do what :data:`CHECKOUT_POLICY` says to a checkout a refused node changed, and say so.
+
+    Every outcome is a run warning and a line in the checkout's :func:`restore_log`, naming
+    the files and where their changed bytes were put.
+    """
+    root = Path(path)
+    try:
+        now = _checkout_state(root)
+    except (OSError, ValueError) as error:
+        result: dict[str, Any] = {"mode": "unknown", "restored": [], "left": [], "set_aside": None,
+                                  "errors": [f"git cannot report its state now: {error}"], "head_moved": False}
+        now = {"head": before.get("head")}
+    else:
+        if restores(before):
+            result = {**restore_target(root, before, checkout_baseline(directory, path), workdir, now=now),
+                      "mode": "restored", "left": []}
+        else:
+            left = _differ(before.get("changes") or {}, now.get("changes") or {})
+            diff = "".join(_node_diff(root, name, before, checkout_baseline(directory, path)) for name in left)
+            result = {"mode": "reported", "restored": [], "left": left, "set_aside": None, "errors": [],
+                      "head_moved": now.get("head") != before.get("head"),
+                      "diff": (diff or "")[:DIFF_SHOWN]}
+    result.update(before_head=before.get("head"), head=now.get("head"))
+    note = _settled(path, node, result)
+    warn(note + (f"\n{result['diff']}" if result.get("diff") else ""))
+    try:
+        log = restore_log(root)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as handle:
+            handle.write(f"{datetime.now(timezone.utc).isoformat()} run {Path(workdir)}: {note}\n")
+    except OSError as error:
+        warn(f"could not write {restore_log(root)}: {error}")
+    return result
+
+
+def checkout_refusal(node: str, target: str | None, changed: dict[str, list[str]],
+                     settled: dict[str, dict[str, Any]], *, set_aside: str | None = None) -> str:
+    """Why an agent node that changed one of refactory's own checkouts is refused."""
+    parts: list[str] = []
+    for path, differences in changed.items():
+        text = f"refactory's own checkout {path} changed while agent {node!r} ran: {'; '.join(differences)}."
+        result = settled.get(path) or {}
+        if result.get("restored"):
+            text += (f" Its changed files were put back as they were before the node: "
+                     f"{_named(result['restored'])}. The changed copies are in {result['set_aside']}.")
+        if result.get("left"):
+            text += f" They were left as they are: {_named(result['left'])}."
+        if result.get("errors"):
+            text += f" Could not restore: {'; '.join(result['errors'])}."
+        if result.get("head_moved"):
+            text += (f" HEAD moved during the node, and commits are not undone; to undo them, run "
+                     f"`git -C {path} reset --keep {result.get('before_head')}`.")
+        parts.append(text)
+    where = f"this run's target, {target}" if target else "this run's target"
+    moved = (f" This attempt's output was moved to {set_aside}, so the redo writes its own."
+             if set_aside else "")
+    return (f"{' '.join(parts)} It is not {where}: it is the checkout the contract's Python imports "
+            "refactory from (the run's driver, or its pin), so a refactory tool run with that Python "
+            "writes there from any directory. A node's work goes only to its declared outputs and "
+            "the run's own steps (materialise, generate, the check), never into refactory's checkout; "
+            f"redo {node} without writing there.{moved}")

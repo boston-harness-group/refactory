@@ -270,17 +270,25 @@ def compose_plan(
 
 
 def pack_workspace(workdir: Path, run_id: str) -> Path:
-    """Pack the workspace into a tarball for upload to the sandbox."""
+    """Pack the workspace into a tarball for upload to the sandbox.
+
+    The staging directory the tarball is written into is inside the workspace, so it is
+    left out of the archive: packing it would add the tarball to itself, half written.
+    """
     workdir = Path(workdir).resolve()
-    staging = workdir / ".refactory" / "openshell" / run_id
+    staging_root = workdir / ".refactory" / "openshell"
+    staging = staging_root / run_id
     staging.mkdir(parents=True, exist_ok=True)
     tarball = staging / "upload.tar.gz"
+    own_staging = Path(workdir.name) / staging_root.relative_to(workdir)
 
     def _filter(entry: tarfile.TarInfo) -> tarfile.TarInfo | None:
         parts = Path(entry.name).parts
         if set(parts) & PACK_EXCLUDES:
             return None
         if ".factory" in parts[:-1] and parts[-1] in RUN_ARTIFACTS:
+            return None
+        if Path(entry.name) == own_staging or own_staging in Path(entry.name).parents:
             return None
         return entry
 
@@ -439,6 +447,81 @@ def run_in_openshell(
 
     telemetry.finish(reason or ('completed' if exit_code == 0 else 'failed'))
     return subprocess.CompletedProcess(argv, exit_code)
+
+
+def run_workspace_session(
+    workspace: Path,
+    argv: list[str],
+    *,
+    context: dict[str, Any],
+    timeout: float | None,
+    dest: Path,
+    receipts: Path,
+) -> tuple[int, Path | None]:
+    """Run one agent session in an OpenShell sandbox holding ``workspace``; bring it back.
+
+    An agent node's workspace (`workspace.py`) is packed with `pack_workspace` and
+    uploaded, ``argv`` runs inside it as the sandbox's run, and the sandbox's copy of the
+    workspace is downloaded into ``dest`` with `download_artifacts`. The worker's receipt
+    is written under ``receipts``, the run directory, never into the workspace.
+
+    Returns the session's exit code and the downloaded folder, which is None when the
+    sandbox could not be made or its workspace could not be downloaded. Needs the
+    OpenShell SDK and a gateway with the ``claude-code`` provider, checked before the
+    sandbox is made, as `run_in_openshell` checks it.
+    """
+    from refactory_dsh.budgets import RunBudget
+    from refactory_dsh.workers import GraphTelemetry
+
+    workspace = Path(workspace).resolve()
+    ledger = context.get('budget_ledger')
+    budget = RunBudget.from_path(ledger) if ledger else None
+    telemetry = GraphTelemetry(Path(receipts), context, budget)
+    plan = compose_plan(
+        workspace, argv, env=telemetry.environment(),
+        gateway=context.get('openshell_gateway'),
+        image=context.get('openshell_image'),
+    )
+    tarball = pack_workspace(workspace, plan.name)
+    try:
+        verify_gateway_provider(plan.gateway)
+        from factory.contained.openshell import build_default_policy
+        client = connect(plan.gateway)
+        session = create_sandbox(client, plan, build_default_policy(), tarball)
+    except ContainedError as exc:
+        telemetry.finish('failed', str(exc))
+        return 2, None
+    try:
+        uploaded = subprocess.run(
+            build_upload_argv(plan.name, tarball, gateway=plan.gateway),
+            capture_output=True, text=True, timeout=600,
+        )
+        if uploaded.returncode != 0:
+            raise ContainedError(f"uploading the workspace failed: {uploaded.stderr.strip()[:300]}")
+        extract_tarball(session, tarball.name)
+        start_run(session, plan)
+        exit_code, reason = _poll_run(session, plan, timeout=timeout, stop_condition=None,
+                                      telemetry=telemetry)
+    except ContainedError as exc:
+        _terminate_remote(session, plan)
+        telemetry.finish('failed', str(exc))
+        return 1, None
+    except BaseException as error:
+        _terminate_remote(session, plan)
+        telemetry.finish('cancelled', str(error))
+        raise
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    if download_artifacts(plan, Path(dest), paths=[plan.project_dir]):
+        telemetry.finish('failed', f"the workspace {plan.project_dir} could not be downloaded")
+        return exit_code or 1, None
+    # Only a folder that is the workspace's own copy (it has the packed .git) comes back;
+    # anything else would read to the sync as every file deleted.
+    downloaded = next((candidate for candidate in (Path(dest) / workspace.name, Path(dest))
+                       if (candidate / '.git').exists()), None)
+    telemetry.finish(reason or ('completed' if exit_code == 0 else 'failed'))
+    if downloaded is None:
+        return exit_code or 1, None
+    return exit_code, downloaded
 
 
 def _poll_run(

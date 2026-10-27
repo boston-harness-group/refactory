@@ -118,6 +118,10 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["feedback_keys"] = list(node.feedback_keys)
         if node.retry is not None:
             entry["retry"] = {**node.retry, "on": list(node.retry["on"])}
+        if node.workspace is not None:
+            # Where the node works, for a reader of the run directory; the worker spec
+            # carries the same declaration to the node's dispatch.
+            entry["workspace"] = dict(node.workspace)
         declarations[node_id] = entry
     return declarations
 
@@ -271,6 +275,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 # which runs it (`node_retry.deliver`), as the walker does.
                 **({"retry": {**node.retry, "on": list(node.retry["on"])}}
                    if node.retry is not None else {}),
+                # Where the node works. Only a dispatched worker can give it one
+                # (`workers.lower_workflow` refuses it on the CEO-subagent route).
+                **({"workspace": dict(node.workspace)} if node.workspace is not None else {}),
             )
 
     edges = [

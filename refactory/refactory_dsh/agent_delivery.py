@@ -206,8 +206,15 @@ def get_skip_receipt() -> Any | None:
 
 def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
                         writes: list[str], model_context: dict[str, Any] | None,
-                        *, set_aside: dict[str, str] | None = None) -> tuple[str, dict[str, Any]]:
-    """Orient one node without making its worker discover the delivery protocol."""
+                        *, set_aside: dict[str, str] | None = None,
+                        workspace: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    """Orient one node without making its worker discover the delivery protocol.
+
+    A node that works in a workspace (``workspace``, `workspace.Workspace.describe`) is
+    told where it is and how its work leaves it: its diff becomes the answer file, or its
+    outputs are copied out of it. Its outputs are listed in the workspace, since that is
+    where it writes them; the run directory is outside what its tools may change.
+    """
     context = model_context or {}
     # Absolute path to refactory's own Python, for nested dispatch (worker_node,
     # sandboxed validation). This is NOT the target's interpreter.
@@ -222,6 +229,16 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
         'outputs': [str(_path(workdir, name)) for name in writes],
         'python': python, 'refactory_source': real_refactory_source,
     }
+    if workspace is not None:
+        place = Path(workspace['path'])
+        execution['workspace'] = dict(workspace)
+        if workspace.get('collect') == 'diff':
+            # The answer is derived from the diff; the rest are the final response.
+            execution['outputs'] = []
+            execution['derived'] = {writes[0]: 'the workspace\'s diff', **{
+                name: 'your final response' for name in writes[1:]}} if writes else {}
+        else:
+            execution['outputs'] = [str(place / name) for name in writes]
     if context.get('runtime_root'):
         execution['runtime_root'] = str(context['runtime_root'])
 
@@ -266,15 +283,29 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
         'and adjacent run reports are not completion instructions; inspect them only if this task explicitly needs them. '
         'Perform the checks required by the current task. After delivering the required outputs, return immediately '
         'with a brief completion response; do not execute later workflow stages or wait for a receipt. '
-        'Do not duplicate a file artifact in the final response. If no output file is declared, return the requested result.'
+        'Do not duplicate a file artifact in the final response.'
     )
+    if not (workspace is not None and workspace.get('collect') == 'diff'):
+        # A node whose answer is its workspace's diff declares no output for it to write.
+        instructions += ' If no output file is declared, return the requested result.'
     if set_aside:
         instructions += (
             ' This step\'s previous outputs were moved to the paths listed in set_aside.'
             ' Read them there when the task revises earlier work, and write each output afresh at its declared path.'
         )
+    if workspace is not None:
+        instructions += _workspace_instructions(workspace, writes)
     # Worktree-aware contract instructions (dm-159).
-    if wt_found is not None:
+    if wt_found is not None and workspace is not None:
+        # A workspace node reads, changes and runs the repository in its workspace,
+        # never in the run's worktree or the target.
+        instructions += (
+            f' The run\'s worktree at {wt_found.path} holds the attempts as committed;'
+            f' do not change it, and never change the target at {wt_found.target}.'
+            ' The python above is for nested dispatch only.'
+            f' It imports refactory from {real_refactory_source}, not from your workspace.'
+        )
+    elif wt_found is not None:
         tg_baseline = target_guard._read(workdir)
         is_output_only = tg_baseline is not None and node in tg_baseline.get('output_only', ())
         instructions += (
@@ -297,7 +328,7 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
             ' The python above is for nested dispatch only.'
             f' It imports refactory from {real_refactory_source},'
             ' so a refactory tool run with it writes there from any directory,'
-            ' and such a write is refused when that is the target.'
+            ' and such a write is refused.'
         )
         if is_output_only:
             instructions += (
@@ -305,6 +336,44 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
             )
     block = f'{CONTRACT_START}\n{instructions}\n{json.dumps(execution, indent=2)}\n{CONTRACT_END}'
     return f'{block}\n\n{prompt}', execution
+
+
+def _workspace_instructions(workspace: dict[str, Any], writes: list[str]) -> str:
+    """What a workspace node is told about where it works and how its work is taken."""
+    place = workspace['path']
+    kind = workspace.get('kind')
+    if kind == 'clone':
+        where = (f' Your workspace is {place}: a clone of the run\'s worktree at its '
+                 f'{"base" if workspace.get("of") == "base" else "last attempt"}, with its'
+                 ' dependencies installed and its setup and generate commands run.'
+                 ' Read, change and run the repository there (its own virtual environment and'
+                 ' package binaries come first on PATH), and give paths relative to it.')
+    else:
+        where = (f' Your workspace is {place}, a new empty folder: work and run commands there,'
+                 ' and give paths relative to it.')
+    sandbox = str(workspace.get('sandbox') or '')
+    if sandbox.startswith('workspace-write'):
+        where += ' Your tools may change files only there and in the temporary directory.'
+    if workspace.get('problems'):
+        where += (' Preparing it reported a problem (listed under workspace.problems below); the check'
+                  ' runs the same steps, so fix it there if your change caused it.')
+    if workspace.get('normalised'):
+        where += (' Your last answer changed the line endings or the blank lines at the ends of'
+                  f' {", ".join(workspace["normalised"])}: an emission carries each file with LF line'
+                  ' endings and one final newline, and the attempt holds them that way.')
+    if workspace.get('collect') == 'diff' and writes:
+        taken = (f' When you are done, stop: the workspace\'s diff is your answer. The runtime writes'
+                 f' {writes[0]} from it, so do not write {writes[0]} yourself, and leave in the'
+                 ' workspace only the change you mean: every file you add, change or delete there is'
+                 ' part of it, except its .refactory folder, environments (.venv, node_modules) and tool'
+                 ' caches (__pycache__ and the like). Text files only:'
+                 ' a binary file, a symlink or a file-mode change is refused.')
+        if len(writes) > 1:
+            taken += f' Your final response is saved as {", ".join(writes[1:])}.'
+    else:
+        taken = (' Write each output at its path relative to your workspace (listed in `outputs`);'
+                 ' the runtime copies it to the run directory when you stop.')
+    return where + taken
 
 
 def _now() -> str:
@@ -418,8 +487,33 @@ def _pending(workdir: Path, node: str) -> Path:
     return workdir / ROOT / 'pending' / (hashlib.sha256(node.encode()).hexdigest() + '.json')
 
 
+def _watch_checkouts(workdir: Path) -> dict[str, Any]:
+    """Snapshot refactory's own checkouts that are not the run's target (dm-164).
+
+    Found from the directory this module, and so the contract's Python, imports
+    refactory from -- the contract's ``refactory_source`` -- and from the run's record.
+    """
+    return target_guard.watch_checkouts(workdir, target_guard.checkouts(workdir, Path(__file__).resolve().parent))
+
+
+def _save_checkout_baselines(directory: Path, checkouts: dict[str, Any] | None) -> None:
+    """Keep each watched checkout's uncommitted bytes for a lossless restore; a redo's replace the last."""
+    if (directory / 'checkouts').exists():
+        (directory / 'checkouts').rename(directory / f'checkouts-{uuid.uuid4().hex[:8]}')
+    for path, snapshot in (checkouts or {}).items():
+        if snapshot.get('changes'):
+            unsaved = target_guard.save_baseline(Path(path), snapshot['changes'],
+                                                 target_guard.checkout_baseline(directory, path))
+            if unsaved:
+                # A refusal leaves these where they are (`restore_target`), so say so now.
+                target_guard.warn(f"refactory's own checkout {path} has uncommitted files whose bytes could "
+                                  f"not be kept, so they cannot be put back if this node changes them: "
+                                  f"{target_guard._named(unsaved)}")
+
+
 def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bool = False,
-          reads: list[str] | None = None, model_context: dict[str, Any] | None = None) -> dict[str, Any]:
+          reads: list[str] | None = None, model_context: dict[str, Any] | None = None,
+          workspace: dict[str, Any] | None = None) -> dict[str, Any]:
     """Snapshot outputs and supply the current ledger before dispatching one agent.
 
     DSH can report the same due node repeatedly; reuse keeps its original output
@@ -442,7 +536,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         previous = json.loads(pending.read_text())
         if previous['writes'] != writes:
             raise ValueError(f'agent {node!r} output declarations changed during delivery')
-        if previous.get('target') is not None and _attempt_failed(workdir, previous):
+        if ((previous.get('target') is not None or previous.get('checkouts'))
+                and _attempt_failed(workdir, previous)):
             # A refused attempt keeps its record for the retry. Judging the retry against
             # the snapshot from before the first attempt would refuse it for changes the
             # person already saw, and chose to keep, every time.
@@ -453,6 +548,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
                 if baseline_dir.exists():
                     baseline_dir.rename(baseline_dir.with_name(f"target-baseline-{uuid.uuid4().hex[:8]}"))
                 target_guard.save_baseline(Path(rewatched['root']), rewatched['changes'], baseline_dir)
+            previous['checkouts'] = _watch_checkouts(workdir)
+            _save_checkout_baselines(workdir / ROOT / previous['id'], previous['checkouts'])
             pending.write_text(json.dumps(previous, indent=2) + '\n')
     ledger = Ledger(workdir)
     ledger_text = ledger.path.read_text() if ledger.exists() else ""
@@ -460,7 +557,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     annotated = prompt_with_ledger(prompt, ledger, entries=entries)
     set_aside = _set_aside_stale_outputs(workdir, node, reads or [], writes) if previous is None else None
     annotated, execution = _execution_contract(workdir, node, annotated, reads or [], writes, model_context,
-                                               set_aside=set_aside)
+                                               set_aside=set_aside, workspace=workspace)
     if previous is not None and previous['prompt'] == annotated:
         return previous
     before = previous['before'] if previous is not None else {name: _fingerprint(workdir, name) for name in writes}
@@ -469,6 +566,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     # the target is attributed to that node alone, not to whatever ran since
     # prepare (#319, dm-159).
     target = previous.get('target') if previous is not None else target_guard.watch(workdir, node)
+    # Refactory's own checkout, when it is not the target: every agent node, any route (dm-164).
+    checkouts = previous.get('checkouts') if previous is not None else _watch_checkouts(workdir)
     identifier = previous['id'] if previous is not None else uuid.uuid4().hex
     directory = workdir / ROOT / identifier
     directory.mkdir(parents=True, exist_ok=True)
@@ -479,6 +578,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
             and (target.get('also') or 'also' not in target)):
         baseline_dir = directory / 'target-baseline'
         target_guard.save_baseline(Path(target['root']), target['changes'], baseline_dir)
+    if previous is None:
+        _save_checkout_baselines(directory, checkouts)
     contexts = list(previous.get('contexts', [])) if previous is not None else []
     context = {'at': _now(), 'entries': entries, 'execution': execution,
                'prompt': str(ROOT / identifier / f'context-{len(contexts)}.prompt.txt'),
@@ -493,10 +594,10 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     record = {'id': identifier, 'node': node,
               'started': previous['started'] if previous is not None else context['at'], 'writes': writes,
               'before': before, 'prompt': annotated, 'entries': entries, 'contexts': contexts,
-              'execution': execution, 'target': target, 'prompt_hash': prompt_hash,
+              'execution': execution, 'target': target, 'checkouts': checkouts, 'prompt_hash': prompt_hash,
               'receipt': str(ROOT / identifier / 'receipt.json')}
     (directory / 'receipt.json').write_text(json.dumps({
-        **{key: value for key, value in record.items() if key not in ('prompt', 'target')},
+        **{key: value for key, value in record.items() if key not in ('prompt', 'target', 'checkouts')},
         'status': 'pending', 'artifacts': before,
     }, indent=2) + '\n')
     pending.parent.mkdir(parents=True, exist_ok=True)
@@ -545,9 +646,16 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
     missing = [name for name in writes if name not in fresh]
     fail_changes, warn_changes = target_guard.strayed(
         workdir, record.get('target'))
+    # Refactory's own checkout, where it is not the target, is refused for every agent
+    # node, a run with or without a worktree alike; `target_guard.CHECKOUT_POLICY` says
+    # what happens to its files (dm-164).
+    checkout_changes = target_guard.strayed_checkouts(workdir, record.get('checkouts'))
+    # A launcher checkout that is also refactory's is refused below, not only warned about.
+    warn_changes = [change for change in warn_changes
+                    if not any(change.startswith(f"in {path}, ") for path in checkout_changes)]
     set_aside = (_set_aside(workdir, record,
                             [name for name in writes if name in fresh])
-                 if fail_changes else None)
+                 if fail_changes or checkout_changes else None)
     # Restore the target losslessly on refusal (dm-159).
     restored_info = None
     wt_path = None
@@ -567,8 +675,11 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
         restored_info = target_guard.restore_target(
             Path(target_before['root']), target_before,
             baseline_dir, workdir)
+    checkouts_settled = {path: target_guard.settle_checkout(path, record['checkouts'][path], directory, workdir,
+                                                             node=record['node'])
+                         for path in checkout_changes}
     all_changes = fail_changes + warn_changes
-    receipt = {key: value for key, value in record.items() if key not in ('prompt', 'target')}
+    receipt = {key: value for key, value in record.items() if key not in ('prompt', 'target', 'checkouts')}
     receipt['prompt_hash'] = record.get('prompt_hash')
     receipt['prompt_path'] = str(ROOT / record['id'] / 'prompt.txt')
     if sent_prompt_hash is not None:
@@ -579,11 +690,12 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
         receipt['sent_prompt_path'] = str(ROOT / record['id'] / 'sent-prompt.txt')
     if unresolved_keys:
         receipt['unresolved_keys'] = unresolved_keys
-    receipt.update(finished=_now(), status='failed' if missing or fail_changes else 'delivered',
+    receipt.update(finished=_now(), status='failed' if missing or fail_changes or checkout_changes else 'delivered',
                    delivery='context supplied; semantic compliance not verified',
                    artifacts=after, captured_final=captured,
                    final_response=str(ROOT / record['id'] / 'final-response.txt') if final_response is not None else None,
                    missing_or_unchanged=missing, **({'target_changes': all_changes} if all_changes else {}),
+                   **({'checkout_changes': checkout_changes} if checkout_changes else {}),
                    **({'set_aside': set_aside} if set_aside else {}))
     (directory / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     pending.unlink()
@@ -595,15 +707,22 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
             "check whether another session or person made them.")
     # Refused even when the declared output arrived: the output may be a summary of
     # edits that never pass through the step that writes the artifact.
-    if fail_changes:
+    if fail_changes or checkout_changes:
         tg_bl = target_guard._read(workdir)
-        is_oo = (restored_info is not None and tg_bl is not None
-                 and record['node'] in tg_bl.get('output_only', ()))
-        raise ValueError(target_guard.refusal(
-            record['node'], record['target']['root'],
-            fail_changes, writes, set_aside=set_aside,
-            worktree_path=wt_path, restored=restored_info,
-            is_output_only=is_oo))
+        reasons = []
+        if fail_changes:
+            is_oo = (restored_info is not None and tg_bl is not None
+                     and record['node'] in tg_bl.get('output_only', ()))
+            reasons.append(target_guard.refusal(
+                record['node'], record['target']['root'],
+                fail_changes, writes, set_aside=set_aside,
+                worktree_path=wt_path, restored=restored_info,
+                is_output_only=is_oo))
+        if checkout_changes:
+            reasons.append(target_guard.checkout_refusal(
+                record['node'], (tg_bl or {}).get('root'), checkout_changes, checkouts_settled,
+                set_aside=None if fail_changes else set_aside))
+        raise ValueError(' '.join(reasons))
     if missing:
         raise ValueError(
             f'agent {record["node"]!r} did not deliver required outputs: '

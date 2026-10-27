@@ -107,8 +107,8 @@ def test_run_records_planning_models(tmp_path, monkeypatch):
             self._node_id = node_id
             self._route = route
 
-        def complete(self, prompt, *, system="", workdir=None):
-            answer = self._parent.complete(prompt, system=system, workdir=workdir)
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
+            answer = self._parent.complete(prompt, system=system, workdir=workdir, **workspace)
             if workdir is not None and self._node_id == "design_doc":
                 from pathlib import Path as P
                 workers_dir = P(workdir) / ".refactory" / "workers"
@@ -172,8 +172,8 @@ def test_delivery_body_includes_planning_models(tmp_path, monkeypatch):
             self._node_id = node_id
             self._route = route
 
-        def complete(self, prompt, *, system="", workdir=None):
-            answer = self._parent.complete(prompt, system=system, workdir=workdir)
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
+            answer = self._parent.complete(prompt, system=system, workdir=workdir, **workspace)
             if workdir is not None and self._node_id == "design_doc":
                 from pathlib import Path as P
                 workers_dir = P(workdir) / ".refactory" / "workers"

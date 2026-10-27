@@ -443,3 +443,52 @@ def test_the_worker_opens_the_session_with_the_nodes_role(tmp_path):
     assert roles == ["code_reviewer"]
     _, roles = _run_worker(tmp_path / "old", _spec(), prompt="Review it.")
     assert roles == ["worker"]
+
+
+def _workspace_spec(workdir: Path, script: Path) -> dict:
+    """The spine's worker spec for one agent node that works in a scratch workspace."""
+    import shlex
+
+    from refactory_dsh import lowering, workers
+    from refactory_dsh.model import DshModelClient
+    from refactory_dsh.nn import Graph, Node
+
+    graph = Graph()
+    graph.add(Node("solve", "agent", prompt_template="Solve it.", writes=("answer.txt",), workspace="scratch"))
+    state = {"graph": graph.to_state(), "knobs": {}}
+    context = DshModelClient(worker_backend="dsh", dsh_cli=str(script), attempts=1).context()
+    lowered = workers.lower_workflow(lowering.to_workflow(state), workdir, context,
+                                     lowering.node_declarations(state))
+    return json.loads(Path(shlex.split(lowered.nodes["solve"].dispatch_command)[-1]).read_text())
+
+
+def test_the_spines_worker_runs_a_workspace_node_in_its_workspace_and_names_it(tmp_path, monkeypatch):
+    """#516 on the spine: `worker_node.execute` asks the agent in the node's workspace
+    (`workspace.ask`), not in the run directory, and the contract names that workspace
+    (`begin(..., workspace=place.describe())`)."""
+    import sys
+
+    from refactory_dsh import worker_node, workspace
+
+    monkeypatch.setattr(workspace, "_sandbox_runner", lambda root: ("landlock", ""))
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    seen = tmp_path / "seen.json"
+    script = tmp_path / "agent-cli"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "prompt = sys.stdin.read()\n"
+        f"pathlib.Path({str(seen)!r}).write_text(json.dumps({{'cwd': str(pathlib.Path.cwd()), 'prompt': prompt}}))\n"
+        "pathlib.Path('answer.txt').write_text('42\\n')\n")
+    script.chmod(0o755)
+    worker_node.execute(_workspace_spec(workdir, script), workdir)
+    found = json.loads(seen.read_text())
+    cwd = Path(found["cwd"])
+    assert cwd.parent == workdir / workspace.ROOT / "solve" and cwd.name.startswith("scratch-")
+    assert (workdir / "answer.txt").read_text() == "42\n", "the workspace's answer is collected"
+    from refactory_dsh.agent_delivery import CONTRACT_END, CONTRACT_START
+    contract = found["prompt"].split(CONTRACT_START, 1)[1].split(CONTRACT_END, 1)[0]
+    execution = json.loads(contract[contract.rfind("\n{\n") + 1:])
+    assert execution["workspace"]["kind"] == "scratch" and execution["workspace"]["path"] == str(cwd)
+    assert f"Your workspace is {cwd}" in contract

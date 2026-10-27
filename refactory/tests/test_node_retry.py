@@ -40,6 +40,10 @@ calls = json.loads(counter.read_text()) if counter.exists() else 0
 plan = plans[key]
 step = plan[min(calls, len(plan) - 1)]
 counter.write_text(json.dumps(calls + 1))
+if step.get("fresh"):
+    assert not pathlib.Path("stale.txt").exists(), "previous attempt survived"
+    assert not pathlib.Path("reviews/report.md").exists(), "partial report survived"
+    assert "Your workspace is " + str(pathlib.Path.cwd()) in prompt, "missing workspace contract"
 for name, text in step.get("write", {{}}).items():
     target = pathlib.Path(name)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -333,7 +337,7 @@ def test_the_retry_stays_inside_the_nodes_envelope(tmp_path, monkeypatch):
     client = _Slow(2.6)
     with pytest.raises(RetriesExhausted, match="its declared retry was not started"):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
-                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, timeout_s=1)
+                ask=lambda c, p, place: c.complete(p), capture_final=True, rule=RULE, timeout_s=1)
     assert client.calls == 1
 
 
@@ -350,7 +354,7 @@ def test_a_budget_spent_during_the_first_session_stops_the_retry(tmp_path):
     client = _Slow(0)
     with pytest.raises(BudgetExhausted):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
-                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, timeout_s=100,
+                ask=lambda c, p, place: c.complete(p), capture_final=True, rule=RULE, timeout_s=100,
                 budget=Spent())
     assert client.calls == 1
     assert _retried(tmp_path) == []
@@ -371,7 +375,7 @@ def test_an_attempt_that_changed_the_target_is_refused_not_retried(tmp_path, mon
     client = _Slow(0)
     with pytest.raises(ValueError, match="changed the target"):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
-                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, timeout_s=100)
+                ask=lambda c, p, place: c.complete(p), capture_final=True, rule=RULE, timeout_s=100)
     assert refused == ["reviewer"] and client.calls == 1
 
 
@@ -544,3 +548,25 @@ def test_a_timed_out_attempt_that_changed_the_worktree_is_not_retried(tmp_path, 
     assert not ok
     assert "not retried: the run's worktree changed while it ran" in error and "probe.py" in error
     assert dsh.calls == 1 and _retried(workdir) == []
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_each_retry_prepares_a_fresh_workspace_and_collects_its_outputs(tmp_path, runtime, monkeypatch):
+    # The first attempt leaves a report and another file in scratch. Only a new
+    # dispatched workspace lets the second session prove neither survived. Drive
+    # both actual runtime entry points so a hook around the whole retry loop fails.
+    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    dsh = Scripted(tmp_path / "dsh", [
+        {"sleep": 30, "write": {REPORT: "partial", "stale.txt": "first attempt"}},
+        {"fresh": True, "write": {REPORT: "collected whole report"}, "answer": "summary"},
+    ])
+    workdir = tmp_path / "run"
+    ok, error = _run(runtime, workdir, _graph(_node(workspace="scratch", timeout_s=1)), dsh.client())
+    assert ok, error
+    assert dsh.calls == 2
+    assert (workdir / REPORT).read_text() == "collected whole report"
+    assert not (workdir / "stale.txt").exists()
+    assert len(_retried(workdir)) == 1
+    receipts = [json.loads(p.read_text()) for p in
+                (workdir / ".refactory/agent-delivery").glob("*/receipt.json")]
+    assert sorted(r["status"] for r in receipts) == ["delivered", "superseded"]

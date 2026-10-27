@@ -50,6 +50,10 @@ interactive = "refactory_dsh.interactive"
 
 [project.entry-points.'refactory.run_end']
 warm_clones = "refactory_dsh.builder_probe:sweep_warm_clones"
+workspaces = "refactory_dsh.workspace:sweep"
+
+[project.entry-points.'refactory.workspace_clone']
+clones = "refactory_dsh.clones:prepare"
 
 [tool.setuptools.package-data]
 refactory_dsh = ["*.mjs", "patches/*.yml", "data/*.json"]

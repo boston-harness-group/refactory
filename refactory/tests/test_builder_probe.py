@@ -1177,17 +1177,25 @@ class _ProbingBuilder(FakeModel):
         self.end = end
         self.facts = facts
         self.clones: list[Path] = []
+        self.workspaces: list[Path] = []
 
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
-        if "## Builder probe" not in prompt:
-            return super().complete(prompt, system=system, workdir=workdir)
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
+        if "## Builder probe" in prompt:
+            command = prompt.split("## Builder probe", 1)[1].split("```bash\n", 1)[1].split("\n```", 1)[0]
+        elif workspace.get("cwd") is not None and "Write the artifact `" in prompt:
+            # Design's builder works in its workspace and its prompt names no probe; the
+            # probe CLI is still there, and the run's end must remove both.
+            self.workspaces.append(Path(str(workspace["cwd"])))
+            command = (f"{sys.executable} -m refactory_dsh.builder_probe --workdir {workdir} "
+                       "--emission emit.txt --test <test_id> [<test_id> ...] --timeout 90")
+        else:
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
         run = Path(str(workdir))
         if self.facts is not None:
             # The walker keeps its facts in memory, and the probe reads facts.json,
             # which only the spine's node runner writes: written here as it would be.
             (run / "facts.json").write_text(json.dumps(self.facts))
         (run / "emit.txt").write_text("===FILE: helper.py===\nVALUE = 1\n")
-        command = prompt.split("## Builder probe", 1)[1].split("```bash\n", 1)[1].split("\n```", 1)[0]
         argv = shlex.split(command.replace("<test_id> [<test_id> ...]", "test_helper.py::test_bar"))
         probe = subprocess.run(argv, capture_output=True, text=True, timeout=180)
         assert json.loads(probe.stdout)["status"] == "pass", probe.stdout + probe.stderr
@@ -1206,10 +1214,12 @@ def test_walker_design_run_that_ends_before_materialise_leaves_no_warm_clone(tmp
     """A walker design run whose builder probed, then ended before materialise, leaves no clone.
 
     Real: DesignMode on the walker with scripted answers, a target repository and the
-    run's worktree of it, and the probe CLI the emit prompt names, which makes a warm
-    clone. The run then ends -- the builder fails, or SIGINT stops it -- before
-    materialise, so only the walker's run end (nn.executor.execute, through the
-    refactory.run_end entry point) can remove the clone.
+    run's worktree of it, and the probe CLI, which makes a warm clone. Design's emit
+    prompt no longer names the probe -- its builder works and tests in a clone of the
+    attempt (`workspace.py`) -- so the builder runs the CLI itself, from its workspace.
+    The run then ends -- the builder fails, or SIGINT stops it -- before materialise, so
+    only the walker's run end (nn.executor.execute, through the refactory.run_end entry
+    point) can remove the clone, and the workspace with it.
     """
     from refactory_dsh.design import DesignMode
 
@@ -1242,6 +1252,8 @@ def test_walker_design_run_that_ends_before_materialise_leaves_no_warm_clone(tmp
     assert len(builder.clones) == 1, "the builder's probe made no warm clone"
     assert not (run / "changes.diff").exists(), "materialise ran"
     assert _warm_dirs(run) == [], "the walker's run end left the warm clone on disk"
+    assert len(builder.workspaces) == 1 and not builder.workspaces[0].exists(), \
+        "the walker's run end left the builder's workspace on disk"
 
 
 @pytest.mark.parametrize("end", ["done", "halted", "waiting"])

@@ -1108,26 +1108,33 @@ class Executor:
         if refilled_keys:
             for k in refilled_keys:
                 self.ctx._internal_fact(k, values[k])
-        # The reloop's feedback once, as the spine's worker delivers it (`with_feedback`).
+        model_context = client.context() if callable(getattr(client, "context", None)) else None
+        route = client.route() if callable(getattr(client, "route", None)) else {}
+        from refactory_dsh import workspace as workspaces
+        from refactory_dsh.node_retry import deliver
+
+        def dispatch_workspace():
+            return workspaces.dispatched(
+                self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
+                route=route, budget=self.ctx.budget,
+                runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
+                else None)
+
         prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
         if self.ctx.budget is not None and not callable(getattr(client, "with_budget", None)):
             self.ctx.budget.require_usage_capability(False)
 
-        def ask(attempt: Any, sent: str) -> str:
+        def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
-            # The prompt alone, as the spine's worker sends it: a node's notes say what it
-            # does (its event summary, a gate's question), and its template says all it is asked.
-            return _ask_model(attempt, sent, system="", workdir=self.ctx.workdir)
-
-        route = client.route() if callable(getattr(client, "route", None)) else {}
-        # The delivery bracket and the node's declared retry, as the spine's worker runs them.
-        from refactory_dsh.node_retry import deliver
+            if place is None:
+                return _ask_model(attempt, sent, system="", workdir=self.ctx.workdir)
+            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system="")
 
         output, _receipt = deliver(
             self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
             reads=list(node.reads), client=client, ask=ask,
             capture_final=route.get("worker_backend", "dsh") == "dsh", rule=node.retry,
-            timeout_s=node.timeout_s, budget=self.ctx.budget)
+            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace)
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.
@@ -1297,7 +1304,8 @@ def _run_end_cleanup(workdir: Path) -> None:
 
     The walker is core and imports nothing from the product, so a cleanup reaches it
     through the ``refactory.run_end`` entry-point group: the builder probe's warm
-    clones (``refactory/refactory_dsh/builder_probe.py``). A cleanup that fails is
+    clones (``refactory/refactory_dsh/builder_probe.py``) and the agents' workspaces
+    (``refactory/refactory_dsh/workspace.py``). A cleanup that fails is
     logged with its error, which names what it left on disk; it never replaces the
     run's own result or exception. The DSH evaluator calls this too
     (``refactory/refactory_dsh/dsh_runtime.py``). The group is read on every call,

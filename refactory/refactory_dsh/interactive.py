@@ -525,10 +525,17 @@ def run(
     except Exception:
         pass  # promotion is best-effort; do not mask the run's exit code
     # The spine run's end, once its DSH child has exited however the run ended:
-    # no builder probe's warm clone outlives it. A clone left on disk is named.
+    # no builder probe's warm clone and no agent's workspace outlives it. One left on
+    # disk is named.
     try:
         from refactory_dsh.builder_probe import sweep_warm_clones
         sweep_warm_clones(workdir)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("run-end cleanup under %s: %s", workdir, exc)
+    try:
+        from refactory_dsh.workspace import sweep as sweep_workspaces
+        sweep_workspaces(workdir)
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("run-end cleanup under %s: %s", workdir, exc)

@@ -376,11 +376,11 @@ class _CrashingModel:
         from tests_support import FakeModel
         self.inner, self.mark, self.crashes = FakeModel(answers), mark, 0
 
-    def complete(self, prompt, *, system="", workdir=None):
+    def complete(self, prompt, *, system="", workdir=None, **workspace):
         if self.mark in prompt:
             self.crashes += 1
             raise RuntimeError("branch crashed")
-        return self.inner.complete(prompt, system=system, workdir=workdir)
+        return self.inner.complete(prompt, system=system, workdir=workdir, **workspace)
 
 
 _VERIFIER_MARK = "design.md is in the run directory. Do NOT read it"
@@ -451,6 +451,8 @@ def test_finding_sources_json(tmp_path):
         return create_ops.gate_qa(ctx)
 
     assert attempt(QA_FAIL) == "reloop"
+    # create's builder writes its own emission, so it answers the verifier there.
+    assert "respond in emit.txt under ## Verifier findings" in ctx.read_text("reviews/qa-gate.txt")
     assert attempt("qa: passed", "## Verifier findings\n"
                    "negative values accepted → rebutted: false positive\n") == "proceed"
     path = tmp_path / "reviews" / "finding-sources.json"
@@ -614,6 +616,9 @@ def test_rebuttal_fate_fast_mode(tmp_path, monkeypatch):
         task={"name": "advisory_fast", "brief": "a tool", "check": "python tool.py"},
     )
     assert result.exit_ok, result.error
+    # design_fast's builder works in a workspace: it answers in its final message.
+    emits = [prompt for prompt in model.prompts if "Current stage: make the change" in prompt]
+    assert "answer in your final message, which is saved as verifier-response.md" in emits[1]
     sources_path = tmp_path / "run" / "reviews" / "finding-sources.json"
     assert sources_path.exists(), "finding-sources.json must be written"
     sources = json.loads(sources_path.read_text())

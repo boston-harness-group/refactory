@@ -716,7 +716,12 @@ def test_a_fixup_that_undoes_the_whole_attempt_is_refused_not_a_crash(tmp_path, 
     test, the second passes."""
     _Chunks(monkeypatch, emissions=[{PIN}, set()])
     repo = _target(tmp_path / "repo", PINNED)
-    model = FakeModel(_answers(BREAKS, UNDOES, PIN_FIXED))
+    # The builder works in a clone of the attempt, which keeps the refused round's revert
+    # (`clones.prepare`: a head that did not move keeps the clone as the agent left it), so
+    # its next round puts the change back and fixes the test, as the refusal asks.
+    restored = render({"tool.py": "VERSION = 2\n",
+                       "tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"})
+    model = FakeModel(_answers(BREAKS, UNDOES, restored))
     run = tmp_path / "run"
     result = _design(run, model, repo)
     assert result.exit_ok, result.error

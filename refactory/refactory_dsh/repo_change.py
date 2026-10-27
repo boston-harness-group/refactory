@@ -35,7 +35,6 @@ import re
 import shutil
 import sys
 import tempfile
-import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
@@ -45,6 +44,7 @@ from refactory_dsh import projects, sandbox, target_guard, worktree
 from refactory_dsh.nn import Knob, Node
 from refactory_dsh.paths import project_for_nodes
 from refactory_dsh.worktree import AttemptRefused, _alive, _json
+from refactory_dsh.emitted_paths import HIDDEN_FORMAT, _unprintable, unprintable_refusal  # noqa: F401
 
 #: Where the steps' own ops live, for the nodes that call them.
 OPS = "refactory_dsh.repo_change"
@@ -274,44 +274,6 @@ def _require_owner(name: str, run: Path) -> None:
             f"so {ARTIFACTS / name} may hold that run's files. Redo emit or materialise to "
             "write this run's artifact again before checking or reporting it."
         )
-
-
-#: The format characters a path may not hold (dm-208): the bidirectional controls, which
-#: make a name read in another order than it is stored, and the invisible ones that make
-#: two different names look the same. Other format characters stay allowed: U+200C and
-#: U+200D join letters in Persian and other scripts, and characters in emoji sequences.
-HIDDEN_FORMAT = frozenset(
-    "\u061c\u200e\u200f" + "".join(map(chr, range(0x202A, 0x202F)))
-    + "".join(map(chr, range(0x2066, 0x206A))) + "\u200b\u2060\ufeff")
-
-
-def _unprintable(path: str) -> str:
-    """The first character of ``path`` that a file name may not hold, named; else ``""``.
-
-    Control characters (Unicode category Cc: the C0 range, DEL and the C1 range) and the
-    format characters in `HIDDEN_FORMAT` (bidirectional controls such as U+202E, zero-width
-    space, word joiner, byte-order mark), which a terminal, a diff or a review hides or
-    shows as something else (dm-208).
-    """
-    for char in path:
-        if unicodedata.category(char) == "Cc" or char in HIDDEN_FORMAT:
-            name = unicodedata.name(char, "")
-            return f"U+{ord(char):04X} " + (name if name else "(a control character)")
-    return ""
-
-
-def unprintable_refusal(path: str) -> str:
-    """Why ``path`` is refused when it holds a character `_unprintable` names; else ``""``.
-
-    The one check for emitted paths: `_artifact_paths` and create mode's
-    `create_ops._package_relative` use it, and so should any other place that takes a
-    path from an agent.
-    """
-    found = _unprintable(path)
-    return (f"the emitted path {path!r} holds {found}, and no emitted path may hold a control "
-            "character or a hidden format character (DEL, a C1 control, a bidirectional "
-            "control, a zero-width space): it is hidden or misshown wherever the path is read. "
-            "Name the file without it") if found else ""
 
 
 def _artifact_paths(names: list[str]) -> list[Path]:
@@ -766,8 +728,8 @@ def refuse_truncated(path: Path, text: str) -> None:
         raise AttemptRefused(
             f"{path} would contain, on line {line}, the read tool's note that it cut text short: "
             f"{match.group(0)!r}. Text copied from that read is incomplete, so the file would be too. Write "
-            "only text that was shown in full; in a worktree, change the file with ===EDIT: blocks that "
-            "leave out the lines you could not read whole.")
+            "only text that was shown in full: copy a file's text from the file itself, or, writing "
+            "===EDIT: blocks, leave out the lines you could not read whole.")
 
 
 def _count_refusal(ctx: Any, refused: Exception) -> dict[str, Any]:
@@ -801,7 +763,10 @@ def materialise(ctx: Any, *, source: Path | None = None, files: tuple[str, ...] 
     applied -- a malformed block, an edit whose text is not in its file, text copied from a
     truncated read, or an emission that changes nothing because every file and edit is
     already in the last attempt -- does not end the run: it is recorded as
-    ``emission_refused``, and the check sends the reason back to emit.
+    ``emission_refused``, and the check sends the reason back to emit. So does an emission
+    derived from an agent's workspace whose change the blocks could not carry (a binary
+    file, a symlink, a mode change), which the workspace's collect step refused
+    (`workspace.refusal_for`).
     """
     # Sweep dead probes and warm clones before proceeding. A warm clone left on
     # disk is named in a warning; it does not stop the attempt.
@@ -819,6 +784,11 @@ def materialise(ctx: Any, *, source: Path | None = None, files: tuple[str, ...] 
         # Like emission_refused: reset only when set, so a run lowered before the
         # refusal count existed still materialises.
         reset_refusals = {"consecutive_refusals": 0} if ctx.facts.get("consecutive_refusals") else {}
+        from refactory_dsh.workspace import refusal_for
+        if ctx.exists(EMIT_FILE):
+            collected = refusal_for(ctx.workdir, EMIT_FILE, ctx.read_text(EMIT_FILE))
+            if collected is not None:
+                raise AttemptRefused(collected)
         if found is None:
             change = (f"The artifact directory is a copy of {source} with this run's files applied."
                       if source is not None else "The artifact directory holds only the files this run wrote.")
@@ -1175,17 +1145,19 @@ def prepare_check_environment(
     home: Path,
     timeout: float,
     budget: Any = None,
+    record: Path | None = None,
 ) -> tuple[worktree.Worktree, dict[str, str], list[str], dict[str, Any] | None]:
     """Install dependencies, build check environment, run generate/setup.
 
-    Factored from _check_in_worktree so the check, the base check and the probe
-    can all call it.  *amend* and *commit_lockfiles* have no default — callers
-    must pass them explicitly.
+    Factored from _check_in_worktree so the check, the base check, the probe and an
+    agent's clone workspace (`clones.prepare`) can all call it.  *amend* and
+    *commit_lockfiles* have no default — callers must pass them explicitly. *record*
+    is where the install record is kept (`worktree.ensure_environment`).
 
     Returns (found, env, problems, prep_fail).
     """
     amended, problems, install_fail = worktree.ensure_environment(
-        found, run, budget, commit_lockfiles=commit_lockfiles,
+        found, run, budget, commit_lockfiles=commit_lockfiles, record=record,
     )
     if amended.head != found.head:
         found = amended

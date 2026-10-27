@@ -45,7 +45,7 @@ class _UnmeteredModel:
         model = route(node_id, role=role) if callable(route) else self._model
         return type(self)(model, self._budget)
 
-    def complete(self, prompt: str, *, system: str = "", workdir: Any = None) -> str:
+    def complete(self, prompt: str, *, system: str = "", workdir: Any = None, **workspace: Any) -> str:
         self._budget.require_usage_capability(False)
         raise BudgetExhausted("custom model lacks shared token accounting")
 

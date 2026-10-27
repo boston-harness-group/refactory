@@ -113,17 +113,30 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # The node's own role, as the walker's session records it; a spec from before the
     # role was written keeps the generic one.
     client = DshModelClient(**spec['model_context']).for_node(node, role=spec.get('role', 'worker'))
-    # The reloop's feedback once: after rendering, so a template that renders the gate's
-    # reason already carries it (`with_feedback`).
+    # A node that declares a workspace works there (`workspace.py`): prepared before the
+    # delivery bracket opens, so the contract can name it, and collected into the node's
+    # outputs before the bracket closes, so delivery checks what the workspace produced.
+    from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import with_feedback
-    # The delivery bracket and the node's declared retry, as the walker runs them.
     from refactory_dsh.node_retry import deliver
+    runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
+
+    def dispatch_workspace():
+        return workspaces.dispatched(
+            workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
+            route=client.route(), runtime_root=Path(runtime_root) if runtime_root else None)
+
+    def ask(attempt, sent, place):
+        if place is None:
+            return attempt.complete(sent, workdir=workdir)
+        return workspaces.ask(place, attempt, sent, workdir=workdir)
+
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback),
-        writes=spec['writes'], reads=spec['reads'], client=client,
-        ask=lambda attempt, sent: attempt.complete(sent, workdir=workdir),
+        writes=spec['writes'], reads=spec['reads'], client=client, ask=ask,
         capture_final=client.route()["worker_backend"] == "dsh", rule=spec.get('retry'),
-        timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None))
+        timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None),
+        workspace=dispatch_workspace)
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():
