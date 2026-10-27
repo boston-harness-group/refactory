@@ -192,9 +192,8 @@ class Node:
     #: a reviewer, a judge, a researcher -- never the run's worktree or the target. Only
     #: such a node may declare a retry: its outputs are set aside and the retry writes
     #: them afresh. A node that changes shared state would have its second session
-    #: start from whatever the first one left. The runtime holds the node to it: the
-    #: delivery bracket refuses it when it changed the run's worktree or the target
-    #: (it joins `target_guard`'s output-only list when it is dispatched).
+    #: start from whatever the first one left. A timed-out attempt during which the
+    #: target or the run's worktree changed is not retried (`node_retry.settle_for_retry`).
     outputs_only: bool = False
 
     def __post_init__(self) -> None:

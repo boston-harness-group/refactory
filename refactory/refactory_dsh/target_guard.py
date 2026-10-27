@@ -231,31 +231,6 @@ def record(workdir: Path, root: Path, *, output_only: tuple[str, ...] = (),
     return baseline
 
 
-def hold_to_outputs(workdir: Path, node: str) -> None:
-    """Put ``node`` on this run's output-only list, if the run recorded a baseline.
-
-    For an agent whose graph node declares ``outputs_only`` (`nn.graph.Node`), added
-    when it is dispatched, on either runtime (`node_retry.deliver`): from then on the
-    delivery bracket refuses it when it changed the run's worktree or the target, as it
-    does `emit`. A run without a baseline is not watched, and stays so.
-    """
-    import fcntl
-
-    path = Path(workdir) / RECORD
-    if not path.exists():
-        return
-    # Branches of one fork are dispatched at once: one at a time through the record.
-    with open(path.with_suffix(".lock"), "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        baseline = _read(workdir)
-        if baseline is None or node in baseline.get("output_only", ()):
-            return
-        baseline["output_only"] = [*baseline.get("output_only", ()), node]
-        pending = path.with_suffix(".hold.tmp")
-        pending.write_text(json.dumps(baseline, indent=2) + "\n")
-        pending.replace(path)
-
-
 def moved(workdir: Path) -> str | None:
     """How the target differs from this run's baseline, or None when it does not."""
     baseline = _read(workdir)

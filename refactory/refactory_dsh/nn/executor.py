@@ -1127,7 +1127,7 @@ class Executor:
             self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
             reads=list(node.reads), client=client, ask=ask,
             capture_final=route.get("worker_backend", "dsh") == "dsh", rule=node.retry,
-            timeout_s=node.timeout_s, outputs_only=node.outputs_only, budget=self.ctx.budget)
+            timeout_s=node.timeout_s, budget=self.ctx.budget)
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.

@@ -271,8 +271,6 @@ def test_the_spine_reserves_every_attempt_and_one_overhead(tmp_path):
     spec = json.loads(Path(lowered.nodes["reviewer"].dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
     assert spec["retry"] == RULE
     assert lowering.node_declarations(state)["reviewer"]["retry"] == RULE
-    # The worker is told to hold the node to its outputs.
-    assert spec["outputs_only"] is True
     # Without a rule the reservation is what it was.
     state = {"graph": _graph(_node(timeout_s=100, retry=None)).to_state(), "knobs": {}}
     lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path, dsh.client().context(),
@@ -521,24 +519,28 @@ def _watched_run(tmp_path: Path) -> tuple[Path, Path]:
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_verifier_that_writes_only_its_report_still_delivers(tmp_path, runtime):
-    """The canary's shape: a verifier in a worktree run answers with its report alone,
-    and joining the output-only list changes nothing for it."""
-    from refactory_dsh import target_guard
-
-    workdir, _worktree = _watched_run(tmp_path)
-    dsh = Scripted(tmp_path / "dsh", [{"answer": "M1: no finding."}])
+def test_a_verifier_still_delivers_while_a_sibling_writes_into_the_worktree(tmp_path, runtime):
+    """The review's repro, in the canary's shape: the verifier runs in fork_qa beside the
+    check and the reviewers, which write into the run's worktree. A verifier that writes
+    only its report delivers it whatever they write there while it runs."""
+    workdir, worktree = _watched_run(tmp_path)
+    # The scripted session writes the sibling's file itself, while the verifier runs.
+    dsh = Scripted(tmp_path / "dsh", [{"answer": "M1: no finding.",
+                                       "write": {str(worktree / "probe_output.txt"): "sibling\n"}}])
     ok, error = _run(runtime, workdir, _graph(_node()), dsh.client())
     assert ok, error
     assert (workdir / REPORT).read_text().strip() == "M1: no finding."
-    assert target_guard._read(workdir)["output_only"] == ["emit", "reviewer"]
+    assert (worktree / "probe_output.txt").exists()
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_an_outputs_only_node_that_changes_the_worktree_is_refused(tmp_path, runtime):
-    """`outputs_only` is enforced: the bracket refuses a node that wrote into the run's
-    worktree -- a half-written probe there is exactly what a retry must not build on."""
+def test_a_timed_out_attempt_that_changed_the_worktree_is_not_retried(tmp_path, runtime):
+    """A retry would start from what the session (or a sibling) left in the run's worktree,
+    so a timed-out attempt during which it changed is the node's failure: one call, no retry."""
     workdir, worktree = _watched_run(tmp_path)
-    dsh = Scripted(tmp_path / "dsh", [{"answer": "done", "write": {str(worktree / "probe.py"): "x = 1\n"}}])
+    dsh = Scripted(tmp_path / "dsh", [{"sleep": 30, "write": {str(worktree / "probe.py"): "x = 1\n"}},
+                                      {"answer": "never asked"}])
     ok, error = _run(runtime, workdir, _graph(_node()), dsh.client())
-    assert not ok and "probe.py" in error
+    assert not ok
+    assert "not retried: the run's worktree changed while it ran" in error and "probe.py" in error
+    assert dsh.calls == 1 and _retried(workdir) == []

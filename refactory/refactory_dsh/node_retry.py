@@ -16,8 +16,8 @@ begins (:func:`settle_for_retry`): if it changed the target, the guard's refusal
 and nothing is retried; otherwise its delivery is superseded, so the next `begin` sets
 its partial outputs aside and the retry writes them afresh. Only a node whose outputs are
 its own declared report files may declare a retry (`Node.outputs_only`), which is what
-makes setting them aside a reset; such a node joins the target guard's output-only list
-when it is dispatched, so the bracket also refuses one that changed the run's worktree.
+makes setting them aside a reset; a timed-out attempt during which the run's worktree
+changed is not retried.
 
 Each retry is checked against the run's budget first, its limit is clamped to what is
 left of the node's envelope and of the run's wall, and it is recorded as a
@@ -93,13 +93,27 @@ def _with_wall(client: Any, seconds: int) -> Any:
     return bind(int(seconds)) if callable(bind) else client
 
 
-def settle_for_retry(workdir: Path, node: str, reason: str) -> None:
+def _worktree_state(workdir: Path) -> dict[str, Any] | None:
+    """The run's watched worktree as it is now (the baseline's ``also`` paths), or None
+    when the run records no baseline."""
+    from refactory_dsh import target_guard
+
+    baseline = target_guard._read(workdir)  # noqa: SLF001
+    if baseline is None:
+        return None
+    return {path: target_guard._also_state(path, Path(workdir))  # noqa: SLF001
+            for path in baseline.get("also", [])}
+
+
+def settle_for_retry(workdir: Path, node: str, reason: str, *,
+                     worktree: dict[str, Any] | None = None) -> None:
     """Close a timed-out attempt's delivery bracket so the next attempt starts clean.
 
     The target guard judges the attempt first: one that changed the target is refused
     by `agent_delivery.finish`, which restores the target and raises, and that refusal is
-    the node's failure -- a retry never runs on top of it. Otherwise the delivery is
-    superseded (`agent_delivery.invalidate`), and the next `begin` sets the attempt's
+    the node's failure -- a retry never runs on top of it. Nor does one whose run's
+    worktree changed against ``worktree``, its state from before the attempt (raising
+    :class:`RetriesExhausted`). Otherwise the delivery is superseded (`agent_delivery.invalidate`), and the next `begin` sets the attempt's
     outputs aside (`_set_aside_stale_outputs`), so the retry must write every one afresh.
     """
     from refactory_dsh import agent_delivery, target_guard
@@ -111,6 +125,16 @@ def settle_for_retry(workdir: Path, node: str, reason: str) -> None:
     fail_changes, _warn = target_guard.strayed(Path(workdir).resolve(), record.get("target"))
     if fail_changes:
         agent_delivery.finish(workdir, node)
+    if worktree:
+        # Only a timed-out attempt is checked, and only to decide whether to retry: a
+        # retry would start from whatever the session left there. A sibling branch may
+        # be the writer, so this refuses the retry and never the node's delivery.
+        now = _worktree_state(workdir) or {}
+        changed = [phrase for path, before in worktree.items()
+                   for phrase in target_guard._compare(before, now.get(path, before))]  # noqa: SLF001
+        if changed:
+            raise RetriesExhausted(f"{node} timed out and was not retried: the run's worktree "
+                                   f"changed while it ran ({'; '.join(changed)})")
     agent_delivery.invalidate(Path(workdir).resolve(), [node], reason)
 
 
@@ -149,7 +173,6 @@ def deliver(
     capture_final: bool,
     rule: dict[str, Any] | None,
     timeout_s: int | None,
-    outputs_only: bool = False,
     budget: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
@@ -158,16 +181,11 @@ def deliver(
     which a rule multiplies. Returns the answer and the delivery receipt. With no rule,
     or a failure the rule does not answer, the first failure is raised unchanged. When
     the last allowed attempt times out too, :class:`RetriesExhausted` says how long each
-    session ran. A node that declares ``outputs_only`` is put on the target guard's
-    output-only list first, so the bracket refuses it when it changed the run's worktree.
+    session ran.
     """
     from refactory_dsh.agent_delivery import begin, finish
 
     workdir = Path(workdir)
-    if outputs_only:
-        from refactory_dsh import target_guard
-
-        target_guard.hold_to_outputs(workdir, node)
     if rule and timeout_s is None:
         raise ValueError(f"{node} declares a retry but no timeout_s for it to multiply")
     tries = 1 + (int(rule["times"]) if rule else 0)
@@ -177,6 +195,7 @@ def deliver(
     ran: list[int] = []
     attempt_client = client
     for index in range(tries):
+        worktree = _worktree_state(workdir) if rule else None
         delivery = begin(workdir, node, prompt, list(writes), reads=list(reads),
                          model_context=_context(attempt_client))
         started = time.monotonic()
@@ -207,7 +226,7 @@ def deliver(
             if budget is not None:
                 budget.checkpoint()
             settle_for_retry(workdir, node, f"timed out after {ran[-1]}s; retried by the "
-                                            "node's declared rule")
+                                            "node's declared rule", worktree=worktree)
             _record_retry(workdir, node, attempt=index + 2, tries=tries, waited_s=ran[-1],
                           wall_s=limit, error=error)
             attempt_client = _with_wall(client, limit)

@@ -252,9 +252,6 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'model_context': selected_context}
         if is_optional:
             payload['optional'] = True
-        if (declarations or {}).get(name, {}).get('outputs_only'):
-            # The worker puts the node on the target guard's output-only list.
-            payload['outputs_only'] = True
         retry = getattr(node, 'retry', None)
         if retry:
             # The worker runs the node's declared retry (`node_retry.deliver`), inside the

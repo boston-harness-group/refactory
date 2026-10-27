@@ -123,8 +123,7 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         writes=spec['writes'], reads=spec['reads'], client=client,
         ask=lambda attempt, sent: attempt.complete(sent, workdir=workdir),
         capture_final=client.route()["worker_backend"] == "dsh", rule=spec.get('retry'),
-        timeout_s=spec['model_context'].get('node_wall_s'),
-        outputs_only=bool(spec.get('outputs_only')), budget=getattr(client, '_budget', None))
+        timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None))
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():
