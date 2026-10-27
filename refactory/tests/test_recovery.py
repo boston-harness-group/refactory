@@ -173,3 +173,19 @@ def test_configuration_fingerprints_ignore_only_interpreter_cache(monkeypatch, t
     assert recovery.configuration_fingerprints(tmp_path, 'package/run', tmp_path) == before
     (package / 'data.json').write_text('{}')
     assert recovery.configuration_fingerprints(tmp_path, 'package/run', tmp_path) != before
+
+def test_set_aside_never_moves_the_runs_own_configuration(tmp_path):
+    """The configuration is identity, not an output: a changed one stays in place for the
+    resume to refuse, while a half-written output beside it is still set aside."""
+    saved_run(tmp_path, 'failed')
+    config = tmp_path / '.refactory/run-config.json'
+    config.write_text('{"mode": "demo/run", "knobs": ["edited"]}')
+    output = tmp_path / 'design.md'
+    output.write_text('half written\n')
+    directory, files = recovery.set_aside(
+        tmp_path, fingerprints={'.refactory/run-config.json': 'stale', 'design.md': 'stale'},
+        markers=[], status='failed', owner_pid=None)
+    assert [entry['original_path'] for entry in files] == ['design.md']
+    assert config.is_file()
+    assert not output.exists()
+    assert (directory / 'outputs/design.md').is_file()

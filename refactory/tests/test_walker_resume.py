@@ -256,6 +256,26 @@ def test_a_changed_run_configuration_is_refused(tmp_path, monkeypatch, capsys):
             in capsys.readouterr().err)
 
 
+def test_an_acknowledgement_leaves_a_changed_configuration_for_the_refusal(tmp_path, monkeypatch, capsys):
+    """An acknowledgement never sets aside the run's own configuration. When the
+    configuration was edited since the boundary, the resume refuses it by name, with the
+    same message a plain resume gives, and the file stays where the person can see it:
+    moving it would leave the run with no identity and no readable reason."""
+    run, _ = _stopped(tmp_path, monkeypatch)
+    _rewrite(run, outcome="failed", error="gate_strategy: boom")
+    path = run / ".refactory/run-config.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "knobs": ["brief=something else"]}))
+    capsys.readouterr()
+    assert _resume(run, "--acknowledge-failure") == 2
+    assert ("input/output '.refactory/run-config.json' changed; dependent results need explicit invalidation"
+            in capsys.readouterr().err)
+    assert path.is_file(), "the configuration keeps its place: the run keeps its identity"
+    manifests = list((run / ".refactory/set-aside").glob("*/manifest.json"))
+    moved = [entry["original_path"] for manifest in manifests
+             for entry in json.loads(manifest.read_text())["files"]]
+    assert ".refactory/run-config.json" not in moved
+
+
 def test_a_changed_checkout_does_not_strand_a_stopped_run(tmp_path, monkeypatch, capsys):
     """The walker has no pin: a stopped run resumes on the code checked out now, as it did
     before, rather than being refused once the driver checkout's source moves on. The

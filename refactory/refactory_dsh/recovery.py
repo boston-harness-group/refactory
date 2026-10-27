@@ -331,6 +331,11 @@ def set_aside(root: Path, *, fingerprints: dict[str, Any], markers: list[Path], 
     # Completed fork branches' outputs match the recorded fingerprints and stay in
     # place; in-flight branches' partial outputs differ and are set aside.
     for name, expected in fingerprints.items():
+        if name == '.refactory/run-config.json':
+            # The run's configuration is its identity, not an output: a changed one is
+            # refused by name when the run is resumed (`prepare`, `prepare_walked`), so
+            # setting it aside here would strand the run and hide the refusal's reason.
+            continue
         output = root / name
         if not output.exists() or fingerprint(output) == expected:
             continue
