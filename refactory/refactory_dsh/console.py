@@ -1005,6 +1005,13 @@ def _steer(
         "control": latest_receipt(run_root),
     }
     payload["_effective_kind"] = _effective_kind
+    if (note is not None and effective_kind in ("correction", "constraint")
+            and scope == "product" and source == "user-relayed"):
+        from refactory_dsh.design_ops import late_correction_notice
+
+        notice = late_correction_notice(run_root)
+        if notice is not None:
+            payload["late_correction"] = notice
     if with_gates:
         payload["gates"] = gates(run_root)
     if control is not None:

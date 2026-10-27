@@ -89,10 +89,11 @@ def test_the_judge_is_an_agent_node_beside_the_first_self_check_only():
     # The first emission goes to the fork; a fix-up's self-check stays in prepare_check.
     assert ("materialise", "prepare_check", None) in edges
     assert ("prepare_check", "fork_self_check", "first") in edges
-    assert ("prepare_check", "emit", "reloop") in edges and ("prepare_check", "fork_qa", "proceed") in edges
+    assert ("prepare_check", "pick_corrections", "reloop") in edges
+    assert ("prepare_check", "fork_qa", "proceed") in edges
     assert not [edge for edge in edges if edge[1] == "early_asks_check"]
     assert {edge for edge in edges if edge[0] == "gate_self_check"} == {
-        ("gate_self_check", "emit", "reloop"), ("gate_self_check", "fork_qa", "proceed"),
+        ("gate_self_check", "pick_corrections", "reloop"), ("gate_self_check", "fork_qa", "proceed"),
         ("gate_self_check", "report", "draft"), ("gate_self_check", "fork_self_check", "reread")}
     # The spine gets the same shape, and dispatches the judge as it does every agent node.
     workflow = lowering.to_workflow(DesignMode().state_dict())

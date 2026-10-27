@@ -48,25 +48,54 @@ class RunRecord:
         if gate not in self.completed:
             self.completed.append(gate)
         self.gate_verdicts[gate] = outcome.lower()
+        # A retry's feedback for this gate was for this visit, as an agent's is (dm-226).
+        self.feedback.pop(gate, None)
         if retry and target is not None:
             self.feedback[target] = reason
             self._uncomplete_between(graph, target, gate)
 
     def _uncomplete_between(self, graph: Graph, target: str, gate: str) -> None:
-        """``target`` and its unconditional downstream up to ``gate``, as the spine walks it."""
-        seen: set[str] = set()
-        queue = [target]
-        for node in queue:
-            if node in seen or node == gate:
-                continue
-            seen.add(node)
-            queue.extend(edge.target for edge in graph.out_edges(node)
-                         if not edge.condition and edge.target != gate and edge.target not in seen)
-            body = graph.nodes.get(node)
-            if body is not None and body.kind == "fork":
-                queue.extend(child for child in body.targets if child != gate and child not in seen)
-        self.completed = [entry for entry in self.completed if entry not in seen]
-        for node in seen:
+        """The nodes a retry from ``gate`` back to ``target`` runs again: exactly the cycle,
+        every node reachable from ``target`` that can also reach ``gate``, along non-retry
+        edges, fork targets and join sources, as the spine reopens them
+        (`Spine.uncompleteBetween`). A target that is a gate (design mode's send-backs onto
+        ``pick_corrections``, dm-226) reopens what each of its routes leads to in the cycle."""
+        from .loops import loop_edges
+
+        retries = loop_edges(graph)
+        forward: dict[str, list[str]] = {}
+        backward: dict[str, list[str]] = {}
+
+        def link(source: str, to: str) -> None:
+            forward.setdefault(source, []).append(to)
+            backward.setdefault(to, []).append(source)
+
+        for edge in graph.edges:
+            if edge.key() not in retries:
+                link(edge.source, edge.target)
+        for node_id, node in graph.nodes.items():
+            if node.kind == "fork":
+                for child in node.targets:
+                    link(node_id, child)
+            if node.kind == "join":
+                for source in node.sources:
+                    link(source, node_id)
+            if node.kind == "data" and node.subgraph_entry:
+                link(node_id, node.subgraph_entry)
+
+        def reach(start: str, following: dict[str, list[str]]) -> set[str]:
+            seen, queue = {start}, [start]
+            for node in queue:
+                for other in following.get(node, ()):
+                    if other not in seen:
+                        seen.add(other)
+                        queue.append(other)
+            return seen
+
+        after, before = reach(target, forward), reach(gate, backward)
+        cycle = {node for node in after if node != gate and (node == target or node in before)}
+        self.completed = [entry for entry in self.completed if entry not in cycle]
+        for node in cycle:
             self.gate_verdicts.pop(node, None)
 
     def merge_branches(self, branches: list[RunRecord], members: list[set[str]]) -> None:

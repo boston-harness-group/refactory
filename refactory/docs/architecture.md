@@ -759,7 +759,11 @@ semantics; a graph edit is not an ordinary verified agent delivery.
 A note given with a `proceed` verdict at `gate_strategy`, in the same steer call or a
 later one before resuming, becomes a gate correction: `pick_gate_corrections` collects
 it and `apply_corrections` rewrites `design.md` before the build, on both the walker
-and DSH runtimes. The rewrite covers every part a correction touches, `## Changes` and
+and DSH runtimes. A correction given later, while the change is built or reviewed, is
+one too (dm-226): every send-back to the builder goes through `pick_corrections`, which
+applies a correction it has not applied yet before the builder's next round, and
+`gate_overwatch` sends back a change built without one rather than pass it. `steer`
+says which will happen, or that a run past its final review will not build it. The rewrite covers every part a correction touches, `## Changes` and
 `## Docs` included, because the builder reads the whole document. The pull request
 lists the corrections, one short bullet each, under "Corrections given at approval",
 after its Follow-ups.

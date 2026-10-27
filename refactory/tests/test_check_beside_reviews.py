@@ -35,14 +35,14 @@ def test_the_check_is_a_branch_of_the_review_fork():
     graph = DesignMode().build()
     edges = _edges(graph)
     assert ("materialise", "prepare_check", None) in edges
-    assert ("prepare_check", "emit", "reloop") in edges
+    assert ("prepare_check", "pick_corrections", "reloop") in edges
     assert ("prepare_check", "fork_qa", "proceed") in edges
     assert "check" in graph.nodes["fork_qa"].targets
     assert "check" in graph.nodes["join_qa"].sources
     # The check sends the run nowhere: like the reviews, its branch drains into the join.
     assert not [e for e in edges if e[0] == "check"]
     assert ("join_qa", "gate_check", None) in edges
-    assert ("gate_check", "emit", "reloop") in edges
+    assert ("gate_check", "pick_corrections", "reloop") in edges
     assert ("gate_check", "synthesize_qa", "proceed") in edges
     assert graph.nodes["check"].kind == "op"
     assert graph.nodes["check"].call.endswith("design_ops:check_beside_reviews")
@@ -52,7 +52,7 @@ def test_the_spine_gets_the_same_shape():
     workflow = lowering.to_workflow(DesignMode().state_dict())
     lowered = {(e.source, e.target, e.condition) for e in workflow.edges}
     assert ("join_qa", "gate_check", None) in lowered
-    assert ("gate_check", "emit", "reloop") in lowered
+    assert ("gate_check", "pick_corrections", "reloop") in lowered
     assert "check" in workflow.nodes["fork_qa"].targets
     assert workflow.nodes["check"].command.endswith(
         "refactory_dsh.design_ops:check_beside_reviews")

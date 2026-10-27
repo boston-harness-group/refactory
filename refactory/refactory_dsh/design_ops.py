@@ -68,68 +68,179 @@ def noop(ctx: Any) -> dict[str, Any]:
     return {}
 
 
-def pick_gate_corrections(ctx: Any) -> str:
-    """Gate evaluator: extract gate_strategy corrections from the intent ledger.
+#: The fact naming the ledger entries `pick_gate_corrections` put in ``gate_corrections``,
+#: and the approval they were picked under (dm-226).
+CORRECTIONS_PICKED = "gate_corrections_picked"
 
-    Returns ``"proceed"`` when corrections exist (route to apply_corrections),
-    or ``"skip"`` when there are none (route directly to emit, skipping the
-    agent entirely).
 
-    Reads the ledger only when it exists; a missing ledger means "no corrections".
-    Only correction or constraint entries with product scope and user-relayed
-    source, between a gate_strategy proceed verdict and the next gate-visit or
-    verdict-use, are gate corrections.
+def _entry_key(entry: dict[str, Any], occurrence: int) -> str:
+    """A correction's key: its words, and which time the person said them. Not its
+    timestamp or its kind (a gate card's note is a constraint, a steered one a
+    correction), so the same run keys alike on either runtime (dm-158)."""
+    import hashlib
+
+    return hashlib.sha256(f"{entry.get('text')}\n{occurrence}".encode()
+                          ).hexdigest()[:16]
+
+
+def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
+    """``(approval, corrections)``: the person's corrections to the approved design.
+
+    Correction and constraint entries with product scope and the person as their source
+    (``user-relayed``), recorded while a ``gate_strategy`` proceed verdict stands: from
+    that verdict to the next verdict on any gate. That includes a correction given after
+    the gate let the run go on, and after `pick_gate_corrections` ran (dm-226): it is the
+    person's word on the same design. ``approval`` names the latest gate_strategy verdict,
+    so a design approved again is corrected from scratch. Each correction is
+    ``(key, text)``, keyed by its ledger entry.
+
+    Only a verdict the run went on from counts once one has: answered at the gate, given
+    up front, or a steered answer the gate used (a ``used`` verdict-use). A steered answer
+    still pending after that -- a ``proceed`` or a stray ``reloop`` given mid-build -- is
+    not a new approval, and neither drops nor re-applies the corrections. Before any is
+    used, a pending answer stands for the approval it is about to be.
     """
     from refactory_dsh.steering import LEDGER, parse_entries
 
-    ledger_path = Path(ctx.workdir) / LEDGER
+    ledger_path = Path(workdir) / LEDGER
     if not ledger_path.exists():
-        ctx.set_fact("gate_corrections", "")
-        ctx.set_fact("design_corrections_applied", "0 corrections (no ledger)")
-        return "skip"
-
-    text = ledger_path.read_text()
-    entries = parse_entries(text)
-    corrections: list[str] = []
-
+        return "", []
+    entries = parse_entries(ledger_path.read_text())
+    used = {_field(entry, "id") for entry in entries
+            if entry.get("kind") == "verdict-use" and _field(entry, "result") == "used"}
+    corrections: list[tuple[str, str]] = []
+    said: dict[str, int] = {}
+    approval = ""
+    approved = False
     collecting = False
     for entry in entries:
         kind = entry.get("kind", "")
-
-        # A verdict for gate_strategy=proceed starts collecting;
-        # any other verdict resets.
+        # A verdict for gate_strategy=proceed starts collecting; any other verdict stops it.
         if kind == "verdict":
-            gate_match = _re.search(r'^gate:\s*(.+)$', entry["text"], _re.MULTILINE)
-            verdict_match = _re.search(r'^verdict:\s*(.+)$', entry["text"], _re.MULTILINE)
-            if gate_match and verdict_match:
-                gate = gate_match.group(1).strip()
-                verdict = verdict_match.group(1).strip().lower()
+            gate, verdict = _field(entry, "gate"), _field(entry, "verdict").lower()
+            if gate and verdict:
+                # Its id, not its text: using the answer marks it consumed in place.
+                named = _field(entry, "id")
+                went_on = (_field(entry, "source") in ("upfront", "interactive")
+                           or (bool(named) and named in used))
+                if approved and not went_on:
+                    continue  # a pending answer after the run went on decides nothing
                 collecting = (gate == "gate_strategy" and verdict == "proceed")
+                if gate == "gate_strategy":
+                    approval = named or str(entry.get("at"))
+                    approved = approved or went_on
             continue
-
-        # A gate-visit or verdict-use stops collecting.
-        if kind in ("gate-visit", "verdict-use"):
-            collecting = False
-            continue
-
-        # While collecting, pick up corrections/constraints with product scope
-        # and user-relayed source.
         if collecting and kind in ("correction", "constraint"):
             if entry.get("scope") == "product" and entry.get("source") == "user-relayed":
-                corrections.append(entry["text"])
+                said[entry["text"]] = occurrence = said.get(entry["text"], 0) + 1
+                corrections.append((_entry_key(entry, occurrence), entry["text"]))
+    return approval, corrections
 
-    if not corrections:
+
+def _field(entry: dict[str, Any], name: str) -> str:
+    """One ``name: value`` line of a ledger decision entry, or ``""``."""
+    found = _re.search(rf'^{name}:\s*(.+)$', str(entry.get("text") or ""), _re.MULTILINE)
+    return found.group(1).strip() if found else ""
+
+
+def _picked(facts: dict[str, Any], approval: str) -> set[str]:
+    """The corrections `pick_gate_corrections` already put in ``gate_corrections`` for this
+    approval of the design: none when it never ran or the design was approved again."""
+    raw = facts.get(CORRECTIONS_PICKED)
+    try:
+        picked = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return set()
+    if not isinstance(picked, dict) or picked.get("approval") != approval:
+        return set()
+    return {str(key) for key in picked.get("keys") or []}
+
+
+def unapplied_corrections(workdir: Path, facts: dict[str, Any]) -> list[str] | None:
+    """The corrections the person gave since `pick_gate_corrections` last ran, which no
+    builder round has had applied to design.md yet; None before it first ran (dm-226)."""
+    if CORRECTIONS_PICKED not in facts:
+        return None
+    approval, due = gate_corrections_due(workdir)
+    picked = _picked(facts, approval)
+    return [text for key, text in due if key not in picked]
+
+
+def late_correction_notice(run_root: Path) -> dict[str, Any] | None:
+    """What becomes of a correction the person just gave a design run whose approval gate
+    has already let it go on, for `refactory steer` to say (dm-226); None when the gate's
+    corrections are still to be picked, which is the ordinary path."""
+    root = Path(run_root)
+    try:
+        facts = json.loads((root / "facts.json").read_text())
+    except (OSError, ValueError):
+        return None
+    late = unapplied_corrections(root, facts) if isinstance(facts, dict) else None
+    if not late:
+        return None
+    try:
+        spine = json.loads((root / ".refactory/spine-status.json").read_text())
+    except (OSError, ValueError):
+        spine = {}
+    # Where the run is: what it completed, what it is due at, and what is running. A
+    # send-back from delivery_gate reopens report and deliver, so they are not in it then.
+    reached = {str(node.get("id") if isinstance(node, dict) else node)
+               for key in ("completed", "nodes", "running_nodes") if isinstance(spine, dict)
+               and isinstance(spine.get(key), list) for node in spine[key]}
+    finished = isinstance(spine, dict) and (spine.get("status") == "done"
+                                            or bool({"report", "deliver"} & reached))
+    if finished:
+        return {"applied": False, "pending": late, "message": (
+            "This run is past its final review, so it will not build this correction. "
+            "Follow its pull request up with a refine run that gives it.")}
+    return {"applied": True, "pending": late, "message": (
+        "The design was already approved, so this correction is applied the next time the "
+        "builder is sent back: pick_corrections adds it to the approved corrections and "
+        "apply_corrections writes it into design.md before that round. The overwatch does "
+        "not pass the change while it is unapplied.")}
+
+
+def pick_gate_corrections(ctx: Any) -> str:
+    """Gate evaluator: extract gate_strategy corrections from the intent ledger.
+
+    Returns ``"proceed"`` when there are corrections it has not yet sent to
+    apply_corrections for this approval of the design (route to apply_corrections), or
+    ``"skip"`` when there are none (route directly to emit, skipping the agent).
+
+    It runs after the approval gate, and again each time the build is sent back to the
+    builder: every send-back goes through it. So a correction the person gives after the
+    approval -- even after this gate first ran -- is applied to design.md before the
+    builder's next round (dm-226). ``gate_corrections`` always holds every correction to
+    this design (`gate_corrections_due`), for the builder's judges and the pull request.
+
+    Reads the ledger only when it exists; a missing ledger means "no corrections".
+    """
+    from refactory_dsh.steering import LEDGER
+
+    approval, due = gate_corrections_due(Path(ctx.workdir))
+    if not (Path(ctx.workdir) / LEDGER).exists():
+        ctx.set_fact("gate_corrections", "")
+        ctx.set_fact("design_corrections_applied", "0 corrections (no ledger)")
+        ctx.set_fact(CORRECTIONS_PICKED, json.dumps({"approval": approval, "keys": []}))
+        return "skip"
+    picked = _picked(ctx.facts, approval)
+    ctx.set_fact(CORRECTIONS_PICKED, json.dumps({"approval": approval,
+                                                 "keys": [key for key, _ in due]}))
+    if not due:
         ctx.set_fact("gate_corrections", "")
         ctx.set_fact("design_corrections_applied", "0 corrections")
         return "skip"
 
-    joined = "\n\n".join(f"- {c}" for c in corrections)
+    joined = "\n\n".join(f"- {text}" for _, text in due)
     ctx.set_fact("gate_corrections", joined)
-    ctx.set_fact("design_corrections_applied", f"{len(corrections)} correction(s)")
+    ctx.set_fact("design_corrections_applied", f"{len(due)} correction(s)")
+    if all(key in picked for key, _ in due):
+        return "skip"  # design.md already carries every one of them
 
-    # Back up design.md before corrections are applied (gate 5c).
+    # Back up design.md before corrections are first applied to it (gate 5c); a later
+    # round's correction leaves the design as it was approved in the backup.
     design_path = Path(ctx.workdir) / "design.md"
-    if design_path.exists():
+    if design_path.exists() and not picked:
         (Path(ctx.workdir) / "design.md.pre_corrections").write_text(design_path.read_text())
 
     return "proceed"
@@ -3168,7 +3279,9 @@ def _judge_overwatch(ctx: Any) -> Any:
     The change goes back to emit, spending a review attempt (`_send_back`), when the
     overwatch finds a correction the person gave not met, whatever its verdict, or says
     ``redo`` and names a must-fix item that holds the change back (`judges.blocks`) or a
-    correction it could not judge. The feedback names each one, with its evidence. At the
+    correction it could not judge. Before any of that, a correction the person gave after
+    the approval that no builder round has had applied (`unapplied_corrections`) sends the
+    change back, whatever the overwatch said (dm-226). The feedback names each one, with its evidence. At the
     review limit, or the overall attempts limit, the change goes to the report as a draft
     instead, listing them unresolved; on a run the QA judge's limit already made a draft,
     they join that draft, and no attempt is spent (`_overwatch_back`). Otherwise the change
@@ -3183,6 +3296,17 @@ def _judge_overwatch(ctx: Any) -> Any:
     from refactory_dsh import judges
     from refactory_dsh.create_ops import record_follow_ups
 
+    late = unapplied_corrections(ctx.workdir, ctx.facts)
+    if late:
+        # dm-226: a correction given while this attempt was built or reviewed was never
+        # applied to the design it was built from. It does not ship unapplied: the send-back
+        # goes through pick_corrections, which applies it before the builder's next round.
+        _note_unresolved(ctx, OVERWATCH_UNRESOLVED, "overwatch gate",
+                         [f"correction given after approval, not yet applied: {text}" for text in late])
+        return _overwatch_back(ctx, "reloop: the person gave corrections after the design was "
+                                    "approved, and this attempt was built without them; they are "
+                                    "applied to design.md before the next round:\n"
+                                    + "\n".join(f"- {text}" for text in late))
     stale = evidence.current_problems(ctx, ("overwatch",))
     if stale:
         _note_unresolved(ctx, OVERWATCH_UNRESOLVED, "overwatch gate", stale)

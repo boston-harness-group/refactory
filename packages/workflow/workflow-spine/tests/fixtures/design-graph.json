@@ -288,7 +288,7 @@
     },
     {
       "source": "delivery_gate",
-      "target": "emit",
+      "target": "pick_corrections",
       "condition": "reloop"
     },
     {
@@ -318,7 +318,7 @@
     },
     {
       "source": "gate_check",
-      "target": "emit",
+      "target": "pick_corrections",
       "condition": "reloop"
     },
     {
@@ -343,13 +343,13 @@
     },
     {
       "source": "gate_overwatch",
-      "target": "emit",
-      "condition": "reloop"
+      "target": "overwatch",
+      "condition": "reread"
     },
     {
       "source": "gate_overwatch",
-      "target": "overwatch",
-      "condition": "reread"
+      "target": "pick_corrections",
+      "condition": "reloop"
     },
     {
       "source": "gate_overwatch",
@@ -373,7 +373,7 @@
     },
     {
       "source": "gate_qa",
-      "target": "emit",
+      "target": "pick_corrections",
       "condition": "reloop"
     },
     {
@@ -393,11 +393,6 @@
     },
     {
       "source": "gate_self_check",
-      "target": "emit",
-      "condition": "reloop"
-    },
-    {
-      "source": "gate_self_check",
       "target": "fork_qa",
       "condition": "proceed"
     },
@@ -405,6 +400,11 @@
       "source": "gate_self_check",
       "target": "fork_self_check",
       "condition": "reread"
+    },
+    {
+      "source": "gate_self_check",
+      "target": "pick_corrections",
+      "condition": "reloop"
     },
     {
       "source": "gate_self_check",
@@ -463,11 +463,6 @@
     },
     {
       "source": "prepare_check",
-      "target": "emit",
-      "condition": "reloop"
-    },
-    {
-      "source": "prepare_check",
       "target": "fork_qa",
       "condition": "proceed"
     },
@@ -475,6 +470,11 @@
       "source": "prepare_check",
       "target": "fork_self_check",
       "condition": "first"
+    },
+    {
+      "source": "prepare_check",
+      "target": "pick_corrections",
+      "condition": "reloop"
     },
     {
       "source": "prepare_check",

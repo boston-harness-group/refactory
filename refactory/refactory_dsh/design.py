@@ -18,8 +18,9 @@ from refactory_dsh.create_ops import API, MARKER_RULE, RESEARCH_SCHEMA, SEVERITY
 from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECORD
 from refactory_dsh.model import DEFAULT_TIMEOUT_S
 from refactory_dsh.nn import Graph, Knob, Mode, Node, RunResult
-from refactory_dsh.design_ops import (EARLY_ASKS_JUDGE_MARK, EARLY_ASKS_VERDICT,
-                                      FIRST_SELF_CHECK, SELF_CHECK_TICKET, UPDATED_TESTS)
+from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
+                                      EARLY_ASKS_VERDICT, FIRST_SELF_CHECK, SELF_CHECK_TICKET,
+                                      UPDATED_TESTS)
 
 OPS = "refactory_dsh.design_ops"
 
@@ -1043,16 +1044,18 @@ class DesignMode(Mode):
         # commit and current check evidence (`design_ops._draft_for_stop`).
         graph.add(Node(
             "pick_corrections", "gate", evaluator=f"{OPS}:pick_gate_corrections",
-            produces=("gate_corrections", "design_corrections_applied"),
+            produces=("gate_corrections", "design_corrections_applied", CORRECTIONS_PICKED),
             max_iterations=2,
-            notes="deterministically extract gate_strategy corrections from the ledger; "
-                  "skip the agent when there are none",
+            notes="deterministically extract the person's corrections to the approved design "
+                  "from the ledger, after the approval and on every send-back to the builder; "
+                  "skip the agent when none is new",
         ))
         graph.add(Node(
             "apply_corrections", "agent",
             prompt_template=(
                 "Read `design.md` from the run directory.\n\n"
-                "The following gate corrections were given when the design was approved:\n\n"
+                "The person gave the following corrections when approving the design, or "
+                "since:\n\n"
                 "{{gate_corrections}}\n\n"
                 "Update `design.md` so that every part of it the corrections touch says what "
                 "they say: the heading (H1), ## Summary, ## Changes and ## Tests, and any "
@@ -1061,14 +1064,15 @@ class DesignMode(Mode):
                 "to. Leave no part stating what a correction overrides, because the "
                 "builder reads the whole document. Keep the sections the corrections do "
                 "not touch as they are, and keep the document's section headings and "
-                "structure. Then add a `## Corrections at approval` section: one bullet "
+                "structure. Then add a `## Corrections at approval` section, or bring the "
+                "one the design has up to date: one bullet "
                 "per correction, quoting it and naming the section(s) of the design that "
                 "now carry it. Write the updated `design.md`. "
                 "Return a short message listing what was changed."
             ),
             reads=("design.md",),
             writes=("design.md",),
-            notes="revise design.md with gate-strategy corrections before the builder runs",
+            notes="revise design.md with the person's corrections before the builder runs",
         ))
         graph.add(Node(
             "deliver", "op", call="refactory_dsh.delivery:deliver_design",
@@ -1086,7 +1090,7 @@ class DesignMode(Mode):
             max_iterations=8,
             knobs=("check_attempts",),
             produces=("validation", "delivery_conflict_reloops"),
-            notes="on authored-file conflict reloop to emit; otherwise proceed to done",
+            notes="on authored-file conflict reloop to the builder; otherwise proceed to done",
         ))
         graph.add(Node(
             "done", "op", call="refactory_dsh.design_ops:noop",
@@ -1120,19 +1124,22 @@ class DesignMode(Mode):
         graph.connect("gate_design_review", "gate_strategy", condition="proceed")
         graph.connect("gate_strategy", "synthesize_strategy", condition="reloop")
         graph.connect("gate_strategy", "pick_corrections", condition="proceed")
+        # Every send-back to the builder goes through pick_corrections, so a correction the
+        # person gives after the approval is applied to design.md before the builder's next
+        # round (dm-226); with nothing new it skips straight to emit.
         graph.connect("pick_corrections", "apply_corrections", condition="proceed")
         graph.connect("pick_corrections", "emit", condition="skip")
         graph.connect("apply_corrections", "emit")
         graph.connect("emit", "materialise")
         graph.connect("materialise", "prepare_check")
-        graph.connect("prepare_check", "emit", condition="reloop")
+        graph.connect("prepare_check", "pick_corrections", condition="reloop")
         graph.connect("prepare_check", "fork_qa", condition="proceed")
         graph.connect("prepare_check", "report", condition="draft")
         graph.connect("prepare_check", "fork_self_check", condition="first")
         graph.connect("fork_self_check", "join_self_check")
         graph.connect("early_asks_check", "join_self_check")
         graph.connect("join_self_check", "gate_self_check")
-        graph.connect("gate_self_check", "emit", condition="reloop")
+        graph.connect("gate_self_check", "pick_corrections", condition="reloop")
         graph.connect("gate_self_check", "fork_qa", condition="proceed")
         graph.connect("gate_self_check", "report", condition="draft")
         # The judge asked again, with no builder round: the self-check's result stands.
@@ -1140,12 +1147,12 @@ class DesignMode(Mode):
         graph.connect("fork_qa", "join_qa")
         graph.connect("verifier", "join_qa")
         graph.connect("join_qa", "gate_check")
-        graph.connect("gate_check", "emit", condition="reloop")
+        graph.connect("gate_check", "pick_corrections", condition="reloop")
         graph.connect("gate_check", "synthesize_qa", condition="proceed")
         graph.connect("gate_check", "report", condition="draft")
         graph.connect("synthesize_qa", "qa_judge")
         graph.connect("qa_judge", "gate_qa")
-        graph.connect("gate_qa", "emit", condition="reloop")
+        graph.connect("gate_qa", "pick_corrections", condition="reloop")
         # A judge-only reread: the QA judge's verdict could not be read, so it is asked
         # again, with no builder round (`design_ops._read_judge`; `judge_rereads` caps it).
         graph.connect("gate_qa", "qa_judge", condition="reread")
@@ -1155,12 +1162,12 @@ class DesignMode(Mode):
         # No `audit` edge back to the overwatch: the evidence map's shape is evidence the
         # overwatch reads (`design_ops.audit_corrections`), not a free round of its own.
         # The `reread` edge is the judge-only reread of a verdict that could not be read.
-        graph.connect("gate_overwatch", "emit", condition="reloop")
+        graph.connect("gate_overwatch", "pick_corrections", condition="reloop")
         graph.connect("gate_overwatch", "overwatch", condition="reread")
         graph.connect("gate_overwatch", "report", condition="proceed")
         graph.connect("report", "deliver")
         graph.connect("deliver", "delivery_gate")
-        graph.connect("delivery_gate", "emit", condition="reloop")
+        graph.connect("delivery_gate", "pick_corrections", condition="reloop")
         graph.connect("delivery_gate", "done", condition="proceed")
         from refactory_dsh.authoring_evidence import wire_reviews
         wire_reviews(graph, check_beside=True, audit_node="qa_judge", judge_nodes=("overwatch",))

@@ -159,6 +159,9 @@ def format_steer(payload: dict[str, Any]) -> str:
     if has_note:
         kind = payload.get('recorded_kind', 'info')
         lines.append(f"Note recorded ({kind}).")
+        late = payload.get('late_correction')
+        if isinstance(late, dict) and late.get('message'):
+            lines.append(str(late['message']))
 
     if not has_verdict and not has_note:
         entries = payload.get('entries') or []

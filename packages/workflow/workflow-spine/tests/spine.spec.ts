@@ -283,9 +283,9 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     s.complete('overwatch')
     expect(ids(s)).toEqual(['gate_overwatch'])
     expect(spineEdges(graph, 'gate_overwatch')).toEqual(
-      [['emit', 'reloop'], ['overwatch', 'reread'], ['report', 'proceed']])
+      [['overwatch', 'reread'], ['pick_corrections', 'reloop'], ['report', 'proceed']])
     s.verdict('gate_overwatch', 'reloop', 'the overwatch sent it back')
-    expect(ids(s)).toEqual(['emit'])
+    toTheBuilder(s)
   })
 
   it('a judge whose verdict could not be read is asked again, and only the judge runs', () => {
@@ -320,7 +320,7 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     s.complete('synthesize_qa')
     s.complete('qa_judge')
     s.verdict('gate_qa', 'reloop', 'the QA judge sent it back')
-    expect(ids(s)).toEqual(['emit'])
+    toTheBuilder(s)
   })
 
   it('a failed check, routed after the join, sends the build back to emit', () => {
@@ -330,7 +330,7 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     for (const n of ['check', 'health_checker', 'code_reviewer', 'qa_director', 'verifier']) s.complete(n)
     s.complete('join_qa')
     s.verdict('gate_check', 'reloop', 'the check failed')
-    expect(ids(s)).toEqual(['emit'])
+    toTheBuilder(s)
   })
 
   it('a check still failing at its limit goes from gate_check straight to the report, as a draft', () => {
@@ -340,7 +340,7 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     for (const n of ['check', 'health_checker', 'code_reviewer', 'qa_director', 'verifier']) s.complete(n)
     s.complete('join_qa')
     expect(spineEdges(graph, 'gate_check')).toEqual(
-      [['emit', 'reloop'], ['report', 'draft'], ['synthesize_qa', 'proceed']])
+      [['pick_corrections', 'reloop'], ['report', 'draft'], ['synthesize_qa', 'proceed']])
     s.verdict('gate_check', 'draft', 'check attempts exhausted after 3 check failure(s)')
     expect(ids(s)).toEqual(['report'])
   })
@@ -349,9 +349,100 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     const s = new Spine(graph)
     advance(s, 'prepare_check', 'proceed')
     expect(spineEdges(graph, 'prepare_check')).toEqual(
-      [['emit', 'reloop'], ['fork_qa', 'proceed'], ['fork_self_check', 'first'], ['report', 'draft']])
+      [['fork_qa', 'proceed'], ['fork_self_check', 'first'], ['pick_corrections', 'reloop'], ['report', 'draft']])
     s.verdict('prepare_check', 'draft', 'emissions refused 3 consecutive times')
     expect(ids(s)).toEqual(['report'])
+  })
+
+  /** A send-back reaches the builder through pick_corrections (dm-226): with no correction
+   *  given since the approval it skips straight to emit. */
+  function toTheBuilder(s: Spine): void {
+    expect(ids(s)).toEqual(['pick_corrections'])
+    // The send-back reopened the build: emit's rerun is a completion of its own.
+    expect(s.state().completed).not.toContain('emit')
+    expect(s.state().completed).not.toContain('apply_corrections')
+    s.verdict('pick_corrections', 'skip')
+    expect(ids(s)).toEqual(['emit'])
+  }
+
+  it('every send-back to the builder goes through pick_corrections, which applies a correction given since', () => {
+    for (const gate of ['prepare_check', 'gate_self_check', 'gate_check', 'gate_qa', 'gate_overwatch', 'delivery_gate']) {
+      expect(spineEdges(graph, gate)).toContainEqual(['pick_corrections', 'reloop'])
+    }
+    expect(graph.edges.filter(e => e.target === 'emit').map(e => [e.source, e.condition ?? '']).sort())
+      .toEqual([['apply_corrections', ''], ['pick_corrections', 'skip']])
+    const s = new Spine(graph)
+    advance(s, 'fork_qa', 'proceed')
+    s.complete('fork_qa')
+    for (const n of ['check', 'health_checker', 'code_reviewer', 'qa_director', 'verifier']) s.complete(n)
+    s.complete('join_qa')
+    s.verdict('gate_check', 'proceed')
+    s.complete('synthesize_qa')
+    s.complete('qa_judge')
+    s.verdict('gate_qa', 'proceed')
+    s.complete('audit_corrections')
+    s.complete('overwatch')
+    s.verdict('gate_overwatch', 'reloop', 'a correction given after the approval is not applied yet')
+    expect(ids(s)).toEqual(['pick_corrections'])
+    s.verdict('pick_corrections', 'proceed')
+    expect(ids(s)).toEqual(['apply_corrections'])
+    s.complete('apply_corrections')
+    expect(ids(s)).toEqual(['emit'])
+  })
+
+  it('a gate_check send-back reopens the whole round, and a delivery_gate one the report and delivery', () => {
+    const s = new Spine(graph)
+    advance(s, 'fork_qa', 'proceed')
+    s.complete('fork_qa')
+    for (const n of ['check', 'health_checker', 'code_reviewer', 'qa_director', 'verifier']) s.complete(n)
+    s.complete('join_qa')
+    s.verdict('gate_check', 'reloop', 'the check failed')
+    const reopened = s.state().completed as string[]
+    for (const n of ['fork_qa', 'code_reviewer', 'check', 'join_qa', 'emit', 'materialise']) {
+      expect(reopened).not.toContain(n)
+    }
+    expect(reopened).toContain('gate_strategy')
+    // The send-back's reason is pick_corrections' visit feedback until it decides.
+    expect(s.state().feedback).toEqual(expect.objectContaining({ pick_corrections: 'the check failed' }))
+    s.verdict('pick_corrections', 'skip')
+    expect(s.state().feedback).not.toHaveProperty('pick_corrections')
+
+    const d = new Spine(graph)
+    advance(d, 'delivery_gate', 'proceed')
+    expect(d.state().completed).toEqual(expect.arrayContaining(['report', 'deliver']))
+    d.verdict('delivery_gate', 'reloop', 'conflicts with main')
+    expect(d.state().completed).not.toContain('report')
+    expect(d.state().completed).not.toContain('deliver')
+    expect(d.state().completed).toContain('gate_strategy')
+  })
+
+  it('a send-back onto a gate reopens its cycle through nested gates, but not what its own retry reaches', () => {
+    const nested = {
+      name: 'nested', start_node: 'S',
+      nodes: Object.fromEntries([
+        ...['S', 'A', 'B', 'E'].map(id => [id, { _type: 'FnNode', id, command: 'true' }]),
+        ...['H', 'H2', 'X'].map(id => [id, { _type: 'GateNode', id, evaluator_type: 'fn', evaluator_command: 'true', max_iterations: 3 }]),
+      ]),
+      edges: [['S', 'H'], ['H', 'H2', 'proceed'], ['H', 'B', 'skip'], ['H', 'S', 'reloop'], ['H2', 'A', 'a'],
+        ['H2', 'B', 'b'], ['A', 'B'], ['B', 'X'], ['X', 'H', 'reloop'], ['X', 'E', 'proceed']]
+        .map(([source, target, condition]) => ({ source, target, ...(condition ? { condition } : {}) })),
+    } as unknown as WorkflowGraph
+    const s = new Spine(nested)
+    s.complete('S')
+    s.verdict('H', 'proceed')
+    s.verdict('H2', 'a')
+    s.complete('A')
+    s.complete('B')
+    // E, reachable from H but outside the cycle (it cannot reach X), completed before.
+    const saved = JSON.parse(JSON.stringify(s.checkpoint()))
+    saved.state.completed = [...saved.state.completed, 'E']
+    const t = new Spine(nested)
+    t.restore(saved)
+    t.verdict('X', 'reloop', 'again')
+    const completed = t.state().completed as string[]
+    for (const n of ['H', 'H2', 'A', 'B']) expect(completed).not.toContain(n)
+    expect(completed).toEqual(expect.arrayContaining(['S', 'E']))
+    expect(ids(t)).toEqual(['H'])
   })
 
   /** One build round from emit to the gate after the first self-check's fork (b48a). */
@@ -375,10 +466,10 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     const s = new Spine(graph)
     advance(s, 'emit', 'proceed')
     expect(spineEdges(graph, 'gate_self_check')).toEqual(
-      [['emit', 'reloop'], ['fork_qa', 'proceed'], ['fork_self_check', 'reread'], ['report', 'draft']])
+      [['fork_qa', 'proceed'], ['fork_self_check', 'reread'], ['pick_corrections', 'reloop'], ['report', 'draft']])
     firstSelfCheck(s)
     s.verdict('gate_self_check', 'reloop', 'self-check fix-up 1 of 2: the early asks judge found 1 ask(s) or correction(s) not built')
-    expect(ids(s)).toEqual(['emit'])
+    toTheBuilder(s)
     // The fix-up's self-check runs in prepare_check: no fork, no judge.
     s.complete('emit')
     s.complete('materialise')
@@ -403,14 +494,16 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
       judged += 1
       s.verdict('gate_self_check', 'reloop', 'self-check fix-up 1 of 2')
       expect(s.isHalted()).toBe(false)
+      toTheBuilder(s)
       // The fix-up's self-check spends the attempt (the early stop), back to emit.
       s.complete('emit')
       s.complete('materialise')
       s.verdict('prepare_check', 'reloop', 'check attempts: the early stop')
       expect(s.isHalted()).toBe(false)
+      toTheBuilder(s)
     }
     expect(judged).toBe(16)
-    expect(s.reloops('gate_self_check')).toEqual({ used: 16, cap: 91, target: 'emit' })
+    expect(s.reloops('gate_self_check')).toEqual({ used: 16, cap: 91, target: 'pick_corrections' })
     firstSelfCheck(s)
     s.verdict('gate_self_check', 'proceed')
     expect(ids(s)).toEqual(['fork_qa'])

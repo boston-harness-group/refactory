@@ -12,7 +12,7 @@
       "blocking": true,
       "role": "ceo",
       "model": "",
-      "prompt_template": "Read `design.md` from the run directory.\n\nThe following gate corrections were given when the design was approved:\n\n{{gate_corrections}}\n\nUpdate `design.md` so that every part of it the corrections touch says what they say: the heading (H1), ## Summary, ## Changes and ## Tests, and any optional section the design has (such as ## Rule and sites or ## Docs) whose wording, example text or file list a correction replaces or adds to. Leave no part stating what a correction overrides, because the builder reads the whole document. Keep the sections the corrections do not touch as they are, and keep the document's section headings and structure. Then add a `## Corrections at approval` section: one bullet per correction, quoting it and naming the section(s) of the design that now carry it. Write the updated `design.md`. Return a short message listing what was changed.",
+      "prompt_template": "Read `design.md` from the run directory.\n\nThe person gave the following corrections when approving the design, or since:\n\n{{gate_corrections}}\n\nUpdate `design.md` so that every part of it the corrections touch says what they say: the heading (H1), ## Summary, ## Changes and ## Tests, and any optional section the design has (such as ## Rule and sites or ## Docs) whose wording, example text or file list a correction replaces or adds to. Leave no part stating what a correction overrides, because the builder reads the whole document. Keep the sections the corrections do not touch as they are, and keep the document's section headings and structure. Then add a `## Corrections at approval` section, or bring the one the design has up to date: one bullet per correction, quoting it and naming the section(s) of the design that now carry it. Write the updated `design.md`. Return a short message listing what was changed.",
       "tools": [],
       "timeout": null,
       "max_iterations": 1,
@@ -134,7 +134,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.delivery:evaluate_delivery_conflicts",
-      "gate_prompt": "on authored-file conflict reloop to emit; otherwise proceed to done",
+      "gate_prompt": "on authored-file conflict reloop to the builder; otherwise proceed to done",
       "max_iterations": 8,
       "_type": "GateNode"
     },
@@ -530,7 +530,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:pick_gate_corrections",
-      "gate_prompt": "deterministically extract gate_strategy corrections from the ledger; skip the agent when there are none",
+      "gate_prompt": "deterministically extract the person's corrections to the approved design from the ledger, after the approval and on every send-back to the builder; skip the agent when none is new",
       "max_iterations": 2,
       "_type": "GateNode"
     },
@@ -857,7 +857,7 @@
     },
     {
       "source": "delivery_gate",
-      "target": "emit",
+      "target": "pick_corrections",
       "condition": "reloop"
     },
     {
@@ -887,7 +887,7 @@
     },
     {
       "source": "gate_check",
-      "target": "emit",
+      "target": "pick_corrections",
       "condition": "reloop"
     },
     {
@@ -912,13 +912,13 @@
     },
     {
       "source": "gate_overwatch",
-      "target": "emit",
-      "condition": "reloop"
+      "target": "overwatch",
+      "condition": "reread"
     },
     {
       "source": "gate_overwatch",
-      "target": "overwatch",
-      "condition": "reread"
+      "target": "pick_corrections",
+      "condition": "reloop"
     },
     {
       "source": "gate_overwatch",
@@ -942,7 +942,7 @@
     },
     {
       "source": "gate_qa",
-      "target": "emit",
+      "target": "pick_corrections",
       "condition": "reloop"
     },
     {
@@ -962,11 +962,6 @@
     },
     {
       "source": "gate_self_check",
-      "target": "emit",
-      "condition": "reloop"
-    },
-    {
-      "source": "gate_self_check",
       "target": "fork_qa",
       "condition": "proceed"
     },
@@ -974,6 +969,11 @@
       "source": "gate_self_check",
       "target": "fork_self_check",
       "condition": "reread"
+    },
+    {
+      "source": "gate_self_check",
+      "target": "pick_corrections",
+      "condition": "reloop"
     },
     {
       "source": "gate_self_check",
@@ -1032,11 +1032,6 @@
     },
     {
       "source": "prepare_check",
-      "target": "emit",
-      "condition": "reloop"
-    },
-    {
-      "source": "prepare_check",
       "target": "fork_qa",
       "condition": "proceed"
     },
@@ -1044,6 +1039,11 @@
       "source": "prepare_check",
       "target": "fork_self_check",
       "condition": "first"
+    },
+    {
+      "source": "prepare_check",
+      "target": "pick_corrections",
+      "condition": "reloop"
     },
     {
       "source": "prepare_check",

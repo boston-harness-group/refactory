@@ -475,12 +475,13 @@ def test_the_design_graph_has_judges_and_no_free_audit_round():
     assert graph.nodes["gate_qa"].evaluator == "refactory_dsh.design_ops:gate_qa"
     assert graph.nodes["gate_overwatch"].evaluator == "refactory_dsh.design_ops:gate_overwatch"
     assert [e.target for e in graph.out_edges("synthesize_qa")] == ["qa_judge"]
-    # A reread goes back to the judge alone; only a reloop reaches the builder.
+    # A reread goes back to the judge alone; only a reloop reaches the builder, through
+    # pick_corrections (dm-226).
     assert {(e.target, e.condition) for e in graph.out_edges("gate_qa")} == {
-        ("emit", "reloop"), ("qa_judge", "reread"), ("audit_corrections", "proceed")}
+        ("pick_corrections", "reloop"), ("qa_judge", "reread"), ("audit_corrections", "proceed")}
     assert [e.target for e in graph.out_edges("audit_corrections")] == ["overwatch"]
     assert {(e.target, e.condition) for e in graph.out_edges("gate_overwatch")} == {
-        ("emit", "reloop"), ("overwatch", "reread"), ("report", "proceed")}
+        ("pick_corrections", "reloop"), ("overwatch", "reread"), ("report", "proceed")}
     for gate, count in (("gate_qa", "qa_judge_rereads"), ("gate_overwatch", "overwatch_rereads")):
         assert count in graph.nodes[gate].produces and "judge_rereads" in graph.nodes[gate].knobs
     knob = DesignMode.declare()["judge_rereads"]

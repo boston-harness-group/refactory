@@ -498,26 +498,43 @@ export class Spine {
     return { used: this.iterations[gate] ?? 0, cap: this.reloopCap(gate), target: edge.target }
   }
 
-  /** Un-complete `target` and its unconditional downstream up to `gate`. */
+  /**
+   * Un-complete the nodes a retry from `gate` back to `target` runs again: exactly the
+   * cycle, every node reachable from `target` that can also reach `gate`, along non-retry
+   * edges, fork targets and join sources (`RunRecord._uncomplete_between` on the walker).
+   * A target that is itself a gate (design mode's send-backs onto `pick_corrections`,
+   * dm-226) reopens what each of its routes leads to inside the cycle, and nothing outside.
+   */
   private uncompleteBetween(target: string, gate: string): void {
-    const seen = new Set<string>()
-    const queue: string[] = [target]
-    for (const node of queue) {
-      if (seen.has(node) || node === gate) continue
-      seen.add(node)
-      for (const edge of this.outgoing(node)) {
-        if (edge.condition == null && edge.target !== gate && !seen.has(edge.target)) {
-          queue.push(edge.target)
-        }
-      }
-      const body = this.nodes.get(node)
-      if (body?._type === 'ForkNode') {
-        for (const child of body.targets ?? []) {
-          if (child !== gate && !seen.has(child)) queue.push(child)
-        }
-      }
+    const retries = this.retryEdges()
+    const forward = new Map<string, string[]>()
+    const backward = new Map<string, string[]>()
+    const link = (from: string, to: string): void => {
+      forward.set(from, [...(forward.get(from) ?? []), to])
+      backward.set(to, [...(backward.get(to) ?? []), from])
     }
-    for (const node of seen) {
+    for (const [id, node] of this.nodes) {
+      for (const edge of this.outgoing(id)) {
+        if (!retries.has(retryKey(id, edge.target, edge.condition))) link(id, edge.target)
+      }
+      if (node._type === 'ForkNode') for (const child of node.targets ?? []) link(id, child)
+      if (node._type === 'JoinNode') for (const source of node.sources ?? []) link(source, id)
+      if (node._type === 'DataNode' && node.subgraph_entry !== undefined) link(id, node.subgraph_entry)
+    }
+    const reach = (start: string, next: Map<string, string[]>): Set<string> => {
+      const seen = new Set<string>([start])
+      const queue = [start]
+      for (const node of queue) {
+        for (const other of next.get(node) ?? []) {
+          if (!seen.has(other)) { seen.add(other); queue.push(other) }
+        }
+      }
+      return seen
+    }
+    const after = reach(target, forward)
+    const before = reach(gate, backward)
+    const cycle = [...after].filter(node => node !== gate && (node === target || before.has(node)))
+    for (const node of cycle) {
       this.completed = this.completed.filter(entry => entry !== node)
       this.gateVerdicts.delete(node)
     }
@@ -928,6 +945,9 @@ export class Spine {
     const record = (): void => {
       if (!this.completed.includes(gate)) this.completed.push(gate)
       this.gateVerdicts.set(gate, outcome)
+      // A retry's feedback for this gate (a send-back onto `pick_corrections`, dm-226) was
+      // for this visit; the gate has now decided, so later views stop repeating it.
+      delete this.feedback[gate]
     }
 
     const selected = this.outgoing(gate).find(edge =>

@@ -590,10 +590,11 @@ def test_on_the_spine_the_fixups_carry_across_processes_and_the_bound_spends_the
     # The attempt is spent, so the next emission is a commit of its own.
     _emit(run, render({"tool.py": "VERSION = 1\n"}), monkeypatch)
     assert _commits(run) == [f"{NAME}: attempt 2", f"{NAME}: attempt 1"]
-    # The lowered graph sends prepare_check's reloop to emit, with room for the worst case.
+    # The lowered graph sends prepare_check's reloop to the builder (through pick_corrections),
+    # with room for the worst case.
     workflow = lowering.to_workflow(DesignMode().state_dict())
-    assert ("prepare_check", "emit", "reloop") in {(e.source, e.target, e.condition)
-                                                   for e in workflow.edges}
+    assert ("prepare_check", "pick_corrections", "reloop") in {
+        (e.source, e.target, e.condition) for e in workflow.edges}
     assert workflow.nodes["prepare_check"].max_iterations == 45
 
 
