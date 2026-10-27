@@ -184,15 +184,17 @@ class Node:
     #: `agent`: what the runtime does when the node's session fails, in its canonical
     #: form (`retry_declaration`), e.g. ``{"on": ["timeout"], "times": 1,
     #: "timeout_factor": 2}``: a session that times out is run once more, fresh, with
-    #: twice the limit, inside the node's whole budget and the run's wall
-    #: (`refactory_dsh.node_retry`). None is no retry, as before. A rule the graph
-    #: declares, on both runtimes, with or without a CEO.
+    #: twice its `timeout_s` (which a retry requires), inside the node's whole budget
+    #: and the run's wall (`refactory_dsh.node_retry`). None is no retry, as before. A
+    #: rule the graph declares, on both runtimes, with or without a CEO.
     retry: dict[str, Any] | None = None
     #: `agent`: the node's only effect is its declared writes, its own report files --
     #: a reviewer, a judge, a researcher -- never the run's worktree or the target. Only
     #: such a node may declare a retry: its outputs are set aside and the retry writes
-    #: them afresh. A node that changes shared state would have its second session start
-    #: from whatever the first one left.
+    #: them afresh. A node that changes shared state would have its second session
+    #: start from whatever the first one left. The runtime holds the node to it: the
+    #: delivery bracket refuses it when it changed the run's worktree or the target
+    #: (it joins `target_guard`'s output-only list when it is dispatched).
     outputs_only: bool = False
 
     def __post_init__(self) -> None:
@@ -269,6 +271,10 @@ class Node:
                 self.retry = retry_declaration(self.retry)
             except ValueError as exc:
                 raise GraphError(f"node {self.id!r}: {exc}") from exc
+            if self.timeout_s is None:
+                raise GraphError(
+                    f"node {self.id!r} declares a retry but no timeout_s: a retry's limit is "
+                    "its timeout_factor times the node's own bound, so the node needs one")
             if not self.outputs_only:
                 # A node that may change the run's worktree or the target cannot simply
                 # run again: the second session would start from what the first left.

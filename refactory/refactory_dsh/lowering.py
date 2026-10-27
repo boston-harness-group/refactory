@@ -118,6 +118,8 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["feedback_keys"] = list(node.feedback_keys)
         if node.retry is not None:
             entry["retry"] = {**node.retry, "on": list(node.retry["on"])}
+        if node.outputs_only:
+            entry["outputs_only"] = True
         declarations[node_id] = entry
     return declarations
 

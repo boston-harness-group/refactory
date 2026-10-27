@@ -1121,15 +1121,13 @@ class Executor:
 
         route = client.route() if callable(getattr(client, "route", None)) else {}
         # The delivery bracket and the node's declared retry, as the spine's worker runs them.
-        from refactory_dsh.node_retry import base_wall_s, deliver
+        from refactory_dsh.node_retry import deliver
 
         output, _receipt = deliver(
             self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
             reads=list(node.reads), client=client, ask=ask,
             capture_final=route.get("worker_backend", "dsh") == "dsh", rule=node.retry,
-            base_s=base_wall_s(node.timeout_s, client.context()
-                               if callable(getattr(client, "context", None)) else None),
-            budget=self.ctx.budget)
+            timeout_s=node.timeout_s, outputs_only=node.outputs_only, budget=self.ctx.budget)
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.

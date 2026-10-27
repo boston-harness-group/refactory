@@ -324,7 +324,8 @@ outer-loop evaluations):
 
 - **Declared node recovery.** An agent node may declare
   `retry={"on": ["timeout"], "times": 1, "timeout_factor": 2}`: a session that
-  times out is run once more, in a fresh session with twice the limit. The rule
+  times out is run once more, in a fresh session with twice its `timeout_s`
+  (which a retry requires). The rule
   is the graph's, never a CEO's judgment, so a headless run recovers as a
   supervised one does. Both runtimes run it through `node_retry.deliver`: the
   walker from `_visit_agent`, the spine from the worker every dispatched agent
@@ -337,9 +338,11 @@ outer-loop evaluations):
   envelope and the run's wall, and is recorded as a `node_retried` event that
   `console status` counts. Only a node that declares `outputs_only` (its
   outputs are its own declared report files) may declare a retry; validation
-  refuses one on a node that may change the run's worktree or the target.
-  Design mode declares it on its researchers, strategists, reviewers, verifier,
-  judges and overwatch, never on `emit` or `apply_corrections`.
+  refuses one on a node that may change the run's worktree or the target, and a
+  dispatched `outputs_only` node joins the target guard's output-only list, so
+  the bracket refuses it when it changed the run's worktree. Design mode
+  declares it on the verifier only, the one agent seen to time out; a node is
+  added when it is seen to time out.
 
 - **Fact restore.** Before each op attempt, `ctx.facts` is deep-copied. On
   failure, facts are restored from the snapshot before retry.

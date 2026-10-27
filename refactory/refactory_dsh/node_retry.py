@@ -8,13 +8,16 @@ dispatched agent node runs (`worker_node.execute`). The spine reserves the node'
 envelope for it when it lowers the graph (`workers.lower_workflow`, with
 :func:`node_allowance_s`), so the retry runs inside the one command the spine started.
 
+A retry needs the node's own `timeout_s`, which each retry's limit multiplies.
+
 An attempt goes through the delivery bracket like any other (`agent_delivery.begin` and
 `finish`, which carry the target guard). A timed-out attempt is settled before the next
 begins (:func:`settle_for_retry`): if it changed the target, the guard's refusal stands
 and nothing is retried; otherwise its delivery is superseded, so the next `begin` sets
 its partial outputs aside and the retry writes them afresh. Only a node whose outputs are
 its own declared report files may declare a retry (`Node.outputs_only`), which is what
-makes setting them aside a reset.
+makes setting them aside a reset; such a node joins the target guard's output-only list
+when it is dispatched, so the bracket also refuses one that changed the run's worktree.
 
 Each retry is checked against the run's budget first, its limit is clamped to what is
 left of the node's envelope and of the run's wall, and it is recorded as a
@@ -66,22 +69,6 @@ def failure_kind(error: BaseException) -> str | None:
     return None
 
 
-def base_wall_s(node_timeout_s: int | None, context: dict[str, Any] | None) -> int | None:
-    """The first attempt's session limit: the node's own bound, or its route's envelope.
-
-    The envelope is the route's attempts times its per-completion limit, as
-    `model.node_session_budget_s` reserves it before the dispatch overhead. None when
-    neither is known (a client that reports no context), and then retries keep the
-    client's own limit.
-    """
-    if node_timeout_s is not None:
-        return int(node_timeout_s)
-    context = context or {}
-    if context.get("timeout_s") is None:
-        return None
-    return max(1, int(context.get("attempts") or 1)) * int(context["timeout_s"])
-
-
 def attempt_walls(base_s: int, rule: dict[str, Any]) -> list[int]:
     """Each attempt's session limit: the base, then each retry ``timeout_factor`` longer."""
     factor = float(rule["timeout_factor"])
@@ -128,10 +115,10 @@ def settle_for_retry(workdir: Path, node: str, reason: str) -> None:
 
 
 def _record_retry(workdir: Path, node: str, *, attempt: int, tries: int, waited_s: int,
-                  wall_s: int | None, error: BaseException) -> None:
+                  wall_s: int, error: BaseException) -> None:
     from refactory_dsh.live import emit
 
-    limit = f"{wall_s}s" if wall_s is not None else "the same limit"
+    limit = f"{wall_s}s"
     emit(workdir, RETRY_EVENT, node_id=node, state="retrying", reason="timeout",
          attempt=attempt, attempts=tries, after_s=waited_s, wall_s=wall_s,
          error=str(error)[:500],
@@ -161,25 +148,33 @@ def deliver(
     ask: Callable[[Any, str], str],
     capture_final: bool,
     rule: dict[str, Any] | None,
-    base_s: int | None,
+    timeout_s: int | None,
+    outputs_only: bool = False,
     budget: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
 
-    ``ask(client, prompt)`` makes one completion. Returns its answer and the delivery
-    receipt. With no rule, or a failure the rule does not answer, the first failure is
-    raised unchanged, as before rules existed. When the last allowed attempt times out
-    too, :class:`RetriesExhausted` says how many times and for how long.
+    ``ask(client, prompt)`` makes one completion; ``timeout_s`` is the node's own bound,
+    which a rule multiplies. Returns the answer and the delivery receipt. With no rule,
+    or a failure the rule does not answer, the first failure is raised unchanged. When
+    the last allowed attempt times out too, :class:`RetriesExhausted` says how long each
+    session ran. A node that declares ``outputs_only`` is put on the target guard's
+    output-only list first, so the bracket refuses it when it changed the run's worktree.
     """
     from refactory_dsh.agent_delivery import begin, finish
 
     workdir = Path(workdir)
+    if outputs_only:
+        from refactory_dsh import target_guard
+
+        target_guard.hold_to_outputs(workdir, node)
+    if rule and timeout_s is None:
+        raise ValueError(f"{node} declares a retry but no timeout_s for it to multiply")
     tries = 1 + (int(rule["times"]) if rule else 0)
-    walls = attempt_walls(base_s, rule) if rule and base_s is not None else None
-    deadline = time.monotonic() + sum(walls) + ENVELOPE_SLACK_S if walls else None
-    #: Each attempt's limit, or how long it ran when the client reports no limit.
-    limits: list[int] = []
-    limit = walls[0] if walls else None
+    walls = attempt_walls(int(timeout_s), rule) if rule else []
+    #: How long each timed-out session actually ran: what the failure reports, and what
+    #: the node's envelope is charged with.
+    ran: list[int] = []
     attempt_client = client
     for index in range(tries):
         delivery = begin(workdir, node, prompt, list(writes), reads=list(reads),
@@ -190,33 +185,32 @@ def deliver(
         except Exception as error:
             if rule is None or failure_kind(error) not in rule["on"]:
                 raise
-            limits.append(limit if limit is not None else int(round(time.monotonic() - started)))
-            spent = ", then ".join(f"{seconds}s" for seconds in limits)
+            ran.append(int(round(time.monotonic() - started)))
+            spent = ", then ".join(f"{seconds}s" for seconds in ran)
             if index + 1 >= tries:
                 raise RetriesExhausted(
-                    f"{node} timed out {_times(len(limits))} (after {spent}); its declared "
+                    f"{node} timed out {_times(len(ran))} (after {spent}); its declared "
                     f"retry is spent. Last error: {error}") from error
-            declared = walls[index + 1] if walls else None
-            bounds = [] if deadline is None else [deadline - time.monotonic()]
+            # The retry's own limit, within what is left of the node's envelope (every
+            # attempt's limit plus some of the dispatch overhead) and of the run's wall.
+            declared = walls[index + 1]
+            bounds = [declared, sum(walls) + ENVELOPE_SLACK_S - sum(ran)]
             remaining = budget.remaining_s() if budget is not None else None
             if remaining is not None:
                 bounds.append(remaining)
-            limit = declared
-            if bounds:
-                limit = int(min([*([declared] if declared is not None else []), *bounds]))
-                floor = MIN_RETRY_WALL_S if declared is None else min(MIN_RETRY_WALL_S, declared)
-                if limit < floor:
-                    raise RetriesExhausted(
-                        f"{node} timed out (after {spent}) and its declared retry was not "
-                        f"started: {max(0, limit)}s is left of the node's envelope and the "
-                        f"run's wall. Last error: {error}") from error
+            limit = int(min(bounds))
+            if limit < min(MIN_RETRY_WALL_S, declared):
+                raise RetriesExhausted(
+                    f"{node} timed out (after {spent}) and its declared retry was not "
+                    f"started: {max(0, limit)}s is left of the node's envelope and the "
+                    f"run's wall. Last error: {error}") from error
             if budget is not None:
                 budget.checkpoint()
-            settle_for_retry(workdir, node, f"timed out after {limits[-1]}s; retried by the "
+            settle_for_retry(workdir, node, f"timed out after {ran[-1]}s; retried by the "
                                             "node's declared rule")
-            _record_retry(workdir, node, attempt=index + 2, tries=tries, waited_s=limits[-1],
+            _record_retry(workdir, node, attempt=index + 2, tries=tries, waited_s=ran[-1],
                           wall_s=limit, error=error)
-            attempt_client = _with_wall(client, limit) if limit is not None else client
+            attempt_client = _with_wall(client, limit)
             continue
         receipt = finish(workdir, node, final_response=output, capture_final=capture_final)
         return output, receipt

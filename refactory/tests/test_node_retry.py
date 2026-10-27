@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -23,8 +24,8 @@ from refactory_dsh import lowering, workers
 from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S, CompletionTimeout, DshModelClient
 from refactory_dsh.nn import Graph, GraphError, Node
 from refactory_dsh.nn.graph import retry_declaration
-from refactory_dsh.node_retry import (RETRY_EVENT, RetriesExhausted, attempt_walls, base_wall_s,
-                                      deliver, failure_kind, node_allowance_s, retries)
+from refactory_dsh.node_retry import (RETRY_EVENT, RetriesExhausted, attempt_walls, deliver,
+                                      failure_kind, node_allowance_s, retries)
 
 RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 REPORT = "reviews/report.md"
@@ -32,6 +33,7 @@ REPORT = "reviews/report.md"
 FAKE_DSH = '''import json, sys, time, pathlib
 plans = json.loads(pathlib.Path({plan!r}).read_text())
 prompt = sys.stdin.read()
+import signal
 key = next((key for key in plans if key and key in prompt), "")
 counter = pathlib.Path({counter!r} + ("." + "".join(c for c in key if c.isalnum()) if key else ""))
 calls = json.loads(counter.read_text()) if counter.exists() else 0
@@ -42,6 +44,8 @@ for name, text in step.get("write", {{}}).items():
     target = pathlib.Path(name)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
+if step.get("ignore_term"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 time.sleep(step.get("sleep", 0))
 if "exit" in step:
     print(step.get("stderr", ""), file=sys.stderr)
@@ -169,7 +173,8 @@ def test_a_node_that_times_out_twice_stops_with_the_reason(tmp_path, runtime):
     dsh = Scripted(tmp_path / "dsh", [{"sleep": 30}])
     ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=1)), dsh.client())
     assert not ok
-    assert "reviewer timed out twice (after 1s, then 2s)" in error
+    # The time each session actually ran: its limit, and a moment to shut down.
+    assert re.search(r"reviewer timed out twice \(after [12]s, then [23]s\)", error), error
     assert dsh.calls == 2
 
 
@@ -266,11 +271,8 @@ def test_the_spine_reserves_every_attempt_and_one_overhead(tmp_path):
     spec = json.loads(Path(lowered.nodes["reviewer"].dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
     assert spec["retry"] == RULE
     assert lowering.node_declarations(state)["reviewer"]["retry"] == RULE
-    # A node without a bound retries on its route's envelope, doubled.
-    state = {"graph": _graph(_node(timeout_s=None)).to_state(), "knobs": {}}
-    lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path, dsh.client().context(),
-                                     lowering.node_declarations(state))
-    assert lowered.nodes["reviewer"].command_timeout_s == 60 + 120 + NODE_DISPATCH_OVERHEAD_S
+    # The worker is told to hold the node to its outputs.
+    assert spec["outputs_only"] is True
     # Without a rule the reservation is what it was.
     state = {"graph": _graph(_node(timeout_s=100, retry=None)).to_state(), "knobs": {}}
     lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path, dsh.client().context(),
@@ -325,15 +327,15 @@ class _Slow:
 
 def test_the_retry_stays_inside_the_nodes_envelope(tmp_path, monkeypatch):
     # Walls of 1 s and 2 s reserve 3 s (with no slack here); a first session that overran
-    # to 2.5 s leaves half a second, so the retry is not started rather than outliving
+    # to 2.6 s is charged 3 s and leaves nothing, so the retry is not started rather than outliving
     # the envelope.
     from refactory_dsh import node_retry
 
     monkeypatch.setattr(node_retry, "ENVELOPE_SLACK_S", 0)
-    client = _Slow(2.5)
+    client = _Slow(2.6)
     with pytest.raises(RetriesExhausted, match="its declared retry was not started"):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
-                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, base_s=1)
+                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, timeout_s=1)
     assert client.calls == 1
 
 
@@ -350,7 +352,7 @@ def test_a_budget_spent_during_the_first_session_stops_the_retry(tmp_path):
     client = _Slow(0)
     with pytest.raises(BudgetExhausted):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
-                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, base_s=100,
+                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, timeout_s=100,
                 budget=Spent())
     assert client.calls == 1
     assert _retried(tmp_path) == []
@@ -371,7 +373,7 @@ def test_an_attempt_that_changed_the_target_is_refused_not_retried(tmp_path, mon
     client = _Slow(0)
     with pytest.raises(ValueError, match="changed the target"):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
-                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, base_s=100)
+                ask=lambda c, p: c.complete(p), capture_final=True, rule=RULE, timeout_s=100)
     assert refused == ["reviewer"] and client.calls == 1
 
 
@@ -421,7 +423,8 @@ def test_the_declaration_survives_the_state_round_trip_and_is_absent_by_default(
 
 def test_a_node_that_may_change_shared_state_cannot_declare_a_retry():
     with pytest.raises(GraphError, match="may change shared state"):
-        Node("emit", "agent", prompt_template="Build it.", writes=("emit.txt",), retry=RULE)
+        Node("emit", "agent", prompt_template="Build it.", writes=("emit.txt",), timeout_s=60,
+             retry=RULE)
     with pytest.raises(GraphError, match="not an agent"):
         Node("x", "op", call="m:f", retry=RULE)
     with pytest.raises(GraphError, match="no writes"):
@@ -429,22 +432,22 @@ def test_a_node_that_may_change_shared_state_cannot_declare_a_retry():
     with pytest.raises(GraphError, match="reads what it writes"):
         Node("x", "agent", prompt_template="p", reads=("design.md",), writes=("design.md",),
              outputs_only=True)
+    with pytest.raises(GraphError, match="no timeout_s"):
+        Node("x", "agent", prompt_template="p", writes=("r.md",), outputs_only=True, retry=RULE)
     # An edit that adds a retry to the builder is refused the same way.
     with pytest.raises(GraphError, match="may change shared state"):
-        Node("emit", "agent", prompt_template="p", writes=("emit.txt",)).with_field("retry", RULE)
+        Node("emit", "agent", prompt_template="p", writes=("emit.txt",),
+             timeout_s=60).with_field("retry", RULE)
 
 
-def test_design_mode_retries_its_reports_and_never_its_builder():
-    from refactory_dsh.design import DesignMode
+def test_design_mode_retries_only_its_verifier():
+    # Only the node seen to time out declares a retry; a node is added when it is seen to.
+    from refactory_dsh.design import DesignMode, TIMEOUT_RETRY
 
     graph = DesignMode().build()
-    retried = sorted(node.id for node in graph.nodes.values() if node.retry is not None)
-    assert retried == ["code_reviewer", "early_asks_check", "health_checker", "overwatch",
-                       "pitfalls_researcher", "qa_director", "qa_judge", "research_director",
-                       "strategy_director", "synthesize_strategy", "verifier"]
-    assert all(graph.nodes[node].outputs_only and graph.nodes[node].retry == RULE for node in retried)
-    for builder in ("emit", "apply_corrections", "design_doc"):
-        assert graph.nodes[builder].retry is None
+    assert [node.id for node in graph.nodes.values() if node.retry is not None] == ["verifier"]
+    assert [node.id for node in graph.nodes.values() if node.outputs_only] == ["verifier"]
+    assert graph.nodes["verifier"].retry == TIMEOUT_RETRY == RULE
 
 
 def test_other_modes_declare_no_retry():
@@ -464,9 +467,6 @@ def test_walls_and_allowance():
     assert attempt_walls(1200, RULE) == [1200, 2400]
     assert attempt_walls(10, {"on": ["timeout"], "times": 2, "timeout_factor": 1.5}) == [10, 15, 23]
     assert node_allowance_s(1200, RULE) == 3600 and node_allowance_s(1200, None) == 1200
-    assert base_wall_s(50, {"timeout_s": 60, "attempts": 3}) == 50
-    assert base_wall_s(None, {"timeout_s": 60, "attempts": 3}) == 180
-    assert base_wall_s(None, None) is None
 
 
 def test_only_a_timeout_is_a_timeout():
@@ -492,3 +492,53 @@ def test_status_shows_the_retries(tmp_path):
     from refactory_dsh.console import status
 
     assert status(tmp_path)["activity"]["node_retries"] == {"verifier": 1}
+
+
+def test_a_session_that_ignores_its_shutdown_is_not_retried(tmp_path, monkeypatch):
+    """A session that does not stop within the grace is a forced exit with cleanup
+    unconfirmed (`owned_process.shutdown`): its tools may still be writing, so it is
+    never retried, however its deadline started."""
+    from refactory_dsh import owned_process
+
+    monkeypatch.setattr(owned_process, "SHUTDOWN_GRACE_S", 1)
+    dsh = Scripted(tmp_path / "dsh", [{"sleep": 30, "ignore_term": True}, {"answer": "fine"}])
+    ok, error = _run("walker", tmp_path / "run", _graph(_node(timeout_s=1)), dsh.client())
+    assert not ok and "did not finish shutdown" in error
+    assert dsh.calls == 1 and _retried(tmp_path / "run") == []
+
+
+def _watched_run(tmp_path: Path) -> tuple[Path, Path]:
+    """A run whose baseline watches a target and the run's own worktree, as prepare
+    records it for a design run in a worktree."""
+    from refactory_dsh import target_guard
+
+    target, worktree, workdir = tmp_path / "target", tmp_path / "worktree", tmp_path / "run"
+    for folder in (target, worktree, workdir):
+        folder.mkdir()
+    (worktree / "tool.py").write_text("VERSION = 2\n")
+    target_guard.record(workdir, target, output_only=("emit",), also=(worktree,))
+    return workdir, worktree
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_verifier_that_writes_only_its_report_still_delivers(tmp_path, runtime):
+    """The canary's shape: a verifier in a worktree run answers with its report alone,
+    and joining the output-only list changes nothing for it."""
+    from refactory_dsh import target_guard
+
+    workdir, _worktree = _watched_run(tmp_path)
+    dsh = Scripted(tmp_path / "dsh", [{"answer": "M1: no finding."}])
+    ok, error = _run(runtime, workdir, _graph(_node()), dsh.client())
+    assert ok, error
+    assert (workdir / REPORT).read_text().strip() == "M1: no finding."
+    assert target_guard._read(workdir)["output_only"] == ["emit", "reviewer"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_outputs_only_node_that_changes_the_worktree_is_refused(tmp_path, runtime):
+    """`outputs_only` is enforced: the bracket refuses a node that wrote into the run's
+    worktree -- a half-written probe there is exactly what a retry must not build on."""
+    workdir, worktree = _watched_run(tmp_path)
+    dsh = Scripted(tmp_path / "dsh", [{"answer": "done", "write": {str(worktree / "probe.py"): "x = 1\n"}}])
+    ok, error = _run(runtime, workdir, _graph(_node()), dsh.client())
+    assert not ok and "probe.py" in error

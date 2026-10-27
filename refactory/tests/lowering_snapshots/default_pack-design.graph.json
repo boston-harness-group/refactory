@@ -104,13 +104,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "deliver": {
@@ -196,13 +189,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "emit": {
@@ -464,13 +450,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "join_qa": {
@@ -536,13 +515,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "pick_corrections": {
@@ -575,13 +547,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "prepare": {
@@ -651,13 +616,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "qa_judge": {
@@ -681,13 +639,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "record_findings": {
@@ -737,13 +688,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "route_refine_design": {
@@ -802,13 +746,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "synthesize_qa": {
@@ -852,13 +789,6 @@
       "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
-      "retry": {
-        "on": [
-          "timeout"
-        ],
-        "times": 1,
-        "timeout_factor": 2
-      },
       "_type": "AgentNode"
     },
     "verifier": {

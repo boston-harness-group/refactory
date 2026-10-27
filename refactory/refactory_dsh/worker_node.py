@@ -117,14 +117,14 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # reason already carries it (`with_feedback`).
     from refactory_dsh.agent_delivery import with_feedback
     # The delivery bracket and the node's declared retry, as the walker runs them.
-    from refactory_dsh.node_retry import base_wall_s, deliver
+    from refactory_dsh.node_retry import deliver
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback),
         writes=spec['writes'], reads=spec['reads'], client=client,
         ask=lambda attempt, sent: attempt.complete(sent, workdir=workdir),
         capture_final=client.route()["worker_backend"] == "dsh", rule=spec.get('retry'),
-        base_s=base_wall_s(spec['model_context'].get('node_wall_s'), spec['model_context']),
-        budget=getattr(client, '_budget', None))
+        timeout_s=spec['model_context'].get('node_wall_s'),
+        outputs_only=bool(spec.get('outputs_only')), budget=getattr(client, '_budget', None))
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():

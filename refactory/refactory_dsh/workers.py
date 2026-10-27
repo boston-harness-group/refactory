@@ -252,6 +252,9 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'model_context': selected_context}
         if is_optional:
             payload['optional'] = True
+        if (declarations or {}).get(name, {}).get('outputs_only'):
+            # The worker puts the node on the target guard's output-only list.
+            payload['outputs_only'] = True
         retry = getattr(node, 'retry', None)
         if retry:
             # The worker runs the node's declared retry (`node_retry.deliver`), inside the
@@ -270,12 +273,13 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         attempts = max(1, int(selected_context.get('attempts') or 1))
         per_completion = int(selected_context.get('timeout_s') or DEFAULT_TIMEOUT_S)
         if retry:
-            # Every attempt's session -- the first under the node's bound or the route's
-            # envelope, each retry longer by its factor -- plus the one dispatch overhead,
+            # Every attempt's session -- the first under the node's bound, each retry
+            # longer by its factor -- plus the one dispatch overhead,
             # so the retry runs inside the command the spine started.
-            from refactory_dsh.node_retry import base_wall_s, node_allowance_s
-            base = base_wall_s(node.timeout, selected_context) or attempts * per_completion
-            command_timeout_s = node_allowance_s(base, retry) + NODE_DISPATCH_OVERHEAD_S
+            from refactory_dsh.node_retry import node_allowance_s
+            if node.timeout is None:
+                raise ValueError(f'worker node {name!r} declares a retry but no timeout')
+            command_timeout_s = node_allowance_s(node.timeout, retry) + NODE_DISPATCH_OVERHEAD_S
         elif node.timeout is not None:
             # The session inside stops at the node's own bound; the dispatch keeps
             # the overhead a derived envelope has, so the session ends first.
