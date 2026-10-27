@@ -35,9 +35,7 @@ def _restore_policy(monkeypatch):
 
 def test_the_default_policy_is_restore_if_clean():
     source = Path(target_guard.__file__).read_text()
-    assert "
-CHECKOUT_POLICY = "restore-if-clean"
-" in source
+    assert '\nCHECKOUT_POLICY = "restore-if-clean"\n' in source
 
 
 #: A refactory tool that, like the generators, writes beside the package it is imported from.
