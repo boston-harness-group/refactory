@@ -33,6 +33,7 @@
     "refactory_dsh.nn.loops",
     "refactory_dsh.nn.mode",
     "refactory_dsh.nn.package",
+    "refactory_dsh.nn.record",
     "refactory_dsh.nn.resolve",
     "refactory_dsh.nn.validate",
     "refactory_dsh.observe",

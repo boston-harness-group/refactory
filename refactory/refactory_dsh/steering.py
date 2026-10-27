@@ -271,10 +271,13 @@ class Ledger:
         return matches[0] if len(matches) == 1 else None
 
     def visit(self, gate: str, reads: list[str] | tuple[str, ...]) -> str:
-        """Record the current declared review inputs for public steering to discover."""
+        """Record the current declared review inputs for public steering to discover.
+
+        In name order, as :meth:`review` fingerprints them and the lowered graph keeps
+        them, so a walked gate and a driven one record the same visit."""
         review = self.review(gate, reads)
         self._decision_entry({"at": _now(), "kind": "gate-visit", "gate": gate,
-                              "review": review, "reads": json.dumps(list(reads))})
+                              "review": review, "reads": json.dumps(sorted(reads))})
         return review
 
     def review(self, gate: str, reads: list[str] | tuple[str, ...]) -> str:

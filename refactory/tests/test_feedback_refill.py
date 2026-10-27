@@ -262,7 +262,7 @@ def test_digest_present_after_redo(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             captured_prompt.append(prompt)
@@ -330,7 +330,7 @@ def test_unfilled_feedback_key_refuses_dispatch(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             return "done"

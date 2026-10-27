@@ -406,7 +406,7 @@ def test_probe_via_worker_node_execute_design(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             captured_prompt.append(prompt)
@@ -476,7 +476,7 @@ def test_probe_via_worker_node_execute_design_fast(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             captured_prompt.append(prompt)
@@ -1264,7 +1264,8 @@ def test_walker_run_end_removes_warm_clone(tmp_path, end):
         graph.connect("gate_check", "materialise", condition="proceed")
     builder = _ProbingBuilder([], end="answered")
 
-    result = nn.execute(graph, run, model=builder,
+    # The run's facts are the walker's, which it writes to `facts.json` as it goes.
+    result = nn.execute(graph, run, model=builder, facts=json.loads((run / "facts.json").read_text()),
                         verdicts={"gate_check": "halt"} if end == "halted" else None)
 
     assert {"done": result.exit_ok, "halted": result.halted,

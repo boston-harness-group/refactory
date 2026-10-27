@@ -1005,10 +1005,17 @@ def state(run: Path, claimant: Any = None, *, branch: str = "") -> str:
         if held(run) or any((run / pending).glob("*.json")):
             return "active"
         spine = run / spine_status
-        if spine.exists():
+        # A walked run writes the status file too, but whether it is over is its progress's
+        # and its walking process's to say (`run_state.walked`).
+        from refactory_dsh.run_state import walked
+
+        if spine.exists() and not walked(run):
             return "ended" if _json(spine).get("status") in ENDED else "active"
         progress = _json(run / progress_path)
-        if progress.get("error") or not _alive(claimant):
+        # A walked run names its walking process in its status file when no claimant did.
+        from refactory_dsh.run_state import owner_pid
+
+        if progress.get("error") or not _alive(claimant if claimant is not None else owner_pid(run)):
             return "ended"
         return "active"
     except OSError:

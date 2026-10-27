@@ -244,7 +244,7 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         answer = (declarations or {}).get(name, {}).get('answer_file')
         if answer in writes:
             writes = [answer, *(item for item in writes if item != answer)]
-        payload = {'schema_version': 1, 'node_id': name,
+        payload = {'schema_version': 1, 'node_id': name, 'role': node.role.value,
                                     'prompt': node.prompt_template, 'reads': sorted(node.reads),
                                     'writes': writes,
                                     'produces': list((declarations or {}).get(name, {}).get('produces', [])),

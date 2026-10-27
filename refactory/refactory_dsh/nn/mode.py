@@ -75,6 +75,8 @@ class RunResult:
     gate_stop: str | None = None
     #: Whether the run was halted by a ``halt`` verdict.
     halted: bool = False
+    #: Each gate's last verdict, as the spine's checkpoint keeps them (`gate_verdicts`).
+    gate_verdicts: dict[str, str] = field(default_factory=dict)
 
 
 class _Values:

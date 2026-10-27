@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from .graph import Edge, Graph, Node
 from .loops import loop_edges
 from .mode import RunResult
+from .record import RunRecord
 from .resolve import resolve
 
 if TYPE_CHECKING:
@@ -544,11 +545,17 @@ class Executor:
     enable_recovery: bool = False
     steps: list[Step] = field(default_factory=list)
     model_calls: int = 0
+    #: The completed nodes, gate verdicts and reloop feedback, kept by the spine's rules.
+    record: RunRecord = field(default_factory=RunRecord)
     _reserve_step: Callable[[], bool] | None = field(default=None, repr=False)
 
     _gate_iterations: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _outcome: str = field(default="pending", init=False, repr=False)
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
+    _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
+    _status: str = field(default="", init=False, repr=False)
+    #: The retry counters of the walk visiting the current node (a data pass has its own).
+    _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
 
     def _record(
         self, node: str, *, error: str | None = None,
@@ -579,10 +586,41 @@ class Executor:
                 **({"model_context": self.ctx.model.context()} if callable(getattr(self.ctx.model, "context", None)) else {}),
                 **({"branches": branches} if branches is not None else {}),
                 **({"schedule": schedule} if schedule is not None else {}),
+                **self.record.to_progress(),
             }, indent=2, default=str))
             pending.replace(path)
         except OSError:  # pragma: no cover - an unwritable run directory
             pass
+        if self._reserve_step is not None:
+            return  # a fork's branch: the run it belongs to writes the run's files
+        running = [target for target, state in (branches or {}).items()
+                   if state.get("status") in ("queued", "running")]
+        nodes = running or ([node] if node else [])
+        if outcome in ("refused", "halted"):
+            self._write_status(outcome, [] if outcome == "halted" else nodes, error=error)
+        elif error is not None:
+            self._write_status("failed", nodes, error=error, failed=node or None)
+        else:
+            self._write_status("executing", nodes)
+
+    def _write_status(self, status: str, nodes: list[str], *, error: str | None = None,
+                      failed: str | None = None) -> None:
+        """Write the run's facts and its status where the spine writes them (`facts.json`,
+        `.refactory/spine-status.json`), so a walked run reads as a driven one does.
+        Best effort, as the progress record is."""
+        from refactory_dsh.run import write_facts
+
+        try:
+            write_facts(self.ctx.workdir, self.ctx.facts)
+            self.record.write_status(self.ctx.workdir, self.graph, status, nodes, error=error, failed=failed)
+            self._status = status
+        except OSError:  # pragma: no cover - an unwritable run directory
+            pass
+
+    def _is_retry(self, gate: str, target: str, condition: str) -> bool:
+        if self._retries is None:
+            self._retries = loop_edges(self.graph)
+        return (gate, target, condition) in self._retries
 
     def run(self, *, start: str | None = None) -> RunResult:
         started = time.time()
@@ -609,6 +647,7 @@ class Executor:
                 from .fork import run_fork
 
                 self.steps.append(Step(node.id, node.kind, 0.0))
+                self.record.complete(node)
                 try:
                     error = run_fork(self, node)
                 except GateStop as exc:
@@ -626,6 +665,7 @@ class Executor:
                 continue
             if node.kind == "join":
                 self.steps.append(Step(node.id, node.kind, 0.0))
+                self.record.complete(node)
                 out = self.graph.out_edges(node.id)
                 current = out[0].target if out else None
                 continue
@@ -686,6 +726,7 @@ class Executor:
                     break
                 if scores and "item_scores" in node.produces:
                     self.ctx.set_fact("item_scores", scores)
+                self.record.complete(node)
                 out = self.graph.out_edges(node.id)
                 current = out[0].target if out else None
                 continue
@@ -699,6 +740,7 @@ class Executor:
             step_started = time.time()
             verdict: str | None = None
             try:
+                self._visits = visits
                 current, verdict = self._try_visit(node, step_started)
                 self.ctx._check_produces()  # noqa: SLF001
                 self._count_retry(node, current, verdict, retries, visits)
@@ -755,6 +797,12 @@ class Executor:
             except BudgetExhausted as exc:
                 error = str(exc)
 
+        if self._reserve_step is None:
+            if error is None:
+                self._write_status("done", [])
+            elif self._status not in ("refused", "halted", "failed"):
+                self._write_status("failed", [current] if current else [], error=error, failed=current)
+
         gate_stop_id = None
         halted = False
         if isinstance(error, str) and "is waiting for a person" in error:
@@ -775,6 +823,7 @@ class Executor:
             model_calls=self.model_calls,
             gate_stop=gate_stop_id,
             halted=halted,
+            gate_verdicts=dict(self.record.gate_verdicts),
         )
 
     # ── one branch of a fork, or one pass of a data node ───────────────────
@@ -811,6 +860,7 @@ class Executor:
             started = time.time()
             verdict: str | None = None
             try:
+                self._visits = visits
                 current, verdict = self._try_visit(node, started)
                 self.ctx._check_produces()  # noqa: SLF001
                 self._count_retry(node, current, verdict, retries, visits)
@@ -1011,6 +1061,8 @@ class Executor:
             raise
         self._outcome = "completed"
         self._next_after_completion = result[0]
+        if node.kind != "gate":  # a gate is recorded with its verdict
+            self.record.complete(node)
         emit(self.ctx.workdir, "node_completed", node_id=node.id, state="completed", summary=render(node.notes, self.ctx))
         if self.ctx.budget is not None:
             self.ctx.budget.checkpoint()
@@ -1038,7 +1090,7 @@ class Executor:
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
-        from refactory_dsh.agent_delivery import begin, finish, fill_feedback
+        from refactory_dsh.agent_delivery import begin, fill_feedback, finish, with_feedback
 
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
@@ -1056,15 +1108,17 @@ class Executor:
         if refilled_keys:
             for k in refilled_keys:
                 self.ctx._internal_fact(k, values[k])
-        delivery = begin(self.ctx.workdir, node.id, render(node.prompt_template, self.ctx), list(node.writes),
+        # The reloop's feedback once, as the spine's worker delivers it (`with_feedback`).
+        prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
+        delivery = begin(self.ctx.workdir, node.id, prompt, list(node.writes),
                          reads=list(node.reads),
                          model_context=client.context() if callable(getattr(client, "context", None)) else None)
         self.model_calls += 1
         if self.ctx.budget is not None and not callable(getattr(client, "with_budget", None)):
             self.ctx.budget.require_usage_capability(False)
-        output = _ask_model(
-            client, delivery["prompt"], system=node.notes, workdir=self.ctx.workdir
-        )
+        # The prompt alone, as the spine's worker sends it: a node's notes say what it does
+        # (its event summary, a gate's question), and its template says all it is asked.
+        output = _ask_model(client, delivery["prompt"], system="", workdir=self.ctx.workdir)
         route = client.route() if callable(getattr(client, "route", None)) else {}
         finish(self.ctx.workdir, node.id, final_response=output,
                capture_final=route.get("worker_backend", "dsh") == "dsh")
@@ -1129,12 +1183,26 @@ class Executor:
             )
         edges = self.graph.out_edges(node.id)
         selected, reason = route_verdict(verdict, edges, node.gate_kind)
+        # The verdict is the run's record, kept where the spine keeps its own (its
+        # checkpoint's `gate_verdicts`, here the progress record), never a fact: no node
+        # reads it, and the spine's facts have none.
         if selected is None:
             # Terminal halt
-            self.ctx._internal_fact(f"{node.id}_verdict", verdict.lower())  # noqa: SLF001
+            self.record.gate(self.graph, node.id, verdict, target=None, retry=False)
             raise HaltStop(node.id, reason=reason)
-        self.ctx._internal_fact(f"{node.id}_verdict", verdict.lower())  # noqa: SLF001
-        return selected.target, Verdict(selected.condition or "", reason=getattr(verdict, "reason", "") or "")
+        why = str(getattr(verdict, "reason", "") or "")
+        from refactory_dsh.run import _clipped
+
+        retry = self._is_retry(node.id, selected.target, selected.condition or "")
+        visits = self._gate_iterations if self._visits is None else self._visits
+        if retry and visits.get(node.id, 0) + 1 > node.max_iterations:
+            # Out of reloops: the spine records the gate halted and goes back over nothing
+            # (`Spine.verdict`); the retry itself is refused below (`_count_retry`).
+            self.record.gate(self.graph, node.id, "halt", target=None, retry=False)
+        else:
+            self.record.gate(self.graph, node.id, verdict, target=selected.target, retry=retry,
+                             reason=_clipped(why.strip()))
+        return selected.target, Verdict(selected.condition or "", reason=why)
 
 
 def execute(
@@ -1196,8 +1264,17 @@ def execute(
         enforce_writes=enforce_writes,
     )
     ctx.budget = budget
+    # A run that goes on from where it stopped goes on with its record: the nodes it
+    # completed, its gates' verdicts and any feedback a reloop left.
+    record = RunRecord()
+    if start is not None:
+        try:
+            record = RunRecord.from_progress(json.loads((workdir / PROGRESS).read_text()))
+        except (OSError, ValueError, AttributeError):
+            pass
     try:
-        result = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery).run(start=start)
+        result = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
+                          record=record).run(start=start)
         if budget is not None:
             result.facts["resources"] = budget.snapshot()
         return result

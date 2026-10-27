@@ -875,7 +875,7 @@ describe('applyControls integration', () => {
       '',
       'class M:',
       '    def __init__(self, **k): pass',
-      '    def for_node(self, n): return self',
+      '    def for_node(self, n, role="worker"): return self',
       '    def complete(self, p, workdir=None):',
       '        captured.append(p); return "done"',
       '    def context(self): return {"provider": "test", "model": "test"}',

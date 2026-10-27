@@ -1188,8 +1188,11 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       } catch { /* absent file — no override to preserve */ }
+      // The runtime and the owning process travel with the status: the walker writes
+      // this file too (`run_state.write_status`), and a reader asks which one ran it.
       const record = {
-        schema_version: 1, run_id: resolve(workdir), at: new Date().toISOString(),
+        schema_version: 1, run_id: resolve(workdir), runtime: 'spine', owner_pid: process.pid,
+        at: new Date().toISOString(),
         status, nodes: state.cursor, running_nodes: runningNodes, completed: state.completed,
         ...(detail === undefined ? {} : { error: detail }),
         ...(wait === undefined ? {} : { wait_reason: wait }),

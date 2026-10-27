@@ -2544,8 +2544,6 @@ def _trim(facts: dict[str, Any], limit: int = 400) -> dict[str, Any]:
     for key, value in facts.items():
         if isinstance(value, str) and len(value) > limit:
             out[key] = value[:limit] + "…"
-        elif key.endswith("_verdict"):
-            continue
         else:
             out[key] = value
     return out

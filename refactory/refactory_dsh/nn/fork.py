@@ -102,9 +102,7 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
 
     writes = [paths(nodes, "writes") for nodes in branches]
     reads = [paths(nodes, "reads") for nodes in branches]
-    facts = [{name for node in nodes for name in node.produces}
-             | {f"{node.id}_verdict" for node in nodes if node.kind == "gate"}
-             for nodes in branches]
+    facts = [{name for node in nodes for name in node.produces} for nodes in branches]
     # A sibling's newly produced fact is no more available than its file. A fact
     # from before the fork can be read by all branches, but not concurrently reset.
     import re
@@ -128,6 +126,7 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
 def run_fork(executor: Executor, node: Node) -> str | None:
     """Wait for all scheduled work; merge in target order; never join on failure."""
     from .executor import ExecutionError, Executor, RunContext
+    from .record import RunRecord
 
     edges = executor.graph.out_edges(node.id)
     if len(edges) != 1 or edges[0].condition is not None:
@@ -193,8 +192,11 @@ def run_fork(executor: Executor, node: Node) -> str | None:
             verdicts=copy.deepcopy(ctx.verdicts), task=copy.deepcopy(ctx.task),
             model=branch_model, memory=ctx.memory, enforce_writes=ctx.enforce_writes,
         )
+        # Each branch keeps its own record, starting from the run's pending feedback;
+        # the branches' records are folded into the run's once they are done.
         child = Executor(executor.graph, child_ctx, max_steps=executor.max_steps,
-                         enable_recovery=executor.enable_recovery)
+                         enable_recovery=executor.enable_recovery,
+                         record=RunRecord(feedback=dict(executor.record.feedback)))
         child_ctx.budget = ctx.budget
         # Branch gate IDs are disjoint. Keep their own counters across a later
         # outer re-entry of this fork, as the DSH spine does; a new child object
@@ -215,7 +217,6 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         try:
             error = child._walk_branch(target, barrier)
             allowed = {key for member in branches[index] for key in member.produces}
-            allowed.update(f"{member.id}_verdict" for member in branches[index] if member.kind == "gate")
             changed = {key for key in ctx.facts.keys() | child.ctx.facts.keys()
                        if key not in ctx.facts or key not in child.ctx.facts
                        or ctx.facts[key] != child.ctx.facts[key]}
@@ -282,6 +283,8 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         raise
     # All workers have finished, so no branch can still write after we return or
     # after the join begins. Order does not depend on completion timing.
+    executor.record.merge_branches([child.record for child in children],
+                                   [{member.id for member in branch} for branch in branches])
     for index, child in enumerate(children):
         if errors[index] and node.targets[index] in optional:
             # A failed optional branch is missing, not failed: keep its steps in
@@ -307,7 +310,6 @@ def run_fork(executor: Executor, node: Node) -> str | None:
             if errors[index] and target in optional:
                 continue
             produced = {key for member in branches[index] for key in member.produces}
-            produced.update(f"{member.id}_verdict" for member in branches[index] if member.kind == "gate")
             for key in sorted(produced):
                 if key in child.ctx.facts:
                     ctx.facts[key] = child.ctx.facts[key]

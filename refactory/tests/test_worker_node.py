@@ -45,7 +45,7 @@ def test_feedback_file_prepends_heading_to_prompt(tmp_path):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             captured_prompt.append(prompt)
@@ -135,7 +135,7 @@ def test_end_to_end_drain_feedback_reaches_real_worker(tmp_path):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             recorded_prompts.append(prompt)
@@ -254,7 +254,7 @@ def test_gate_reloop_reason_reaches_reloop_target_prompt(tmp_path):
     class ScriptedModelClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             recorded_prompts.append(prompt)
@@ -329,7 +329,7 @@ def test_no_feedback_file_leaves_prompt_unchanged(tmp_path):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
-        def for_node(self, node):
+        def for_node(self, node, role="worker"):
             return self
         def complete(self, prompt, workdir=None):
             captured_prompt.append(prompt)
@@ -370,3 +370,76 @@ def test_no_feedback_file_leaves_prompt_unchanged(tmp_path):
     final_prompt = captured_prompt[0]
     assert "Feedback for this visit" not in final_prompt
     assert final_prompt == "Build the widget."
+
+
+def _run_worker(tmp_path, spec, *, prompt: str, feedback: str | None = None):
+    """Run ``worker_node.execute`` with a recording client; return (prompts, roles)."""
+    from refactory_dsh.run import NODE_ENV
+
+    prompts_dir = tmp_path / ".refactory" / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = prompts_dir / f"{spec['node_id']}.md"
+    prompt_path.write_text(prompt)
+    manifest = {"id": spec["node_id"], "type": "AgentNode", "command": "refactory-worker", "reads": [],
+                "writes": [], "prompt_file": str(prompt_path)}
+    if feedback is not None:
+        fb_path = prompts_dir / f"{spec['node_id']}.feedback.md"
+        fb_path.write_text(feedback)
+        manifest["feedback_file"] = str(fb_path)
+    prompts: list[str] = []
+    roles: list[str] = []
+
+    class RecordingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def for_node(self, node, role="worker"):
+            roles.append(role)
+            return self
+
+        def complete(self, prompt, workdir=None):
+            return "done"
+
+        def context(self):
+            return {"provider": "test", "model": "test"}
+
+        def route(self):
+            return {"worker_backend": "dsh"}
+
+    def begin(workdir, node, prompt, writes, *, reads=None, model_context=None):
+        prompts.append(prompt)
+        return {"prompt": prompt, "node": node, "status": "pending"}
+
+    with mock.patch.dict(os.environ, {NODE_ENV: json.dumps(manifest)}), \
+            mock.patch("refactory_dsh.model.DshModelClient", RecordingClient), \
+            mock.patch("refactory_dsh.agent_delivery.begin", begin), \
+            mock.patch("refactory_dsh.agent_delivery.finish",
+                       lambda workdir, node, **kw: {"node": node, "status": "delivered"}), \
+            mock.patch("refactory_dsh.run._knobs", return_value={}), \
+            mock.patch("refactory_dsh.run._read_facts", return_value={}):
+        from refactory_dsh import worker_node
+        worker_node.execute(spec, tmp_path)
+    return prompts, roles
+
+
+def _spec(**extra):
+    return {"schema_version": 1, "node_id": "builder", "prompt": "fallback", "reads": [], "writes": [],
+            "produces": [], "model_context": {"provider": "test", "model": "test"}, **extra}
+
+
+def test_feedback_the_rendered_prompt_already_carries_is_not_repeated(tmp_path):
+    """dm-123 #436 gap 5: a template that renders the gate's reason says it once; the worker
+    adds the feedback heading only for feedback the prompt does not carry."""
+    reason = "GATE-REASON: tests/test_pin.py::test_pin fails"
+    prompts, _ = _run_worker(tmp_path, _spec(), prompt=f"Implement it.\n\n## What went wrong last time\n{reason}\n",
+                             feedback=reason)
+    assert prompts[-1].count(reason) == 1
+    assert "## Feedback for this visit" not in prompts[-1]
+
+
+def test_the_worker_opens_the_session_with_the_nodes_role(tmp_path):
+    """The receipt records the node's role, as the walker's does; an older spec keeps `worker`."""
+    _, roles = _run_worker(tmp_path, _spec(role="code_reviewer"), prompt="Review it.")
+    assert roles == ["code_reviewer"]
+    _, roles = _run_worker(tmp_path / "old", _spec(), prompt="Review it.")
+    assert roles == ["worker"]

@@ -89,6 +89,8 @@ def test_lowered_bridge_preserves_edges_and_declared_outputs(tmp_path):
     spec = json.loads(next((tmp_path / '.refactory/worker-specs').glob('*.json')).read_text())
     assert spec['model_context']['worker_backend'] == 'codex'
     assert spec['writes'] == ['result.txt']
+    # The worker opens its session with the node's role, as the walker does.
+    assert spec['role'] == AgentRole.BUILDER.value
 
 
 def test_lowered_node_timeout_covers_the_declared_completion_budget(tmp_path):

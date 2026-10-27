@@ -468,8 +468,13 @@ one-shot correction ("emit these two files and change nothing else") applies
 to that visit only and does not override a later review's repair.
 
 A dispatched agent node's prompt carries that visit's feedback (rerun text
-and a gate's reloop reason) under a heading "## Feedback for this visit",
-for any graph and any mode. The feedback sidecar is written atomically by
+and a gate's reloop reason) once, for any graph and any mode: under a heading
+"## Feedback for this visit" ahead of the prompt, unless the rendered prompt
+already says it as whole lines (a template that renders the gate's reason, as
+design mode's `emit` does; for a reason clipped to the runner's limit, its head
+and its tail). A note found only inside a longer line is not said. `agent_delivery.with_feedback` decides, on both runtimes: the
+walker hands it its gate's reason for the reloop target's next visit. The
+feedback sidecar is written atomically by
 the spine's `drain()` and read by the worker node before dispatch. It is
 removed (or omitted from the manifest) when no feedback exists for the
 visit, so a stale file is never read. Concurrent item passes of one node

@@ -91,12 +91,11 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         prompt_path = Path(prompt_file)
         if prompt_path.exists():
             prompt = prompt_path.read_text(encoding='utf-8')
+    feedback = ''
     if feedback_file:
         fb_path = Path(feedback_file)
         if fb_path.exists():
-            fb_text = fb_path.read_text(encoding='utf-8').strip()
-            if fb_text:
-                prompt = f"## Feedback for this visit\n\n{fb_text}\n\n{prompt}"
+            feedback = fb_path.read_text(encoding='utf-8')
 
     node = spec['node_id']
     from refactory_dsh.nn.executor import RunContext, render
@@ -111,8 +110,13 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     )
     if refilled_keys:
         context = RunContext(workdir, knobs=context.knobs, facts={**context.facts, **{k: values[k] for k in refilled_keys}})
-    client = DshModelClient(**spec['model_context']).for_node(node)
-    delivery = begin(workdir, node, render(prompt, context), spec['writes'],
+    # The node's own role, as the walker's session records it; a spec from before the
+    # role was written keeps the generic one.
+    client = DshModelClient(**spec['model_context']).for_node(node, role=spec.get('role', 'worker'))
+    # The reloop's feedback once: after rendering, so a template that renders the gate's
+    # reason already carries it (`with_feedback`).
+    from refactory_dsh.agent_delivery import with_feedback
+    delivery = begin(workdir, node, with_feedback(render(prompt, context), feedback), spec['writes'],
                      reads=spec['reads'], model_context=client.context())
     output = client.complete(delivery['prompt'], workdir=workdir)
     receipt = finish(workdir, node, final_response=output, capture_final=client.route()["worker_backend"] == "dsh")

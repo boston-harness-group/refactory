@@ -213,6 +213,26 @@ def update_facts(workdir: Path, changed: dict[str, Any], removed: tuple[str, ...
     edit_facts(workdir, edit)
 
 
+def write_facts(workdir: Path, facts: dict[str, Any]) -> None:
+    """Make the run's facts exactly ``facts``, under :data:`FACTS_LOCK`: what the walker
+    does, whose facts live in its own memory and reach `facts.json` whole after each node,
+    where every reader of a run directory reads them. A facts file that cannot be read is
+    replaced, not refused: the walker's facts are the run's, not a merge with it."""
+    import fcntl
+
+    lock_path = workdir / FACTS_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    path = workdir / FACTS
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            temporary = path.with_name(f".{FACTS}.{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(facts, indent=2, default=str))
+            temporary.replace(path)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def _write_changes(workdir: Path, before: dict[str, Any], after: dict[str, Any]) -> None:
     """Write back the facts a node changed: those it set or altered, and those it dropped."""
     changed = {key: value for key, value in after.items()

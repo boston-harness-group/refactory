@@ -79,7 +79,8 @@ def test_a_gate_loops_until_its_verdict_changes(tmp_path):
     result = nn.execute(_loop_graph("loop_ops:three_passes"), tmp_path, knobs={"step": 2})
     assert result.exit_ok, result.error
     assert result.facts["passes"] == 3
-    assert result.facts["gate_verdict"] == "proceed"
+    # The verdict is the run's record, as the spine's checkpoint keeps it, not a fact.
+    assert result.gate_verdicts["gate"] == "proceed" and "gate_verdict" not in result.facts
 
 
 def test_a_gate_loop_is_bounded_by_max_iterations(tmp_path):

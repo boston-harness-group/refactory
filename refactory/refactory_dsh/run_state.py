@@ -45,6 +45,64 @@ def is_alive(pid: int) -> bool:
     return True
 
 
+#: The status file both runtimes write.
+STATUS = '.refactory/spine-status.json'
+
+
+def write_status(root: Path, *, status: str, nodes: list[str], running_nodes: list[dict[str, str]],
+                 completed: list[str], error: str | None = None, wait_reason: str | None = None,
+                 last_failure: dict[str, str] | None = None, runtime: str = 'walker',
+                 owner_pid: int | None = None) -> None:
+    """Write the status file in the spine's format (`recordStatus` in workflow-spine).
+
+    The walker writes it through here, so a walked run has the record every reader of a
+    run directory reads: where the run stands, what is due, and what completed. Whole
+    and atomic, so no reader sees half of it. Like the spine's, it names the runtime and
+    the process that owns the run (:func:`walked`, :func:`owner_pid`).
+    """
+    from datetime import datetime, timezone
+
+    at = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+    record: dict[str, Any] = {
+        'schema_version': 1, 'run_id': str(Path(root).resolve()), 'runtime': runtime,
+        'owner_pid': os.getpid() if owner_pid is None else owner_pid, 'at': at, 'status': status,
+        'nodes': list(nodes), 'running_nodes': list(running_nodes), 'completed': list(completed),
+    }
+    if error is not None:
+        record['error'] = error
+    if wait_reason is not None:
+        record['wait_reason'] = wait_reason
+    if last_failure is not None:
+        record['last_failure'] = {**last_failure, 'at': at}
+    path = Path(root) / STATUS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    pending.write_text(json.dumps(record, indent=2))
+    pending.replace(path)
+
+
+def _status_record(root: Path) -> dict[str, Any]:
+    try:
+        data = json.loads((Path(root) / STATUS).read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def walked(root: Path) -> bool:
+    """Whether the walker drives this run, as its status file says (`runtime`). Whether
+    a walked run is still alive is its progress's and its walking process's to say, not
+    a spine checkpoint's -- and a status file from before it named its runtime is the
+    spine's, the only runtime that wrote one then."""
+    return _status_record(root).get('runtime') == 'walker'
+
+
+def owner_pid(root: Path) -> int | None:
+    """The process the status file names as the run's owner, when it names one."""
+    pid = _status_record(root).get('owner_pid')
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+
+
 def spine_status(root: Path) -> str:
     """Read and return the status string from spine-status.json."""
     path = Path(root) / '.refactory/spine-status.json'

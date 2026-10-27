@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -81,6 +82,64 @@ def fill_feedback(workdir: Path, node: str, values: dict[str, Any], *,
     ep = list(eps)[0]
     refill_fn = ep.load()
     return refill_fn(Path(workdir), feedback_keys, values)
+
+#: The heading a reloop's feedback travels under, ahead of the node's prompt.
+FEEDBACK_HEADING = '## Feedback for this visit'
+
+
+def with_feedback(prompt: str, feedback: str) -> str:
+    """``prompt`` with the feedback a reloop left for this visit, said once.
+
+    A gate that sends a node back says why, and the node's next prompt must carry it.
+    Most prompts already do -- their template renders the gate's reason from a fact
+    (design mode's `emit`: "What went wrong last time") -- and repeating it under a
+    second heading only doubles a long check log. So the feedback is added, under
+    :data:`FEEDBACK_HEADING` ahead of the prompt, unless the rendered prompt already
+    says it (:func:`_rendered`). Both runtimes deliver through here: the spine's worker
+    with the feedback file the spine wrote, the walker with the reason its gate gave.
+    """
+    feedback = (feedback or '').strip()
+    if not feedback or _rendered(feedback, prompt):
+        return prompt
+    return f'{FEEDBACK_HEADING}\n\n{feedback}\n\n{prompt}'
+
+
+#: How a gate's reason over the runner's limit is clipped: head, this marker, tail
+#: (`run._clipped`, and `reasonOf` in workflow-spine's `execute.ts`).
+_CLIPPED = re.compile(r'\n… \(clipped from \d+ characters\) …\n')
+
+
+def _rendered(feedback: str, prompt: str) -> bool:
+    """Whether ``prompt`` already says ``feedback``: its lines appear, whole and in a row,
+    among the prompt's. Text that merely occurs inside a longer line is not the same
+    words -- a note "add tests" is not said by "add tests for every change". A reason
+    clipped to the runner's limit is said when its head and its tail both are, the head
+    ending and the tail starting where the clip cut a line."""
+    lines = [line.rstrip() for line in prompt.split('\n')]
+    clipped = _CLIPPED.split(feedback)
+    if len(clipped) == 2:
+        head, tail = clipped
+        return _lines_in(head, lines, cut_last=True) and _lines_in(tail, lines, cut_first=True)
+    return _lines_in(feedback, lines)
+
+
+def _lines_in(text: str, lines: list[str], *, cut_first: bool = False, cut_last: bool = False) -> bool:
+    """Whether ``text``'s lines are a run of ``lines``; a cut first line need only end one,
+    a cut last line only begin one."""
+    wanted = [line.rstrip() for line in text.split('\n')]
+    last = len(wanted) - 1
+    for start in range(len(lines) - last):
+        for offset, want in enumerate(wanted):
+            have = lines[start + offset]
+            cut_start, cut_end = cut_first and offset == 0, cut_last and offset == last
+            same = (want in have if cut_start and cut_end else have.endswith(want) if cut_start
+                    else have.startswith(want) if cut_end else have == want)
+            if not same:
+                break
+        else:
+            return True
+    return False
+
 
 CONTRACT_START = '<!-- refactory worker execution -->'
 CONTRACT_END = '<!-- end refactory worker execution -->'
@@ -157,7 +216,9 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
     real_refactory_source = str(Path(__file__).resolve().parent)
     execution = {
         'node': node, 'workdir': str(workdir),
-        'inputs': [str((workdir / name).resolve()) for name in reads],
+        # In name order on both runtimes: the lowered graph keeps a node's reads as a set,
+        # and the gate's review scope is fingerprinted over them sorted (`Ledger.review`).
+        'inputs': [str((workdir / name).resolve()) for name in sorted(reads)],
         'outputs': [str(_path(workdir, name)) for name in writes],
         'python': python, 'refactory_source': real_refactory_source,
     }

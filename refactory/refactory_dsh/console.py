@@ -505,6 +505,11 @@ def _run_kind(run_root: Path, spine: dict[str, Any]) -> str:
     config = _read_json(run_root / "config.json")
     if isinstance(config.get("mode"), str) and isinstance(config.get("optimizer"), str):
         return "optimizer"
+    # A walked run has no spine checkpoint, so no graph controls to offer.
+    from refactory_dsh import run_state
+
+    if run_state.walked(run_root):
+        return "walker"
     if spine or any((run_root / "graphs").glob("*.graph.json")):
         return "graph"
     return "unknown"
@@ -562,7 +567,8 @@ def status(run_root: Path, *, after: int = 0) -> dict[str, Any]:
         activity['queued_controls'] = qc
     # Compute owner liveness before the start-failure check needs it.
     checkpoint = _read_json(run_root / '.refactory/spine-checkpoint.json')
-    owner = checkpoint.get('owner_pid')
+    # A walked run's owner is the walking process its status file names.
+    owner = run_state.owner_pid(run_root) if run_state.walked(run_root) else checkpoint.get('owner_pid')
     owner_alive = (True if (isinstance(owner, int) and _alive(owner)) else
                    False if isinstance(owner, int) else None)
     # Supervision-history and start-failure enrich the activity dict.
@@ -1005,7 +1011,8 @@ def _steer(
         from refactory_dsh.control import Control, ControlError
 
         try:
-            if _run_kind(run_root, _spine(run_root)) == "graph":
+            # A walked run's controls are refused there: they need the spine's checkpoint.
+            if _run_kind(run_root, _spine(run_root)) in ("graph", "walker"):
                 from refactory_dsh.graph_control import request
                 payload["control"] = request(run_root, control)
                 return payload
