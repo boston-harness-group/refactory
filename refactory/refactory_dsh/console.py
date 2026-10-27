@@ -548,6 +548,11 @@ def status(run_root: Path, *, after: int = 0) -> dict[str, Any]:
         lf_node = last_failure.get('node', 'unknown')
         activity['last_failure'] = last_failure
         activity['wait_reason'] = f'step {lf_node} is being retried'
+    # The nodes the graph's declared retry rule ran again (`node_retry`), on either runtime.
+    from refactory_dsh.node_retry import retries as _node_retries
+    retried = _node_retries(run_root)
+    if retried:
+        activity['node_retries'] = retried
     # Report command corrections from facts.json
     facts_data = _read_json(run_root / 'facts.json')
     # dm-127: show design review status when a user gate is due.

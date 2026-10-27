@@ -24,6 +24,14 @@ from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
 
 OPS = "refactory_dsh.design_ops"
 
+#: The verifier's recovery (`Node.retry`): a session that times out is run once more,
+#: fresh, with twice its `timeout_s`. Remote-factory's CEO did this by judgment; here it
+#: is the graph's rule, on both runtimes. Only the verifier declares it: across about
+#: 1,900 lab sessions of design's other agents there were no timeouts, so a node is
+#: added when it is seen to time out. A node that declares it writes only its own report
+#: files (`outputs_only`); the builder (`emit`) never can until agent workspaces.
+TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
+
 #: Design mode's verifier runs beside the check, in the review fork.
 BESIDE_CHECK_VERIFIER_NOTE = (
     "\n\n## The check runs beside this review\n"
@@ -836,11 +844,12 @@ class DesignMode(Mode):
         ))
 
         # ── design-v2's three reviews, in parallel, and the overwatch pass ──
-        from refactory_dsh.verification import VERIFIER_PROMPT, VERIFIER_TIMEOUT_S
+        from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, VERIFIER_PROMPT
         graph.add(Node(
             "verifier", "agent",
+            retry=TIMEOUT_RETRY, outputs_only=True,
             prompt_template=VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
-            timeout_s=VERIFIER_TIMEOUT_S,
+            timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
             reads=("brief.json", "changes.diff"),
             writes=("reviews/verification.md",),

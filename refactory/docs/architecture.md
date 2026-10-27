@@ -317,9 +317,32 @@ outer-loop evaluations):
 
 - **FnNode-only retry.** An op node (`kind="op"`) that raises gets one retry.
   Gates (`kind="gate"`) are timed but never retried (their reloop mechanism via
-  `max_iterations` is the graph-level retry). Agent nodes are not retried by the
-  executor (`DshModelClient` has its own transport retry with exponential
-  backoff). Fork, join, and data nodes are structural.
+  `max_iterations` is the graph-level retry). An agent node is retried only by
+  its own declared rule (`Node.retry`, below), on both runtimes;
+  `DshModelClient` has its own transport retry with exponential backoff. Fork,
+  join, and data nodes are structural.
+
+- **Declared node recovery.** An agent node may declare
+  `retry={"on": ["timeout"], "times": 1, "timeout_factor": 2}`: a session that
+  times out is run once more, in a fresh session with twice its `timeout_s`
+  (which a retry requires). The rule
+  is the graph's, never a CEO's judgment, so a headless run recovers as a
+  supervised one does. Both runtimes run it through `node_retry.deliver`: the
+  walker from `_visit_agent`, the spine from the worker every dispatched agent
+  runs (`worker_node.execute`), whose `command_timeout_s` reserves every
+  attempt's limit plus the dispatch overhead (`node_retry.node_allowance_s`).
+  Each attempt goes through the delivery bracket and its target guard; a
+  timed-out attempt that changed the target is refused, not retried, and
+  otherwise its outputs are set aside so the retry writes them afresh. A retry
+  checks the run's budget first, is clamped to what is left of the node's
+  envelope and the run's wall, and is recorded as a `node_retried` event that
+  `console status` counts. Only a node that declares `outputs_only` (its
+  outputs are its own declared report files) may declare a retry; validation
+  refuses one on a node that may change the run's worktree or the target, and a
+  timed-out attempt during which the run's worktree changed is not retried
+  (another branch of its fork may have written there). Design mode
+  declares it on the verifier only, the one agent seen to time out; a node is
+  added when it is seen to time out.
 
 - **Fact restore.** Before each op attempt, `ctx.facts` is deep-copied. On
   failure, facts are restored from the snapshot before retry.

@@ -75,7 +75,7 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
                 }}
         except Exception:
             pass
-    from refactory_dsh.agent_delivery import begin, finish, _path
+    from refactory_dsh.agent_delivery import _path
     from refactory_dsh.model import DshModelClient
     if spec.get('schema_version') != 1:
         raise ValueError('unsupported worker spec version')
@@ -118,21 +118,25 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # outputs before the bracket closes, so delivery checks what the workspace produced.
     from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import with_feedback
+    from refactory_dsh.node_retry import deliver
     runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
-    with workspaces.dispatched(workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
-                               route=client.route(),
-                               runtime_root=Path(runtime_root) if runtime_root else None) as place:
-        # The reloop's feedback once: after rendering, so a template that renders the gate's
-        # reason already carries it (`with_feedback`).
-        delivery = begin(workdir, node, with_feedback(render(prompt, context), feedback), spec['writes'],
-                         reads=spec['reads'], model_context=client.context(),
-                         **({'workspace': place.describe()} if place is not None else {}))
+
+    def dispatch_workspace(retrying: bool):
+        return workspaces.dispatched(
+            workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
+            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None)
+
+    def ask(attempt, sent, place):
         if place is None:
-            output = client.complete(delivery['prompt'], workdir=workdir)
-        else:
-            output = workspaces.ask(place, client, delivery['prompt'], workdir=workdir)
-            workspaces.collect(place, workdir, spec['writes'], final_response=output)
-    receipt = finish(workdir, node, final_response=output, capture_final=client.route()["worker_backend"] == "dsh")
+            return attempt.complete(sent, workdir=workdir)
+        return workspaces.ask(place, attempt, sent, workdir=workdir)
+
+    output, receipt = deliver(
+        workdir, node, prompt=with_feedback(render(prompt, context), feedback),
+        writes=spec['writes'], reads=spec['reads'], client=client, ask=ask,
+        capture_final=client.route()["worker_backend"] == "dsh", rule=spec.get('retry'),
+        timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None),
+        workspace=dispatch_workspace)
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():

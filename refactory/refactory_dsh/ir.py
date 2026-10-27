@@ -2,8 +2,8 @@
 
 Re-exports the canonical IR types from remote-factory (v1) via the subtree
 at ``v1/``, extending three node classes with fields v2 needs
-that v1 does not yet carry: ``resource_role``, ``command_timeout_s``, and
-``dispatch_command``.
+that v1 does not yet carry: ``resource_role``, ``command_timeout_s``,
+``dispatch_command`` and an agent's ``retry``.
 
 The v1 types are imported through ``_v1_compat``, which adds the subtree
 root to ``sys.path``.  v1's only transitive dependency beyond stdlib is
@@ -77,6 +77,10 @@ class AgentNode(Node):
     post_checks: list[ArtifactCheck] = Field(default_factory=list)
     dispatch_command: str | None = None
     command_timeout_s: int | None = Field(default=None, gt=0, le=2_147_483)
+    #: The node's declared recovery (`nn.graph.retry_declaration`'s canonical form). None
+    #: is no retry, and is left out of the serialized graph, so a graph that declares
+    #: none is byte-identical to one lowered before the field existed.
+    retry: dict[str, Any] | None = None
     #: Where the node works (`nn.graph.workspace_declaration`'s canonical form). None is
     #: the run directory, and is left out of the serialized graph, so a graph that
     #: declares no workspace is byte-identical to one lowered before the field existed.
@@ -211,6 +215,8 @@ class Workflow(BaseModel):
                 d.pop("command_timeout_s", None)
             if d.get("dispatch_command") is None:
                 d.pop("dispatch_command", None)
+            if "retry" in d and d["retry"] is None:
+                d.pop("retry")
             if "workspace" in d and d["workspace"] is None:
                 d.pop("workspace")
             for field_name in ("reads", "writes"):

@@ -17,7 +17,7 @@ from refactory_dsh.design import DesignMode
 from refactory_dsh.fast import DesignFastMode
 from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S, DshModelClient
 from refactory_dsh.nn import Graph, GraphError, Node
-from refactory_dsh.verification import VERIFIER_TIMEOUT_S
+from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, VERIFIER_TIMEOUT_S
 
 
 def test_only_an_agent_declares_a_positive_timeout():
@@ -34,9 +34,12 @@ def test_the_timeout_survives_the_graph_state_round_trip():
     assert "timeout_s" not in Node("y", "agent", prompt_template="p").to_state()
 
 
-@pytest.mark.parametrize("mode", [DesignMode, DesignFastMode])
-def test_the_verifier_declares_its_bound_in_both_modes(mode):
-    assert mode().build().nodes["verifier"].timeout_s == VERIFIER_TIMEOUT_S
+def test_the_verifier_declares_its_bound_in_both_modes():
+    # Design mode's verifier has a bound a medium change fits, and a retry; design_fast
+    # keeps the short one, without a retry.
+    assert DesignMode().build().nodes["verifier"].timeout_s == DESIGN_VERIFIER_TIMEOUT_S
+    assert DesignFastMode().build().nodes["verifier"].timeout_s == VERIFIER_TIMEOUT_S
+    assert DesignFastMode().build().nodes["verifier"].retry is None
 
 
 def test_an_inline_verifier_keeps_the_route_envelope():
@@ -51,17 +54,18 @@ def test_an_inline_verifier_keeps_the_route_envelope():
 def test_the_spine_gives_the_session_the_bound_and_the_command_its_overhead(tmp_path):
     state = DesignMode().state_dict()
     workflow = lowering.to_workflow(state)
-    assert workflow.nodes["verifier"].timeout == VERIFIER_TIMEOUT_S
+    assert workflow.nodes["verifier"].timeout == DESIGN_VERIFIER_TIMEOUT_S
     assert workflow.nodes["health_checker"].timeout is None
     lowered = workers.lower_workflow(workflow, tmp_path, DshModelClient().context())
     verifier = lowered.nodes["verifier"]
-    assert verifier.command_timeout_s == VERIFIER_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
+    # Its bound, then its declared retry at twice the bound, then the dispatch overhead.
+    assert verifier.command_timeout_s == 3 * DESIGN_VERIFIER_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
     import json
     spec = json.loads(open(verifier.dispatch_command.rsplit(" ", 1)[1].strip("'")).read())
-    assert spec["model_context"]["node_wall_s"] == VERIFIER_TIMEOUT_S
+    assert spec["model_context"]["node_wall_s"] == DESIGN_VERIFIER_TIMEOUT_S
     # The dispatched worker rebuilds its client from that context with the bound.
     client = DshModelClient(**spec["model_context"])
-    assert client.context()["node_wall_s"] == VERIFIER_TIMEOUT_S
+    assert client.context()["node_wall_s"] == DESIGN_VERIFIER_TIMEOUT_S
 
 
 def _budget_of(client, monkeypatch, tmp_path):

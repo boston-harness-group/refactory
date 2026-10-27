@@ -1090,7 +1090,7 @@ class Executor:
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
-        from refactory_dsh.agent_delivery import begin, fill_feedback, finish, with_feedback
+        from refactory_dsh.agent_delivery import fill_feedback, with_feedback
 
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
@@ -1110,33 +1110,31 @@ class Executor:
                 self.ctx._internal_fact(k, values[k])
         model_context = client.context() if callable(getattr(client, "context", None)) else None
         route = client.route() if callable(getattr(client, "route", None)) else {}
-        # A node that declares a workspace works there, through the same module the
-        # spine's worker uses (`workspace.py`): prepared before the delivery bracket,
-        # collected into the node's outputs before it closes.
         from refactory_dsh import workspace as workspaces
-        with workspaces.dispatched(
+        from refactory_dsh.node_retry import deliver
+
+        def dispatch_workspace(retrying: bool):
+            return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
-                route=route, budget=self.ctx.budget,
+                route=route, budget=self.ctx.budget, fresh=retrying,
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
-                else None) as place:
-            # The reloop's feedback once, as the spine's worker delivers it (`with_feedback`).
-            prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
-            delivery = begin(self.ctx.workdir, node.id, prompt, list(node.writes),
-                             reads=list(node.reads), model_context=model_context,
-                             **({"workspace": place.describe()} if place is not None else {}))
+                else None)
+
+        prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
+        if self.ctx.budget is not None and not callable(getattr(client, "with_budget", None)):
+            self.ctx.budget.require_usage_capability(False)
+
+        def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
-            if self.ctx.budget is not None and not callable(getattr(client, "with_budget", None)):
-                self.ctx.budget.require_usage_capability(False)
-            # The prompt alone, as the spine's worker sends it: a node's notes say what it does
-            # (its event summary, a gate's question), and its template says all it is asked.
             if place is None:
-                output = _ask_model(client, delivery["prompt"], system="", workdir=self.ctx.workdir)
-            else:
-                output = workspaces.ask(place, client, delivery["prompt"], workdir=self.ctx.workdir,
-                                        system="")
-                workspaces.collect(place, self.ctx.workdir, list(node.writes), final_response=output)
-        finish(self.ctx.workdir, node.id, final_response=output,
-               capture_final=route.get("worker_backend", "dsh") == "dsh")
+                return _ask_model(attempt, sent, system="", workdir=self.ctx.workdir)
+            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system="")
+
+        output, _receipt = deliver(
+            self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
+            reads=list(node.reads), client=client, ask=ask,
+            capture_final=route.get("worker_backend", "dsh") == "dsh", rule=node.retry,
+            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace)
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.

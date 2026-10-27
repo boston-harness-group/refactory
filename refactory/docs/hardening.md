@@ -1518,12 +1518,18 @@ fix_pack has no reviewers, so in those the verifier applies all seven.
 
 The verifier is given the brief, the diff and the repository — never
 design.md. It runs in parallel with the reviews as an optional branch of
-the review fork, bounded at `VERIFIER_TIMEOUT_S` (600 s) on both runtimes: the
-node declares `timeout_s`, the spine gives its dispatched session that wall
-(`node_wall_s`) plus the usual dispatch overhead, and the walker gives its model
-client the same wall. Its prompt asks it to finish in about seven minutes and to write
-each finding as it finds it, since a session stopped at the wall leaves nothing. A
-verifier that fails, returns nothing or runs out of time is recorded as missing.
+the review fork, bounded at `DESIGN_VERIFIER_TIMEOUT_S` (1,200 s) in design mode and
+`VERIFIER_TIMEOUT_S` (600 s) in design_fast, on both runtimes: the node declares
+`timeout_s`, the spine gives its dispatched session that wall (`node_wall_s`) plus the
+usual dispatch overhead, and the walker gives its model client the same wall. Its
+prompt asks it to finish in about seven minutes and to write each finding as it finds
+it, since a session stopped at the wall leaves nothing. 1,200 s is what a medium change
+needs: before any bound, 22 of 23 verifier sessions on changes of 500 diff lines or
+more finished within it (median 740 s), while under 600 s, 45 of 88 sessions timed out.
+In design mode a verifier that times out is retried once with twice the limit
+(`Node.retry`, `refactory_dsh.node_retry`). A verifier that fails, returns nothing or
+runs out of time again is recorded as missing, and the QA synthesis both judges read
+says so, with the reason (`VERIFIER MISSING (timed out twice)`).
 fix_pack's verifier is inline on the main path, where running out of time would fail
 the run, so it keeps the route's envelope.
 

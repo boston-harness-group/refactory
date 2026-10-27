@@ -34,6 +34,12 @@ from refactory_dsh.invocations import HOOK_SUPPRESS, WORKTREE_RECORD
 from refactory_dsh.owned_process import SHUTDOWN_GRACE_S, shutdown, _termination_as_exit
 
 
+class CompletionTimeout(RuntimeError):
+    """A model session ran out of its time. The client never replays it: a tool-using
+    session may already have changed its workdir. A node that declares a retry on
+    ``timeout`` gets a fresh session instead (`refactory_dsh.node_retry`)."""
+
+
 class ModelChoiceError(Exception):
     """A run has no model: no flag, no route and no stored choice (dm-258).
 
@@ -329,6 +335,9 @@ class DshModelClient:
         #: A node's own bound on its whole model session (`Node.timeout_s`), when
         #: it declares one: the session stops there whatever the route allows.
         self._node_wall_s = int(node_wall_s) if node_wall_s is not None else None
+        #: Whether that wall is the session's limit even beyond the route's envelope: a
+        #: declared retry's longer session (`with_retry_wall`). Otherwise it only lowers it.
+        self._node_wall_exact = False
         self._worker_receipt: Path | None = None
         #: Set per completion on the copy `complete` makes, as the receipt is: where the
         #: agent works when that is not the run directory, what its environment
@@ -389,6 +398,13 @@ class DshModelClient:
         """A copy whose node session ends after ``seconds``, however the route is set."""
         client = copy.copy(self)
         client._node_wall_s = int(seconds)
+        return client
+
+    def with_retry_wall(self, seconds: int) -> DshModelClient:
+        """A copy whose node session runs for exactly ``seconds``: a declared retry's
+        longer limit (`node_retry.deliver`), which may exceed the route's envelope."""
+        client = self.with_wall(seconds)
+        client._node_wall_exact = True
         return client
 
     def with_budget(self, budget: Any) -> DshModelClient:
@@ -656,7 +672,7 @@ class DshModelClient:
             budget_s = self._timeout_s
             stop_at = None
         wall = getattr(self, "_node_wall_s", None)
-        if wall is not None and wall < budget_s:
+        if wall is not None and (wall < budget_s or getattr(self, "_node_wall_exact", False)):
             budget_s = wall
             stop_at = time.monotonic() + budget_s
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
@@ -670,9 +686,9 @@ class DshModelClient:
                 # A tool-using completion may already have changed its workdir.
                 # A deadline is not a transport failure: replaying the prompt can
                 # duplicate real work even after its subprocesses have shut down.
-                raise RuntimeError(
+                raise CompletionTimeout(
                     f"model completion timed out after {budget_s}s; "
-                    "requested runtime shutdown; not retried"
+                    "requested runtime shutdown; the client does not replay a deadline"
                 ) from exc
             else:
                 self._raise_if_cancelled()

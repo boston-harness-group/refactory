@@ -171,7 +171,10 @@ Each dispatched agent node's spine limit is computed by
 `node_session_budget_s(attempts, timeout_s) = attempts × timeout_s + 600`, where
 `attempts` defaults to 3 and 600 is `NODE_DISPATCH_OVERHEAD_S`. The per-node
 `command_timeout_s` overrides the spine's global `commandTimeoutMs`, so a
-`--model-timeout` larger than the profile's default does not get silently cut.
+`--model-timeout` larger than the profile's default does not get silently cut. A node
+that declares a retry (`Node.retry`) reserves every attempt instead: its own `timeout_s`
+(which a retry requires), each retry's limit `timeout_factor` times the last, and one
+600 s overhead.
 
 The value is saved in `model_context` (as the `timeout_s` key) in
 `run-config.json`, and inherited by nested workers via `REFACTORY_WORKER_CONTEXT`.

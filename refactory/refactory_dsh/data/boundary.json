@@ -37,6 +37,7 @@
     "refactory_dsh.nn.record",
     "refactory_dsh.nn.resolve",
     "refactory_dsh.nn.validate",
+    "refactory_dsh.node_retry",
     "refactory_dsh.observe",
     "refactory_dsh.openshell_backend",
     "refactory_dsh.optim",

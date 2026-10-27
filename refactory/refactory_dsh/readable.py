@@ -61,6 +61,11 @@ def format_status(payload: dict[str, Any]) -> str:
 
         lines.append(f"State: {state}")
 
+        retried = activity.get('node_retries')
+        if isinstance(retried, dict) and retried:
+            lines.append("Retried after a timeout: " + ", ".join(
+                f"{node} ({count}x)" for node, count in sorted(retried.items())))
+
         error = authoring.get('error')
         if error:
             lines.append(f"Error: {error}")

@@ -811,9 +811,16 @@
       "model": "",
       "prompt_template": "Artifact directory (absolute): {{artifact}}\nRead and run the delivered files at this exact path; do not infer it from your working directory. {{change}}\n\nBrief: {{brief}}\n\n{{verification_methods}}\nFor each finding, report it as:\nBLOCKING: <file:line>: <description with a runnable counterexample or a cited file:line chain>\nWrite the blocking marker only at the start of a finding line, in its plain form: BLOCKING: <path>: <description>. Never wrap it in backticks, a code span, or quotation marks while explaining a check or describing the parser. When discussing the marker itself, call it \"the blocking marker\". Write every real finding as a plain line outside any fenced code block, because fenced blocks are not read as findings. When you show the format as an example rather than report a finding, put the example inside a fenced code block.\n\ndesign.md is in the run directory. Do NOT read it, or strategy.json, or any review files. You verify the change against the brief and the repository only.\n\nEnd with a line that is exactly VERDICT: PASS when there are no blocking findings, or VERDICT: FAIL when there are any.\n\n## The check runs beside this review\nThe check `{{check}}` runs at the same time, on the same commit, and is judged on its own. Do not run the whole check yourself.\n",
       "tools": [],
-      "timeout": 600,
+      "timeout": 1200,
       "max_iterations": 1,
       "post_checks": [],
+      "retry": {
+        "on": [
+          "timeout"
+        ],
+        "times": 1,
+        "timeout_factor": 2
+      },
       "_type": "AgentNode"
     }
   },

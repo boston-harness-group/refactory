@@ -22,6 +22,54 @@ NODE_KINDS = ("op", "agent", "gate", "fork", "join", "data")
 #: Who answers a gate: the evaluated function, a person, or the running agent.
 GATE_KINDS = ("fn", "user", "agent")
 
+#: The failures an agent node may declare a retry on (`Node.retry`). Only a timeout: a
+#: session that ran out of time is the one failure a fresh, longer session can fix. A
+#: model that answered wrongly answers wrongly again, and a transport blip is already
+#: retried inside the model client (`model.DEFAULT_ATTEMPTS`).
+RETRY_ON = ("timeout",)
+
+#: The most retries one node may declare, and the largest factor its limit may grow by
+#: per retry. A bound, so a declared rule cannot hold a run for an unbounded time.
+MAX_RETRY_TIMES = 3
+MAX_TIMEOUT_FACTOR = 10
+
+
+def retry_declaration(value: Any) -> dict[str, Any] | None:
+    """A retry declaration in its one canonical form, or None for no retry.
+
+    A mapping of ``on`` (the failures it answers, from `RETRY_ON`), ``times`` (how many
+    retries) and ``timeout_factor`` (how much longer each retry's session limit is than
+    the last one's). Unset keys take ``on: ["timeout"]``, ``times: 1`` and
+    ``timeout_factor: 2``. Canonical -- ``on`` sorted, a whole factor an integer -- so a
+    rule written two ways serializes, and therefore identifies a candidate, one way.
+    Raises ``ValueError`` saying what is wrong.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"a retry is a mapping of on, times and timeout_factor, not {value!r}")
+    unknown = sorted(set(value) - {"on", "times", "timeout_factor"})
+    if unknown:
+        raise ValueError(f"a retry takes on, times and timeout_factor; unknown: {unknown}")
+    on = value.get("on", ["timeout"])
+    if isinstance(on, str) or not isinstance(on, (list, tuple)) or not on:
+        raise ValueError(f"a retry's 'on' is a non-empty list of failures, not {on!r}")
+    strange = sorted({str(item) for item in on} - set(RETRY_ON))
+    if strange:
+        raise ValueError(f"a retry can answer {list(RETRY_ON)} only; unknown: {strange}")
+    times = value.get("times", 1)
+    if isinstance(times, bool) or not isinstance(times, int) or not 1 <= times <= MAX_RETRY_TIMES:
+        raise ValueError(f"a retry's 'times' is a whole number from 1 to {MAX_RETRY_TIMES}, "
+                         f"not {times!r}")
+    factor = value.get("timeout_factor", 2)
+    if (isinstance(factor, bool) or not isinstance(factor, (int, float))
+            or not 1 <= factor <= MAX_TIMEOUT_FACTOR):
+        raise ValueError(f"a retry's 'timeout_factor' is a number from 1 to {MAX_TIMEOUT_FACTOR}, "
+                         f"not {factor!r}")
+    if float(factor).is_integer():
+        factor = int(factor)
+    return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor}
+
 #: Where an agent node works (`Node.workspace`). ``none`` is the run directory, as
 #: every node had before workspaces; ``scratch`` is a fresh empty folder per dispatch;
 #: ``clone`` is a prepared clone of the run's worktree (`refactory_dsh.workspace`).
@@ -112,6 +160,8 @@ _NODE_FIELDS = frozenset(
         "limit",
         "feedback_keys",
         "timeout_s",
+        "retry",
+        "outputs_only",
         "workspace",
     }
 )
@@ -185,6 +235,20 @@ class Node:
     #: runs over fails like any other failed node, so an optional fork branch is
     #: then missing rather than late.
     timeout_s: int | None = None
+    #: `agent`: what the runtime does when the node's session fails, in its canonical
+    #: form (`retry_declaration`), e.g. ``{"on": ["timeout"], "times": 1,
+    #: "timeout_factor": 2}``: a session that times out is run once more, fresh, with
+    #: twice its `timeout_s` (which a retry requires), inside the node's whole budget
+    #: and the run's wall (`refactory_dsh.node_retry`). None is no retry, as before. A
+    #: rule the graph declares, on both runtimes, with or without a CEO.
+    retry: dict[str, Any] | None = None
+    #: `agent`: the node's only effect is its declared writes, its own report files --
+    #: a reviewer, a judge, a researcher -- never the run's worktree or the target. Only
+    #: such a node may declare a retry: its outputs are set aside and the retry writes
+    #: them afresh. A node that changes shared state would have its second session
+    #: start from whatever the first one left. A timed-out attempt during which the
+    #: target or the run's worktree changed is not retried (`node_retry.settle_for_retry`).
+    outputs_only: bool = False
     #: `agent`: where the node changes files and runs commands (`WORKSPACE_KINDS`),
     #: in its canonical form (`workspace_declaration`). None is ``none``: the run
     #: directory, as before. The graph still decides what crosses into shared state:
@@ -249,6 +313,38 @@ class Node:
                 raise GraphError(f"node {self.id!r} is not an agent but declares timeout_s")
             if self.timeout_s < 1:
                 raise GraphError(f"node {self.id!r}: timeout_s must be >= 1")
+        if self.outputs_only:
+            if self.kind != "agent":
+                raise GraphError(f"node {self.id!r} is not an agent but declares outputs_only")
+            if not self.writes:
+                raise GraphError(f"node {self.id!r} declares outputs_only and no writes, so it "
+                                 "has no outputs to be the only effect of")
+            rewritten = sorted(set(self.writes) & set(self.reads))
+            if rewritten:
+                raise GraphError(f"node {self.id!r} declares outputs_only but reads what it "
+                                 f"writes ({rewritten}): its outputs are not its own reports")
+        if self.retry is not None:
+            if self.kind != "agent":
+                raise GraphError(f"node {self.id!r} is not an agent but declares a retry")
+            try:
+                self.retry = retry_declaration(self.retry)
+            except ValueError as exc:
+                raise GraphError(f"node {self.id!r}: {exc}") from exc
+            if self.timeout_s is None:
+                raise GraphError(
+                    f"node {self.id!r} declares a retry but no timeout_s: a retry's limit is "
+                    "its timeout_factor times the node's own bound, so the node needs one")
+            if not self.outputs_only:
+                # A node that may change the run's worktree or the target cannot simply
+                # run again: the second session would start from what the first left.
+                # Agent workspaces (#516) make such a node retryable by giving each
+                # attempt a fresh workspace; until then it declares no retry.
+                raise GraphError(
+                    f"node {self.id!r} declares a retry but may change shared state (the "
+                    "run's worktree or the target), so a second session would start from "
+                    "whatever the first one left. Only a node whose outputs are its own "
+                    "declared report files may retry: declare outputs_only=True if that is "
+                    "all it changes, or give it a workspace once agent workspaces land")
         if self.workspace is not None:
             try:
                 self.workspace = workspace_declaration(self.workspace)
@@ -301,6 +397,9 @@ class Node:
             **({"limit": self.limit} if self.limit else {}),
             **({"feedback_keys": list(self.feedback_keys)} if self.feedback_keys else {}),
             **({"timeout_s": self.timeout_s} if self.timeout_s is not None else {}),
+            **({"retry": {**self.retry, "on": list(self.retry["on"])}}
+               if self.retry is not None else {}),
+            **({"outputs_only": True} if self.outputs_only else {}),
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
         }
 
@@ -341,6 +440,9 @@ class Node:
             limit=int(state.get("limit", 0)),
             feedback_keys=tuple(state.get("feedback_keys") or ()),
             timeout_s=(int(state["timeout_s"]) if state.get("timeout_s") is not None else None),
+            retry=(dict(state["retry"]) if isinstance(state.get("retry"), dict)
+                   else state.get("retry")),
+            outputs_only=bool(state.get("outputs_only", False)),
             workspace=(dict(state["workspace"]) if isinstance(state.get("workspace"), dict)
                        else state.get("workspace")),
         )

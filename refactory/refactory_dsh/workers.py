@@ -284,6 +284,11 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'model_context': selected_context}
         if is_optional:
             payload['optional'] = True
+        retry = getattr(node, 'retry', None)
+        if retry:
+            # The worker runs the node's declared retry (`node_retry.deliver`), inside the
+            # envelope reserved for all its attempts below.
+            payload['retry'] = retry
         if node.workspace:
             # Only when declared, so the spec of a node without one -- named by its
             # hash -- is the bytes it was before workspaces.
@@ -300,7 +305,15 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         from refactory_dsh.model import DEFAULT_TIMEOUT_S, NODE_DISPATCH_OVERHEAD_S, node_session_budget_s
         attempts = max(1, int(selected_context.get('attempts') or 1))
         per_completion = int(selected_context.get('timeout_s') or DEFAULT_TIMEOUT_S)
-        if node.timeout is not None:
+        if retry:
+            # Every attempt's session -- the first under the node's bound, each retry
+            # longer by its factor -- plus the one dispatch overhead,
+            # so the retry runs inside the command the spine started.
+            from refactory_dsh.node_retry import node_allowance_s
+            if node.timeout is None:
+                raise ValueError(f'worker node {name!r} declares a retry but no timeout')
+            command_timeout_s = node_allowance_s(node.timeout, retry) + NODE_DISPATCH_OVERHEAD_S
+        elif node.timeout is not None:
             # The session inside stops at the node's own bound; the dispatch keeps
             # the overhead a derived envelope has, so the session ends first.
             command_timeout_s = node.timeout + NODE_DISPATCH_OVERHEAD_S
@@ -309,9 +322,9 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if node.workspace:
             # The workspace is prepared before the session starts -- a clone, its
             # installs, generate and setup -- so the dispatch outlasts the session by
-            # that much more, or the spine stops a node still preparing.
+            # that much more per attempt, or the spine stops a retry still preparing.
             from refactory_dsh.workspace import preparation_budget_s
-            command_timeout_s += preparation_budget_s(
+            command_timeout_s += (1 + int(retry["times"]) if retry else 1) * preparation_budget_s(
                 node.workspace, workflow.knob_values.get('check_timeout_s'))
         node.dispatch_command = f'{sys.executable} -m refactory_dsh.worker_node ' + shlex.quote(str(spec))
         node.command_timeout_s = command_timeout_s
