@@ -113,7 +113,13 @@ NODE_PATCH = Path(__file__).resolve().parent / "patches" / "agent-node.yml"
 #: of them (`qa_director`, which builds and runs an adversarial probe) exceeded a
 #: five-minute ceiling in a live create run. A caller that knows its own nodes can
 #: set `timeout_s`; the default has to cover the slowest node a shipped mode declares.
-DEFAULT_TIMEOUT_S = 1800
+#:
+#: Overridable via ``REFACTORY_MODEL_TIMEOUT_S`` for workloads whose nodes run much
+#: longer than the authoring modes — e.g. a node that builds a container (podman)
+#: inside its own session can exceed 30 minutes. The default stays conservative;
+#: such a workload exports the env var rather than every consumer inheriting a high
+#: ceiling. (Same env-driven pattern as REFACTORY_WORKER_BACKEND / REFACTORY_MODEL_EFFORT.)
+DEFAULT_TIMEOUT_S = int(os.environ.get("REFACTORY_MODEL_TIMEOUT_S", "1800"))
 
 #: Overhead a node's dispatch reserves beyond its completion attempts, for process
 #: startup, sandbox discovery and delivery bookkeeping. `workers.lower_workflow`
