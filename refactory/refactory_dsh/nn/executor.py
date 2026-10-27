@@ -14,6 +14,7 @@ are.
 
 from __future__ import annotations
 
+import atexit
 import copy
 import importlib
 import json
@@ -554,6 +555,213 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         conn.close()
 
 
+# ── persistent worker pool ─────────────────────────────────────────────────
+#
+# Spawning a forkserver child costs ~9 ms. For runs with hundreds of
+# deterministic ops this adds up (test_durability: ~2 700 ops). A persistent
+# worker stays alive across ops: the parent sends work items over a pipe and
+# only kills/replaces the worker on timeout.  Timeout semantics (SIGTERM →
+# grace → SIGKILL on the process group) are identical to the one-shot path.
+
+def _op_worker_loop(conn: Any) -> None:
+    """Persistent child process: receive work items, run ops, send results."""
+    os.setsid()
+
+    def _sigterm_handler(signum: int, frame: Any) -> None:
+        raise SystemExit(f"terminated by signal {signum}")
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    _initialized = False
+
+    while True:
+        try:
+            args_dict = conn.recv()
+        except (EOFError, ConnectionResetError):
+            break
+        if args_dict is None:  # shutdown sentinel
+            break
+
+        # First call: set up sys.path and package paths once.
+        if not _initialized:
+            sys.path[:] = args_dict["sys_path"]
+            for _pkg_name, _pkg_path in args_dict.get("_package_paths", {}).items():
+                _pkg = sys.modules.get(_pkg_name)
+                if _pkg is not None and hasattr(_pkg, "__path__"):
+                    for _p in _pkg_path:
+                        if _p not in _pkg.__path__:
+                            _pkg.__path__.append(_p)
+            importlib.invalidate_caches()
+            _initialized = True
+
+        try:
+            from refactory_dsh.run import build_op_context
+
+            model: Any = None
+            model_info = args_dict.get("model_info")
+            if model_info:
+                kind = model_info.get("kind")
+                if kind == "dsh":
+                    from refactory_dsh.model import DshModelClient
+                    model = DshModelClient(**model_info["context"])
+                elif kind is not None:
+                    class _StandIn:
+                        def __getattr__(self, name: str) -> Any:
+                            raise RuntimeError(f"model.{name}() called in child process")
+                        def complete(self, *a: Any, **kw: Any) -> str:
+                            raise RuntimeError("model.complete() called in child process")
+                    model = _StandIn()
+
+            ctx = build_op_context(
+                Path(args_dict["workdir"]),
+                args_dict["node_id"],
+                knobs=args_dict.get("knobs"),
+                facts=args_dict.get("facts"),
+                task=args_dict.get("task"),
+            )
+            ctx._declared = tuple(args_dict.get("writes", ()))
+            ctx._declared_reads = tuple(args_dict.get("reads", ()))
+            ctx._declared_facts = tuple(args_dict.get("produces", ()))
+
+            model_info_2 = args_dict.get("model_info")
+            if model_info_2 and model_info_2.get("kind") == "other":
+                ctx.model = model
+            elif model is not None:
+                ctx.model = model
+
+            budget_ledger = args_dict.get("budget_ledger")
+            if budget_ledger:
+                from refactory_dsh.budgets import RunBudget
+                ctx.budget = RunBudget.from_path(budget_ledger)
+
+            fn = resolve(args_dict["callable_target"])
+            result = fn(ctx)
+
+            conn.send(("ok", {
+                "result": result,
+                "facts": dict(ctx.facts),
+                "writes_made": list(ctx.writes_made),
+                "_produced": list(ctx._produced),
+            }))
+        except SystemExit:
+            raise  # propagate SIGTERM
+        except BaseException as exc:
+            conn.send(("error", {
+                "type": type(exc).__qualname__,
+                "module": type(exc).__module__,
+                "message": str(exc),
+                "traceback": "".join(traceback_mod.format_exception(exc)),
+            }))
+
+    conn.close()
+
+
+class _OpWorker:
+    """A persistent forkserver child that runs ops on demand.
+
+    One worker per thread (via ``threading.local``).  When an op times out
+    the worker is killed and replaced transparently on the next call.
+    """
+
+    __slots__ = ("child", "conn")
+
+    def __init__(self) -> None:
+        self.child: Any = None
+        self.conn: Any = None
+
+    def ensure(self, graph: Graph) -> None:
+        """Create the worker process if it is not already running."""
+        if self.child is not None and self.child.is_alive():
+            return
+        # Previous worker died — clean up stale handles.
+        self._cleanup()
+        _ensure_forkserver_preload(graph)
+        parent_conn, child_conn = _forkserver_ctx.Pipe()
+        self.child = _forkserver_ctx.Process(
+            target=_op_worker_loop, args=(child_conn,),
+        )
+        self.child.start()
+        child_conn.close()
+        self.conn = parent_conn
+
+    def submit(
+        self, args_dict: dict[str, Any], timeout: float, node: Node,
+    ) -> tuple[str, dict[str, Any]]:
+        """Send *args_dict* to the worker and wait up to *timeout* seconds."""
+        self.conn.send(args_dict)
+        if self.conn.poll(timeout):
+            return self.conn.recv()  # type: ignore[return-value]
+        # Timeout — kill the worker (and its process group).
+        self._kill()
+        raise OpTimeoutError(node.id, timeout)
+
+    # -- lifecycle helpers ---------------------------------------------------
+
+    def _kill(self) -> None:
+        if self.child is None:
+            return
+        try:
+            os.killpg(self.child.pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            try:
+                self.child.kill()
+            except OSError:
+                pass
+        self.child.join(timeout=5)
+        if self.child is not None and self.child.is_alive():
+            try:
+                os.killpg(self.child.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                try:
+                    self.child.kill()
+                except OSError:
+                    pass
+            self.child.join(timeout=5)
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+        self.child = None
+        self.conn = None
+
+    def close(self) -> None:
+        """Shut down the worker gracefully."""
+        if self.conn is not None:
+            try:
+                self.conn.send(None)  # shutdown sentinel
+            except (BrokenPipeError, OSError):
+                pass
+        self._kill()
+
+
+# Thread-local workers so fork-branch threads each get their own.
+_tls = threading.local()
+
+
+def _get_worker() -> _OpWorker:
+    try:
+        return _tls.worker  # type: ignore[return-value]
+    except AttributeError:
+        w = _OpWorker()
+        _tls.worker = w
+        return w
+
+
+def _shutdown_workers() -> None:
+    """Best-effort cleanup at interpreter exit."""
+    try:
+        w: _OpWorker = _tls.worker  # type: ignore[assignment]
+        w.close()
+    except (AttributeError, Exception):
+        pass
+
+
+atexit.register(_shutdown_workers)
+
+
 @dataclass
 class Executor:
     """Walk a graph from its start node to a terminal."""
@@ -977,24 +1185,15 @@ class Executor:
         deadlines are clamped to the remaining run wall budget
         (``budget.remaining_s()``) with a 1-second floor.
 
-        Enforcement uses two mechanisms depending on path:
+        An op that exceeds its deadline is killed (SIGTERM → 5 s grace → SIGKILL
+        on its process group) and raises ``OpTimeoutError`` with the node id and
+        deadline.  Timeouts are never silently retried.
 
-        - **Sequential path (main thread):** unclassified ops run in-process
-          with ``SIGALRM`` via ``_run_op_alarmed`` — near-zero overhead.
-        - **Fork branches and classified ops:** run in a forkserver child
-          process via ``_run_op_timed`` — the child and its process group are
-          killed (SIGTERM → 5 s grace → SIGKILL).
-
-        Both raise ``OpTimeoutError`` with the node id and deadline.
-        Timeouts are never silently retried.
-
-        Limitation: the in-process ``SIGALRM`` path does not kill subprocesses
-        spawned by the op itself.  Classified ops that spawn subprocesses
-        (e.g. check ops using ``sandbox.run_command``) use the child-process
-        path, which does kill them.  fcntl file locking under the child-process
-        path has higher latency than in-memory access; under extreme contention
-        lock wait time could approach the timeout; in practice contention is
-        minimal.
+        Limitation: fcntl file locking has higher latency than in-memory access;
+        under extreme contention (many concurrent forkserver children writing to
+        the same budget ledger), lock wait time could approach the timeout.  In
+        practice, the walker runs ops sequentially (or in fork branches with
+        ``MAX_WORKERS`` threads), so contention is minimal.
         """
         if not self.enable_recovery:
             return None
@@ -1014,39 +1213,15 @@ class Executor:
             return max(1.0, float(raw))
         return None
 
-    def _has_derived_timeout(self, node: Node) -> bool:
-        """True if the node has a timeout from the shared formula (classified op)."""
-        from refactory_dsh.lowering import command_timeout_s as _cmd_timeout_s
-        state = {"knobs": {n: {"value": v} for n, v in self.ctx.knobs.items()}}
-        return _cmd_timeout_s(node, state) is not None
-
-    # ── in-process signal-based op timeout ─────────────────────────────────
-    def _run_op_alarmed(self, callable_target: str, node: Node, timeout: float) -> Any:
-        """Run a callable in-process with ``SIGALRM``; main thread only.
-
-        Used for unclassified ops with the default 3600 s deadline so
-        the fast-path cost stays near zero.  Classified ops and fork-branch
-        ops go through ``_run_op_timed`` (child process) instead.
-        """
-        fn = resolve(callable_target)
-
-        def _alarm(signum: int, frame: Any) -> None:
-            raise OpTimeoutError(node.id, timeout)
-
-        old = signal.signal(signal.SIGALRM, _alarm)
-        signal.setitimer(signal.ITIMER_REAL, timeout)
-        try:
-            return fn(self.ctx)
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, old)
-
     # ── child-process-based op timeout ─────────────────────────────────────
     def _run_op_timed(self, callable_target: str, node: Node, timeout: float) -> Any:
-        """Run a callable in a forkserver child process, killed at *timeout*."""
-        _ensure_forkserver_preload(self.graph)
-        parent_conn, child_conn = _forkserver_ctx.Pipe()
+        """Run a callable in a forkserver child process, killed at *timeout*.
 
+        Uses a persistent worker (``_OpWorker``) that stays alive across ops
+        so each call pays only pipe-communication cost (~1 ms) rather than
+        forkserver spawn cost (~9 ms).  On timeout or unexpected death the
+        worker is replaced transparently.
+        """
         model_info: dict[str, Any] | None = None
         if self.ctx.model is not None:
             from refactory_dsh.model import DshModelClient
@@ -1079,35 +1254,15 @@ class Executor:
         if _pkg is not None and hasattr(_pkg, "__path__"):
             args_dict["_package_paths"] = {"refactory_packages": list(_pkg.__path__)}
 
-        child = _forkserver_ctx.Process(target=_op_child_target, args=(child_conn, args_dict))
-        child.start()
-        child_conn.close()
-
-        if parent_conn.poll(timeout):
-            status, payload = parent_conn.recv()
-            parent_conn.close()
-            child.join(timeout=5)
-        else:
-            parent_conn.close()
-            # Kill escalation: SIGTERM → grace → SIGKILL, matching DSH.
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                try:
-                    child.kill()
-                except OSError:
-                    pass
-            child.join(timeout=5)
-            if child.is_alive():
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    try:
-                        child.kill()
-                    except OSError:
-                        pass
-                child.join(timeout=5)
-            raise OpTimeoutError(node.id, timeout)
+        # Try the persistent worker first.
+        worker = _get_worker()
+        worker.ensure(self.graph)
+        try:
+            status, payload = worker.submit(args_dict, timeout, node)
+        except (EOFError, ConnectionResetError, BrokenPipeError):
+            # Worker died unexpectedly — fall back to one-shot spawn.
+            worker._kill()
+            status, payload = self._run_op_oneshot(args_dict, timeout, node)
 
         if status == "ok":
             # Merge child state back into the parent's context.
@@ -1120,6 +1275,50 @@ class Executor:
             return payload.get("result")
 
         # Exception from child: reconstruct and re-raise.
+        return self._reraise_child_error(payload)
+
+    def _run_op_oneshot(
+        self, args_dict: dict[str, Any], timeout: float, node: Node,
+    ) -> tuple[str, dict[str, Any]]:
+        """One-shot child process: used when the persistent worker dies."""
+        _ensure_forkserver_preload(self.graph)
+        parent_conn, child_conn = _forkserver_ctx.Pipe()
+        child = _forkserver_ctx.Process(
+            target=_op_child_target, args=(child_conn, args_dict),
+        )
+        child.start()
+        child_conn.close()
+
+        if parent_conn.poll(timeout):
+            status, payload = parent_conn.recv()
+            parent_conn.close()
+            child.join(timeout=5)
+            return status, payload
+
+        parent_conn.close()
+        # Kill escalation: SIGTERM → grace → SIGKILL, matching DSH.
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            try:
+                child.kill()
+            except OSError:
+                pass
+        child.join(timeout=5)
+        if child.is_alive():
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                try:
+                    child.kill()
+                except OSError:
+                    pass
+            child.join(timeout=5)
+        raise OpTimeoutError(node.id, timeout)
+
+    @staticmethod
+    def _reraise_child_error(payload: dict[str, Any]) -> Any:
+        """Reconstruct and re-raise an exception sent by the child process."""
         exc_type_name = payload.get("type", "RuntimeError")
         exc_msg = payload.get("message", "")
         exc_tb = payload.get("traceback", "")
@@ -1176,13 +1375,7 @@ class Executor:
         if node.kind == "op":
             timeout = self._effective_timeout(node)
             if timeout is not None:
-                if (not self._has_derived_timeout(node)
-                        and threading.current_thread() is threading.main_thread()):
-                    # Unclassified ops on the sequential path: in-process with
-                    # SIGALRM so the fast-path cost stays near zero (dm-173).
-                    produced = self._run_op_alarmed(node.call, node, timeout)
-                else:
-                    produced = self._run_op_timed(node.call, node, timeout)
+                produced = self._run_op_timed(node.call, node, timeout)
             else:
                 fn = resolve(node.call)
                 produced = fn(self.ctx)
@@ -1297,11 +1490,7 @@ class Executor:
         else:
             timeout = self._effective_timeout(node)
             if timeout is not None:
-                if (not self._has_derived_timeout(node)
-                        and threading.current_thread() is threading.main_thread()):
-                    verdict = self._run_op_alarmed(node.evaluator, node, timeout)
-                else:
-                    verdict = self._run_op_timed(node.evaluator, node, timeout)
+                verdict = self._run_op_timed(node.evaluator, node, timeout)
             else:
                 fn: Callable[[RunContext], Any] = resolve(node.evaluator)
                 verdict = fn(self.ctx)
