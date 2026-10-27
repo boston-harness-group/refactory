@@ -1273,9 +1273,28 @@ def _published(github: Path, slug: str, source: Path) -> Path:
     bare.parent.mkdir(parents=True, exist_ok=True)
     git(bare.parent, "init", "-q", "--bare", "-b", "main", bare.name)
     (github / f"{slug}.json").write_text(json.dumps({"visibility": "private", "default_branch": "main"}))
-    git(source, "remote", "add", "origin", f"https://github.com/{slug}.git")
+    # Pushed before origin is added: from git 2.56 a push to a URL that matches a configured
+    # remote also updates its tracking refs, and the person's clone here has none.
     git(source, "push", "-q", f"https://github.com/{slug}.git", "main:refs/heads/main")
+    git(source, "remote", "add", "origin", f"https://github.com/{slug}.git")
     return bare
+
+
+def test_delivery_leaves_the_persons_remote_tracking_refs_as_they_were(github, tmp_path):
+    """A real push of the run's branch writes no remote-tracking ref, also when the person's
+    origin/HEAD points at that branch (git 2.56 updates a matching remote's on a URL push)."""
+    repo = git_repo(tmp_path / "repo")
+    _published(github, "acme/app", repo)
+    git(repo, "fetch", "-q", "origin")
+    git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/run-1")
+    before = git(repo, "for-each-ref", "refs/remotes")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "run")
+    head = git(repo, "rev-parse", "HEAD")
+    delivery._push(repo, "acme/app", head, "run-1", default="main")
+    assert _remote_head(github, "acme/app", "run-1") == head
+    assert git(repo, "for-each-ref", "refs/remotes") == before
+    assert git(repo, "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/run-1"
+    assert git(repo, "remote") == "origin"
 
 
 def _remote_head(github: Path, slug: str, branch: str) -> str:
