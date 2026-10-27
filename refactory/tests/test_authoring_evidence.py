@@ -666,8 +666,8 @@ def test_evidence_map_problems_reach_the_design_overwatch_as_evidence(tmp_path, 
     overwatch_prompts = []
 
     class AuditModel(FakeModel):
-        def complete(self, prompt, *, system="", workdir=None):
-            text = super().complete(prompt, system=system, workdir=workdir)
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
+            text = super().complete(prompt, system=system, workdir=workdir, **workspace)
             if "You are the overwatch" in prompt:
                 overwatch_prompts.append(prompt)
             if "You are the QA judge" in prompt:
@@ -853,10 +853,10 @@ def test_full_qa_repair_cannot_spend_final_validation_reserve(tmp_path, monkeypa
             self.budget = budget
             return self
 
-        def complete(self, prompt, *, system="", workdir=None):
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
             index = len(self.prompts)
             self.budget.record_usage(f"request-{index}", 60 if index == 4 else 10 if index >= 5 else 0)
-            return super().complete(prompt, system=system, workdir=workdir)
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
 
     mode = CreateMode()
     state = mode.state_dict()

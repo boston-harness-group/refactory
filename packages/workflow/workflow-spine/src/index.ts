@@ -45,7 +45,7 @@ export { Spine, validateGraph } from './spine.ts'
 export { commandOf, dataCommandOf, isDeterministic, reasonOf, runDataCommand, runWarningsOf, verdictOf, NODE_ENV_KEY, REASON_LIMIT } from './execute.ts'
 export type { CommandFailure, CommandOutcome, CommandRunnerConfig, NodeManifest } from './execute.ts'
 export type { DataPass, GraphIssue, NodeView, PromptAmendmentMode, SpineNext } from './spine.ts'
-export type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types.ts'
+export type { AgentWorkspace, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types.ts'
 export { BUILD_STAMP, computeSourceStamp, validateBuild } from './build-stamp.ts'
 
 export const name = 'workflow-spine'

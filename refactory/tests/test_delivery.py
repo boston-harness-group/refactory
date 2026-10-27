@@ -1508,7 +1508,10 @@ def test_the_refusal_bound_after_an_applied_commit_delivers_that_commit_as_a_dra
                              [REFUSED], [REFUSED], refusal_attempts=2, review_attempts=3)
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
-    assert fact["reason"].startswith("emissions refused 2 consecutive times: missing.py")
+    # REFUSED edits a file that is not there, which a builder working in its workspace
+    # cannot do: its workspace has no change, and materialise refuses that.
+    assert fact["reason"].startswith("emissions refused 2 consecutive times: your workspace at")
+    assert "has no change from the last attempt" in fact["reason"]
     assert "check_failing" not in fact
     assert fact["unresolved"] == [{"text": QA_HELD_LINE, "source": "QA judge", "rounds": [1]}]
     assert _asked(model, OVERWATCH_JUDGE_MARK) == 0
@@ -3112,10 +3115,10 @@ def test_the_approval_gate_reads_what_delivery_will_do_before_anything_is_built(
     class Watching(FakeModel):
         """Notes, as the approved design is built, what the gate had read and what GitHub held."""
 
-        def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
+        def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
             if "Write the artifact `" in prompt:
                 seen.append(((run / delivery.PLAN).exists(), sorted(github.glob("*/*.git"))))
-            return super().complete(prompt, system=system, workdir=workdir)
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
 
     result = DesignMode().run(run, model=Watching(_answers(render({"tool.py": "print('built')\n"}))),
                               verdicts={"gate_strategy": "proceed"},
@@ -3147,6 +3150,54 @@ def test_an_existing_repository_gets_a_pull_request_into_its_default_branch(gith
     assert git(repo, "remote") == "origin"
     assert git(repo, "for-each-ref", "--exclude", f"refs/heads/{branch}") == refs
     assert f"opens a pull request from {branch} into {slug}:main" in (run / delivery.PLAN).read_text()
+
+
+class _WorkspaceBuilder(FakeModel):
+    """A builder that does its work in its workspace: it writes the tool there, runs the
+    check there, and stops, answering only that it is done."""
+
+    def __init__(self, answers: list[str]) -> None:
+        super().__init__(answers)
+        self.ran: list[str] = []
+
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, cwd: object = None,
+                 env: object = None, confine: bool = False) -> str:
+        answer = super().complete(prompt, system=system, workdir=workdir, cwd=cwd, env=env, confine=confine)
+        if cwd is not None and "Write the artifact `" in prompt:
+            clone = Path(str(cwd))
+            (clone / "tool.py").write_text("import app\nprint('built')\n")
+            (clone / "app.py").write_text("print('app, reworked')\n")
+            ran = subprocess.run([sys.executable, "tool.py"], cwd=clone, capture_output=True, text=True,
+                                 env={**os.environ, **{k: v for k, v in dict(env or {}).items() if v is not None}})
+            self.ran.append(ran.stdout)
+            return "Done: the tool is written and runs."
+        return answer
+
+
+def test_a_builder_that_changes_code_in_its_workspace_delivers_a_pull_request(github, tmp_path):
+    """End to end on the walker: the builder works in its clone, the derived emission is
+    materialised, checked and reviewed, and the run opens a pull request with exactly
+    the builder's change."""
+    repo = git_repo(tmp_path / "repo")
+    slug = "acme/app"
+    _published(github, slug, repo)
+    model = _WorkspaceBuilder(_answers("(the builder answers with its workspace, not blocks)"))
+    run = tmp_path / "run"
+    result = DesignMode().run(run, model=model, verdicts={"gate_strategy": "proceed"},
+                              task={"name": NAME, "brief": "Build a tool\nthat prints built.",
+                                    "check": "python tool.py", "target": str(repo)})
+    assert result.exit_ok, result.error
+    assert model.ran == ["app, reworked\nbuilt\n"], "the builder ran its change in its workspace"
+    assert (run / "emit.txt").read_text() == ("===FILE: app.py===\nprint('app, reworked')\n"
+                                             "===FILE: tool.py===\nimport app\nprint('built')\n")
+    branch = json.loads((run / "design.json").read_text())["branch"]
+    [pull] = _pulls(github, slug)
+    assert (pull["head"], pull["base"]) == (branch, "main")
+    pushed = github / f"{slug}.git"
+    assert git(pushed, "show", f"{branch}:tool.py") == "import app\nprint('built')"
+    assert git(pushed, "show", f"{branch}:app.py") == "print('app, reworked')"
+    assert sorted(git(pushed, "diff", "--name-only", "main", branch).splitlines()) == ["app.py", "tool.py"]
+    assert not (run / ".refactory" / "workspaces").exists(), "the run's end removes the workspace"
 
 
 def test_unpushed_commits_in_the_base_are_never_pushed(github, tmp_path, capsys):

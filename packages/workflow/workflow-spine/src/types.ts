@@ -82,7 +82,23 @@ export interface WorkflowNode {
   limit?: number
   /** `SelectionNode`: the selection strategy. */
   strategy?: string
+  /**
+   * `AgentNode`: where the node works — a fresh scratch folder or a prepared clone of
+   * the run's worktree — and how its output is collected. Python's worker
+   * (`refactory_dsh/workspace.py`) prepares and collects it, and Python's lowering
+   * refuses it on the CEO-subagent route; the spine only passes it through.
+   */
+  workspace?: AgentWorkspace
   [key: string]: unknown
+}
+
+/** An agent node's workspace declaration, as `refactory_dsh.nn.graph.workspace_declaration` writes it. */
+export interface AgentWorkspace {
+  kind: 'scratch' | 'clone'
+  /** `clone`: a clone of the run's last attempt or of its base. */
+  of?: 'attempt' | 'base'
+  /** `files` copies the declared writes out; `diff` writes the clone's diff as the answer file. */
+  collect: 'files' | 'diff'
 }
 
 /** One directed edge with an optional gate condition label. */

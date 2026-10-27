@@ -52,6 +52,7 @@ EXTENSION_FIELDS: frozenset[str] = frozenset({
     "split",
     "subgraph_entry",
     "subgraph_exit",
+    "workspace",
 })
 
 #: Whether networkx is available (needed by v1's validate_graph).

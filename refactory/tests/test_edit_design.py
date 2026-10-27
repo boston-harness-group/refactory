@@ -181,13 +181,26 @@ def test_emit_writes_its_file_blocks_into_emit_txt():
     assert "Answer with file blocks" not in prompt
 
 
-def test_design_emit_writes_the_blocks_its_scope_describes_into_emit_txt():
-    """Design's blocks depend on the run -- edits only where a worktree has a last
-    attempt to apply them to -- so `emit_scope` describes them and the prompt places them."""
-    prompt = DesignMode().build().nodes["emit"].prompt_template
-    assert "{{emit_scope}}" in prompt and "Write those blocks into emit.txt" in prompt
-    assert "Write nothing but emit.txt" in prompt
-    assert "Answer with file blocks" not in prompt
+def test_design_emit_works_in_a_clone_whose_diff_is_its_answer():
+    """Design's builder no longer writes blocks into emit.txt: it works in a prepared clone
+    of the last attempt, runs what it needs there, and stops; the runtime derives emit.txt
+    from the clone's diff (`workspace.py`). So the block grammar (`emit_scope`), "write
+    nothing but emit.txt" and the probe instruction are gone from its prompt, and its
+    checklist reverts in the workspace rather than in a draft emit.txt."""
+    from refactory_dsh.fast import DesignFastMode
+
+    for mode in (DesignMode(), DesignFastMode()):
+        node = mode.build().nodes["emit"]
+        prompt = node.prompt_template
+        assert node.workspace == {"kind": "clone", "of": "attempt", "collect": "diff"}
+        assert "Your workspace is a prepared clone of the last attempt" in prompt
+        assert "the workspace's diff is your answer" in prompt
+        for gone in ("{{emit_scope}}", "Write those blocks into emit.txt", "Write nothing but emit.txt",
+                     "{{probe_instruction}}", "Answer with file blocks"):
+            assert gone not in prompt, gone
+    checklist = DesignMode().build().nodes["emit"].prompt_template
+    assert "revert that change in the workspace and run the same test again: it must fail" in checklist
+    assert "draft emit.txt" not in checklist
 
 
 def _design_answers(emit: list[str]) -> list[str]:

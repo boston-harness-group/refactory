@@ -49,6 +49,21 @@ def _isolate_refactory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatc
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _checkout_guard_leaves_this_checkout_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The checkout guard (dm-164) never watches the checkout under test.
+
+    Every scripted agent the suite dispatches imports refactory from it, so the guard would
+    snapshot it twice per dispatch, and refuse a test for an edit made there while the suite
+    runs. Through the environment, so node and worker processes the tests start inherit it;
+    the guard's own tests point it at temporary checkouts instead.
+    """
+    from refactory_dsh import target_guard
+    from refactory_dsh.paths import REPO_ROOT
+
+    monkeypatch.setenv(target_guard.UNWATCHED_ENV, str(REPO_ROOT))
+
+
 # ── the sealed suite: no test reaches the person's DSH home or the real gh ──────
 #
 # A test resolved the person's own DSH home and touched a profile there in the middle of

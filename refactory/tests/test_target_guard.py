@@ -365,8 +365,8 @@ class _EditingModel(FakeModel):
         super().__init__(answers)
         self.target = target
 
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
-        answer = super().complete(prompt, system=system, workdir=workdir)
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
+        answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
         if "Write the artifact `" in prompt:
             (self.target / "app.py").write_text("print('edited in place')\n")
         return answer
@@ -407,5 +407,6 @@ def test_a_refused_emit_is_redone_from_a_fresh_emit_txt(target, tmp_path):
                                                               VERIFICATION_ANSWER,
                                                               REVIEW_ANSWERS[3], "VERDICT: PASS"]))
     assert redone.error is None
-    assert (workdir / "emit.txt").read_text() == render({"tool.py": "print('redone')\n"})
+    # The redo's emission is derived from its workspace's diff: the file it wrote, whole.
+    assert (workdir / "emit.txt").read_text() == "===FILE: tool.py===\nprint('redone')\n"
     assert (target / repo_change.ARTIFACTS / NAME / "tool.py").read_text() == "print('redone')\n"

@@ -230,10 +230,10 @@ def test_design_validation_reserve_cannot_fund_repair(tmp_path, monkeypatch, nee
             self.budget = budget
             return self
 
-        def complete(self, prompt, *, system="", workdir=None):
+        def complete(self, prompt, *, system="", workdir=None, **workspace):
             index = len(self.prompts)
             self.budget.record_usage(f"request-{index}", [5, 55, qa_tokens, 0, 0, qa_tokens, 0][index])
-            return super().complete(prompt, system=system, workdir=workdir)
+            return super().complete(prompt, system=system, workdir=workdir, **workspace)
 
     client = MeteredModel([PLAN, initial, QA_PASS, VERIFICATION_ANSWER, good, QA_PASS, VERIFICATION_ANSWER])
     workdir = tmp_path / "run"

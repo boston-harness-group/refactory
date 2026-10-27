@@ -3,6 +3,12 @@
 The builder can test its candidate emission before making its final answer,
 without touching the target, the run's worktree or the shared ``.git``.
 Every isolation guarantee from dm-96 and #368 is preserved.
+
+The probe is a client of the agent-workspace machinery (`clones`, `workspace`): its
+clone is made by `clones.clone_shared` and its environment loses the run worktree's
+tools as a workspace's does (`workspace.strip_run_paths`). A builder that works in a
+workspace (design mode's) tests there directly and needs no probe; the design probe
+(`run_design_probe`) still uses it.
 """
 
 from __future__ import annotations
@@ -97,12 +103,10 @@ def _apply_emission_to_clone(clone_root: Path, files: dict[Path, str], deletes: 
 # ── PATH stripping ────────────────────────────────────────────────────────────
 
 def _strip_worktree_path(env: dict[str, str], run_worktree_path: str) -> dict[str, str]:
-    """Strip the run worktree's .venv/bin and node_modules/.bin from PATH."""
-    wt = Path(run_worktree_path)
-    exclude = {str(wt / ".venv" / "bin"), str(wt / "node_modules" / ".bin")}
-    entries = env.get("PATH", "").split(os.pathsep)
-    cleaned = [e for e in entries if e not in exclude]
-    return {**env, "PATH": os.pathsep.join(cleaned)}
+    """Strip the run worktree's .venv/bin and node_modules/.bin from PATH (`workspace.strip_run_paths`)."""
+    from refactory_dsh.workspace import strip_run_paths
+
+    return strip_run_paths(env, run_worktree_path)
 
 
 # ── warm probe ────────────────────────────────────────────────────────────────
@@ -197,21 +201,15 @@ def _try_evict_clone(probe_dir: Path, refactory_dir: Path) -> bool:
 
 
 def _do_cold_clone(probe_dir: Path, clone_dir: Path, found: Worktree, remaining: float) -> None:
-    """Create a cold clone of the target for probing."""
+    """Create a cold clone of the target for probing, at the run's attempt.
+
+    The agent-workspace clone (`clones.clone_shared`): the target's objects shared, its
+    own refs, no remote, no hooks.
+    """
+    from refactory_dsh.clones import clone_shared
+
     probe_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "--no-local", "--depth", "1",
-         "--branch", found.branch, found.target, str(clone_dir)],
-        check=True, capture_output=True, timeout=min(60, remaining),
-    )
-    subprocess.run(
-        ["git", "-C", str(clone_dir), "remote", "remove", "origin"],
-        check=True, capture_output=True, timeout=10,
-    )
-    subprocess.run(
-        ["git", "-C", str(clone_dir), "config", "core.hooksPath", "/dev/null"],
-        check=True, capture_output=True, timeout=5,
-    )
+    clone_shared(Path(found.target), clone_dir, found.head, timeout=max(1.0, min(60, remaining)))
 
 
 def _stage_emission(clone_dir: Path, clone_base: str, emission: str | None,

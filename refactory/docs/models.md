@@ -137,12 +137,14 @@ also regenerates the lowering snapshots (a few seconds, in the attempt and in th
 base, check-copy and probe worktrees that run generate too). See
 docs/hardening.md, "Self-check inside the attempt (b41a)".
 
-The `emit` worker can test its candidate through the builder probe before making
-its final emission.  The probe creates a throwaway standalone clone with the
-candidate applied, runs named tests in an isolated environment, and reports the
-result.  It is not an attempt: no commit, no counter increment.  It is bounded by
-its timeout and deleted afterwards.  See docs/hardening.md for the isolation
-guarantees.
+Design's `emit` worker (and design_fast's) works in a prepared clone of the last
+attempt (`workspace: clone of attempt, collect: diff`): it makes the change there and
+runs the tests its change touches and the brief's own example as often as it needs,
+leaving the full suite to the check, and the runtime writes `emit.txt` from the clone's
+diff. The clone is prepared once per run
+and installs again only when the manifests change. See docs/hardening.md, "Agent
+workspaces". Design's emit prompt no longer names the builder probe; `design_doc` still
+uses it (`--command`), below.
 
 The `design_doc` worker can also probe the current codebase
 via `--command` (no `--emission`), to verify mechanisms the design relies on.

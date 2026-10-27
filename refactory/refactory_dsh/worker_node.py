@@ -113,12 +113,25 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # The node's own role, as the walker's session records it; a spec from before the
     # role was written keeps the generic one.
     client = DshModelClient(**spec['model_context']).for_node(node, role=spec.get('role', 'worker'))
-    # The reloop's feedback once: after rendering, so a template that renders the gate's
-    # reason already carries it (`with_feedback`).
+    # A node that declares a workspace works there (`workspace.py`): prepared before the
+    # delivery bracket opens, so the contract can name it, and collected into the node's
+    # outputs before the bracket closes, so delivery checks what the workspace produced.
+    from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import with_feedback
-    delivery = begin(workdir, node, with_feedback(render(prompt, context), feedback), spec['writes'],
-                     reads=spec['reads'], model_context=client.context())
-    output = client.complete(delivery['prompt'], workdir=workdir)
+    runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
+    with workspaces.dispatched(workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
+                               route=client.route(),
+                               runtime_root=Path(runtime_root) if runtime_root else None) as place:
+        # The reloop's feedback once: after rendering, so a template that renders the gate's
+        # reason already carries it (`with_feedback`).
+        delivery = begin(workdir, node, with_feedback(render(prompt, context), feedback), spec['writes'],
+                         reads=spec['reads'], model_context=client.context(),
+                         **({'workspace': place.describe()} if place is not None else {}))
+        if place is None:
+            output = client.complete(delivery['prompt'], workdir=workdir)
+        else:
+            output = workspaces.ask(place, client, delivery['prompt'], workdir=workdir)
+            workspaces.collect(place, workdir, spec['writes'], final_response=output)
     receipt = finish(workdir, node, final_response=output, capture_final=client.route()["worker_backend"] == "dsh")
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])

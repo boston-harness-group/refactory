@@ -22,6 +22,60 @@ NODE_KINDS = ("op", "agent", "gate", "fork", "join", "data")
 #: Who answers a gate: the evaluated function, a person, or the running agent.
 GATE_KINDS = ("fn", "user", "agent")
 
+#: Where an agent node works (`Node.workspace`). ``none`` is the run directory, as
+#: every node had before workspaces; ``scratch`` is a fresh empty folder per dispatch;
+#: ``clone`` is a prepared clone of the run's worktree (`refactory_dsh.workspace`).
+WORKSPACE_KINDS = ("none", "scratch", "clone")
+
+#: What a ``clone`` workspace is a clone of: the run's last attempt, or its base.
+WORKSPACE_OF = ("attempt", "base")
+
+#: How a workspace's work becomes the node's output: its declared writes copied out of
+#: it (``files``), or the clone's diff written as the node's answer file (``diff``).
+WORKSPACE_COLLECT = ("files", "diff")
+
+
+def workspace_declaration(value: Any) -> dict[str, str] | None:
+    """A workspace declaration in its one canonical form, or None for ``none``.
+
+    Accepts the kind alone (``"scratch"``) or a mapping of ``kind``, ``of`` and
+    ``collect``. ``of`` defaults to ``attempt`` and belongs to a clone only;
+    ``collect`` defaults to ``files``, and ``diff`` needs a clone, the only kind with a
+    base to diff against. Canonical, so a declaration written two ways serializes, and
+    therefore identifies a candidate, one way. Raises ``ValueError`` saying what is
+    wrong.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = {"kind": value}
+    if not isinstance(value, dict):
+        raise ValueError(f"a workspace is a kind or a mapping of kind, of and collect, not {value!r}")
+    unknown = sorted(set(value) - {"kind", "of", "collect"})
+    if unknown:
+        raise ValueError(f"a workspace takes kind, of and collect; unknown: {unknown}")
+    kind = value.get("kind", "none")
+    if kind not in WORKSPACE_KINDS:
+        raise ValueError(f"unknown workspace kind {kind!r}; known: {list(WORKSPACE_KINDS)}")
+    if kind == "none":
+        if len(value) > 1:
+            raise ValueError("a 'none' workspace takes no 'of' or 'collect': the node works in the run directory")
+        return None
+    collect = value.get("collect", "files")
+    if collect not in WORKSPACE_COLLECT:
+        raise ValueError(f"unknown workspace collect {collect!r}; known: {list(WORKSPACE_COLLECT)}")
+    if kind == "clone":
+        of = value.get("of", "attempt")
+        if of not in WORKSPACE_OF:
+            raise ValueError(f"unknown clone workspace 'of' {of!r}; known: {list(WORKSPACE_OF)}")
+        return {"kind": kind, "of": of, "collect": collect}
+    if "of" in value:
+        raise ValueError("only a 'clone' workspace takes 'of'")
+    if collect == "diff":
+        raise ValueError("'collect: diff' needs a clone, which has a base to diff against; "
+                         "a scratch workspace collects its files")
+    return {"kind": kind, "collect": collect}
+
 #: Who answers a gate. ``fn`` runs the evaluator and routes by its verdict; ``user``
 #: is a pause the person answers while using the mode; ``agent`` is one the running
 #: agent answers. Only ``fn`` can be answered with nobody present, which is why the
@@ -58,6 +112,7 @@ _NODE_FIELDS = frozenset(
         "limit",
         "feedback_keys",
         "timeout_s",
+        "workspace",
     }
 )
 
@@ -130,6 +185,12 @@ class Node:
     #: runs over fails like any other failed node, so an optional fork branch is
     #: then missing rather than late.
     timeout_s: int | None = None
+    #: `agent`: where the node changes files and runs commands (`WORKSPACE_KINDS`),
+    #: in its canonical form (`workspace_declaration`). None is ``none``: the run
+    #: directory, as before. The graph still decides what crosses into shared state:
+    #: the runtime collects the node's output from its workspace before delivery
+    #: checks it (`refactory_dsh.workspace`).
+    workspace: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in NODE_KINDS:
@@ -188,6 +249,16 @@ class Node:
                 raise GraphError(f"node {self.id!r} is not an agent but declares timeout_s")
             if self.timeout_s < 1:
                 raise GraphError(f"node {self.id!r}: timeout_s must be >= 1")
+        if self.workspace is not None:
+            try:
+                self.workspace = workspace_declaration(self.workspace)
+            except ValueError as exc:
+                raise GraphError(f"node {self.id!r}: {exc}") from exc
+            if self.workspace is not None and self.kind != "agent":
+                raise GraphError(f"node {self.id!r} is not an agent but declares a workspace")
+            if self.workspace is not None and self.workspace["collect"] == "diff" and not self.writes:
+                raise GraphError(f"node {self.id!r} collects its workspace's diff, which is written "
+                                 "into its first declared write, and it declares none")
 
     @property
     def resource_phase(self) -> str | None:
@@ -230,6 +301,7 @@ class Node:
             **({"limit": self.limit} if self.limit else {}),
             **({"feedback_keys": list(self.feedback_keys)} if self.feedback_keys else {}),
             **({"timeout_s": self.timeout_s} if self.timeout_s is not None else {}),
+            **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
         }
 
     @classmethod
@@ -269,6 +341,8 @@ class Node:
             limit=int(state.get("limit", 0)),
             feedback_keys=tuple(state.get("feedback_keys") or ()),
             timeout_s=(int(state["timeout_s"]) if state.get("timeout_s") is not None else None),
+            workspace=(dict(state["workspace"]) if isinstance(state.get("workspace"), dict)
+                       else state.get("workspace")),
         )
 
     def with_field(self, field_name: str, value: Any) -> "Node":

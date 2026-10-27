@@ -116,9 +116,21 @@ def finish(path: Path, state: str, *, error: str | None = None) -> dict[str, Any
     return record
 
 
-def permission_patch(route: dict[str, Any]) -> list[dict[str, Any]]:
-    """Scope DSH bypass to this runtime, without leaking through child env."""
+def permission_patch(route: dict[str, Any], *, workspace_root: Path | None = None) -> list[dict[str, Any]]:
+    """Scope DSH bypass to this runtime, without leaking through child env.
+
+    A node that works in a workspace (`workspace.py`) gets DSH's ``workspace-write``
+    policy rooted at it instead of full access: its tools may change files there (and
+    in the platform's temporary area) and nowhere else, and nothing asks, because
+    nobody answers a worker. The caller passes ``workspace_root`` only where DSH can
+    enforce the policy (`workspace.confinement`); elsewhere the node keeps today's full
+    access and the run records why.
+    """
     if route.get('worker_backend', 'dsh') == 'dsh' and route.get('permission_mode', 'skip') == 'skip':
+        if workspace_root is not None:
+            return [{'id': 'sandbox-policy', 'config': {'mode': 'workspace-write',
+                                                        'workspaceRoot': str(workspace_root)}},
+                    {'id': 'approval', 'config': {'policy': 'never'}}]
         return [{'id': 'sandbox-policy', 'config': {'mode': 'danger-full-access'}},
                 {'id': 'approval', 'config': {'policy': 'never'}}]
     return []
@@ -169,12 +181,20 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
 
 
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
-                provider_config: dict[str, Any] | None = None) -> None:
-    """Compose installed DSH services, never a parallel agent wire protocol."""
+                provider_config: dict[str, Any] | None = None, *,
+                workspace_root: Path | None = None, tool_home: Path | None = None) -> None:
+    """Compose installed DSH services, never a parallel agent wire protocol.
+
+    ``workspace_root`` confines the node's tools to its workspace (`permission_patch`).
+    ``tool_home`` is the DSH home the node's shell is told (`workspace.tool_dsh_home`):
+    the DSH process keeps its own, and a command run in a workspace never reaches it.
+    """
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
-    rows.extend(permission_patch(route))
+    rows.extend(permission_patch(route, workspace_root=workspace_root))
+    if tool_home is not None:
+        rows.append({'id': 'shell-env', 'config': {'dshHome': str(tool_home)}})
     rows.extend(provider_rows(route, provider_config))
     inner_backend = route['worker_backend']
     if inner_backend == 'openshell':
@@ -206,12 +226,24 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
 
     Each dispatched AgentNode carries a deterministic command the runtime runs.
     The original prompt stays in the node so wf_edit can amend it.
+
+    A node that declares a workspace is refused on the CEO-subagent route (no
+    ``model_context``): the driving agent's subagent runs where the CEO runs, so nothing
+    could give it a workspace or collect its output from one.
     """
+    from refactory_dsh.ir import AgentNode
     if model_context is None:
+        declared = sorted(name for name, node in workflow.nodes.items()
+                          if isinstance(node, AgentNode) and node.workspace)
+        if declared:
+            raise ValueError(
+                f"agent node(s) {', '.join(repr(name) for name in declared)} declare a workspace, which "
+                "only a dispatched worker can give them; this graph has no worker model context, so "
+                "they would run as the CEO's subagent, in the CEO's own directory. Run it with a "
+                "worker route (the default for `refactory run` and the GUI).")
         return workflow
     import hashlib
     import shlex
-    from refactory_dsh.ir import AgentNode
     from refactory_dsh.model import DshModelClient
 
     # Routing/serialization does not dispatch work. The fresh invocation installs
@@ -252,6 +284,10 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'model_context': selected_context}
         if is_optional:
             payload['optional'] = True
+        if node.workspace:
+            # Only when declared, so the spec of a node without one -- named by its
+            # hash -- is the bytes it was before workspaces.
+            payload['workspace'] = dict(node.workspace)
         serialized = json.dumps(payload, indent=2, sort_keys=True) + '\n'
         spec = directory / (hashlib.sha256(serialized.encode()).hexdigest() + '.json')
         spec.write_text(serialized)
@@ -270,6 +306,13 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             command_timeout_s = node.timeout + NODE_DISPATCH_OVERHEAD_S
         else:
             command_timeout_s = node_session_budget_s(attempts, per_completion)
+        if node.workspace:
+            # The workspace is prepared before the session starts -- a clone, its
+            # installs, generate and setup -- so the dispatch outlasts the session by
+            # that much more, or the spine stops a node still preparing.
+            from refactory_dsh.workspace import preparation_budget_s
+            command_timeout_s += preparation_budget_s(
+                node.workspace, workflow.knob_values.get('check_timeout_s'))
         node.dispatch_command = f'{sys.executable} -m refactory_dsh.worker_node ' + shlex.quote(str(spec))
         node.command_timeout_s = command_timeout_s
     return result

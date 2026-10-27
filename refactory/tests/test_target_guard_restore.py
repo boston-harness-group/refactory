@@ -264,8 +264,8 @@ def test_incident_scripted_design_run(tmp_path):
     seen: dict[str, object] = {}
 
     class Incident(FakeModel):
-        def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
-            answer = super().complete(prompt, system=system, workdir=workdir)
+        def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
+            answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
             if "Write the artifact `" in prompt and "python" not in seen:
                 block = prompt[prompt.index(ad.CONTRACT_START):prompt.index(ad.CONTRACT_END)]
                 execution = _json.loads(block[block.index("{"):])
@@ -346,8 +346,8 @@ def test_scripted_design_run_verifier_writes_into_target(tmp_path):
     before = _tree_with_modes(repo)
 
     class Verifier(FakeModel):
-        def complete(self, prompt: str, *, system: str = "", workdir: object = None) -> str:
-            answer = super().complete(prompt, system=system, workdir=workdir)
+        def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
+            answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
             block = prompt[prompt.index(ad.CONTRACT_START):prompt.index(ad.CONTRACT_END)] if ad.CONTRACT_START in prompt else ""
             if block and json.loads(block[block.index("\n{") + 1:])["node"] == "verifier":
                 (repo / "app.py").write_text("print('verifier edited the target')\n")

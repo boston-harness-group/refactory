@@ -77,6 +77,10 @@ class AgentNode(Node):
     post_checks: list[ArtifactCheck] = Field(default_factory=list)
     dispatch_command: str | None = None
     command_timeout_s: int | None = Field(default=None, gt=0, le=2_147_483)
+    #: Where the node works (`nn.graph.workspace_declaration`'s canonical form). None is
+    #: the run directory, and is left out of the serialized graph, so a graph that
+    #: declares no workspace is byte-identical to one lowered before the field existed.
+    workspace: dict[str, str] | None = None
 
 
 class FnNode(Node):
@@ -207,6 +211,8 @@ class Workflow(BaseModel):
                 d.pop("command_timeout_s", None)
             if d.get("dispatch_command") is None:
                 d.pop("dispatch_command", None)
+            if "workspace" in d and d["workspace"] is None:
+                d.pop("workspace")
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

@@ -2308,11 +2308,10 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     # Build the description the builder receives via {{validation}}.
     description_parts = [f"Merge conflict with main ({target_tip[:12]}). "
                          f"Conflicting authored files: {', '.join(conflict_files)}.\n"
-                         f"During this merge, ===EDIT: blocks apply to the working tree "
-                         f"text (with conflict markers for conflicted files, with main's "
-                         f"changes for cleanly merged files), not the committed text. "
-                         f"Resolve every conflict so no <<<<<<< / >>>>>>> markers "
-                         f"remain.\n"]
+                         f"Your workspace holds the same merge, started for you: the "
+                         f"conflicted files with their markers, main's other changes already "
+                         f"merged. Resolve every conflict there so no <<<<<<< / >>>>>>> "
+                         f"markers remain, and stop.\n"]
     for entry in detail:
         description_parts.append(f"\n### {entry['path']}\n")
         if entry.get("base"):
