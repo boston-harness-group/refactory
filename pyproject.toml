@@ -17,7 +17,7 @@ refactory-dsh = { path = "refactory", editable = true }
 [dependency-groups]
 # What the test suite needs. `uv sync` installs these by default, so a clone can run
 # the tests without a second install step — the suite is part of the product here.
-dev = ["pytest>=8", "sympy>=1.12", "networkx>=3.1"]
+dev = ["pytest>=8", "pytest-xdist>=3", "sympy>=1.12", "networkx>=3.1"]
 
 [tool.uv]
 package = false
