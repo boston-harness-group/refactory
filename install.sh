@@ -178,6 +178,15 @@ else
   # Executing its rows rather than iterating a second copy of the profile list in
   # shell is what keeps the composition in one place.
   PLAN="$("$VENV/bin/python" -c 'from refactory_dsh import dsh_profile; print(dsh_profile.render_plan(), end="")')"
+  # A profile is machine state, and a machine has one set per DSH home: without this
+  # guard, installing a second clone repoints the first checkout's profiles, and a run
+  # live there has its spine replaced underneath it. `install_guard` names the other
+  # checkout and the run, or says it repointed (dm: install profile guard).
+  # Only the profiles this plan would write: a plan that changes nothing writes no
+  # profile, so the guard stays silent rather than refusing an install that would not
+  # have touched the other checkout.
+  PLAN_PROFILES="$(printf '%s\n' "$PLAN" | cut -f2 | sort -u | tr '\n' ' ')"
+  "$VENV/bin/python" -m refactory_dsh.install_guard "$HERE" $PLAN_PROFILES || exit 1
   if [ -z "$PLAN" ]; then
     echo "  DSH profiles: already present"
   else

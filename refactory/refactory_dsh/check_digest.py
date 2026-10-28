@@ -293,26 +293,46 @@ def format_digest(digest: CheckDigest) -> str:
     return "\n".join(parts)
 
 
+#: pytest options that take a value, so the value is not a positional path.
+#: A flag missing here whose value happens to name a path would lose the value and
+#: leave the flag dangling (`-n 4` became `-n refactory/tests/...` once).
+_PYTEST_VALUE_OPTIONS = frozenset({
+    "-n", "-k", "-m", "-p", "-o", "-W", "-c", "-r",
+    "--dist", "--maxfail", "--durations", "--timeout", "--tb", "--rootdir",
+    "--junitxml", "--junit-xml", "--deselect", "--ignore", "--ignore-glob",
+    "--import-mode", "--confcutdir", "--basetemp", "--cov", "--cov-report",
+    "--override-ini", "--color", "--capture", "--log-level", "--log-file",
+    "--log-cli-level", "--log-format", "--assert",
+})
+
+
 def _strip_pytest_positional_paths(step: str) -> str:
-    """Remove positional path arguments from a pytest command, keeping flags.
+    """Remove positional path arguments from a pytest command, keeping flags and values.
 
     ``pytest -q tests`` becomes ``pytest -q`` so that only the appended test
-    IDs run, instead of the whole directory.
+    IDs run, instead of the whole directory. A flag that takes a value keeps it:
+    ``-n 4`` and ``-p no:cacheprovider`` stay whole, because dropping the value
+    leaves the flag dangling and the targeted command runs nothing.
     """
     tokens = shlex.split(step)
-    # Find the pytest executable token
     kept: list[str] = []
     past_cmd = False
+    expect_value = False
     for tok in tokens:
         if not past_cmd:
             kept.append(tok)
             if "pytest" in tok:
                 past_cmd = True
             continue
-        # After the command name, keep flags (start with -) and drop bare paths
+        if expect_value:
+            kept.append(tok)
+            expect_value = False
+            continue
         if tok.startswith("-"):
             kept.append(tok)
-        # else: a positional path like "tests" or "refactory/tests" — drop it
+            expect_value = tok in _PYTEST_VALUE_OPTIONS
+            continue
+        # A positional path like "tests" or "refactory/tests": dropped.
     return shlex.join(kept)
 
 

@@ -1823,7 +1823,16 @@ def runtime_context(project: Path, *, provider: str = "", model: str = "") -> di
     if status not in messages:
         status = "diagnostic-unavailable"
     credential = result.get("credential")
+    from refactory_dsh.model import credential_source
     from refactory_dsh.worker_config import effective
+    source = credential_source(context["dsh_home"], project)
+    # The probe's refusal wins when it read the store: a missing or invalid credential is
+    # a stated fact, not a guess. It does not model a Vertex or base-URL route, so a
+    # source of that kind stands on its own.
+    route_source = str(source.get("source") or "").startswith(
+        ("Vertex", "base-url", "environment ("))
+    authenticated = bool(source.get("configured")) and (
+        route_source or status not in ("missing-credential", "invalid-configuration"))
     return {
         "worker_configuration": effective(project),
         "model_route": route,
@@ -1835,10 +1844,16 @@ def runtime_context(project: Path, *, provider: str = "", model: str = "") -> di
             "ready": result.get("ready") if status != "diagnostic-unavailable" else None,
             "status": status,
             "credential_configured": credential.get("configured") if isinstance(credential, dict) else None,
-            "authenticated": False,
+            "authenticated": authenticated,
+            "authenticated_source": source.get("source"),
+            "authenticated_checked": None if authenticated else source.get("checked"),
             "reasoning_effort": None,
             "reasoning_note": "The credential diagnostic does not resolve nested reasoning effort; the current session's effort is not proof of a child's selection.",
-            "message": refusal or messages[status],
+            "message": refusal or (
+                f"A credential source is configured ({source['source']}); "
+                "no authenticated request was made."
+                if authenticated and status == "diagnostic-unavailable"
+                else messages[status]),
         },
         "inheritance": "This readiness diagnostic describes the selected DSH context, not an executed worker. worker_configuration reports project worker defaults; prepared runs and inherited children retain resolved routes independently of the CEO conversation model.",
     }

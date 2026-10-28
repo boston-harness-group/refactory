@@ -995,3 +995,74 @@ def test_additive_profile_is_composed_and_not_retired(tmp_path, monkeypatch):
     assert dsh_profile.provision_plan(additive=True) == []
     assert dsh_profile.provision_plan() == [], "standalone launch must not retire the additive profile"
     assert dsh_profile.obsolete_selections("refactory-web") == []
+
+
+def _manifest(home: Path, profile: str, bundles: list[str], *, checkout: Path) -> None:
+    """A profile manifest shaped like the harness writes: declarations and the link."""
+    (home / "profiles" / profile).mkdir(parents=True, exist_ok=True)
+    (home / "profiles" / profile / "package.json").write_text(json.dumps({
+        "name": f"dsh-profile-{profile}",
+        "dependencies": {bundle: f"link:{checkout}/packages/bundle/{bundle.split('/')[-1].removeprefix('dsh-')}"
+                         for bundle in bundles},
+        "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-base", *bundles]}},
+    }))
+
+
+def _linked(home: Path, profile: str, bundle: str, checkout: Path) -> None:
+    link = home / "profiles" / profile / "node_modules" / "@deepseek-ai" / bundle.split("/")[-1]
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(checkout / "packages/bundle" / bundle.split("/")[-1].removeprefix("dsh-"))
+
+
+def _checkouts(tmp_path: Path) -> tuple[Path, Path, Path]:
+    home, first, second = tmp_path / "dsh", tmp_path / "first", tmp_path / "second"
+    for checkout in (first, second):
+        (checkout / "packages/bundle/graph").mkdir(parents=True)
+    return home, first, second
+
+
+def test_the_plan_repoints_a_layer_that_resolves_into_another_checkout(tmp_path, monkeypatch):
+    """Installing a checkout makes it the active one: a layer the profile already
+    declares, but whose link points elsewhere, is a reason to add this checkout's copy."""
+    from refactory_dsh import dsh_profile
+
+    home, first, second = _checkouts(tmp_path)
+    monkeypatch.setenv("DSH_HOME", str(home))
+    _manifest(home, "graph", ["@deepseek-ai/dsh-graph"], checkout=first)
+    _linked(home, "graph", "@deepseek-ai/dsh-graph", first)
+    monkeypatch.setattr(dsh_profile, "REPO_ROOT", second)
+
+    assert "add\tgraph\tgraph\n" in dsh_profile.render_plan(), (
+        "a layer pointing at another checkout is added again")
+    assert dsh_profile.resolves_elsewhere("graph", "@deepseek-ai/dsh-graph")
+
+    # `dsh plugin add` moves the link; the plan then stops asking for it.
+    _manifest(home, "graph", ["@deepseek-ai/dsh-graph"], checkout=second)
+    _linked(home, "graph", "@deepseek-ai/dsh-graph", second)
+    assert "add\tgraph\tgraph\n" not in dsh_profile.render_plan()
+    assert not dsh_profile.resolves_elsewhere("graph", "@deepseek-ai/dsh-graph")
+
+
+def test_a_second_checkout_takes_the_profile_over_and_the_first_reports_the_mismatch(tmp_path, monkeypatch):
+    """What an install does now: the plan asks for the row, the link moves to the second
+    checkout, and the first checkout's doctor reports the mismatch instead of a later
+    command crashing."""
+    from refactory_dsh import dsh_profile
+
+    home, first, second = _checkouts(tmp_path)
+    monkeypatch.setenv("DSH_HOME", str(home))
+    _manifest(home, "graph", ["@deepseek-ai/dsh-graph"], checkout=first)
+    _linked(home, "graph", "@deepseek-ai/dsh-graph", first)
+
+    monkeypatch.setattr(dsh_profile, "REPO_ROOT", second)
+    assert "add\tgraph\tgraph\n" in dsh_profile.render_plan()
+    _manifest(home, "graph", ["@deepseek-ai/dsh-graph"], checkout=second)
+    _linked(home, "graph", "@deepseek-ai/dsh-graph", second)
+    assert dsh_profile.bundle_checkout_root("graph") == second / "packages/bundle/graph"
+
+    monkeypatch.setattr(dsh_profile, "REPO_ROOT", first)
+    said = dsh_profile.checkout_mismatch("graph")
+    assert said is not None and str(second) in said, (
+        "the first checkout reports where the profile points now")

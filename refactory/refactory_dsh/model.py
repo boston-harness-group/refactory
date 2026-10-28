@@ -54,6 +54,55 @@ class ModelChoiceError(Exception):
         super().__init__(message or NO_MODEL_CHOICE_MESSAGE)
 
 
+def credential_source(home: str | Path | None = None,
+                      workdir: str | Path | None = None) -> dict[str, Any]:
+    """Where a nested model command finds its credential, naming sources only.
+
+    The model client never reads a key itself: DSH's credentials service reads the
+    managed store (and a dotenv beside it) in the selected model home, and the harness's
+    providers answer through the environment (Vertex, a base-URL proxy). This reports the
+    first source the client would rely on, by name or path, and never a value. Exported
+    provider keys are named last because nested workers scrub them, so on their own they
+    are not a credential for a worker.
+    """
+    from refactory_dsh.dsh_profile import model_home
+
+    selected = model_home(home)
+    checked: list[str] = []
+    for name in ("REFACTORY_MODEL_DSH_HOME", "DSH_HOME"):
+        if (os.environ.get(name) or "").strip():
+            checked.append(name)
+            break
+    store = selected / ".credentials.yaml"
+    checked.append(str(store))
+    if store.is_file():
+        return {"configured": True, "source": f"credential store {store}"}
+    dotenv = selected / ".env"
+    checked.append(str(dotenv))
+    if dotenv.is_file():
+        return {"configured": True, "source": f"dotenv {dotenv}"}
+    if workdir is not None:
+        project = Path(workdir) / ".env"
+        checked.append(str(project))
+        if project.is_file():
+            return {"configured": True, "source": f"dotenv {project}"}
+    vertex = (os.environ.get("CLAUDE_CODE_USE_VERTEX") or "").strip().lower()
+    if vertex not in ("", "0", "false"):
+        return {"configured": True, "source": "Vertex (CLAUDE_CODE_USE_VERTEX)"}
+    for name in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "REFACTORY_MODEL_BASE_URL"):
+        if (os.environ.get(name) or "").strip():
+            checked.append(name)
+            return {"configured": True, "source": f"base-url proxy ({name})"}
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+        if (os.environ.get(name) or "").strip():
+            # A worker's own environment reaches DSH, so this runs the top-level worker;
+            # the scrubbed nested paths (checks, validation) do not see it.
+            checked.append(f"{name} (scrubbed for nested workers)")
+            return {"configured": True,
+                    "source": f"environment ({name}; scrubbed for nested workers)"}
+    return {"configured": False, "source": None, "checked": checked}
+
+
 def half_route_refusal(provider: str, model: str) -> str:
     """What a route naming only one of provider and model is refused with; ``""`` otherwise.
 
