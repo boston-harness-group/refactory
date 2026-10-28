@@ -2086,7 +2086,8 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
                                "fixup_changed_since": changed_since},
                  ran=prepass.ran_ids, cut=prepass.cut_ids, commands=prepass.commands,
                  notes=prepass.notes, limit_s=prepass.limit_s, duration_s=prepass.elapsed_s,
-                 timings=prepass.timings)
+                 timings=prepass.timings, ran_nothing=prepass.ran_nothing,
+                 broken_command=prepass.broken_command)
     return _settle_self_check(ctx, prepass, entry, base=base, inherited=inherited, not_built=[],
                               unparsed="", prev_record=prev_record,
                               saved_base_unavailable=saved_base_unavailable, attempt=attempt,

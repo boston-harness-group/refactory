@@ -212,6 +212,11 @@ def test_dsh_system_prompt_not_concatenated_into_stdin():
                       ("_provider_config", {})]:
         setattr(client, attr, val)
 
+    # An inherited value must not leak into a call without system text.
+    client._system_text = ""
+    with mock.patch.dict(os.environ, {"REFACTORY_SYSTEM_PROMPT": "stale from parent"}):
+        assert "REFACTORY_SYSTEM_PROMPT" not in client._environment()
+
     # With system text: env var is set
     client._system_text = "You are a Python expert"
     env = client._environment()

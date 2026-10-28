@@ -16,6 +16,7 @@
     "refactory_dsh.graph_control",
     "refactory_dsh.harness_check",
     "refactory_dsh.history",
+    "refactory_dsh.install_guard",
     "refactory_dsh.invocations",
     "refactory_dsh.ir",
     "refactory_dsh.items",
@@ -118,7 +119,10 @@
   ],
   "allowed_leaks": {
     "refactory_dsh.run": [
-      {"imports": "refactory_dsh.base_check", "reason": "format_failure_detail uses parse_test_failures to extract failing test ids for the spine's status record; moves to product after the split"}
+      {
+        "imports": "refactory_dsh.base_check",
+        "reason": "format_failure_detail uses parse_test_failures to extract failing test ids for the spine's status record; moves to product after the split"
+      }
     ]
   },
   "references": [

@@ -361,6 +361,12 @@ def _workspace_instructions(workspace: dict[str, Any], writes: list[str]) -> str
         where += (' Your last answer changed the line endings or the blank lines at the ends of'
                   f' {", ".join(workspace["normalised"])}: an emission carries each file with LF line'
                   ' endings and one final newline, and the attempt holds them that way.')
+    if workspace.get('prepared_edits'):
+        where += (' You changed files the run\'s generate command builds:'
+                  f' {", ".join(workspace["prepared_edits"])}. They were left out of the emission,'
+                  ' because that command rebuilds them: change the sources they are built from.'
+                  ' You may run the generate command to test with fresh output; what it writes is'
+                  ' not carried.')
     if workspace.get('collect') == 'diff' and writes:
         taken = (f' When you are done, stop: the workspace\'s diff is your answer. The runtime writes'
                  f' {writes[0]} from it, so do not write {writes[0]} yourself, and leave in the'

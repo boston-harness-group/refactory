@@ -484,3 +484,71 @@ class TestCreateFastEditFastUnchanged:
         result = json.loads((tmp_path / "run/create.json").read_text())
         assert result["fast"]["structural_admission"] == "passed"
         assert result["fast"]["canonical_smoke"] == "passed"
+
+
+def test_a_step_option_keeps_its_value_when_the_check_is_targeted():
+    """`-n 4`, `-k expr`, `-m mark`, `-p plugin` are option and value: stripping the value
+    leaves the option dangling, and the targeted run collects nothing."""
+    from refactory_dsh.check_digest import build_probe_command
+
+    command, refusal = build_probe_command(
+        ".venv/bin/python -m pytest -q -n 4 refactory/tests",
+        ["refactory/tests/test_a.py::test_one"])
+    assert refusal is None
+    assert "-n 4" in command, command
+    assert "refactory/tests/test_a.py::test_one" in command
+    assert command.count("refactory/tests") == 1, "the directory itself is still stripped"
+
+    command, refusal = build_probe_command('pytest -q -k "a or b" tests', ["tests/test_a.py::test_one"])
+    assert refusal is None
+    assert "-k 'a or b'" in command or '-k "a or b"' in command, command
+
+
+def test_a_targeted_command_pytest_cannot_parse_fails_loudly():
+    """Exit 4 with no not-found id means the command itself is broken — the case `-n 4`
+    stripped to `-n` produced. A self-check that cannot run at all is a fault, not a pass."""
+    import pytest
+
+    from refactory_dsh import failfast
+
+    class Result:
+        ok = False
+        returncode = 4
+        timed_out = False
+        prep_failure = None
+        stdout = "error: argument -n: invalid int value\n"
+        stderr = ""
+
+    def runner(_command: str, _timeout: float) -> Result:
+        return Result()
+
+    with pytest.raises(RuntimeError, match="the targeted check ran no tests"):
+        failfast.targeted_prepass(
+            {"status": "fail"}, "pytest -q -n refactory/tests", runner, 60,
+            selection=["refactory/tests/test_a.py::test_one"],
+            self_check_timeout_s=30)
+
+
+def test_a_targeted_check_that_collects_no_test_is_recorded_not_a_pass():
+    """Exit 5 (nothing matched) is not a broken command: the chunk is recorded as having
+    verified nothing, the self-check does not count it, and the whole check still runs."""
+    from refactory_dsh import failfast
+
+    class Result:
+        ok = False
+        returncode = 5
+        timed_out = False
+        prep_failure = None
+        stdout = "no tests ran in 0.01s\n"
+        stderr = ""
+
+    def runner(_command: str, _timeout: float) -> Result:
+        return Result()
+
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q refactory/tests", runner, 60,
+        selection=["refactory/tests/test_a.py::test_one"],
+        self_check_timeout_s=30)
+    assert result.ran_nothing, "the record says the chunk ran nothing"
+    assert not result.broken_command
+    assert not result.failing_ids and not result.early_stop, "it is not a pass on a failure"

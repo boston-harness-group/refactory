@@ -2049,22 +2049,16 @@ def test_empty_diff_check_skipped_when_head_equals_base(tmp_path, monkeypatch):
     assert records[-1]["outcome"] not in ("empty_diff_fixup", "exhausted")
 
 
-def test_rerun_with_zero_remaining_records_lower_bound(tmp_path, monkeypatch):
-    """When a not-found rerun has no time left (remaining_for_rerun < 1), a
-    timed_out timing entry is recorded and the chunk is cut.
-
-    Exercises the guard at failfast.py lines 296-305.  Removing those lines
-    lets the rerun proceed with nearly zero time — this test fails because
-    ``run_fn`` is called a second time."""
+def test_a_not_found_chunk_with_no_time_to_rerun_is_recorded(tmp_path, monkeypatch):
+    """A chunk whose ids a rename removed collects nothing and cannot rerun: it is recorded
+    as having verified nothing (not a pass), and no second run is attempted."""
     import time as _time
+
     from refactory_dsh.sandbox import SandboxResult
 
-    exit4_output = "ERROR: not found: /abs/path/tests/test_x.py::test_gone\n"
-    exit4 = SandboxResult(ok=False, returncode=4, stdout=exit4_output, stderr="",
-                          timed_out=False, elapsed_s=9.5)
-
-    # Force both items into one chunk so rest_of_chunk is non-empty after
-    # dropping the not-found id.
+    exit4 = SandboxResult(ok=False, returncode=4,
+                          stdout="ERROR: not found: /abs/path/tests/test_x.py::test_gone\n",
+                          stderr="", timed_out=False, elapsed_s=9.5)
     monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
 
     calls = []
@@ -2077,21 +2071,16 @@ def test_rerun_with_zero_remaining_records_lower_bound(tmp_path, monkeypatch):
 
     def run_fn(cmd, timeout):
         calls.append(cmd)
-        elapsed[0] = 9.5  # simulate nearly the full 10 s limit consumed
+        elapsed[0] = 9.5
         return exit4
 
-    prepass = failfast.targeted_prepass(
-        {}, CHECK, run_fn, 180,
-        selection=["tests/test_x.py::test_gone", "tests/test_x.py"],
-        self_check_timeout_s=10,
-    )
-    # run_fn was called once (the loop-level guard did not cut first).
-    assert len(calls) == 1
-    # The chunk was cut.
-    assert prepass.cut_ids
-    # The note specifically mentions "no time left for a rerun".
-    assert any("no time left" in n for n in prepass.notes)
-
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q tests", run_fn, 10,
+        selection=["tests/test_x.py::test_gone", "tests/test_x.py::test_here"],
+        self_check_timeout_s=10)
+    assert len(calls) == 1, "no rerun is attempted, so the chunk's tests never run"
+    assert result.ran_nothing, "the self-check says it verified nothing"
+    assert not result.broken_command, "a renamed id is not a broken command"
 
 def test_rerun_handles_module_import_error(tmp_path, monkeypatch):
     """When the rerun's output contains ``_INTERRUPTED``, broken modules are in ran
@@ -2186,3 +2175,50 @@ def test_the_limit_is_the_knob_and_never_more_than_a_third_of_the_check():
     assert failfast.self_check_limit(300, 180) == 60
     knob = DesignMode.declare()["self_check_timeout_s"]
     assert (knob.default, knob.lo, knob.hi, knob.frozen) == (300, 10, 600, False)
+
+
+def test_a_renamed_id_with_time_left_is_recorded_not_a_broken_command(tmp_path, monkeypatch):
+    """Exit 4 whose not-found ids were dropped leaves nothing to run: the selection is
+    stale, not the command, so it is recorded and the whole check still runs."""
+    import time as _time
+
+    from refactory_dsh.sandbox import SandboxResult
+
+    exit4 = SandboxResult(ok=False, returncode=4,
+                          stdout="ERROR: not found: /abs/tests/test_x.py::test_gone\n",
+                          stderr="", timed_out=False, elapsed_s=0.5)
+    monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
+
+    def run_fn(cmd, timeout):
+        return exit4
+
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q tests", run_fn, 60,
+        selection=["tests/test_x.py::test_gone"], self_check_timeout_s=60)
+    assert result.ran_nothing, "it verified nothing"
+    assert not result.broken_command, "a stale id is not a command pytest cannot parse"
+
+
+def test_a_rerun_that_collects_nothing_is_recorded(tmp_path, monkeypatch):
+    """The not-found rerun can also collect nothing: that must not pass quietly either."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    first = SandboxResult(ok=False, returncode=4,
+                          stdout="ERROR: not found: /abs/tests/test_y.py::test_gone\n",
+                          stderr="", timed_out=False, elapsed_s=0.5)
+    second = SandboxResult(ok=False, returncode=5, stdout="no tests ran\n",
+                           stderr="", timed_out=False, elapsed_s=0.2)
+    monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
+    calls = []
+
+    def run_fn(cmd, timeout):
+        calls.append(cmd)
+        return first if len(calls) == 1 else second
+
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q tests", run_fn, 60,
+        selection=["tests/test_y.py::test_gone", "tests/test_x.py::test_here"],
+        self_check_timeout_s=60)
+    assert len(calls) == 2, "the not-found rerun happens"
+    assert result.ran_nothing, "the rerun verified nothing, and the record says so"
+    assert not result.broken_command

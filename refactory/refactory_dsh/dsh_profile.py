@@ -539,9 +539,28 @@ def _retirement_steps(profile: str, layers: tuple[str, ...]) -> list[ProvisionSt
     current = declared_bundles(profile)
     for key in layers:
         bundle = LAYERS[key].bundle
-        if bundle not in current or bundle not in declared:
+        if (bundle not in current or bundle not in declared
+                or resolves_elsewhere(profile, bundle)):
             steps.append(ProvisionStep("add", profile, bundle_directory(bundle)))
     return steps
+
+
+def resolves_elsewhere(profile: str, bundle: str) -> bool:
+    """Whether this profile's copy of *bundle* resolves into another checkout.
+
+    The manifest names a bundle; it does not say which checkout's copy the symlink
+    points at. Installing a checkout is meant to make it the active one, so a link
+    into a different checkout is a reason to add this checkout's copy — the row that
+    repoints it. ``install_guard`` decides whether that is safe first.
+    """
+    resolved = bundle_checkout_root(profile, bundle)
+    if resolved is None:
+        return False
+    expected = REPO_ROOT / "packages" / "bundle" / bundle_directory(bundle)
+    try:
+        return resolved != expected.resolve()
+    except (OSError, ValueError):
+        return False
 
 
 def render_plan(steps: list[ProvisionStep] | None = None) -> str:
