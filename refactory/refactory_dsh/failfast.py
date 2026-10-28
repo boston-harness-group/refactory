@@ -307,6 +307,7 @@ def _self_check(
             entry_f["durations"] = chunk_durations
         timings.append(entry_f)
         if why_not:
+            dropped: list[str] = []
             if "exit 4" in why_not:
                 dropped = _not_found_ids(_output(result))
                 if dropped:
@@ -366,6 +367,8 @@ def _self_check(
                                          f"{sorted(dropped)}, reran but the rest also failed")
                             cut.extend(chunk)
                             notes.append(f"chunk {number} did not count: {why_not}")
+                            if why2 and "collected no test" in why2:
+                                ran_nothing.append(cmd2)
                             continue
                     # Nothing left after dropping not-found ids, or couldn't target.
                     notes.append(f"chunk {number}: dropped not-found ids "
@@ -377,9 +380,9 @@ def _self_check(
                 # Exit 4 with no not-found id is a command pytest cannot parse: a harness
                 # fault, not a selection that matched nothing (exit 5, or ids a rename
                 # removed, are recorded and go on to the whole check).
-                if "exit 4" in why_not:
+                if "exit 4" in why_not and not dropped:
                     broken_command.append(command)
-                else:
+                elif not dropped:
                     ran_nothing.append(command)
             continue
         for test_id in sorted(found):

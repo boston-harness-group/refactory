@@ -2175,3 +2175,50 @@ def test_the_limit_is_the_knob_and_never_more_than_a_third_of_the_check():
     assert failfast.self_check_limit(300, 180) == 60
     knob = DesignMode.declare()["self_check_timeout_s"]
     assert (knob.default, knob.lo, knob.hi, knob.frozen) == (300, 10, 600, False)
+
+
+def test_a_renamed_id_with_time_left_is_recorded_not_a_broken_command(tmp_path, monkeypatch):
+    """Exit 4 whose not-found ids were dropped leaves nothing to run: the selection is
+    stale, not the command, so it is recorded and the whole check still runs."""
+    import time as _time
+
+    from refactory_dsh.sandbox import SandboxResult
+
+    exit4 = SandboxResult(ok=False, returncode=4,
+                          stdout="ERROR: not found: /abs/tests/test_x.py::test_gone\n",
+                          stderr="", timed_out=False, elapsed_s=0.5)
+    monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
+
+    def run_fn(cmd, timeout):
+        return exit4
+
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q tests", run_fn, 60,
+        selection=["tests/test_x.py::test_gone"], self_check_timeout_s=60)
+    assert result.ran_nothing, "it verified nothing"
+    assert not result.broken_command, "a stale id is not a command pytest cannot parse"
+
+
+def test_a_rerun_that_collects_nothing_is_recorded(tmp_path, monkeypatch):
+    """The not-found rerun can also collect nothing: that must not pass quietly either."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    first = SandboxResult(ok=False, returncode=4,
+                          stdout="ERROR: not found: /abs/tests/test_y.py::test_gone\n",
+                          stderr="", timed_out=False, elapsed_s=0.5)
+    second = SandboxResult(ok=False, returncode=5, stdout="no tests ran\n",
+                           stderr="", timed_out=False, elapsed_s=0.2)
+    monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
+    calls = []
+
+    def run_fn(cmd, timeout):
+        calls.append(cmd)
+        return first if len(calls) == 1 else second
+
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q tests", run_fn, 60,
+        selection=["tests/test_y.py::test_gone", "tests/test_x.py::test_here"],
+        self_check_timeout_s=60)
+    assert len(calls) == 2, "the not-found rerun happens"
+    assert result.ran_nothing, "the rerun verified nothing, and the record says so"
+    assert not result.broken_command

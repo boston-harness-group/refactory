@@ -1688,3 +1688,16 @@ def test_a_pytest_flag_keeps_its_value_when_the_targeted_command_is_built():
     assert _strip_pytest_positional_paths(
         "pytest -q -p no:cacheprovider -k 'a or b' refactory/tests tests/x.py") == \
         "pytest -q -p no:cacheprovider -k 'a or b'"
+
+
+def test_a_path_valued_option_keeps_its_path():
+    """`--ignore tests/legacy` and `--cov-report term` take a path or a word as their value:
+    stripping it would leave the option dangling and the targeted run unparseable."""
+    from refactory_dsh.check_digest import _strip_pytest_positional_paths
+
+    assert _strip_pytest_positional_paths(
+        "pytest -q --ignore tests/legacy --cov-report term refactory/tests") == \
+        "pytest -q --ignore tests/legacy --cov-report term"
+    assert _strip_pytest_positional_paths(
+        "pytest -q --ignore-glob '*/slow/*' tests") == \
+        "pytest -q --ignore-glob '*/slow/*'"
