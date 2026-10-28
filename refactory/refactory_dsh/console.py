@@ -1829,7 +1829,8 @@ def runtime_context(project: Path, *, provider: str = "", model: str = "") -> di
     # The probe's refusal wins when it read the store: a missing or invalid credential is
     # a stated fact, not a guess. It does not model a Vertex or base-URL route, so a
     # source of that kind stands on its own.
-    route_source = str(source.get("source") or "").startswith(("Vertex", "base-url"))
+    route_source = str(source.get("source") or "").startswith(
+        ("Vertex", "base-url", "environment ("))
     authenticated = bool(source.get("configured")) and (
         route_source or status not in ("missing-credential", "invalid-configuration"))
     return {

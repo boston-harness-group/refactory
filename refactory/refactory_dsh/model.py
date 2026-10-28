@@ -93,10 +93,13 @@ def credential_source(home: str | Path | None = None,
         if (os.environ.get(name) or "").strip():
             checked.append(name)
             return {"configured": True, "source": f"base-url proxy ({name})"}
-    checked.extend(
-        f"{name} (scrubbed for nested workers)"
-        for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY")
-        if (os.environ.get(name) or "").strip())
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+        if (os.environ.get(name) or "").strip():
+            # A worker's own environment reaches DSH, so this runs the top-level worker;
+            # the scrubbed nested paths (checks, validation) do not see it.
+            checked.append(f"{name} (scrubbed for nested workers)")
+            return {"configured": True,
+                    "source": f"environment ({name}; scrubbed for nested workers)"}
     return {"configured": False, "source": None, "checked": checked}
 
 

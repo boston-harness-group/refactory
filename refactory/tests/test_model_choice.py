@@ -889,10 +889,12 @@ def test_credential_source_names_the_store_dotenv_routes_and_scrubbed_keys(
     assert credential_source(workdir=project)["source"] == f"dotenv {project / '.env'}"
 
     (project / ".env").unlink()
+    # A worker's own environment reaches DSH, so an exported key runs the top-level
+    # worker; only the scrubbed nested paths lose it, which the source says.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
     found = credential_source()
-    assert found["configured"] is False
-    assert "ANTHROPIC_API_KEY (scrubbed for nested workers)" in found["checked"]
+    assert found["configured"] is True
+    assert found["source"] == "environment (ANTHROPIC_API_KEY; scrubbed for nested workers)"
 
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
