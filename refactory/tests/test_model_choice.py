@@ -862,3 +862,38 @@ def test_runtime_names_a_vertex_or_base_url_route_without_printing_it(project, c
     assert console.main(["runtime", "--project", str(project)]) == 0
     nested = json.loads(capsys.readouterr().out)["nested"]
     assert nested["authenticated_source"] == "Vertex (CLAUDE_CODE_USE_VERTEX)"
+
+
+def test_credential_source_names_the_store_dotenv_routes_and_scrubbed_keys(
+        tmp_path, monkeypatch):
+    """Each source the client would rely on, by name or path; an exported key on its own
+    is named as scrubbed, so someone with only ANTHROPIC_API_KEY set sees why."""
+    from refactory_dsh.model import credential_source
+
+    for name in _CREDENTIAL_SOURCES:
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "dsh"
+    home.mkdir()
+    monkeypatch.setenv("DSH_HOME", str(home))
+
+    assert credential_source()["configured"] is False
+    assert str(home / ".credentials.yaml") in credential_source()["checked"]
+
+    (home / ".env").write_text("")
+    assert credential_source()["source"] == f"dotenv {home / '.env'}"
+
+    (home / ".env").unlink()
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".env").write_text("")
+    assert credential_source(workdir=project)["source"] == f"dotenv {project / '.env'}"
+
+    (project / ".env").unlink()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    found = credential_source()
+    assert found["configured"] is False
+    assert "ANTHROPIC_API_KEY (scrubbed for nested workers)" in found["checked"]
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
+    assert credential_source()["source"] == "base-url proxy (ANTHROPIC_BASE_URL)"

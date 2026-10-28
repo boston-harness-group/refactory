@@ -103,3 +103,26 @@ def test_install_sh_runs_the_guard_before_it_writes_a_profile():
     rows = installer.index("while IFS=$'\\t' read -r kind profile value")
     assert guard < rows, "the guard must run before any profile row is executed"
     assert "|| exit 1" in installer[guard:rows]
+
+
+def test_a_plan_with_nothing_to_write_is_silent(world):
+    """install.sh passes exactly the plan's profiles, so no profiles means the install
+    writes nothing and the guard must not refuse it."""
+    _home, tmp = world
+    mine = _checkout(tmp / "mine")
+    assert install_guard.main([str(mine)]) == 0
+
+
+def test_force_accepts_no_as_false(world, monkeypatch):
+    """REFACTORY_INSTALL_FORCE_RELINK=0 is not consent."""
+    home, tmp = world
+    other, mine = _checkout(tmp / "other"), _checkout(tmp / "mine")
+    _profile(home, "graph", other)
+    run = tmp / "run"
+    run.mkdir()
+    pin.register_run_on_driver(other, run)
+    monkeypatch.setenv(install_guard.FORCE_ENV, "0")
+
+    with run_ownership.ownership(run):
+        code, _lines = install_guard.check(mine, ("graph",))
+    assert code == 1

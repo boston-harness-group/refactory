@@ -1825,10 +1825,13 @@ def runtime_context(project: Path, *, provider: str = "", model: str = "") -> di
     credential = result.get("credential")
     from refactory_dsh.model import credential_source
     from refactory_dsh.worker_config import effective
-    source = credential_source(context["dsh_home"])
-    # A source is configured; the probe still wins when it read the store and found it
-    # invalid, because that is a stated refusal and not a guess.
-    authenticated = bool(source.get("configured")) and status != "invalid-configuration"
+    source = credential_source(context["dsh_home"], project)
+    # The probe's refusal wins when it read the store: a missing or invalid credential is
+    # a stated fact, not a guess. It does not model a Vertex or base-URL route, so a
+    # source of that kind stands on its own.
+    route_source = str(source.get("source") or "").startswith(("Vertex", "base-url"))
+    authenticated = bool(source.get("configured")) and (
+        route_source or status not in ("missing-credential", "invalid-configuration"))
     return {
         "worker_configuration": effective(project),
         "model_route": route,

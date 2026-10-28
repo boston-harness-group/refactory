@@ -80,7 +80,8 @@ def check(checkout: Path, profiles: tuple[str, ...] = PROFILES, *,
     """Lines to say before installing, and 1 when a profile must not be repointed."""
     this = Path(checkout).expanduser().resolve()
     if force is None:
-        force = bool(os.environ.get(FORCE_ENV, "").strip())
+        value = str(os.environ.get(FORCE_ENV, "")).strip().lower()
+        force = value not in ("", "0", "false", "no", "off")
     lines: list[str] = []
     for profile in profiles:
         other = profile_checkout(profile, home=home)
@@ -99,9 +100,9 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: python -m refactory_dsh.install_guard <checkout> [profile ...]",
               file=sys.stderr)
         return 2
-    checkout = Path(args[0])
-    profiles = tuple(args[1:]) or PROFILES
-    code, lines = check(checkout, profiles)
+    # The installer passes exactly the profiles its plan would write, so no profiles
+    # means it changes nothing and there is nothing to guard.
+    code, lines = check(Path(args[0]), tuple(args[1:]))
     for line in lines:
         print(line)
     return code

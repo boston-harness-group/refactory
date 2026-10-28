@@ -182,7 +182,11 @@ else
   # guard, installing a second clone repoints the first checkout's profiles, and a run
   # live there has its spine replaced underneath it. `install_guard` names the other
   # checkout and the run, or says it repointed (dm: install profile guard).
-  "$VENV/bin/python" -m refactory_dsh.install_guard "$HERE" || exit 1
+  # Only the profiles this plan would write: a plan that changes nothing writes no
+  # profile, so the guard stays silent rather than refusing an install that would not
+  # have touched the other checkout.
+  PLAN_PROFILES="$(printf '%s\n' "$PLAN" | cut -f2 | sort -u | tr '\n' ' ')"
+  "$VENV/bin/python" -m refactory_dsh.install_guard "$HERE" $PLAN_PROFILES || exit 1
   if [ -z "$PLAN" ]; then
     echo "  DSH profiles: already present"
   else
