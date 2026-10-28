@@ -705,6 +705,11 @@ def test_correction_audit_and_overwatch_accept_only_built_correction(runs, runti
     assert built_verdict["corrections"] and all(item["met"] is True for item in built_verdict["corrections"])
     calls = [json.loads(line) for line in built.dsh.joinpath("calls.jsonl").read_text().splitlines()]
     assert calls and all("What the user has said" not in call["prompt"] for call in calls)
+    correction_prompt = next(call["prompt"] for call in calls if call["node"] == "apply_corrections")
+    assert CORRECTION in correction_prompt
+    first_emit = next(call for call in calls if call["node"] == "emit")
+    assert "Read the approved design from `design.md`" in first_emit["prompt"]
+    assert "with a NAME constant" in first_emit["available_design"]
 
     unbuilt_audit = json.loads((unbuilt.run / "correction-audit.json").read_text())
     unbuilt_verdict = json.loads((unbuilt.run / "overwatch-verdict.json").read_text())

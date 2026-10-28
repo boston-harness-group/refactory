@@ -47,8 +47,10 @@ def _print_line(line: str) -> None:
     print(line.rstrip("\n"), flush=True)
 
 
-def _persist_steering_option(workdir: Path, omit_steering: bool) -> None:
-    """Persist the effective prompt policy for both runtimes and actual inner-run resume."""
+def _persist_steering_option(workdir: Path, omit_steering: bool | None) -> None:
+    """Persist an explicit prompt policy for both runtimes and actual inner-run resume."""
+    if omit_steering is None:
+        return
     import json
 
     path = Path(workdir) / ".refactory" / "run-config.json"

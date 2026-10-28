@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
+CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
     'codex': ('skip', 'default', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'),
@@ -56,6 +58,9 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f'{backend} uses native provider settings and does not support provider overrides')
     if route.get('effort') and backend not in ('dsh', 'claude_code'):
         raise ValueError(f'{backend} does not support effort overrides')
+    if backend == 'claude_code' and route.get('effort') and route['effort'] not in CLAUDE_CODE_EFFORT_LEVELS:
+        accepted = ', '.join(sorted(CLAUDE_CODE_EFFORT_LEVELS))
+        raise ValueError(f'claude_code effort must be one of {accepted}; got {route["effort"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route

@@ -204,9 +204,14 @@ def main(argv: list[str]) -> int:
         fcntl.flock(lock, fcntl.LOCK_EX)
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         visit = sum(1 for call in calls if call["node"] == node)
+        record = {"node": node, "visit": visit, "cwd": str(cwd), "prompt": prompt, "route": route}
+        if node == "emit":
+            receipt_path = Path(os.environ.get("REFACTORY_WORKER_RECEIPT", ""))
+            run_dir = receipt_path.parents[2] if len(receipt_path.parents) > 2 else _run_dir(cwd)
+            design = run_dir / "design.md"
+            record["available_design"] = design.read_text() if design.exists() else None
         with open(log, "a") as out:
-            out.write(json.dumps({"node": node, "visit": visit, "cwd": str(cwd), "prompt": prompt,
-                                  "route": route}) + "\n")
+            out.write(json.dumps(record) + "\n")
     answers = script.get(node)
     if not answers:
         print(f"parity_dsh: no scripted answer for node {node!r}", file=sys.stderr)

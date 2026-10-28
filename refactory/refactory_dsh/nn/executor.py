@@ -1405,6 +1405,8 @@ def execute(
     from refactory_dsh.steering import for_run
 
     workdir = Path(workdir)
+    from refactory_dsh.evaluators import _persist_steering_option
+    _persist_steering_option(workdir, omit_steering)
     from refactory_dsh.budgets import LEDGER, ResourceLimits, RunBudget
 
     budget = shared_budget or RunBudget.inherited(model)
