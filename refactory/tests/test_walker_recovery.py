@@ -767,3 +767,76 @@ def test_child_preserves_iteration_verdicts_task_and_write_policy(tmp_path):
     assert result.facts["first"] == 0 and result.facts["second"] == 1
     assert result.facts["context_flags"] == {
         "verdicts": {"approval": "proceed"}, "task": {}, "enforce_writes": False}
+
+
+def test_each_op_runs_in_a_fresh_interpreter(tmp_path):
+    """One child per op: an op cannot see what an earlier op left in its interpreter.
+
+    A reused worker would report 1 here, because the first op's module state would
+    still be in the process that runs the second.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("mark", "op", call="walker_recovery_ops:mark_interpreter",
+                      writes=("mark.txt",), produces=("marked_pid",)))
+    graph.add(nn.Node("report", "op", call="walker_recovery_ops:report_interpreter",
+                      writes=("seen.txt",), produces=("seen",)))
+    graph.connect("mark", "report")
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok, result.error
+    assert result.facts["seen"] == 0
+    assert (tmp_path / "seen.txt").read_text() == "0"
+
+
+def test_the_op_child_is_gone_when_the_node_returns(tmp_path):
+    """No child outlives its node, even when the op leaves a thread behind.
+
+    A child still running here keeps multiprocessing's exit-time join waiting, so the
+    run would hang after the node that caused it (and the reviewer measured exactly
+    that at 40 s and counting).
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("threaded", "op", call="walker_recovery_ops:leave_a_thread_running",
+                      writes=("threaded.pid",), produces=("threaded_pid",)))
+    started = time.monotonic()
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok, result.error
+    assert time.monotonic() - started < 30, "the run waited for the op's thread"
+    pid = int(result.facts["threaded_pid"])
+    assert pid != os.getpid()
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        state = Path(f"/proc/{pid}/stat")
+        if state.exists() and state.read_text().rsplit(") ", 1)[1].split()[0] == "Z":
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, 9)
+        finally:
+            pytest.fail("the op's child outlived the node")
+
+
+def test_an_unclassified_op_gets_the_spines_default_deadline(tmp_path):
+    """An op outside every envelope is bounded at the spine's 3600 s, not left open.
+
+    Both shipped spine configurations pin commandTimeoutMs to 3600000; an op with no
+    deadline is the hang dm-173 is about.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
+                      writes=("seen.txt",), produces=("seen",)))
+    ctx = nn.RunContext(tmp_path)
+    executor = nn.Executor(graph, ctx, enable_recovery=True)
+    assert executor._effective_timeout(graph.nodes["plain"]) == 3600.0
+
+
+def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
+    """Without recovery the walker runs ops in process, as before."""
+    graph = nn.Graph()
+    graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
+                      writes=("seen.txt",), produces=("seen",)))
+    executor = nn.Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
+    assert executor._effective_timeout(graph.nodes["plain"]) is None

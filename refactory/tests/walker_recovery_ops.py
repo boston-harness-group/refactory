@@ -5,7 +5,9 @@ by name, so every callable must be a plain module-level function.
 """
 from __future__ import annotations
 
+import os
 import threading
+import time
 from typing import Any
 
 
@@ -157,3 +159,26 @@ def record_parent_context(ctx):
     ctx.write_text("extra.txt", "permitted by parent policy")
     return {ctx.node_id: ctx.iteration, "context_flags": {
         "verdicts": ctx.verdicts, "task": ctx.task, "enforce_writes": ctx.enforce_writes}}
+
+
+_SEEN_IN_THIS_INTERPRETER: dict[str, int] = {}
+
+
+def mark_interpreter(ctx):
+    """Record that this interpreter has run an op. A reused child would remember."""
+    _SEEN_IN_THIS_INTERPRETER["marked"] = 1
+    ctx.write_text("mark.txt", str(os.getpid()))
+    return {"marked_pid": os.getpid()}
+
+
+def report_interpreter(ctx):
+    """Report whether this interpreter had already run an op of this graph."""
+    ctx.write_text("seen.txt", str(_SEEN_IN_THIS_INTERPRETER.get("marked", 0)))
+    return {"seen": _SEEN_IN_THIS_INTERPRETER.get("marked", 0)}
+
+
+def leave_a_thread_running(ctx):
+    """Return normally while a non-daemon thread keeps this interpreter alive."""
+    threading.Thread(target=lambda: time.sleep(120), daemon=False).start()
+    ctx.write_text("threaded.pid", str(os.getpid()))
+    return {"threaded_pid": os.getpid()}

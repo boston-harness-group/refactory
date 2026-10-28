@@ -557,8 +557,25 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         conn.close()
 
 
+def _finish_op_child(child: Any) -> None:
+    """Reap a child that has reported, killing it if it is still there.
+
+    An op that returns with a non-daemon thread still running keeps its child alive,
+    and multiprocessing joins every child at interpreter exit: the run would hang after
+    the node that caused it. So a child that outlives its grace is killed like a
+    timed-out one.
+    """
+    child.join(timeout=1)
+    if child.is_alive():
+        _kill_op_child(child)
+
+
 def _kill_op_child(child: Any) -> None:
-    """Stop one op's process group: terminate, grace, then kill whatever is left."""
+    """Stop one op's process group: terminate, grace, then kill whatever is left.
+
+    The leader is not reaped before the group is signalled, so its pid — and so the
+    group id — cannot have been reused when the signal is sent.
+    """
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except (ProcessLookupError, OSError):
@@ -566,8 +583,11 @@ def _kill_op_child(child: Any) -> None:
             child.terminate()
         except OSError:
             pass
-    child.join(timeout=5)
-    # The leader may exit on TERM while a descendant ignores it: kill the group anyway.
+    grace_until = time.monotonic() + 5
+    while time.monotonic() < grace_until and child.is_alive():
+        time.sleep(0.05)
+    # The leader may have exited on TERM while a descendant ignored it: kill the group
+    # anyway, before the join that would free the pid.
     try:
         os.killpg(child.pid, signal.SIGKILL)
     except (ProcessLookupError, OSError):
@@ -1037,10 +1057,12 @@ class Executor:
     def _run_op_timed(self, callable_target: str, node: Node, timeout: float) -> Any:
         """Run a callable in a forkserver child process, killed at *timeout*.
 
-        Uses a persistent worker (``_OpWorker``) that stays alive across ops
-        so each call pays only pipe-communication cost (~1 ms) rather than
-        forkserver spawn cost (~9 ms).  On timeout or unexpected death the
-        a later op gets a fresh worker. A crashed op is never replayed here.
+        One child per op (``_op_child_target``), never reused: an op that crashes,
+        hangs or leaves state behind cannot reach the next one, and the child's
+        interpreter is the parent's as it is at this dispatch. The child never
+        outlives the dispatch — whether the op reports, times out, dies, or the
+        parent is interrupted — so nothing it left running blocks the run's exit.
+        A crashed op is never replayed here.
         """
         model_info: dict[str, Any] | None = None
         if self.ctx.model is not None:
@@ -1080,26 +1102,39 @@ class Executor:
 
         _ensure_forkserver_preload(self.graph)
         parent_conn, child_conn = _forkserver_ctx.Pipe()
-        child = _forkserver_ctx.Process(target=_op_child_target, args=(child_conn, args_dict))
-        child.start()
+        try:
+            child = _forkserver_ctx.Process(
+                target=_op_child_target, args=(child_conn, args_dict))
+            child.start()
+        except BaseException:
+            parent_conn.close()
+            child_conn.close()
+            raise
         child_conn.close()
 
+        received = False
         try:
             if not parent_conn.poll(timeout):
                 raise OpTimeoutError(node.id, timeout)
             status, payload = parent_conn.recv()
+            received = True
         except (EOFError, ConnectionResetError):
             # Its side effects may already have happened. Never replay an
             # unknown outcome as an unrecorded retry.
             raise OpOutcomeUnknown(
                 f"op {node.id!r} child exited before reporting its outcome"
             ) from None
-        except OpTimeoutError:
-            _kill_op_child(child)
-            raise
         finally:
             parent_conn.close()
-        child.join(timeout=5)
+            if received:
+                # The op has reported. Reap it; kill it only if it lingers, because a
+                # non-daemon thread an op started would otherwise block interpreter
+                # exit when multiprocessing joins its children.
+                _finish_op_child(child)
+            else:
+                # Timed out, died mid-report, or this frame is unwinding (a stop, a
+                # KeyboardInterrupt): nothing of this dispatch outlives it.
+                _kill_op_child(child)
 
         if status == "ok":
             # Merge child state back into the parent's context.
