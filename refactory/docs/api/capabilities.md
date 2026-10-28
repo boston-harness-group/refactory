@@ -9147,18 +9147,6 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "value": "",
       "values": []
     },
-    "builder_timeout_s": {
-      "default": 1800,
-      "description": "how long the builder's model session may run before timeout; its retry doubles this",
-      "frozen": true,
-      "kind": "int",
-      "range": [
-        60,
-        7200
-      ],
-      "value": 1800,
-      "values": []
-    },
     "check": {
       "default": "",
       "description": "the command that decides whether the artifact works",
@@ -9333,7 +9321,7 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small artifact with one sequential strategist, coder and QA agent, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none (`worktree=0` writes .factory/artifacts instead; `source_project` copies a directory there). The check runs in that worktree before focused QA. It has no approval gate, so it opens no pull request: the branch is left for you to push. The coder works in a prepared clone of the last attempt, whose diff becomes the attempt.",
-    "reviewed_schema": "497b203f0f1669cfdaa10dfaaeae140316e6684eae12106ada03c29b0791fe47"
+    "reviewed_schema": "5cf531ee4f16c72c81714341da874ea34e912b54f6e0f76369f97ce5c77a9447"
   }
 }
 ```
