@@ -267,6 +267,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # The gate reads each marked test's report in the controller, and xdist reports in
+    # its workers, so under -n it would see nothing and pass a suite it never checked.
+    if config.getoption("--toolchain-gate", default=False):
+        workers = config.getoption("numprocesses", default=None)
+        if workers not in (None, 0):
+            raise pytest.UsageError(
+                "--toolchain-gate runs in one process: it reads each test's report in the "
+                "controller, and xdist reports in its workers. Re-run it with -n 0.")
     config.addinivalue_line(
         "markers", "integration: slow tests that spawn a real DSH CEO run"
     )

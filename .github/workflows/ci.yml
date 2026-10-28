@@ -98,10 +98,16 @@ jobs:
       # credential are marked and skipped with a reason; the toolchain summary at
       # the end of this step names every skipped unit, so a green run here states
       # what it did not verify rather than implying it verified everything.
+      #
+      # Four workers on this runner's four vCPUs: the suite is I/O- and
+      # subprocess-heavy and parallelises cleanly (22.4 min serial to 5.7 min at
+      # four on the lab). It is deliberately here and not in pytest.ini, because
+      # some invocations must stay serial: --toolchain-gate reads per-test reports
+      # in the controller, and the per-site base check runs one test under a cap.
       - name: Python suite
         env:
           REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
-        run: uv run python -m pytest refactory/tests -q -rs
+        run: uv run python -m pytest refactory/tests -q -rs -n 4
 
       # The harness this repository pins and the `dsh` that boots the profile
       # must agree on the version and on the strict TypertCodec contract. CI has

@@ -11,7 +11,12 @@ Run from the repository root.
 
 ```bash
 uv run python -m pytest refactory/tests/ -q                    # the suite
+uv run python -m pytest refactory/tests/ -q -n 4               # ... on four workers (22.4 min to 5.7 min)
 uv run python -m pytest refactory/tests/ -q --run-integration  # ... plus the real-DSH runs
+
+`-n` is a command-line choice, not a setting: `--toolchain-gate` must stay in one process
+(it refuses `-n` rather than passing a suite it did not check), and the per-site base
+check runs a single test under a time cap.
 uv run python -m refactory_dsh.tools.gen_api_reference --check # docs match the code
 uv sync --group reference                                      # add the test-time oracle
 ```
