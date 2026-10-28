@@ -740,6 +740,10 @@ class DesignMode(Mode):
             produces=("emit",),
             feedback_keys=("validation", "qa_gate", "overwatch_review"),
             workspace=dict(BUILDER_WORKSPACE),
+            # Behaviour change: emit gains timeout_s and retry, which changes the
+            # candidate id; runs in flight at this commit cannot be resumed.  The
+            # spine reservation for the builder roughly doubles (1800 + 3600 plus
+            # overhead and preparation).
             timeout_s=self.values().get("builder_timeout_s", 1800),
             retry=TIMEOUT_RETRY,
             knobs=("builder_timeout_s",),

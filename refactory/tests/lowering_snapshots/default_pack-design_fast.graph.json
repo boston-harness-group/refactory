@@ -345,7 +345,6 @@
     "brief": "",
     "check": "",
     "refusal_attempts": 3.0,
-    "builder_timeout_s": 1800.0,
     "target": "",
     "base": "",
     "worktree": 1.0,
@@ -420,17 +419,6 @@
       "values": [],
       "frozen": true,
       "description": "consecutive refused emissions before the run stops",
-      "required": false
-    },
-    "builder_timeout_s": {
-      "default": 1800,
-      "kind": "int",
-      "lo": 60,
-      "hi": 7200,
-      "enum": [],
-      "values": [],
-      "frozen": true,
-      "description": "how long the builder's model session may run before timeout; its retry doubles this",
       "required": false
     },
     "target": {
