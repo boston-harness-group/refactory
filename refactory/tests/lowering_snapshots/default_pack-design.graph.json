@@ -208,9 +208,16 @@
       "model": "",
       "prompt_template": "Write the artifact `{{name}}` so that it is complete and runnable.\n\nBrief: {{brief}}\nIt will be checked by running: {{check}}\n\n## The design\nRead the approved design from `design.md` in the run directory.\n\n## What went wrong last time\n{{validation}}\n\n## What the reviews refused\n{{qa_gate}}\n{{overwatch_review}}\n\nAcceptance baseline: the original brief, any approved design, and explicit user steering. Preserve user-approved non-goals. A README limitation, proposed exclusion, coordinator summary or reviewer note cannot waive a requested behavior without explicit user agreement to that change. Report conflicts instead of silently narrowing scope. Reviews must mark observed noncompliance as BLOCKING even when the limitation is documented.\n\n## Your workspace\nYour workspace is a prepared clone of the last attempt, with its dependencies installed and its setup and generate commands run; its path is in the execution block above. Make the change there. `git diff HEAD` there shows what you changed since the last attempt; the run's base commit is {{base}}.\nRun there, as often as you need, the tests your change touches: the test files you changed or added, and the tests that import the modules you changed. Run the brief's own example or CLI path there too. They run there as they run in the check.\nDo not run the full suite yourself: the check runs it for you after you answer.\nWrap commands that might hang in `timeout` (for example, `timeout -k 5s 5m pytest ...`); DSH workspace shell commands are killed after at most 10 minutes.\nWhen you are done, stop: the workspace's diff is your answer. The runtime turns it into the next attempt, which the check and the reviews then judge. Return a short completion message.\nWhen you updated an existing test because the brief or a correction changes what it pins, end the message with one line: `Updated tests: <test id> (follows <the ask or correction>), ...`.\n\n## Before you stop\n- For each correction made at the design gate and each ask in the brief, find the test that proves it and run it in your workspace.\n- Then revert that change in the workspace and run the same test again: it must fail. If it still passes, the test does not prove the change: fix the test, then restore the change and run the test once more.\n- A correction counts as met only if a test fails without it. The reviewers check this.\n- Avoid a test that calls the helper under test instead of driving the real path the brief names, test inputs nothing uses (such as a verdict list nothing consumes), and assertions on results the test built by hand.\n",
       "tools": [],
-      "timeout": null,
+      "timeout": 1800,
       "max_iterations": 1,
       "post_checks": [],
+      "retry": {
+        "on": [
+          "timeout"
+        ],
+        "times": 1,
+        "timeout_factor": 2
+      },
       "workspace": {
         "kind": "clone",
         "of": "attempt",
@@ -1126,6 +1133,7 @@
     "judge_rereads": 1.0,
     "self_check_fixups": 2.0,
     "self_check_timeout_s": 300.0,
+    "builder_timeout_s": 1800.0,
     "refine_design": "light",
     "target": "",
     "base": "",
@@ -1270,6 +1278,17 @@
       "values": [],
       "frozen": false,
       "description": "how long the self-check's tests may run before the reviews; never more than a third of check_timeout_s",
+      "required": false
+    },
+    "builder_timeout_s": {
+      "default": 1800,
+      "kind": "int",
+      "lo": 60,
+      "hi": 7200,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "how long the builder's model session may run before timeout; its retry doubles this",
       "required": false
     },
     "refine_design": {

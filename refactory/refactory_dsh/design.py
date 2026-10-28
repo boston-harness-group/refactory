@@ -24,12 +24,11 @@ from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
 
 OPS = "refactory_dsh.design_ops"
 
-#: The verifier's recovery (`Node.retry`): a session that times out is run once more,
+#: The timeout recovery rule (`Node.retry`): a session that times out is run once more,
 #: fresh, with twice its `timeout_s`. Remote-factory's CEO did this by judgment; here it
-#: is the graph's rule, on both runtimes. Only the verifier declares it: across about
-#: 1,900 lab sessions of design's other agents there were no timeouts, so a node is
-#: added when it is seen to time out. A node that declares it writes only its own report
-#: files (`outputs_only`); the builder (`emit`) never can until agent workspaces.
+#: is the graph's rule, on both runtimes. Both the verifier and the builder declare it.
+#: The verifier uses `outputs_only`; the builder uses its workspace, which provides the
+#: same isolation: each attempt gets a fresh workspace via `workspace.dispatched(fresh=True)`.
 TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 
 #: Design mode's verifier runs beside the check, in the review fork.
@@ -363,6 +362,11 @@ class DesignMode(Mode):
                 300, "int", lo=10, hi=600,
                 description="how long the self-check's tests may run before the reviews; "
                             "never more than a third of check_timeout_s",
+            ),
+            "builder_timeout_s": Knob(
+                1800, "int", lo=60, hi=7200, frozen=True,
+                description="how long the builder's model session may run before "
+                            "timeout; its retry doubles this",
             ),
             "refine_design": Knob(
                 "light", "str", values=("light", "full"), frozen=True,
@@ -736,6 +740,9 @@ class DesignMode(Mode):
             produces=("emit",),
             feedback_keys=("validation", "qa_gate", "overwatch_review"),
             workspace=dict(BUILDER_WORKSPACE),
+            timeout_s=self.values().get("builder_timeout_s", 1800),
+            retry=TIMEOUT_RETRY,
+            knobs=("builder_timeout_s",),
             notes="make the change in a clone of the last attempt; its diff is the emission",
         ))
         graph.add(repo_change.materialise_node(

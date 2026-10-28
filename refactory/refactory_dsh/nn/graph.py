@@ -334,17 +334,20 @@ class Node:
                 raise GraphError(
                     f"node {self.id!r} declares a retry but no timeout_s: a retry's limit is "
                     "its timeout_factor times the node's own bound, so the node needs one")
-            if not self.outputs_only:
+            if not self.outputs_only and self.workspace is None:
                 # A node that may change the run's worktree or the target cannot simply
                 # run again: the second session would start from what the first left.
-                # Agent workspaces (#516) make such a node retryable by giving each
-                # attempt a fresh workspace; until then it declares no retry.
+                # A node with a workspace is safe: each attempt gets a fresh workspace
+                # via workspace.dispatched(fresh=True), which discards the previous one.
+                # A clone and a scratch folder both keep an attempt's writes inside the
+                # workspace until collect, and collect runs only after the session
+                # returns, so a timed-out attempt contributes nothing.
                 raise GraphError(
                     f"node {self.id!r} declares a retry but may change shared state (the "
                     "run's worktree or the target), so a second session would start from "
                     "whatever the first one left. Only a node whose outputs are its own "
-                    "declared report files may retry: declare outputs_only=True if that is "
-                    "all it changes, or give it a workspace once agent workspaces land")
+                    "declared report files may retry: declare outputs_only=True or give "
+                    "it a workspace")
         if self.workspace is not None:
             try:
                 self.workspace = workspace_declaration(self.workspace)
