@@ -1329,6 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
                 project=project_root(),
                 knobs=knobs,
                 model_context=walker_context(client),
+                omit_steering=getattr(args, 'omit_steering', False),
             )
 
             # Persist up-front verdicts as run-scoped ledger entries.

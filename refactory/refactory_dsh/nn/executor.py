@@ -1260,14 +1260,24 @@ class Executor:
                 else None)
 
         prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
+        system = render(node.system_prompt_template, self.ctx) if node.system_prompt_template else ""
+        # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.
+        if system:
+            from refactory_dsh.workers import capabilities as _caps
+            backend = route.get("worker_backend", "dsh")
+            if backend in ('dsh', 'codex', 'claude_code', 'openshell') and not _caps(backend).get("system_prompt"):
+                raise ValueError(
+                    f"agent node {node.id!r} has a system prompt, but the {backend!r} "
+                    "route does not support a system-prompt channel"
+                )
         if self.ctx.budget is not None and not callable(getattr(client, "with_budget", None)):
             self.ctx.budget.require_usage_capability(False)
 
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                return _ask_model(attempt, sent, system="", workdir=self.ctx.workdir)
-            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system="")
+                return _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
 
         output, _receipt = deliver(
             self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),

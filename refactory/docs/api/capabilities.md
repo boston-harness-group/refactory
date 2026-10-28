@@ -4435,9 +4435,10 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         ],
         "progress": "lifecycle",
         "provider_selection": false,
-        "reasoning_effort": false,
+        "reasoning_effort": true,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": true,
         "usage": false,
         "user_questions": false
       },
@@ -4458,6 +4459,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "reasoning_effort": false,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": false,
         "usage": false,
         "user_questions": false
       },
@@ -4475,6 +4477,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "reasoning_effort": true,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": true,
         "usage": true,
         "user_questions": false
       },
@@ -4492,6 +4495,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "reasoning_effort": false,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": false,
         "usage": false,
         "user_questions": false
       }
@@ -4559,7 +4563,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
     }
   },
   "purpose": "Inspect effective project worker routing and provenance. Configure refactory.workers.json, CLI or panel; this read-only action never changes workers or the CEO model.",
-  "reviewed_schema": "b14acef6de973e2c4e6244be0cc28031c2b5c7bdf892858f06ad94acc024dc8e"
+  "reviewed_schema": "9924e23a8f60541ec940d87409bdb1ca1db6e32546c0a0eff696d163225f80a4"
 }
 ```
 
@@ -4808,6 +4812,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "positional": false,
       "required": false,
       "type": "object"
+    },
+    "omit_steering": {
+      "default": false,
+      "description": "omit the steering ledger from agent prompts (benchmark runs); gate routing, correction audits and overwatch enforcement still apply",
+      "flags": [
+        "--omit-steering"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
     },
     "permission_mode": {
       "default": "",
@@ -5077,7 +5092,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "c15be6ad5cf100457ed6fcc98d0c766748e2c20d4a31c9f2b8015c86c1d1ccdc"
+  "reviewed_schema": "fefb28cd8b637915329c68d8d817790f72a76862b6ead493cfec65e539b6ad81"
 }
 ```
 

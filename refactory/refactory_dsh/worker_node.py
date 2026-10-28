@@ -126,10 +126,21 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
             route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None)
 
+    system = render(spec.get('system_prompt', ''), context)
+    # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.
+    if system:
+        from refactory_dsh.workers import capabilities as _caps
+        backend = client.route().get('worker_backend', 'dsh')
+        if not _caps(backend).get('system_prompt'):
+            raise ValueError(
+                f"worker node {node!r} has a system prompt, but the {backend!r} "
+                "route does not support a system-prompt channel"
+            )
+
     def ask(attempt, sent, place):
         if place is None:
-            return attempt.complete(sent, workdir=workdir)
-        return workspaces.ask(place, attempt, sent, workdir=workdir)
+            return attempt.complete(sent, workdir=workdir, system=system)
+        return workspaces.ask(place, attempt, sent, workdir=workdir, system=system)
 
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback),

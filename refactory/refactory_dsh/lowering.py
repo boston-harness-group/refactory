@@ -264,6 +264,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 **common,
                 role=role,
                 prompt_template=node.prompt_template,
+                **({"system_prompt": node.system_prompt_template} if node.system_prompt_template else {}),
                 tools=list(node.tools),
                 max_iterations=node.max_iterations,
                 # The node's model-session wall: `workers.lower_workflow` gives the

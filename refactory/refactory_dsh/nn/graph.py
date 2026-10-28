@@ -163,6 +163,7 @@ _NODE_FIELDS = frozenset(
         "retry",
         "outputs_only",
         "workspace",
+        "system_prompt_template",
     }
 )
 
@@ -197,6 +198,9 @@ class Node:
     writes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     prompt_template: str = ""
+    #: Optional system-prompt template for agent nodes, rendered with knobs/facts.
+    #: Distinct from notes and the user prompt.
+    system_prompt_template: str = ""
     role: str = "ceo"
     tools: tuple[str, ...] = ()
     max_iterations: int = 1
@@ -382,6 +386,7 @@ class Node:
             "writes": list(self.writes),
             "produces": list(self.produces),
             "prompt_template": self.prompt_template,
+            **({"system_prompt_template": self.system_prompt_template} if self.system_prompt_template else {}),
             "role": self.role,
             **({"resource_role": self.resource_role} if self.resource_role is not None else {}),
             "tools": list(self.tools),
@@ -426,6 +431,7 @@ class Node:
             writes=tuple(state.get("writes") or ()),
             produces=tuple(state.get("produces") or ()),
             prompt_template=str(state.get("prompt_template", "")),
+            system_prompt_template=str(state.get("system_prompt_template", "")),
             role=str(state.get("role", "ceo")),
             resource_role=state.get("resource_role"),
             tools=tuple(state.get("tools") or ()),

@@ -129,6 +129,7 @@ def edit(config: EditConfig, client: Any = None, *, enable_recovery: bool = Fals
             project=project_root(),
             knobs=list(config.knobs),
             model_context=walker_context(client),
+            omit_steering=getattr(config, 'omit_steering', False),
         )
 
         # Persist up-front verdicts as run-scoped ledger entries.

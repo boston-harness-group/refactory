@@ -71,6 +71,7 @@ class AgentNode(Node):
     role: AgentRole
     model: str = ""
     prompt_template: str = ""
+    system_prompt: str = ""
     tools: list[str] = Field(default_factory=list)
     timeout: int | None = None
     max_iterations: int = 1
@@ -219,6 +220,8 @@ class Workflow(BaseModel):
                 d.pop("retry")
             if "workspace" in d and d["workspace"] is None:
                 d.pop("workspace")
+            if not d.get("system_prompt"):
+                d.pop("system_prompt", None)
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

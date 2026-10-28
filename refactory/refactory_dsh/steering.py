@@ -610,7 +610,9 @@ def for_run(workflow: Any, workdir: Path) -> Any:
     walker have to carry the same ledger; annotating in one path only is a
     difference between the runtimes that nothing would report.
     """
-    workflow = annotate(workflow, Ledger(workdir))
+    from refactory_dsh.run_preparation import saved_run_config
+    if not saved_run_config(workdir).get("omit_steering"):
+        workflow = annotate(workflow, Ledger(workdir))
     # Inject the design probe fact reference into the structurally identified writer.
     for nid in design_probe_steps(workflow):
         node = workflow.nodes[nid]

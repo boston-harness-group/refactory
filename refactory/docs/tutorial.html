@@ -265,9 +265,10 @@
                                       [--source PATH]
                                       [--source-format {,directory,jsonl,csv}]
                                       [--timeout TIMEOUT] [--headless]
-                                      [--data-node] [--input NAME]
-                                      [--sample NAME=VALUE] [--task TASK_REF]
-                                      [--single] [--resume RUN_DIR]
+                                      [--omit-steering] [--data-node]
+                                      [--input NAME] [--sample NAME=VALUE]
+                                      [--task TASK_REF] [--single]
+                                      [--resume RUN_DIR]
                                       [--acknowledge-failure]
                                       [--smoke-timeout SMOKE_TIMEOUT_S]
 
@@ -369,6 +370,9 @@ options:
                         exit, for scripts and CI; without it a spine run is
                         live and a line you type between turns reaches the
                         CEO. The walker always runs this way
+  --omit-steering       omit the steering ledger from agent prompts (benchmark
+                        runs); gate routing, correction audits and overwatch
+                        enforcement still apply
   --data-node           build the package as a DataNode that runs its subgraph
                         once per item; naming a Task implies this, so it is
                         only for a caller that wants to be explicit
