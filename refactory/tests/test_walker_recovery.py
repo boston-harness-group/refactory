@@ -698,12 +698,12 @@ def test_successful_child_run_exits_its_interpreter(tmp_path):
                 pass
 
 
-def test_worker_crash_is_unknown_and_does_not_replay_side_effects(tmp_path):
+def test_op_crash_is_unknown_and_does_not_replay_side_effects(tmp_path):
     graph = nn.Graph()
     graph.add(nn.Node("crash", "op", call="walker_recovery_ops:crash_after_side_effect"))
     result = nn.execute(graph, tmp_path, enable_recovery=True)
     assert not result.exit_ok
-    assert "worker exited before reporting its outcome" in result.error
+    assert "child exited before reporting its outcome" in result.error
     assert (tmp_path / "crash-count").read_text() == "1"
     progress = json.loads((tmp_path / ".refactory/progress.json").read_text())
     assert progress["outcome"] == "unknown"
