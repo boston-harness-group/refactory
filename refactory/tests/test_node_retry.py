@@ -453,6 +453,17 @@ def test_a_node_that_may_change_shared_state_cannot_declare_a_retry():
          workspace={"kind": "scratch", "collect": "files"})
 
 
+@pytest.mark.parametrize("workspace", [{"kind": "none"}, {}, "none"])
+def test_a_workspace_that_means_none_is_not_isolation(workspace):
+    """The guard reads the workspace in canonical form: a declaration that means "no
+    workspace" is not a fresh attempt, so a retry on it is refused like any other node
+    that may change shared state. Canonicalising below the guard instead lets the raw
+    dict through and the retry is wrongly accepted."""
+    with pytest.raises(GraphError, match="may change shared state"):
+        Node("emit", "agent", prompt_template="Build it.", writes=("emit.txt",),
+             timeout_s=60, retry=RULE, workspace=workspace)
+
+
 def test_design_mode_retries_its_builder_and_verifier():
     from refactory_dsh.design import DesignMode, TIMEOUT_RETRY
 
