@@ -736,3 +736,34 @@ def test_timeout_kills_term_resistant_descendant_after_leader_exits(tmp_path):
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_child_uses_the_callers_actual_memory_roots(tmp_path):
+    from refactory_dsh.memory import MemoryStore
+    roots = {scope: tmp_path / ("chosen-" + scope) for scope in ("run", "project", "global")}
+    memory = MemoryStore([nn.Memory(scope, "log", scope) for scope in roots],
+                         run_root=roots["run"], project_root=roots["project"],
+                         global_root=roots["global"])
+    graph = nn.Graph()
+    graph.add(nn.Node("remember", "op", call="walker_recovery_ops:write_declared_memories",
+                      produces=("memory_pid",)))
+    result = nn.execute(graph, tmp_path / "execution", memory=memory, enable_recovery=True)
+    assert result.exit_ok, result.error
+    assert result.facts["memory_pid"] != os.getpid()
+    for scope in roots:
+        assert memory.path(scope).is_relative_to(roots[scope])
+        assert memory.read(scope) == [{"pid": result.facts["memory_pid"]}]
+
+
+def test_child_preserves_iteration_verdicts_task_and_write_policy(tmp_path):
+    graph = nn.Graph()
+    for name in ("first", "second"):
+        graph.add(nn.Node(name, "op", call="walker_recovery_ops:record_parent_context",
+                          writes=("allowed.txt",), produces=(name, "context_flags")))
+    graph.connect("first", "second")
+    ctx = nn.RunContext(tmp_path, verdicts={"approval": "proceed"}, task={}, enforce_writes=False)
+    result = nn.Executor(graph, ctx, enable_recovery=True).run()
+    assert result.exit_ok, result.error
+    assert result.facts["first"] == 0 and result.facts["second"] == 1
+    assert result.facts["context_flags"] == {
+        "verdicts": {"approval": "proceed"}, "task": {}, "enforce_writes": False}

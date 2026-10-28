@@ -144,3 +144,16 @@ def hang_with_term_resistant_descendant(ctx):
     while not path.exists():
         time.sleep(0.01)
     threading.Event().wait()
+
+
+def write_declared_memories(ctx):
+    import os
+    for name in ctx.memory.namespaces():
+        ctx.memory.append(name, {"pid": os.getpid()})
+    return {"memory_pid": os.getpid()}
+
+
+def record_parent_context(ctx):
+    ctx.write_text("extra.txt", "permitted by parent policy")
+    return {ctx.node_id: ctx.iteration, "context_flags": {
+        "verdicts": ctx.verdicts, "task": ctx.task, "enforce_writes": ctx.enforce_writes}}

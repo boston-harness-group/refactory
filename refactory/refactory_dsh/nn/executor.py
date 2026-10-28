@@ -503,7 +503,12 @@ def _op_worker_loop(conn: Any) -> None:
         importlib.invalidate_caches()
 
         try:
-            from refactory_dsh.run import build_op_context
+            from refactory_dsh.budgets import ENV_LEDGER, RunBudget
+            ledger = args_dict.get("budget_ledger")
+            if ledger is None:
+                os.environ.pop(ENV_LEDGER, None)
+            else:
+                os.environ[ENV_LEDGER] = ledger
 
             model: Any = None
             model_info = args_dict.get("model_info")
@@ -520,13 +525,14 @@ def _op_worker_loop(conn: Any) -> None:
                             raise RuntimeError("model.complete() called in child process")
                     model = _StandIn()
 
-            ctx = build_op_context(
-                Path(args_dict["workdir"]),
-                args_dict["node_id"],
-                knobs=args_dict.get("knobs"),
-                facts=args_dict.get("facts"),
-                task=args_dict.get("task"),
+            ctx = RunContext(
+                Path(args_dict["workdir"]), knobs=args_dict["knobs"],
+                facts=args_dict["facts"], task=args_dict["task"],
+                memory=args_dict["memory"],
+                verdicts=args_dict["verdicts"], enforce_writes=args_dict["enforce_writes"],
             )
+            ctx.node_id = args_dict["node_id"]
+            ctx.iteration = args_dict["iteration"]
             ctx._declared = tuple(args_dict.get("writes", ()))
             ctx._declared_reads = tuple(args_dict.get("reads", ()))
             ctx._declared_facts = tuple(args_dict.get("produces", ()))
@@ -538,9 +544,7 @@ def _op_worker_loop(conn: Any) -> None:
                 ctx.model = model
 
             budget_ledger = args_dict.get("budget_ledger")
-            if budget_ledger:
-                from refactory_dsh.budgets import RunBudget
-                ctx.budget = RunBudget.from_path(budget_ledger)
+            ctx.budget = RunBudget.from_path(budget_ledger) if budget_ledger else None
 
             fn = resolve(args_dict["callable_target"])
             result = fn(ctx)
@@ -1152,6 +1156,10 @@ class Executor:
             "reads": tuple(node.reads),
             "produces": tuple(node.produces),
             "model_info": model_info,
+            "memory": self.ctx.memory,
+            "iteration": self.ctx.iteration,
+            "verdicts": dict(self.ctx.verdicts),
+            "enforce_writes": self.ctx.enforce_writes,
         }
         # Forward the budget ledger path so the child process can open the
         # same shared RunBudget file (dm-173 / PC-2).
