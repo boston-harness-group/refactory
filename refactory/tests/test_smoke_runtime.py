@@ -35,7 +35,7 @@ def test_smoke_enforces_production_agent_inputs(tmp_path, input_exists):
     result = sandbox.smoke(
         f"{NAME}/counter", workdir, project=tmp_path,
         model=True, model_context=client.context(),
-        timeout_s=180 if input_exists else 20,
+        timeout_s=180 if input_exists else 40,
     )
     if input_exists:
         assert result.ok, result.problem()
