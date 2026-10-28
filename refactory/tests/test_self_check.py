@@ -2049,22 +2049,21 @@ def test_empty_diff_check_skipped_when_head_equals_base(tmp_path, monkeypatch):
     assert records[-1]["outcome"] not in ("empty_diff_fixup", "exhausted")
 
 
-def test_rerun_with_zero_remaining_records_lower_bound(tmp_path, monkeypatch):
-    """When a not-found rerun has no time left (remaining_for_rerun < 1), a
-    timed_out timing entry is recorded and the chunk is cut.
-
-    Exercises the guard at failfast.py lines 296-305.  Removing those lines
-    lets the rerun proceed with nearly zero time — this test fails because
-    ``run_fn`` is called a second time."""
+def test_a_not_found_chunk_with_no_time_to_rerun_fails_loudly(tmp_path, monkeypatch):
+    """A chunk whose targeted command collected nothing proves nothing about its tests.
+    When the not-found ids leave no time to rerun, the self-check must fail loudly rather
+    than record a lower bound and pass: a silent pass hides a broken command or a
+    selection nothing matches, and it would let a parallel check verify nothing."""
     import time as _time
+
+    import pytest
+
     from refactory_dsh.sandbox import SandboxResult
 
-    exit4_output = "ERROR: not found: /abs/path/tests/test_x.py::test_gone\n"
-    exit4 = SandboxResult(ok=False, returncode=4, stdout=exit4_output, stderr="",
-                          timed_out=False, elapsed_s=9.5)
+    exit4 = SandboxResult(ok=False, returncode=4,
+                          stdout="ERROR: not found: /abs/path/tests/test_x.py::test_gone\n",
+                          stderr="", timed_out=False, elapsed_s=9.5)
 
-    # Force both items into one chunk so rest_of_chunk is non-empty after
-    # dropping the not-found id.
     monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
 
     calls = []
@@ -2077,20 +2076,15 @@ def test_rerun_with_zero_remaining_records_lower_bound(tmp_path, monkeypatch):
 
     def run_fn(cmd, timeout):
         calls.append(cmd)
-        elapsed[0] = 9.5  # simulate nearly the full 10 s limit consumed
+        elapsed[0] = 9.5  # nearly the whole 10 s limit already spent
         return exit4
 
-    prepass = failfast.targeted_prepass(
-        {}, CHECK, run_fn, 180,
-        selection=["tests/test_x.py::test_gone", "tests/test_x.py"],
-        self_check_timeout_s=10,
-    )
-    # run_fn was called once (the loop-level guard did not cut first).
-    assert len(calls) == 1
-    # The chunk was cut.
-    assert prepass.cut_ids
-    # The note specifically mentions "no time left for a rerun".
-    assert any("no time left" in n for n in prepass.notes)
+    with pytest.raises(RuntimeError, match="the targeted check ran no tests"):
+        failfast.targeted_prepass(
+            {"status": "fail"}, "pytest -q tests", run_fn, 10,
+            selection=["tests/test_x.py::test_gone", "tests/test_x.py::test_here"],
+            self_check_timeout_s=10)
+    assert len(calls) == 1, "no rerun is attempted, so the chunk's tests never run"
 
 
 def test_rerun_handles_module_import_error(tmp_path, monkeypatch):

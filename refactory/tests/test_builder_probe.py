@@ -1675,3 +1675,16 @@ def test_warm_probe_stale_clone_not_reused(tmp_path, monkeypatch):
         "stale clone should be evicted — the probe dir name must differ")
 
     sweep_warm_clones(run)
+
+
+def test_a_pytest_flag_keeps_its_value_when_the_targeted_command_is_built():
+    """`-n 4` is a flag and its value: dropping the 4 leaves `-n <test path>`, which runs
+    nothing — the self-check's chunked run then verifies nothing."""
+    from refactory_dsh.check_digest import _strip_pytest_positional_paths
+
+    assert _strip_pytest_positional_paths(
+        ".venv/bin/python -m pytest -q -n 4 refactory/tests") == \
+        ".venv/bin/python -m pytest -q -n 4"
+    assert _strip_pytest_positional_paths(
+        "pytest -q -p no:cacheprovider -k 'a or b' refactory/tests tests/x.py") == \
+        "pytest -q -p no:cacheprovider -k 'a or b'"

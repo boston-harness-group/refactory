@@ -484,3 +484,46 @@ class TestCreateFastEditFastUnchanged:
         result = json.loads((tmp_path / "run/create.json").read_text())
         assert result["fast"]["structural_admission"] == "passed"
         assert result["fast"]["canonical_smoke"] == "passed"
+
+
+def test_a_step_option_keeps_its_value_when_the_check_is_targeted():
+    """`-n 4`, `-k expr`, `-m mark`, `-p plugin` are option and value: stripping the value
+    leaves the option dangling, and the targeted run collects nothing."""
+    from refactory_dsh.check_digest import build_probe_command
+
+    command, refusal = build_probe_command(
+        ".venv/bin/python -m pytest -q -n 4 refactory/tests",
+        ["refactory/tests/test_a.py::test_one"])
+    assert refusal is None
+    assert "-n 4" in command, command
+    assert "refactory/tests/test_a.py::test_one" in command
+    assert command.count("refactory/tests") == 1, "the directory itself is still stripped"
+
+    command, refusal = build_probe_command('pytest -q -k "a or b" tests', ["tests/test_a.py::test_one"])
+    assert refusal is None
+    assert "-k 'a or b'" in command or '-k "a or b"' in command, command
+
+
+def test_a_targeted_check_that_collects_nothing_fails_loudly():
+    """pytest exits 5 when nothing is collected: the self-check proved nothing, so it must
+    raise rather than report a pass."""
+    import pytest
+
+    from refactory_dsh import failfast
+
+    class Result:
+        ok = False
+        returncode = 5
+        timed_out = False
+        prep_failure = None
+        stdout = "no tests ran in 0.01s\n"
+        stderr = ""
+
+    def runner(_command: str, _timeout: float) -> Result:
+        return Result()
+
+    with pytest.raises(RuntimeError, match="the targeted check ran no tests"):
+        failfast.targeted_prepass(
+            {"status": "fail"}, "pytest -q refactory/tests", runner, 60,
+            selection=["refactory/tests/test_a.py::test_one"],
+            self_check_timeout_s=30)

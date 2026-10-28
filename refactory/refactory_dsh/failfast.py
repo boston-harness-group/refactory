@@ -55,6 +55,9 @@ class PrepassResult:
     cut_ids: list[str] = field(default_factory=list)  # not started, or killed by the limit
     failing_ids: list[str] = field(default_factory=list)  # failed, and not inherited
     commands: list[str] = field(default_factory=list)  # one per chunk that ran
+    #: Chunks whose targeted command collected no test at all (pytest exit 4 or 5). The
+    #: self-check proves nothing about them, so it must not pass quietly.
+    ran_nothing: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # why a chunk did not count
     limit_s: float = 0.0
     elapsed_s: float = 0.0
@@ -235,6 +238,7 @@ def _self_check(
     cut: list[str] = []
     failing: list[str] = []
     commands: list[str] = []
+    ran_nothing: list[str] = []
     notes: list[str] = []
     failed_outputs: list[str] = []
     timings: list[dict[str, Any]] = []
@@ -313,6 +317,8 @@ def _self_check(
                         notes.append(f"chunk {number}: dropped not-found ids "
                                      f"{sorted(dropped)}, but no time left for a rerun")
                         notes.append(f"chunk {number} did not count: {why_not}")
+                        if "collected no test" in why_not:
+                            ran_nothing.append(command)
                         continue
                     if rest_of_chunk:
                         ids2 = [name for name in rest_of_chunk if "::" in name or " > " in name]
@@ -362,6 +368,8 @@ def _self_check(
                                  f"{sorted(dropped)}, nothing left after dropping")
             cut.extend(chunk)
             notes.append(f"chunk {number} did not count: {why_not}")
+            if "collected no test" in why_not:
+                ran_nothing.append(command)
             continue
         for test_id in sorted(found):
             if test_id not in failing:
@@ -390,7 +398,7 @@ def _self_check(
         check_mode="targeted" if failing else "full", result=last,
         digest_text=digest_text, runners=runners, raw_tail=raw_tail,
         selection=list(selection), ran_ids=ran, cut_ids=cut, failing_ids=failing,
-        commands=commands, notes=notes, limit_s=limit_s,
+        commands=commands, notes=notes, limit_s=limit_s, ran_nothing=ran_nothing,
         elapsed_s=round(time.monotonic() - started, 1),
         outputs=failed_outputs, left_out=sorted(inherited), timings=timings,
     )
@@ -479,8 +487,19 @@ def targeted_prepass(
             return _skip()
         limit = self_check_limit(300 if self_check_timeout_s is None else self_check_timeout_s,
                                  check_timeout_s)
-        return _self_check(selection, prev_record, check_command, run_check_fn, limit, root,
-                           alone)
+        result = _self_check(selection, prev_record, check_command, run_check_fn, limit, root,
+                             alone)
+        if result.ran_nothing:
+            # A chunked self-check whose targeted command collected no test proves nothing,
+            # so it must not count as a pass: pytest exits 4 or 5 in exactly that case, and
+            # a silent pass here hides a broken command or a selection nothing matches.
+            raise RuntimeError(
+                "the targeted check ran no tests: "
+                + result.ran_nothing[0]
+                + f" (pytest collected nothing; the self-check cannot report on {len(result.ran_nothing)} "
+                  "chunk(s)). Check that the check command's options survived, and that the "
+                  "selected tests exist.")
+        return result
 
     # 1. Skip when previous record is not a failure.
     if prev_record.get("status") != "fail":
