@@ -2049,21 +2049,16 @@ def test_empty_diff_check_skipped_when_head_equals_base(tmp_path, monkeypatch):
     assert records[-1]["outcome"] not in ("empty_diff_fixup", "exhausted")
 
 
-def test_a_not_found_chunk_with_no_time_to_rerun_fails_loudly(tmp_path, monkeypatch):
-    """A chunk whose targeted command collected nothing proves nothing about its tests.
-    When the not-found ids leave no time to rerun, the self-check must fail loudly rather
-    than record a lower bound and pass: a silent pass hides a broken command or a
-    selection nothing matches, and it would let a parallel check verify nothing."""
+def test_a_not_found_chunk_with_no_time_to_rerun_is_recorded(tmp_path, monkeypatch):
+    """A chunk whose ids a rename removed collects nothing and cannot rerun: it is recorded
+    as having verified nothing (not a pass), and no second run is attempted."""
     import time as _time
-
-    import pytest
 
     from refactory_dsh.sandbox import SandboxResult
 
     exit4 = SandboxResult(ok=False, returncode=4,
                           stdout="ERROR: not found: /abs/path/tests/test_x.py::test_gone\n",
                           stderr="", timed_out=False, elapsed_s=9.5)
-
     monkeypatch.setattr(failfast, "SELF_CHECK_CHUNKS", 1)
 
     calls = []
@@ -2076,16 +2071,16 @@ def test_a_not_found_chunk_with_no_time_to_rerun_fails_loudly(tmp_path, monkeypa
 
     def run_fn(cmd, timeout):
         calls.append(cmd)
-        elapsed[0] = 9.5  # nearly the whole 10 s limit already spent
+        elapsed[0] = 9.5
         return exit4
 
-    with pytest.raises(RuntimeError, match="the targeted check ran no tests"):
-        failfast.targeted_prepass(
-            {"status": "fail"}, "pytest -q tests", run_fn, 10,
-            selection=["tests/test_x.py::test_gone", "tests/test_x.py::test_here"],
-            self_check_timeout_s=10)
+    result = failfast.targeted_prepass(
+        {"status": "fail"}, "pytest -q tests", run_fn, 10,
+        selection=["tests/test_x.py::test_gone", "tests/test_x.py::test_here"],
+        self_check_timeout_s=10)
     assert len(calls) == 1, "no rerun is attempted, so the chunk's tests never run"
-
+    assert result.ran_nothing, "the self-check says it verified nothing"
+    assert not result.broken_command, "a renamed id is not a broken command"
 
 def test_rerun_handles_module_import_error(tmp_path, monkeypatch):
     """When the rerun's output contains ``_INTERRUPTED``, broken modules are in ran

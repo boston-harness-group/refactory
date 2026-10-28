@@ -55,9 +55,12 @@ class PrepassResult:
     cut_ids: list[str] = field(default_factory=list)  # not started, or killed by the limit
     failing_ids: list[str] = field(default_factory=list)  # failed, and not inherited
     commands: list[str] = field(default_factory=list)  # one per chunk that ran
-    #: Chunks whose targeted command collected no test at all (pytest exit 4 or 5). The
-    #: self-check proves nothing about them, so it must not pass quietly.
+    #: Chunks whose targeted command collected no test at all (pytest exit 4 or 5): the
+    #: self-check proves nothing about them, so the record says so rather than a pass.
     ran_nothing: list[str] = field(default_factory=list)
+    #: Chunks whose command pytest could not parse at all (exit 4 with no not-found id):
+    #: a broken command is a harness fault, and the self-check stops instead of pretending.
+    broken_command: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # why a chunk did not count
     limit_s: float = 0.0
     elapsed_s: float = 0.0
@@ -239,6 +242,7 @@ def _self_check(
     failing: list[str] = []
     commands: list[str] = []
     ran_nothing: list[str] = []
+    broken_command: list[str] = []
     notes: list[str] = []
     failed_outputs: list[str] = []
     timings: list[dict[str, Any]] = []
@@ -366,10 +370,17 @@ def _self_check(
                     # Nothing left after dropping not-found ids, or couldn't target.
                     notes.append(f"chunk {number}: dropped not-found ids "
                                  f"{sorted(dropped)}, nothing left after dropping")
+                    ran_nothing.append(command)
             cut.extend(chunk)
             notes.append(f"chunk {number} did not count: {why_not}")
             if "collected no test" in why_not:
-                ran_nothing.append(command)
+                # Exit 4 with no not-found id is a command pytest cannot parse: a harness
+                # fault, not a selection that matched nothing (exit 5, or ids a rename
+                # removed, are recorded and go on to the whole check).
+                if "exit 4" in why_not:
+                    broken_command.append(command)
+                else:
+                    ran_nothing.append(command)
             continue
         for test_id in sorted(found):
             if test_id not in failing:
@@ -399,6 +410,7 @@ def _self_check(
         digest_text=digest_text, runners=runners, raw_tail=raw_tail,
         selection=list(selection), ran_ids=ran, cut_ids=cut, failing_ids=failing,
         commands=commands, notes=notes, limit_s=limit_s, ran_nothing=ran_nothing,
+        broken_command=broken_command,
         elapsed_s=round(time.monotonic() - started, 1),
         outputs=failed_outputs, left_out=sorted(inherited), timings=timings,
     )
@@ -489,16 +501,14 @@ def targeted_prepass(
                                  check_timeout_s)
         result = _self_check(selection, prev_record, check_command, run_check_fn, limit, root,
                              alone)
-        if result.ran_nothing:
-            # A chunked self-check whose targeted command collected no test proves nothing,
-            # so it must not count as a pass: pytest exits 4 or 5 in exactly that case, and
-            # a silent pass here hides a broken command or a selection nothing matches.
+        if result.broken_command:
+            # pytest could not parse the targeted command, so no test could run. The command
+            # is the harness's, and a self-check that cannot run is a fault, not a verdict.
             raise RuntimeError(
                 "the targeted check ran no tests: "
-                + result.ran_nothing[0]
-                + f" (pytest collected nothing; the self-check cannot report on {len(result.ran_nothing)} "
-                  "chunk(s)). Check that the check command's options survived, and that the "
-                  "selected tests exist.")
+                + result.broken_command[0]
+                + " (pytest could not parse it, exit 4). The check command's options were not "
+                  "carried into the targeted one, so this self-check could not run at all.")
         return result
 
     # 1. Skip when previous record is not a failure.
