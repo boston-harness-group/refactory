@@ -1140,5 +1140,7 @@ def test_the_contract_tells_the_builder_which_files_it_must_not_edit():
         ["emit.txt"])
     assert "docs.md" in said
     assert "generate command builds" in said
-    assert "change their sources instead" in said
-    assert "do not run the generate command yourself" in said
+    assert "change the sources they are built from" in said
+    assert "You may run the generate command to test" in said, (
+        "running it is how a builder tests docs; only its output is not carried")
+    assert "not carried" in said
