@@ -75,6 +75,8 @@ WORKSPACE_BRIEFING = (
     "changed or added, and the tests that import the modules you changed. Run the brief's "
     "own example or CLI path there too. They run there as they run in the check.\n"
     "Do not run the full suite yourself: the check runs it for you after you answer.\n"
+    "Wrap commands that might hang in `timeout` (for example, `timeout -k 5s 5m pytest ...`); "
+    "DSH workspace shell commands are killed after at most 10 minutes.\n"
     "When you are done, stop: the workspace's diff is your answer. The runtime turns it "
     "into the next attempt, which the check and the reviews then judge. Return a short "
     "completion message.\n"

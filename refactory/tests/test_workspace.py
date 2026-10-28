@@ -168,6 +168,12 @@ def test_a_scratch_solver_works_in_a_new_empty_folder_and_its_answer_is_collecte
     assert sorted(policy["workspaceRoot"] for policy in policies) == sorted([first["cwd"], second["cwd"]])
     assert {policy["mode"] for policy in policies} == {"workspace-write"}
     assert all({"id": "approval", "config": {"policy": "never"}} in rows for rows in patches)
+    for rows in patches:
+        assert {"id": "bash-sandbox", "config": {
+            "timeoutMs": 600_000, "maxTimeoutMs": 600_000}} in rows
+        assert {"id": "tool-bash", "config": {
+            "enableRunInBackground": False, "promoteOnTimeout": False}} in rows
+
 
 
 def test_without_a_working_sandbox_a_workspace_with_a_shell_is_refused_unless_chosen(tmp_path, monkeypatch, capsys):

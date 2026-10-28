@@ -23,6 +23,8 @@ SKIP_PERMISSIONS = {'codex': 'dangerously-bypass-approvals-and-sandbox',
                     'claude_code': 'bypassPermissions'}
 PACKAGES = {'codex': '@deepseek-ai/dsh-subagent-codex',
             'claude_code': '@deepseek-ai/dsh-subagent-claude-code'}
+WORKSPACE_COMMAND_TIMEOUT_MS = 600_000
+
 OPENCODE_PROVIDER = 'opencode-go'
 OPENCODE_API_KEY_ENV = 'OPENCODE_API_KEY'
 OPENCODE_SESSION_HEADER = 'x-opencode-session'
@@ -195,6 +197,16 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     rows.extend(permission_patch(route, workspace_root=workspace_root))
     if tool_home is not None:
         rows.append({'id': 'shell-env', 'config': {'dshHome': str(tool_home)}})
+        if route['worker_backend'] in ('dsh', 'openshell'):
+            # DSH otherwise promotes expired commands to unbounded background jobs.
+            # Apply to workspace tools only, not the spine's whole-node executor.
+            rows.extend([
+                {'id': 'bash-sandbox', 'config': {
+                    'timeoutMs': WORKSPACE_COMMAND_TIMEOUT_MS,
+                    'maxTimeoutMs': WORKSPACE_COMMAND_TIMEOUT_MS}},
+                {'id': 'tool-bash', 'config': {
+                    'enableRunInBackground': False, 'promoteOnTimeout': False}},
+            ])
     rows.extend(provider_rows(route, provider_config))
     inner_backend = route['worker_backend']
     if inner_backend == 'openshell':
