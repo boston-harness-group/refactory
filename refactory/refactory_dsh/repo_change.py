@@ -1087,7 +1087,9 @@ def _warn_if_shared_changed(found: worktree.Worktree, when: str) -> None:
 
 
 def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], home: Path, timeout: float,
-                     budget: Any, *, amend: bool = True) -> tuple[worktree.Worktree, list[str], dict[str, Any] | None]:
+                     budget: Any, *, amend: bool = True,
+                     generate_edits: list[str] | None = None,
+                     ) -> tuple[worktree.Worktree, list[str], dict[str, Any] | None]:
     """Run the run's generate command, then its setup command, in a prepared worktree.
 
     Generated files are inputs to what setup builds and checks, so generate comes first.
@@ -1095,6 +1097,8 @@ def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], ho
     amended into the attempt; without it (the base worktree base_check runs), the
     rewrite stays local. Returns the worktree, at its new head when amended, the
     problems that stop the check, and the prep-failure dict of the first failing step.
+    ``generate_edits``, when given, receives the tracked files the generate command
+    rewrote: the run's own output, never the agent's change (`workspace.derive_emission`).
     """
     problems: list[str] = []
     prep_fail: dict[str, Any] | None = None
@@ -1113,9 +1117,11 @@ def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], ho
             if crashed_gen and gen_rc is not None and gen_rc > 0:
                 gen_rc = -(gen_rc - 128)
             prep_fail = {"step": generate, "returncode": gen_rc, "timed_out": prepared.timed_out}
-        elif amend:
+        else:
             edits = worktree.tracked_edits(found)
-            if edits:
+            if generate_edits is not None:
+                generate_edits[:] = list(edits)
+            if amend and edits:
                 found = worktree.amend(found, ctx.workdir, edits, "files written by the generate command")
     setup = str(ctx.facts.get("setup") or "").strip()
     if not problems and setup:
@@ -1146,6 +1152,7 @@ def prepare_check_environment(
     timeout: float,
     budget: Any = None,
     record: Path | None = None,
+    generate_edits: list[str] | None = None,
 ) -> tuple[worktree.Worktree, dict[str, str], list[str], dict[str, Any] | None]:
     """Install dependencies, build check environment, run generate/setup.
 
@@ -1167,7 +1174,7 @@ def prepare_check_environment(
         # Build a minimal context proxy for prepare_commands
         _ctx = _PrepCtx(facts, workdir=run)
         found, problems, cmd_fail = prepare_commands(
-            _ctx, found, env, home, timeout, budget, amend=amend,
+            _ctx, found, env, home, timeout, budget, amend=amend, generate_edits=generate_edits,
         )
         if cmd_fail:
             prep_fail = cmd_fail
