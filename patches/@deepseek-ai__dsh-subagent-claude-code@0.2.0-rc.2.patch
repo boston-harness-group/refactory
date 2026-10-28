@@ -1,11 +1,11 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305..57ba531 100644
+index 9efd305..7f615d3 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -231,15 +231,30 @@ function successfulResult(message) {
-  * @param onResult - records that the SDK supplied a terminal result message.
-  * @returns the completed shared result.
-  */
+ * @param onResult - records that the SDK supplied a terminal result message.
+ * @returns the completed shared result.
+ */
 -async function consumeClaudeQuery(query, onPermissionDenied, onResult) {
 +async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata) {
  	let answer;
@@ -34,8 +34,9 @@ index 9efd305..57ba531 100644
  		answer = successfulResult(message);
  	}
  	if (answer === void 0) throw new ClaudeCodeFailure({
-@@ -309,7 +324,15 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
-  */
+@@ -295,7 +310,9 @@ async function disposeClaudeCodeChild(query, child) {
+ * @returns options that inherit native settings while disabling persistence and user questions.
+ */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
 -	return {
 +	const _rfSystemText = (spec.env && spec.env.REFACTORY_SYSTEM_PROMPT) || "";
@@ -44,10 +45,7 @@ index 9efd305..57ba531 100644
  		abortController: controller,
  		cwd: spec.cwd,
  		...spec.model === void 0 ? {} : { model: spec.model },
-@@ -339,8 +362,15 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
- 		supportedDialogKinds: SUPPORTED_UNATTENDED_DIALOG_KINDS,
- 		spawnClaudeCodeProcess: (options) => {
- 			const child = spec.spawn(claudeSpawnSpec(options, spec.disposeGraceMs));
+@@ -327,8 +344,15 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -62,7 +60,9 @@ index 9efd305..57ba531 100644
 +	}
 +	return options;
  }
-@@ -434,7 +464,7 @@ async function startClaudeCodeRun(request, spec) {
+ /**
+ * Start one official Claude Agent SDK query and publish its one-shot run.
+@@ -434,7 +458,7 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -71,7 +71,7 @@ index 9efd305..57ba531 100644
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -529,6 +559,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +553,9 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

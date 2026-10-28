@@ -348,4 +348,6 @@ def interactive_options(args: argparse.Namespace) -> list[str]:
             forwarded += ["--" + key.replace("_", "-"), json.dumps(value)]
     if args.headless:
         forwarded += ["--headless"]
+    if getattr(args, "omit_steering", False):
+        forwarded += ["--omit-steering"]
     return forwarded

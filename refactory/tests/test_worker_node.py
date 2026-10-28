@@ -47,7 +47,7 @@ def test_feedback_file_prepends_heading_to_prompt(tmp_path):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             captured_prompt.append(prompt)
             return "done"
         def context(self):
@@ -137,7 +137,7 @@ def test_end_to_end_drain_feedback_reaches_real_worker(tmp_path):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             recorded_prompts.append(prompt)
             return "done"
         def context(self):
@@ -256,7 +256,7 @@ def test_gate_reloop_reason_reaches_reloop_target_prompt(tmp_path):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             recorded_prompts.append(prompt)
             return "done"
         def context(self):
@@ -331,7 +331,7 @@ def test_no_feedback_file_leaves_prompt_unchanged(tmp_path):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             captured_prompt.append(prompt)
             return "done"
         def context(self):
@@ -397,7 +397,7 @@ def _run_worker(tmp_path, spec, *, prompt: str, feedback: str | None = None):
             roles.append(role)
             return self
 
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             return "done"
 
         def context(self):

@@ -53,6 +53,7 @@ EXTENSION_FIELDS: frozenset[str] = frozenset({
     "split",
     "subgraph_entry",
     "subgraph_exit",
+    "system_prompt",
     "workspace",
 })
 

@@ -73,8 +73,8 @@ def test_saved_and_nested_contexts_ignore_later_project_and_environment(tmp_path
 
 @pytest.mark.parametrize('settings, match', [
     ({'worker_backend': 'missing'}, 'unknown worker backend'),
-    ({'worker_backend': 'codex', 'provider': 'openai'}, 'provider/effort'),
-    ({'worker_backend': 'claude_code', 'effort': 'high'}, 'provider/effort'),
+    ({'worker_backend': 'codex', 'provider': 'openai'}, 'provider'),
+    ({'worker_backend': 'codex', 'effort': 'high'}, 'effort'),
     ({'worker_backend': 'codex', 'permission_mode': 'acceptEdits'}, 'permission'),
     ({'model': 42}, 'strings'), ({'api_key': 'not-a-real-key'}, 'unknown routing fields'),
     ({'node_routes': {'emit': []}}, 'overrides must be objects'),

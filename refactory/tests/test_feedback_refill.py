@@ -264,7 +264,7 @@ def test_digest_present_after_redo(tmp_path, monkeypatch):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             captured_prompt.append(prompt)
             p = Path(workdir) if workdir else run
             (p / "emit.txt").write_text("===FILE: tool.py===\nprint(1)\n")
@@ -332,7 +332,7 @@ def test_unfilled_feedback_key_refuses_dispatch(tmp_path, monkeypatch):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             return "done"
         def context(self):
             return {"provider": "test", "model": "test"}
@@ -475,7 +475,7 @@ def test_worker_refill_without_spec_keys(tmp_path, monkeypatch):
             pass
         def for_node(self, node, **kw):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             captured_prompt.append(prompt)
             p = Path(workdir) if workdir else run
             (p / "emit.txt").write_text("===FILE: tool.py===\nprint(1)\n")
