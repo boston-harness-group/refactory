@@ -169,13 +169,12 @@ def test_omit_steering_through_walker_evaluator_path(tmp_path):
     # Prepare a run directory with omit_steering and a ledger
     run_dir = tmp_path / "walker_eval_run"
     run_dir.mkdir()
-    _write_run_config(run_dir, omit=True)
     _write_ledger(run_dir)
     (run_dir / "out.txt").write_text("")
 
     # Exercise through WalkerEvaluator.evaluate() — the real outer-loop path
     from refactory_dsh.evaluators import WalkerEvaluator
-    evaluator = WalkerEvaluator(model=FakeClient(), project=tmp_path)
+    evaluator = WalkerEvaluator(model=FakeClient(), project=tmp_path, omit_steering=True)
     result = evaluator.evaluate(mode, mode.state_dict(), run_dir)
 
     assert result.exit_ok, result.error
