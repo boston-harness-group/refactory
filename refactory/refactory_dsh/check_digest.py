@@ -302,7 +302,7 @@ _PYTEST_VALUE_OPTIONS = frozenset({
     "--junitxml", "--junit-xml", "--deselect", "--ignore", "--ignore-glob",
     "--import-mode", "--confcutdir", "--basetemp", "--cov", "--cov-report",
     "--override-ini", "--color", "--capture", "--log-level", "--log-file",
-    "--log-cli-level", "--log-format",
+    "--log-cli-level", "--log-format", "--assert",
 })
 
 
