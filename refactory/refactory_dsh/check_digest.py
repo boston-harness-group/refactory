@@ -297,12 +297,12 @@ def format_digest(digest: CheckDigest) -> str:
 #: A flag missing here whose value happens to name a path would lose the value and
 #: leave the flag dangling (`-n 4` became `-n refactory/tests/...` once).
 _PYTEST_VALUE_OPTIONS = frozenset({
-    "-n", "-k", "-m", "-p", "-o", "-W", "-c", "-r", "-A",
+    "-n", "-k", "-m", "-p", "-o", "-W", "-c", "-r",
     "--dist", "--maxfail", "--durations", "--timeout", "--tb", "--rootdir",
     "--junitxml", "--junit-xml", "--deselect", "--ignore", "--ignore-glob",
     "--import-mode", "--confcutdir", "--basetemp", "--cov", "--cov-report",
     "--override-ini", "--color", "--capture", "--log-level", "--log-file",
-    "--log-cli-level", "--log-format", "--assert", "--strict-markers",
+    "--log-cli-level", "--log-format",
 })
 
 
