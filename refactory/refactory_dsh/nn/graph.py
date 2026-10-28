@@ -323,6 +323,17 @@ class Node:
             if rewritten:
                 raise GraphError(f"node {self.id!r} declares outputs_only but reads what it "
                                  f"writes ({rewritten}): its outputs are not its own reports")
+        if self.workspace is not None:
+            try:
+                self.workspace = workspace_declaration(self.workspace)
+            except ValueError as exc:
+                raise GraphError(f"node {self.id!r}: {exc}") from exc
+            if self.workspace is not None and self.kind != "agent":
+                raise GraphError(f"node {self.id!r} is not an agent but declares a workspace")
+            if self.workspace is not None and self.workspace["collect"] == "diff" and not self.writes:
+                raise GraphError(f"node {self.id!r} collects its workspace's diff, which is written "
+                                 "into its first declared write, and it declares none")
+
         if self.retry is not None:
             if self.kind != "agent":
                 raise GraphError(f"node {self.id!r} is not an agent but declares a retry")
@@ -341,24 +352,15 @@ class Node:
                 # via workspace.dispatched(fresh=True), which discards the previous one.
                 # A clone and a scratch folder both keep an attempt's writes inside the
                 # workspace until collect, and collect runs only after the session
-                # returns, so a timed-out attempt contributes nothing.
+                # returns, so a timed-out attempt contributes nothing. The declaration is
+                # canonical by here, so one that means "no workspace" is None and counts
+                # as none.
                 raise GraphError(
                     f"node {self.id!r} declares a retry but may change shared state (the "
                     "run's worktree or the target), so a second session would start from "
                     "whatever the first one left. Only a node whose outputs are its own "
                     "declared report files may retry: declare outputs_only=True or give "
                     "it a workspace")
-        if self.workspace is not None:
-            try:
-                self.workspace = workspace_declaration(self.workspace)
-            except ValueError as exc:
-                raise GraphError(f"node {self.id!r}: {exc}") from exc
-            if self.workspace is not None and self.kind != "agent":
-                raise GraphError(f"node {self.id!r} is not an agent but declares a workspace")
-            if self.workspace is not None and self.workspace["collect"] == "diff" and not self.writes:
-                raise GraphError(f"node {self.id!r} collects its workspace's diff, which is written "
-                                 "into its first declared write, and it declares none")
-
     @property
     def resource_phase(self) -> str | None:
         """Explicit resource scope, with the historical validator fallback."""

@@ -665,11 +665,13 @@ design-v2: a brief in, a checked software artifact out.
 | kind | name | signature |
 |---|---|---|
 | class | `DesignMode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
+| function | `builder_timeout` | `(values: 'dict[str, Any]') -> 'int'` |
 | function | `gate_self_check_iterations` | `(knobs: 'dict[str, Any]') -> 'int'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `prepare_check_iterations` | `(knobs: 'dict[str, Any]') -> 'int'` |
 
 - **`DesignMode`** — Design, emit and check a software artifact.
+- **`builder_timeout`** — The builder's session limit, from the knob a person may set.
 - **`gate_self_check_iterations`** — gate_self_check's iteration limit: one more than the most reloops and rereads it gives.
 - **`main`** — ``python -m refactory_dsh.design --name <n> --brief <text> --check <cmd>``.
 - **`prepare_check_iterations`** — prepare_check's iteration limit: one more than the most reloops its knobs allow.

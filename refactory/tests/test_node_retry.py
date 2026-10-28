@@ -588,12 +588,15 @@ def test_the_builder_knob_sets_its_timeout_and_both_runtimes_use_it(tmp_path):
     from refactory_dsh.design import DesignMode, TIMEOUT_RETRY
     from refactory_dsh.workspace import preparation_budget_s
 
+    # A person's knob, exactly as the run path applies it: the graph is built from the
+    # defaults and the state dict carries the override into both runtimes.
+    from refactory_dsh.interactive import with_knobs
     mode = DesignMode()
-    mode._knobs["builder_timeout_s"]["value"] = 600
-    graph = mode.build()
-    assert graph.nodes["emit"].timeout_s == 600
-    # Rebuild state_dict with the updated graph and knobs.
-    mode._graph_state = graph.to_state()
+    loaded = with_knobs(mode.state_dict(), ["builder_timeout_s=600"])
+    mode.load_state_dict(loaded)
+    assert mode.graph().nodes["emit"].timeout_s == 600
+    assert Graph.from_state(mode.state_dict()["graph"]).nodes["emit"].timeout_s == 600
+    graph = mode.graph()
     state = mode.state_dict()
     dsh = Scripted(tmp_path / "dsh", []).client()
     lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path / "run", dsh.context(),

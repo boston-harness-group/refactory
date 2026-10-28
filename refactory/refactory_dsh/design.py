@@ -31,6 +31,10 @@ OPS = "refactory_dsh.design_ops"
 #: same isolation: each attempt gets a fresh workspace via `workspace.dispatched(fresh=True)`.
 TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 
+#: The builder session limit before its retry: the model default (1800 s), and the
+#: `builder_timeout_s` knob overrides it for a run.
+BUILDER_TIMEOUT_S = 1800
+
 #: Design mode's verifier runs beside the check, in the review fork.
 BESIDE_CHECK_VERIFIER_NOTE = (
     "\n\n## The check runs beside this review\n"
@@ -295,6 +299,11 @@ def gate_self_check_iterations(knobs: dict[str, Any]) -> int:
     return (1 + int(knobs.get("judge_rereads", 1))) * prepare_check_iterations(knobs) + 1
 
 
+def builder_timeout(values: dict[str, Any]) -> int:
+    """The builder's session limit, from the knob a person may set."""
+    return int(values.get("builder_timeout_s") or BUILDER_TIMEOUT_S)
+
+
 class DesignMode(Mode):
     """Design, emit and check a software artifact.
 
@@ -387,6 +396,9 @@ class DesignMode(Mode):
         for name, limit in self._LIMITS.items():
             if name in graph.nodes:
                 graph.nodes[name].max_iterations = limit(self.values())
+        builder = graph.nodes.get("emit")
+        if builder is not None and builder.retry is not None:
+            builder.timeout_s = builder_timeout(self.values())
         return graph
 
     def state_dict(self) -> dict[str, Any]:
@@ -397,6 +409,9 @@ class DesignMode(Mode):
             node = state["graph"].get("nodes", {}).get(name)
             if node is not None:
                 node["max_iterations"] = limit(self.values())
+        node = state["graph"].get("nodes", {}).get("emit")
+        if node is not None and node.get("retry") is not None:
+            node["timeout_s"] = builder_timeout(self.values())
         return state
 
     def build(self) -> Graph:
@@ -744,7 +759,7 @@ class DesignMode(Mode):
             # candidate id; runs in flight at this commit cannot be resumed.  The
             # spine reservation for the builder roughly doubles (1800 + 3600 plus
             # overhead and preparation).
-            timeout_s=self.values().get("builder_timeout_s", 1800),
+            timeout_s=builder_timeout(self.values()),
             retry=TIMEOUT_RETRY,
             knobs=("builder_timeout_s",),
             notes="make the change in a clone of the last attempt; its diff is the emission",
