@@ -1,10 +1,9 @@
-/** The actual DSH overlay, system-prompt service, and pinned Claude SDK request boundary. */
+/** Real DSH system-prompt composition through AgentLoop to a scripted LLM adapter. */
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import vm from 'node:vm'
 
 const [root, requestPath] = process.argv.slice(2)
 const request = JSON.parse(readFileSync(requestPath, 'utf8'))
@@ -14,6 +13,11 @@ for (const key of ['REFACTORY_SYSTEM_PROMPT', 'REFACTORY_MODEL_EFFORT']) {
 }
 const project = createRequire(join(root, 'package.json'))
 const installed = createRequire(project.resolve('@deepseek-ai/dsh/package.json'))
+const packagePath = (prefix, packageName) => {
+  const folder = readdirSync(join(root, 'node_modules/.pnpm')).find(name => name.startsWith(prefix))
+  assert.ok(folder, `missing installed package ${prefix}`)
+  return join(root, 'node_modules/.pnpm', folder, 'node_modules', packageName)
+}
 const boot = await import(pathToFileURL(installed.resolve('@deepseek-ai/dsh-app-boot')).href)
 const base = join(dirname(installed.resolve('@deepseek-ai/dsh-base/package.json')), 'cordis.patch.yml')
 const headless = join(dirname(installed.resolve('@deepseek-ai/dsh-headless/package.json')), 'cordis.patch.yml')
@@ -21,58 +25,48 @@ const patch = JSON.parse(readFileSync(request.patch, 'utf8'))
 const entries = boot.composeEntries([boot.loadOverlayPatches('test-base', base),
   boot.loadOverlayPatches('test-headless', headless), patch])
 const systemRow = entries.find(row => row.id === 'refactory-system-prompt')
-const systemPromptRequire = createRequire(installed.resolve('@deepseek-ai/dsh-system-prompt/package.json'))
-const { Context } = systemPromptRequire('@deepseek-ai/cordis')
-const SystemPrompt = (await import(pathToFileURL(systemPromptRequire.resolve('@deepseek-ai/dsh-system-prompt')).href)).default
-const composition = new Context()
-await composition.plugin(SystemPrompt)
-if (systemRow) {
-  const systemPlugin = await import(pathToFileURL(systemRow.name).href)
-  systemPlugin.apply(composition)
-}
-const assembly = await composition.systemPrompt.assemble()
-const section = assembly.sections.find(item => item.name === 'refactory-node-system')
+assert.ok(systemRow, 'DSH overlay omitted the system-prompt composition plugin')
 
-const row = entries.find(item => item.id === 'refactory-external-worker')
-assert.ok(row, 'DSH overlay has no external worker provider')
-row.config = { ...row.config, env: {
-  REFACTORY_SYSTEM_PROMPT: section?.text || '',
-  REFACTORY_MODEL_EFFORT: request.env.REFACTORY_MODEL_EFFORT,
-} }
-const context = vm.createContext({ process, Buffer, AbortController, AbortSignal, setTimeout, clearTimeout,
-  setImmediate, clearImmediate, console })
-const resolve = createRequire(realpathSync(row.name))
-let sdkInput, queryCalls = 0, nativeSpawns = 0, registered
-const module = new vm.SourceTextModule(readFileSync(row.name, 'utf8'), {
-  context, identifier: row.name, initializeImportMeta(meta) { meta.url = pathToFileURL(row.name).href },
-})
-await module.link(async specifier => {
-  const exports = specifier === '@anthropic-ai/claude-agent-sdk'
-    ? { query(input) { queryCalls++; sdkInput = input; throw new Error('scripted SDK boundary') } }
-    : await import(specifier.startsWith('node:') ? specifier : pathToFileURL(resolve.resolve(specifier)).href)
-  const names = Object.keys(exports)
-  return new vm.SyntheticModule(names, function () {
-    for (const name of names) this.setExport(name, exports[name])
-  }, { context })
-})
-await module.evaluate()
-const native = module.namespace
-native.apply({
-  subagents: { registerProvider(value) { registered = value } },
-  logger: { warn() {} }, emit() {},
-  subprocess: { spawn() { nativeSpawns++; throw new Error('native process forbidden') } },
-}, native.Config(row.config))
-await assert.rejects(registered.start({
-  parent: { session: { id: 'system-prompt-test', header: { cwd: request.cwd } } },
-  prompt: [{ type: 'text', text: request.task }],
-  signal: new AbortController().signal,
-}), /query-start/)
-assert.equal(queryCalls, 1)
-assert.equal(nativeSpawns, 0)
-assert.equal(sdkInput.prompt, 'History: user asked to build')
-assert.equal(sdkInput.options.systemPrompt.type, 'preset')
-assert.equal(sdkInput.options.systemPrompt.preset, 'claude_code')
-assert.equal(sdkInput.options.systemPrompt.append, 'You are a Python expert')
-assert.equal(sdkInput.options.effort, 'medium')
-console.log(JSON.stringify({ prompt: sdkInput.prompt, systemPrompt: sdkInput.options.systemPrompt,
-  effort: sdkInput.options.effort, sections: assembly.sections.map(item => item.name) }))
+const systemPromptRequire = createRequire(installed.resolve('@deepseek-ai/dsh/package.json'))
+const { Context } = systemPromptRequire('@deepseek-ai/cordis')
+const testkit = await import(pathToFileURL(join(packagePath('@deepseek-ai+dsh-agent-loop-testkit@', '@deepseek-ai/dsh-agent-loop-testkit'), 'lib/index.js')).href)
+const llmPath = packagePath('@deepseek-ai+dsh-llm@', '@deepseek-ai/dsh-llm')
+const { LlmAdapter, createUserMessage } = await import(pathToFileURL(join(llmPath, 'lib/index.js')).href)
+const ctx = new Context()
+await testkit.mountAgentLoopTestDependencies(ctx)
+const systemPlugin = await import(pathToFileURL(systemRow.name).href)
+systemPlugin.apply(ctx)
+
+let finalRequest
+class ScriptedAdapter extends LlmAdapter {
+  providerInfo(provider) { return { id: provider, name: 'Scripted provider' } }
+  async listModels() { return [] }
+  async resolveModel(provider, model) { return { provider, id: model, name: model } }
+  async *stream(options) {
+    finalRequest = options
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'done' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter())
+const harness = await testkit.mountAgentLoopTestHarness(ctx)
+const handle = await harness.create('system-prompt-test', {
+  provider: 'scripted', model: 'scripted-model',
+}, { cwd: request.cwd })
+try {
+  handle.followup(createUserMessage({ content: [{ type: 'text', text: request.task }] }))
+  await handle.whenIdle()
+  assert.ok(finalRequest, 'no request reached the DSH LLM provider boundary')
+  const system = finalRequest.messages.find(message => message.role === 'system')
+  const user = finalRequest.messages.find(message => message.role === 'user')
+  assert.ok(system, 'DSH final provider request has no system message')
+  assert.ok(user, 'DSH final provider request has no user history')
+  assert.match(JSON.stringify(system.content), /You are a Python expert/)
+  assert.match(JSON.stringify(user.content), /History: user asked to build/)
+  console.log(JSON.stringify({ provider: finalRequest.provider, model: finalRequest.model,
+    messages: finalRequest.messages, sections: entries.map(entry => entry.id) }))
+} finally {
+  handle.cancel({ kind: "disposed" })
+}

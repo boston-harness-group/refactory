@@ -257,12 +257,12 @@ def test_system_prompt_plugin_injects_section():
 
 
 def test_dsh_composition_boot_system_channel(tmp_path):
-    """Run DSH overlay composition through a real SystemPrompt service and native request boundary.
+    """Run the real DSH system-prompt composition and AgentLoop to a scripted ordinary provider.
 
-    DshModelClient builds the worker patch and environment; app-boot composes the real
-    overlays, the inserted plugin contributes a section, and the installed Claude provider
-    reaches a scripted SDK query. The history prompt stays unchanged and no native process
-    or paid model call starts. Revert: workers.py write_patch(system_prompt), plugin, or adapter.
+    DshModelClient builds the worker patch; app-boot composes the real overlays, the inserted
+    plugin contributes a section, and a production AgentLoop request reaches a scripted LLM
+    adapter. The system payload and user history are both checked at that final boundary.
+    No paid model call starts. Revert: workers.py write_patch(system_prompt) or plugin.
     """
     from refactory_dsh.model import DshModelClient
 
@@ -271,7 +271,7 @@ def test_dsh_composition_boot_system_channel(tmp_path):
     receipt.write_text("{}")
     client = DshModelClient.__new__(DshModelClient)
     for attr, value in [
-        ("_provider", ""), ("_model", "claude-sonnet-4-5"), ("_worker_backend", "claude_code"),
+        ("_provider", "scripted"), ("_model", "scripted-model"), ("_worker_backend", "dsh"),
         ("_dsh_home", tmp_path / "dsh"), ("_runtime_root", root), ("_effort", "medium"),
         ("_dsh_cli", ""), ("_timeout_s", 300), ("_attempts", 1), ("_retry_window_s", 0),
         ("_backoff_s", None), ("_budget", None), ("_worker_receipt", receipt), ("_node_id", "build"),
@@ -285,7 +285,7 @@ def test_dsh_composition_boot_system_channel(tmp_path):
     boundary = tmp_path / "boundary.json"
     script = Path(__file__).with_name("system_prompt_composition_test.mjs")
 
-    def scripted_sdk(cmd, run_dir, stop_at=None, budget_s=None, task=None, target_workdir=None):
+    def scripted_provider(cmd, run_dir, stop_at=None, budget_s=None, task=None, target_workdir=None):
         patch_indexes = [index for index, value in enumerate(cmd) if value == "--patch"]
         patch = Path(cmd[patch_indexes[-1] + 1])
         env = client._environment()
@@ -302,16 +302,16 @@ def test_dsh_composition_boot_system_channel(tmp_path):
         assert result.returncode == 0, result.stderr
         return subprocess.CompletedProcess(cmd, 0, result.stdout, result.stderr)
 
-    client._run_completion = scripted_sdk
+    client._run_completion = scripted_provider
     result = client._complete(
         "History: user asked to build", system="You are a Python expert", workdir=tmp_path
     )
     observed = json.loads(result)
-    assert observed["prompt"] == "History: user asked to build"
-    assert observed["systemPrompt"] == {
-        "type": "preset", "preset": "claude_code", "append": "You are a Python expert"
-    }
-    assert observed["effort"] == "medium"
+    system = next(message for message in observed["messages"] if message["role"] == "system")
+    user = next(message for message in observed["messages"] if message["role"] == "user")
+    assert "You are a Python expert" in json.dumps(system["content"])
+    assert "History: user asked to build" in json.dumps(user["content"])
+    assert observed["provider"] == "scripted" and observed["model"] == "scripted-model"
 
 
 def test_claude_code_preset_preserved_with_system_text():
