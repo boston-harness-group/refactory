@@ -805,3 +805,60 @@ def test_a_first_run_choice_that_cannot_be_stored_is_a_refusal(tmp_path, fake_ds
     said = capsys.readouterr().err
     assert "fakeprov/fake-model could not be stored" in said and "could not be edited in place" in said
     assert fake_dsh.calls() == []
+
+
+# ── `refactory runtime` names the credential source it would use ──────────────
+
+_CREDENTIAL_SOURCES = (
+    "REFACTORY_MODEL_DSH_HOME", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL", "REFACTORY_MODEL_BASE_URL", "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
+)
+
+
+def _nested(capsys, project: Path, monkeypatch) -> dict:
+    for name in _CREDENTIAL_SOURCES:
+        monkeypatch.delenv(name, raising=False)
+    assert console.main(["runtime", "--project", str(project)]) == 0
+    return json.loads(capsys.readouterr().out)["nested"]
+
+
+def test_runtime_names_the_credential_store_it_would_use(project, capsys, monkeypatch):
+    """`authenticated: false` on a machine that runs models reads as a missing key: say
+    where the client finds its credential, by path, and never a value."""
+    store = Path(os.environ["DSH_HOME"]) / ".credentials.yaml"
+    store.unlink(missing_ok=True)
+
+    nested = _nested(capsys, project, monkeypatch)
+    assert nested["authenticated"] is False
+    assert nested["authenticated_source"] is None
+    assert str(store) in nested["authenticated_checked"]
+    assert "missing" in nested["message"].lower() or "unverified" in nested["message"].lower()
+
+    store.write_text("{}")
+    nested = _nested(capsys, project, monkeypatch)
+    # An empty store is a source, not a credential: the probe read it and refused.
+    assert nested["authenticated"] is False
+    assert nested["authenticated_source"].endswith(str(store))
+    assert "invalid" in nested["message"].lower()
+
+
+def test_runtime_names_a_vertex_or_base_url_route_without_printing_it(project, capsys, monkeypatch):
+    store = Path(os.environ["DSH_HOME"]) / ".credentials.yaml"
+    store.unlink(missing_ok=True)
+
+    nested = _nested(capsys, project, monkeypatch)
+    assert nested["authenticated"] is False
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8082")
+    assert console.main(["runtime", "--project", str(project)]) == 0
+    nested = json.loads(capsys.readouterr().out)["nested"]
+    assert nested["authenticated"] is True
+    assert nested["authenticated_source"] == "base-url proxy (ANTHROPIC_BASE_URL)"
+    assert "127.0.0.1" not in json.dumps(nested), "a URL is not a credential, but keep it out anyway"
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    assert console.main(["runtime", "--project", str(project)]) == 0
+    nested = json.loads(capsys.readouterr().out)["nested"]
+    assert nested["authenticated_source"] == "Vertex (CLAUDE_CODE_USE_VERTEX)"
