@@ -631,6 +631,8 @@ def smoke(
     client = (
         "from refactory_dsh.model import DshModelClient\n"
         "from refactory_dsh.dsh_runtime import evaluate_on_dsh\n"
+        "import os\n"
+        f"os.environ['REFACTORY_PROJECT'] = {str(project.resolve())!r}\n"
         if model
         else ""
     )
@@ -651,8 +653,6 @@ def smoke(
         "from refactory_dsh import registry\n"
         "from refactory_dsh.nn.edits import configure\n"
         f"{client}"
-        "import os\n"
-        f"os.environ['REFACTORY_PROJECT'] = {str(project.resolve())!r}\n"
         f"package, mode_class = registry.resolve(Path({str(project)!r}), {identifier!r})\n"
         "mode = mode_class()\n"
         f"overrides = {dict(knobs or {})!r}\n"
