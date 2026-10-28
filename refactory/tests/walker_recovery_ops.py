@@ -5,7 +5,9 @@ by name, so every callable must be a plain module-level function.
 """
 from __future__ import annotations
 
+import os
 import threading
+import time
 from typing import Any
 
 
@@ -95,3 +97,88 @@ def sandbox_sleep_op(ctx: Any) -> dict[str, Any]:
     pid_file = ctx.workdir / "_sleep_pid.txt"
     sandbox.run_command(f"echo $$ > {pid_file}; exec sleep 600", workdir=ctx.workdir, timeout_s=900)
     return {}
+
+
+def classified_succeed_op(ctx: Any) -> dict[str, Any]:
+    """An op that succeeds and produces check-like facts."""
+    return {"commit": "abc123", "files": [], "inherited_failures": [], "changed_functions": []}
+
+
+def budget_spend_op(ctx: Any) -> dict[str, Any]:
+    """Record usage through ctx.budget in a child process (dm-173 test)."""
+    ctx.budget.record_usage(str(ctx.workdir), 5)
+    return {"spent": True}
+
+
+def budget_snapshot_op(ctx: Any) -> dict[str, Any]:
+    """Return budget.snapshot() as a fact to prove it works in a child (dm-173 test)."""
+    snap = ctx.budget.snapshot()
+    return {"budget_snapshot": snap}
+
+
+def record_worker_pid(ctx):
+    import os
+    ctx.write_text("worker.pid", str(os.getpid()))
+    return {"done": True}
+
+
+def crash_after_side_effect(ctx):
+    import os
+    path = ctx.workdir / "crash-count"
+    count = int(path.read_text()) + 1 if path.exists() else 1
+    path.write_text(str(count))
+    if count == 1:
+        os._exit(17)
+    return {}
+
+
+def hang_with_term_resistant_descendant(ctx):
+    import subprocess
+    import sys
+    import time
+    path = ctx.workdir / "descendant.pid"
+    source = (
+        "import os,signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(path)!r}).write_text(str(os.getpid())); time.sleep(600)"
+    )
+    subprocess.Popen([sys.executable, "-c", source])
+    while not path.exists():
+        time.sleep(0.01)
+    threading.Event().wait()
+
+
+def write_declared_memories(ctx):
+    import os
+    for name in ctx.memory.namespaces():
+        ctx.memory.append(name, {"pid": os.getpid()})
+    return {"memory_pid": os.getpid()}
+
+
+def record_parent_context(ctx):
+    ctx.write_text("extra.txt", "permitted by parent policy")
+    return {ctx.node_id: ctx.iteration, "context_flags": {
+        "verdicts": ctx.verdicts, "task": ctx.task, "enforce_writes": ctx.enforce_writes}}
+
+
+_SEEN_IN_THIS_INTERPRETER: dict[str, int] = {}
+
+
+def mark_interpreter(ctx):
+    """Record that this interpreter has run an op. A reused child would remember."""
+    _SEEN_IN_THIS_INTERPRETER["marked"] = 1
+    ctx.write_text("mark.txt", str(os.getpid()))
+    return {"marked_pid": os.getpid()}
+
+
+def report_interpreter(ctx):
+    """Report whether this interpreter had already run an op of this graph."""
+    ctx.write_text("seen.txt", str(_SEEN_IN_THIS_INTERPRETER.get("marked", 0)))
+    return {"seen": _SEEN_IN_THIS_INTERPRETER.get("marked", 0)}
+
+
+def leave_a_thread_running(ctx):
+    """Return normally while a non-daemon thread keeps this interpreter alive."""
+    threading.Thread(target=lambda: time.sleep(120), daemon=False).start()
+    ctx.write_text("threaded.pid", str(os.getpid()))
+    return {"threaded_pid": os.getpid()}

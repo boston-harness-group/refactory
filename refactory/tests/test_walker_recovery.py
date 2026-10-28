@@ -23,6 +23,22 @@ import pytest
 from refactory_dsh import nn
 from refactory_dsh.nn.executor import OpTimeoutError
 
+@pytest.fixture(autouse=True)
+def bounded_recovery_test():
+    """An independent watchdog keeps reverted hang fixes from hanging pytest."""
+    import signal
+    previous = signal.getsignal(signal.SIGALRM)
+    def expired(_signum, _frame):
+        pytest.fail("recovery test exceeded its independent 30-second watchdog")
+    signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 30)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous)
+
+
 #: The run budget for the time-limit tests, in seconds. The walker clamps a check
 #: op's limit to the budget left (and never below 1 s), so this is the limit itself.
 SHORT_LIMIT_S = 1.0
@@ -416,3 +432,411 @@ def test_a_checks_own_tools_die_at_the_limit(tmp_path):
     else:
         os.kill(pid, 9)
         pytest.fail(f"the check's sleep (pid {pid}) outlived the op's time limit")
+
+
+# ---------------------------------------------------------------------------
+# dm-173 tests: default deadline for unclassified ops
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Test 13: a hung unclassified op times out with the 3600 s default
+# ---------------------------------------------------------------------------
+def test_unclassified_hung_op_times_out_with_default_deadline(tmp_path):
+    """An op with no CHECK_PRODUCES / check_timeout_s gets the default 3600 s
+    deadline, clamped by the budget.  Without the fix, it runs in-process with
+    no timeout and hangs indefinitely."""
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "unclass_hang", "op",
+        call="walker_recovery_ops:hanging_op",
+        produces=("never",),
+    ))
+
+    t0 = time.time()
+    result = nn.execute(
+        graph, tmp_path,
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": SHORT_LIMIT_S},
+    )
+    elapsed = time.time() - t0
+
+    assert result.exit_ok is False
+    assert "unclass_hang" in (result.error or "")
+    assert "timed out" in (result.error or "").lower()
+    # Should complete within a few seconds (budget clamps to ~1 s).
+    assert elapsed < 15, f"took {elapsed:.1f}s; expected budget clamp near {SHORT_LIMIT_S}s"
+
+
+# ---------------------------------------------------------------------------
+# Test 14: classified op still uses derived timeout, not the 3600 s default
+# ---------------------------------------------------------------------------
+def test_unclassified_op_uses_explicit_timeout_when_classified(tmp_path):
+    """An op that has check_timeout_s and CHECK_PRODUCES uses the derived
+    timeout, not the 3600 s default.  Pins existing behavior."""
+    from refactory_dsh.invocations import CHECK_PRODUCES
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "classified_op", "op",
+        call="walker_recovery_ops:classified_succeed_op",
+        produces=(*CHECK_PRODUCES,),
+        knobs=("check_timeout_s",),
+    ))
+
+    result = nn.execute(
+        graph, tmp_path,
+        knobs={"check_timeout_s": 10},
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": 30},
+    )
+    assert result.exit_ok is True, result.error
+
+
+# ---------------------------------------------------------------------------
+# Test 15: remaining budget clamps the default timeout
+# ---------------------------------------------------------------------------
+def test_remaining_budget_clamps_default_timeout(tmp_path):
+    """A hung unclassified op with a short budget times out at the budget
+    limit, not 3600 s.  Wall-clock must complete in under 5 s."""
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "clamped_hang", "op",
+        call="walker_recovery_ops:hanging_op",
+        produces=("never",),
+    ))
+
+    t0 = time.time()
+    result = nn.execute(
+        graph, tmp_path,
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": SHORT_LIMIT_S},
+    )
+    elapsed = time.time() - t0
+
+    assert result.exit_ok is False
+    assert "clamped_hang" in (result.error or "")
+    assert elapsed < 5, f"took {elapsed:.1f}s; budget should have clamped near {SHORT_LIMIT_S}s"
+
+
+# ---------------------------------------------------------------------------
+# Test 16: child process budget record_usage visible in parent
+# ---------------------------------------------------------------------------
+def test_child_process_budget_record_usage_visible_in_parent(tmp_path):
+    """An unclassified op in a fork branch calls ctx.budget.record_usage() in
+    a child process — the parent's budget must see the recorded tokens.
+    Without PC-2/PC-3, the child gets ctx.budget=None and record_usage raises.
+    Uses a fork branch so the op goes through the child-process path."""
+    graph = nn.Graph()
+    graph.add(nn.Node("f", "fork", targets=("spend_op",)))
+    graph.add(nn.Node(
+        "spend_op", "op",
+        call="walker_recovery_ops:budget_spend_op",
+        produces=("spent",),
+    ))
+    barrier = "j"
+    graph.add(nn.Node(barrier, "join", sources=("spend_op",)))
+    graph.connect("f", barrier)
+    graph.connect("spend_op", barrier)
+
+    result = nn.execute(
+        graph, tmp_path,
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": 30},
+    )
+    assert result.exit_ok is True, result.error
+    assert result.facts.get("spent") is True
+
+    from refactory_dsh.budgets import RunBudget
+    budget = RunBudget.from_path(tmp_path / ".refactory/resource-usage.json")
+    snap = budget.snapshot()
+    assert snap["known_tokens"] >= 5, f"expected >=5, got {snap['known_tokens']}"
+
+
+# ---------------------------------------------------------------------------
+# Test 17: child process budget snapshot works
+# ---------------------------------------------------------------------------
+def test_child_process_budget_snapshot_works(tmp_path):
+    """An unclassified op in a fork branch returns budget.snapshot() from the
+    child process.  Uses a fork branch so the op goes through the child-process
+    path and exercises budget forwarding."""
+    graph = nn.Graph()
+    graph.add(nn.Node("f", "fork", targets=("snap_op",)))
+    graph.add(nn.Node(
+        "snap_op", "op",
+        call="walker_recovery_ops:budget_snapshot_op",
+        produces=("budget_snapshot",),
+    ))
+    barrier = "j"
+    graph.add(nn.Node(barrier, "join", sources=("snap_op",)))
+    graph.connect("f", barrier)
+    graph.connect("snap_op", barrier)
+
+    result = nn.execute(
+        graph, tmp_path,
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": 30},
+    )
+    assert result.exit_ok is True, result.error
+    snap = result.facts.get("budget_snapshot")
+    assert isinstance(snap, dict), f"expected dict, got {type(snap)}"
+    assert "limits" in snap
+    assert "elapsed_s" in snap
+
+
+# ---------------------------------------------------------------------------
+# Test 18: fork branch unclassified hung op times out
+# ---------------------------------------------------------------------------
+def test_fork_branch_unclassified_hung_op_times_out(tmp_path):
+    """An unclassified hanging_op in a fork branch must time out."""
+    graph = nn.Graph()
+    graph.add(nn.Node("f", "fork", targets=("branch_unclass",)))
+    graph.add(nn.Node(
+        "branch_unclass", "op",
+        call="walker_recovery_ops:hanging_op",
+        produces=("never",),
+    ))
+    barrier = "j"
+    graph.add(nn.Node(barrier, "join", sources=("branch_unclass",)))
+    graph.connect("f", barrier)
+    graph.connect("branch_unclass", barrier)
+
+    t0 = time.time()
+    result = nn.execute(
+        graph, tmp_path,
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": SHORT_LIMIT_S},
+    )
+    elapsed = time.time() - t0
+
+    assert result.exit_ok is False
+    assert "branch_unclass" in (result.error or "")
+    assert "timed out" in (result.error or "").lower()
+    assert elapsed < 15
+
+
+# ---------------------------------------------------------------------------
+# Test 19: unclassified fn gate times out
+# ---------------------------------------------------------------------------
+def test_unclassified_fn_gate_times_out(tmp_path):
+    """An unclassified hanging fn gate (no check_timeout_s, no CHECK_PRODUCES)
+    gets the default timeout through _effective_timeout."""
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "unclass_gate", "gate", gate_kind="fn",
+        evaluator="walker_recovery_ops:hanging_gate",
+    ))
+    graph.add(nn.Node("after", "op",
+                       call="walker_recovery_ops:succeed_op",
+                       produces=("done",)))
+    graph.connect("unclass_gate", "after", condition="proceed")
+
+    t0 = time.time()
+    result = nn.execute(
+        graph, tmp_path,
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": SHORT_LIMIT_S},
+    )
+    elapsed = time.time() - t0
+
+    assert result.exit_ok is False
+    assert "unclass_gate" in (result.error or "")
+    assert "timed out" in (result.error or "").lower()
+    assert elapsed < 15
+
+
+# ---------------------------------------------------------------------------
+# Test 20: enable_recovery=False keeps unclassified ops in-process
+# ---------------------------------------------------------------------------
+def test_enable_recovery_false_unclassified_op_runs_in_process(tmp_path):
+    """With enable_recovery=False, unclassified ops run in-process without a
+    timeout.  Pins the opt-in semantics."""
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "simple_op", "op",
+        call="walker_recovery_ops:succeed_op",
+        produces=("done",),
+    ))
+
+    result = nn.execute(graph, tmp_path, enable_recovery=False)
+    assert result.exit_ok is True, result.error
+    assert result.facts.get("done") is True
+
+
+def test_successful_child_run_exits_its_interpreter(tmp_path):
+    import signal
+    import subprocess
+    import sys
+    script = tmp_path / "run_once.py"
+    work = tmp_path / "run"
+    script.write_text(
+        "from pathlib import Path\nfrom refactory_dsh import nn\n"
+        "if __name__ == '__main__':\n"
+        "    graph = nn.Graph()\n"
+        "    graph.add(nn.Node('work', 'op', call='walker_recovery_ops:record_worker_pid', "
+        "writes=('worker.pid',), produces=('done',)))\n"
+        f"    result = nn.execute(graph, Path({str(work)!r}), enable_recovery=True)\n"
+        "    assert result.exit_ok, result.error\n"
+        "    print('completed', flush=True)\n"
+    )
+    process = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True,
+                               env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                                   [str(Path(__file__).parent), os.environ.get("PYTHONPATH", "")])})
+    try:
+        out, err = process.communicate(timeout=15)
+        assert process.returncode == 0, err
+        assert "completed" in out
+        assert int((work / "worker.pid").read_text()) != process.pid
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        if (work / "worker.pid").exists():
+            try:
+                os.killpg(int((work / "worker.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_op_crash_is_unknown_and_does_not_replay_side_effects(tmp_path):
+    graph = nn.Graph()
+    graph.add(nn.Node("crash", "op", call="walker_recovery_ops:crash_after_side_effect"))
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert not result.exit_ok
+    assert "child exited before reporting its outcome" in result.error
+    assert (tmp_path / "crash-count").read_text() == "1"
+    progress = json.loads((tmp_path / ".refactory/progress.json").read_text())
+    assert progress["outcome"] == "unknown"
+
+
+def test_timeout_kills_term_resistant_descendant_after_leader_exits(tmp_path):
+    import signal
+    graph = nn.Graph()
+    graph.add(nn.Node("hang", "op", call="walker_recovery_ops:hang_with_term_resistant_descendant"))
+    pid = None
+    try:
+        result = nn.execute(graph, tmp_path, enable_recovery=True,
+                            resource_limits={"max_elapsed_s": 2})
+        assert not result.exit_ok and "timed out" in result.error
+        pid = int((tmp_path / "descendant.pid").read_text())
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+                stat = Path(f"/proc/{pid}/stat")
+                if stat.exists() and stat.read_text().rsplit(") ", 1)[1].split()[0] == "Z":
+                    break
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("TERM-resistant descendant outlived the op deadline")
+    finally:
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_child_uses_the_callers_actual_memory_roots(tmp_path):
+    from refactory_dsh.memory import MemoryStore
+    roots = {scope: tmp_path / ("chosen-" + scope) for scope in ("run", "project", "global")}
+    memory = MemoryStore([nn.Memory(scope, "log", scope) for scope in roots],
+                         run_root=roots["run"], project_root=roots["project"],
+                         global_root=roots["global"])
+    graph = nn.Graph()
+    graph.add(nn.Node("remember", "op", call="walker_recovery_ops:write_declared_memories",
+                      produces=("memory_pid",)))
+    result = nn.execute(graph, tmp_path / "execution", memory=memory, enable_recovery=True)
+    assert result.exit_ok, result.error
+    assert result.facts["memory_pid"] != os.getpid()
+    for scope in roots:
+        assert memory.path(scope).is_relative_to(roots[scope])
+        assert memory.read(scope) == [{"pid": result.facts["memory_pid"]}]
+
+
+def test_child_preserves_iteration_verdicts_task_and_write_policy(tmp_path):
+    graph = nn.Graph()
+    for name in ("first", "second"):
+        graph.add(nn.Node(name, "op", call="walker_recovery_ops:record_parent_context",
+                          writes=("allowed.txt",), produces=(name, "context_flags")))
+    graph.connect("first", "second")
+    ctx = nn.RunContext(tmp_path, verdicts={"approval": "proceed"}, task={}, enforce_writes=False)
+    result = nn.Executor(graph, ctx, enable_recovery=True).run()
+    assert result.exit_ok, result.error
+    assert result.facts["first"] == 0 and result.facts["second"] == 1
+    assert result.facts["context_flags"] == {
+        "verdicts": {"approval": "proceed"}, "task": {}, "enforce_writes": False}
+
+
+def test_each_op_runs_in_a_fresh_interpreter(tmp_path):
+    """One child per op: an op cannot see what an earlier op left in its interpreter.
+
+    A reused worker would report 1 here, because the first op's module state would
+    still be in the process that runs the second.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("mark", "op", call="walker_recovery_ops:mark_interpreter",
+                      writes=("mark.txt",), produces=("marked_pid",)))
+    graph.add(nn.Node("report", "op", call="walker_recovery_ops:report_interpreter",
+                      writes=("seen.txt",), produces=("seen",)))
+    graph.connect("mark", "report")
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok, result.error
+    assert result.facts["seen"] == 0
+    assert (tmp_path / "seen.txt").read_text() == "0"
+
+
+def test_the_op_child_is_gone_when_the_node_returns(tmp_path):
+    """No child outlives its node, even when the op leaves a thread behind.
+
+    A child still running here keeps multiprocessing's exit-time join waiting, so the
+    run would hang after the node that caused it (and the reviewer measured exactly
+    that at 40 s and counting).
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("threaded", "op", call="walker_recovery_ops:leave_a_thread_running",
+                      writes=("threaded.pid",), produces=("threaded_pid",)))
+    started = time.monotonic()
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok, result.error
+    assert time.monotonic() - started < 30, "the run waited for the op's thread"
+    pid = int(result.facts["threaded_pid"])
+    assert pid != os.getpid()
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        state = Path(f"/proc/{pid}/stat")
+        if state.exists() and state.read_text().rsplit(") ", 1)[1].split()[0] == "Z":
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, 9)
+        finally:
+            pytest.fail("the op's child outlived the node")
+
+
+def test_an_unclassified_op_gets_the_spines_default_deadline(tmp_path):
+    """An op outside every envelope is bounded at the spine's 3600 s, not left open.
+
+    Both shipped spine configurations pin commandTimeoutMs to 3600000; an op with no
+    deadline is the hang dm-173 is about.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
+                      writes=("seen.txt",), produces=("seen",)))
+    ctx = nn.RunContext(tmp_path)
+    executor = nn.Executor(graph, ctx, enable_recovery=True)
+    assert executor._effective_timeout(graph.nodes["plain"]) == 3600.0
+
+
+def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
+    """Without recovery the walker runs ops in process, as before."""
+    graph = nn.Graph()
+    graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
+                      writes=("seen.txt",), produces=("seen",)))
+    executor = nn.Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
+    assert executor._effective_timeout(graph.nodes["plain"]) is None

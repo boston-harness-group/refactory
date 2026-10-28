@@ -15,6 +15,7 @@ are.
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import multiprocessing
 import os
@@ -69,6 +70,10 @@ def _ensure_forkserver_preload(graph: Graph) -> None:
 
 class ExecutionError(RuntimeError):
     """A run could not be carried out."""
+
+
+class OpOutcomeUnknown(ExecutionError):
+    """A child exited after dispatch without reporting its side effects."""
 
 
 class OpTimeoutError(RuntimeError):
@@ -465,74 +470,137 @@ PROGRESS = ".refactory/progress.json"
 
 
 def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
-    """Target function for the spawned child process running an op or fn gate."""
+    """Target for the child process that runs one op or fn gate, and then exits.
+
+    One child per call, so an op that crashes, hangs or leaves state behind cannot
+    affect the next one: the interpreter is the parent's as it is at this dispatch.
+    The parent kills the child's whole process group at the node's deadline.
+    """
     os.setsid()
 
     def _sigterm_handler(signum: int, frame: Any) -> None:
         raise SystemExit(f"terminated by signal {signum}")
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
-    # Restore parent's sys.path so resolve() finds the same modules.
-    sys.path[:] = args_dict["sys_path"]
-
     try:
-        from refactory_dsh.run import build_op_context
+        # Restore the parent's sys.path so resolve() finds the same modules, and pick up
+        # a workspace package installed since the forkserver preloaded.
+        sys.path[:] = args_dict["sys_path"]
+        for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
+            pkg = importlib.import_module(pkg_name)
+            pkg.__path__ = list(pkg_paths)
+        importlib.invalidate_caches()
 
-        model: Any = None
-        model_info = args_dict.get("model_info")
-        if model_info:
-            kind = model_info.get("kind")
-            if kind == "dsh":
-                from refactory_dsh.model import DshModelClient
-                model = DshModelClient(**model_info["context"])
-            elif kind is not None:
-                # Stand-in for non-DSH clients: not None so prepare/create_ops
-                # skip readiness, and every method raises so nothing silently proceeds.
-                class _StandIn:
-                    def __getattr__(self, name: str) -> Any:
-                        raise RuntimeError(f"model.{name}() called in child process")
-                    def complete(self, *a: Any, **kw: Any) -> str:
-                        raise RuntimeError("model.complete() called in child process")
-                model = _StandIn()
+        try:
+            from refactory_dsh.budgets import ENV_LEDGER, RunBudget
 
-        ctx = build_op_context(
-            Path(args_dict["workdir"]),
-            args_dict["node_id"],
-            knobs=args_dict.get("knobs"),
-            facts=args_dict.get("facts"),
-            task=args_dict.get("task"),
-        )
-        # Override declarations with the node's own (not from disk).
-        ctx._declared = tuple(args_dict.get("writes", ()))
-        ctx._declared_reads = tuple(args_dict.get("reads", ()))
-        ctx._declared_facts = tuple(args_dict.get("produces", ()))
+            ledger = args_dict.get("budget_ledger")
+            if ledger is None:
+                os.environ.pop(ENV_LEDGER, None)
+            else:
+                os.environ[ENV_LEDGER] = ledger
 
-        # Set model AFTER context creation so RunBudget.inherited sees None,
-        # not the stand-in.  The stand-in is only for ops that check ctx.model.
-        model_info_2 = args_dict.get("model_info")
-        if model_info_2 and model_info_2.get("kind") == "other":
-            ctx.model = model
-        elif model is not None:
-            ctx.model = model
+            model: Any = None
+            model_info = args_dict.get("model_info")
+            if model_info:
+                kind = model_info.get("kind")
+                if kind == "dsh":
+                    from refactory_dsh.model import DshModelClient
+                    model = DshModelClient(**model_info["context"])
+                elif kind is not None:
+                    # Stand-in for non-DSH clients: not None so prepare/create_ops
+                    # skip readiness, and every method raises so nothing silently proceeds.
+                    class _StandIn:
+                        def __getattr__(self, name: str) -> Any:
+                            raise RuntimeError(f"model.{name}() called in child process")
+                        def complete(self, *a: Any, **kw: Any) -> str:
+                            raise RuntimeError("model.complete() called in child process")
+                    model = _StandIn()
 
-        fn = resolve(args_dict["callable_target"])
-        result = fn(ctx)
+            ctx = RunContext(
+                Path(args_dict["workdir"]), knobs=args_dict["knobs"],
+                facts=args_dict["facts"], task=args_dict["task"],
+                memory=args_dict["memory"],
+                verdicts=args_dict["verdicts"], enforce_writes=args_dict["enforce_writes"],
+            )
+            ctx.node_id = args_dict["node_id"]
+            ctx.iteration = args_dict["iteration"]
+            ctx._declared = tuple(args_dict.get("writes", ()))
+            ctx._declared_reads = tuple(args_dict.get("reads", ()))
+            ctx._declared_facts = tuple(args_dict.get("produces", ()))
 
-        conn.send(("ok", {
-            "result": result,
-            "facts": dict(ctx.facts),
-            "writes_made": list(ctx.writes_made),
-            "_produced": list(ctx._produced),
-        }))
-    except BaseException as exc:
-        conn.send(("error", {
-            "type": type(exc).__qualname__,
-            "module": type(exc).__module__,
-            "message": str(exc),
-            "traceback": "".join(traceback_mod.format_exception(exc)),
-        }))
+            if model is not None:
+                ctx.model = model
+            # Open the same shared ledger the parent holds, so an op that records usage
+            # is charged once, in this run (dm-173).
+            ctx.budget = RunBudget.from_path(ledger) if ledger else None
+
+            fn = resolve(args_dict["callable_target"])
+            result = fn(ctx)
+
+            conn.send(("ok", {
+                "result": result,
+                "facts": dict(ctx.facts),
+                "writes_made": list(ctx.writes_made),
+                "_produced": list(ctx._produced),
+            }))
+        except SystemExit:
+            raise  # propagate SIGTERM
+        except BaseException as exc:
+            conn.send(("error", {
+                "type": type(exc).__qualname__,
+                "module": type(exc).__module__,
+                "message": str(exc),
+                "traceback": "".join(traceback_mod.format_exception(exc)),
+            }))
     finally:
         conn.close()
+
+
+def _finish_op_child(child: Any) -> None:
+    """Reap a child that has reported, killing it if it is still there.
+
+    An op that returns with a non-daemon thread still running keeps its child alive,
+    and multiprocessing joins every child at interpreter exit: the run would hang after
+    the node that caused it. So a child that outlives its grace is killed like a
+    timed-out one.
+    """
+    child.join(timeout=1)
+    if child.is_alive():
+        _kill_op_child(child)
+
+
+def _kill_op_child(child: Any) -> None:
+    """Stop one op's process group: terminate, grace, then kill whatever is left.
+
+    The grace waits on the group rather than on the child: polling the child would reap
+    the leader, freeing its pid, and the kill below names the group by that pid.
+    """
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        try:
+            child.terminate()
+        except OSError:
+            pass
+    grace_until = time.monotonic() + 5
+    while time.monotonic() < grace_until:
+        try:
+            os.killpg(child.pid, 0)  # the group is still there, and so is its id
+        except OSError:
+            break
+        time.sleep(0.05)
+    # The leader may have exited on TERM while a descendant ignored it: kill the group
+    # anyway, before the join that would free the pid.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        if child.is_alive():
+            try:
+                child.kill()
+            except OSError:
+                pass
+    child.join(timeout=5)
 
 
 @dataclass
@@ -782,7 +850,7 @@ class Executor:
                     self._record(node.id, error=error, outcome="failed")
                 else:
                     unknown = self._outcome == "running" and (
-                        isinstance(exc, (BudgetExhausted, CancelledError, subprocess.TimeoutExpired))
+                        isinstance(exc, (BudgetExhausted, CancelledError, subprocess.TimeoutExpired, OpOutcomeUnknown))
                         or "timed out" in str(exc).lower()
                     )
                     self._record(node.id, error=error,
@@ -923,7 +991,7 @@ class Executor:
             return self._visit(node)
         except BudgetExhausted:
             raise
-        except OpTimeoutError:
+        except (OpTimeoutError, OpOutcomeUnknown):
             raise
         except Exception:
             from refactory_dsh.run import BuildLoopStop
@@ -948,7 +1016,29 @@ class Executor:
 
     # ── effective timeout ──────────────────────────────────────────────────
     def _effective_timeout(self, node: Node) -> float | None:
-        """Derive per-op timeout from the shared formula and clamp to budget."""
+        """Derive per-op timeout from the shared formula and clamp to budget.
+
+        When ``enable_recovery`` is ``True``, every op and fn gate receives a
+        deadline.  Classified ops (smoke, check, deliver) use the shared timeout
+        formula from ``lowering.command_timeout_s()``.  Unclassified ops receive
+        a 3600-second default, as both shipped spine configurations set
+        (``packages/bundle/refactory/presets/ceo.patch.yml`` and
+        ``packages/bundle/graph/cordis.patch.yml`` each pin
+        ``commandTimeoutMs: 3600000``; the ``600_000`` in the spine's schema is only
+        its fallback when nothing configures one).  All
+        deadlines are clamped to the remaining run wall budget
+        (``budget.remaining_s()``) with a 1-second floor.
+
+        An op that exceeds its deadline is killed (SIGTERM → 5 s grace → SIGKILL
+        on its process group) and raises ``OpTimeoutError`` with the node id and
+        deadline.  Timeouts are never silently retried.
+
+        Limitation: fcntl file locking has higher latency than in-memory access;
+        under extreme contention (many concurrent forkserver children writing to
+        the same budget ledger), lock wait time could approach the timeout.  In
+        practice, the walker runs ops sequentially (or in fork branches with
+        ``MAX_WORKERS`` threads), so contention is minimal.
+        """
         if not self.enable_recovery:
             return None
         if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
@@ -957,10 +1047,10 @@ class Executor:
             state = {"knobs": {n: {"value": v} for n, v in self.ctx.knobs.items()}}
             raw = _cmd_timeout_s(node, state)
             if raw is None:
-                # Unclassified ops stay in-process, with the run's budget: an op that
-                # records usage through ctx.budget needs it, and a child gets none.
-                # Giving them DSH's 3600 s default needs budget forwarding (dm-173).
-                return None
+                # Unclassified ops get the spine's 3600 s default (dm-173).
+                # Budget forwarding (PC-2/PC-3) ensures ctx.budget works in
+                # the child process.
+                raw = 3600.0
             remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
             if remaining is not None:
                 raw = min(raw, remaining)
@@ -969,10 +1059,15 @@ class Executor:
 
     # ── child-process-based op timeout ─────────────────────────────────────
     def _run_op_timed(self, callable_target: str, node: Node, timeout: float) -> Any:
-        """Run a callable in a forkserver child process, killed at *timeout*."""
-        _ensure_forkserver_preload(self.graph)
-        parent_conn, child_conn = _forkserver_ctx.Pipe()
+        """Run a callable in a forkserver child process, killed at *timeout*.
 
+        One child per op (``_op_child_target``), never reused: an op that crashes,
+        hangs or leaves state behind cannot reach the next one, and the child's
+        interpreter is the parent's as it is at this dispatch. The child never
+        outlives the dispatch — whether the op reports, times out, dies, or the
+        parent is interrupted — so nothing it left running blocks the run's exit.
+        A crashed op is never replayed here.
+        """
         model_info: dict[str, Any] | None = None
         if self.ctx.model is not None:
             from refactory_dsh.model import DshModelClient
@@ -994,37 +1089,56 @@ class Executor:
             "reads": tuple(node.reads),
             "produces": tuple(node.produces),
             "model_info": model_info,
+            "memory": self.ctx.memory,
+            "iteration": self.ctx.iteration,
+            "verdicts": dict(self.ctx.verdicts),
+            "enforce_writes": self.ctx.enforce_writes,
         }
+        # Forward the budget ledger path so the child process can open the
+        # same shared RunBudget file (dm-173 / PC-2).
+        if self.ctx.budget is not None:
+            args_dict["budget_ledger"] = str(self.ctx.budget.path)
+        # Forward extended package __path__ entries so the child can import
+        # workspace packages that were installed after the forkserver started.
+        _pkg = sys.modules.get("refactory_packages")
+        if _pkg is not None and hasattr(_pkg, "__path__"):
+            args_dict["_package_paths"] = {"refactory_packages": list(_pkg.__path__)}
 
-        child = _forkserver_ctx.Process(target=_op_child_target, args=(child_conn, args_dict))
-        child.start()
+        _ensure_forkserver_preload(self.graph)
+        parent_conn, child_conn = _forkserver_ctx.Pipe()
+        try:
+            child = _forkserver_ctx.Process(
+                target=_op_child_target, args=(child_conn, args_dict))
+            child.start()
+        except BaseException:
+            parent_conn.close()
+            child_conn.close()
+            raise
         child_conn.close()
 
-        if parent_conn.poll(timeout):
+        received = False
+        try:
+            if not parent_conn.poll(timeout):
+                raise OpTimeoutError(node.id, timeout)
             status, payload = parent_conn.recv()
+            received = True
+        except (EOFError, ConnectionResetError):
+            # Its side effects may already have happened. Never replay an
+            # unknown outcome as an unrecorded retry.
+            raise OpOutcomeUnknown(
+                f"op {node.id!r} child exited before reporting its outcome"
+            ) from None
+        finally:
             parent_conn.close()
-            child.join(timeout=5)
-        else:
-            parent_conn.close()
-            # Kill escalation: SIGTERM → grace → SIGKILL, matching DSH.
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                try:
-                    child.kill()
-                except OSError:
-                    pass
-            child.join(timeout=5)
-            if child.is_alive():
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    try:
-                        child.kill()
-                    except OSError:
-                        pass
-                child.join(timeout=5)
-            raise OpTimeoutError(node.id, timeout)
+            if received:
+                # The op has reported. Reap it; kill it only if it lingers, because a
+                # non-daemon thread an op started would otherwise block interpreter
+                # exit when multiprocessing joins its children.
+                _finish_op_child(child)
+            else:
+                # Timed out, died mid-report, or this frame is unwinding (a stop, a
+                # KeyboardInterrupt): nothing of this dispatch outlives it.
+                _kill_op_child(child)
 
         if status == "ok":
             # Merge child state back into the parent's context.
@@ -1037,6 +1151,11 @@ class Executor:
             return payload.get("result")
 
         # Exception from child: reconstruct and re-raise.
+        return self._reraise_child_error(payload)
+
+    @staticmethod
+    def _reraise_child_error(payload: dict[str, Any]) -> Any:
+        """Reconstruct and re-raise an exception sent by the child process."""
         exc_type_name = payload.get("type", "RuntimeError")
         exc_msg = payload.get("message", "")
         exc_tb = payload.get("traceback", "")
