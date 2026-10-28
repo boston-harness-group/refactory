@@ -137,24 +137,14 @@ def _label(out: str) -> str:
 
 
 def _prepare(run: Path, monkeypatch, judge: str | None = None) -> tuple[int, str, str]:
-    """The self-check as the spine runs it, each node its own process: prepare_check, and on
-    an attempt's first emission the fork's two branches and gate_self_check. The judge's
-    verdict is ``judge`` (everything built when None), written where the agent node writes
-    it; `test_the_judge_runs_through_the_worker_on_the_spine` runs the agent node itself."""
-    code, out, err = _node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
-                           monkeypatch)
-    if code != 0 or _label(out) != "first":
-        return code, out, err
-    code, _, more = _node(run, f"{design_ops.__name__}:first_self_check", "first_self_check",
-                          "op", monkeypatch)
-    err += more
-    if code != 0:
-        return code, out, err
-    (run / design_ops.EARLY_ASKS_VERDICT).write_text(
-        judge if judge is not None else early_asks_judgment())
-    code, out, more = _node(run, f"{design_ops.__name__}:gate_self_check", "gate_self_check",
-                            "gate", monkeypatch)
-    return code, out, err + more
+    """The self-check as the spine runs it: prepare_check decides on the self-check's
+    touched tests. The judge's verdict is written where the agent node writes it when
+    ``judge`` is given; `test_the_judge_runs_through_the_worker_on_the_spine` runs the
+    agent node itself."""
+    if judge is not None:
+        (run / design_ops.EARLY_ASKS_VERDICT).write_text(judge)
+    return _node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
+                 monkeypatch)
 
 
 def _as_a_fixup(run: Path) -> None:

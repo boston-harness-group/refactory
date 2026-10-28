@@ -26,6 +26,11 @@ from refactory_dsh.nn import Verdict
 EARLY_ASKS_VERDICT = "early-asks.json"
 EARLY_ASKS_JUDGE_MARK = "You are the early asks judge."
 
+#: The combined send-back loop is bounded by ``gate_check``'s ``max_iterations``:
+#: when ``combined_sendback_count`` reaches this, ``gate_check`` delivers a draft
+#: marked check-failing instead of looping further.
+_COMBINED_SENDBACK_BOUND = 8
+
 #: What the builder says it updated on the attempt in progress (`note_updated_tests`).
 UPDATED_TESTS = "updated-tests.json"
 #: The line of the builder's completion message that names the tests it updated.
@@ -1850,16 +1855,6 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
     entry: dict[str, Any] = {"attempt": int(ctx.facts.get("attempts_used", 0)) + 1,
                              "commit": str(ctx.facts.get("commit") or ""),
                              "fixups_before": _fixups_used(ctx)}
-    if last.get("unparsed"):
-        whole = _whole_self_check(ctx, command)
-        entry.update({key: whole.get(key) for key in ("selection", "how_selected", "ran", "cut",
-                                                      "commands", "notes", "limit_s",
-                                                      "duration_s", "timings")})
-        return _settle_self_check(
-            ctx, _prepass_of(whole), entry, base=str(whole.get("base") or ""),
-            inherited=list(whole.get("inherited_filtered") or []), not_built=[],
-            unparsed=str(whole.get("unparsed") or ""), prev_record=prev_record,
-            saved_base_unavailable=saved_base_unavailable, attempt=attempt, command=command)
     touched, changed_since = _fixup_changes(root, found, last)
     selection = test_selection.select(touched, root, prev_record, check_command=command,
                                       first=list(last.get("failing_ids", [])),
@@ -1920,14 +1915,12 @@ def _settle_self_check(ctx: Any, prepass: Any, entry: dict[str, Any], *, base: s
                        command: str) -> Any:
     """Send what the self-check found back, or let the attempt go on to the reviews.
 
-    The attempt's own failures, a failure that named no test, and the asks and corrections
-    the early asks judge found not built all go back to emit as a fix-up, which spends no
-    attempt and runs no review, at most ``self_check_fixups`` times an attempt and that
-    many times ``check_attempts`` a run. Past the bound, failures are the early stop, which
-    spends the attempt; items the judge found not built, alone, go on to the reviews, which
-    are told of them (dm-276). Anything else -- a pass, failures the base has too, or a result
-    that says nothing (a timeout, a runner it cannot target, nothing collected) -- goes on
-    to the reviews and the whole check.
+    The attempt's own failures and a failure that named no test go back to emit as a
+    fix-up, which spends no attempt and runs no review, at most ``self_check_fixups``
+    times an attempt and that many times ``check_attempts`` a run. Past the bound,
+    failures are the early stop, which spends the attempt. Anything else -- a pass,
+    failures the base has too, or a result that says nothing (a timeout, a runner it
+    cannot target, nothing collected) -- goes on to the reviews and the whole check.
     """
     from dataclasses import replace
 
@@ -2212,10 +2205,10 @@ def gate_check(ctx: Any) -> Any:
         label = str(decided.get("verdict") or "")
         if label == "proceed":
             # Check passed — also check early_asks findings.
-            return _gate_check_early_asks(ctx, attempt)
+            return _gate_check_early_asks(ctx)
         # Check failed — compose combined send-back.
         reason = str(decided.get("reason") or "")
-        return _gate_check_combined_sendback(ctx, reason, attempt)
+        return _gate_check_combined_sendback(ctx, reason)
     validation = (ctx.read_json(evidence.EVIDENCE, {}) if ctx.exists(evidence.EVIDENCE)
                   else {}).get("validation", {})
     if (validation.get("status") == "skipped" and validation.get("source") == "person"
@@ -2229,8 +2222,8 @@ def gate_check(ctx: Any) -> Any:
         return "draft"
     _record_check_verdict(ctx, attempt, verdict)
     if str(verdict) == "proceed":
-        return _gate_check_early_asks(ctx, attempt)
-    return _gate_check_combined_sendback(ctx, getattr(verdict, "reason", "") or str(verdict), attempt)
+        return _gate_check_early_asks(ctx)
+    return _gate_check_combined_sendback(ctx, getattr(verdict, "reason", "") or str(verdict))
 
 
 def _read_early_asks_verdict(ctx: Any) -> list[dict[str, Any]]:
@@ -2248,8 +2241,10 @@ def _read_early_asks_verdict(ctx: Any) -> list[dict[str, Any]]:
         return []
 
 
-def _gate_check_early_asks(ctx: Any, attempt: str) -> Any:
+def _gate_check_early_asks(ctx: Any) -> Any:
     """Check passed — see if the early asks judge found items not built."""
+    from refactory_dsh.run import BuildLoopStop
+
     items = _read_early_asks_verdict(ctx)
     not_built = [item for item in items if not item["built"]]
     if not not_built:
@@ -2266,11 +2261,24 @@ def _gate_check_early_asks(ctx: Any, attempt: str) -> Any:
     ctx.set_fact("validation", detail)
     count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
     ctx.set_fact("combined_sendback_count", count)
+    if count >= _COMBINED_SENDBACK_BOUND:
+        stop = BuildLoopStop(
+            f"check failures exhausted after {count} combined send-back(s)")
+        if _draft_for_stop(ctx, stop, check_failing=True) is not None:
+            return "draft"
+        raise stop
     return Verdict("reloop", detail)
 
 
-def _gate_check_combined_sendback(ctx: Any, check_reason: str, attempt: str) -> Any:
-    """Check failed — compose one send-back with check failures and early-asks findings."""
+def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
+    """Check failed — compose one send-back with check failures and early-asks findings.
+
+    The combined send-back loop is bounded: when ``combined_sendback_count`` reaches 8
+    (matching ``gate_check``'s ``max_iterations``), ``gate_check`` delivers a draft
+    marked check-failing instead of looping further.
+    """
+    from refactory_dsh.run import BuildLoopStop
+
     parts = [check_reason]
     items = _read_early_asks_verdict(ctx)
     not_built = [item for item in items if not item["built"]]
@@ -2288,6 +2296,12 @@ def _gate_check_combined_sendback(ctx: Any, check_reason: str, attempt: str) -> 
     ctx.set_fact("validation", detail)
     count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
     ctx.set_fact("combined_sendback_count", count)
+    if count >= _COMBINED_SENDBACK_BOUND:
+        stop = BuildLoopStop(
+            f"check failures exhausted after {count} combined send-back(s)")
+        if _draft_for_stop(ctx, stop, check_failing=True) is not None:
+            return "draft"
+        raise stop
     return Verdict("reloop", detail)
 
 

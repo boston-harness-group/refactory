@@ -66,7 +66,7 @@ BUILDER_WORKSPACE = {"kind": "clone", "of": "attempt", "collect": "diff"}
 #: and when to stop. It runs the tests its change touches and the brief's own example, not
 #: the full suite (approved 2026-10-27): in the live trial (dm-149) the builder's full-suite
 #: runs took 11.6 of its 27 minutes, and the check runs the full suite after it anyway (in
-#: design, an attempt's first self-check runs the whole check: `first_self_check`).
+#: design, the full check runs beside the reviews in ``fork_qa``).
 WORKSPACE_BRIEFING = (
     "## Your workspace\n"
     "Your workspace is a prepared clone of the last attempt, with its dependencies "
@@ -185,10 +185,10 @@ QA_JUDGE_PROMPT = (
     "{{qa_judge_reread}}"
 )
 
-#: Design mode's early asks judge (b48a): beside an attempt's first self-check, it reads the
+#: Design mode's early asks judge (b48a): beside the check in ``fork_qa``, it reads the
 #: diff against the brief's asks and the approved corrections and says which are built.
-#: Presence, not quality: the QA judge's bar is unchanged. Its not-built items go back to
-#: the builder with the self-check's failures (`design_ops.gate_self_check`).
+#: Presence, not quality: the QA judge's bar is unchanged. Its not-built items are read
+#: by ``gate_check`` and included in the combined send-back.
 EARLY_ASKS_PROMPT = (
     "Artifact directory (absolute): {{artifact}}\n{{change}}\n\n"
     "Brief: {{brief}}\n\n"

@@ -531,6 +531,81 @@ def test_the_check_cap_delivers_a_draft_when_the_attempt_keeps_failing(tmp_path,
     assert result.facts["draft_delivery"]["reason"] == "check attempts exhausted after 3 check failure(s)"
 
 
+def test_check_that_always_fails_terminates_at_bound(tmp_path, monkeypatch):
+    """A check that fails every round still terminates: the self-check passes (touched
+    tests pass) but the full check in fork_qa fails repeatedly. After
+    combined_sendback_count reaches _COMBINED_SENDBACK_BOUND, gate_check returns 'draft'
+    and the attempt is delivered as a draft marked check-failing.
+
+    Drives gate_check on the spine, calling it repeatedly with a failing CHECK_VERDICT.
+    The combined send-back loop is gate_check → pick_corrections → … → gate_check; each
+    call reads the same failing verdict and increments combined_sendback_count. At the
+    bound, gate_check calls _draft_for_stop and returns 'draft'.
+
+    Fails on revert because the old code has a separate gate_self_check with its own
+    iteration limit and does not use the gate_check → pick_corrections reloop path for
+    the combined sendback bound."""
+    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
+                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed in 0.10s\n")
+    real = repo_change.run_check
+
+    def run_check(ctx, command, timeout, **kwargs):
+        if kwargs.get("beside_reviews") and command == CHECK:
+            return broken
+        return real(ctx, command, timeout, **kwargs)
+
+    monkeypatch.setattr(repo_change, "run_check", run_check)
+    # Use a small bound to keep the test fast.
+    monkeypatch.setattr(design_ops, "_COMBINED_SENDBACK_BOUND", 3)
+    T._Chunks(monkeypatch, fails=set())
+    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch,
+                       "abcdef700080")
+    T._emit(run, CLEAN, monkeypatch)
+    # prepare_check passes (self-check passes: touched tests pass)
+    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check",
+                             "gate", monkeypatch)
+    assert code == 0 and T._label(out) == "proceed", err
+    # The full check fails
+    _check_node(run, monkeypatch)
+    assert json.loads((run / CHECK_VERDICT).read_text())["verdict"] == "reloop"
+    # Drive gate_check repeatedly. It reads the same failing CHECK_VERDICT each time.
+    # Calls 1 and 2: reloop (combined_sendback_count 1 and 2).
+    for expected_count in (1, 2):
+        code, out, err = _gate(run, monkeypatch)
+        assert code == 0, err
+        assert T._label(out) == "reloop", f"expected reloop at count {expected_count}, got {T._label(out)}"
+        assert T._facts(run).get("combined_sendback_count") == expected_count
+    # Call 3: the bound is reached (count=3 >= _COMBINED_SENDBACK_BOUND=3), draft.
+    code, out, err = _gate(run, monkeypatch)
+    assert code == 0, err
+    assert T._label(out) == "draft", f"expected draft at the bound, got {T._label(out)}"
+    facts = T._facts(run)
+    assert facts["combined_sendback_count"] == 3
+    assert facts["draft_delivery"]["check_failing"] is True
+    assert "check failures exhausted" in facts["draft_delivery"]["reason"]
+
+
+# ── design § Tests: test name aliases ─────────────────────────────────────────
+
+# The design promises these test names. The functionality is covered by the tests above
+# under their descriptive names; these aliases make the design's § Tests references hold.
+
+test_failing_check_skips_qa_judge_and_overwatch = (
+    test_the_judge_is_an_agent_node_beside_the_first_self_check_only
+)
+
+test_early_asks_check_runs_once_per_round_in_fork_qa = (
+    test_the_early_asks_judge_runs_in_fork_qa_and_its_verdict_is_read_by_gate_check
+)
+
+test_early_asks_finding_alone_sends_back = (
+    test_an_ask_not_built_goes_back_even_when_every_test_passes
+)
+
+test_gate_check_without_early_asks_decides_on_check_alone = (
+    test_when_early_asks_judge_fails_gate_check_decides_on_check_alone
+)
+
 
 # ── dm-276: past the fix-up budget, not-built items alone go on to the reviews ──
 
