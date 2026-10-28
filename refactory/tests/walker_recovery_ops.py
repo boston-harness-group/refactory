@@ -112,3 +112,35 @@ def budget_snapshot_op(ctx: Any) -> dict[str, Any]:
     """Return budget.snapshot() as a fact to prove it works in a child (dm-173 test)."""
     snap = ctx.budget.snapshot()
     return {"budget_snapshot": snap}
+
+
+def record_worker_pid(ctx):
+    import os
+    ctx.write_text("worker.pid", str(os.getpid()))
+    return {"done": True}
+
+
+def crash_after_side_effect(ctx):
+    import os
+    path = ctx.workdir / "crash-count"
+    count = int(path.read_text()) + 1 if path.exists() else 1
+    path.write_text(str(count))
+    if count == 1:
+        os._exit(17)
+    return {}
+
+
+def hang_with_term_resistant_descendant(ctx):
+    import subprocess
+    import sys
+    import time
+    path = ctx.workdir / "descendant.pid"
+    source = (
+        "import os,signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(path)!r}).write_text(str(os.getpid())); time.sleep(600)"
+    )
+    subprocess.Popen([sys.executable, "-c", source])
+    while not path.exists():
+        time.sleep(0.01)
+    threading.Event().wait()

@@ -23,6 +23,22 @@ import pytest
 from refactory_dsh import nn
 from refactory_dsh.nn.executor import OpTimeoutError
 
+@pytest.fixture(autouse=True)
+def bounded_recovery_test():
+    """An independent watchdog keeps reverted hang fixes from hanging pytest."""
+    import signal
+    previous = signal.getsignal(signal.SIGALRM)
+    def expired(_signum, _frame):
+        pytest.fail("recovery test exceeded its independent 30-second watchdog")
+    signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 30)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous)
+
+
 #: The run budget for the time-limit tests, in seconds. The walker clamps a check
 #: op's limit to the budget left (and never below 1 s), so this is the limit itself.
 SHORT_LIMIT_S = 1.0
@@ -644,3 +660,79 @@ def test_enable_recovery_false_unclassified_op_runs_in_process(tmp_path):
     result = nn.execute(graph, tmp_path, enable_recovery=False)
     assert result.exit_ok is True, result.error
     assert result.facts.get("done") is True
+
+
+def test_successful_child_run_exits_its_interpreter(tmp_path):
+    import signal
+    import subprocess
+    import sys
+    script = tmp_path / "run_once.py"
+    work = tmp_path / "run"
+    script.write_text(
+        "from pathlib import Path\nfrom refactory_dsh import nn\n"
+        "if __name__ == '__main__':\n"
+        "    graph = nn.Graph()\n"
+        "    graph.add(nn.Node('work', 'op', call='walker_recovery_ops:record_worker_pid', "
+        "writes=('worker.pid',), produces=('done',)))\n"
+        f"    result = nn.execute(graph, Path({str(work)!r}), enable_recovery=True)\n"
+        "    assert result.exit_ok, result.error\n"
+        "    print('completed', flush=True)\n"
+    )
+    process = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True,
+                               env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                                   [str(Path(__file__).parent), os.environ.get("PYTHONPATH", "")])})
+    try:
+        out, err = process.communicate(timeout=15)
+        assert process.returncode == 0, err
+        assert "completed" in out
+        assert int((work / "worker.pid").read_text()) != process.pid
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        if (work / "worker.pid").exists():
+            try:
+                os.killpg(int((work / "worker.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_worker_crash_is_unknown_and_does_not_replay_side_effects(tmp_path):
+    graph = nn.Graph()
+    graph.add(nn.Node("crash", "op", call="walker_recovery_ops:crash_after_side_effect"))
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert not result.exit_ok
+    assert "worker exited before reporting its outcome" in result.error
+    assert (tmp_path / "crash-count").read_text() == "1"
+    progress = json.loads((tmp_path / ".refactory/progress.json").read_text())
+    assert progress["outcome"] == "unknown"
+
+
+def test_timeout_kills_term_resistant_descendant_after_leader_exits(tmp_path):
+    import signal
+    graph = nn.Graph()
+    graph.add(nn.Node("hang", "op", call="walker_recovery_ops:hang_with_term_resistant_descendant"))
+    pid = None
+    try:
+        result = nn.execute(graph, tmp_path, enable_recovery=True,
+                            resource_limits={"max_elapsed_s": 2})
+        assert not result.exit_ok and "timed out" in result.error
+        pid = int((tmp_path / "descendant.pid").read_text())
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+                stat = Path(f"/proc/{pid}/stat")
+                if stat.exists() and stat.read_text().rsplit(") ", 1)[1].split()[0] == "Z":
+                    break
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("TERM-resistant descendant outlived the op deadline")
+    finally:
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

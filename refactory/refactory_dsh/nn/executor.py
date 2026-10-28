@@ -14,11 +14,11 @@ are.
 
 from __future__ import annotations
 
-import atexit
 import copy
 import importlib
 import json
 import multiprocessing
+from multiprocessing.util import Finalize
 import os
 import signal
 import sys
@@ -72,6 +72,10 @@ def _ensure_forkserver_preload(graph: Graph) -> None:
 
 class ExecutionError(RuntimeError):
     """A run could not be carried out."""
+
+
+class OpOutcomeUnknown(ExecutionError):
+    """A child exited after dispatch without reporting its side effects."""
 
 
 class OpTimeoutError(RuntimeError):
@@ -467,94 +471,6 @@ def _ask_model(model: Any, prompt: str, *, system: str, workdir: Path) -> str:
 PROGRESS = ".refactory/progress.json"
 
 
-def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
-    """Target function for the spawned child process running an op or fn gate."""
-    os.setsid()
-
-    def _sigterm_handler(signum: int, frame: Any) -> None:
-        raise SystemExit(f"terminated by signal {signum}")
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-
-    # Restore parent's sys.path so resolve() finds the same modules.
-    sys.path[:] = args_dict["sys_path"]
-    # Restore extended package __path__ entries (e.g. workspace packages added
-    # by registry.install_workspace after the forkserver started).
-    for _pkg_name, _pkg_path in args_dict.get("_package_paths", {}).items():
-        _pkg = sys.modules.get(_pkg_name)
-        if _pkg is not None and hasattr(_pkg, "__path__"):
-            for _p in _pkg_path:
-                if _p not in _pkg.__path__:
-                    _pkg.__path__.append(_p)
-    importlib.invalidate_caches()
-
-    try:
-        from refactory_dsh.run import build_op_context
-
-        model: Any = None
-        model_info = args_dict.get("model_info")
-        if model_info:
-            kind = model_info.get("kind")
-            if kind == "dsh":
-                from refactory_dsh.model import DshModelClient
-                model = DshModelClient(**model_info["context"])
-            elif kind is not None:
-                # Stand-in for non-DSH clients: not None so prepare/create_ops
-                # skip readiness, and every method raises so nothing silently proceeds.
-                class _StandIn:
-                    def __getattr__(self, name: str) -> Any:
-                        raise RuntimeError(f"model.{name}() called in child process")
-                    def complete(self, *a: Any, **kw: Any) -> str:
-                        raise RuntimeError("model.complete() called in child process")
-                model = _StandIn()
-
-        ctx = build_op_context(
-            Path(args_dict["workdir"]),
-            args_dict["node_id"],
-            knobs=args_dict.get("knobs"),
-            facts=args_dict.get("facts"),
-            task=args_dict.get("task"),
-        )
-        # Override declarations with the node's own (not from disk).
-        ctx._declared = tuple(args_dict.get("writes", ()))
-        ctx._declared_reads = tuple(args_dict.get("reads", ()))
-        ctx._declared_facts = tuple(args_dict.get("produces", ()))
-
-        # Set model AFTER context creation so RunBudget.inherited sees None,
-        # not the stand-in.  The stand-in is only for ops that check ctx.model.
-        model_info_2 = args_dict.get("model_info")
-        if model_info_2 and model_info_2.get("kind") == "other":
-            ctx.model = model
-        elif model is not None:
-            ctx.model = model
-
-        # Reconstruct the shared RunBudget from the forwarded ledger path so
-        # ctx.budget.record_usage / remaining_s / snapshot work identically
-        # in the child process (dm-173 / PC-3).
-        budget_ledger = args_dict.get("budget_ledger")
-        if budget_ledger:
-            from refactory_dsh.budgets import RunBudget
-            ctx.budget = RunBudget.from_path(budget_ledger)
-
-        fn = resolve(args_dict["callable_target"])
-        result = fn(ctx)
-
-        conn.send(("ok", {
-            "result": result,
-            "facts": dict(ctx.facts),
-            "writes_made": list(ctx.writes_made),
-            "_produced": list(ctx._produced),
-        }))
-    except BaseException as exc:
-        conn.send(("error", {
-            "type": type(exc).__qualname__,
-            "module": type(exc).__module__,
-            "message": str(exc),
-            "traceback": "".join(traceback_mod.format_exception(exc)),
-        }))
-    finally:
-        conn.close()
-
-
 # ── persistent worker pool ─────────────────────────────────────────────────
 #
 # Spawning a forkserver child costs ~9 ms. For runs with hundreds of
@@ -571,27 +487,20 @@ def _op_worker_loop(conn: Any) -> None:
         raise SystemExit(f"terminated by signal {signum}")
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
-    _initialized = False
-
     while True:
         try:
             args_dict = conn.recv()
         except (EOFError, ConnectionResetError):
             break
-        if args_dict is None:  # shutdown sentinel
+        if args_dict is None:
             break
 
-        # First call: set up sys.path and package paths once.
-        if not _initialized:
-            sys.path[:] = args_dict["sys_path"]
-            for _pkg_name, _pkg_path in args_dict.get("_package_paths", {}).items():
-                _pkg = sys.modules.get(_pkg_name)
-                if _pkg is not None and hasattr(_pkg, "__path__"):
-                    for _p in _pkg_path:
-                        if _p not in _pkg.__path__:
-                            _pkg.__path__.append(_p)
-            importlib.invalidate_caches()
-            _initialized = True
+        # A reused worker must see workspace packages installed since its last op.
+        sys.path[:] = args_dict["sys_path"]
+        for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
+            pkg = importlib.import_module(pkg_name)
+            pkg.__path__ = list(pkg_paths)
+        importlib.invalidate_caches()
 
         try:
             from refactory_dsh.run import build_op_context
@@ -655,6 +564,26 @@ def _op_worker_loop(conn: Any) -> None:
     conn.close()
 
 
+def _close_op_worker(child: Any, conn: Any) -> None:
+    """Release one worker before multiprocessing joins its children at exit."""
+    try:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            if child.is_alive():
+                child.terminate()
+        child.join(timeout=5)
+        # The leader may exit on TERM while a descendant ignores it.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            if child.is_alive():
+                child.kill()
+        child.join(timeout=5)
+    finally:
+        conn.close()
+
+
 class _OpWorker:
     """A persistent forkserver child that runs ops on demand.
 
@@ -662,11 +591,12 @@ class _OpWorker:
     the worker is killed and replaced transparently on the next call.
     """
 
-    __slots__ = ("child", "conn")
+    __slots__ = ("child", "conn", "_finalizer", "__weakref__")
 
     def __init__(self) -> None:
         self.child: Any = None
         self.conn: Any = None
+        self._finalizer: Any = None
 
     def ensure(self, graph: Graph) -> None:
         """Create the worker process if it is not already running."""
@@ -682,6 +612,11 @@ class _OpWorker:
         self.child.start()
         child_conn.close()
         self.conn = parent_conn
+        # Finalize runs before multiprocessing's child joins, in every thread,
+        # and on thread-local worker collection; it does not retain self.
+        self._finalizer = Finalize(
+            self, _close_op_worker, args=(self.child, self.conn), exitpriority=10,
+        )
 
     def submit(
         self, args_dict: dict[str, Any], timeout: float, node: Node,
@@ -697,28 +632,14 @@ class _OpWorker:
     # -- lifecycle helpers ---------------------------------------------------
 
     def _kill(self) -> None:
-        if self.child is None:
-            return
-        try:
-            os.killpg(self.child.pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            try:
-                self.child.kill()
-            except OSError:
-                pass
-        self.child.join(timeout=5)
-        if self.child is not None and self.child.is_alive():
-            try:
-                os.killpg(self.child.pid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                try:
-                    self.child.kill()
-                except OSError:
-                    pass
-            self.child.join(timeout=5)
+        if self.child is not None:
+            _close_op_worker(self.child, self.conn)
         self._cleanup()
 
     def _cleanup(self) -> None:
+        if self._finalizer is not None:
+            self._finalizer.cancel()
+            self._finalizer = None
         if self.conn is not None:
             try:
                 self.conn.close()
@@ -748,18 +669,6 @@ def _get_worker() -> _OpWorker:
         w = _OpWorker()
         _tls.worker = w
         return w
-
-
-def _shutdown_workers() -> None:
-    """Best-effort cleanup at interpreter exit."""
-    try:
-        w: _OpWorker = _tls.worker  # type: ignore[assignment]
-        w.close()
-    except (AttributeError, Exception):
-        pass
-
-
-atexit.register(_shutdown_workers)
 
 
 @dataclass
@@ -1009,7 +918,7 @@ class Executor:
                     self._record(node.id, error=error, outcome="failed")
                 else:
                     unknown = self._outcome == "running" and (
-                        isinstance(exc, (BudgetExhausted, CancelledError, subprocess.TimeoutExpired))
+                        isinstance(exc, (BudgetExhausted, CancelledError, subprocess.TimeoutExpired, OpOutcomeUnknown))
                         or "timed out" in str(exc).lower()
                     )
                     self._record(node.id, error=error,
@@ -1150,7 +1059,7 @@ class Executor:
             return self._visit(node)
         except BudgetExhausted:
             raise
-        except OpTimeoutError:
+        except (OpTimeoutError, OpOutcomeUnknown):
             raise
         except Exception:
             from refactory_dsh.run import BuildLoopStop
@@ -1220,7 +1129,7 @@ class Executor:
         Uses a persistent worker (``_OpWorker``) that stays alive across ops
         so each call pays only pipe-communication cost (~1 ms) rather than
         forkserver spawn cost (~9 ms).  On timeout or unexpected death the
-        worker is replaced transparently.
+        a later op gets a fresh worker. A crashed op is never replayed here.
         """
         model_info: dict[str, Any] | None = None
         if self.ctx.model is not None:
@@ -1259,10 +1168,13 @@ class Executor:
         worker.ensure(self.graph)
         try:
             status, payload = worker.submit(args_dict, timeout, node)
-        except (EOFError, ConnectionResetError, BrokenPipeError):
-            # Worker died unexpectedly — fall back to one-shot spawn.
+        except (EOFError, ConnectionResetError, BrokenPipeError) as exc:
+            # Its side effects may already have happened. Never replay an
+            # unknown outcome as an unrecorded retry.
             worker._kill()
-            status, payload = self._run_op_oneshot(args_dict, timeout, node)
+            raise OpOutcomeUnknown(
+                f"op {node.id!r} worker exited before reporting its outcome"
+            ) from exc
 
         if status == "ok":
             # Merge child state back into the parent's context.
@@ -1276,45 +1188,6 @@ class Executor:
 
         # Exception from child: reconstruct and re-raise.
         return self._reraise_child_error(payload)
-
-    def _run_op_oneshot(
-        self, args_dict: dict[str, Any], timeout: float, node: Node,
-    ) -> tuple[str, dict[str, Any]]:
-        """One-shot child process: used when the persistent worker dies."""
-        _ensure_forkserver_preload(self.graph)
-        parent_conn, child_conn = _forkserver_ctx.Pipe()
-        child = _forkserver_ctx.Process(
-            target=_op_child_target, args=(child_conn, args_dict),
-        )
-        child.start()
-        child_conn.close()
-
-        if parent_conn.poll(timeout):
-            status, payload = parent_conn.recv()
-            parent_conn.close()
-            child.join(timeout=5)
-            return status, payload
-
-        parent_conn.close()
-        # Kill escalation: SIGTERM → grace → SIGKILL, matching DSH.
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            try:
-                child.kill()
-            except OSError:
-                pass
-        child.join(timeout=5)
-        if child.is_alive():
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                try:
-                    child.kill()
-                except OSError:
-                    pass
-            child.join(timeout=5)
-        raise OpTimeoutError(node.id, timeout)
 
     @staticmethod
     def _reraise_child_error(payload: dict[str, Any]) -> Any:
