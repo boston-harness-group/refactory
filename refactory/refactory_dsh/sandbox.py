@@ -696,7 +696,7 @@ def smoke(
     if model:
         # Leave time for the inner runtime to shut down before sandbox termination.
         timeout = kwargs["timeout_s"]
-        code = f"smoke_timeout_s={max(0.1, timeout - min(5, timeout / 2))!r}\n" + code
+        code = f"smoke_timeout_s={max(1, int(timeout - min(5, timeout / 2)))!r}\n" + code
     return run_sandboxed(
         code, workdir=Path(workdir), env=dict(os.environ), forwarded=forwarded, **kwargs
     )
