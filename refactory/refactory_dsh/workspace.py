@@ -159,9 +159,10 @@ class Workspace:
     #: Files whose line endings or end-of-file blank lines the last emission normalised,
     #: which the agent is told on its next dispatch.
     normalised: tuple[str, ...] = ()
-    #: Files the run's generate command rewrote while preparing the workspace. They are
-    #: never carried: the run regenerates them, and an agent's edit to one is reported.
-    generate_owned: tuple[str, ...] = ()
+    #: Files the run's generate command wrote while preparing the workspace, by digest as
+    #: it left them. They are never carried: the run regenerates them, and an agent's edit
+    #: to one is reported.
+    generate_owned: dict[str, str] = field(default_factory=dict)
     #: Files in ``generate_owned`` the agent then changed, which it is told about.
     prepared_edits: tuple[str, ...] = ()
 
@@ -306,7 +307,7 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
             deletes=bool(prepared.get("deletes", True)), prepared=str(prepared.get("prepared", "")),
             problems=tuple(str(problem) for problem in prepared.get("problems") or ()),
             skip=dict(prepared.get("skip") or {}),
-            generate_owned=tuple(prepared.get("generate_owned") or ()))
+            generate_owned=dict(prepared.get("generate_owned") or {}))
         if workspace.problems:
             _warn(f"preparing agent node {node!r}'s workspace reported: " + "; ".join(workspace.problems))
     workspace.confine, workspace.unconfined = confine, unconfined
@@ -694,7 +695,7 @@ def _content_digest(target: Path) -> str:
 
 def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), deletes: bool = True,
                     skip: dict[str, str] | None = None,
-                    generate_owned: tuple[str, ...] = (),
+                    generate_owned: dict[str, str] | None = None,
                     prepared_edits: list[str] | None = None) -> tuple[str, list[str], list[str]]:
     """The workspace's change from ``base`` as ``===FILE:`` and ``===DELETE:`` blocks.
 
@@ -708,9 +709,9 @@ def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), d
     ends of a file, which a block normalises). A file in ``skip`` whose content is still
     the digest recorded there is left out while the agent leaves it as it was made. A file
     in ``generate_owned`` is left out always, and appended to ``prepared_edits`` when the
-    caller passes one if the agent changed it: the run's generate command rebuilds it, so
-    carrying it would credit the agent with the generator's work. Setup's output is not in
-    that set: a lockfile setup refreshed is the agent's to change for a new dependency.
+    caller passes one and the agent's content differs from the digest the command left: the
+    run rebuilds it, so carrying it would credit the agent with the generator's work.
+    Setup's output is not in that set: a lockfile setup refreshed is the agent's to change.
     """
     skip = skip or {}
     # Stat information the agent's tools left stale must not read as a change.
@@ -758,8 +759,10 @@ def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), d
             continue
         target = path / relative
         present = target.exists() or target.is_symlink()
-        if name in generate_owned:
-            edits_out.append(name)
+        if name in (generate_owned or {}):
+            current = _content_digest(target) if present else "deleted"
+            if (generate_owned or {})[name] != current:
+                edits_out.append(name)
             continue
         if name in skip and skip[name] == (_content_digest(target) if present else "deleted"):
             continue

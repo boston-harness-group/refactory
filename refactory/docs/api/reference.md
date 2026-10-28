@@ -692,8 +692,8 @@ The steps a mode uses to change a repository: where it works, what lands, how it
 | function | `materialise` | `(ctx: 'Any', *, source: 'Path \| None' = None, files: 'tuple[str, ...]' = ()) -> 'dict[str, Any]'` |
 | function | `materialise_node` | `(**fields: 'Any') -> 'Node'` |
 | function | `prepare_attempt` | `(ctx: 'Any', timeout: 'float') -> 'list[str]'` |
-| function | `prepare_check_environment` | `(found: 'worktree.Worktree', facts: 'dict[str, Any]', *, amend: 'bool', commit_lockfiles: 'bool', run: 'Path', home: 'Path', timeout: 'float', budget: 'Any' = None, record: 'Path \| None' = None, generate_edits: 'list[str] \| None' = None) -> 'tuple[worktree.Worktree, dict[str, str], list[str], dict[str, Any] \| None]'` |
-| function | `prepare_commands` | `(ctx: 'Any', found: 'worktree.Worktree', env: 'dict[str, str]', home: 'Path', timeout: 'float', budget: 'Any', *, amend: 'bool' = True, generate_edits: 'list[str] \| None' = None) -> 'tuple[worktree.Worktree, list[str], dict[str, Any] \| None]'` |
+| function | `prepare_check_environment` | `(found: 'worktree.Worktree', facts: 'dict[str, Any]', *, amend: 'bool', commit_lockfiles: 'bool', run: 'Path', home: 'Path', timeout: 'float', budget: 'Any' = None, record: 'Path \| None' = None, snapshot: 'Callable[[], dict[str, str]] \| None' = None, generate_owned: 'dict[str, str] \| None' = None) -> 'tuple[worktree.Worktree, dict[str, str], list[str], dict[str, Any] \| None]'` |
+| function | `prepare_commands` | `(ctx: 'Any', found: 'worktree.Worktree', env: 'dict[str, str]', home: 'Path', timeout: 'float', budget: 'Any', *, amend: 'bool' = True, snapshot: 'Callable[[], dict[str, str]] \| None' = None, generate_owned: 'dict[str, str] \| None' = None) -> 'tuple[worktree.Worktree, list[str], dict[str, Any] \| None]'` |
 | function | `produces` | `() -> 'tuple[str, ...]'` |
 | function | `refuse_truncated` | `(path: 'Path', text: 'str') -> 'None'` |
 | function | `refused` | `(ctx: 'Any') -> 'str'` |

@@ -227,7 +227,7 @@ def prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], comman
                                     target=found.target, run=str(workdir))
     deps = dependency_fingerprint(repo)
     before = file_state(repo)
-    generate_owned: list[str] = list(state.get("generate_owned") or ())
+    generate_owned: dict[str, str] = dict(state.get("generate_owned") or {})
     if deps != state.get("deps") or not state.get("ready"):
         from refactory_dsh.repo_change import prepare_check_environment
 
@@ -239,7 +239,7 @@ def prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], comman
         _, env, problems, _ = prepare_check_environment(
             clone_found, facts, amend=False, commit_lockfiles=False, run=workdir, home=home,
             timeout=command_timeout_s, budget=budget, record=root / "environment.json",
-            generate_edits=generate_owned)
+            snapshot=lambda: file_state(repo), generate_owned=generate_owned)
         prepared = "installs, generate and setup"
     else:
         from refactory_dsh.repo_change import _PrepCtx, prepare_commands
@@ -247,7 +247,7 @@ def prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], comman
         env = worktree.check_environment(repo, home)
         _, problems, _ = prepare_commands(_PrepCtx({"generate": facts.get("generate") or ""}, workdir=workdir),
                                           clone_found, env, home, command_timeout_s, budget, amend=False,
-                                          generate_edits=generate_owned)
+                                          snapshot=lambda: file_state(repo), generate_owned=generate_owned)
         prepared = "generate"
     # What the preparation changed in the working tree -- a file setup builds, a tracked
     # file generate rewrites -- is the run's steps' work, not the agent's: the check runs
@@ -256,9 +256,10 @@ def prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], comman
     after = file_state(repo)
     made = {name: digest for name, digest in after.items() if before.get(name) != digest}
     state["prepared"] = {**(state.get("prepared") or {}), **made}
-    # What the generate command rewrote is the run's own output. Setup's output is not:
-    # a lockfile setup refreshes is carried when the agent changes it for a new dependency.
-    state["generate_owned"] = sorted(set(generate_owned))
+    # What the generate command itself wrote is the run's own output, kept by digest across
+    # dispatches: a later one where generate is a no-op must not forget it. Setup's output
+    # is not in the set: a lockfile setup refreshes is carried when the agent changes it.
+    state["generate_owned"] = {name: digest for name, digest in generate_owned.items()}
     # A step that failed does not stop the node: the agent can work, and may be the one
     # to fix it. It is told, the check runs the same steps and judges them, and the next
     # dispatch prepares in full again.
@@ -267,7 +268,7 @@ def prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], comman
     return {"path": str(repo), "base": base, "env": agent_environment(env, found.path, home),
             "synced": synced, "conflicts": list(conflicts), "prepared": prepared,
             "problems": list(problems), "skip": dict(state["prepared"]),
-            "generate_owned": list(state["generate_owned"])}
+            "generate_owned": dict(state["generate_owned"])}
 
 
 def _holds(repo: Path, rev: str, prepared: dict[str, str]) -> bool:

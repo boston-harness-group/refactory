@@ -657,7 +657,7 @@ def test_what_the_generate_command_wrote_is_never_the_agents_change(tmp_path):
     place = workspace.prepare(run, "emit", {"kind": "clone", "collect": "diff"},
                               facts={"generate": "echo new > generated.txt"})
     assert (place.path / "generated.txt").read_text() == "new\n"
-    assert place.generate_owned == ("generated.txt",)
+    assert "generated.txt" in place.generate_owned, "what generate wrote is owned, by digest"
     (place.path / "tool.py").write_text("print(1)\n")
     workspace.collect(place, run, ["emit.txt"])
     assert (run / "emit.txt").read_text() == "===FILE: tool.py===\nprint(1)\n"
@@ -678,7 +678,7 @@ def test_what_setup_built_is_carried_when_the_agent_changes_it(tmp_path):
     place = workspace.prepare(run, "emit", {"kind": "clone", "collect": "diff"},
                               facts={"setup": "echo 'version = 2' > lock.txt"})
     assert (place.path / "lock.txt").read_text() == "version = 2\n"
-    assert place.generate_owned == (), "setup is not the generate command"
+    assert place.generate_owned == {}, "setup is not the generate command"
 
     (place.path / "manifest.txt").write_text("deps = [\"x\"]\n")
     (place.path / "lock.txt").write_text("version = 3\n")
@@ -1065,19 +1065,56 @@ def test_a_file_the_preparation_wrote_is_never_carried(tmp_path):
     from refactory_dsh.workspace import _content_digest, derive_emission
 
     repo, base = _repo_with(tmp_path, {"docs.md": "generated: one\n", "code.py": "x = 1\n"})
-    prepared = {"docs.md": _content_digest(repo / "docs.md")}   # what the preparation left
+    prepared = {"docs.md": _content_digest(repo / "docs.md")}   # what generate left
 
     (repo / "docs.md").write_text("generated: two\n")            # the builder ran generate
     (repo / "code.py").write_text("x = 2\n")                     # and made its real change
 
     prepared_edits: list[str] = []
     emission, refused, approximate = derive_emission(
-        repo, base, generate_owned=("docs.md",), prepared_edits=prepared_edits)
+        repo, base, generate_owned=prepared, prepared_edits=prepared_edits)
 
     assert "docs.md" not in emission, "a preparation-owned file is dropped even when it changed"
     assert "===FILE: code.py" in emission
     assert prepared_edits == ["docs.md"], "the builder is told which file it should not edit"
     assert not refused and not approximate
+
+
+def test_a_kept_clone_does_not_own_the_agents_earlier_edits(tmp_path):
+    """The refusal path keeps the workspace as the agent left it, so the next dispatch sees
+    its edits before generate runs: they are the agent's, not the run's."""
+    run, repo, found = _run_with_worktree(tmp_path, {"generated.txt": "old\n"})
+    place = workspace.prepare(run, "emit", {"kind": "clone", "collect": "diff"},
+                              facts={"generate": "echo new > generated.txt"})
+    (place.path / "tool.py").write_text("print(1)\n")
+    workspace.collect(place, run, ["emit.txt"])          # refused or not, the clone is kept
+
+    again = workspace.prepare(run, "emit", {"kind": "clone", "collect": "diff"},
+                              facts={"generate": "echo new > generated.txt"})
+    assert again.synced in ("kept", "verified")
+    assert "generated.txt" in again.generate_owned
+    assert "tool.py" not in again.generate_owned, (
+        "the agent's own file is not owned just because it was there when generate ran")
+    assert (again.path / "tool.py").exists()
+
+
+def test_a_no_op_generate_keeps_what_the_first_one_owned(tmp_path):
+    """After the attempt holds generate's output, the command writes nothing on the next
+    dispatch: the owned set must survive that, or the docs are re-claimed again."""
+    run, repo, found = _run_with_worktree(tmp_path, {"generated.txt": "old\n"})
+    place = workspace.prepare(run, "emit", {"kind": "clone", "collect": "diff"},
+                              facts={"generate": "echo new > generated.txt"})
+    (place.path / "tool.py").write_text("print(1)\n")
+    workspace.collect(place, run, ["emit.txt"])
+
+    # The attempt now holds the generated file, as materialise amends it.
+    worktree.git(place.path, "-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "add", "-A")
+    worktree.git(place.path, "-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "commit", "-qm", "attempt")
+    again = workspace.prepare(run, "emit", {"kind": "clone", "collect": "diff"},
+                              facts={"generate": "echo new > generated.txt"})
+    assert "generated.txt" in again.generate_owned, "the set is kept when generate is a no-op"
 
 
 def test_a_preparation_owned_file_left_alone_is_not_named(tmp_path):
@@ -1090,7 +1127,7 @@ def test_a_preparation_owned_file_left_alone_is_not_named(tmp_path):
     (repo / "docs.md").write_text("generated: one\n")
 
     prepared_edits: list[str] = []
-    derive_emission(repo, base, generate_owned=("docs.md",), prepared_edits=prepared_edits)
+    derive_emission(repo, base, generate_owned=prepared, prepared_edits=prepared_edits)
     assert prepared_edits == []
 
 
