@@ -603,7 +603,7 @@ def design_probe_steps(workflow: Any) -> dict[str, str]:
     return result
 
 
-def for_run(workflow: Any, workdir: Path) -> Any:
+def for_run(workflow: Any, workdir: Path, *, omit_steering: bool | None = None) -> Any:
     """Fold the run directory's ledger into a workflow about to run.
 
     Called by **both** runtimes.  A mode lowered for DSH and one executed by the
@@ -611,7 +611,8 @@ def for_run(workflow: Any, workdir: Path) -> Any:
     difference between the runtimes that nothing would report.
     """
     from refactory_dsh.run_preparation import saved_run_config
-    if not saved_run_config(workdir).get("omit_steering"):
+    omit = saved_run_config(workdir).get("omit_steering", False) if omit_steering is None else omit_steering
+    if not omit:
         workflow = annotate(workflow, Ledger(workdir))
     # Inject the design probe fact reference into the structurally identified writer.
     for nid in design_probe_steps(workflow):

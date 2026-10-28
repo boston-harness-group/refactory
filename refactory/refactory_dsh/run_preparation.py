@@ -98,7 +98,7 @@ def prepare_run(
         "configuration_fingerprints": configuration_fingerprints(
             workdir, mode_id, Path(project) if project else Path(".")
         ) if project else {},
-        **({"omit_steering": True} if omit_steering else {}),
+        "omit_steering": bool(omit_steering),
     }
     config_path = workdir / ".refactory/run-config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)

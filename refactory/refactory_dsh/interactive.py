@@ -197,7 +197,7 @@ def prepare(
             mode_id=identifier,
             intent=intent.strip() or f"Run {identifier}.",
             transform=lambda workflow, stage_dir=None: workers.lower_workflow(
-                steering.for_run(workflow, stage_dir or workdir),
+                steering.for_run(workflow, stage_dir or workdir, omit_steering=omit_steering),
                 workdir, model_context, lowering.node_declarations(state)),
             runtime="spine",
             command="refactory ceo",

@@ -151,3 +151,72 @@ def test_both_evaluators_agree_on_the_same_mode(tmp_path):
         f"the two evaluators disagree about the same mode: walker {fast.score}, "
         f"dsh {shipped.score}"
     )
+
+
+def test_omit_steering_is_public_on_walker_evaluator_and_saved_for_resume(tmp_path, monkeypatch):
+    """The outer-loop setting reaches mode.evaluate and the durable inner run config."""
+    import json
+
+    from refactory_dsh import registry
+
+    config = _config(tmp_path, omit_steering=True)
+    restored = LoopConfig.from_dict(config.to_dict())
+    assert restored.omit_steering is True
+    _, mode_class = registry.resolve(ROOT, MODE)
+    mode = mode_class()
+    original = mode.evaluate
+    seen = {}
+
+    def observe(workdir, **kwargs):
+        seen.update(kwargs)
+        return original(workdir, **kwargs)
+
+    monkeypatch.setattr(mode, "evaluate", observe)
+    evaluator = WalkerEvaluator.from_settings(config=config, model=None, project=ROOT)
+    result = evaluator.evaluate(mode, mode.state_dict(), tmp_path / "inner")
+    assert result.exit_ok, result.error
+    assert seen["omit_steering"] is True
+    saved = json.loads((tmp_path / "inner/.refactory/run-config.json").read_text())
+    assert saved["omit_steering"] is True
+
+
+def test_omit_steering_false_overrides_saved_true_on_reused_workdir(tmp_path, monkeypatch):
+    """An explicit false policy replaces a prior true value for a reused candidate."""
+    import json
+    from refactory_dsh import registry
+
+    _, mode_class = registry.resolve(ROOT, MODE)
+    mode = mode_class()
+    original = mode.evaluate
+    observed = []
+
+    def observe(workdir, **kwargs):
+        observed.append(kwargs["omit_steering"])
+        return original(workdir, **kwargs)
+
+    monkeypatch.setattr(mode, "evaluate", observe)
+    workdir = tmp_path / "reused"
+    state = mode.state_dict()
+    enabled = WalkerEvaluator.from_settings(
+        config=_config(tmp_path, omit_steering=True), model=None, project=ROOT
+    )
+    disabled = WalkerEvaluator.from_settings(
+        config=_config(tmp_path, omit_steering=False), model=None, project=ROOT
+    )
+    assert enabled.evaluate(mode, state, workdir).exit_ok
+    assert json.loads((workdir / ".refactory/run-config.json").read_text())["omit_steering"] is True
+    assert disabled.evaluate(mode, state, workdir).exit_ok
+    assert observed == [True, False]
+    assert json.loads((workdir / ".refactory/run-config.json").read_text())["omit_steering"] is False
+
+
+def test_persist_steering_option_does_not_erase_malformed_run_config(tmp_path):
+    from refactory_dsh.evaluators import _persist_steering_option
+
+    path = tmp_path / ".refactory/run-config.json"
+    path.parent.mkdir(parents=True)
+    original = "{not json"
+    path.write_text(original)
+    with pytest.raises(ValueError, match="cannot read run configuration"):
+        _persist_steering_option(tmp_path, False)
+    assert path.read_text() == original

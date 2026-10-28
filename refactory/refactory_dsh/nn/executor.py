@@ -1384,6 +1384,7 @@ def execute(
     start: str | None = None,
     resource_limits: Any = None,
     shared_budget: Any = None,
+    omit_steering: bool | None = None,
     enable_recovery: bool = False,
 ) -> RunResult:
     """Build a context and run the graph once.
@@ -1416,7 +1417,7 @@ def execute(
         budget.resume()
     if budget is not None:
         model = budget.bind_model(model)
-    graph = for_run(graph, workdir)
+    graph = for_run(graph, workdir, omit_steering=omit_steering)
     ctx = RunContext(
         workdir,
         knobs=knobs,

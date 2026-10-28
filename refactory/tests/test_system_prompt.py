@@ -528,6 +528,19 @@ def test_unsupported_effort_on_codex_refused():
         validate_route({"worker_backend": "codex", "effort": "medium"})
 
 
+def test_claude_code_effort_matches_pinned_sdk_query_type():
+    """The accepted values come from the pinned SDK QueryOptions type, not inference."""
+    rt = Path(__file__).resolve().parent.parent.parent
+    packages = list((rt / "node_modules/.pnpm").glob(
+        "@anthropic-ai+claude-agent-sdk@0.3.263*/node_modules/@anthropic-ai/claude-agent-sdk"
+    ))
+    assert len(packages) == 1, f"Expected pinned Agent SDK 0.3.263, found {packages}"
+    sdk_types = (packages[0] / "sdk.d.ts").read_text()
+    assert "export declare type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';" in sdk_types
+    assert "effort?: EffortLevel;" in sdk_types
+    assert "@anthropic-ai/claude-agent-sdk@0.3.263" in (rt / "pnpm-lock.yaml").read_text()
+
+
 def test_claude_code_effort_medium_reaches_sdk_invocation():
     """Adapter patch reads REFACTORY_MODEL_EFFORT and sets effort in options.
     Revert: adapter patch effort addition."""
@@ -535,6 +548,69 @@ def test_claude_code_effort_medium_reaches_sdk_invocation():
     content = patch_path.read_text()
     assert "REFACTORY_MODEL_EFFORT" in content
     assert "options.effort = _rfEffort" in content
+
+
+def test_claude_code_adapter_calls_sdk_boundary_with_preset_append_and_effort(tmp_path):
+    """Run the patched provider against a scripted SDK query boundary, without a model call."""
+    rt = Path(__file__).resolve().parent.parent.parent
+    candidates = list((rt / "node_modules/.pnpm").glob(
+        "@deepseek-ai+dsh-subagent-claude-code*/node_modules/@deepseek-ai/dsh-subagent-claude-code/lib/index.js"
+    ))
+    assert len(candidates) == 1, f"Expected one installed adapter, found {candidates}"
+    adapter = candidates[0]
+    loader = tmp_path / "loader.mjs"
+    loader.write_text("""export async function resolve(specifier, context, nextResolve) {
+  if (specifier === '@anthropic-ai/claude-agent-sdk') {
+    return { url: new URL('./sdk-mock.mjs', import.meta.url).href, shortCircuit: true };
+  }
+  return nextResolve(specifier, context);
+}
+""")
+    sdk_mock = tmp_path / "sdk-mock.mjs"
+    sdk_mock.write_text("""export function query({ prompt, options }) {
+  globalThis.sdkCalls.push({ prompt, systemPrompt: options.systemPrompt, effort: options.effort });
+  return { close() {}, async *[Symbol.asyncIterator]() {} };
+}
+""")
+    script = tmp_path / "exercise.mjs"
+    script.write_text("""import { pathToFileURL } from 'node:url';
+globalThis.sdkCalls = [];
+const { apply } = await import(pathToFileURL(process.argv[2]));
+async function invoke(env) {
+  let provider;
+  const ctx = {
+    subagents: { registerProvider(value) { provider = value; } },
+    subprocess: { spawn() { throw new Error('scripted SDK boundary must not spawn'); } },
+    logger: { warn() {} },
+    emit() {},
+  };
+  apply(ctx, { providerName: 'scripted', permissionMode: 'dontAsk',
+    disposeGraceMs: 1000, env });
+  try {
+    await provider.start({ signal: new AbortController().signal,
+      prompt: [{ type: 'text', text: 'History: turn' }],
+      parent: { session: { id: 'parent', header: { cwd: process.cwd() } } } });
+  } catch {
+    // The adapter expects the SDK to publish a process; the scripted query only
+    // captures its options, so startup stops here before any provider process.
+  }
+}
+await invoke({ REFACTORY_SYSTEM_PROMPT: 'You are an expert', REFACTORY_MODEL_EFFORT: 'medium' });
+await invoke({ REFACTORY_MODEL_EFFORT: 'medium' });
+console.log(JSON.stringify(globalThis.sdkCalls));
+""")
+    result = subprocess.run(
+        ["node", "--no-warnings", "--experimental-loader", str(loader), str(script), str(adapter)],
+        cwd=rt, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(result.stdout)
+    assert [call["prompt"] for call in calls] == ["History: turn", "History: turn"]
+    assert calls[0]["systemPrompt"] == {
+        "type": "preset", "preset": "claude_code", "append": "You are an expert"
+    }
+    assert calls[1]["systemPrompt"] == {"type": "preset", "preset": "claude_code"}
+    assert [call["effort"] for call in calls] == ["medium", "medium"]
 
 
 def test_actual_route_effort_not_copied_from_request():
@@ -546,3 +622,56 @@ def test_actual_route_effort_not_copied_from_request():
     # options.effort is not in the metadata init block
     init_block = content[content.index("actual_route"):content.index("source: \"native-sdk-init\"")]
     assert "effort: null" in init_block
+
+
+def test_real_mode_resume_retains_omit_steering(tmp_path):
+    """Resume uses the saved option through the actual walker resume entry point."""
+    from refactory_dsh import nn
+    from refactory_dsh.evaluators import WalkerEvaluator
+    from refactory_dsh.steering import Ledger
+
+    captured = {}
+
+    class OneAgent(nn.Mode):
+        @classmethod
+        def declare(cls):
+            return {}
+
+        def build(self):
+            graph = nn.Graph()
+            graph.add(nn.Node("agent", "agent", prompt_template="continue the build",
+                              writes=("result.txt",)))
+            return graph
+
+        def score(self, result):
+            return 1.0
+
+    class Client:
+        def __init__(self, fail=False):
+            self.fail = fail
+        def for_node(self, node, role="worker"):
+            return self
+        def with_wall(self, seconds):
+            return self
+        def context(self):
+            return {}
+        def route(self):
+            return {"worker_backend": "dsh"}
+        def complete(self, prompt, *, system="", workdir=None, **kwargs):
+            captured["prompt"] = prompt
+            if self.fail:
+                raise RuntimeError("scripted first attempt failure")
+            return "resumed"
+
+    run = tmp_path / "resume"
+    Ledger.seed(run, "build a tool")
+    Ledger(run).note("correction", "keep retries deterministic")
+    mode = OneAgent()
+    initial = WalkerEvaluator(model=Client(fail=True), project=tmp_path,
+                              omit_steering=True)
+    failed = initial.evaluate(mode, mode.state_dict(), run)
+    assert not failed.exit_ok
+    resumed = OneAgent.resume(run, model=Client())
+    assert resumed.exit_ok, resumed.error
+    assert "What the user has said" not in captured["prompt"]
+    assert "keep retries deterministic" not in captured["prompt"]
