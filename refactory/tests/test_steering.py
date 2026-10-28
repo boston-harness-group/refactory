@@ -205,10 +205,19 @@ def test_the_gate_reports_a_defaulted_ledger(tmp_path):
 # ── what the transform produces is still a valid workflow ──────────────────
 def test_the_annotated_workflow_is_still_valid_ir(tmp_path):
     """A transform that produced an unloadable graph would be worse than none."""
-    state = _state()
-    steering.interactive(state, tmp_path, request="build a mode for circle packing")
-    issues = validate_state(state)
-    assert not issues, f"validation issues: {issues}"
+    workflow, _ledger = steering.interactive(
+        _state(), tmp_path, request="build a mode for circle packing"
+    )
+    from refactory_dsh.ir import Workflow
+    reconstructed = Workflow.from_dict(workflow.to_dict())
+    assert sorted(reconstructed.nodes) == sorted(workflow.nodes)
+    for edge in reconstructed.edges:
+        assert edge.source in reconstructed.nodes, (
+            f"edge source {edge.source!r} not in nodes"
+        )
+        assert edge.target in reconstructed.nodes, (
+            f"edge target {edge.target!r} not in nodes"
+        )
 
 
 # ── the ledger as a run artifact ───────────────────────────────────────────

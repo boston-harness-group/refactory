@@ -24,8 +24,20 @@ def _state() -> dict:
 
 # ── the graph ──────────────────────────────────────────────────────────────
 def test_a_mode_lowers_to_valid_ir():
-    issues = validate_state(_state())
-    assert not issues, f"the validator refused it: {issues}"
+    state = _state()
+    issues = validate_state(state)
+    assert not issues, f"the state has validation issues: {issues}"
+    workflow = lowering.to_workflow(state, name=MODE)
+    from refactory_dsh.ir import Workflow
+    reconstructed = Workflow.from_dict(workflow.to_dict())
+    assert sorted(reconstructed.nodes) == sorted(workflow.nodes)
+    for edge in reconstructed.edges:
+        assert edge.source in reconstructed.nodes, (
+            f"edge source {edge.source!r} not in nodes"
+        )
+        assert edge.target in reconstructed.nodes, (
+            f"edge target {edge.target!r} not in nodes"
+        )
 
 
 def test_every_node_survives_with_its_declarations():
