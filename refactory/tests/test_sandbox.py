@@ -328,7 +328,7 @@ def _stage_finishing_with(tmp_path: Path, lines: str) -> None:
 
 @pytest.mark.skipif(sys.platform != "linux", reason="only Linux enforces these caps")
 @pytest.mark.parametrize("model", [False, True])
-def test_a_smoke_keeps_the_heap_cap_and_drops_the_address_space_cap_only_for_a_model(tmp_path, model):
+def test_a_smoke_keeps_the_heap_cap_and_drops_the_address_space_cap_only_for_a_model(tmp_path, model, graph_profile_home):
     import resource
 
     from refactory_dsh.model import DshModelClient
@@ -349,7 +349,7 @@ def test_a_smoke_keeps_the_heap_cap_and_drops_the_address_space_cap_only_for_a_m
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="only Linux enforces these caps")
-def test_a_smoke_with_a_model_still_stops_a_heap_bomb(tmp_path):
+def test_a_smoke_with_a_model_still_stops_a_heap_bomb(tmp_path, graph_profile_home):
     """The mode's own code in a model smoke cannot take more than the heap cap."""
     from refactory_dsh.model import DshModelClient
 
@@ -366,7 +366,7 @@ def test_a_smoke_with_a_model_still_stops_a_heap_bomb(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="only Linux enforces these caps")
-def test_a_smoke_with_a_model_starts_its_dsh_worker(tmp_path):
+def test_a_smoke_with_a_model_starts_its_dsh_worker(tmp_path, graph_profile_home):
     """The real DSH worker, started by the same `sandbox.smoke` call create makes, reaches
     its model endpoint: here a stand-in on this machine that refuses every request, so no
     model is called. Under the address-space cap it died at load and sent nothing."""
@@ -394,7 +394,7 @@ def test_a_smoke_with_a_model_starts_its_dsh_worker(tmp_path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Refuse)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        home = model_home_with_a_key(tmp_path / "dsh", provider="anthropic", model="claude-opus-4-6",
+        home = model_home_with_a_key(graph_profile_home, provider="anthropic", model="claude-opus-4-6",
                                      base_url=f"http://127.0.0.1:{server.server_address[1]}")
         _stage_finishing_with(tmp_path, (
             "    try:\n"
