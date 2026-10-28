@@ -225,22 +225,6 @@
       },
       "_type": "AgentNode"
     },
-    "first_self_check": {
-      "id": "first_self_check",
-      "reads": [
-        "self-check-ticket.json"
-      ],
-      "writes": [
-        "self-check-first.json"
-      ],
-      "blocking": true,
-      "resource_role": "final_validation",
-      "command": "python -m refactory_dsh.run refactory_dsh.design_ops:first_self_check",
-      "callable_name": "refactory_dsh.design_ops:first_self_check",
-      "notes": "run the brief's whole check once on the attempt and compare what fails with the base",
-      "command_timeout_s": 8940,
-      "_type": "FnNode"
-    },
     "fork_qa": {
       "id": "fork_qa",
       "reads": [],
@@ -252,23 +236,11 @@
         "code_reviewer",
         "qa_director",
         "verifier",
-        "check"
-      ],
-      "optional_targets": [
-        "verifier"
-      ],
-      "_type": "ForkNode"
-    },
-    "fork_self_check": {
-      "id": "fork_self_check",
-      "reads": [],
-      "writes": [],
-      "blocking": true,
-      "targets": [
-        "first_self_check",
+        "check",
         "early_asks_check"
       ],
       "optional_targets": [
+        "verifier",
         "early_asks_check"
       ],
       "_type": "ForkNode"
@@ -277,7 +249,8 @@
       "id": "gate_check",
       "reads": [
         "check-prep.json",
-        "check-verdict.json"
+        "check-verdict.json",
+        "early-asks.json"
       ],
       "writes": [
         "authoring-evidence.json",
@@ -295,7 +268,7 @@
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:gate_check",
       "command_timeout_s": 6540,
-      "gate_prompt": "send a failed check back to the builder, or, at its limit, deliver the attempt as a draft marked check failing; otherwise read the reviews",
+      "gate_prompt": "compose one send-back from check failures and review findings without spending an attempt; a failing check skips the QA judge and overwatch by graph topology (gate_check \u2192 pick_corrections bypasses synthesize_qa \u2192 qa_judge \u2192 overwatch); at its limit, deliver the attempt as a draft marked check failing; when the check and all reviews passed, proceed",
       "max_iterations": 8,
       "_type": "GateNode"
     },
@@ -399,35 +372,6 @@
       "max_iterations": 8,
       "_type": "GateNode"
     },
-    "gate_self_check": {
-      "id": "gate_self_check",
-      "reads": [
-        "early-asks.json",
-        "self-check-first.json",
-        "self-check-ticket.json"
-      ],
-      "writes": [
-        "authoring-evidence.json",
-        "changed-functions.json",
-        "changes.diff",
-        "check-prep.json",
-        "check-record.json",
-        "check-verdict.json",
-        "check.txt",
-        "self-check-record.jsonl",
-        "test-guardedness.json",
-        "validation.txt"
-      ],
-      "blocking": true,
-      "resource_role": "final_validation",
-      "evaluator_type": "fn",
-      "evaluator_role": null,
-      "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:gate_self_check",
-      "command_timeout_s": 6540,
-      "gate_prompt": "send the attempt's failures and the asks the judge found not built back to emit as one fix-up, or go on to the reviews; ask an unreadable judge again once; a limit stop goes to the report as a draft",
-      "max_iterations": 91,
-      "_type": "GateNode"
-    },
     "gate_strategy": {
       "id": "gate_strategy",
       "reads": [
@@ -475,16 +419,6 @@
         "health_checker",
         "code_reviewer",
         "qa_director"
-      ],
-      "_type": "JoinNode"
-    },
-    "join_self_check": {
-      "id": "join_self_check",
-      "reads": [],
-      "writes": [],
-      "blocking": true,
-      "sources": [
-        "first_self_check"
       ],
       "_type": "JoinNode"
     },
@@ -594,7 +528,6 @@
         "check-verdict.json",
         "check.txt",
         "self-check-record.jsonl",
-        "self-check-ticket.json",
         "test-guardedness.json",
         "validation.txt"
       ],
@@ -604,7 +537,7 @@
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:prepare_check",
       "command_timeout_s": 6540,
-      "gate_prompt": "settle the commit the check and the reviews see; an attempt's first emission goes to the whole check beside the early asks judge, and a fix-up's self-check runs here: a failure goes back to emit as a fix-up, spending no attempt and running no review; a limit stop with an applied commit and current check evidence goes to the report as a draft",
+      "gate_prompt": "settle the commit the check and the reviews see; every attempt's self-check runs the tests the change touches here (first or fix-up): a failure goes back to emit as a fix-up, spending no attempt and running no review; the full check runs beside the reviews in fork_qa; a limit stop with an applied commit and current check evidence goes to the report as a draft",
       "max_iterations": 45,
       "_type": "GateNode"
     },
@@ -874,7 +807,7 @@
     },
     {
       "source": "early_asks_check",
-      "target": "join_self_check",
+      "target": "join_qa",
       "condition": null
     },
     {
@@ -885,11 +818,6 @@
     {
       "source": "fork_qa",
       "target": "join_qa",
-      "condition": null
-    },
-    {
-      "source": "fork_self_check",
-      "target": "join_self_check",
       "condition": null
     },
     {
@@ -968,26 +896,6 @@
       "condition": "reloop"
     },
     {
-      "source": "gate_self_check",
-      "target": "fork_qa",
-      "condition": "proceed"
-    },
-    {
-      "source": "gate_self_check",
-      "target": "fork_self_check",
-      "condition": "reread"
-    },
-    {
-      "source": "gate_self_check",
-      "target": "pick_corrections",
-      "condition": "reloop"
-    },
-    {
-      "source": "gate_self_check",
-      "target": "report",
-      "condition": "draft"
-    },
-    {
       "source": "gate_strategy",
       "target": "pick_corrections",
       "condition": "proceed"
@@ -1000,11 +908,6 @@
     {
       "source": "join_qa",
       "target": "gate_check",
-      "condition": null
-    },
-    {
-      "source": "join_self_check",
-      "target": "gate_self_check",
       "condition": null
     },
     {
@@ -1041,11 +944,6 @@
       "source": "prepare_check",
       "target": "fork_qa",
       "condition": "proceed"
-    },
-    {
-      "source": "prepare_check",
-      "target": "fork_self_check",
-      "condition": "first"
     },
     {
       "source": "prepare_check",

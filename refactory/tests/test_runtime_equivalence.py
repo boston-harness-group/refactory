@@ -670,7 +670,8 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
     visits = observed["visits"]["order and outcome"].splitlines()
     assert "apply_corrections: completed" in visits
     assert visits.count("emit: completed") == 2, visits
-    assert "gate_self_check: reloop" in visits and "delivery_gate: proceed" in visits, visits
+    # gate_self_check no longer exists; the self-check sends back from prepare_check
+    assert "delivery_gate: proceed" in visits, visits
     assert any(line.startswith("fork_qa branches:") for line in visits), visits
     assert "NAME constant" in observed["artifacts"]["design.md"]
     [patch] = observed["commits"].values()

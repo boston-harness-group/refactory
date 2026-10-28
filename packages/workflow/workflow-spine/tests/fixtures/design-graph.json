@@ -62,10 +62,6 @@
       "max_iterations": 1,
       "_type": "AgentNode"
     },
-    "first_self_check": {
-      "id": "first_self_check",
-      "_type": "FnNode"
-    },
     "fork_qa": {
       "id": "fork_qa",
       "targets": [
@@ -73,20 +69,11 @@
         "code_reviewer",
         "qa_director",
         "verifier",
-        "check"
-      ],
-      "optional_targets": [
-        "verifier"
-      ],
-      "_type": "ForkNode"
-    },
-    "fork_self_check": {
-      "id": "fork_self_check",
-      "targets": [
-        "first_self_check",
+        "check",
         "early_asks_check"
       ],
       "optional_targets": [
+        "verifier",
         "early_asks_check"
       ],
       "_type": "ForkNode"
@@ -127,12 +114,6 @@
       "max_iterations": 8,
       "_type": "GateNode"
     },
-    "gate_self_check": {
-      "id": "gate_self_check",
-      "evaluator_type": "fn",
-      "max_iterations": 91,
-      "_type": "GateNode"
-    },
     "gate_strategy": {
       "id": "gate_strategy",
       "evaluator_type": "user",
@@ -152,13 +133,6 @@
         "health_checker",
         "code_reviewer",
         "qa_director"
-      ],
-      "_type": "JoinNode"
-    },
-    "join_self_check": {
-      "id": "join_self_check",
-      "sources": [
-        "first_self_check"
       ],
       "_type": "JoinNode"
     },
@@ -298,7 +272,7 @@
     },
     {
       "source": "early_asks_check",
-      "target": "join_self_check",
+      "target": "join_qa",
       "condition": null
     },
     {
@@ -309,11 +283,6 @@
     {
       "source": "fork_qa",
       "target": "join_qa",
-      "condition": null
-    },
-    {
-      "source": "fork_self_check",
-      "target": "join_self_check",
       "condition": null
     },
     {
@@ -392,26 +361,6 @@
       "condition": "reloop"
     },
     {
-      "source": "gate_self_check",
-      "target": "fork_qa",
-      "condition": "proceed"
-    },
-    {
-      "source": "gate_self_check",
-      "target": "fork_self_check",
-      "condition": "reread"
-    },
-    {
-      "source": "gate_self_check",
-      "target": "pick_corrections",
-      "condition": "reloop"
-    },
-    {
-      "source": "gate_self_check",
-      "target": "report",
-      "condition": "draft"
-    },
-    {
       "source": "gate_strategy",
       "target": "pick_corrections",
       "condition": "proceed"
@@ -424,11 +373,6 @@
     {
       "source": "join_qa",
       "target": "gate_check",
-      "condition": null
-    },
-    {
-      "source": "join_self_check",
-      "target": "gate_self_check",
       "condition": null
     },
     {
@@ -465,11 +409,6 @@
       "source": "prepare_check",
       "target": "fork_qa",
       "condition": "proceed"
-    },
-    {
-      "source": "prepare_check",
-      "target": "fork_self_check",
-      "condition": "first"
     },
     {
       "source": "prepare_check",

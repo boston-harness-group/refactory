@@ -19,8 +19,7 @@ from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECO
 from refactory_dsh.model import DEFAULT_TIMEOUT_S
 from refactory_dsh.nn import Graph, Knob, Mode, Node, RunResult
 from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
-                                      EARLY_ASKS_VERDICT, FIRST_SELF_CHECK, SELF_CHECK_TICKET,
-                                      UPDATED_TESTS)
+                                      EARLY_ASKS_VERDICT, UPDATED_TESTS)
 
 OPS = "refactory_dsh.design_ops"
 
@@ -288,16 +287,6 @@ def prepare_check_iterations(knobs: dict[str, Any]) -> int:
     return (reach + fixups + 1) * refusals + fixups + reach + 1
 
 
-def gate_self_check_iterations(knobs: dict[str, Any]) -> int:
-    """gate_self_check's iteration limit: one more than the most reloops and rereads it gives.
-
-    It runs once for each attempt's first self-check, which `prepare_check` routes, so at
-    most ``prepare_check_iterations`` times; each time it reloops at most once and has the
-    early asks judge asked again at most ``judge_rereads`` times. Past that, b39b's stop has
-    already ended the run: the limit never ends it, however many times the pair is used.
-    """
-    return (1 + int(knobs.get("judge_rereads", 1))) * prepare_check_iterations(knobs) + 1
-
 
 def builder_timeout(values: dict[str, Any]) -> int:
     """The builder's session limit, from the knob a person may set."""
@@ -387,11 +376,10 @@ class DesignMode(Mode):
         }
 
     #: The gates whose iteration limits follow the knobs' values.
-    _LIMITS = {"prepare_check": prepare_check_iterations,
-               "gate_self_check": gate_self_check_iterations}
+    _LIMITS = {"prepare_check": prepare_check_iterations}
 
     def graph(self) -> Graph:
-        """The graph, with prepare_check's and gate_self_check's limits following the knobs."""
+        """The graph, with prepare_check's limit following the knobs."""
         graph = super().graph()
         for name, limit in self._LIMITS.items():
             if name in graph.nodes:
@@ -796,38 +784,20 @@ class DesignMode(Mode):
             "prepare_check", "gate", evaluator=f"{OPS}:prepare_check", role="validation",
             resource_role="final_validation",
             reads=("brief.json",),
-            writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD,
-                    SELF_CHECK_TICKET),
+            writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD),
             produces=self_check_produces,
             knobs=(*check_knobs, "self_check_fixups", "self_check_timeout_s"),
             # From the knobs, so the build loop's stop always comes first: 45 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
             max_iterations=prepare_check_iterations(defaults),
-            notes="settle the commit the check and the reviews see; an attempt's first "
-                  "emission goes to the whole check beside the early asks judge, and a "
-                  "fix-up's self-check runs here: a failure goes back to emit as a fix-up, "
-                  "spending no attempt and running no review; a limit stop with an "
-                  "applied commit and current check evidence goes to the report as a draft",
+            notes="settle the commit the check and the reviews see; every attempt's "
+                  "self-check runs the tests the change touches here (first or fix-up): "
+                  "a failure goes back to emit as a fix-up, spending no attempt and running "
+                  "no review; the full check runs beside the reviews in fork_qa; a limit "
+                  "stop with an applied commit and current check evidence goes to the "
+                  "report as a draft",
         ))
-        # ── the first self-check, beside the early asks judge (b48a) ──
-        # An attempt's first emission runs the whole check once, so the builder sees every
-        # failure in one pass, while a judge reads the diff against the brief's asks and the
-        # approved corrections. gate_self_check sends both back as one fix-up. The judge is
-        # an optional branch: one that fails is asked again once, then the attempt goes on
-        # with the failure on record, never read as "everything is built".
-        graph.add(Node("fork_self_check", "fork",
-                       targets=("first_self_check", "early_asks_check"),
-                       optional_targets=("early_asks_check",),
-                       notes="run the whole check and the early asks judge at once"))
-        graph.add(Node(
-            "first_self_check", "op", call=f"{OPS}:first_self_check", role="validation",
-            resource_role="final_validation",
-            reads=(SELF_CHECK_TICKET,),
-            writes=(FIRST_SELF_CHECK,),
-            knobs=("check_timeout_s", "self_check_timeout_s"),
-            notes="run the brief's whole check once on the attempt and compare what fails "
-                  "with the base",
-        ))
+        # ── the early asks judge, beside the check and the reviews in fork_qa ──
         graph.add(Node(
             "early_asks_check", "agent",
             prompt_template=EARLY_ASKS_PROMPT,
@@ -835,21 +805,6 @@ class DesignMode(Mode):
             writes=(EARLY_ASKS_VERDICT,),
             resource_role="final_validation",
             notes="judge whether the attempt builds each ask and correction",
-        ))
-        graph.add(Node("join_self_check", "join", sources=("first_self_check",),
-                       notes="wait for the self-check and the judge"))
-        graph.add(Node(
-            "gate_self_check", "gate", evaluator=f"{OPS}:gate_self_check", role="validation",
-            resource_role="final_validation",
-            reads=(SELF_CHECK_TICKET, FIRST_SELF_CHECK, EARLY_ASKS_VERDICT),
-            writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD),
-            produces=self_check_produces,
-            knobs=(*check_knobs, "self_check_fixups", "self_check_timeout_s", "judge_rereads"),
-            # Never the run's stop (`gate_self_check_iterations`; `DesignMode.graph`).
-            max_iterations=gate_self_check_iterations(defaults),
-            notes="send the attempt's failures and the asks the judge found not built back "
-                  "to emit as one fix-up, or go on to the reviews; ask an unreadable judge "
-                  "again once; a limit stop goes to the report as a draft",
         ))
         graph.add(Node(
             "check", "op", call=f"{OPS}:check_beside_reviews", role="validation",
@@ -862,13 +817,17 @@ class DesignMode(Mode):
         graph.add(Node(
             "gate_check", "gate", evaluator=f"{OPS}:gate_check", role="validation",
             resource_role="final_validation",
-            reads=(CHECK_PREP, CHECK_VERDICT),
+            reads=(CHECK_PREP, CHECK_VERDICT, EARLY_ASKS_VERDICT),
             # It runs the whole check itself when no decision stands for this attempt.
             writes=(*check_writes, *repo_change.CHECK_WRITES),
-            produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery"),
+            produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
+                      "combined_sendback_count"),
             knobs=check_knobs, max_iterations=8,
-            notes="send a failed check back to the builder, or, at its limit, deliver the "
-                  "attempt as a draft marked check failing; otherwise read the reviews",
+            notes="compose one send-back from check failures and review findings without "
+                  "spending an attempt; a failing check skips the QA judge and overwatch "
+                  "by graph topology (gate_check → pick_corrections bypasses synthesize_qa "
+                  "→ qa_judge → overwatch); at its limit, deliver the attempt as a draft "
+                  "marked check failing; when the check and all reviews passed, proceed",
         ))
 
         # ── design-v2's three reviews, in parallel, and the overwatch pass ──
@@ -889,9 +848,10 @@ class DesignMode(Mode):
         ))
         graph.add(Node("fork_qa", "fork",
                        targets=("health_checker", "code_reviewer", "qa_director", "verifier",
-                                "check"),
-                       optional_targets=("verifier",),
-                       notes="start the three reviews, the verifier and the check"))
+                                "check", "early_asks_check"),
+                       optional_targets=("verifier", "early_asks_check"),
+                       notes="start the three reviews, the verifier, the check and the "
+                             "early asks judge"))
         graph.add(Node(
             "health_checker", "agent",
             prompt_template=(
@@ -1163,16 +1123,8 @@ class DesignMode(Mode):
         graph.connect("prepare_check", "pick_corrections", condition="reloop")
         graph.connect("prepare_check", "fork_qa", condition="proceed")
         graph.connect("prepare_check", "report", condition="draft")
-        graph.connect("prepare_check", "fork_self_check", condition="first")
-        graph.connect("fork_self_check", "join_self_check")
-        graph.connect("early_asks_check", "join_self_check")
-        graph.connect("join_self_check", "gate_self_check")
-        graph.connect("gate_self_check", "pick_corrections", condition="reloop")
-        graph.connect("gate_self_check", "fork_qa", condition="proceed")
-        graph.connect("gate_self_check", "report", condition="draft")
-        # The judge asked again, with no builder round: the self-check's result stands.
-        graph.connect("gate_self_check", "fork_self_check", condition="reread")
         graph.connect("fork_qa", "join_qa")
+        graph.connect("early_asks_check", "join_qa")
         graph.connect("verifier", "join_qa")
         graph.connect("join_qa", "gate_check")
         graph.connect("gate_check", "pick_corrections", condition="reloop")

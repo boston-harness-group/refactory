@@ -445,18 +445,13 @@ def test_a_design_check_limit_goes_to_the_report_as_a_draft_on_the_spine(tmp_pat
 
 
 #: The nodes of one attempt, as the spine runs design's graph (`DesignMode.graph`): the
-#: first self-check's fork, its judge's verdict (written as the agent node writes it,
-#: `tests_support.judge_finds_everything_built`), then the check beside the reviews.
+#: self-check in prepare_check, then the check beside the reviews in fork_qa.
 _ATTEMPT = (("refactory_dsh.design_ops:design_materialise", "materialise", "op"),
             ("refactory_dsh.design_ops:prepare_check", "prepare_check", "gate"),
-            ("refactory_dsh.design_ops:first_self_check", "first_self_check", "op"),
-            ("tests_support:judge_finds_everything_built", "early_asks_check", "op"),
-            ("refactory_dsh.design_ops:gate_self_check", "gate_self_check", "gate"),
             ("refactory_dsh.design_ops:check_beside_reviews", "check", "op"),
             ("refactory_dsh.design_ops:gate_check", "gate_check", "gate"))
-#: The attempt's routes up to the check beside the reviews, which the first self-check passes.
-_TO_THE_CHECK = [("materialise", 0, ""), ("prepare_check", 0, "first"), ("first_self_check", 0, ""),
-                 ("early_asks_check", 0, ""), ("gate_self_check", 0, "proceed"), ("check", 0, "")]
+#: The attempt's routes up to the check beside the reviews.
+_TO_THE_CHECK = [("materialise", 0, ""), ("prepare_check", 0, "proceed"), ("check", 0, "")]
 _REPORT = ("refactory_dsh.design_ops:report_judged", "report", "op")
 
 
