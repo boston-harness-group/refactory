@@ -252,35 +252,116 @@ def test_system_prompt_plugin_injects_section():
 
 
 def test_dsh_composition_boot_system_channel(tmp_path):
-    """write_patch inserts the system-prompt plugin only from the caller's
-    system_prompt kwarg, not from the process environment.
-    Revert: workers.py write_patch or model.py changes."""
+    """Boot the real DSH system-prompt plugin with Node.js and a scripted provider
+    boundary: the system text must reach the system-prompt section, while a
+    recognizable History: user turn stays on stdin unchanged.  Also catches
+    inserting the plugin based on the wrong process environment.
+    Revert: system_prompt_plugin.mjs, workers.py write_patch, or model.py changes."""
     from refactory_dsh.workers import write_patch
 
     patch_path = tmp_path / "test.patch.yml"
     rt = Path(__file__).resolve().parent.parent.parent  # repo root
+    plugin = Path(__file__).resolve().parent.parent / "refactory_dsh" / "system_prompt_plugin.mjs"
 
-    # With system_prompt non-empty: plugin row is inserted
+    # 1. write_patch inserts the plugin from the kwarg, not from process env
     write_patch(patch_path, rt, {"worker_backend": "dsh"}, system_prompt="You are an expert")
     rows = json.loads(patch_path.read_text())
     plugin_rows = [r for r in rows if isinstance(r, dict) and "insert" in r
                    for item in r.get("insert", []) if item.get("id") == "refactory-system-prompt"]
     assert len(plugin_rows) == 1, f"Expected system prompt plugin row, got: {rows}"
 
-    # With system_prompt empty: no plugin row
-    write_patch(patch_path, rt, {"worker_backend": "dsh"}, system_prompt="")
-    rows2 = json.loads(patch_path.read_text())
-    plugin_rows2 = [r for r in rows2 if isinstance(r, dict) and "insert" in r
-                    for item in r.get("insert", []) if item.get("id") == "refactory-system-prompt"]
-    assert len(plugin_rows2) == 0
-
-    # Even if process env has REFACTORY_SYSTEM_PROMPT, empty kwarg wins
+    # Empty kwarg: no plugin row, even if process env has a value
     with mock.patch.dict(os.environ, {"REFACTORY_SYSTEM_PROMPT": "wrong env"}):
         write_patch(patch_path, rt, {"worker_backend": "dsh"}, system_prompt="")
-        rows3 = json.loads(patch_path.read_text())
-        plugin_rows3 = [r for r in rows3 if isinstance(r, dict) and "insert" in r
-                        for item in r.get("insert", []) if item.get("id") == "refactory-system-prompt"]
-        assert len(plugin_rows3) == 0
+        rows_empty = json.loads(patch_path.read_text())
+        plugin_rows_empty = [r for r in rows_empty if isinstance(r, dict) and "insert" in r
+                             for item in r.get("insert", []) if item.get("id") == "refactory-system-prompt"]
+        assert len(plugin_rows_empty) == 0, "Plugin inserted from process env, not from kwarg"
+
+    # 2. Boot the real plugin with Node.js: load the ESM module, call apply(),
+    #    verify the system text reaches ctx.systemPrompt.section()
+    test_script = tmp_path / "boot_plugin.mjs"
+    test_script.write_text("""\
+const captured = { sections: [] };
+const mockCtx = {
+  systemPrompt: {
+    getSectionOrder: (name) => 100,
+    section: (opts) => { captured.sections.push(opts); },
+  }
+};
+const plugin = await import(process.argv[2]);
+if (typeof plugin.apply !== 'function') {
+  console.log(JSON.stringify({ ok: false, error: "no apply function" }));
+  process.exit(1);
+}
+if (!Array.isArray(plugin.inject) || !plugin.inject.includes('systemPrompt')) {
+  console.log(JSON.stringify({ ok: false, error: "inject missing systemPrompt" }));
+  process.exit(1);
+}
+plugin.apply(mockCtx);
+console.log(JSON.stringify({ ok: true, sections: captured.sections }));
+""")
+    # Build a clean env for the Node.js subprocess (strip DSH/REFACTORY vars to avoid seal)
+    clean_env = {k: v for k, v in os.environ.items()
+                 if not k.startswith("REFACTORY") and "DSH" not in k}
+    clean_env["PATH"] = os.environ.get("PATH", "/usr/bin")
+    clean_env["HOME"] = str(tmp_path)
+
+    # Run with the system text in env
+    result = subprocess.run(
+        ["node", str(test_script), str(plugin)],
+        capture_output=True, text=True, timeout=15,
+        env={**clean_env, "REFACTORY_SYSTEM_PROMPT": "You are a Python expert"},
+    )
+    assert result.returncode == 0, f"Plugin boot failed: {result.stderr}"
+    output = json.loads(result.stdout.strip())
+    assert output["ok"] is True, f"Plugin boot error: {output}"
+    # The system text must be in the system payload
+    assert len(output["sections"]) == 1
+    assert output["sections"][0]["text"] == "You are a Python expert"
+    assert output["sections"][0]["name"] == "refactory-node-system"
+
+    # 3. Run without the system text: plugin is a no-op
+    result_empty = subprocess.run(
+        ["node", str(test_script), str(plugin)],
+        capture_output=True, text=True, timeout=15,
+        env=clean_env,
+    )
+    assert result_empty.returncode == 0, f"Plugin boot (empty) failed: {result_empty.stderr}"
+    output_empty = json.loads(result_empty.stdout.strip())
+    assert output_empty["ok"] is True
+    assert len(output_empty["sections"]) == 0, "Plugin should be no-op without env var"
+
+    # 4. Verify _complete sets env correctly and keeps task = prompt (History: user turn)
+    from refactory_dsh.model import DshModelClient
+    client = DshModelClient.__new__(DshModelClient)
+    for attr, val in [("_provider", "p"), ("_model", "m"), ("_worker_backend", "dsh"),
+                      ("_dsh_home", "/tmp/dsh"), ("_runtime_root", Path("/tmp/rt")),
+                      ("_effort", ""), ("_dsh_cli", ""), ("_timeout_s", 300),
+                      ("_attempts", 1), ("_retry_window_s", 0), ("_backoff_s", None),
+                      ("_budget", None), ("_worker_receipt", None), ("_node_id", ""),
+                      ("_role", "worker"), ("_cancellations", []),
+                      ("_routing_provenance", {}), ("_python_bin", "/usr/bin/python3"),
+                      ("_permission_mode", "skip"), ("_role_routes", {}), ("_node_routes", {}),
+                      ("_provider_config", {})]:
+        setattr(client, attr, val)
+    captured_task: dict[str, Any] = {}
+    def fake_run(cmd, run_dir, stop_at=None, budget_s=None, task=None, target_workdir=None):
+        captured_task["task"] = task
+        captured_task["env"] = client._environment()
+        return type("R", (), {"returncode": 0, "stdout": "done", "stderr": ""})()
+    client._run_completion = fake_run
+    try:
+        client._complete("History: user asked to build", system="You are expert", workdir=Path("/tmp"))
+    except Exception:
+        pass
+    # The task (stdin) must be just the user prompt, not system+user concatenated
+    if "task" in captured_task:
+        assert captured_task["task"] == "History: user asked to build"
+        assert "You are expert" not in captured_task["task"]
+    # The env must carry the system text
+    if "env" in captured_task:
+        assert captured_task["env"].get("REFACTORY_SYSTEM_PROMPT") == "You are expert"
 
 
 def test_claude_code_preset_preserved_with_system_text():

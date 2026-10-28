@@ -876,7 +876,7 @@ describe('applyControls integration', () => {
       'class M:',
       '    def __init__(self, **k): pass',
       '    def for_node(self, n, role="worker"): return self',
-      '    def complete(self, p, workdir=None):',
+      '    def complete(self, p, workdir=None, **kw):',
       '        captured.append(p); return "done"',
       '    def context(self): return {"provider": "test", "model": "test"}',
       '    def route(self): return {"worker_backend": "dsh"}',

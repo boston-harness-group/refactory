@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { Spine } from '../src/spine'
+import type { WorkflowGraph, WorkflowNode } from '../src/types'
 
-function makeGraph(systemPrompt?: string) {
-  const node: Record<string, unknown> = {
+function makeGraph(systemPrompt?: string): WorkflowGraph {
+  const node: WorkflowNode = {
     _type: 'AgentNode',
     id: 'build',
     role: 'builder',
