@@ -573,8 +573,8 @@ def _finish_op_child(child: Any) -> None:
 def _kill_op_child(child: Any) -> None:
     """Stop one op's process group: terminate, grace, then kill whatever is left.
 
-    The leader is not reaped before the group is signalled, so its pid — and so the
-    group id — cannot have been reused when the signal is sent.
+    The grace waits on the group rather than on the child: polling the child would reap
+    the leader, freeing its pid, and the kill below names the group by that pid.
     """
     try:
         os.killpg(child.pid, signal.SIGTERM)
@@ -584,7 +584,11 @@ def _kill_op_child(child: Any) -> None:
         except OSError:
             pass
     grace_until = time.monotonic() + 5
-    while time.monotonic() < grace_until and child.is_alive():
+    while time.monotonic() < grace_until:
+        try:
+            os.killpg(child.pid, 0)  # the group is still there, and so is its id
+        except OSError:
+            break
         time.sleep(0.05)
     # The leader may have exited on TERM while a descendant ignored it: kill the group
     # anyway, before the join that would free the pid.
