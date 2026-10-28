@@ -1027,3 +1027,25 @@ def test_run_node_optional_op_records_missing(tmp_path, monkeypatch):
     missing_file = workdir / 'reviews' / 'verifier-missing.txt'
     assert missing_file.exists(), 'missing file must be written'
     assert 'RuntimeError' in missing_file.read_text()
+
+
+def test_workspace_shell_kills_hangs_and_remains_usable(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    if not (root / "node_modules/@deepseek-ai/dsh").exists():
+        pytest.skip("DSH packages not installed")
+    patch = tmp_path / "workspace.json"
+    workers.write_patch(patch, root, DshModelClient().route(), tool_home=tmp_path / "home")
+    subprocess.run(["node", str(Path(__file__).with_name("workspace_command_timeout_test.mjs")),
+                    str(root), str(patch)], check=True, timeout=30)
+
+
+def test_command_limit_is_scoped_to_dsh_workspace_tools(tmp_path):
+    for backend, workspace in [("dsh", False), ("codex", True), ("claude_code", True)]:
+        patch = tmp_path / (backend + ".json")
+        root = Path(__file__).resolve().parents[2]
+        if backend != "dsh" and not (root / "node_modules" / workers.PACKAGES[backend]).exists():
+            continue
+        workers.write_patch(patch, root, DshModelClient(worker_backend=backend).route(),
+                            tool_home=tmp_path if workspace else None)
+        assert not any(row.get("id") in ("bash-sandbox", "tool-bash")
+                       for row in json.loads(patch.read_text()))
