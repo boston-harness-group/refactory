@@ -1131,8 +1131,10 @@ class DesignMode(Mode):
         graph.connect("prepare_check", "report", condition="draft")
         graph.connect("fork_qa", "join_qa")
         # No explicit edges from early_asks_check or verifier to join_qa:
-        # the fork→join connection drains all branches, and join_qa.sources
-        # includes both for uncompleteBetween on reloop.
+        # the fork→join drains all targets (forwardWalk adds fork targets),
+        # and join_qa.sources includes both for uncompleteBetween on reloop.
+        # An explicit edge would cause advance() to add join_qa to the cursor
+        # when one branch completes, before the other branches finish.
         graph.connect("join_qa", "gate_check")
         graph.connect("gate_check", "pick_corrections", condition="reloop")
         graph.connect("gate_check", "synthesize_qa", condition="proceed")

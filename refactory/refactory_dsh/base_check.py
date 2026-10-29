@@ -137,6 +137,18 @@ def _split_at_double_ampersand(command: str) -> list[str]:
     Backslashes, single and double quotes, and parenthesis nesting are all respected.
 
     Returns the original command in a one-element list when no top-level ``&&`` appears.
+
+    **Guarantees (PR body):**
+
+    Each segment between top-level ``&&`` runs in one shell process, preserving the
+    person's working directory, environment variables, pipes, semicolons, redirections
+    and ``set -e``.  Each segment's exit code is captured independently, so a failed
+    segment does not hide the next one's.  The whole command gets the check's one time
+    limit, not one per segment.  A command with no ``&&`` runs exactly once, unchanged.
+
+    **What this does not guarantee:** the segments do not short-circuit on failure the
+    way ``&&`` normally does.  ``cmd_a && cmd_b`` always runs both commands even when
+    ``cmd_a`` fails, because the purpose is to collect every failure in one pass.
     """
     segments: list[str] = []
     current = ""

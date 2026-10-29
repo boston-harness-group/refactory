@@ -1053,6 +1053,35 @@ def test_pipe_preserves_output(tmp_path, monkeypatch):
     segments = base_check._split_at_double_ampersand("cd pkg && pytest | tee log.txt")
     assert segments == ["cd pkg", "pytest | tee log.txt"]
 
+    # Drive through the real run_check: a pipe command as the check, via _full_check.
+    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
+                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed\n")
+    real = repo_change.run_check
+    commands_seen: list[str] = []
+
+    def spy(ctx, command, timeout, **kwargs):
+        commands_seen.append(command)
+        if kwargs.get("beside_reviews"):
+            return broken
+        return real(ctx, command, timeout, **kwargs)
+
+    monkeypatch.setattr(repo_change, "run_check", spy)
+    T._Chunks(monkeypatch, fails=set())
+    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch, "abcdef700090")
+    # Use a pipe in the check command — no &&, so no split
+    (run / "facts.json").write_text(json.dumps({**T._facts(run),
+                                                "check": "python -m pytest | tee check.log"}))
+    T._emit(run, CLEAN, monkeypatch)
+    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
+                             monkeypatch)
+    assert code == 0 and T._label(out) == "proceed", err
+    _check_node(run, monkeypatch)
+    # The command with the pipe was passed as-is, not split at |
+    beside_cmds = [c for c in commands_seen if "pytest" in c and "beside" not in c]
+    # With no &&, the command runs unchanged — the pipe is preserved
+    assert any("tee" in c for c in beside_cmds), \
+        f"pipe not preserved: commands were {beside_cmds}"
+
 
 # ── fix 2: no-attempt send-back through the graph to the draft ────────────────
 

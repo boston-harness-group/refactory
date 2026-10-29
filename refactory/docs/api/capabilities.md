@@ -7825,11 +7825,6 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     },
     {
       "condition": null,
-      "source": "early_asks_check",
-      "target": "join_qa"
-    },
-    {
-      "condition": null,
       "source": "emit",
       "target": "materialise"
     },
@@ -8027,11 +8022,6 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "condition": null,
       "source": "synthesize_strategy",
       "target": "design_doc"
-    },
-    {
-      "condition": null,
-      "source": "verifier",
-      "target": "join_qa"
     }
   ],
   "gates": [
@@ -8212,7 +8202,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "check_timeout_s",
         "check_attempt_cap"
       ],
-      "notes": "compose one send-back from check failures and review findings without spending an attempt; a failing check skips the QA judge and overwatch by graph topology (gate_check \u2192 pick_corrections bypasses synthesize_qa \u2192 qa_judge \u2192 overwatch); at its limit, deliver the attempt as a draft marked check failing; when the check and all reviews passed, proceed",
+      "notes": "compose one send-back from check failures and review findings without spending an attempt; the combined send-back names every failing test and every review finding of the round; a failing check skips the QA judge and overwatch by graph topology (gate_check \u2192 pick_corrections bypasses synthesize_qa \u2192 qa_judge \u2192 overwatch); at its limit, deliver the attempt as a draft marked check failing; when the check and all reviews passed, proceed",
       "role": "validation"
     },
     {
@@ -8290,7 +8280,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "join_qa",
       "kind": "join",
       "knobs": [],
-      "notes": "wait for the check and all three reviews",
+      "notes": "wait for the check, all three reviews, the verifier and the early asks judge",
       "role": "ceo"
     },
     {
@@ -8806,7 +8796,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "659de2d88d278d8bad05652ff1fbf983462b58cfc63f7fd26fc4ae57825aa9ed"
+    "reviewed_schema": "fbb7d666a476f38da8ece9d1311a03a2642d125de12718e3d3ac170ef88273da"
   }
 }
 ```

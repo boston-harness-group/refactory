@@ -1203,11 +1203,17 @@ def test_the_full_check_still_runs_and_binds_after_a_self_check_cut_at_the_limit
     # finds the failure and sends back.
     assert records[0]["outcome"] == "inconclusive"
     # The full check beside the reviews found the failure and sent back; the run
-    # needed multiple attempts to succeed.  The self-check records are all
+    # needed three attempts to succeed.  The self-check records are all
     # inconclusive (the slow file is always cut), but the run exits ok because
-    # the third emission fixes the pinned test.
-    assert len(records) >= 2
-    assert result.exit_ok
+    # the third emission fixes the pinned test.  Three emissions prove the full
+    # path: inconclusive self-check → fork_qa full check finds failure → send-back
+    # → builder retries → eventual success.
+    assert len(records) == 3, f"expected 3 self-check records, got {len(records)}: {[r['outcome'] for r in records]}"
+    for i, rec in enumerate(records):
+        assert rec["outcome"] == "inconclusive", (
+            f"record {i} should be inconclusive (slow test always cut), got {rec['outcome']}")
+    assert len([p for p in model.prompts if EMIT in p]) == 3, (
+        "the run needed 3 emissions: inconclusive self-check → full check failure → send-back, twice, then success")
 
 
 def _base_runs(monkeypatch, result=None, limits=None):

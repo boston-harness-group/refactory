@@ -1370,7 +1370,7 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             # each segment's exit code, and exits non-zero when any failed.
             script_lines = ["__refactory_rc=0"]
             for idx, seg in enumerate(segments):
-                script_lines.append(f"( {seg} )")
+                script_lines.append(seg)
                 script_lines.append(f"__rc_{idx}=$?")
                 script_lines.append(f'[ $__rc_{idx} -ne 0 ] && __refactory_rc=$__rc_{idx}')
             script_lines.append("exit $__refactory_rc")
@@ -2189,23 +2189,25 @@ def _read_early_asks_verdict(ctx: Any) -> list[dict[str, Any]]:
 
 
 def _gate_check_early_asks(ctx: Any) -> Any:
-    """Check passed — see if the early asks judge or the reviews found items not built
-    or blocking findings."""
+    """Check passed — see if the early asks judge found items not built.
+
+    When composing the early-asks send-back (check passed but asks not built), include
+    review findings extracted by ``create_ops.blocking_findings`` alongside the
+    early-asks items.  Review findings alone do not cause a send-back — they are
+    handled by the QA judge downstream.
+    """
     from refactory_dsh.run import BuildLoopStop
 
     items = _read_early_asks_verdict(ctx)
     not_built = [item for item in items if not item["built"]]
-    review_findings = _collect_review_findings(ctx)
-    if not not_built and not review_findings:
+    if not not_built:
         return "proceed"
-    # Early asks or reviews found issues — send back.
-    parts: list[str] = []
-    if not_built:
-        parts.append("the check passed, but the early asks judge found items not built:")
-        parts.extend(_not_built_lines(not_built))
+    # Early asks found items not built — send back with the check's result.
+    parts = ["the check passed, but the early asks judge found items not built:"]
+    parts.extend(_not_built_lines(not_built))
+    review_findings = _collect_review_findings(ctx)
     if review_findings:
-        if parts:
-            parts.append("")
+        parts.append("")
         parts.append("## Review findings")
         for finding in review_findings:
             parts.append(f"- {finding}")

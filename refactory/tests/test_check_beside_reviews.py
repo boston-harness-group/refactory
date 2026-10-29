@@ -268,6 +268,7 @@ def test_prepare_check_sends_back_before_the_reviews_when_last_attempts_failures
         commands=["pytest t.py::x"])
     monkeypatch.setattr(failfast, "targeted_prepass", lambda *a, **k: go)
     attempts_before = int(ctx.facts.get("attempts_used", 0))
+    check_attempts_before = int(ctx.facts.get("check_attempts_used", 0))
     assert design_ops.prepare_check(ctx) == "proceed"
     prepared = ctx.read_json(CHECK_PREP)
     assert prepared["commit"] == "c1" and prepared["root"] == str(tmp_path)
@@ -277,6 +278,32 @@ def test_prepare_check_sends_back_before_the_reviews_when_last_attempts_failures
     assert ctx.facts.get("self_check_fixup_count", 0) == 0
     # prepare_check did not spend an attempt: it just prepared and proceeded
     assert int(ctx.facts.get("attempts_used", 0)) == attempts_before
+    assert int(ctx.facts.get("check_attempts_used", 0)) == check_attempts_before
+
+    # Now test the send-back path: exhaust the fix-up budget so _early_stop fires.
+    # A self-check that exhausts fixups sends back with "reloop" from _early_stop,
+    # and attempts_used must not change (no attempt spent in the send-back).
+    failing = failfast.PrepassResult(
+        ran=True, early_stop=True, targeted_command="pytest t.py::x", check_mode="full",
+        result=None, digest_text="t.py::x failed", selection=["t.py::x"],
+        ran_ids=["t.py::x"], commands=["pytest t.py::x"],
+        failing_ids=["t.py::x"])
+    monkeypatch.setattr(failfast, "targeted_prepass", lambda *a, **k: failing)
+    # Exhaust fixup budget: set self_check_fixup_count to the allowed limit
+    ctx.set_fact("self_check_fixup_count", 2)
+    ctx.set_fact("total_self_check_fixups_used", 6)
+    attempts_before2 = int(ctx.facts.get("attempts_used", 0))
+    early_stops.clear()
+    sent_back2 = design_ops.prepare_check(ctx)
+    assert str(sent_back2) == "reloop", (
+        f"expected reloop when fixup budget exhausted, got {sent_back2}")
+    # _early_stop was called with the failing test IDs from the prepass
+    assert len(early_stops) == 1, f"_early_stop must be called once, was called {len(early_stops)} times"
+    assert "t.py::x" in early_stops[0], (
+        "the send-back must name the failing test from the previous round")
+    # attempts_used must not have changed during the send-back
+    assert int(ctx.facts.get("attempts_used", 0)) == attempts_before2, (
+        "prepare_check send-back must not spend an attempt")
 
 
 def test_a_failed_preparation_is_judged_by_the_whole_check_at_once(tmp_path, monkeypatch):

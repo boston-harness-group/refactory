@@ -146,18 +146,21 @@ describe('four-branch fork with optional verifier', () => {
       name: 'test_four_branch', start_node: 'start',
       nodes: {
         start:           { _type: 'FnNode', id: 'start' },
-        fork_qa:         { _type: 'ForkNode', id: 'fork_qa', targets: ['hc', 'cr', 'qd', 'verifier'], optional_targets: ['verifier'] },
+        fork_qa:         { _type: 'ForkNode', id: 'fork_qa', targets: ['hc', 'cr', 'qd', 'verifier', 'early_asks_check'], optional_targets: ['verifier', 'early_asks_check'] },
         hc:              { _type: 'AgentNode', id: 'hc', role: 'ceo', prompt_template: '' },
         cr:              { _type: 'AgentNode', id: 'cr', role: 'ceo', prompt_template: '' },
         qd:              { _type: 'AgentNode', id: 'qd', role: 'ceo', prompt_template: '' },
         verifier:        { _type: 'AgentNode', id: 'verifier', role: 'code_reviewer', prompt_template: '' },
-        join_qa:         { _type: 'JoinNode', id: 'join_qa', sources: ['hc', 'cr', 'qd'] },
+        early_asks_check: { _type: 'AgentNode', id: 'early_asks_check', role: 'ceo', prompt_template: '' },
+        join_qa:         { _type: 'JoinNode', id: 'join_qa', sources: ['hc', 'cr', 'qd', 'early_asks_check', 'verifier'] },
         gate_qa:         { _type: 'GateNode', id: 'gate_qa', evaluator_type: 'fn', max_iterations: 5 },
       },
       edges: [
         { source: 'start', target: 'fork_qa' },
         { source: 'fork_qa', target: 'join_qa' },
-        { source: 'verifier', target: 'join_qa' },
+        // No explicit edges from verifier or early_asks_check to join_qa:
+        // the fork→join drains all targets, and join_qa.sources includes both
+        // for uncompleteBetween on reloop.
         { source: 'join_qa', target: 'gate_qa' },
       ],
     }
@@ -166,22 +169,26 @@ describe('four-branch fork with optional verifier', () => {
     s.complete('start')
     expect(ids(s)).toEqual(['fork_qa'])
     s.complete('fork_qa')
-    // All four branches appear
-    expect(ids(s).sort()).toEqual(['cr', 'hc', 'qd', 'verifier'])
-    // Complete three reviewers — verifier still pending, join not reached
+    // All five branches appear (hc, cr, qd, verifier, early_asks_check)
+    expect(ids(s).sort()).toEqual(['cr', 'early_asks_check', 'hc', 'qd', 'verifier'])
+    // Complete three reviewers — verifier and early_asks_check still pending, join not reached
     s.complete('hc')
     s.complete('cr')
     s.complete('qd')
     expect(ids(s)).toContain('verifier')
+    expect(ids(s)).toContain('early_asks_check')
     expect(ids(s)).not.toContain('join_qa')
-    // Complete verifier (simulating "missing" status at the app level)
+    // Complete verifier — early_asks_check still pending, join still not reached
     s.complete('verifier')
+    expect(ids(s)).not.toContain('join_qa')
+    // Complete early_asks_check — now join_qa fires
+    s.complete('early_asks_check')
     expect(ids(s)).toEqual(['join_qa'])
     s.complete('join_qa')
     expect(ids(s)).toEqual(['gate_qa'])
     // Check optional_targets is visible
     const forkView = s.view('fork_qa')
-    expect(forkView.optional_targets).toEqual(['verifier'])
+    expect(forkView.optional_targets).toEqual(['verifier', 'early_asks_check'])
   })
 })
 
