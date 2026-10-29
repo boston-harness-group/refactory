@@ -17,16 +17,21 @@ export function apply(ctx) {
   let lastDelta = null
   function usage() {
     const known = calls.reduce((sum, call) => sum + call.tokens, 0)
+    // Every journal record used to carry the whole call log, so each new record
+    // repeated every earlier one and the journal grew quadratically. A count is
+    // the fact a reader needs; the log itself stays in this observer's memory.
     return incompleteNestedUsage
-      ? { status: 'unavailable', tokens: null, known_tokens: known, tokens_delta: lastDelta, calls,
+      ? { status: 'unavailable', tokens: null, known_tokens: known, tokens_delta: lastDelta, calls: calls.length,
         incomplete_nested_usage: true, reason: 'A delegated runtime has incomplete nested token coverage.' }
-      : { status: 'measured', tokens: known, tokens_delta: lastDelta, calls }
+      : { status: 'measured', tokens: known, tokens_delta: lastDelta, calls: calls.length }
   }
   function save(patch, state, summary) {
     const receipt = { ...JSON.parse(readFileSync(path, 'utf8')), ...patch }
     const temp = path + '.runtime.tmp'
     writeFileSync(temp, JSON.stringify(receipt, null, 2) + '\n')
     renameSync(temp, path)
+    // Both places get the same bounded summary: what a reader needs is how many
+    // requests were measured, not every one of them again.
     if (state) appendFileSync(join(dirname(dirname(path)), 'events.jsonl'), JSON.stringify({
       schema_version: 1, at: new Date().toISOString(), kind: 'worker',
       run_id: initial.run_id, node_id: initial.node_id, worker_id: initial.worker_id,

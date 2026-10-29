@@ -24,7 +24,9 @@ import type {
   RefactoryRunStatus,
   RefactorySteering,
 } from '@deepseek-ai/dsh-refactory-console/types'
-import type { Loadable, RefactoryChoices, RefactoryNotice, RefactorySingleState, RefactoryTabState } from '../src/client/store.ts'
+import type {
+  Loadable, RefactoryActivityLevel, RefactoryChoices, RefactoryNotice, RefactorySingleState, RefactoryTabState,
+} from '../src/client/store.ts'
 import { fakeConsole } from './fake-console.client.ts'
 import type { FakeConsole } from './fake-console.client.ts'
 
@@ -54,6 +56,11 @@ export interface TabSeed {
   readonly settings?: Partial<RefactoryTabState['settings']>
   readonly watching?: string | null
   readonly frame?: Loadable<RefactoryRunStatus> | null
+  /** The journal history the face would have written; `null` before any page. */
+  readonly activity?: { after: number; cursor: number; events: readonly Readonly<Record<string, unknown>>[]; total: number; paged: boolean; first?: number } | null
+  /** The verbosity level; omitted keeps the store's own default. */
+  readonly activityLevel?: RefactoryActivityLevel
+  readonly activityScroll?: number
   /** The watched run's ledger read, as the face would have written it. */
   readonly steering?: Loadable<RefactorySteering> | null
   /** The watched run's candidates, as the face would have written them. */
@@ -101,7 +108,18 @@ export function mountBody(seed: TabSeed = {}): Mounted {
   if (seed.watching !== undefined && seed.watching !== null) actions.watching(TAB, seed.watching)
   if (seed.frame !== undefined && seed.frame !== null) {
     if (seed.frame.kind === 'ready') actions.framed(TAB, seed.frame.value)
-    else if (seed.frame.kind === 'failed') actions.frameFailed(TAB, seed.frame.message)
+    else if (seed.frame.kind === 'failed') actions.frameFailed(TAB, seed.frame.message, seed.frame.code, seed.frame.details)
+  }
+  // The held history is seeded after `watching`: attaching to a run drops the
+  // previous one's history (R-4.4), and what a face writes it writes after that.
+  if (seed.activityLevel !== undefined) actions.setActivityLevel(TAB, seed.activityLevel)
+  if (seed.activityScroll !== undefined) actions.activityScrolled(TAB, seed.activityScroll)
+  if (seed.activity !== undefined && seed.activity !== null) {
+    // The run the seed names must be the one the frame names, or the store
+    // refuses the page as another run's history (R-4.5).
+    const run = seed.frame?.kind === 'ready' ? seed.frame.value.root : seed.watching ?? '/runs/live'
+    const { after, cursor, events, total, paged } = seed.activity
+    actions.activityPage(TAB, run, { after, cursor, events, total, paged, run: null })
   }
   if (seed.steering !== undefined && seed.steering !== null) {
     if (seed.steering.kind === 'ready') actions.steered(TAB, seed.steering.value)

@@ -9,13 +9,15 @@
  */
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { makeTranslate } from './translate.client.ts'
 import { failureLine } from '../src/client/RefactoryBody.tsx'
 import css from '../src/client/RefactoryBody.module.css'
 import { en, zh } from '../src/client/locales.ts'
+import { RENDER_WINDOW } from '../src/client/store.ts'
+import type { RefactoryActivity } from '@deepseek-ai/dsh-refactory-console/types'
 import {
-  AUTHORING, CANDIDATES, COMPLETED, DISABLED, FRAME, GATED, GATED_STEERING, MODE, NO_STRATEGIES,
+  ACTIVITY, AUTHORING, CANDIDATES, COMPLETED, DISABLED, FRAME, GATED, GATED_STEERING, MODE, NO_STRATEGIES,
   PACKAGE, RECEIPT, SINGLE, STEERED, STEERING, STRATEGIES, ok,
 } from './fake-console.client.ts'
 import { TAB, mountBody } from './mount.client.tsx'
@@ -42,6 +44,16 @@ function at(view: { container: HTMLElement }, attribute: string, value?: string)
   const found = view.container.querySelector(selector)
   if (found === null) throw new Error(`no element for ${selector}`)
   return found as HTMLElement
+}
+
+/** The activity one mount hands the panel, with its journal paged. */
+function live(after: number, limit: number, total: number): RefactoryActivity {
+  return ACTIVITY(after, limit, total)
+}
+
+/** The `<li>` rows the activity section has in the DOM right now (T-18b). */
+function rows(view: { container: HTMLElement }): Element[] {
+  return [...view.container.querySelectorAll('[data-refactory-activity] li[data-refactory-activity-row]')]
 }
 
 /** Absent, as opposed to present and empty. */
@@ -247,6 +259,253 @@ describe('the run the picker is reading', () => {
     await waitFor(() => { expect(console.status).toHaveBeenCalledWith('/runs/live', FRAME.cursor, expect.anything()) })
     fireEvent.click(at(view, 'data-refactory-stop'))
     await waitFor(() => { expect(console.stop).toHaveBeenCalledWith('/runs/live', expect.anything()) })
+  })
+})
+
+describe('the activity levels of the run the picker reads', () => {
+  // T-18 (R-2.1, R-2.3-4, R-2.6-7, SD-2, UC-3): exactly three levels, standard by
+  // default and visible, verbose exhausts the journal from 0, compact hides
+  // detail but keeps the way to the history.
+  it('offers exactly three levels with standard selected on attach', () => {
+    const { view } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 200, 450) } },
+    })
+    const levels = [...view.container.querySelectorAll('[data-refactory-activity-level]')]
+    expect(levels.map(node => node.getAttribute('data-refactory-activity-level'))).toEqual(['compact', 'standard', 'verbose'])
+    // A radio group is the control: one visible choice, every option focusable.
+    expect([...view.container.querySelectorAll('[data-refactory-activity-level] input')]
+      .map(node => (node as HTMLInputElement).checked)).toEqual([false, true, false])
+    expect(at(view, 'data-refactory-activity-level', 'standard').getAttribute('data-selected')).toBe('true')
+    expect(at(view, 'data-refactory-activity').getAttribute('data-refactory-level')).toBe('standard')
+  })
+
+  it('draws the newest window at standard, and a control that can reach the rest', () => {
+    const { view } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 200, 450) } },
+    })
+    // SD-2: the standard window is the newest 200 records of what is held.
+    expect(rows(view)).toHaveLength(200)
+    expect(missing(view, 'data-refactory-activity-earlier')).toBe(false)
+    expect(missing(view, 'data-refactory-activity-more')).toBe(false)
+  })
+
+  it('exhausts the journal to has_more: false when verbose is chosen, holding index 0 through total-1', async () => {
+    const { view, console, instance } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 200, 450) } },
+    })
+    console.status.mockImplementation(async (_run: string, after: number) => ok({ ...FRAME, activity: live(after, 200, 450) }) as never)
+    fireEvent.click(at(view, 'data-refactory-activity-level', 'verbose').querySelector('input')!)
+    await waitFor(() => { expect(instance.getSnapshot().byTab[TAB]?.activity?.complete).toBe(true) })
+    // R-2.2: every complete record, accumulated page by page; the answer that
+    // said `has_more: false` and its `total` are the completeness evidence.
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events).toHaveLength(450)
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events[0]).toMatchObject({ at: 't0' })
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events.at(-1)).toMatchObject({ at: 't449' })
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.total).toBe(450)
+    expect(instance.getSnapshot().byTab[TAB]?.activityLevel).toBe('verbose')
+    // The pass asked from 0 and continued from each answer's own cursor.
+    expect(console.status.mock.calls.map(call => call[1])).toEqual([0, 200, 400])
+  })
+
+  it('hides the detail at compact but keeps the history and its paging control reachable', () => {
+    const plain = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: { ...live(0, 200, 450), resources: { cpu: 1 }, outputs: { name: 'demo' } } } },
+      activityLevel: 'compact',
+    })
+    // §2 R-2's table: outputs, resource usage and delivery are standard-and-above.
+    expect(missing(plain.view, 'data-refactory-activity-outputs')).toBe(true)
+    expect(plain.view.queryByText('Resource usage and limits')).toBeNull()
+    // R-2.4 / DEC-001: the history and the way to it are drawn at every level.
+    expect(missing(plain.view, 'data-refactory-activity-history')).toBe(false)
+    expect(missing(plain.view, 'data-refactory-activity-earlier')).toBe(false)
+    expect(rows(plain.view)).toHaveLength(200)
+  })
+
+  it('keeps the summary every level draws, at compact', () => {
+    const { view } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 200, 450) } },
+      activityLevel: 'compact',
+    })
+    expect(view.getByText(/Current nodes/)).toBeDefined()
+    expect(view.getByText(/Waiting/)).toBeDefined()
+    expect(view.getByText(/Completed/)).toBeDefined()
+  })
+
+  // T-18b (R-2.2, R-2.5, SD-12, F-4): the DOM bound is the contract, and it is
+  // independent of how many records are held.
+  it('renders at most RENDER_WINDOW + 2 rows for a held history of 5,000 records', () => {
+    const { view } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      activityLevel: 'verbose',
+      activity: { after: 0, cursor: 5000, events: ACTIVITY(0, 5000, 5000).events, total: 5000, paged: true },
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 5000, 5000) } },
+    })
+    expect(rows(view).length).toBeLessThanOrEqual(RENDER_WINDOW + 2)
+    expect(rows(view).length).toBe(RENDER_WINDOW)
+  })
+
+  // Reported from a live 437-record run: the history opened with a large empty
+  // gap above its first row. The drawn slice is translated to its position in
+  // the history, but the viewport stayed scrolled to the top, so the rows began
+  // far below the visible area. Rendering therefore has to position the viewport
+  // at the slice, which is asserted here from the two values that must agree.
+  it('positions the viewport at the slice it draws, so the rows are in view', () => {
+    const { view } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      activityLevel: 'standard',
+      activity: { after: 0, cursor: 437, events: ACTIVITY(0, 437, 437).events, total: 437, paged: true },
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 437, 437) } },
+    })
+    const viewport = at(view, 'data-refactory-activity-history').querySelector('[role="group"]') as HTMLElement
+    const indices = rows(view).map(row => Number(row.getAttribute('data-refactory-activity-row')))
+    // Standard still opens at the newest records (SD-2)...
+    expect(indices[0]).toBe(437 - RENDER_WINDOW)
+    // ...and the slice index the element reports must be the one whose offset the
+    // viewport is scrolled to. A view scrolled to 0 while the slice sits at row
+    // 237 is the reported gap.
+    const slice = Number(viewport.getAttribute('data-refactory-activity-window'))
+    expect(slice).toBe(437 - RENDER_WINDOW)
+    expect(viewport.getAttribute('data-refactory-activity-offset')).toBe(String(slice * 24))
+  })
+
+  it('scrolls to a row near the end, renders it, and still keeps the count bounded', () => {
+    const { view, instance } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      activityLevel: 'verbose',
+      activity: { after: 0, cursor: 5000, events: ACTIVITY(0, 5000, 5000).events, total: 5000, paged: true },
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 5000, 5000) } },
+    })
+    const viewport = at(view, 'data-refactory-activity-history').querySelector('[role="group"]') as HTMLElement
+    // A window of rows down: the store keeps a row index, not a pixel offset.
+    Object.defineProperty(viewport, 'scrollTop', { value: 24 * RENDER_WINDOW * 23, configurable: true })
+    fireEvent.scroll(viewport)
+    expect(instance.getSnapshot().byTab[TAB]?.activityScroll).toBe(23 * RENDER_WINDOW)
+    expect(rows(view).length).toBeLessThanOrEqual(RENDER_WINDOW + 2)
+    // The row at that position is drawn, and it is the journal index it claims.
+    const indices = rows(view).map(row => Number(row.getAttribute('data-refactory-activity-row')))
+    expect(indices[0]).toBe(23 * RENDER_WINDOW)
+    expect(view.getByText(/t4600/)).toBeDefined()
+  })
+
+  it('re-renders the window, not the history, when a page arrives', () => {
+    const { view, instance } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      activityLevel: 'verbose',
+      activity: { after: 0, cursor: 400, events: ACTIVITY(0, 400, 400).events, total: 400, paged: true },
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(0, 400, 400) } },
+    })
+    const before = rows(view).length
+    act(() => {
+      instance.actions.activityPage(TAB, '/runs/live', {
+        after: 400, cursor: 600, events: ACTIVITY(400, 200, 600).events, total: 600, paged: true, run: null,
+      })
+    })
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events).toHaveLength(600)
+    expect(rows(view).length).toBe(before)
+    expect(rows(view).length).toBeLessThanOrEqual(RENDER_WINDOW + 2)
+  })
+
+  // T-19 (R-1.4, F-6): "Load earlier activity" walks to index 0 and then disables.
+  it('walks "Load earlier activity" to index 0 and then disables it', async () => {
+    const { view, console, instance } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: live(400, 200, 600) } },
+      // The tab holds records 400..599 of 600, so index 0 is two presses away.
+      activity: { after: 400, cursor: 600, events: live(400, 200, 600).events, total: 600, paged: true },
+    })
+    console.status.mockImplementation(async (_run: string, after: number) => ok({ ...FRAME, activity: live(after, 200, 600) }) as never)
+    const earlier = () => at(view, 'data-refactory-activity-earlier') as HTMLButtonElement
+    expect(earlier().disabled).toBe(false)
+    fireEvent.click(earlier())
+    await waitFor(() => { expect(instance.getSnapshot().byTab[TAB]?.activity?.events).toHaveLength(400) })
+    expect(console.status).toHaveBeenLastCalledWith('/runs/live', 200, expect.anything())
+    fireEvent.click(earlier())
+    await waitFor(() => { expect(instance.getSnapshot().byTab[TAB]?.activity?.events).toHaveLength(600) })
+    expect(console.status).toHaveBeenLastCalledWith('/runs/live', 0, expect.anything())
+    // Index 0 is held, so the first record is there and the control is spent.
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events[0]).toMatchObject({ at: 't0' })
+    await waitFor(() => { expect(earlier().disabled).toBe(true) })
+  })
+
+  // T-20 (R-6.3, UC-9, UC-10): an older console's answer is shown whole and
+  // marked unpaged rather than passed off as the complete history.
+  it('draws an older console\'s whole answer with the unpaged note', () => {
+    const { has_more: _more, total: _total, after: _after, page_size: _size, ...unpaged } = live(0, 3, 3)
+    const { view } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, activity: { ...unpaged, paged: false } } },
+    })
+    expect(rows(view)).toHaveLength(3)
+    expect(at(view, 'data-refactory-activity-unpaged').textContent).toBe(zh['activity.unpagedNote'])
+    // The answer's own page is the whole of what this console serves, so the
+    // history is whole as far as it goes — but it is *marked* unpaged rather
+    // than passed off as a paged history that happens to be short (R-6.3).
+    expect(at(view, 'data-refactory-activity-count').textContent).toContain(zh['activity.count'].replace('{held}', '3').replace('{total}', '3'))
+  })
+
+  // T-23b (R-2 outputs row, SD-4, E-1): `outputs` stays, and so does its disclosure.
+  it('keeps the "Outputs and validation" disclosure at standard and at verbose', () => {
+    for (const level of ['standard', 'verbose'] as const) {
+      const { view } = mountBody({
+        choices: { kind: 'ready', value: CHOICES },
+        watching: '/runs/live',
+        activityLevel: level,
+        frame: { kind: 'ready', value: { ...FRAME, activity: { ...live(0, 200, 200), outputs: { name: 'demo', validation: 'ok' } } } },
+      })
+      const disclosure = at(view, 'data-refactory-activity-outputs')
+      expect(disclosure.querySelector('summary')?.textContent).toBe('Outputs and validation')
+      expect(disclosure.querySelector('pre')?.textContent).toContain('"validation": "ok"')
+      cleanup()
+    }
+  })
+
+  // T-17 (R-4.2-3, F-3): refresh continues the journal, not the progress cursor.
+  it('refreshes the journal from the highest held cursor rather than the progress cursor', async () => {
+    const { view, console } = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'ready', value: { ...FRAME, cursor: 3, activity: live(200, 200, 450) } },
+      activity: { after: 200, cursor: 400, events: ACTIVITY(200, 200, 450).events, total: 450, paged: true },
+    })
+    console.status.mockImplementation(async () => ok({ ...FRAME, activity: live(400, 200, 450) }) as never)
+    fireEvent.click(at(view, 'data-refactory-refresh'))
+    // 400 is the journal index the held history reaches; 3 is the progress
+    // cursor, which indexes a different file and is never the journal's index.
+    await waitFor(() => { expect(console.status).toHaveBeenCalledWith('/runs/live', 400, expect.anything()) })
+  })
+
+  it('renders the two failure lines differently: a cut payload is not "no JSON"', () => {
+    const truncated = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'failed', code: 'refactory/console-truncated', message: 'the console output was truncated at the 4194304-byte collection cap', details: { capBytes: 4194304, retainedBytes: 4194304 } },
+    })
+    const cut = at(truncated.view, 'data-refactory-status', 'failed').textContent ?? ''
+    expect(cut).toContain('4194304')
+    expect(cut).not.toContain('no JSON')
+    cleanup()
+    const plain = mountBody({
+      choices: { kind: 'ready', value: CHOICES },
+      watching: '/runs/live',
+      frame: { kind: 'failed', code: 'refactory/console-failed', message: 'the console printed no JSON: oops' },
+    })
+    expect(at(plain.view, 'data-refactory-status', 'failed').textContent).toContain('the console printed no JSON: oops')
   })
 })
 

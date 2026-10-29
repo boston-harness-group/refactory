@@ -119,6 +119,24 @@
 .node { display: flex; align-items: center; gap: 7px; border: 1px solid var(--rf-border); border-radius: 7px; padding: 7px 10px; font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
 .node[data-state="complete"] { color: var(--refactory-success); }
 .node[data-state="current"] { color: var(--rf-accent); border-color: color-mix(in srgb,var(--rf-accent) 45%,var(--rf-border)); }
+.activityHead { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; }
+/* Exactly three levels, one visible choice, and every option focusable in turn. */
+.levels { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--rf-border); border-radius: 8px; background: var(--rf-canvas); }
+.level { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; color: var(--rf-muted); font-size: 12px; cursor: pointer; }
+.level[data-selected="true"] { color: var(--dsw-alias-label-primary); background: var(--rf-surface); font-weight: 600; }
+.level input { margin: 0; accent-color: var(--rf-accent); }
+/* The viewport is as tall as the whole history and scrolls the drawn window
+   inside it; `overflow-anchor: none` keeps the browser from re-anchoring a list
+   whose rows are translated rather than re-created.
+   Each row is exactly ROW_HEIGHT (24px, defined in RunActivity.tsx): the
+   translate offset and the scroll-to-index mapping are arithmetic on that
+   constant, so a row that grew would put every row after it out of step with
+   the scrollbar. A long record is therefore clipped and ellipsised instead of
+   wrapped — the full text is still in the record, and a person can widen the
+   panel. */
+.historyViewport { max-height: 320px; overflow-y: auto; overflow-anchor: none; }
+.historyViewport .recorded { gap: 0; }
+.historyViewport .recorded > li { box-sizing: border-box; height: 24px; padding: 4px 0; line-height: 15px; border-bottom: 1px solid var(--rf-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .activityMeta { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 6px 12px; margin: 0; font-size: 12px; }
 .activityMeta dt { color: var(--rf-muted); }
 .activityMeta dd { margin: 0; overflow-wrap: anywhere; }

@@ -112,6 +112,63 @@ try {
       rmSync(deltaRoot, { recursive: true, force: true })
     }
   }
+
+  // --- T-9: journal usage is bounded; a 30-request worker stays linear ---
+  {
+    const linearRoot = mkdtempSync(join(tmpdir(), 'refactory-linear-'))
+    try {
+      const linearDir = join(linearRoot, '.refactory', 'workers')
+      mkdirSync(linearDir, { recursive: true })
+      const linearPath = join(linearDir, 'linear.json')
+      writeFileSync(linearPath, JSON.stringify({
+        requested_route: { worker_backend: 'dsh' },
+        worker_id: 'linear', run_id: linearRoot, node_id: 'test_node',
+        usage: { status: 'unavailable', tokens: null }
+      }))
+      const savedReceipt = process.env.REFACTORY_WORKER_RECEIPT
+      process.env.REFACTORY_WORKER_RECEIPT = linearPath
+      const linearEvents = new Map()
+      apply({
+        on: (name, callback) => linearEvents.set(name, callback),
+        subagents: { list: () => ['spawn', 'fork'] }
+      })
+      const agent = { session: { id: 'linear-session' } }
+      const request = linearEvents.get('agent/request')
+      const stream = linearEvents.get('agent/assistant-stream')
+      for (let i = 1; i <= 30; i++) {
+        await request({ agent }, async () => ({ provider: 'p', model: 'm' }))
+        stream({ agent, frame: { type: 'start' } })
+        stream({ agent, frame: { type: 'chunk', chunk: { type: 'usage', usage: { totalTokens: i } } } })
+        stream({ agent, frame: { type: 'end' } })
+      }
+
+      const records = readFileSync(join(linearRoot, '.refactory', 'events.jsonl'), 'utf8')
+        .trim().split('\n').map(line => JSON.parse(line))
+      const usageRecords = records.filter(record => record.kind === 'worker' && record.state === 'usage')
+      assert.equal(usageRecords.length, 30)
+      // No record carries the cumulative call log any more (R-3.1).
+      for (const record of records) {
+        assert.ok(!Array.isArray(record.usage?.calls),
+          `record ${record.state} carries usage.calls as an array`)
+      }
+      // The count and the token totals survive (SD-7).
+      assert.equal(usageRecords[29].usage.calls, 30)
+      assert.equal(usageRecords[29].usage.tokens, 465)
+      assert.equal(usageRecords[9].usage.calls, 10)
+      // Linear, not quadratic: a usage summary grows by a digit when its count
+      // and token total gain one, where the array grew by a whole
+      // {session_id, tokens} entry for every request behind it.
+      const widths = usageRecords.map(record => JSON.stringify(record.usage).length)
+      for (const width of widths) {
+        assert.ok(width <= 70, `usage width ${width} grows with the requests behind it: ${widths}`)
+      }
+
+      process.env.REFACTORY_WORKER_RECEIPT = savedReceipt
+      console.log('bounded journal usage passed')
+    } finally {
+      rmSync(linearRoot, { recursive: true, force: true })
+    }
+  }
 } finally {
   rmSync(root, { recursive: true, force: true })
 }

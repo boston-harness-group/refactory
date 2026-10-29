@@ -31,7 +31,20 @@ import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 export type Loadable<T> =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly value: T }
-  | { readonly kind: 'failed'; readonly message: string }
+  | {
+    readonly kind: 'failed'
+    readonly message: string
+    /**
+     * The Host's code and typed details, where the failure carries them.
+     *
+     * Both are optional because the message alone is what most failures have and
+     * all of them show; they are kept so a read whose *kind* of failure the
+     * reader must tell apart — a payload cut by the collection cap versus a
+     * console that printed no JSON — can do it without matching text (R-5.4).
+     */
+    readonly code?: string
+    readonly details?: unknown
+  }
 
 /** Everything a picker offers to choose between, read as one. */
 export interface RefactoryChoices {
@@ -91,6 +104,77 @@ export function searchBudget(settings: Pick<RefactorySettings, RefactoryBudgetNa
   return budget
 }
 
+/**
+ * How much of a watched run's journalled history the panel shows.
+ *
+ * Exactly these three, and `standard` is the default (INT-001, DEC-002): the
+ * level is a rendering choice, so it never reaches the console and never filters
+ * what is read — the tab holds the same records at every level and only decides
+ * how many of them it draws.
+ */
+export type RefactoryActivityLevel = 'compact' | 'standard' | 'verbose'
+
+/** The level a fresh tab reads at, and the only one the spec names as the default. */
+export const DEFAULT_ACTIVITY_LEVEL: RefactoryActivityLevel = 'standard'
+
+/** The three levels, in the order the control offers them. */
+export const ACTIVITY_LEVELS: readonly RefactoryActivityLevel[] = ['compact', 'standard', 'verbose']
+
+/**
+ * How many held records are in the DOM at once.
+ *
+ * Rendering is bounded, holding is not: a verbose pass holds every record, and
+ * drawing one `<li>` per record would block the tab on a large run. The window
+ * equals one console page so a page arrival and a scroll move it the same way.
+ */
+export const RENDER_WINDOW = 200
+
+/** One page of a run's journal, as the reader that fetched it reports it. */
+export interface RefactoryActivityPage {
+  /** Journal index the page's first event sits at. */
+  readonly after: number
+  /** Index of the next record: what a later read continues from. */
+  readonly cursor: number
+  /** The page's records, in journal order. */
+  readonly events: readonly Readonly<Record<string, unknown>>[]
+  /** Complete records in the journal as this page's answer counted them. */
+  readonly total: number
+  /** Whether the console pages the history at all (false for an older console). */
+  readonly paged: boolean
+  /** The run this page belongs to, when the answer names one. */
+  readonly run: string | null
+}
+
+/**
+ * The journalled history a tab holds for the run it is reading.
+ *
+ * `events` is deliberately uncapped. Capping it would silently turn verbose into
+ * "the last N", which is the one thing DEC-001 forbids; what is bounded is the
+ * slice drawn (`RENDER_WINDOW`). `complete` is the reader's evidence that the
+ * history is whole — it is set only by an answer that reported `has_more: false`,
+ * and never by the absence of an error.
+ */
+export interface HeldHistory {
+  /** The run these records belong to (R-4.5). */
+  readonly run: string
+  /** Held records, oldest first, uncapped. */
+  readonly events: readonly Readonly<Record<string, unknown>>[]
+  /** The journal index `events[0]` sits at: 0 once the history reaches the start. */
+  readonly first: number
+  /** Highest journal cursor held: where the next forward read continues. */
+  readonly through: number
+  /** Last reported journal total. */
+  readonly total: number
+  /** An answer with `has_more: false` has been seen for this run. */
+  readonly complete: boolean
+  /** False when the console does not page (R-6.3). */
+  readonly paged: boolean
+  /** A page is in flight. */
+  readonly reading: boolean
+  /** Why the last page failed, or `null`. */
+  readonly error: string | null
+}
+
 /** Why a gesture was refused: the Host's code, and the Host's own message. */
 export interface RefactoryNotice {
   /** The Remote failure's code, e.g. `refactory/authoring-mode`. */
@@ -132,6 +216,15 @@ export interface RefactoryTabState {
   watching: string | null
   /** The last status frame for `watching`; `null` before the first read. */
   frame: Loadable<RefactoryRunStatus> | null
+  /** The journal history held for `watching`; `null` before anything is held. */
+  activity: HeldHistory | null
+  /**
+   * The chosen verbosity level. Per tab and never persisted across tab records:
+   * the level belongs to the record, not to the tab type or to the session key.
+   */
+  activityLevel: RefactoryActivityLevel
+  /** The row index of the first held record the history window draws. */
+  activityScroll: number
   /** The watched run's intent ledger and gates; `null` before the ledger is read. */
   steering: Loadable<RefactorySteering> | null
   /** The watched run's candidates, with what a person did to each; `null` before they are read. */
@@ -181,7 +274,13 @@ type RefactoryActions = {
   watching: (draft: RefactoryState, tabId: TabId, run: string) => void
   frameLoading: (draft: RefactoryState, tabId: TabId) => void
   framed: (draft: RefactoryState, tabId: TabId, frame: RefactoryRunStatus) => void
-  frameFailed: (draft: RefactoryState, tabId: TabId, message: string) => void
+  frameFailed: (draft: RefactoryState, tabId: TabId, message: string, code?: string, details?: unknown) => void
+  setActivityLevel: (draft: RefactoryState, tabId: TabId, level: RefactoryActivityLevel) => void
+  activityPage: (draft: RefactoryState, tabId: TabId, run: string, page: RefactoryActivityPage) => void
+  activityEarlier: (draft: RefactoryState, tabId: TabId, run: string, page: RefactoryActivityPage) => void
+  activityPageLoading: (draft: RefactoryState, tabId: TabId, run: string) => void
+  activityPageFailed: (draft: RefactoryState, tabId: TabId, run: string, message: string) => void
+  activityScrolled: (draft: RefactoryState, tabId: TabId, row: number) => void
   steeringLoading: (draft: RefactoryState, tabId: TabId) => void
   steered: (draft: RefactoryState, tabId: TabId, steering: RefactorySteering) => void
   steeringFailed: (draft: RefactoryState, tabId: TabId, message: string) => void
@@ -265,6 +364,9 @@ export function createRefactoryStore(): EngineStoreHandle<RefactoryState, Refact
           settings: { ...NO_SETTINGS },
           watching: null,
           frame: null,
+          activity: null,
+          activityLevel: DEFAULT_ACTIVITY_LEVEL,
+          activityScroll: 0,
           steering: null,
           candidates: null,
           single: null,
@@ -360,6 +462,12 @@ export function createRefactoryStore(): EngineStoreHandle<RefactoryState, Refact
        */
       watching: (d, tabId: TabId, run: string) => {
         const tab = bucket(d, tabId)
+        // A different run is a different history: dropping it is what keeps two
+        // runs' journal indices from being spliced into one list (R-4.4). The
+        // level survives, because which detail a person wants is about them and
+        // not about the run (R-2.1).
+        tab.activity = null
+        tab.activityScroll = 0
         tab.watching = run
         tab.frame = { kind: 'loading' }
         tab.steering = { kind: 'loading' }
@@ -409,8 +517,143 @@ export function createRefactoryStore(): EngineStoreHandle<RefactoryState, Refact
        * @param tabId - the tab being drawn.
        * @param message - the Host's reason.
        */
-      frameFailed: (d, tabId: TabId, message: string) => {
-        bucket(d, tabId).frame = { kind: 'failed', message }
+      frameFailed: (d, tabId: TabId, message: string, code?: string, details?: unknown) => {
+        bucket(d, tabId).frame = {
+          kind: 'failed',
+          message,
+          ...code === undefined ? {} : { code },
+          ...details === undefined ? {} : { details },
+        }
+      },
+      /**
+       * Choose how much of the held history to draw.
+       *
+       * Only the level moves: the records already held stay held, so a level
+       * switch neither refetches a page nor loses the run's summary (R-2.7), and
+       * the window starts at the newest record again because that is where a
+       * person arriving at a level looks first.
+       * @param d - draft state.
+       * @param tabId - the tab being drawn.
+       * @param level - the level to draw at.
+       */
+      setActivityLevel: (d, tabId: TabId, level: RefactoryActivityLevel) => {
+        const tab = bucket(d, tabId)
+        tab.activityLevel = level
+        tab.activityScroll = 0
+      },
+      /**
+       * Splice one forward page onto the held history.
+       *
+       * The page goes wherever its `after` says it belongs rather than always at
+       * the end: a polled page starts at the held cursor, so appending it keeps
+       * journal order, while a page-0 refetch after a gap replaces the indices it
+       * covers. Splicing by index is also what makes the two cases one write.
+       * @param d - draft state.
+       * @param tabId - the tab being drawn.
+       * @param run - the run the page belongs to.
+       * @param page - the page the console answered with.
+       */
+      activityPage: (d, tabId: TabId, run: string, page: RefactoryActivityPage) => {
+        const tab = bucket(d, tabId)
+        const held = tab.activity?.run === run ? tab.activity : null
+        // A splice is only safe where the page's own index is what the held list
+        // already means. `after` past the held end would leave a hole, and
+        // anything else is a page for history this tab does not hold (R-4.5).
+        const after = page.paged ? Math.max(0, page.after) : 0
+        if (held !== null && after > held.events.length) return
+        const events = held === null ? [] : [...held.events]
+        if (page.paged) events.splice(after, events.length - after, ...page.events)
+        else events.splice(0, events.length, ...page.events)
+        tab.activity = {
+          run,
+          events,
+          // The list still begins where it began: `after` says where this page
+          // goes, not where the history starts.
+          first: page.paged ? held?.first ?? after : 0,
+          through: page.paged ? Math.max(after + page.events.length, page.cursor) : page.events.length,
+          total: page.paged ? page.total : page.events.length,
+          // An unpaged console answered with its whole history, so the answer
+          // itself is the completeness evidence a `has_more: false` would be.
+          complete: !page.paged || page.cursor >= page.total,
+          paged: page.paged,
+          reading: false,
+          error: null,
+        }
+      },
+      /**
+       * Put an older page in front of the held history.
+       *
+       * "Load earlier activity" is the one gesture that moves the window
+       * backwards, so the retained scroll row shifts by exactly the records that
+       * were added ahead of it — the row a person was reading stays under them.
+       * @param d - draft state.
+       * @param tabId - the tab being drawn.
+       * @param run - the run the page belongs to.
+       * @param page - the earlier page the console answered with.
+       */
+      activityEarlier: (d, tabId: TabId, run: string, page: RefactoryActivityPage) => {
+        const tab = bucket(d, tabId)
+        const held = tab.activity?.run === run ? tab.activity : null
+        if (held === null || !page.paged) return
+        // A backwards read may overlap what is held: the page ends at its own
+        // `cursor`, and the held list begins at `held.first`. Only the records
+        // before that first one are new; the rest would duplicate rows.
+        const prefix = page.events.slice(0, Math.max(0, Math.min(page.events.length, held.first - page.after)))
+        tab.activity = {
+          ...held,
+          events: [...prefix, ...held.events],
+          first: Math.max(0, Math.min(held.first, page.after)),
+          through: held.through,
+          total: page.total,
+          complete: held.complete,
+          reading: false,
+          error: null,
+        }
+        tab.activityScroll = tab.activityScroll + prefix.length
+      },
+      /**
+       * Say that a page is on its way for one run.
+       * @param d - draft state.
+       * @param tabId - the tab being drawn.
+       * @param run - the run the page belongs to.
+       */
+      activityPageLoading: (d, tabId: TabId, run: string) => {
+        const tab = bucket(d, tabId)
+        const held = tab.activity?.run === run ? tab.activity : null
+        tab.activity = held === null
+          ? { run, events: [], first: 0, through: 0, total: 0, complete: false, paged: true, reading: true, error: null }
+          : { ...held, reading: true, error: null }
+      },
+      /**
+       * Record why a page could not be read, keeping every record already held.
+       *
+       * A failed page is not a lost history: what was read stays drawn and the
+       * failure is a line beside it, because throwing the held records away
+       * would make a transient console refusal look like a shorter journal.
+       * @param d - draft state.
+       * @param tabId - the tab being drawn.
+       * @param run - the run the page belongs to.
+       * @param message - the Host's reason.
+       */
+      activityPageFailed: (d, tabId: TabId, run: string, message: string) => {
+        const tab = bucket(d, tabId)
+        const held = tab.activity?.run === run ? tab.activity : null
+        tab.activity = held === null
+          ? { run, events: [], first: 0, through: 0, total: 0, complete: false, paged: true, reading: false, error: message }
+          : { ...held, reading: false, error: message }
+      },
+      /**
+       * Remember where the history window is, as a row index in the held list.
+       *
+       * A row rather than a pixel offset: a page arrival changes the list under a
+       * scroll, and a row keeps meaning the same record where a pixel count does
+       * not.
+       * @param d - draft state.
+       * @param tabId - the tab being drawn.
+       * @param row - the row index of the first drawn record.
+       */
+      activityScrolled: (d, tabId: TabId, row: number) => {
+        bucket(d, tabId).activityScroll = Math.max(0, Math.floor(row))
       },
       /**
        * Mark the watched run's ledger as being read.

@@ -1412,6 +1412,14 @@
             "run": "/tmp/example-run"
           },
           "explanation": "Read durable run state and incremental events using after. A live process or receipt is not proof of successful output."
+        },
+        {
+          "arguments": {
+            "run": "/tmp/example-run",
+            "activity_after": 400,
+            "activity_limit": 200
+          },
+          "explanation": "Read journal records 400-599: the answer carries activity.cursor 600, activity.total and activity.has_more, so the next call continues from the cursor."
         }
       ],
       "interfaces": {
@@ -1419,8 +1427,8 @@
         "cli": "python -m refactory_dsh.console status",
         "panel": "Live run view."
       },
-      "purpose": "Read durable run state and incremental events using after. A live process or receipt is not proof of successful output.",
-      "reviewed_schema": "2b225312f5e01da962a3e1b5fc62b1026df0b65a3250a1c2dfa5d12f781e7fae"
+      "purpose": "Read durable run state and incremental events using after, and page the activity journal with activity-after/activity-limit. A live process or receipt is not proof of successful output.",
+      "reviewed_schema": "6dd18ee76e65feb27260947df121776aac85d0828970c6932cda0c59a8f24cbf"
     },
     "steer": {
       "chat": {
