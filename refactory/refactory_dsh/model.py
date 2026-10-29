@@ -417,6 +417,7 @@ class DshModelClient:
 
             stored = stored_model_choice(dsh_home)
             self._provider, self._model = stored["provider"], stored["model"]
+        self._tool_policy = ""
         self._attempts = max(1, int(attempts)) if self._worker_backend == "dsh" else 1
         self._backoff_s = None if backoff_s is None else max(0.0, float(backoff_s))
         self._retry_window_s = max(0.0, float(retry_window_s))
@@ -454,6 +455,12 @@ class DshModelClient:
         longer limit (`node_retry.deliver`), which may exceed the route's envelope."""
         client = self.with_wall(seconds)
         client._node_wall_exact = True
+        return client
+
+    def with_tool_policy(self, policy: str) -> DshModelClient:
+        """A copy whose model call enforces the given tool policy."""
+        client = copy.copy(self)
+        client._tool_policy = policy
         return client
 
     def with_budget(self, budget: Any) -> DshModelClient:
@@ -501,6 +508,8 @@ class DshModelClient:
             # getattr: a client built without __init__ (as a boundary test does) has none.
             **({"node_wall_s": wall} if (wall := getattr(self, "_node_wall_s", None)) is not None
                else {}),
+            **({"tool_policy": tp} if (tp := getattr(self, "_tool_policy", ""))
+               else {}),
         }
 
     def _environment(self, *, target_workdir: "Path | None" = None) -> dict[str, str]:
@@ -513,6 +522,12 @@ class DshModelClient:
                   "REFACTORY_RUNTIME_ROOT": str(self._runtime_root)}
         # Clear inherited values because this client owns the current call.
         result.pop("REFACTORY_SYSTEM_PROMPT", None)
+        # Tool policy: set when this node has one, clear for ordinary nodes so a
+        # previous no-tools dispatch's env var does not leak to the next node.
+        if getattr(self, '_tool_policy', '') == 'none':
+            result["REFACTORY_TOOL_POLICY"] = "none"
+        else:
+            result.pop("REFACTORY_TOOL_POLICY", None)
         if getattr(self, '_system_text', ''):
             result["REFACTORY_SYSTEM_PROMPT"] = self._system_text
         if self._budget is not None:
@@ -628,7 +643,8 @@ class DshModelClient:
         client._checkpoint()
         if client._budget is not None:
             client._budget.require_usage_capability(self._worker_backend == "dsh")
-        client._worker_receipt = workers.begin(run_dir, self.route(), node=self._node_id, role=self._role)
+        client._worker_receipt = workers.begin(run_dir, self.route(), node=self._node_id, role=self._role,
+                                               tool_policy=getattr(self, '_tool_policy', ''))
         try:
             result = client._complete(prompt, system=system, workdir=run_dir, target_workdir=original_workdir)
             client._checkpoint(final=True)
@@ -700,7 +716,8 @@ class DshModelClient:
             write_patch(patch, self._runtime_root, self.route(), provider_config=self._provider_config,
                         workspace_root=cwd if getattr(self, "_confine", False) else None,
                         tool_home=tool_dsh_home(cwd) if cwd is not None else None,
-                        system_prompt=system)
+                        system_prompt=system,
+                        tool_policy=getattr(self, '_tool_policy', ''))
             cmd += ["--patch", str(patch)]
         if self._worker_backend == "dsh":
             if self._provider:

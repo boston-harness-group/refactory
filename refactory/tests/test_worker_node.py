@@ -57,7 +57,7 @@ def test_feedback_file_prepends_heading_to_prompt(tmp_path):
 
     class FakeDelivery:
         @staticmethod
-        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None):
+        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None, tool_policy=""):
             captured_prompt.clear()
             captured_prompt.append(prompt)
             return {"prompt": prompt, "node": node, "status": "pending"}
@@ -147,7 +147,7 @@ def test_end_to_end_drain_feedback_reaches_real_worker(tmp_path):
 
     class FakeDelivery:
         @staticmethod
-        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None):
+        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None, tool_policy=""):
             recorded_prompts.append(prompt)
             return {"prompt": prompt, "node": node, "status": "pending"}
         @staticmethod
@@ -266,7 +266,7 @@ def test_gate_reloop_reason_reaches_reloop_target_prompt(tmp_path):
 
     class FakeDelivery:
         @staticmethod
-        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None):
+        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None, tool_policy=""):
             recorded_prompts.append(prompt)
             return {"prompt": prompt, "node": node, "status": "pending"}
         @staticmethod
@@ -341,7 +341,7 @@ def test_no_feedback_file_leaves_prompt_unchanged(tmp_path):
 
     class FakeDelivery:
         @staticmethod
-        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None):
+        def begin(workdir, node, prompt, writes, *, reads=None, model_context=None, tool_policy=""):
             captured_prompt.clear()
             captured_prompt.append(prompt)
             return {"prompt": prompt, "node": node, "status": "pending"}
@@ -406,7 +406,7 @@ def _run_worker(tmp_path, spec, *, prompt: str, feedback: str | None = None):
         def route(self):
             return {"worker_backend": "dsh"}
 
-    def begin(workdir, node, prompt, writes, *, reads=None, model_context=None):
+    def begin(workdir, node, prompt, writes, *, reads=None, model_context=None, tool_policy=""):
         prompts.append(prompt)
         return {"prompt": prompt, "node": node, "status": "pending"}
 

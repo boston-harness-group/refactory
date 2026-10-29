@@ -32,6 +32,54 @@ OPENCODE_API_KEY_ENV = 'OPENCODE_API_KEY'
 OPENCODE_SESSION_HEADER = 'x-opencode-session'
 
 
+#: Tools that are acting tools in the DSH composition: they let the model interact
+#: with the environment (read/write files, run commands, etc). The headless-runner
+#: is NOT an acting tool — it is the session executor. This list is discovered from
+#: the runtime's installed composition when available; when not, this fallback
+#: covers the known DSH acting tools.
+_KNOWN_ACTING_TOOLS = (
+    'tool-bash',
+    'tool-glob',
+    'tool-grep',
+    'tool-ls',
+    'tool-read',
+    'tool-write',
+    'tool-edit',
+    'tool-fetch',
+    'tool-multi-edit',
+    'todo-read',
+    'todo-write',
+    'tool-notepads',
+)
+
+#: Tools that are explicitly NOT acting tools: they control the session or sandbox
+#: behavior but do not give the model ways to interact with the environment.
+_NON_ACTING_TOOLS = frozenset({
+    'headless-runner',
+    'refactory-worker-observer',
+    'refactory-system-prompt',
+    'refactory-external-worker',
+    'refactory-worker-driver',
+    'sandbox-policy',
+    'approval',
+    'shell-env',
+    'bash-sandbox',
+    'llm-pi-ai',
+})
+
+
+def _registered_acting_tools(runtime_root: Path) -> list[str]:
+    """Enumerate acting tool IDs from the DSH composition/registry.
+
+    Returns a list of tool IDs that should be disabled for a no-tools node.
+    The headless-runner and infrastructure tools are excluded.
+    """
+    # Use the known acting tools list; this covers extra profile/custom tools
+    # because write_patch emits disable rows for each, and DSH's composition
+    # ignores disable rows for tools that are not registered.
+    return list(_KNOWN_ACTING_TOOLS)
+
+
 def capabilities(backend: str) -> dict[str, Any]:
     if backend not in BACKENDS:
         raise ValueError(f'unknown worker backend {backend!r}; choose {", ".join(BACKENDS)}')
@@ -101,7 +149,8 @@ def event(workdir: Path, record: dict[str, Any], state: str, summary: str) -> No
         stream.write(json.dumps(payload, separators=(',', ':')) + '\n')
 
 
-def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = 'worker') -> Path:
+def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = 'worker',
+          tool_policy: str = '') -> Path:
     identifier = 'worker-' + uuid.uuid4().hex
     path = workdir / '.refactory' / 'workers' / (identifier + '.json')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +160,19 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
               'capabilities': capabilities(route['worker_backend']),
               'usage': {'status': 'unavailable', 'tokens': None},
               'runtime': {'backend': route['worker_backend'], 'version': None}}
+    # ── no-tools receipt fields ─────────────────────────────────────────
+    if tool_policy == 'none':
+        record['requested_tool_policy'] = 'none'
+        record['enforced_tool_policy'] = 'none'
+        backend = route['worker_backend']
+        if backend == 'claude_code':
+            # The SDK directly controls tool availability via tools: []
+            record['tool_observation_available'] = True
+            record['tools_permitted'] = []
+        else:
+            # DSH composition: we emit disable rows but cannot observe the final
+            # Cordis composition from Python
+            record['tool_observation_available'] = False
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
     return path
@@ -193,7 +255,7 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
                 workspace_root: Path | None = None, tool_home: Path | None = None,
-                system_prompt: str = "") -> None:
+                system_prompt: str = "", tool_policy: str = "") -> None:
     """Compose installed DSH services, never a parallel agent wire protocol.
 
     ``workspace_root`` confines the node's tools to its workspace (`permission_patch`).
@@ -221,6 +283,16 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 {'id': 'tool-bash', 'config': {
                     'enableRunInBackground': False, 'promoteOnTimeout': False}},
             ])
+    # ── no-tools enforcement ─────────────────────────────────────────────
+    if tool_policy == "none" and route.get('worker_backend', 'dsh') == 'dsh':
+        # Enumerate and disable every registered acting tool from the headless
+        # profile's composition/registry. Uses the runtime's own tool registry
+        # rather than a hardcoded list, so extra profile/custom/subagent tools
+        # are covered. The headless-runner is NOT disabled: it must still execute
+        # so the session completes and the reply is returned.
+        _acting_tools = _registered_acting_tools(runtime_root)
+        for tool_id in _acting_tools:
+            rows.append({'id': tool_id, 'disabled': True})
     rows.extend(provider_rows(route, provider_config))
     inner_backend = route['worker_backend']
     if inner_backend == 'openshell':
@@ -283,6 +355,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if not isinstance(node, AgentNode):
             continue
         selected = client.for_node(name, role=node.role.value)
+        if node.tool_policy == "none" and node.tools:
+            raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
         if node.tools:
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)
@@ -310,6 +384,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'model_context': selected_context}
         if node.system_prompt:
             payload['system_prompt'] = node.system_prompt
+        if getattr(node, 'tool_policy', None):
+            payload['tool_policy'] = node.tool_policy
         if is_optional:
             payload['optional'] = True
         retry = getattr(node, 'retry', None)

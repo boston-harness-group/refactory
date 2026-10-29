@@ -41,6 +41,7 @@ index 9efd305..7f615d3 100644
 -	return {
 +	const _rfSystemText = (spec.env && spec.env.REFACTORY_SYSTEM_PROMPT) || "";
 +	const _rfEffort = (spec.env && spec.env.REFACTORY_MODEL_EFFORT) || "";
++	const _rfToolPolicy = (spec.env && spec.env.REFACTORY_TOOL_POLICY) || "";
 +	const options = {
  		abortController: controller,
  		cwd: spec.cwd,
@@ -57,6 +58,11 @@ index 9efd305..7f615d3 100644
  	};
 +	if (_rfEffort) {
 +		options.effort = _rfEffort;
++	}
++	if (_rfToolPolicy === "none") {
++		options.tools = [];
++		options.mcpServers = [];
++		options.permissionMode = "plan";
 +	}
 +	return options;
  }

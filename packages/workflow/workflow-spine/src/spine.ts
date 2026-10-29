@@ -54,6 +54,8 @@ export interface NodeView {
   limit?: number
   /** For a `SelectionNode`: the selection strategy. */
   strategy?: string
+  /** `AgentNode`: optional tool policy. `'none'` disables all tools. */
+  tool_policy?: 'none'
   unsupported?: boolean
 }
 
@@ -568,6 +570,7 @@ export class Spine {
         view.command = node.dispatch_command
         if (node.command_timeout_s !== undefined) view.command_timeout_s = node.command_timeout_s
       }
+      if (node.tool_policy === 'none') view.tool_policy = 'none'
     }
     if (node._type === 'LLMNode') {
       // A one-shot model call is delivered the same way an agent node is: the

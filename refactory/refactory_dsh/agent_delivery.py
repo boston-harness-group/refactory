@@ -207,14 +207,21 @@ def get_skip_receipt() -> Any | None:
 def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
                         writes: list[str], model_context: dict[str, Any] | None,
                         *, set_aside: dict[str, str] | None = None,
-                        workspace: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+                        workspace: dict[str, Any] | None = None,
+                        tool_policy: str = "") -> tuple[str, dict[str, Any]]:
     """Orient one node without making its worker discover the delivery protocol.
 
     A node that works in a workspace (``workspace``, `workspace.Workspace.describe`) is
     told where it is and how its work leaves it: its diff becomes the answer file, or its
     outputs are copied out of it. Its outputs are listed in the workspace, since that is
     where it writes them; the run directory is outside what its tools may change.
+
+    When ``tool_policy`` is ``"none"``, the execution contract is suppressed entirely:
+    the node's model receives no tools and cannot write files, so the contract's
+    file-writing instructions would be noise. The raw reply is delivered by the runtime.
     """
+    if tool_policy == "none":
+        return (prompt, {})
     context = model_context or {}
     # Absolute path to refactory's own Python, for nested dispatch (worker_node,
     # sandboxed validation). This is NOT the target's interpreter.
@@ -519,7 +526,8 @@ def _save_checkout_baselines(directory: Path, checkouts: dict[str, Any] | None) 
 
 def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bool = False,
           reads: list[str] | None = None, model_context: dict[str, Any] | None = None,
-          workspace: dict[str, Any] | None = None) -> dict[str, Any]:
+          workspace: dict[str, Any] | None = None,
+          tool_policy: str = "") -> dict[str, Any]:
     """Snapshot outputs and supply the current ledger before dispatching one agent.
 
     DSH can report the same due node repeatedly; reuse keeps its original output
@@ -567,7 +575,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         annotated = prompt_with_ledger(prompt, ledger, entries=entries)
     set_aside = _set_aside_stale_outputs(workdir, node, reads or [], writes) if previous is None else None
     annotated, execution = _execution_contract(workdir, node, annotated, reads or [], writes, model_context,
-                                               set_aside=set_aside, workspace=workspace)
+                                               set_aside=set_aside, workspace=workspace,
+                                               tool_policy=tool_policy)
     if previous is not None and previous['prompt'] == annotated:
         return previous
     before = previous['before'] if previous is not None else {name: _fingerprint(workdir, name) for name in writes}
@@ -825,7 +834,8 @@ def main() -> int:
             template_keys = _re.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', scan_prompt)
             unresolved = [k for k in template_keys if k.strip() not in values and k not in (refilled_keys or [])]
             result = begin(workdir, request['node'], rendered, request['writes'], reuse=True,
-                           reads=request.get('reads'))
+                           reads=request.get('reads'),
+                           tool_policy=request.get('tool_policy', ''))
             # The bridge reads the prompt; the target snapshot is this module's own state.
             result = {key: value for key, value in result.items() if key != 'target'}
             if unresolved:

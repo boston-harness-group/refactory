@@ -122,6 +122,16 @@ class AgentNode(Node):
     #: the run directory, and is left out of the serialized graph, so a graph that
     #: declares no workspace is byte-identical to one lowered before the field existed.
     workspace: dict[str, str] | None = None
+    #: Optional tool policy. ``"none"`` disables all tools; ``None`` preserves defaults.
+    tool_policy: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_policy(self) -> AgentNode:
+        if self.tool_policy is not None and self.tool_policy != "none":
+            raise ValueError(
+                f"invalid tool_policy {self.tool_policy!r}; the only accepted value is 'none'"
+            )
+        return self
 
 
 class FnNode(Node):
@@ -258,6 +268,8 @@ class Workflow(BaseModel):
                 d.pop("workspace")
             if not d.get("system_prompt"):
                 d.pop("system_prompt", None)
+            if "tool_policy" in d and d["tool_policy"] is None:
+                d.pop("tool_policy")
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

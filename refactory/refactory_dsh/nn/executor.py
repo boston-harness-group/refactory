@@ -1234,6 +1234,30 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
+        # ── no-tools enforcement ──────────────────────────────────────────
+        tool_policy = node.tool_policy or ""
+        if tool_policy == "none":
+            # Validate single-output cardinality before the model
+            if len(node.writes) != 1:
+                raise ValueError(
+                    f"agent node {node.id!r} declares tool_policy='none' but has "
+                    f"{len(node.writes)} write(s); a no-tools node must declare "
+                    "exactly one output for its captured reply"
+                )
+            if not callable(getattr(client, "with_tool_policy", None)):
+                raise ValueError(
+                    f"agent node {node.id!r} declares tool_policy='none' but the "
+                    "model client does not support with_tool_policy; cannot "
+                    "enforce the policy"
+                )
+            client = client.with_tool_policy(tool_policy)
+            # Route refusal
+            backend = (client.route() if callable(getattr(client, "route", None)) else {}).get("worker_backend", "dsh")
+            if backend not in ("dsh", "claude_code"):
+                raise ValueError(
+                    f"agent node {node.id!r} declares tool_policy='none', but the "
+                    f"{backend!r} route cannot enforce it"
+                )
         # The node's own bound on its session, as the spine applies it (#307).
         if node.timeout_s is not None and callable(getattr(client, "with_wall", None)):
             client = client.with_wall(node.timeout_s)
@@ -1279,11 +1303,15 @@ class Executor:
                 return _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
             return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
 
+        _capture_final = route.get("worker_backend", "dsh") == "dsh"
+        if tool_policy == "none":
+            _capture_final = True
         output, _receipt = deliver(
             self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
             reads=list(node.reads), client=client, ask=ask,
-            capture_final=route.get("worker_backend", "dsh") == "dsh", rule=node.retry,
-            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace)
+            capture_final=_capture_final, rule=node.retry,
+            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
+            tool_policy=tool_policy)
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.

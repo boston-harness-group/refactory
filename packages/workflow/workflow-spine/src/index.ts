@@ -1785,6 +1785,7 @@ export function apply(ctx: Context, config: Config): void {
         const receipt = runtimeBridge(agentCommand, workdir, commandEnv, {
           action: 'begin', node: node.id, prompt: node.prompt_template ?? '',
           reads: node.reads ?? [], writes: node.writes ?? [],
+          ...(node.tool_policy === 'none' ? { tool_policy: 'none' } : {}),
         })
         if (typeof receipt.prompt !== 'string') throw new Error('agent delivery bridge returned no prompt')
         node.prompt_template = receipt.prompt
