@@ -977,6 +977,11 @@ def test_loop_delete_readd_escape_rejected(tmp_path):
     loop.init()
     removed = Run(loop).attempt(Proposal(edit={"op": "remove_node", "id": "a"}), loop.population[0])
     assert isinstance(removed, Candidate), removed
+    grant = {**seed["graph"]["nodes"]["a"], "tool_policy": None, "tools": ["Read"]}
+    before_resume = Run(loop).attempt(Proposal(edit={"op": "add_node", "node": grant,
+        "position": {"after": "b"}}), removed)
+    assert isinstance(before_resume, list), before_resume
+    assert any("E-tool-policy-escalation" in reason for reason in before_resume)
     loop._journal_candidate(removed)
     resumed = make(resume=True)
     resumed.init()
