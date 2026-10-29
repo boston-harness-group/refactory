@@ -17,6 +17,15 @@ export function apply(ctx) {
     // the route the launch names, if any, and never the headless profile's default
     // model, so nothing here can reach a provider nobody chose (dm-258).
     const { provider, model } = ctx.get('headlessStartup')
+    let task = ctx.get('headlessStartup').task
+    // The launcher passes "-" to mean "read the prompt from stdin" (large prompts
+    // exceed MAX_ARG_STRLEN).  The headless-runner resolves this, but the bridge
+    // disables the headless-runner and must resolve it itself.
+    if (task === undefined || task === '-') {
+      const chunks = []
+      for await (const chunk of process.stdin) chunks.push(chunk)
+      task = Buffer.concat(chunks).toString('utf8')
+    }
     const handle = await ctx.get('agents').create({
       sessionId: `refactory-parent-${randomUUID()}`,
       meta: { cwd: process.cwd() },
@@ -25,7 +34,7 @@ export function apply(ctx) {
     try {
       owned = await ctx.get('subagents').start('refactory-worker', {
         parent: handle.agent,
-        prompt: [{ type: 'text', text: ctx.get('headlessStartup').task }],
+        prompt: [{ type: 'text', text: task }],
         signal: controller.signal,
       })
       const result = await owned.result
