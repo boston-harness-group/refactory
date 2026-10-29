@@ -46,10 +46,38 @@ export interface ConsoleSettings {
  * written beside the payload it is about (`console run` reports where the run
  * stopped in the same object as the reason it did not finish), and a caller that
  * needs that payload cannot read it back from the error line.
+ *
+ * `truncation` and `suppressed` are the two ways a call can need more than the
+ * plain answer says. They are separate members rather than a richer `error`
+ * string so a caller can branch on the cause instead of reading prose: the
+ * collection cap cutting the payload is a size problem with a fix
+ * (`collectBytes`), and a console that refused the paging options is an age
+ * problem with an answer (the unpaged read).
  */
 export type ConsoleResult =
-  | { ok: true; value: unknown; argv: string[] }
-  | { ok: false; error: string; argv: string[]; value?: unknown }
+  | { ok: true; value: unknown; argv: string[]; suppressed?: readonly string[] }
+  | {
+    ok: false
+    error: string
+    argv: string[]
+    value?: unknown
+    /** Present when the collection cap, not the console, cut the payload. */
+    truncation?: {
+      readonly capBytes: number
+      /** Bytes actually retained in the in-memory tail. */
+      readonly retainedBytes: number
+    }
+    /** Present when the call succeeded only by dropping options this console refuses. */
+    suppressed?: readonly string[]
+  }
+
+/**
+ * The options an older console refuses, long option names spelled as argv does.
+ *
+ * Paging the journal is the only contract that needs a console new enough to
+ * serve it, so these are exactly the two flags a caller may be asked to drop.
+ */
+export const ACTIVITY_OPTIONS = ['activity-after', 'activity-limit'] as const
 
 /**
  * Deployment settings for reaching the console, before they are resolved.
@@ -216,11 +244,69 @@ export class Console {
 
   /**
    * Run one invocation and decode its JSON.
+   *
+   * Two verdicts are made here rather than in the caller, because both are facts
+   * only this seam holds:
+   *
+   * - **The collected payload was truncated.** When the reader is `lossy` on the
+   *   after-settlement `readFrom(0)` — the same read the JSON is decoded from —
+   *   the collector dropped the head of stdout at its cap, and the retained tail
+   *   is all there is. A payload that does not decode *because of that* is
+   *   reported as the size problem it is, with the cap and the retained length,
+   *   and never as `the console printed no JSON` — which is reserved for a
+   *   complete stdout that is not JSON, including a child's own output printed
+   *   ahead of the envelope (issue 95). The seam exposes no whole-stream byte
+   *   total, so none is claimed; spilling is not configured for these streams,
+   *   so `spillPath` is never a recovery route here.
+   * - **The console refused the paging options.** A console older than the
+   *   activity paging contract exits 2 with `unrecognized arguments`. That
+   *   refusal is retried exactly once without the paging options, and the answer
+   *   names what was dropped, so the run stays readable rather than the person
+   *   being told their run is broken. Only that exact refusal is retried.
    * @param invocation - verb, positionals, and options.
    * @param signal - caller's abort signal, forwarded to the child.
    * @returns the decoded result; a nonzero exit or undecodable stdout is reported, not thrown.
    */
   async run(invocation: ConsoleInvocation, signal?: AbortSignal): Promise<ConsoleResult> {
+    const result = await this.execute(invocation, signal)
+    if (result.ok || result.truncation !== undefined) return result
+    const suppressed = this.refusedActivityOptions(result.error, invocation, result.argv)
+    if (suppressed === undefined) return result
+    const fallback = { ...invocation, options: withoutActivityOptions(invocation.options ?? {}, suppressed) }
+    const retried = await this.execute(fallback, signal)
+    return { ...retried, suppressed: [...suppressed, ...retried.suppressed ?? []] }
+  }
+
+  /**
+   * Which paging options a console refused, read from its own refusal.
+   *
+   * `unrecognized arguments` is argparse's exit-2 wording for an unknown option,
+   * and the error line here is the console's, so the flags it names are the flags
+   * it does not know. A call that sent none of them has nothing to drop, and a
+   * refusal that is not that exact wording is a different failure.
+   * @param error - the failure line the failed call reported.
+   * @param invocation - the call that produced it.
+   * @param argv - the argv the console was given.
+   * @returns the refused option names, or `undefined` when nothing may be dropped.
+   */
+  private refusedActivityOptions(
+    error: string,
+    invocation: ConsoleInvocation,
+    argv: readonly string[],
+  ): readonly string[] | undefined {
+    if (!UNRECOGNIZED.test(error)) return undefined
+    const sent = new Set(Object.keys(invocation.options ?? {}))
+    const refused = ACTIVITY_OPTIONS.filter(option => sent.has(option) && argv.includes(`--${option}`))
+    return refused.length === 0 ? undefined : refused
+  }
+
+  /**
+   * Run one invocation once, and decode what it printed.
+   * @param invocation - verb, positionals, and options.
+   * @param signal - caller's abort signal, forwarded to the child.
+   * @returns the decoded result of that one process.
+   */
+  private async execute(invocation: ConsoleInvocation, signal?: AbortSignal): Promise<ConsoleResult> {
     const argv = this.argv(invocation)
     const timer = AbortSignal.timeout(this.settings.timeoutMs)
     const abort = signal === undefined ? timer : AbortSignal.any([signal, timer])
@@ -246,7 +332,8 @@ export class Console {
       // that did not honour its own spec. Report it rather than read undefined.
       return { ok: false, argv, error: 'the subprocess provider returned no collected output' }
     }
-    const stdoutText = stdout.readFrom(0).text
+    const read = stdout.readFrom(0)
+    const stdoutText = read.text
     const stderrText = stderr.readFrom(0).text
     if (outcome.exitCode !== 0) {
       // The console prints its own `{"error": ...}` on a handled refusal, so a
@@ -265,8 +352,43 @@ export class Console {
     }
     const decoded = decode(stdoutText)
     if (decoded.kind === 'json') return { ok: true, argv, value: decoded.value }
+    if (read.lossy) {
+      // The cap, not the console, decided what this process printed: the head is
+      // gone, so the tail cannot be decoded and no byte total can be named.
+      return {
+        ok: false,
+        argv,
+        error: `the console's output was truncated at the ${this.settings.collectBytes}-byte collection cap `
+          + `before it printed JSON (only ${stdoutText.length} bytes were retained); `
+          + `raise collectBytes or page the read\n${argv.join(' ')}`,
+        truncation: { capBytes: this.settings.collectBytes, retainedBytes: stdoutText.length },
+      }
+    }
     return { ok: false, argv, error: `the console printed no JSON: ${stdoutText.trim() || stderrText.trim()}` }
   }
+}
+
+/**
+ * argparse's wording for an option a parser does not declare.
+ *
+ * Matched on the message rather than on the exit code alone, because exit 2 is
+ * every console refusal — an unreadable run directory included — and only this
+ * one is answered by dropping the flag.
+ */
+const UNRECOGNIZED = /unrecognized arguments/
+
+/**
+ * The same options without the named ones, so an older console is asked the
+ * question it understands.
+ * @param options - the invocation's options.
+ * @param dropped - long option names to leave out.
+ * @returns the options that remain.
+ */
+function withoutActivityOptions(
+  options: Readonly<Record<string, string | number | boolean | readonly string[] | undefined>>,
+  dropped: readonly string[],
+): Readonly<Record<string, string | number | boolean | readonly string[] | undefined>> {
+  return Object.fromEntries(Object.entries(options).filter(([name]) => !dropped.includes(name)))
 }
 
 /** A record with string keys, as JSON objects decode. */

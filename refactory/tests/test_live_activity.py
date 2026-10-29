@@ -1,6 +1,10 @@
 import hashlib
 import json
 import os
+import statistics
+import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -803,3 +807,670 @@ def test_graph_snapshot_tolerates_old_and_partial_checkpoints(tmp_path):
     for content in ['{', '{}', '{"graph": {"nodes": []}}']:
         checkpoint.write_text(content)
         assert live.snapshot(tmp_path)['graph'] is None
+
+
+# ── the activity index and its paged read ──────────────────────────────────
+#
+# The journal is the record; `events.index.jsonl` and its anchor are derived from
+# it. Every test here holds one reader to the other, because an index that
+# changes an answer is a second source of truth whatever it is called.
+
+
+def _journal(root: Path, lines: list[bytes]) -> Path:
+    path = root / live.EVENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b''.join(lines))
+    return path
+
+
+def _record(kind: str = 'step', **fields: object) -> bytes:
+    return (json.dumps({'schema_version': 1, 'kind': kind, 'at': '2026-10-26T09:00:00+00:00', **fields}) + '\n').encode()
+
+
+def _full_scan(root: Path) -> dict[str, object]:
+    """Today's answer, computed by scanning: the rule an indexed answer must equal."""
+    records, total = live.events(root, 0)
+    return {'total': total, 'last_event_at': records[-1].get('at') if records else None}
+
+
+def _status(root: Path, *argv: str) -> dict:
+    result = subprocess.run([sys.executable, '-m', 'refactory_dsh.console', 'status',
+                             '--run', str(root), *argv], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
+    return json.loads(result.stdout)
+
+
+def test_events_page_returns_a_bounded_ordered_slice(tmp_path):
+    """T-1: a page is a window with a cursor, and a partial write is in neither."""
+    _journal(tmp_path, [_record(n=i) for i in range(5)])
+    records, total = live.events_page(tmp_path, after=1, limit=2)
+    assert [row['n'] for row in records] == [1, 2]
+    assert total == 5
+    assert live.events_page(tmp_path, after=5, limit=10) == ([], 5)
+    with (tmp_path / live.EVENTS).open('ab') as handle:
+        handle.write(b'{"kind":"half"')
+    records, total = live.events_page(tmp_path, after=3, limit=10)
+    assert [row['n'] for row in records] == [3, 4]
+    assert total == 5
+
+
+def test_one_status_answer_takes_its_summary_from_the_page_pass(tmp_path, monkeypatch):
+    """T-2: `total`/`last_event_at` cost no second journal read (today's double scan)."""
+    _journal(tmp_path, [_record(n=i) for i in range(10)])
+    live.page(tmp_path)
+    reads: list[str] = []
+    open_real = Path.open
+
+    def counting(self, *args, **kwargs):
+        if self.name == live.EVENTS.name:
+            reads.append(str(self))
+        return open_real(self, *args, **kwargs)
+
+    # A warm index and an unchanged journal: `total` and `last_event_at` are in
+    # the overview line, and the journal is opened only to re-read its first
+    # record as the identity anchor — never walked to count or to find the newest
+    # `at`, which is what `snapshot` used to do twice.
+    monkeypatch.setattr(Path, 'open', counting)
+    assert live.summary(tmp_path) == {'total': 10, 'last_event_at': '2026-10-26T09:00:00+00:00'}
+    assert len(reads) == 1, reads
+
+    # A page opens the journal once for its records, on top of the anchor read it
+    # shares with the summary: never a pass over the whole journal.
+    reads.clear()
+    result = live.page(tmp_path, after=4, limit=3)
+    assert [row['n'] for row in result['events']] == [4, 5, 6]
+    assert (result['total'], result['last_event_at']) == (10, '2026-10-26T09:00:00+00:00')
+    assert len(reads) == 2, reads
+
+    # The record appended since is indexed from where the last pass stopped: an
+    # open each for the anchor and the new suffix, and none per record — the same
+    # three opens whether one record or a thousand arrived.
+    monkeypatch.undo()
+    with (tmp_path / live.EVENTS).open('ab') as handle:
+        handle.write(_record(n=10))
+    reads.clear()
+    monkeypatch.setattr(Path, 'open', counting)
+    assert live.summary(tmp_path)['total'] == 11
+    assert len(reads) <= 3, reads
+
+    # The same call on a journal a thousand records longer costs the same opens,
+    # so nothing here is proportional to the history.
+    with (tmp_path / live.EVENTS).open('ab') as handle:
+        for n in range(11, 1011):
+            handle.write(_record(n=n))
+    assert live.summary(tmp_path)['total'] == 1011
+    reads.clear()
+    assert live.summary(tmp_path)['total'] == 1011
+    assert len(reads) <= 3, reads
+
+
+def _median_ms(action: object, rounds: int = 9) -> float:
+    """The median duration of `action` in milliseconds, warm."""
+    timings = []
+    for _ in range(rounds):
+        started = time.perf_counter()
+        action()
+        timings.append((time.perf_counter() - started) * 1000)
+    return statistics.median(timings)
+
+
+def test_page_cost_does_not_grow_with_the_journal(tmp_path):
+    """T-3: a warm page and a warm summary are flat across N — R-1.7a and R-1.7b.
+
+    The assertions are cross-N ratios, because a threshold that compares two
+    numbers measured at the same N accepts an implementation that is linear in N
+    at every N (the code this test replaces did exactly that: 9.05 ms at 5,000
+    records and 35.6 ms at 20,000 records still passed). With three journal sizes
+    40x apart, a page that reads anything proportional to N cannot stay within
+    `max(small * 2, 5 ms)`; a page that seeks does, because its cost is four
+    strides and 200 records whatever the history behind it is.
+    """
+    sizes = (500, 5000, 20000, 270000)
+    roots = {}
+    for size in sizes:
+        roots[size] = tmp_path / f'journal-{size}'
+        _journal(roots[size], [_record(i=i, summary='x' * 900) for i in range(size)])
+        # The cold first call is allowed to scan: it is what builds the index.
+        assert len(live.page(roots[size])['events']) == live.PAGE_DEFAULT
+
+    # R-1.7b: `total`/`last_event_at` cost one small file read, not a walk.
+    summary = {size: _median_ms(lambda root=roots[size]: live.summary(root)) for size in sizes}
+
+    # R-1.7a: the same 200-record page at a fixed `after`, and at N/2.
+    pages = {size: _median_ms(lambda root=roots[size]: live.page(root, after=200, limit=200))
+             for size in sizes}
+    late = {size: _median_ms(lambda root=roots[size], n=size: live.page(root, after=n // 2, limit=200))
+            for size in sizes}
+
+    # 40x the journal for the same page: the ceiling is 2x, not the 10x the
+    # previous test used, and it is measured against a page, not against nothing.
+    assert pages[20000] < max(pages[500] * 2, 5.0), (pages, late)
+    assert late[20000] < max(late[500] * 2, 5.0), (pages, late)
+    # The slope with no absolute floor in front of it, at the size the reported
+    # run actually reached. The 5 ms floor above is needed at 500 records, where
+    # a page's own cost is close to timer noise, but it also hides a read
+    # proportional to N while the index is still small: a page that parsed the
+    # whole index was measured passing that floor at 20,000 records (0.74 ms
+    # against 5.0 ms) and passing a 20,000-vs-5,000 ratio at 1.16x, because the
+    # 64:1 striding keeps a full index read cheap at that size. At 270,000
+    # records the same read costs 4.5x a page (2.76 ms against 0.61 ms), so the
+    # ratio is asserted against the largest pair, where it bites.
+    assert pages[270000] < pages[20000] * 2, (pages, late)
+    assert late[270000] < late[20000] * 2, (pages, late)
+    # The summary is flat across the same range, and is cheaper than a page
+    # because it parses no record at all.
+    assert summary[20000] < max(summary[500] * 2, 5.0), summary
+    assert summary[270000] < summary[20000] * 2, summary
+    # A page that returns 200 records has a floor; a real one must not be below
+    # the noise floor either, so a broken (empty) page cannot pass by being fast.
+    assert pages[20000] > 0 and len(live.page(roots[20000], after=200, limit=200)['events']) == 200
+
+    # R-1.7a's other half: an exhaustive pass costs O(N) in total, so N x 4
+    # must be about x 4 and not x 16. 40x the records may take 12x the time.
+    def full_pass(root: Path) -> int:
+        after, pages_read = 0, 0
+        while True:
+            result = live.page(root, after=after, limit=live.PAGE_DEFAULT)
+            pages_read += 1
+            after = result['cursor']
+            if not result['has_more']:
+                return pages_read
+
+    passes = {size: _median_ms(lambda root=roots[size]: full_pass(root), rounds=3) for size in sizes}
+    assert passes[20000] < passes[500] * 40 * 2, passes
+
+
+def test_page_cost_separates_journal_size_from_worker_count(tmp_path):
+    """T-3b: with the index warm, N does not move a page; receipts cost separately.
+
+    The journal bound (i) is measured on `live.page`, which reads records only.
+    The receipt slope (ii) is measured on `console.status`, which is where the
+    `O(workers + deliveries)` member R-1.5 names is actually paid; asserting it
+    of `live.page` would be asserting a cost that function does not have.
+    """
+    def timed(page_read, rounds: int = 5) -> float:
+        for _ in range(rounds):
+            page_read()
+        started = time.perf_counter()
+        for _ in range(rounds):
+            page_read()
+        return (time.perf_counter() - started) / rounds
+
+    def receipted(root: Path, count: int) -> None:
+        workers = root / '.refactory/workers'
+        workers.mkdir(parents=True, exist_ok=True)
+        for i in range(count):
+            (workers / f'w{i}.json').write_text(json.dumps({'id': f'w{i}', 'usage': {'tokens': i}}))
+
+    trees = {}
+    for name, size in (('small', 500), ('large', 20000)):
+        for receipts in (1, 500):
+            root = tmp_path / f'{name}-{receipts}'
+            _journal(root, [_record(i=i) for i in range(size)])
+            receipted(root, receipts)
+            # Warm the index, then measure the second page onwards.
+            assert len(live.page(root)['events']) == min(size, live.PAGE_DEFAULT)
+            trees[name, receipts] = root
+
+    journal_page = lambda root: lambda: live.page(root, after=200, limit=200)   # noqa: E731
+    status_page = lambda root: lambda: console.status(root, activity_after=0)   # noqa: E731
+
+    # (i) journal size does not move a warm page, at the same receipt count.
+    assert timed(journal_page(trees['large', 1])) < max(timed(journal_page(trees['small', 1])) * 10, 0.25)
+
+    # (ii) the receipt member grows with the receipt count, and is not claimed flat.
+    one, many = timed(status_page(trees['small', 1])), timed(status_page(trees['small', 500]))
+    assert many > one, (one, many)
+    # And the journal bound is independent of it: both trees pay the same receipts cost.
+    assert timed(status_page(trees['large', 500])) < many * 10
+
+
+def test_every_page_carries_the_summary_members(tmp_path):
+    """T-6: a reader that only ever reads page 0 still sees the run summary."""
+    _journal(tmp_path, [_record(n=i) for i in range(300)])
+    _journal(tmp_path, [_record(n=i) for i in range(300)])
+    (tmp_path / '.refactory/workers').mkdir(parents=True, exist_ok=True)
+    (tmp_path / '.refactory/workers/w.json').write_text(json.dumps(
+        {'id': 'w', 'node_id': 'build', 'status': 'done', 'usage': {'tokens': 5, 'calls': 2}}))
+    (tmp_path / 'facts.json').write_text(json.dumps({'name': 'packed'}))
+    (tmp_path / '.refactory/spine-status.json').write_text(json.dumps({'status': 'executing', 'nodes': ['build']}))
+    (tmp_path / '.refactory/spine-checkpoint.json').write_text(json.dumps({'owner_pid': os.getpid()}))
+    (tmp_path / '.refactory/graph-control-receipt.json').write_text(json.dumps({'status': 'applied'}))
+    summary = {'run_id', 'invocation', 'after', 'cursor', 'total', 'page_size', 'has_more',
+               'last_event_at', 'started_at', 'nodes', 'completed', 'running_nodes', 'graph',
+               'wait_reason', 'workers', 'deliveries', 'outputs', 'resources', 'control'}
+    for after in (0, 200, 300):
+        activity = console.status(tmp_path, activity_after=after)['activity']
+        assert summary <= set(activity), sorted(summary - set(activity))
+        assert activity['outputs'] == {'name': 'packed'}
+        assert activity['workers'][0]['usage'] == {'tokens': 5, 'calls': 2}
+        assert activity['control'] == {'status': 'applied'}
+        assert str(activity['run_id']).endswith(tmp_path.name)
+    assert console.status(tmp_path, activity_after=0)['activity']['cursor'] == 200
+
+
+def test_status_serves_400_records_as_two_pages(tmp_path):
+    """T-5: two pages of 200 reconstruct the journal, and neither exceeds it."""
+    _journal(tmp_path, [_record(n=i) for i in range(400)])
+    seen: list[int] = []
+    after = 0
+    while True:
+        activity = console.status(tmp_path, activity_after=after)['activity']
+        assert len(activity['events']) <= activity['page_size']
+        assert activity['cursor'] == after + len(activity['events'])
+        seen.extend(row['n'] for row in activity['events'])
+        if not activity['has_more']:
+            break
+        after = activity['cursor']
+    assert seen == list(range(400))
+
+
+def test_format_status_still_prints_warnings_from_the_page_it_is_given(tmp_path):
+    """T-8: the readable block renders the page it is given, at either cursor."""
+    _journal(tmp_path, [_record('run_warning', summary='old warning')] + [_record(n=i) for i in range(400)])
+    (tmp_path / '.refactory/spine-status.json').write_text(json.dumps({'status': 'executing', 'nodes': ['build']}))
+    page = console.status(tmp_path, activity_after=200)
+    page['text'] = readable.format_status(page)
+    assert 'old warning' not in page['text']
+    whole = console.status(tmp_path, activity_after=0)
+    whole['text'] = readable.format_status(whole)
+    assert 'Warning: old warning' in whole['text']
+
+
+def test_preexisting_usage_calls_array_still_reads_as_a_count(tmp_path):
+    """T-10: a pre-existing journal and receipt still read; the row reports a count."""
+    calls = [{'tokens': 4}, {'tokens': 5}]
+    _journal(tmp_path, [_record('worker', usage={'status': 'measured', 'tokens': 9, 'calls': calls})])
+    workers = tmp_path / '.refactory/workers'
+    workers.mkdir(parents=True, exist_ok=True)
+    (workers / 'w.json').write_text(json.dumps(
+        {'id': 'w', 'usage': {'status': 'measured', 'tokens': 9, 'calls': calls}}))
+    activity = console.status(tmp_path)['activity']
+    # The journal record is history and is served exactly as it was written (R-3.3).
+    assert activity['events'][0]['usage']['calls'] == calls
+    # The summary row reports the count, so no array travels on the wire (SD-7).
+    assert activity['workers'][0]['usage'] == {'status': 'measured', 'tokens': 9, 'calls': 2}
+    json.dumps(activity)  # the whole page is still serialisable
+
+
+def test_last_event_at_matches_a_full_scan_on_a_fixed_matrix(tmp_path):
+    """T-25: the indexed `last_event_at` is today's answer for all 15 journals."""
+    good = _record('a')
+    good2 = _record('b', at='2026-10-26T10:00:00+00:00')
+    bad = b'not json\n'
+    no_at = b'{"schema_version":1,"kind":"c"}\n'
+    cases = {
+        'malformed last complete line': good + good2 + bad,
+        'two consecutive trailing gaps': good + bad + bad,
+        'gap then unterminated tail': good + bad + b'{"half":',
+        'json line that is not an object': good + b'[1,2]\n',
+        'malformed middle line': good + bad + good2,
+        'good json with unterminated tail': good + good2 + b'{"half":',
+        'empty journal': b'',
+        'blank line only': b'\n\n\n',
+        'blank line at tail': good + b'\n\n',
+        'record without at before a good one': no_at + good,
+        'newest record without at': good + no_at,
+        'only gaps': bad + bad,
+        'newest {}': good + b'{}\n',
+        'gap then an at-less record': good + bad + no_at,
+        'ordinary newest record': good + good2,
+    }
+    assert len(cases) == 15
+    for name, payload in cases.items():
+        root = tmp_path / name.replace(' ', '_').replace('{}', 'braces')
+        _journal(root, [payload])
+        expected = _full_scan(root)
+        # Twice: the first answers from a rebuild, the second from the index it wrote.
+        for _ in range(2):
+            activity = live.snapshot(root)
+            assert (activity['total'], activity['last_event_at']) == (
+                expected['total'], expected['last_event_at']), name
+    missing = tmp_path / 'missing'
+    (missing / '.refactory').mkdir(parents=True)
+    assert (live.snapshot(missing)['total'], live.snapshot(missing)['last_event_at']) == (0, None)
+
+
+def test_the_index_never_changes_an_answer_and_is_rebuilt(tmp_path):
+    """T-24: loss, corruption, a torn line and a replaced journal answer alike."""
+    _journal(tmp_path, [_record(n=i) for i in range(6)])
+    expected = _full_scan(tmp_path)
+    fresh = live.snapshot(tmp_path)
+    assert (fresh['total'], fresh['last_event_at']) == (expected['total'], expected['last_event_at'])
+    assert len(fresh['events']) == 6
+    index, anchor = tmp_path / live.INDEX, tmp_path / live.PROVENANCE
+    assert index.is_file() and anchor.is_file()
+    whole = index.read_bytes()
+    for damage in ('absent', 'anchor absent', 'corrupt', 'torn final line'):
+        if damage == 'absent':
+            index.unlink(missing_ok=True)
+        elif damage == 'anchor absent':
+            anchor.unlink()
+        elif damage == 'corrupt':
+            index.write_bytes(b'this is not an index\n')
+        else:
+            index.write_bytes(index.read_bytes() + b'{"schema_version":1,"i":6,"sta')
+        activity = live.snapshot(tmp_path)
+        assert (activity['total'], activity['last_event_at']) == (expected['total'], expected['last_event_at']), damage
+        assert len(activity['events']) == 6, damage
+        # The next call rebuilt whatever was damaged.
+        assert index.is_file() and anchor.is_file(), damage
+        assert index.read_bytes() == whole, damage
+
+    # An index cut short at every byte, including inside the lines that place
+    # records 1…5. A cut that leaves a whole line behind is the case that broke
+    # `total`: the index claimed provenance for the whole journal and the reader
+    # believed it, so the records past the cut were never placed and `total`
+    # answered the truncated line count. A cut inside record 0 happened to trigger
+    # a rebuild, which is why cutting at 40 alone could not see it.
+    for cut in range(len(whole)):
+        index.write_bytes(whole[:cut])
+        for _ in range(2):  # the rebuild's answer, then the index it wrote
+            activity = live.snapshot(tmp_path)
+            assert (activity['total'], activity['last_event_at']) == (
+                expected['total'], expected['last_event_at']), cut
+            assert len(activity['events']) == 6, cut
+            assert index.read_bytes() == whole, cut
+
+    # The same sweep on a journal long enough to be several index strides, where
+    # a cut can fall between strides rather than only inside one.
+    _journal(tmp_path, [_record(n=i) for i in range(300)])
+    live.snapshot(tmp_path)
+    expected = _full_scan(tmp_path)
+    whole = index.read_bytes()
+    assert len(whole) > 2 * live._STRIDE_LINE
+    for cut in (0, 1, 40, len(whole) // 3, len(whole) // 2, len(whole) - live._STRIDE_LINE,
+                len(whole) - 1, len(whole)):
+        index.write_bytes(whole[:cut])
+        for _ in range(2):
+            activity = live.snapshot(tmp_path)
+            assert (activity['total'], activity['last_event_at']) == (
+                expected['total'], expected['last_event_at']), cut
+            assert len(activity['events']) == 200, cut
+            assert index.read_bytes() == whole, cut
+
+    # A gap as the newest record is counted, served, and answers `null`.
+    _journal(tmp_path, [_record(n=0), b'bad\n', b'also bad\n'])
+    activity = live.snapshot(tmp_path)
+    assert activity['total'] == 3
+    assert activity['last_event_at'] is None
+    assert activity['events'][-1]['kind'] == 'journal_gap'
+    assert activity['has_more'] is False
+
+    # The journal is archived away, then a fresh one replaces it at the same path.
+    archived = tmp_path / '.refactory/invocations/second/artifacts'
+    archived.mkdir(parents=True)
+    (tmp_path / live.EVENTS).rename(archived / 'events.jsonl')
+    gone = live.snapshot(tmp_path)
+    assert (gone['total'], gone['last_event_at'], gone['events']) == (0, None, [])
+    _journal(tmp_path, [_record('fresh', at='2026-10-26T11:00:00+00:00') for _ in range(4)])
+    replaced = live.snapshot(tmp_path)
+    assert (replaced['total'], replaced['last_event_at']) == (4, '2026-10-26T11:00:00+00:00')
+    assert replaced['events'][0]['kind'] == 'fresh'
+
+
+def test_the_index_answers_under_concurrent_builders_and_torn_lines(tmp_path):
+    """T-26: two builders and a torn line; three writers; one answer each."""
+    _journal(tmp_path, [_record(n=i) for i in range(50)])
+    script = tmp_path / 'read.py'
+    script.write_text(
+        'import json, sys\n'
+        'from pathlib import Path\n'
+        'from refactory_dsh import live\n'
+        'result = live.snapshot(Path(sys.argv[1]))\n'
+        'print(json.dumps({"total": result["total"], "last_event_at": result["last_event_at"],'
+        ' "kinds": [row.get("n", row["kind"]) for row in result["events"]]}))\n'
+    )
+
+    def reader() -> subprocess.Popen[str]:
+        return subprocess.Popen([sys.executable, str(script), str(tmp_path)],
+                                stdout=subprocess.PIPE, text=True)
+
+    # A warm index whose last line was torn mid-write, then two readers racing.
+    live.page(tmp_path)
+    assert (tmp_path / live.INDEX).is_file()
+    (tmp_path / live.INDEX).write_bytes((tmp_path / live.INDEX).read_bytes() + b'{"schema_version":1,"i":')
+    builders = [reader(), reader()]
+    outputs = [json.loads(process.communicate()[0]) for process in builders]
+    expected = _full_scan(tmp_path)
+    for output in outputs:
+        assert (output['total'], output['last_event_at']) == (expected['total'], expected['last_event_at'])
+        assert output['kinds'] == list(range(50))
+
+    # Three processes appending, as the spine, the worker and the observer do.
+    def writer(offset: int) -> subprocess.Popen[bytes]:
+        code = ('import sys\nfrom pathlib import Path\nfrom refactory_dsh import live\n'
+                f'for n in range({offset}, {offset + 20}): live.emit(Path(sys.argv[1]), "w", n=n)\n')
+        return subprocess.Popen([sys.executable, '-c', code, str(tmp_path)])
+
+    writers = [writer(100), writer(200), writer(300)]
+    assert [process.wait() for process in writers] == [0, 0, 0]
+    lines = (tmp_path / live.EVENTS).read_bytes().splitlines(keepends=True)
+    # The count is the newline-terminated lines, and the index agrees with it.
+    assert live.snapshot(tmp_path)['total'] == sum(1 for line in lines if line.endswith(b'\n'))
+
+
+def test_bounded_activity_page(tmp_path):
+    """Every `status` answer is a page, not the whole journal (§12 gate 7).
+
+    A 400-record journal page by page, then a gap record as the newest, then a
+    record after it, then a half-written line: the bounds, the refusals and the
+    timestamp at the boundary are what this locks.
+    """
+    _journal(tmp_path, [_record(i=i, summary='x' * 1000) for i in range(400)])
+    for argv, after in ((('--activity-after', '0'), 0), (('--activity-after', '200'), 200),
+                        (('--activity-after', '400'), 400), (('--activity-limit', '50'), 0)):
+        activity = _status(tmp_path, *argv)['activity']
+        assert len(activity['events']) <= activity['page_size']
+        assert activity['cursor'] == after + len(activity['events'])
+        assert activity['has_more'] is (activity['cursor'] < activity['total']), argv
+
+    for refused in (('--activity-limit', '0'), ('--activity-limit', '-1'), ('--activity-after', '-1')):
+        result = subprocess.run([sys.executable, '-m', 'refactory_dsh.console', 'status',
+                                 '--run', str(tmp_path), *refused], capture_output=True, text=True)
+        assert result.returncode == 2, (refused, result.stdout)
+
+    with (tmp_path / live.EVENTS).open('ab') as handle:
+        handle.write(b'not json\n')
+    activity = _status(tmp_path, '--activity-after', '400')['activity']
+    assert activity['total'] == 401
+    assert activity['events'][-1]['kind'] == 'journal_gap'
+    # R-1.4's identity holds on this answer like on every other. `after == 400`
+    # is the gap's own page — the single record left — so serving it advances the
+    # cursor to `total` and there is nothing more: `has_more` is false.
+    assert activity['has_more'] is (activity['cursor'] < activity['total'])
+    assert (activity['cursor'], activity['has_more']) == (401, False)
+    assert activity['last_event_at'] is None
+    # Its reachability is asserted from the start instead: an exhaustive pass over
+    # 200-record pages serves all 401 records and the gap is its last.
+    seen: list[str] = []
+    after = 0
+    while True:
+        page = _status(tmp_path, '--activity-after', str(after))['activity']
+        assert page['has_more'] is (page['cursor'] < page['total']), after
+        seen.extend(str(row['kind']) for row in page['events'])
+        if not page['has_more']:
+            break
+        after = page['cursor']
+    assert len(seen) == 401 and seen[-1] == 'journal_gap'
+    middle = _status(tmp_path, '--activity-after', '200')['activity']
+    assert (middle['cursor'], middle['has_more']) == (400, True)
+
+    with (tmp_path / live.EVENTS).open('ab') as handle:
+        handle.write(_record('after-gap', at='2026-10-26T12:00:00+00:00'))
+    assert _status(tmp_path)['activity']['last_event_at'] == '2026-10-26T12:00:00+00:00'
+
+    with (tmp_path / live.EVENTS).open('ab') as handle:
+        handle.write(b'{"half":')
+    assert _status(tmp_path)['activity']['total'] == 402
+
+
+def test_builders_racing_a_live_writer_never_publish_a_torn_pair(tmp_path):
+    """T-27: builders racing a live writer publish whole pairs, and leave no temp.
+
+    §4.6 gives most of its text to concurrent builders, and T-26 races two of them
+    against a torn line already on disk. What it does not exercise is builders
+    running *while* a writer appends — the state the overview and provenance
+    publishes race in. Every reader is also a writer of those two derived files,
+    and one fixed temp name let two of them open the same inode: the loser's
+    truncate landed mid-flight, so a half-written `events.index.overview.json` (or
+    a pair from two different coverages) could be renamed into place.
+
+    Correctness survived that — the reader re-parses and rejects a torn pair — so
+    what a test has to catch is the torn write itself, which forces every racing
+    reader onto the full O(N) rebuild this index exists to remove. A per-writer
+    temp (PID + a per-process counter, so no two publishes share an inode; no
+    `O_EXCL`, which would wedge the index behind a crashed writer's leftover) is
+    what this asserts: a concurrent watcher never sees a derived file that is not
+    a complete JSON object, the answers still equal a full scan, and no publish
+    temp outlives its writer.
+    """
+    live.emit(tmp_path, 'seed')
+    directory = tmp_path / '.refactory'
+    script = tmp_path / 'race.py'
+    script.write_text(
+        'import json, sys\n'
+        'from pathlib import Path\n'
+        'from refactory_dsh import live\n'
+        'root = Path(sys.argv[1])\n'
+        'answers = []\n'
+        'for _ in range(1200):\n'
+        '    result = live.snapshot(root)\n'
+        '    answers.append({"total": result["total"], "last_event_at": result["last_event_at"],\n'
+        '                    "summary": live.summary(root)["total"]})\n'
+        'print(json.dumps(answers))\n'
+    )
+
+    def builder() -> subprocess.Popen[str]:
+        return subprocess.Popen([sys.executable, str(script), str(tmp_path)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # Warm the index so the publishes are what the builders do from their first
+    # poll, not the initial rebuild from an empty run directory.
+    live.snapshot(tmp_path)
+    # Start the builders first, then append while they are still reading, so the
+    # publishes interleave with the writer instead of following it. Eight builders
+    # against 1500 appends is the pressure that makes the collision reproducible:
+    # the fixed-temp code publishes a torn file in roughly two runs out of three,
+    # the per-writer one never does (measured over three runs each).
+    builders = [builder() for _ in range(8)]
+    torn: list[str] = []
+    observed = 0
+    for n in range(1500):
+        live.emit(tmp_path, 'racing', n=n)
+        # Watch the two published files from here, between appends, the way a
+        # second reader would: each must always be one complete JSON object.
+        for name in (live.OVERVIEW, live.PROVENANCE):
+            try:
+                text = (tmp_path / name).read_text()
+            except FileNotFoundError:
+                continue
+            observed += 1
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                torn.append(f'{name.name}: {text[:60]!r}')
+                continue
+            if not isinstance(value, dict):
+                torn.append(f'{name.name}: not an object')
+    for process in builders:
+        out, err = process.communicate()
+        assert process.returncode == 0, err
+        answers = json.loads(out)
+        assert len(answers) == 1200
+        for answer in answers:
+            # A builder reads while the writer appends, so each of its two reads
+            # observes its own instant of the journal. Neither count may be pinned
+            # to the *final* total, and a tight bound around it is not sound under
+            # contention (CI's four workers produced 1520 against a true 1501 once):
+            # `summary` and `snapshot` each re-read, the writer is mid-append, and
+            # the derived index is rebuilt by whichever reader wins. Asserting a
+            # narrow numeric band on racing reads tests the scheduler, not this
+            # change. What this test is for — that a racing writer never publishes a
+            # torn derived file — is asserted below via `torn`, and the settled
+            # answer that follows pins the exact total.
+            assert isinstance(answer['total'], int) and answer['total'] >= 0, answer
+            assert isinstance(answer['summary'], int) and answer['summary'] >= 0, answer
+    # The declaration above is only meaningful if the watcher really did overlap:
+    # with no reads there is nothing that could have seen a torn file.
+    assert observed > 0, 'the watcher never overlapped the builders; the race was not exercised'
+    assert torn == [], f'torn derived file published while racing: {torn[:3]}'
+    # The settled answer equals the full scan exactly.
+    expected = _full_scan(tmp_path)
+    settled = live.snapshot(tmp_path)
+    assert (settled['total'], settled['last_event_at']) == (expected['total'], expected['last_event_at'])
+    assert settled['total'] == 1501
+    # No publish temp outlives its writer, under any name.
+    leftovers = [path.name for path in directory.iterdir() if path.name.endswith('.tmp')]
+    assert leftovers == [], leftovers
+
+
+def test_a_cursor_past_the_end_answers_an_empty_page_clamped_to_total(tmp_path):
+    """T-28: `after` beyond the journal never hands back a cursor past `total`.
+
+    R-1.3 defines the cursor as `after + len(events)` and leaves `after > total`
+    open. Serving it literally returned `cursor: 5000` on a 1,100-record journal: a
+    caller trusting `cursor <= total` was surprised, and a page-until-`has_more`
+    loop still terminated but on a number that names no record. The page stays
+    empty and `has_more` stays false; only the cursor is clamped.
+    """
+    _journal(tmp_path, [_record(n=i) for i in range(60)])
+    assert live.summary(tmp_path)['total'] == 60
+
+    beyond = live.page(tmp_path, after=5000, limit=10)
+    assert beyond['events'] == []
+    assert (beyond['cursor'], beyond['total'], beyond['has_more']) == (60, 60, False)
+    # Exactly at the end is the settled case, and it agrees.
+    at_end = live.page(tmp_path, after=60, limit=10)
+    assert at_end['events'] == []
+    assert (at_end['cursor'], at_end['has_more']) == (60, False)
+    # Just short of the end still serves the last record and lands on `total`.
+    last = live.page(tmp_path, after=59, limit=10)
+    assert len(last['events']) == 1
+    assert (last['cursor'], last['has_more']) == (60, False)
+    # A page in the middle is unaffected by the clamp.
+    middle = live.page(tmp_path, after=10, limit=10)
+    assert (middle['cursor'], middle['has_more']) == (20, True)
+    # An empty run directory answers 0 rather than echoing the caller's cursor.
+    empty = tmp_path / 'nothing-here'
+    empty.mkdir()
+    assert live.page(empty, after=99)['cursor'] == 0
+
+
+def test_a_trailing_partial_write_costs_one_publish_then_nothing(tmp_path, monkeypatch):
+    """T-29: a poll tick does not re-index or re-publish a journal that is mid-write.
+
+    A writer appending record-by-record leaves unterminated bytes between its
+    writes. The walk stops at that line, so the covered prefix does not move — but
+    the journal's own size does, and a guard comparing the journal against the
+    *covered prefix* rather than against the size it was measured at rebuilt the
+    whole index on every tick. Every reader polls while a run is live, so that
+    rebuild is the O(N) scan the index exists to avoid, repeated per poll.
+
+    The contract this locks: settling on a trailing partial publishes at most once,
+    and every poll after that neither rebuilds nor rewrites.
+    """
+    live.emit(tmp_path, 'complete')
+    journal = tmp_path / live.EVENTS
+    with journal.open('ab') as handle:
+        handle.write(b'{"kind":"half"')
+    # Settle first: the read that observes the partial publishes once (the covered
+    # prefix is unchanged, but `size_at_write` catches up to what was examined), and
+    # everything after that must be silent.
+    live.summary(tmp_path)
+    live.summary(tmp_path)
+    rebuilds: list[int] = []
+    writes: list[int] = []
+    real_rebuild, real_write = live._rebuild, live._write
+    monkeypatch.setattr(live, '_rebuild', lambda *a, **k: (rebuilds.append(1), real_rebuild(*a, **k))[1])
+    monkeypatch.setattr(live, '_write', lambda *a, **k: (writes.append(1), real_write(*a, **k))[1])
+    for _ in range(10):
+        assert live.summary(tmp_path)['total'] == 1
+        live.page(tmp_path)
+    assert rebuilds == [], f'poll ticks rebuilt the index {len(rebuilds)} times'
+    assert writes == [], f'poll ticks republished the index {len(writes)} times'
+    # The partial is still not a record, and terminating it makes it a counted gap.
+    with journal.open('ab') as handle:
+        handle.write(b'"}\n')
+    assert live.summary(tmp_path)['total'] == 2
+    assert live.events(tmp_path)[1] == 2

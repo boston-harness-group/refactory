@@ -797,7 +797,7 @@ Driving a run from a GUI: the catalogue, a live run, and what it produced.
 | function | `runs` | `(*, project: 'Path \| None' = None, runs_root: 'Path \| None' = None, limit: 'int' = 20) -> 'list[dict[str, Any]]'` |
 | function | `runtime_context` | `(project: 'Path', *, provider: 'str' = '', model: 'str' = '') -> 'dict[str, Any]'` |
 | function | `start` | `(mode: 'str', *, project: 'Path \| None' = None, runs_root: 'Path \| None' = None, run_id: 'str \| None' = None, **config: 'Any') -> 'dict[str, Any]'` |
-| function | `status` | `(run_root: 'Path', *, after: 'int' = 0) -> 'dict[str, Any]'` |
+| function | `status` | `(run_root: 'Path', *, after: 'int' = 0, activity_after: 'int' = 0, activity_limit: 'int' = 200) -> 'dict[str, Any]'` |
 | function | `stop` | `(run_root: 'Path') -> 'dict[str, Any]'` |
 
 - **`ConsoleError`** — The request cannot be served, and why.

@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from refactory_dsh import observe
+from refactory_dsh import live, observe
 from refactory_dsh import registry, profiles
 from refactory_dsh.adopt import AdoptionError
 from refactory_dsh.control import search_finished, search_owner, search_phase
@@ -515,16 +515,35 @@ def _run_kind(run_root: Path, spine: dict[str, Any]) -> str:
     return "unknown"
 
 
-def status(run_root: Path, *, after: int = 0) -> dict[str, Any]:
+def _activity_page(after: int, limit: int) -> int:
+    """Refuse an activity window that cannot advance a cursor; clamp the rest.
+
+    ``limit`` is a page size, so zero and negatives are refused (exit 2) before a
+    run directory is read. Above the maximum it is clamped rather than refused: a
+    caller asking for more than the console serves still gets a usable page.
+    """
+    if after < 0:
+        raise ConsoleError(f"--activity-after must be nonnegative, got {after}")
+    if limit < 1:
+        raise ConsoleError(f"--activity-limit must be at least 1, got {limit}; "
+                           "a page with no records cannot advance a cursor")
+    return min(limit, live.PAGE_MAX)
+
+
+def status(run_root: Path, *, after: int = 0, activity_after: int = 0,
+           activity_limit: int = live.PAGE_DEFAULT) -> dict[str, Any]:
     """Where the run is, and what is new since the reader last looked.
 
     ``after`` is a line count, not a timestamp: a reader polling this wants the
     events it has not seen, and a clock cannot tell it which those are.
+    ``activity_after``/``activity_limit`` page the journal the same way, so the
+    activity history can be read a window at a time instead of whole.
 
     A search run's progress is `progress.jsonl`. An authoring run is driven by the
     graph spine and has none, so its own status file is read instead — without that,
     a creation could only be waited on by waiting for the call to return.
     """
+    limit = _activity_page(activity_after, activity_limit)
     run_root = Path(run_root)
     if not run_root.is_dir():
         raise ConsoleError(f"{run_root} is not a run directory")
@@ -540,8 +559,8 @@ def status(run_root: Path, *, after: int = 0) -> dict[str, Any]:
         state = SPINE_STATES.get(str(spine.get("status")), state)
         if finished and not halted:
             state = "finished"
-    from refactory_dsh import live, run_state
-    activity = live.snapshot(run_root)
+    from refactory_dsh import run_state
+    activity = live.snapshot(run_root, after=activity_after, limit=limit)
     # dm-95: surface last_failure info when the graph is retrying a node
     last_failure = spine.get('last_failure')
     if last_failure and isinstance(last_failure, dict) and spine.get('status') == 'ready':
@@ -1385,6 +1404,16 @@ def _parser() -> argparse.ArgumentParser:
 
     watch = add(sub.add_parser("status", help="where a run is"))
     watch.add_argument("--after", type=int, default=0)
+    watch.add_argument(
+        "--activity-after", type=int, default=0,
+        help="journal record index the activity page starts at (default: 0); "
+             "serve the next page from the previous answer's activity.cursor",
+    )
+    watch.add_argument(
+        "--activity-limit", type=int, default=200,
+        help="journal records one activity page may carry (default: 200, at most 1000); "
+             "0 is refused, because a page with no records cannot advance a cursor",
+    )
     watch.add_argument("--follow", action="store_true", help="stream durable state changes without launching work")
     watch.add_argument("--interval", type=float, default=1.0, help="reader interval in seconds (minimum 0.1)")
 
@@ -1913,10 +1942,18 @@ def main(argv: list[str] | None = None) -> int:
             payload = comparison(_root_for(args, project))
         elif args.verb == "status" and args.follow:
             root = _root_for(args, project)
+            # Each frame is a page, not the whole journal: the cursors the last
+            # frame reported are where the next one starts, so a poll costs what
+            # was appended since rather than everything ever written.
+            progress_cursor = args.after
+            activity_cursor = args.activity_after
             previous = None
             try:
                 while True:
-                    frame = status(root, after=args.after)
+                    frame = status(root, after=progress_cursor, activity_after=activity_cursor,
+                                   activity_limit=args.activity_limit)
+                    progress_cursor = frame["cursor"]
+                    activity_cursor = frame["activity"]["cursor"]
                     encoded = json.dumps(frame, sort_keys=True)
                     if encoded != previous:
                         print(encoded, flush=True)
@@ -1927,7 +1964,8 @@ def main(argv: list[str] | None = None) -> int:
             except KeyboardInterrupt:
                 return 0
         elif args.verb == "status":
-            payload = status(_root_for(args, project), after=args.after)
+            payload = status(_root_for(args, project), after=args.after,
+                             activity_after=args.activity_after, activity_limit=args.activity_limit)
             from refactory_dsh import readable
             payload['text'] = readable.format_status(payload)
         elif args.verb == "graph-control":

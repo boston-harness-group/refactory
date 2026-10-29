@@ -11,6 +11,7 @@ import { vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
+  RefactoryActivity,
   RefactoryCandidateRow,
   RefactoryModeChoice,
   RefactoryPackageChoice,
@@ -205,6 +206,46 @@ export const COMPLETED: RefactorySingleRun = {
   ...SINGLE,
   authoring: { spine: 'done', nodes_due: [], error: '' },
   facts: {},
+}
+
+/**
+ * A run's activity with its journal paged: `after`..`cursor` of `total` records.
+ *
+ * `has_more` is computed the way the console computes it (`cursor < total`), so a
+ * spec that feeds pages to a reader is feeding it the same identity the console
+ * promises (R-1.4) rather than a fixed flag.
+ * @param after - the journal index the page starts at.
+ * @param limit - how many records this answer may carry.
+ * @param total - complete records in the journal.
+ * @param run - the run the answer names.
+ * @returns the activity envelope, with one placeholder record per index.
+ */
+export function ACTIVITY(after: number, limit: number, total: number, run = '/runs/live'): RefactoryActivity {
+  const cursor = Math.min(total, after + limit)
+  return {
+    schema_version: 1,
+    run_id: run,
+    invocation: 'inv-1',
+    cursor,
+    after,
+    total,
+    page_size: limit,
+    has_more: cursor < total,
+    last_event_at: '2026-01-01T00:00:00+00:00',
+    started_at: '2026-01-01T00:00:00+00:00',
+    nodes: ['build'],
+    completed: [],
+    graph: null,
+    wait_reason: null,
+    workers: [],
+    deliveries: [],
+    events: Array.from({ length: cursor - after }, (_unused, index) => ({
+      at: `t${after + index}`, kind: 'worker_event', node_id: 'build',
+    })),
+    outputs: { name: 'demo' },
+    resources: null,
+    control: null,
+  }
 }
 
 /** A landed Remote call. */

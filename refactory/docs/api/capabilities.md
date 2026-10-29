@@ -3907,7 +3907,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
 
 ## status
 
-Read durable run state and incremental events using after. A live process or receipt is not proof of successful output.
+Read durable run state and incremental events using after, and page the activity journal with activity-after/activity-limit. A live process or receipt is not proof of successful output.
 
 Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
@@ -3936,6 +3936,14 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "run": "/tmp/example-run"
       },
       "explanation": "Read durable run state and incremental events using after. A live process or receipt is not proof of successful output."
+    },
+    {
+      "arguments": {
+        "activity_after": 400,
+        "activity_limit": 200,
+        "run": "/tmp/example-run"
+      },
+      "explanation": "Read journal records 400-599: the answer carries activity.cursor 600, activity.total and activity.has_more, so the next call continues from the cursor."
     }
   ],
   "interfaces": {
@@ -3944,6 +3952,28 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     "panel": "Live run view."
   },
   "parameters": {
+    "activity_after": {
+      "default": 0,
+      "description": "journal record index the activity page starts at (default: 0); serve the next page from the previous answer's activity.cursor",
+      "flags": [
+        "--activity-after"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "activity_limit": {
+      "default": 200,
+      "description": "journal records one activity page may carry (default: 200, at most 1000); 0 is refused, because a page with no records cannot advance a cursor",
+      "flags": [
+        "--activity-limit"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "after": {
       "default": 0,
       "description": "",
@@ -4011,8 +4041,8 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "type": "string"
     }
   },
-  "purpose": "Read durable run state and incremental events using after. A live process or receipt is not proof of successful output.",
-  "reviewed_schema": "2b225312f5e01da962a3e1b5fc62b1026df0b65a3250a1c2dfa5d12f781e7fae"
+  "purpose": "Read durable run state and incremental events using after, and page the activity journal with activity-after/activity-limit. A live process or receipt is not proof of successful output.",
+  "reviewed_schema": "6dd18ee76e65feb27260947df121776aac85d0828970c6932cda0c59a8f24cbf"
 }
 ```
 

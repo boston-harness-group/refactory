@@ -27,24 +27,26 @@ interface Scripted {
   readonly stdout: string
   readonly exitCode?: number
   readonly stderr?: string
+  /** The reader's own fact that this stream lost its head at the collection cap. */
+  readonly lossy?: boolean
 }
 
 function runResult(scripted: Scripted): {
-  stdout: { text: string }
+  stdout: { text: string; lossy: boolean }
   stderr: { text: string }
   outcome: SubprocessOutcome
 } {
   return {
-    stdout: { text: scripted.stdout },
+    stdout: { text: scripted.stdout, lossy: scripted.lossy === true },
     stderr: { text: scripted.stderr ?? '' },
     outcome: { exitCode: scripted.exitCode ?? 0, signal: null },
   }
 }
 
 class FakeReader {
-  constructor(private readonly read: { text: string }) {}
+  constructor(private readonly read: { text: string; lossy?: boolean }) {}
   readFrom(_fromByte: number): SubprocessOutputRead {
-    return { text: this.read.text, nextOffset: this.read.text.length, lossy: false }
+    return { text: this.read.text, nextOffset: this.read.text.length, lossy: this.read.lossy === true }
   }
 }
 
@@ -551,6 +553,7 @@ describe('refactoryConsole — reading a run', () => {  it('maps a status frame,
   })
   expect(subprocess.lastArgv).toEqual([
     '/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', '/runs/live', '--after', '3',
+    '--activity-after', '3', '--activity-limit', '200',
   ])
 })
 
@@ -816,7 +819,10 @@ describe('refactoryConsole — the console boundary', () => {
     expect(failure.code).toBe('refactory/console-failed')
     expect(failure.message).toBe('/runs/absent is not a run directory')
     expect(failure.details).toEqual({
-      argv: ['/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', 'absent', '--after', '0'],
+      argv: [
+        '/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', 'absent', '--after', '0',
+        '--activity-after', '0', '--activity-limit', '200',
+      ],
     })
   })
 
@@ -838,5 +844,163 @@ describe('refactoryConsole — the console boundary', () => {
     subprocess.answer('not an object')
     await expect(service.strategies(signal())).rejects.toThrow('strategy answer is not an object')
     await expect(service.status('live', 0, signal())).rejects.toThrow('run status is not an object')
+  })
+
+  it('reports a payload the collection cap cut as a size problem, and a complete non-JSON one as no JSON', async () => {
+    // T-14 (R-5.4): the two causes are different reader-facing lines and different
+    // codes. A cap overflow has no answer to decode at all, so it must not be
+    // dressed as the console refusing anything — and it must not claim a
+    // whole-stream byte total, which the process seam never exposes.
+    const { service, subprocess } = await setup()
+    subprocess.script = [{ stdout: '{"activity":{"events":[{"at":"2026-', lossy: true }]
+    const truncated = await failureOf(service.status('live', 0, signal()))
+    expect(truncated.code).toBe('refactory/console-truncated')
+    expect(truncated.message).toContain('truncated at the 1048576-byte collection cap')
+    expect(truncated.message).toContain('only 35 bytes were retained')
+    expect(truncated.message).not.toContain('printed no JSON')
+    expect(truncated.details).toEqual({
+      argv: [
+        '/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', 'live', '--after', '0',
+        '--activity-after', '0', '--activity-limit', '200',
+      ],
+      capBytes: 1_048_576,
+      retainedBytes: 35,
+    })
+
+    // A complete stdout that is not JSON is the console's own failure, unchanged.
+    subprocess.script = [{ stdout: 'child banner\n{"run_id":"live"}' }]
+    const notJson = await failureOf(service.status('live', 0, signal()))
+    expect(notJson.code).toBe('refactory/console-failed')
+    expect(notJson.message).toBe('the console printed no JSON: child banner\n{"run_id":"live"}')
+    expect(notJson.details).not.toHaveProperty('capBytes')
+  })
+
+  it('keeps a run readable against a console that refuses the paging options, retrying once', async () => {
+    // T-13 (R-6.1, UC-9): a console older than the paging contract exits 2 with
+    // `unrecognized arguments`. The answer is the one it can still give — the
+    // whole history and no page bounds — and the reader is told the history is
+    // unpaged rather than handed an absent member it has to guess about.
+    const { service, subprocess } = await setup()
+    subprocess.script = [
+      { stdout: '', exitCode: 2, stderr: "console: error: unrecognized arguments: --activity-after 0 --activity-limit 200" },
+      { stdout: JSON.stringify({ ...FRAME, activity: { cursor: 3, events: [{ kind: 'worker_event' }], outputs: {} } }) },
+    ]
+    const frame = await service.status('live', 0, signal())
+    expect(frame.activity).toMatchObject({ paged: false, cursor: 3 })
+    expect(frame.state).toBe('running')
+    expect(subprocess.spawns).toHaveLength(2)
+    expect(subprocess.lastArgv).toEqual([
+      '/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', 'live', '--after', '0',
+    ])
+
+    // A different failure is not retried: only the paging refusal has an answer
+    // this side can give, so an unreadable run is reported as the console's own.
+    const refused = await setup()
+    refused.subprocess.script = [
+      { stdout: JSON.stringify({ error: '/runs/live is not a run directory' }), exitCode: 2 },
+      { stdout: JSON.stringify(FRAME) },
+    ]
+    const failure = await failureOf(refused.service.status('live', 0, signal()))
+    expect(failure.code).toBe('refactory/console-failed')
+    expect(failure.message).toBe('/runs/live is not a run directory')
+    expect(refused.subprocess.spawns).toHaveLength(1)
+  })
+
+  it('advances its own journal cursor across polls instead of restarting the page', async () => {
+    // T-15 (R-4.2, SD-5): a poll that re-sends the caller's `after` re-reads the
+    // same records every frame, which is the cost paging exists to remove — and a
+    // reset to 0 mid-stream would splice them onto the history twice. The answer
+    // is keyed off the cursor it was asked from, so a second poll only produces a
+    // *different* frame (and so only reaches a second read) if the stream actually
+    // moved past the caller's 4 to the cursor its first answer reported.
+    const { service, subprocess } = await setup()
+    const asked: string[] = []
+    const original = subprocess.spawn.bind(subprocess)
+    // Answer each call by what it asked: a status read reports a cursor five past
+    // the journal index it was given, and the ledger read is ledger-shaped. The
+    // script is replaced per spawn, so neither answer bleeds into the other.
+    subprocess.spawn = (spec: SubprocessSpawnSpec): SubprocessHandle => {
+      if (spec.argv.includes('status')) {
+        const at = spec.argv[spec.argv.indexOf('--activity-after') + 1] ?? ''
+        asked.push(at)
+        subprocess.script = [{
+          stdout: JSON.stringify({
+            ...FRAME,
+            activity: {
+              cursor: Number(at) + 5, total: 100, has_more: true, events: [{ kind: 'worker_event' }], outputs: {},
+            },
+          }),
+        }]
+      } else {
+        subprocess.script = [{
+          stdout: JSON.stringify({ run: 'live', entries: [], constraints: [], verdicts: {}, gates: [], problems: [] }),
+        }]
+      }
+      return original(spec)
+    }
+    const controller = new AbortController()
+    const cursors: (number | undefined)[] = []
+    for await (const frame of service.watchStream('live', 4, controller.signal)) {
+      cursors.push(frame.status.activity?.cursor)
+      if (cursors.length === 2) controller.abort()
+    }
+    // First poll from the caller's cursor, second from the first answer's cursor:
+    // 4 → 9, and never back to 4 or to 0.
+    expect(asked).toEqual(['4', '9'])
+    expect(cursors).toEqual([9, 14])
+    expect(subprocess.spawns[0]?.argv).toEqual([
+      '/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', 'live', '--after', '4',
+      '--activity-after', '4', '--activity-limit', '200',
+    ])
+  })
+
+  it('carries the progress cursor and the activity cursor separately (R-4.3)', async () => {
+    // T-16 (R-4.3, SD-9): the two cursors index different files and never derive
+    // from one another. An optimizer run writes progress.jsonl *and* a journal, and
+    // the journal cursor runs far ahead of the progress line count, so advancing
+    // `--after` from the activity cursor makes the console answer an empty progress
+    // delta for every frame after the first. Each flag must advance from the answer
+    // that belongs to its own file: `--after` from the progress `cursor`,
+    // `--activity-after` from `activity.cursor`.
+    const { service, subprocess } = await setup()
+    const progressAsked: string[] = []
+    const activityAsked: string[] = []
+    const original = subprocess.spawn.bind(subprocess)
+    subprocess.spawn = (spec: SubprocessSpawnSpec): SubprocessHandle => {
+      if (spec.argv.includes('status')) {
+        const after = spec.argv[spec.argv.indexOf('--after') + 1] ?? ''
+        const activityAt = spec.argv[spec.argv.indexOf('--activity-after') + 1] ?? ''
+        progressAsked.push(after)
+        activityAsked.push(activityAt)
+        subprocess.script = [{
+          stdout: JSON.stringify({
+            ...FRAME,
+            // The progress file has 3 lines, so its cursor stops at 3 while the
+            // journal's cursor keeps climbing — exactly the mismatch R-4.3 names.
+            cursor: 3,
+            events: [{ at: '2026-10-26T09:00:00+00:00', kind: 'progress' }],
+            activity: {
+              cursor: Number(activityAt) + 40, total: 500, has_more: true, events: [{ kind: 'worker_event' }], outputs: {},
+            },
+          }),
+        }]
+      } else {
+        subprocess.script = [{
+          stdout: JSON.stringify({ run: 'live', entries: [], constraints: [], verdicts: {}, gates: [], problems: [] }),
+        }]
+      }
+      return original(spec)
+    }
+    const controller = new AbortController()
+    const cursors: (number | undefined)[] = []
+    for await (const frame of service.watchStream('live', 0, controller.signal)) {
+      cursors.push(frame.status.activity?.cursor)
+      if (cursors.length === 2) controller.abort()
+    }
+    // The journal advances 0 → 40. The progress cursor is 3 on both polls: it is
+    // advanced from the progress answer, never from the journal's 40.
+    expect(activityAsked).toEqual(['0', '40'])
+    expect(progressAsked).toEqual(['0', '3'])
+    expect(cursors).toEqual([40, 80])
   })
 })

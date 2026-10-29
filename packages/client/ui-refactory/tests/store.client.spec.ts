@@ -10,6 +10,13 @@ import { CANDIDATES, FRAME, GATED_STEERING, MODE, NO_STRATEGIES, PACKAGE, PROJEC
 const TAB = 'tab-1' as TabId
 const OTHER = 'tab-2' as TabId
 
+/** Three journal records, as an answer carries them. */
+const EVENTS: readonly Readonly<Record<string, unknown>>[] = [
+  { at: '2026-01-01T00:00:00', kind: 'worker_event', node_id: 'a' },
+  { at: '2026-01-01T00:00:01', kind: 'worker_event', node_id: 'b' },
+  { at: '2026-01-01T00:00:02', kind: 'worker_event', node_id: 'c' },
+]
+
 const CHOICES = { project: '/repo', modes: [MODE], strategies: { ...NO_STRATEGIES, optimizers: [{ name: 'random', description: 'sample uniformly' }] }, packages: [PACKAGE], projects: [PROJECT] }
 
 function open() {
@@ -19,7 +26,7 @@ function open() {
 }
 
 describe('createRefactoryStore', () => {
-  it('seeds a tab with the choices being read, nothing chosen, and nothing in flight', () => {
+  it('seeds a tab with the choices being read, nothing held, and the standard level', () => {
     const instance = open()
     expect(instance.getSnapshot().byTab[TAB]).toEqual({
       choices: { kind: 'loading' },
@@ -30,6 +37,9 @@ describe('createRefactoryStore', () => {
       settings: { ...NO_SETTINGS },
       watching: null,
       frame: null,
+      activity: null,
+      activityLevel: 'standard',
+      activityScroll: 0,
       steering: null,
       candidates: null,
       single: null,
@@ -208,6 +218,76 @@ describe('createRefactoryStore', () => {
     instance.actions.forget(TAB)
     expect(instance.getSnapshot().byTab[TAB]).toBeUndefined()
     expect(instance.getSnapshot().byTab[OTHER]).toBeDefined()
+  })
+
+  // T-21 (R-2.1, §4.5): the level is one tab's, starts at `standard`, and a
+  // forgotten tab takes the history it held with it.
+  it('keeps the activity level per tab, defaulting to standard', () => {
+    const instance = open()
+    instance.actions.start(OTHER)
+    expect(instance.getSnapshot().byTab[TAB]?.activityLevel).toBe('standard')
+    instance.actions.setActivityLevel(TAB, 'verbose')
+    expect(instance.getSnapshot().byTab[TAB]?.activityLevel).toBe('verbose')
+    expect(instance.getSnapshot().byTab[OTHER]?.activityLevel).toBe('standard')
+    instance.actions.setActivityLevel(TAB, 'compact')
+    expect(instance.getSnapshot().byTab[TAB]?.activityLevel).toBe('compact')
+  })
+
+  it('keeps the level across a run switch but drops the history it held', () => {
+    const instance = open()
+    instance.actions.watching(TAB, '/runs/live')
+    instance.actions.activityPage(TAB, '/runs/live', { after: 0, cursor: 2, events: EVENTS.slice(0, 2), total: 2, paged: true, run: null })
+    instance.actions.setActivityLevel(TAB, 'verbose')
+    instance.actions.activityScrolled(TAB, 40)
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events).toHaveLength(2)
+    instance.actions.watching(TAB, '/runs/other')
+    // R-4.4: another run's indices are not this history's, so the history goes.
+    expect(instance.getSnapshot().byTab[TAB]?.activity).toBeNull()
+    expect(instance.getSnapshot().byTab[TAB]?.activityScroll).toBe(0)
+    // R-2.1: which detail a person wants is about them, not about the run.
+    expect(instance.getSnapshot().byTab[TAB]?.activityLevel).toBe('verbose')
+  })
+
+  it('forgets a tab and the history it held', () => {
+    const instance = open()
+    instance.actions.watching(TAB, '/runs/live')
+    instance.actions.activityPage(TAB, '/runs/live', { after: 0, cursor: 2, events: EVENTS.slice(0, 2), total: 2, paged: true, run: null })
+    instance.actions.forget(TAB)
+    expect(instance.getSnapshot().byTab[TAB]).toBeUndefined()
+  })
+
+  it('splices a forward page where its own after says, and marks completeness only on has_more: false', () => {
+    const instance = open()
+    instance.actions.watching(TAB, '/runs/live')
+    instance.actions.activityPage(TAB, '/runs/live', { after: 0, cursor: 2, events: EVENTS.slice(0, 2), total: 3, paged: true, run: null })
+    expect(instance.getSnapshot().byTab[TAB]?.activity).toMatchObject({ through: 2, total: 3, complete: false, paged: true })
+    instance.actions.activityPage(TAB, '/runs/live', { after: 2, cursor: 3, events: EVENTS.slice(2), total: 3, paged: true, run: null })
+    expect(instance.getSnapshot().byTab[TAB]?.activity).toMatchObject({
+      events: EVENTS, through: 3, total: 3, complete: true,
+    })
+  })
+
+  it('prepends an earlier page and keeps the reader on the row they were reading', () => {
+    const instance = open()
+    instance.actions.watching(TAB, '/runs/live')
+    instance.actions.activityPage(TAB, '/runs/live', { after: 2, cursor: 3, events: EVENTS.slice(2), total: 3, paged: true, run: null })
+    instance.actions.activityScrolled(TAB, 1)
+    instance.actions.activityEarlier(TAB, '/runs/live', { after: 0, cursor: 2, events: EVENTS.slice(0, 2), total: 3, paged: true, run: null })
+    expect(instance.getSnapshot().byTab[TAB]?.activity?.events).toEqual(EVENTS)
+    // Two records were added in front of the row, so the row index moved by two.
+    expect(instance.getSnapshot().byTab[TAB]?.activityScroll).toBe(3)
+  })
+
+  it('records a page in flight and why it failed, keeping what is already held', () => {
+    const instance = open()
+    instance.actions.watching(TAB, '/runs/live')
+    instance.actions.activityPage(TAB, '/runs/live', { after: 0, cursor: 2, events: EVENTS.slice(0, 2), total: 3, paged: true, run: null })
+    instance.actions.activityPageLoading(TAB, '/runs/live')
+    expect(instance.getSnapshot().byTab[TAB]?.activity).toMatchObject({ reading: true, error: null })
+    instance.actions.activityPageFailed(TAB, '/runs/live', 'the console exited 2')
+    expect(instance.getSnapshot().byTab[TAB]?.activity).toMatchObject({
+      events: EVENTS.slice(0, 2), reading: false, error: 'the console exited 2',
+    })
   })
 
   it('refuses to write a tab it does not hold', () => {

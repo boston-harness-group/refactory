@@ -38,6 +38,15 @@ async function setup(): Promise<{ ctx: Context; service: RefactoryConsole }> {
   return { ctx, service: ctx.refactoryConsole }
 }
 
+/** One context with the real provider and the service, overridden settings and all. */
+async function setupWith(overrides: Partial<Config>): Promise<RefactoryConsole> {
+  const ctx = new Context()
+  await ctx.plugin(LocalSubprocessRuntime)
+  ctx.provide('typert', {} as never)
+  await ctx.plugin(RefactoryConsole, { ...CONFIG, ...overrides })
+  return ctx.refactoryConsole
+}
+
 const signal = (): AbortSignal => new AbortController().signal
 
 /** The failure a Remote error carries, or a defect when it is not one. */
@@ -131,6 +140,28 @@ describe('the picker service against the real loop', () => {
     expect(failure.message).toContain('does not exist (checked')
   }, 120_000)
 
+  it('pages a real journal through the console the service builds argv for', async () => {
+    // T-14/T-15 against the real parser: the two activity flags the service now
+    // always sends must be options this console accepts, and the answer they
+    // produce must be the page the next poll continues from. A console that
+    // refused them would answer through the one-shot fallback, so the answer's own
+    // `after`/`page_size`/`total` is what proves it understood the flags.
+    const { service } = await setup()
+    const run = mkdtempSync(join(tmpdir(), 'refactory-page-'))
+    try {
+      mkdirSync(join(run, '.refactory'), { recursive: true })
+      writeFileSync(join(run, '.refactory', 'events.jsonl'), Array.from({ length: 250 }, (_, index) =>
+        JSON.stringify({ schema_version: 1, run_id: run, invocation: 'inv-1', kind: 'worker_event', i: index }) + '\n')
+        .join(''))
+      const frame = await service.status(run, 200, signal())
+      expect(frame.activity).toMatchObject({ after: 200, page_size: 200, total: 250, has_more: false })
+      expect(frame.activity?.events).toHaveLength(50)
+      expect(frame.activity?.cursor).toBe(250)
+    } finally {
+      rmSync(run, { recursive: true, force: true })
+    }
+  }, 120_000)
+
   it('steers a real run: a note is read back, and a `user` gate reports its verdicts', async () => {
     const { service } = await setup()
     const run = mkdtempSync(join(tmpdir(), 'refactory-steer-'))
@@ -163,6 +194,38 @@ describe('the picker service against the real loop', () => {
       expect(answered.verdicts).toEqual({ approve: 'proceed' })
     } finally {
       rmSync(run, { recursive: true, force: true })
+    }
+  }, 120_000)
+  // §11 item 7 / T-14 against the real process: the console's answer is larger
+  // than the collection cap. The unit spec proves the verdict over a fake reader;
+  // this proves the real subprocess seam reports it, which is the failure the
+  // reported issue actually hit — a capped payload used to surface as "the console
+  // printed no JSON", indistinguishable from a console that printed nothing.
+  it('names a real capped payload as truncation, not as missing JSON', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'refactory-cap-'))
+    const run = join(root, 'run')
+    mkdirSync(join(run, '.refactory'), { recursive: true })
+    const records = Array.from({ length: 400 }, (_, i) => JSON.stringify({
+      schema_version: 1, at: '2026-10-26T09:00:00+00:00', kind: 'worker',
+      node_id: `n${i}`, summary: 'z'.repeat(400),
+    }))
+    writeFileSync(join(run, '.refactory', 'events.jsonl'), records.join('\n') + '\n')
+    writeFileSync(join(run, '.refactory', 'invocation.json'), JSON.stringify({ id: 'inv-1' }))
+    try {
+      // 2 KiB cannot hold this run's answer, whatever the console emits.
+      const service = await setupWith({ collectBytes: 2048 })
+      let caught: { code: string; message: string; details: unknown } | undefined
+      try {
+        await service.status(run, 0, signal())
+      } catch (error: unknown) {
+        caught = remoteErrorOf(error) as typeof caught
+      }
+      expect(caught?.code).toBe('refactory/console-truncated')
+      expect(caught?.message).not.toMatch(/printed no JSON/)
+      expect(caught?.message).toMatch(/2048/)
+      expect(caught?.details).toMatchObject({ capBytes: 2048, retainedBytes: 2048 })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   }, 120_000)
 })

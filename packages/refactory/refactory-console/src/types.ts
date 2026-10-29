@@ -195,7 +195,30 @@ export interface RefactoryActivity {
   readonly schema_version: number
   readonly run_id: string
   readonly invocation: string | null
+  /** Index of the next journal record: where the next page starts. */
   readonly cursor: number
+  /**
+   * Index this answer's `events` starts at.
+   *
+   * Absent on a console that does not page the journal: absent means "this
+   * console serves the history in one answer", which is not the same statement
+   * as zero.
+   */
+  readonly after?: number
+  /** Complete records in the journal; absent on a console that does not page. */
+  readonly total?: number
+  /** Records one answer may carry; absent on a console that does not page. */
+  readonly page_size?: number
+  /** Whether records remain past `cursor`; absent on a console that does not page. */
+  readonly has_more?: boolean
+  /**
+   * Whether the history is paged at all.
+   *
+   * `false` when the read only succeeded by dropping the paging options an older
+   * console refuses, so a reader shows the whole `events` it received and says
+   * the history is unpaged rather than treating the answer as a complete journal.
+   */
+  readonly paged?: boolean
   readonly last_event_at: string | null
   readonly started_at: string | null
   readonly nodes: readonly string[]
@@ -547,5 +570,16 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
      * `argv` is absent for a refusal the registry forwarded inside its own answer.
      */
     'refactory/console-failed': { readonly argv?: readonly string[] }
+    /**
+     * The console's collected stdout was cut by the collection cap before it
+     * printed JSON, so there is no answer to decode. `capBytes` is the configured
+     * cap and `retainedBytes` the length of the tail that survived; no
+     * whole-stream total is claimed, because the process seam exposes none.
+     */
+    'refactory/console-truncated': {
+      readonly argv: readonly string[]
+      readonly capBytes: number
+      readonly retainedBytes: number
+    }
   }
 }

@@ -31,7 +31,10 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {} from './locales.ts'
 import type { RefactoryInjected } from './face.ts'
-import type { Loadable, RefactoryBudgetName, RefactoryNotice, RefactorySettingName, RefactorySingleState, createRefactoryStore } from './store.ts'
+import type {
+  HeldHistory, Loadable, RefactoryActivityLevel, RefactoryBudgetName, RefactoryNotice, RefactorySettingName,
+  RefactorySingleState, createRefactoryStore,
+} from './store.ts'
 import { knobValues, searchBudget, SEARCH_BUDGET_DEFAULTS } from './store.ts'
 import css from './RefactoryBody.module.css'
 import { GraphControls, RunList } from './GraphControls.tsx'
@@ -276,9 +279,36 @@ function Single({
   )
 }
 
+/**
+ * Why a status could not be read, in the reader's own terms.
+ *
+ * A payload the collection cap cut and a console that printed something which is
+ * not JSON are two different problems — one is a size limit the reader can raise,
+ * the other is whatever the console said — so they get two different lines and a
+ * refusal never collapses into the other (R-5.4, F-7, F-8).
+ * @param t - namespace-bound translate.
+ * @param failure - the settled status failure: the Host's code and message.
+ * @returns the line to show where the status would be.
+ */
+export function statusFailureLine(
+  t: TranslateNS<'sidebarRefactory'>,
+  failure: { readonly code?: string; readonly message: string; readonly details?: unknown },
+): string {
+  if (failure.code !== 'refactory/console-truncated') return t('error.failed', { message: failure.message })
+  const details = failure.details as { capBytes?: unknown; retainedBytes?: unknown } | undefined
+  const cap = typeof details?.capBytes === 'number' ? details.capBytes : null
+  const retained = typeof details?.retainedBytes === 'number' ? details.retainedBytes : null
+  // The seam reports the cap and the retained tail; it never observes a
+  // whole-stream size, so the line names only those two facts.
+  return cap === null || retained === null
+    ? t('error.failed', { message: failure.message })
+    : t('activity.truncated', { cap, retained })
+}
+
 /** The run's status, once there is a run to read. */
 function Status({
-  tabId, frame, run, signal, t, refresh, stop,
+  tabId, frame, run, signal, t, refresh, stop, activity, level, scroll,
+  setActivityLevel, loadEarlierActivity, scrollActivity,
 }: {
   readonly tabId: Parameters<RefactoryInjected['refresh']>[0]
   readonly frame: Loadable<RefactoryRunStatus> | null
@@ -287,6 +317,12 @@ function Status({
   readonly t: TranslateNS<'sidebarRefactory'>
   readonly refresh: RefactoryInjected['refresh']
   readonly stop: RefactoryInjected['stop']
+  readonly activity: HeldHistory | null
+  readonly level: RefactoryActivityLevel
+  readonly scroll: number
+  readonly setActivityLevel: RefactoryInjected['setActivityLevel']
+  readonly loadEarlierActivity: RefactoryInjected['loadEarlierActivity']
+  readonly scrollActivity: RefactoryInjected['scrollActivity']
 }): ReactNode {
   if (frame === null || frame.kind === 'loading') {
     return <p className={css.note} data-refactory-status="reading">{t('status.reading')}</p>
@@ -294,7 +330,7 @@ function Status({
   if (frame.kind === 'failed') {
     return (
       <p className={css.notice} role="alert" data-refactory-status="failed">
-        {t('error.failed', { message: frame.message })}
+        {statusFailureLine(t, frame)}
       </p>
     )
   }
@@ -302,7 +338,17 @@ function Status({
   return (
     <div className={css.status} data-refactory-status={status.state}>
       <span className={css.badge} data-tone={stateTone(status.state)} role="status">{t('status.state')}: {status.state}</span>
-      <RunActivity activity={status.activity} state={status.state} />
+      <RunActivity
+        activity={status.activity}
+        state={status.state}
+        level={level}
+        held={activity}
+        scroll={scroll}
+        t={t}
+        onLevel={(chosen) => { setActivityLevel(tabId, run, chosen, signal) }}
+        onEarlier={(oldest) => { loadEarlierActivity(tabId, run, oldest, signal) }}
+        onScroll={(row) => { scrollActivity(tabId, row) }}
+      />
       <p className={css.statusLine} data-refactory-score>
         {status.best_score === null
           ? t(status.finished ? 'single.noAggregate' : 'status.noScore')
@@ -319,7 +365,15 @@ function Status({
           type="button"
           className={css.action}
           data-refactory-refresh
-          onClick={() => { refresh(tabId, run, status.cursor, signal) }}
+          // The top-level cursor indexes the progress file; the journal continues
+          // from where this tab's held history ends, and the two never derive from
+          // one another (R-4.2-3, F-3). A run with no journal in its answer has
+          // nothing to continue, so it stays the plain status call.
+          onClick={() => {
+            const through = Math.max(activity?.through ?? 0, status.activity?.cursor ?? 0)
+            if (status.activity == null) refresh(tabId, run, status.cursor, signal)
+            else refresh(tabId, run, status.cursor, signal, { after: through })
+          }}
         >
           <IconRefreshOutlineRegular />
           {t('status.refresh')}
@@ -645,6 +699,7 @@ export function RefactoryBody({
   useTabInfo, useStore, choose, choosePackage, chooseIntent, setKnob, setSetting, start, run: runOnce, load, reload, refresh, watch, stop,
   readSteering, readCandidates, addNote, answerGate, controlRun, setEnabled, remove,
   importPackage, listRuns, graphControl, profileApi, discoveryApi, t,
+  setActivityLevel, loadEarlierActivity, scrollActivity,
 }: RefactoryBodyProps): ReactNode {
   const { tab } = useTabInfo()
   const { signal } = tab
@@ -940,6 +995,12 @@ export function RefactoryBody({
               t={t}
               refresh={refresh}
               stop={stop}
+              activity={state.activity}
+              level={state.activityLevel}
+              scroll={state.activityScroll}
+              setActivityLevel={setActivityLevel}
+              loadEarlierActivity={loadEarlierActivity}
+              scrollActivity={scrollActivity}
             />
           )}
       </section>
