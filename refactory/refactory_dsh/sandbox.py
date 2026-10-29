@@ -605,6 +605,9 @@ def smoke(
 ) -> SandboxResult:
     """Run one mode once, in a sandbox, and report what it scored.
 
+    Model-backed smoke runs use the production DSH graph executor, including its
+    worker input checks. Deterministic smoke runs keep the model-free walker.
+
     The package's declared tools have their environment forwarded, so a mode whose
     checker is a per-user toolchain finds it here exactly as it does unsandboxed.
     Without that, this path and the walker disagree about the same mode on the same
@@ -627,6 +630,9 @@ def smoke(
     project = Path(project or project_for_nodes())
     client = (
         "from refactory_dsh.model import DshModelClient\n"
+        "from refactory_dsh.dsh_runtime import evaluate_on_dsh\n"
+        "import os\n"
+        f"os.environ['REFACTORY_PROJECT'] = {str(project.resolve())!r}\n"
         if model
         else ""
     )
@@ -636,6 +642,11 @@ def smoke(
     # The generated package still receives no credential environment variables.
     context = model_context if model_context is not None else DshModelClient().context()
     call = f"model=DshModelClient(**{context!r})" if model else ""
+    evaluation = (
+        f"evaluate_on_dsh(mode, mode.state_dict(), Path({str(Path(workdir))!r}), "
+        f"timeout_s=smoke_timeout_s, {call})"
+        if model else f"mode.evaluate(Path({str(Path(workdir))!r}))"
+    )
     code = (
         "import json\n"
         "from pathlib import Path\n"
@@ -650,7 +661,7 @@ def smoke(
         "    for name, value in overrides.items():\n"
         "        state = configure(state, name, value)\n"
         "    mode.load_state_dict(state)\n"
-        f"result = mode.evaluate(Path({str(Path(workdir))!r}){', ' + call if call else ''})\n"
+        f"result = {evaluation}\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
         # Reported after the run, so a mode that cannot report them still passes.
         "try:\n"
@@ -682,6 +693,10 @@ def smoke(
         if remaining is not None:
             kwargs["timeout_s"] = min(kwargs["timeout_s"], remaining)
         forwarded["REFACTORY_BUDGET_LEDGER"] = str(budget.path)
+    if model:
+        # Leave time for the inner runtime to shut down before sandbox termination.
+        timeout = kwargs["timeout_s"]
+        code = f"smoke_timeout_s={max(1, int(timeout - min(5, timeout / 2)))!r}\n" + code
     return run_sandboxed(
         code, workdir=Path(workdir), env=dict(os.environ), forwarded=forwarded, **kwargs
     )
@@ -726,7 +741,7 @@ def verify_sandboxed(
         "from refactory_dsh import registry\n"
         "from refactory_dsh.nn import validate_state\n"
         # When a shared project is given alongside a staging project, install
-        # the shared workspace first (appended) and the staging workspace at
+        # the shared workspace first and the staging workspace at
         # position 0 so the staged package wins for its own name while every
         # other workspace package still resolves.
         f"_shared = {_shared_str!r}\n"

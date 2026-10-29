@@ -62,7 +62,8 @@ def install_workspace(project: Path, *, project_override: Path | None = None) ->
     installed ones use, so an op written in a generated package needs no special
     case and the op namespace does not depend on where a package happens to live.
 
-    ``project_override``, when given, adds that path's workspace root too, so a
+    The requested workspace takes priority over previously installed workspaces.
+    ``project_override``, when given, takes priority over that workspace too, so a
     worktree's ``.factory/packages/`` is importable alongside the shared one.
     """
     import refactory_packages
@@ -73,16 +74,18 @@ def install_workspace(project: Path, *, project_override: Path | None = None) ->
             return None
     else:
         resolved = str(root.resolve())
-        if resolved not in refactory_packages.__path__:
-            refactory_packages.__path__.append(resolved)
-            importlib.invalidate_caches()
+        if resolved in refactory_packages.__path__:
+            refactory_packages.__path__.remove(resolved)
+        refactory_packages.__path__.insert(0, resolved)
+        importlib.invalidate_caches()
     if project_override is not None:
         override_root = workspace_root(project_override)
         if override_root.is_dir():
             override_resolved = str(override_root.resolve())
-            if override_resolved not in refactory_packages.__path__:
-                refactory_packages.__path__.insert(0, override_resolved)
-                importlib.invalidate_caches()
+            if override_resolved in refactory_packages.__path__:
+                refactory_packages.__path__.remove(override_resolved)
+            refactory_packages.__path__.insert(0, override_resolved)
+            importlib.invalidate_caches()
             return override_root
     return root
 

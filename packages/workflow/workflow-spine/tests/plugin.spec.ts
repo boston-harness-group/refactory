@@ -388,6 +388,26 @@ function realShell(): object {
 }
 
 describe('deterministic nodes run without the driver', () => {
+  it.each([true, false])('classifies an agent with dispatch=%s for the configured driver', async (dispatched) => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('shell', realShell() as never)
+    await ctx.plugin(workflowSpine, {
+      graph: {
+        name: 'worker', start_node: 'work', edges: [],
+        nodes: {
+          work: { _type: 'AgentNode', id: 'work', prompt_template: 'Do work',
+            ...(dispatched ? { dispatch_command: 'true' } : {}) },
+        },
+      },
+      executeCommands: true,
+    })
+    const configured = ctx.get(workflowSpine.CONFIGURED_RUN_SERVICE) as workflowSpine.ConfiguredRun
+    expect(configured.automatic).toBe(dispatched)
+    if (dispatched) expect(await configured.advance()).toMatchObject({ status: 'done' })
+  })
+
   async function commandSetup(options: { executeCommands: boolean }): Promise<Context> {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
