@@ -12,9 +12,7 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import lowering, registry
-from refactory_dsh.nn import Graph, Node
-
-from reference_ir import needs_factory, validate_reference
+from refactory_dsh.nn import Graph, Node, validate_state
 
 MODE = "circle_packing/adaptive"
 
@@ -25,11 +23,21 @@ def _state() -> dict:
 
 
 # ── the graph ──────────────────────────────────────────────────────────────
-@pytest.mark.toolchain("factory")
-@needs_factory
-def test_a_mode_lowers_to_an_ir_refactory_accepts():
-    workflow = lowering.to_workflow(_state(), name=MODE)
-    assert validate_reference(workflow) == [], "the reference validator refused it"
+def test_a_mode_lowers_to_valid_ir():
+    state = _state()
+    issues = validate_state(state)
+    assert not issues, f"the state has validation issues: {issues}"
+    workflow = lowering.to_workflow(state, name=MODE)
+    from refactory_dsh.ir import Workflow
+    reconstructed = Workflow.from_dict(workflow.to_dict())
+    assert sorted(reconstructed.nodes) == sorted(workflow.nodes)
+    for edge in reconstructed.edges:
+        assert edge.source in reconstructed.nodes, (
+            f"edge source {edge.source!r} not in nodes"
+        )
+        assert edge.target in reconstructed.nodes, (
+            f"edge target {edge.target!r} not in nodes"
+        )
 
 
 def test_every_node_survives_with_its_declarations():

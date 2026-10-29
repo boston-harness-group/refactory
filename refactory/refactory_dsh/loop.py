@@ -153,6 +153,8 @@ class LoopConfig:
     #: Which runtime runs a candidate: "walker" (fast, for search) or "dsh" (the
     #: runtime that ships). Both score identically; the equivalence tests keep it so.
     evaluator: str = "walker"
+    #: Exclude the run steering ledger from candidate model prompts; controls remain binding.
+    omit_steering: bool = False
     #: Wall-clock ceiling for one inner run when the evaluator is DSH.
     dsh_timeout_s: int = 900
     #: Carry on from the journal in the run directory instead of starting over.

@@ -51,6 +51,7 @@ CASES: dict[str, tuple[bool, list[str]]] = {
     "--approve": (False, ["--approve", "gate_strategy=proceed"]),
     "--verdict, the alias": (False, ["--verdict", "gate_strategy=proceed"]),
     "--headless": (False, ["--headless"]),
+    "--omit-steering": (False, ["--omit-steering"]),
 }
 #: The flags one runtime cannot honour, and the runtime that refuses them.
 REFUSED = {"--timeout": "walker", "--intent": "both", "--source": "both", "--source-format": "both"}
@@ -245,7 +246,7 @@ def test_each_walker_main_takes_every_run_flag_and_a_resume_refuses_them(main, t
               "--node-routes": "{}", "--model-timeout": "60", "--max-elapsed-s": "100",
               "--max-tokens": "1000", "--validation-reserve-s": "1", "--validation-reserve-tokens": "1",
               "--warn-tokens": "5", "--refine-design": "full", "--source-format": "jsonl", "--timeout": "5"}
-    switches = {"--no-worktree", "--no-pr", "--review-comments", "--headless"}
+    switches = {"--no-worktree", "--no-pr", "--review-comments", "--headless", "--omit-steering"}
     argv = ["--resume", str(tmp_path / "run")]
     for option in sorted(_shared_options() - {"--verdict"}):
         argv += [option] if option in switches else [option, values.get(option, "x")]
@@ -256,7 +257,7 @@ def test_each_walker_main_takes_every_run_flag_and_a_resume_refuses_them(main, t
     assert run_flags.RESUME_RETAINS in err
     given = err.split("(given: ", 1)[1].split(")", 1)[0].split(", ")
     kept = {"--max-elapsed-s", "--max-tokens", "--validation-reserve-s", "--validation-reserve-tokens",
-            "--warn-tokens", "--headless"}
+            "--warn-tokens", "--headless", "--omit-steering"}
     assert set(given) == _shared_options() - {"--verdict"} - kept
 
 

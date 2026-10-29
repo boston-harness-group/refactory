@@ -23,7 +23,7 @@ def test_route_precedence_is_per_node_and_does_not_mutate_parent():
 
 
 @pytest.mark.parametrize('route', [{'worker_backend': 'codex', 'provider': 'openai'},
-                                   {'worker_backend': 'claude_code', 'effort': 'high'},
+                                   {'worker_backend': 'codex', 'effort': 'high'},
                                    {'worker_backend': 'codex', 'permission_mode': 'invalid'},
                                    {'worker_backend': 'invalid'}])
 def test_unsupported_routes_fail_before_launch(route):

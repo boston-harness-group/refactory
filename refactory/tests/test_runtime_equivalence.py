@@ -113,7 +113,7 @@ SCRIPT: dict[str, list[Any]] = {
     # The first build breaks the pinning test; the self-check sends it back, and the
     # fix-up updates the test.
     "emit": [_files({"tool.py": "VERSION = 2\nNAME = 'tool'\n"}),
-             _files({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"})],
+             _files({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n    assert tool.NAME == 'tool'\n"})],
     "early_asks_check": [{"judge": "early_asks"}],
     # The four reviewers each take a moment, so reviewers run one after another are told
     # apart from reviewers run at once (`test_the_review_branches_run_at_once`).
@@ -122,7 +122,7 @@ SCRIPT: dict[str, list[Any]] = {
     "qa_director": [{"text": REVIEW_ANSWERS[2], "repo_questions": True, "hold_s": HOLD_S}],
     "verifier": [{"text": VERIFICATION_ANSWER, "hold_s": HOLD_S}],
     "qa_judge": [{"text": QA_PROCEED, "judge": "intent_audit"}],
-    "overwatch": [OVERWATCH_PASS],
+    "overwatch": [{"judge": "correction_overwatch"}],
 }
 
 
@@ -158,7 +158,7 @@ class World:
         return done
 
 
-def _world(base: Path, gh_shim: Path, answers: list[Any]) -> World:
+def _world(base: Path, gh_shim: Path, answers: list[Any], *, built: bool = True) -> World:
     """GitHub with `octo/app` on it, its checkout, a DSH home and the fake dsh, under ``base``."""
     base.mkdir(parents=True)
     github = base / "github"
@@ -170,7 +170,13 @@ def _world(base: Path, gh_shim: Path, answers: list[Any]) -> World:
     graph_profile(home, REPO_ROOT)
     dsh = base / "dsh"
     dsh.mkdir()
-    (dsh / "scenario.json").write_text(json.dumps(SCRIPT))
+    scenario = json.loads(json.dumps(SCRIPT))
+    if not built:
+        scenario["emit"] = [
+            _files({"tool.py": "VERSION = 2\n"}),
+            _files({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"}),
+        ]
+    (dsh / "scenario.json").write_text(json.dumps(scenario))
     (dsh / "owner-script.json").write_text(json.dumps({"answers": answers}))
     launcher = dsh / "dsh"
     launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_DSH}" --scenario "{dsh}" '
@@ -212,7 +218,8 @@ def _steer(world: World) -> None:
 def _walk(world: World) -> None:
     """The walker: its main stops at the gate, the person steers, the main resumes."""
     first = world.call([PYTHON, "-m", "refactory_dsh.design", "--name", NAME, "--brief", BRIEF,
-                        "--check", CHECK, "--target", str(world.base / "app"), "--workdir", str(world.run)])
+                        "--check", CHECK, "--target", str(world.base / "app"), "--workdir", str(world.run),
+                        "--omit-steering"])
     assert first.returncode == 2 and "gate_strategy" in first.stderr, first.stderr[-3000:]
     _steer(world)
     resumed = world.call([PYTHON, "-m", "refactory_dsh.design", "--resume", str(world.run)])
@@ -221,7 +228,8 @@ def _walk(world: World) -> None:
 
 def _ceo(world: World) -> subprocess.CompletedProcess[str]:
     return world.call([REFACTORY, "ceo", BRIEF, "--name", NAME, "--check", CHECK,
-                       "--target", str(world.base / "app"), "--workdir", str(world.run), "--headless"])
+                       "--target", str(world.base / "app"), "--workdir", str(world.run),
+                       "--headless", "--omit-steering"])
 
 
 def _spine_status(world: World) -> str:
@@ -635,8 +643,11 @@ def runs(tmp_path_factory: pytest.TempPathFactory, _real_gh_shim: tuple[Path, Pa
     shim = _real_gh_shim[0]
     card = [{"selected": "proceed", "custom": CORRECTION}]
     worlds = {"walker": _world(root / "walker", shim, []), "card": _world(root / "card", shim, card),
-              "resumed": _world(root / "resumed", shim, [])}
-    drivers = {"walker": _walk, "card": _spine_at_the_card, "resumed": _spine_resumed}
+              "resumed": _world(root / "resumed", shim, []),
+              "unbuilt-walker": _world(root / "unbuilt-walker", shim, [], built=False),
+              "unbuilt-spine": _world(root / "unbuilt-spine", shim, [], built=False)}
+    drivers = {"walker": _walk, "card": _spine_at_the_card, "resumed": _spine_resumed,
+               "unbuilt-walker": _walk, "unbuilt-spine": _spine_resumed}
     with ThreadPoolExecutor(max_workers=len(worlds)) as pool:
         futures = {name: pool.submit(drivers[name], world) for name, world in worlds.items()}
     failures = []
@@ -650,7 +661,7 @@ def runs(tmp_path_factory: pytest.TempPathFactory, _real_gh_shim: tuple[Path, Pa
         pytest.fail("\n\n".join(failures), pytrace=False)
     tmp_root = tmp_path_factory.getbasetemp()
     observed = {name: observe(world, "walker" if name == "walker" else "spine", tmp_root)
-                for name, world in worlds.items()}
+                for name, world in worlds.items() if name in ("walker", "card", "resumed")}
     found = {scenario: differences(observed["walker"], observed[scenario]) for scenario in SCENARIO_GAPS}
     if os.environ.get("PARITY_REPORT"):
         for scenario, items in found.items():
@@ -679,6 +690,33 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
     assert pull["state"] == "OPEN" and not pull["draft"]
     route = json.loads(observed["routes"]["verifier#0"])
     assert route["env"]["REFACTORY_MODEL_ID"] == "fake-model" and route["patches"], route
+
+
+@pytest.mark.parametrize("runtime", ["walker", "card", "resumed"])
+def test_correction_audit_and_overwatch_accept_only_built_correction(runs, runtime):
+    """The real audit feeds the scripted overwatch in each runtime: built passes; unbuilt reloops."""
+    worlds = runs["worlds"]
+    built = worlds[runtime]
+    unbuilt = worlds["unbuilt-walker" if runtime == "walker" else "unbuilt-spine"]
+    built_audit = json.loads((built.run / "correction-audit.json").read_text())
+    built_verdict = json.loads((built.run / "overwatch-verdict.json").read_text())
+    assert built_audit and all(item["status"] == "pass" for item in built_audit), built_audit
+    assert built_verdict["verdict"] == "pass", built_verdict
+    assert built_verdict["corrections"] and all(item["met"] is True for item in built_verdict["corrections"])
+    calls = [json.loads(line) for line in built.dsh.joinpath("calls.jsonl").read_text().splitlines()]
+    assert calls and all("What the user has said" not in call["prompt"] for call in calls)
+    correction_prompt = next(call["prompt"] for call in calls if call["node"] == "apply_corrections")
+    assert CORRECTION in correction_prompt
+    first_emit = next(call for call in calls if call["node"] == "emit")
+    assert "Read the approved design from `design.md`" in first_emit["prompt"]
+    assert "with a NAME constant" in first_emit["available_design"]
+
+    unbuilt_audit = json.loads((unbuilt.run / "correction-audit.json").read_text())
+    unbuilt_verdict = json.loads((unbuilt.run / "overwatch-verdict.json").read_text())
+    assert unbuilt_audit and any(item["status"] == "fail" for item in unbuilt_audit), unbuilt_audit
+    assert unbuilt_verdict["verdict"] == "redo", unbuilt_verdict
+    assert unbuilt_verdict["corrections"] and all(item["met"] is False for item in unbuilt_verdict["corrections"])
+    assert "reloop" in (unbuilt.run / "reviews/overwatch-gate.txt").read_text()
 
 
 @pytest.mark.parametrize("scenario", sorted(SCENARIO_GAPS))

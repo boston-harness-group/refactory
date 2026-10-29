@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305..57ba531 100644
+index 9efd305..7f615d3 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -231,15 +231,30 @@ function successfulResult(message) {
@@ -34,7 +34,35 @@ index 9efd305..57ba531 100644
  		answer = successfulResult(message);
  	}
  	if (answer === void 0) throw new ClaudeCodeFailure({
-@@ -434,7 +449,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -295,7 +310,9 @@ async function disposeClaudeCodeChild(query, child) {
+ * @returns options that inherit native settings while disabling persistence and user questions.
+ */
+ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+-	return {
++	const _rfSystemText = (spec.env && spec.env.REFACTORY_SYSTEM_PROMPT) || "";
++	const _rfEffort = (spec.env && spec.env.REFACTORY_MODEL_EFFORT) || "";
++	const options = {
+ 		abortController: controller,
+ 		cwd: spec.cwd,
+ 		...spec.model === void 0 ? {} : { model: spec.model },
+@@ -327,8 +344,15 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+ 			const process = new ManagedClaudeCodeProcess(child);
+ 			capture(child, process);
+ 			return process;
+-		}
++		},
++		systemPrompt: _rfSystemText
++			? { type: "preset", preset: "claude_code", append: _rfSystemText }
++			: { type: "preset", preset: "claude_code" },
+ 	};
++	if (_rfEffort) {
++		options.effort = _rfEffort;
++	}
++	return options;
+ }
+ /**
+ * Start one official Claude Agent SDK query and publish its one-shot run.
+@@ -434,7 +458,7 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -43,7 +71,7 @@ index 9efd305..57ba531 100644
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -529,6 +544,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +553,9 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

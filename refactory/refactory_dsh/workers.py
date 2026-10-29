@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
+CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
     'codex': ('skip', 'default', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'),
@@ -34,9 +36,10 @@ def capabilities(backend: str) -> dict[str, Any]:
     if backend not in BACKENDS:
         raise ValueError(f'unknown worker backend {backend!r}; choose {", ".join(BACKENDS)}')
     return {'model_selection': True, 'provider_selection': backend == 'dsh',
-            'reasoning_effort': backend == 'dsh', 'usage': backend == 'dsh',
+            'reasoning_effort': backend in ('dsh', 'claude_code'), 'usage': backend == 'dsh',
             'cancel': True, 'resume': False, 'inflight_steering': False,
             'images': False, 'user_questions': False,
+            'system_prompt': backend in ('dsh', 'claude_code'),
             'steering': 'next-node-boundary', 'permissions': list(PERMISSIONS[backend]),
             'progress': 'model-request' if backend == 'dsh' else 'lifecycle'}
 
@@ -51,8 +54,13 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f'unknown worker route fields: {sorted(unknown)}')
     if any(not isinstance(value, str) for value in route.values()):
         raise ValueError('worker route fields must be strings')
-    if backend != 'dsh' and (route.get('provider') or route.get('effort')):
-        raise ValueError(f'{backend} uses native provider settings and does not support provider/effort overrides')
+    if backend != 'dsh' and route.get('provider'):
+        raise ValueError(f'{backend} uses native provider settings and does not support provider overrides')
+    if route.get('effort') and backend not in ('dsh', 'claude_code'):
+        raise ValueError(f'{backend} does not support effort overrides')
+    if backend == 'claude_code' and route.get('effort') and route['effort'] not in CLAUDE_CODE_EFFORT_LEVELS:
+        accepted = ', '.join(sorted(CLAUDE_CODE_EFFORT_LEVELS))
+        raise ValueError(f'claude_code effort must be one of {accepted}; got {route["effort"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route
@@ -184,16 +192,22 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
 
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
-                workspace_root: Path | None = None, tool_home: Path | None = None) -> None:
+                workspace_root: Path | None = None, tool_home: Path | None = None,
+                system_prompt: str = "") -> None:
     """Compose installed DSH services, never a parallel agent wire protocol.
 
     ``workspace_root`` confines the node's tools to its workspace (`permission_patch`).
     ``tool_home`` is the DSH home the node's shell is told (`workspace.tool_dsh_home`):
     the DSH process keeps its own, and a command run in a workspace never reaches it.
+    ``system_prompt`` is the rendered system text; when non-empty, a composition plugin
+    is inserted that injects it as a system-prompt section.
     """
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
+    if system_prompt:
+        plugin = Path(__file__).with_name('system_prompt_plugin.mjs')
+        rows.append({'insert': [{'id': 'refactory-system-prompt', 'name': str(plugin)}]})
     rows.extend(permission_patch(route, workspace_root=workspace_root))
     if tool_home is not None:
         rows.append({'id': 'shell-env', 'config': {'dshHome': str(tool_home)}})
@@ -294,6 +308,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'produces': list((declarations or {}).get(name, {}).get('produces', [])),
                                     'post_checks': [check.model_dump() for check in node.post_checks],
                                     'model_context': selected_context}
+        if node.system_prompt:
+            payload['system_prompt'] = node.system_prompt
         if is_optional:
             payload['optional'] = True
         retry = getattr(node, 'retry', None)

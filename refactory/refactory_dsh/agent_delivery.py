@@ -560,7 +560,11 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     ledger = Ledger(workdir)
     ledger_text = ledger.path.read_text() if ledger.exists() else ""
     entries = parse_entries(ledger_text)
-    annotated = prompt_with_ledger(prompt, ledger, entries=entries)
+    from refactory_dsh.run_preparation import saved_run_config
+    if saved_run_config(workdir).get("omit_steering"):
+        annotated = prompt
+    else:
+        annotated = prompt_with_ledger(prompt, ledger, entries=entries)
     set_aside = _set_aside_stale_outputs(workdir, node, reads or [], writes) if previous is None else None
     annotated, execution = _execution_contract(workdir, node, annotated, reads or [], writes, model_context,
                                                set_aside=set_aside, workspace=workspace)

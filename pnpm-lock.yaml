@@ -17,7 +17,7 @@ patchedDependencies:
   '@deepseek-ai/dsh-client-ui-directory-picker-native@0.2.0-rc.2': afda7716710bb59d4dc27c1255a5e5c8f21208700e52b6b1a86610b548c11c7b
   '@deepseek-ai/dsh-goal-round-driver@0.2.0-rc.2': 0c044c544b1882b12c46ea4b033b1c74f229b0896301f486db4fc30648221c8f
   '@deepseek-ai/dsh-headless@0.2.0-rc.2': 0145c5159715625dc4c820eeadf88c576cd843c11b940ac0b001387ed0a26d99
-  '@deepseek-ai/dsh-subagent-claude-code@0.2.0-rc.2': c8027c19949cd8c7b56d36c80b25f92e2ad269bc2b7404b4899ea67ee5e74499
+  '@deepseek-ai/dsh-subagent-claude-code@0.2.0-rc.2': 2e9df7c0b3788d8bd307f334022d4f70968484087556efb491963fd4ce534f9c
   '@deepseek-ai/dsh-subagent-codex@0.2.0-rc.2': 8659c66a3681a5fdcb8465aeceb0a833530626a8197c23c7375b52756c12785b
 
 importers:
@@ -133,7 +133,7 @@ importers:
     optionalDependencies:
       '@deepseek-ai/dsh-subagent-claude-code':
         specifier: 0.2.0-rc.2
-        version: 0.2.0-rc.2(patch_hash=c8027c19949cd8c7b56d36c80b25f92e2ad269bc2b7404b4899ea67ee5e74499)(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-session@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))))(@deepseek-ai/dsh-subagent@0.2.0-rc.2(e19af1be7d262987c47232cf9209bcaf))(@deepseek-ai/dsh-subprocess@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-http-proxy@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))(@deepseek-ai/dsh-timeout@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))
+        version: 0.2.0-rc.2(patch_hash=2e9df7c0b3788d8bd307f334022d4f70968484087556efb491963fd4ce534f9c)(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-session@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))))(@deepseek-ai/dsh-subagent@0.2.0-rc.2(e19af1be7d262987c47232cf9209bcaf))(@deepseek-ai/dsh-subprocess@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-http-proxy@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))(@deepseek-ai/dsh-timeout@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))
       '@deepseek-ai/dsh-subagent-codex':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(patch_hash=8659c66a3681a5fdcb8465aeceb0a833530626a8197c23c7375b52756c12785b)(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-session@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))))(@deepseek-ai/dsh-subagent@0.2.0-rc.2(e19af1be7d262987c47232cf9209bcaf))(@deepseek-ai/dsh-subprocess@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-http-proxy@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))(@deepseek-ai/dsh-timeout@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))
@@ -8721,7 +8721,7 @@ snapshots:
     dependencies:
       '@deepseek-ai/cordis': 4.0.4(@deepseek-ai/cordis-plugin-include@1.0.9)(@deepseek-ai/cordis-plugin-loader@1.0.5)
 
-  '@deepseek-ai/dsh-subagent-claude-code@0.2.0-rc.2(patch_hash=c8027c19949cd8c7b56d36c80b25f92e2ad269bc2b7404b4899ea67ee5e74499)(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-session@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))))(@deepseek-ai/dsh-subagent@0.2.0-rc.2(e19af1be7d262987c47232cf9209bcaf))(@deepseek-ai/dsh-subprocess@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-http-proxy@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))(@deepseek-ai/dsh-timeout@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))':
+  '@deepseek-ai/dsh-subagent-claude-code@0.2.0-rc.2(patch_hash=2e9df7c0b3788d8bd307f334022d4f70968484087556efb491963fd4ce534f9c)(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-session@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))))(@deepseek-ai/dsh-subagent@0.2.0-rc.2(e19af1be7d262987c47232cf9209bcaf))(@deepseek-ai/dsh-subprocess@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-http-proxy@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))(@deepseek-ai/dsh-timeout@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))':
     dependencies:
       '@anthropic-ai/claude-agent-sdk': 0.3.263(@anthropic-ai/sdk@0.93.0(zod@4.6.5))(@modelcontextprotocol/sdk@1.30.1(zod@4.6.5))(zod@4.6.5)
       '@anthropic-ai/sdk': 0.93.0(zod@4.6.5)

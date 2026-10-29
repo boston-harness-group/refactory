@@ -47,6 +47,27 @@ def _print_line(line: str) -> None:
     print(line.rstrip("\n"), flush=True)
 
 
+def _persist_steering_option(workdir: Path, omit_steering: bool | None) -> None:
+    """Persist an explicit prompt policy for both runtimes and actual inner-run resume."""
+    if omit_steering is None:
+        return
+    import json
+
+    path = Path(workdir) / ".refactory" / "run-config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            config = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"cannot read run configuration at {path}: {error}") from error
+        if not isinstance(config, dict):
+            raise ValueError(f"run configuration at {path} must be a JSON object")
+    else:
+        config = {}
+    config["omit_steering"] = bool(omit_steering)
+    path.write_text(json.dumps(config, indent=2))
+
+
 class EvaluatorError(ValueError):
     """An evaluator cannot be built. Always names what is wrong."""
 
@@ -95,11 +116,13 @@ class WalkerEvaluator(Evaluator):
         project: Path | None = None,
         memory_global_root: Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
+        omit_steering: bool = False,
     ) -> None:
         self.model = model
         self.project = Path(project or Path("."))
         self.memory_global_root = memory_global_root
         self.max_steps = max_steps
+        self.omit_steering = bool(omit_steering)
 
     @classmethod
     def from_settings(
@@ -110,9 +133,11 @@ class WalkerEvaluator(Evaluator):
             project=project,
             memory_global_root=config.memory_global_root,
             max_steps=config.max_steps,
+            omit_steering=getattr(config, "omit_steering", False),
         )
 
     def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path) -> RunResult:
+        _persist_steering_option(workdir, self.omit_steering)
         # One store per inner run, and its `run`-retention namespaces are deleted
         # when it ends. The roots already keep candidates apart; forgetting is what
         # makes the policy true of the *same* candidate evaluated twice. A resumed
@@ -129,7 +154,7 @@ class WalkerEvaluator(Evaluator):
             result = mode.evaluate(
                 workdir, model=self.model, memory=store, max_steps=self.max_steps,
                 **({"shared_budget": self.budget} if self.budget is not None else {}),
-                enable_recovery=True,
+                enable_recovery=True, omit_steering=self.omit_steering,
             )
         finally:
             # Also on a crash or a stop: a namespace that outlives the run it was
@@ -146,12 +171,14 @@ class DshEvaluator(Evaluator):
     out_of_process = True
 
     def __init__(
-        self, *, timeout_s: int | None = None, on_output: Callable[[str], None] | None = None, model: Any = None
+        self, *, timeout_s: int | None = None, on_output: Callable[[str], None] | None = None,
+        model: Any = None, omit_steering: bool = False
     ) -> None:
         from refactory_dsh.dsh_runtime import DEFAULT_TIMEOUT_S
 
         self.timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
         self.model = model
+        self.omit_steering = bool(omit_steering)
         #: Where a candidate's own run output goes while it runs. Only a verbose
         #: run passes one: the meaningful per-candidate line is the loop's own event.
         self.on_output = on_output
@@ -166,9 +193,11 @@ class DshEvaluator(Evaluator):
             timeout_s=config.dsh_timeout_s,
             on_output=_print_line if watching and verbose else None,
             model=model,
+            omit_steering=getattr(config, "omit_steering", False),
         )
 
     def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path) -> RunResult:
+        _persist_steering_option(workdir, self.omit_steering)
         from refactory_dsh.dsh_runtime import evaluate_on_dsh
 
         model = self.model

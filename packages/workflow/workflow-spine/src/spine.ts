@@ -32,6 +32,8 @@ export interface NodeView {
   writes?: string[]
   /** The task handed to the driving agent, for `AgentNode` and `LLMNode`. */
   prompt_template?: string
+  /** `AgentNode`: optional system-prompt text, distinct from the user prompt and notes. */
+  system_prompt?: string
   /** For a one-shot `LLMNode`: the model and sampling it was declared with. */
   model?: string
   temperature?: number
@@ -558,6 +560,7 @@ export class Spine {
       view.writes = node.writes ?? []
       view.reads = node.reads ?? []
       view.prompt_template = node.prompt_template ?? ''
+      if (node.system_prompt !== undefined && node.system_prompt !== '') view.system_prompt = node.system_prompt
       if (node.expand !== undefined) view.expand = node.expand
       // Dispatched AgentNode: map dispatch_command to the view's command field
       // so commandOf() and runDeterministic() can see it.

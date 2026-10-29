@@ -113,7 +113,15 @@ def test_additive_composes_web_and_refactory_without_copying_web(additive_home):
         assert rpc(opener, base, "refactoryConsole/project", {}) == str(REPO_ROOT)
         from refactory_dsh.console import catalogue
         modes = rpc(opener, base, "refactoryConsole/modes", {})
-        assert {row["id"] for row in modes} == {row["id"] for row in catalogue(project=REPO_ROOT)}
+        server_ids = {row["id"] for row in modes}
+        shipped_ids = {row["id"] for row in catalogue(project=REPO_ROOT)}
+        # The server and catalogue both scan .factory/packages/; in parallel CI
+        # another worker may have installed a workspace package (e.g. created_pkg)
+        # between the two snapshots.  The shipped set must be present; extra
+        # workspace packages are not a failure.
+        assert shipped_ids <= server_ids, (
+            f"server is missing shipped modes: {shipped_ids - server_ids}"
+        )
         created = rpc(opener, base, "session/create", {"request": {"cwd": str(user_home)}})
         assert created["agentPreset"] == "ceo"
         ceo = rpc(opener, base, "session/create", {"request": {"cwd": str(user_home), "agentPreset": "ceo"}})

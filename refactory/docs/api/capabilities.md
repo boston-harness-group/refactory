@@ -2041,7 +2041,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## profile-resolve
 
-Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search.
+Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -2084,6 +2084,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "max_tokens": null,
     "model": "",
     "node_routes": {},
+    "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
     "permission_mode": "skip",
@@ -2101,9 +2102,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
   "examples": [
     {
       "arguments": {
-        "mode": "counting_pack/fixed_step"
+        "mode": "counting_pack/fixed_step",
+        "omit_steering": true
       },
-      "explanation": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search."
+      "explanation": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. Set omit_steering to exclude steering from candidate model prompts without disabling correction gates or audits."
     }
   ],
   "interfaces": {
@@ -2351,6 +2353,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "object"
     },
+    "omit_steering": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--omit-steering"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "optimizer": {
       "default": null,
       "description": "",
@@ -2550,8 +2563,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search.",
-  "reviewed_schema": "17102bf328d155cddd7605188e1ee9e6239d15c594ccff3971225ed817bb3141"
+  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
+  "reviewed_schema": "f5b6d4c9f9b4853b747650bb49a0aed78137b526db795f341857958f1292dd9b"
 }
 ```
 
@@ -3347,7 +3360,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3394,6 +3407,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "max_tokens": null,
     "model": "",
     "node_routes": {},
+    "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
     "permission_mode": "skip",
@@ -3414,9 +3428,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
         "epochs": 1,
         "max_evaluations": 2,
         "mode": "counting_pack/fixed_step",
+        "omit_steering": true,
         "optimizer": "random"
       },
-      "explanation": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch."
+      "explanation": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. Set omit_steering to exclude steering from candidate model prompts without disabling correction gates or audits."
     }
   ],
   "interfaces": {
@@ -3664,6 +3679,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "object"
     },
+    "omit_steering": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--omit-steering"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "optimizer": {
       "default": null,
       "description": "",
@@ -3874,8 +3900,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch.",
-  "reviewed_schema": "a0c76da2ae709ffa0528074d032f87c16435e3a380ecee6651608ed7302dc21e"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
+  "reviewed_schema": "73ecff28ddecca400ab767af6aa18b969c9601ad385170626d73eabc4c86817b"
 }
 ```
 
@@ -4435,9 +4461,10 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         ],
         "progress": "lifecycle",
         "provider_selection": false,
-        "reasoning_effort": false,
+        "reasoning_effort": true,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": true,
         "usage": false,
         "user_questions": false
       },
@@ -4458,6 +4485,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "reasoning_effort": false,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": false,
         "usage": false,
         "user_questions": false
       },
@@ -4475,6 +4503,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "reasoning_effort": true,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": true,
         "usage": true,
         "user_questions": false
       },
@@ -4492,6 +4521,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
         "reasoning_effort": false,
         "resume": false,
         "steering": "next-node-boundary",
+        "system_prompt": false,
         "usage": false,
         "user_questions": false
       }
@@ -4559,7 +4589,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
     }
   },
   "purpose": "Inspect effective project worker routing and provenance. Configure refactory.workers.json, CLI or panel; this read-only action never changes workers or the CEO model.",
-  "reviewed_schema": "b14acef6de973e2c4e6244be0cc28031c2b5c7bdf892858f06ad94acc024dc8e"
+  "reviewed_schema": "9924e23a8f60541ec940d87409bdb1ca1db6e32546c0a0eff696d163225f80a4"
 }
 ```
 
@@ -4808,6 +4838,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "positional": false,
       "required": false,
       "type": "object"
+    },
+    "omit_steering": {
+      "default": false,
+      "description": "omit the steering ledger from agent prompts (benchmark runs); gate routing, correction audits and overwatch enforcement still apply",
+      "flags": [
+        "--omit-steering"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
     },
     "permission_mode": {
       "default": "",
@@ -5077,7 +5118,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "c15be6ad5cf100457ed6fcc98d0c766748e2c20d4a31c9f2b8015c86c1d1ccdc"
+  "reviewed_schema": "fefb28cd8b637915329c68d8d817790f72a76862b6ead493cfec65e539b6ad81"
 }
 ```
 
@@ -5256,7 +5297,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -5285,6 +5326,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "max_tokens": null,
     "model": "",
     "node_routes": {},
+    "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
     "permission_mode": "skip",
@@ -5304,9 +5346,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "arguments": {
         "max_evaluations": 2,
         "mode": "counting_pack/fixed_step",
+        "omit_steering": true,
         "optimizer": "random"
       },
-      "explanation": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity."
+      "explanation": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. Set omit_steering to exclude steering from candidate model prompts without disabling correction gates or audits."
     }
   ],
   "interfaces": {
@@ -5554,6 +5597,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "object"
     },
+    "omit_steering": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--omit-steering"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "optimizer": {
       "default": null,
       "description": "",
@@ -5742,8 +5796,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity.",
-  "reviewed_schema": "385980db8e51c67b856129633060a390a7d6487f55bda54639ba73670c44fd43"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
+  "reviewed_schema": "09d1e3ff59a3740637db363f7ce91c1da86768099e7903ff48eb1c2fa1455e08"
 }
 ```
 

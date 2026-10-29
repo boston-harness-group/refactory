@@ -205,6 +205,11 @@
       "reason": "worker observer plugin used by workers"
     },
     {
+      "path": "refactory_dsh/system_prompt_plugin.mjs",
+      "classification": "core",
+      "reason": "system prompt composition plugin used by workers"
+    },
+    {
       "path": "refactory_dsh/patches/agent-node.yml",
       "classification": "core",
       "reason": "agent node patch used by model"

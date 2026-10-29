@@ -511,6 +511,10 @@ class DshModelClient:
                   "REFACTORY_MODEL_PROVIDER": self._provider, "REFACTORY_MODEL_ID": self._model,
                   "REFACTORY_MODEL_EFFORT": self._effort, "REFACTORY_WORKER_BACKEND": self._worker_backend,
                   "REFACTORY_RUNTIME_ROOT": str(self._runtime_root)}
+        # Clear inherited values because this client owns the current call.
+        result.pop("REFACTORY_SYSTEM_PROMPT", None)
+        if getattr(self, '_system_text', ''):
+            result["REFACTORY_SYSTEM_PROMPT"] = self._system_text
         if self._budget is not None:
             result["REFACTORY_BUDGET_LEDGER"] = str(self._budget.path)
         if self._worker_receipt is not None:
@@ -671,7 +675,8 @@ class DshModelClient:
         # starts without a complete route, so the headless profile's default never answers.
         if self._worker_backend == "dsh" and not (self._provider and self._model):
             raise ModelChoiceError()
-        task = f"{system}\n\n{prompt}" if system else prompt
+        self._system_text = system
+        task = prompt
         # The launcher resolves its own entry; the child's working directory stays
         # the node's, not the checkout's.
         cmd = [
@@ -694,7 +699,8 @@ class DshModelClient:
             from refactory_dsh.workspace import tool_dsh_home
             write_patch(patch, self._runtime_root, self.route(), provider_config=self._provider_config,
                         workspace_root=cwd if getattr(self, "_confine", False) else None,
-                        tool_home=tool_dsh_home(cwd) if cwd is not None else None)
+                        tool_home=tool_dsh_home(cwd) if cwd is not None else None,
+                        system_prompt=system)
             cmd += ["--patch", str(patch)]
         if self._worker_backend == "dsh":
             if self._provider:

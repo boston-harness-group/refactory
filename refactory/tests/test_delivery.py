@@ -5499,6 +5499,9 @@ def test_gate_correction_updates_pr_text(github, tmp_path, monkeypatch):
 
     run = tmp_path / "run"
     run.mkdir(parents=True, exist_ok=True)
+    # Exercise corrections with steering prompt injection explicitly disabled.
+    (run / ".refactory").mkdir()
+    (run / ".refactory/run-config.json").write_text(json.dumps({"omit_steering": True}))
 
     # Seed the ledger with a gate_strategy proceed verdict and correction,
     # driven through the real Ledger API (steering.py:577-587).
@@ -5538,6 +5541,16 @@ def test_gate_correction_updates_pr_text(github, tmp_path, monkeypatch):
               "check": "python tool.py", "target": str(repo)},
     )
     assert result.exit_ok, result.error
+
+    # The correction must still be applied, audited and judged with prompt opt-out.
+    assert not any("What the user has said" in prompt for prompt in model.prompts)
+    assert any("use websockets instead of a polling loop" in prompt for prompt in model.prompts)
+    assert (run / "correction-audit.json").exists()
+    evidence = json.loads((run / "authoring-evidence.json").read_text())
+    correction = next(row for row in evidence["requirements"]
+                      if row.get("text") == "use websockets instead of a polling loop")
+    audit = json.loads((run / "correction-audit.json").read_text())
+    assert any(row.get("id") == correction["id"] for row in audit), audit
 
     # design.md should contain the corrected approach.
     design_text = (run / "design.md").read_text()

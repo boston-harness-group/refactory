@@ -1320,7 +1320,8 @@ def main(argv: list[str] | None = None) -> int:
                 invocation_name=f"default_pack-{mode_name}",
                 mode_id=mode_id,
                 intent=args.brief,
-                transform=lambda workflow, stage_dir=None: steering.for_run(workflow, stage_dir or workdir),
+                transform=lambda workflow, stage_dir=None: steering.for_run(
+                    workflow, stage_dir or workdir, omit_steering=getattr(args, "omit_steering", False)),
                 runtime="walker",
                 command="python -m refactory_dsh.design",
                 resume_command=f"python -m refactory_dsh.design --resume {workdir}",
@@ -1329,6 +1330,7 @@ def main(argv: list[str] | None = None) -> int:
                 project=project_root(),
                 knobs=knobs,
                 model_context=walker_context(client),
+                omit_steering=getattr(args, 'omit_steering', False),
             )
 
             # Persist up-front verdicts as run-scoped ledger entries.
