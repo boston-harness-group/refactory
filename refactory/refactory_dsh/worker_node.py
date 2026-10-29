@@ -98,7 +98,9 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             feedback = fb_path.read_text(encoding='utf-8')
 
     node = spec['node_id']
-    tool_policy = spec.get('tool_policy', '')
+    tool_policy = spec.get('tool_policy') or ''
+    if tool_policy not in ('', 'none'):
+        raise ValueError(f'invalid tool_policy {tool_policy!r}')
 
     # ── route refusal for no-tools ──
     if tool_policy == 'none':
@@ -137,6 +139,7 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
                 f"worker node {node!r} declares tool_policy='none' but the model "
                 "client does not support with_tool_policy"
             )
+    if callable(getattr(client, 'with_tool_policy', None)):
         client = client.with_tool_policy(tool_policy)
     # A node that declares a workspace works there (`workspace.py`): prepared before the
     # delivery bracket opens, so the contract can name it, and collected into the node's

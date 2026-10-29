@@ -329,6 +329,7 @@ class DshModelClient:
         routes_resolved: bool = False,
         routing_provenance: dict[str, Any] | None = None,
         node_wall_s: int | None = None,
+        tool_policy: str = "",
     ) -> None:
         from refactory_dsh.workers import validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -417,7 +418,9 @@ class DshModelClient:
 
             stored = stored_model_choice(dsh_home)
             self._provider, self._model = stored["provider"], stored["model"]
-        self._tool_policy = ""
+        if tool_policy not in ("", "none"):
+            raise ValueError(f"invalid tool_policy {tool_policy!r}")
+        self._tool_policy = tool_policy
         self._attempts = max(1, int(attempts)) if self._worker_backend == "dsh" else 1
         self._backoff_s = None if backoff_s is None else max(0.0, float(backoff_s))
         self._retry_window_s = max(0.0, float(retry_window_s))
@@ -459,6 +462,8 @@ class DshModelClient:
 
     def with_tool_policy(self, policy: str) -> DshModelClient:
         """A copy whose model call enforces the given tool policy."""
+        if policy not in ("", "none"):
+            raise ValueError(f"invalid tool_policy {policy!r}")
         client = copy.copy(self)
         client._tool_policy = policy
         return client

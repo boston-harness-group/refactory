@@ -570,6 +570,7 @@ export class Spine {
         view.command = node.dispatch_command
         if (node.command_timeout_s !== undefined) view.command_timeout_s = node.command_timeout_s
       }
+      if (node.tool_policy !== undefined && node.tool_policy !== null && node.tool_policy !== 'none') throw new Error(`invalid tool_policy ${node.tool_policy}`)
       if (node.tool_policy === 'none') view.tool_policy = 'none'
     }
     if (node._type === 'LLMNode') {

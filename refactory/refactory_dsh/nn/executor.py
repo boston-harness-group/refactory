@@ -1236,6 +1236,8 @@ class Executor:
             client = client.for_node(node.id, role=node.role)
         # ── no-tools enforcement ──────────────────────────────────────────
         tool_policy = node.tool_policy or ""
+        if callable(getattr(client, "with_tool_policy", None)):
+            client = client.with_tool_policy(tool_policy)
         if tool_policy == "none":
             # Validate single-output cardinality before the model
             if len(node.writes) != 1:
@@ -1250,7 +1252,6 @@ class Executor:
                     "model client does not support with_tool_policy; cannot "
                     "enforce the policy"
                 )
-            client = client.with_tool_policy(tool_policy)
             # Route refusal
             backend = (client.route() if callable(getattr(client, "route", None)) else {}).get("worker_backend", "dsh")
             if backend not in ("dsh", "claude_code"):

@@ -537,7 +537,19 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     """
     from refactory_dsh.steering import Ledger, parse_entries, prompt_with_ledger
 
+    if tool_policy not in ("", "none"):
+        raise ValueError(f"invalid tool_policy {tool_policy!r}")
+    if tool_policy == "none" and len(writes) != 1:
+        raise ValueError("a no-tools node must declare exactly one reply output")
     workdir = Path(workdir).resolve()
+    if tool_policy == "none" and reads:
+        inputs = []
+        for name in reads:
+            path = _path(workdir, name)
+            if not path.is_file():
+                raise ValueError(f"no-tools input is not a readable file: {name}")
+            inputs.append(f"### {name}\n{path.read_text()}")
+        prompt += "\n\n## Declared inputs\n\n" + "\n\n".join(inputs)
     ws = get_worktree_state()
     if ws is None and (workdir / WORKTREE_RECORD).exists():
         raise RuntimeError(

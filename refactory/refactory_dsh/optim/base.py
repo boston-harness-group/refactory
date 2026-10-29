@@ -103,15 +103,6 @@ def _tool_policy_escalated(seed_state: dict[str, Any], candidate_state: dict[str
                 f"E-tool-policy-escalation: node {node_id!r} seed declares "
                 f"tool_policy='none'; candidate adds tools {candidate_tools!r}"
             )
-    # Check for delete/re-add escape: a seed node that was deleted and re-added
-    # without the policy. We already handle existing nodes above; here we check
-    # that no NEW node with the same ID as a deleted seed no-tools node drops the policy.
-    for node_id, seed_node in seed_nodes.items():
-        if seed_node.get("tool_policy") != "none":
-            continue
-        if node_id not in candidate_nodes:
-            # Node was deleted -- fine, no escalation
-            continue
     return reasons
 
 
@@ -607,10 +598,9 @@ class Optimizer:
             return [f"E-internal: {type(exc).__name__}: {exc}"]
 
         # ── tool-policy escalation check (anchored to the original seed) ──
-        if seed_state is not None:
-            escalation = _tool_policy_escalated(seed_state, state)
-            if escalation:
-                return escalation
+        escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
+        if escalation:
+            return escalation
 
         fixed = frozen | {name for name, value in parent.state.get("knobs", {}).items()
                           if (value.get("spec") or {}).get("frozen")}

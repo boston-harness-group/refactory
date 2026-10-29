@@ -54,9 +54,9 @@ describe('tool_policy on WorkflowNode', () => {
     expect(next.nodes?.[0]?.tool_policy).toBe('none')
   })
 
-  it('invalid tool_policy value is ignored at parse time', () => {
+  it('invalid tool_policy is refused before dispatch', () => {
     // TypeScript types restrict tool_policy to 'none' | undefined, but at runtime
-    // the spine only passes through 'none'; any other value is not included in the view.
+    // Runtime input must also refuse unsupported policies.
     const graph: WorkflowGraph = {
       ...baseGraph,
       nodes: {
@@ -72,9 +72,7 @@ describe('tool_policy on WorkflowNode', () => {
       },
     }
     const spine = new Spine(graph)
-    const next = spine.next()
-    // The spine only passes 'none' through; 'invalid' is not set on the view
-    expect(next.nodes?.[0]?.tool_policy).toBeUndefined()
+    expect(() => spine.next()).toThrow('invalid tool_policy')
   })
 
   it('dispatched spine passes tool_policy to worker', () => {

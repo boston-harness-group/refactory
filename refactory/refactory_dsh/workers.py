@@ -32,54 +32,6 @@ OPENCODE_API_KEY_ENV = 'OPENCODE_API_KEY'
 OPENCODE_SESSION_HEADER = 'x-opencode-session'
 
 
-#: Tools that are acting tools in the DSH composition: they let the model interact
-#: with the environment (read/write files, run commands, etc). The headless-runner
-#: is NOT an acting tool — it is the session executor. This list is discovered from
-#: the runtime's installed composition when available; when not, this fallback
-#: covers the known DSH acting tools.
-_KNOWN_ACTING_TOOLS = (
-    'tool-bash',
-    'tool-glob',
-    'tool-grep',
-    'tool-ls',
-    'tool-read',
-    'tool-write',
-    'tool-edit',
-    'tool-fetch',
-    'tool-multi-edit',
-    'todo-read',
-    'todo-write',
-    'tool-notepads',
-)
-
-#: Tools that are explicitly NOT acting tools: they control the session or sandbox
-#: behavior but do not give the model ways to interact with the environment.
-_NON_ACTING_TOOLS = frozenset({
-    'headless-runner',
-    'refactory-worker-observer',
-    'refactory-system-prompt',
-    'refactory-external-worker',
-    'refactory-worker-driver',
-    'sandbox-policy',
-    'approval',
-    'shell-env',
-    'bash-sandbox',
-    'llm-pi-ai',
-})
-
-
-def _registered_acting_tools(runtime_root: Path) -> list[str]:
-    """Enumerate acting tool IDs from the DSH composition/registry.
-
-    Returns a list of tool IDs that should be disabled for a no-tools node.
-    The headless-runner and infrastructure tools are excluded.
-    """
-    # Use the known acting tools list; this covers extra profile/custom tools
-    # because write_patch emits disable rows for each, and DSH's composition
-    # ignores disable rows for tools that are not registered.
-    return list(_KNOWN_ACTING_TOOLS)
-
-
 def capabilities(backend: str) -> dict[str, Any]:
     if backend not in BACKENDS:
         raise ValueError(f'unknown worker backend {backend!r}; choose {", ".join(BACKENDS)}')
@@ -164,15 +116,10 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
     if tool_policy == 'none':
         record['requested_tool_policy'] = 'none'
         record['enforced_tool_policy'] = 'none'
-        backend = route['worker_backend']
-        if backend == 'claude_code':
-            # The SDK directly controls tool availability via tools: []
-            record['tool_observation_available'] = True
-            record['tools_permitted'] = []
-        else:
-            # DSH composition: we emit disable rows but cannot observe the final
-            # Cordis composition from Python
-            record['tool_observation_available'] = False
+        # This is adapter policy, not an observation of the provider request.
+        record['tool_observation_available'] = False
+        record['tools_permitted'] = []
+        record['tool_policy_source'] = 'configured-adapter-policy'
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
     return path
@@ -285,14 +232,8 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
             ])
     # ── no-tools enforcement ─────────────────────────────────────────────
     if tool_policy == "none" and route.get('worker_backend', 'dsh') == 'dsh':
-        # Enumerate and disable every registered acting tool from the headless
-        # profile's composition/registry. Uses the runtime's own tool registry
-        # rather than a hardcoded list, so extra profile/custom/subagent tools
-        # are covered. The headless-runner is NOT disabled: it must still execute
-        # so the session completes and the reply is returned.
-        _acting_tools = _registered_acting_tools(runtime_root)
-        for tool_id in _acting_tools:
-            rows.append({'id': tool_id, 'disabled': True})
+        plugin = Path(__file__).with_name('no_tools_plugin.mjs')
+        rows.append({'insert': [{'id': 'refactory-no-tools', 'name': str(plugin)}]})
     rows.extend(provider_rows(route, provider_config))
     inner_backend = route['worker_backend']
     if inner_backend == 'openshell':

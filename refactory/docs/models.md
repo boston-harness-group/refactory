@@ -377,3 +377,11 @@ contract. The client does not undo files written before failure or certify their
 [Worker routing](worker-routing.md) documents `refactory.workers.json`, coder-only
 selection and precedence. [Live help and docs](discovery.md) provide current-build
 read-only discovery in chat and the terminal without source inspection.
+
+### Explicit no-tools agents
+
+Set `tool_policy="none"` on an agent node to disable acting tools. An omitted policy keeps existing defaults; an empty `tools` list alone does not disable them.
+
+The DSH runtime restricts the actual scoped tool registry, guards execution, and refuses a provider request if tools remain exposed. Claude Code receives `tools: []`, `mcpServers: {}`, `settingSources: []`, and `strictMcpConfig: true`. Unsupported routes, including Codex and OpenShell, refuse this policy before calling a model.
+
+A no-tools node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.
