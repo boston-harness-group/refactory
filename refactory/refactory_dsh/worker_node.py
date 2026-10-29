@@ -98,7 +98,9 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             feedback = fb_path.read_text(encoding='utf-8')
 
     node = spec['node_id']
-    tool_policy = spec.get('tool_policy') or ''
+    tool_policy = spec.get('tool_policy')
+    if tool_policy is None:
+        tool_policy = ''
     if tool_policy not in ('', 'none'):
         raise ValueError(f'invalid tool_policy {tool_policy!r}')
 

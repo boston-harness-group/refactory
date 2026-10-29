@@ -570,6 +570,11 @@ class DshModelClient:
                 result.pop(name, None)
             else:
                 result[name] = value
+        # Owned policy must win over arbitrary caller/workspace environment.
+        if getattr(self, '_tool_policy', '') == 'none':
+            result['REFACTORY_TOOL_POLICY'] = 'none'
+        else:
+            result.pop('REFACTORY_TOOL_POLICY', None)
         return result
 
     def _readiness_unavailable(self, reason: str) -> dict[str, object]:
@@ -696,6 +701,8 @@ class DshModelClient:
         # starts without a complete route, so the headless profile's default never answers.
         if self._worker_backend == "dsh" and not (self._provider and self._model):
             raise ModelChoiceError()
+        if getattr(self, '_tool_policy', '') == 'none' and self._worker_backend not in ('dsh', 'claude_code'):
+            raise ValueError(f"{self._worker_backend} cannot enforce tool_policy='none'")
         self._system_text = system
         task = prompt
         # The launcher resolves its own entry; the child's working directory stays

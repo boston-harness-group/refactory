@@ -233,6 +233,11 @@
       "path": "refactory_dsh/data/verdict-routing-cases.json",
       "classification": "core",
       "reason": "verdict routing shared test cases used by test_route_verdict.py and verdict-routing.test.ts"
+    },
+    {
+      "path": "refactory_dsh/no_tools_plugin.mjs",
+      "classification": "core",
+      "reason": "no-tools registry guard and provider boundary used by workers"
     }
   ]
 }

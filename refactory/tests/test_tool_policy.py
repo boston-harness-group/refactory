@@ -564,7 +564,7 @@ def test_claude_code_sdk_invocation_with_tool_policy_none(tmp_path):
 
     Loads the installed (patched) adapter JavaScript and calls claudeQueryOptions
     with a scripted spec containing REFACTORY_TOOL_POLICY=none. Verifies the returned
-    options include tools:[], mcpServers:[], and permissionMode:"plan".
+    options include tools:[], mcpServers:{}, strict MCP isolation and no settings sources.
     Preserves F2 preset/effort. Not a patch-text assertion — drives the real function.
     """
     import subprocess
@@ -956,7 +956,37 @@ def test_loop_resume_preserves_seed_anchor(tmp_path):
 
 
 def test_loop_delete_readd_escape_rejected(tmp_path):
-    test_loop_resume_preserves_seed_anchor(tmp_path)
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.outerloop import Run
+    from refactory_dsh.optim.base import Candidate, Proposal
+    seed = _minimal_state(tool_policy="none")
+    # A surviving node keeps the graph runnable after removing protected a.
+    seed["version"] = 1
+    seed["graph"]["nodes"]["b"] = {**seed["graph"]["nodes"]["a"],
+        "id": "b", "tool_policy": None, "writes": ["other.txt"]}
+    seed["graph"]["start"] = "b"
+    seed["graph"]["edges"] = [{"source": "b", "target": "a"}]
+    def make(resume=False):
+        loop = Loop("circle_packing/adaptive", LoopConfig(runs_root=tmp_path,
+                    resume=resume, optimizer="random", batch_size=1,
+                    allowed_ops=["remove_node", "add_node"]), project=Path("."))
+        loop.mode.load_state_dict(seed)
+        loop.invariants = ()
+        return loop
+    loop = make()
+    loop.init()
+    removed = Run(loop).attempt(Proposal(edit={"op": "remove_node", "id": "a"}), loop.population[0])
+    assert isinstance(removed, Candidate), removed
+    loop._journal_candidate(removed)
+    resumed = make(resume=True)
+    resumed.init()
+    parent = next(c for c in resumed.population if c.id == removed.id)
+    grant = {**seed["graph"]["nodes"]["a"], "tool_policy": None, "tools": ["Read"]}
+    result = Run(resumed).attempt(Proposal(edit={"op": "add_node", "node": grant,
+        "position": {"after": "b"}}), parent)
+    assert isinstance(result, list), result
+    assert any("E-tool-policy-escalation" in reason for reason in result)
+
 
 
 
@@ -1469,3 +1499,32 @@ def test_no_tools_declared_input_is_supplied_without_file_tools(tmp_path):
                     reads=["question.txt"], tool_policy="none")
     assert "What is 2+2?" in receipt["prompt"]
     assert CONTRACT_START not in receipt["prompt"]
+
+
+@pytest.mark.parametrize("backend", ["codex", "openshell"])
+def test_direct_model_client_refuses_unsupported_no_tools_backend(tmp_path, backend):
+    client = _make_client().with_tool_policy("none")
+    client._worker_backend = backend
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported backend reached process boundary")
+    client._run_completion = forbidden
+    with pytest.raises(ValueError, match="cannot enforce"):
+        client.complete("task", workdir=tmp_path)
+
+
+@pytest.mark.parametrize("override", [None, "", "other", "none"])
+def test_owned_policy_wins_over_caller_environment(override):
+    client = _make_client().with_tool_policy("none")
+    client._env_overrides = {"REFACTORY_TOOL_POLICY": override}
+    assert client._environment()["REFACTORY_TOOL_POLICY"] == "none"
+    assert "REFACTORY_TOOL_POLICY" not in client.with_tool_policy("")._environment()
+
+
+@pytest.mark.parametrize("value", [False, 0, [], {}, "invalid"])
+def test_worker_rejects_false_like_invalid_policy_before_client(tmp_path, value):
+    from refactory_dsh.worker_node import execute
+    spec = {"schema_version": 1, "node_id": "a", "role": "worker", "prompt": "task",
+            "reads": [], "writes": ["out.txt"], "produces": [], "post_checks": [],
+            "tool_policy": value, "model_context": {}}
+    with pytest.raises(ValueError, match="invalid tool_policy"):
+        execute(spec, tmp_path)
