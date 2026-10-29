@@ -20,7 +20,7 @@ _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 #: makes one a marker is that the patch's own context and removed lines do not contain it.
 _TOKEN = re.compile(r'"[^"\n]{6,}"|`[^`\n]{6,}`|\b[A-Za-z_][A-Za-z0-9_]{5,}\b')
 #: Files a patch may change, by suffix. Sourcemaps are not read.
-_SUFFIXES = {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json"}
+_SUFFIXES = {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json", ".yml", ".yaml"}
 
 
 def _declared() -> dict[str, Path]:
