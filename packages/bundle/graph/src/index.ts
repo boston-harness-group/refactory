@@ -272,7 +272,13 @@ async function run(ctx: Context, io: Io): Promise<void> {
       if (existsSync(priorStatus)) {
         renameSync(priorStatus, join(startup.workdir, '.refactory', `spine-status.previous-automatic-${randomUUID()}.json`))
       }
-      await configured.advance()
+      const result = await configured.advance()
+      // A retryable node failure leaves persisted cursor status `ready`. The
+      // dispatch result carries the reason; do not replace it with that status.
+      if (result !== null && typeof result === 'object' && !Array.isArray(result)
+        && result.status === 'failed' && typeof result.error === 'string') {
+        failure = result.error
+      }
     } catch (error: unknown) {
       failure = error instanceof Error ? error.message : String(error)
     }
