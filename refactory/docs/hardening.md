@@ -2417,12 +2417,11 @@ first self-check ran 82 files in chunks, found 25 failures and cut 10 files at t
 function was defined but never called for three rounds, its tests passing, until the
 QA judge saw it.
 
-**The graph.** `prepare_check` routes an attempt's first emission `first`, to a fork:
+**The graph.** `prepare_check` runs the self-check (touched tests in chunks) and
+proceeds to `fork_qa`, which runs the full check beside the three reviews:
 
-- **`first_self_check`** (op) runs the brief's whole check once in the prepared
-  worktree and compares what fails with the base (`design_ops._whole_self_check`),
-  then writes `self-check-first.json`. `prepare_check` names the attempt it is for in
-  `self-check-ticket.json`.
+- **`check`** (op) runs the brief's whole check in a check copy beside the reviews
+  (`design_ops.check_beside_reviews`), recording its decision for `gate_check`.
 - **`early_asks_check`** (agent, an optional branch, no workspace of its own) reads
   `changes.diff` against the brief's asks and the approved corrections and writes
   `early-asks.json`: for each ask and correction, built or not built, with

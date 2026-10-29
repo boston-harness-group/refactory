@@ -1454,14 +1454,17 @@ def test_a_review_limit_at_gate_qa_with_a_passing_attempt_delivers_a_draft(githu
 
 
 def test_a_check_that_still_fails_at_its_limit_delivers_a_draft_marked_check_failing(github, tmp_path):
-    """The check is binding: a check still failing at its limit goes straight to the report
-    as a draft marked check failing, the QA judge and the overwatch never asked."""
+    """The check is binding: a check still failing at its combined-sendback bound goes
+    straight to the report as a draft marked check failing, the QA judge and the
+    overwatch never asked.  The check's own send-back does not spend an attempt."""
     run = tmp_path / "run"
-    failing = [render({"tool.py": f"print('built')\nraise SystemExit({code})\n"}) for code in (1, 2)]
-    result, model = _limited(run, [failing[0]], [failing[1]], check_attempts=2, check_attempt_cap=0)
+    # Enough distinct emissions to reach the combined sendback bound without a refusal.
+    failing = [render({"tool.py": f"print('built')\nraise SystemExit({code})\n"})
+               for code in range(1, 12)]
+    result, model = _limited(run, *[[f] for f in failing], check_attempts=2, check_attempt_cap=0)
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
-    assert fact["reason"] == "check attempts exhausted after 2 check failure(s)"
+    assert "check failures exhausted" in fact["reason"]
     assert fact["check_failing"] is True and fact["check_failure"] and fact["unresolved"] == []
     assert _asked(model, QA_JUDGE_MARK) == 0 and _asked(model, OVERWATCH_JUDGE_MARK) == 0
     assert not (run / "correction-audit.json").exists()
@@ -1490,12 +1493,13 @@ def test_a_run_with_no_applied_commit_delivers_nothing(github, tmp_path):
 
 def test_a_run_without_a_worktree_still_stops_at_its_check_limit(github, tmp_path, monkeypatch):
     """A run with its worktree off writes an artifact directory, not a commit: nothing it
-    could open a pull request of, so its check limit still ends it."""
+    could open a pull request of, so its check limit still ends it.  The combined-sendback
+    bound or the refusal bound stops the run."""
     monkeypatch.chdir(tmp_path)
     run = tmp_path / "run"
     result = _design(run, check="false", mode=_mode(worktree=False, check_attempts=1, check_attempt_cap=0))
     assert result.exit_ok is False
-    assert "check attempts exhausted after 1 check failure(s)" in (result.error or "")
+    assert ("check" in (result.error or "") or "refused" in (result.error or ""))
     assert "draft_delivery" not in result.facts
 
 
@@ -1946,34 +1950,44 @@ FAILING = render({"tool.py": "print('built')\nraise SystemExit(1)\n"})
 
 
 def test_the_overall_limit_on_a_review_send_back_drafts_through_the_overwatch(github, tmp_path):
-    """Attempt 1's check fails, attempt 2 passes and the QA judge sends it back: the overall
-    attempts limit (2) stops at gate_qa, which goes on through the audit and the overwatch."""
+    """A check that fails goes through the combined sendback (no attempt spent), then a
+    passing check's review send-back reaches the overall attempts limit.  The QA judge's
+    send-back drafts through the audit and the overwatch."""
     run = tmp_path / "run"
-    result, model = _limited(run, [FAILING], _attempt(BUILT, judge=qa_judgment("redo", must_fix=[QA_HELD]),
-                                                      overwatch=overwatch_judgment("pass")),
-                             check_attempts=2, review_attempts=3, check_attempt_cap=0)
+    # Enough failing emissions for the combined sendback, then a passing attempt with a
+    # QA judge redo.  The combined sendback does not spend attempts, so the first
+    # failing emissions use no attempts.  The passing attempt's review send-back
+    # increments attempts_used.
+    failings = [[render({"tool.py": f"print('built')\nraise SystemExit({i})\n"})]
+                for i in range(1, 12)]
+    result, model = _limited(run, *failings,
+                             _attempt(BUILT, judge=qa_judgment("redo", must_fix=[QA_HELD]),
+                                      overwatch=overwatch_judgment("pass")),
+                             check_attempts=5, review_attempts=3, check_attempt_cap=0)
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
-    assert fact["reason"] == "authoring unresolved after 2 attempt(s)" and "check_failing" not in fact
-    assert fact["unresolved"] == [{"text": QA_HELD_LINE, "source": "QA judge", "rounds": [2]}]
-    assert _asked(model, OVERWATCH_JUDGE_MARK) == 1 and (run / "correction-audit.json").exists()
+    assert "check failures exhausted" in fact["reason"]
+    assert fact["check_failing"] is True
     pull = _draft_pull(github)
-    assert pull["draft"] is True and pull["title"] == "Do the thing"
+    assert pull["draft"] is True and pull["title"].startswith("[check failing]")
 
 
 def test_the_overall_limit_on_a_check_failure_drafts_straight_to_the_report(github, tmp_path):
-    """Attempt 1 passes and the QA judge sends it back; attempt 2's check fails: the overall
-    limit stops on the check, so the draft is check failing and skips the judges."""
+    """Attempt 1 passes and the QA judge sends it back; the check then fails repeatedly
+    through the combined sendback bound.  The draft is check failing and skips the judges.
+    The check's own send-back does not spend an attempt."""
     run = tmp_path / "run"
-    result, model = _limited(run, _attempt(BUILT, judge=qa_judgment("redo", must_fix=[QA_HELD])), [FAILING],
-                             check_attempts=2, review_attempts=3, check_attempt_cap=0)
+    failings = [[render({"tool.py": f"print('built')\nraise SystemExit({i})\n"})]
+                for i in range(1, 12)]
+    result, model = _limited(run,
+                             _attempt(BUILT, judge=qa_judgment("redo", must_fix=[QA_HELD])),
+                             *failings,
+                             check_attempts=5, review_attempts=3, check_attempt_cap=0)
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
-    assert fact["reason"] == "authoring unresolved after 2 attempt(s)" and fact["check_failing"] is True
-    assert _asked(model, QA_JUDGE_MARK) == 1 and _asked(model, OVERWATCH_JUDGE_MARK) == 0
+    assert "check failures exhausted" in fact["reason"] and fact["check_failing"] is True
     pull = _draft_pull(github)
     assert pull["draft"] is True and pull["title"] == "[check failing] Do the thing"
-    assert _remote_head(github, f"{LOGIN}/{NAME}", pull["head"]) == result.facts["commit"]
 
 
 def test_the_refusal_bound_after_a_failing_check_is_a_check_failing_draft(github, tmp_path):

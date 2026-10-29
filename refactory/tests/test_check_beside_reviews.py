@@ -39,6 +39,8 @@ def test_the_check_is_a_branch_of_the_review_fork():
     assert ("prepare_check", "fork_qa", "proceed") in edges
     assert "check" in graph.nodes["fork_qa"].targets
     assert "check" in graph.nodes["join_qa"].sources
+    assert "early_asks_check" in graph.nodes["join_qa"].sources
+    assert "verifier" in graph.nodes["join_qa"].sources
     # The check sends the run nowhere: like the reviews, its branch drains into the join.
     assert not [e for e in edges if e[0] == "check"]
     assert ("join_qa", "gate_check", None) in edges
@@ -265,6 +267,7 @@ def test_prepare_check_sends_back_before_the_reviews_when_last_attempts_failures
         result=None, digest_text="", selection=["t.py::x"], ran_ids=["t.py::x"],
         commands=["pytest t.py::x"])
     monkeypatch.setattr(failfast, "targeted_prepass", lambda *a, **k: go)
+    attempts_before = int(ctx.facts.get("attempts_used", 0))
     assert design_ops.prepare_check(ctx) == "proceed"
     prepared = ctx.read_json(CHECK_PREP)
     assert prepared["commit"] == "c1" and prepared["root"] == str(tmp_path)
@@ -272,6 +275,8 @@ def test_prepare_check_sends_back_before_the_reviews_when_last_attempts_failures
     # The reviewers judge the attempt against what sent it back.
     assert ctx.facts.get("review_feedback") == "what went wrong last time"
     assert ctx.facts.get("self_check_fixup_count", 0) == 0
+    # prepare_check did not spend an attempt: it just prepared and proceeded
+    assert int(ctx.facts.get("attempts_used", 0)) == attempts_before
 
 
 def test_a_failed_preparation_is_judged_by_the_whole_check_at_once(tmp_path, monkeypatch):

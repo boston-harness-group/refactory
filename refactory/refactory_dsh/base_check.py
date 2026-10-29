@@ -128,6 +128,53 @@ def _steps(command: str) -> list[str]:
     return [step for step in steps if step]
 
 
+def _split_at_double_ampersand(command: str) -> list[str]:
+    """Split ``command`` only at top-level ``&&``, respecting quotes and parentheses.
+
+    Everything else — pipes (``|``), semicolons (``;``), ``||``, ``&``, newlines,
+    redirections — stays inside its segment, so a command like
+    ``cd pkg && pytest | tee log`` yields ``['cd pkg', 'pytest | tee log']``.
+    Backslashes, single and double quotes, and parenthesis nesting are all respected.
+
+    Returns the original command in a one-element list when no top-level ``&&`` appears.
+    """
+    segments: list[str] = []
+    current = ""
+    depth = 0
+    quote = ""
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote:
+            current += char
+            if char == "\\" and quote == '"' and i + 1 < len(command):
+                current += command[i + 1]
+                i += 1
+            elif char == quote:
+                quote = ""
+        elif char == "\\" and i + 1 < len(command):
+            current += command[i:i + 2]
+            i += 1
+        elif char in "'\"":
+            quote = char
+            current += char
+        elif char == "(":
+            depth += 1
+            current += char
+        elif char == ")":
+            depth -= 1
+            current += char
+        elif depth == 0 and char == "&" and command[i + 1:i + 2] == "&":
+            segments.append(current.strip())
+            current = ""
+            i += 1  # skip the second '&'
+        else:
+            current += char
+        i += 1
+    segments.append(current.strip())
+    return [seg for seg in segments if seg]
+
+
 def _runner(step: str) -> str | None:
     """``pytest`` or ``vitest`` when ``step`` names that runner (jest reports like vitest)."""
     import shlex

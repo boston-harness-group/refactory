@@ -817,17 +817,21 @@ class DesignMode(Mode):
         graph.add(Node(
             "gate_check", "gate", evaluator=f"{OPS}:gate_check", role="validation",
             resource_role="final_validation",
-            reads=(CHECK_PREP, CHECK_VERDICT, EARLY_ASKS_VERDICT),
+            reads=(CHECK_PREP, CHECK_VERDICT, EARLY_ASKS_VERDICT,
+                   "reviews/health-check.md", "reviews/code-review.md",
+                   "reviews/qa.md", "reviews/verification.md"),
             # It runs the whole check itself when no decision stands for this attempt.
             writes=(*check_writes, *repo_change.CHECK_WRITES),
             produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
                       "combined_sendback_count"),
             knobs=check_knobs, max_iterations=8,
             notes="compose one send-back from check failures and review findings without "
-                  "spending an attempt; a failing check skips the QA judge and overwatch "
-                  "by graph topology (gate_check → pick_corrections bypasses synthesize_qa "
-                  "→ qa_judge → overwatch); at its limit, deliver the attempt as a draft "
-                  "marked check failing; when the check and all reviews passed, proceed",
+                  "spending an attempt; the combined send-back names every failing test "
+                  "and every review finding of the round; a failing check skips the QA "
+                  "judge and overwatch by graph topology (gate_check → pick_corrections "
+                  "bypasses synthesize_qa → qa_judge → overwatch); at its limit, deliver "
+                  "the attempt as a draft marked check failing; when the check and all "
+                  "reviews passed, proceed",
         ))
 
         # ── design-v2's three reviews, in parallel, and the overwatch pass ──
@@ -946,8 +950,10 @@ class DesignMode(Mode):
             notes="attack the artifact against the brief",
         ))
         graph.add(Node("join_qa", "join",
-                       sources=("check", "health_checker", "code_reviewer", "qa_director"),
-                       notes="wait for the check and all three reviews"))
+                       sources=("check", "health_checker", "code_reviewer", "qa_director",
+                                "early_asks_check", "verifier"),
+                       notes="wait for the check, all three reviews, the verifier "
+                             "and the early asks judge"))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(
             "synthesize_qa", "op", call=f"{OPS}:synthesize_qa",
@@ -1124,8 +1130,9 @@ class DesignMode(Mode):
         graph.connect("prepare_check", "fork_qa", condition="proceed")
         graph.connect("prepare_check", "report", condition="draft")
         graph.connect("fork_qa", "join_qa")
-        graph.connect("early_asks_check", "join_qa")
-        graph.connect("verifier", "join_qa")
+        # No explicit edges from early_asks_check or verifier to join_qa:
+        # the fork→join connection drains all branches, and join_qa.sources
+        # includes both for uncompleteBetween on reloop.
         graph.connect("join_qa", "gate_check")
         graph.connect("gate_check", "pick_corrections", condition="reloop")
         graph.connect("gate_check", "synthesize_qa", condition="proceed")

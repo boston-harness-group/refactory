@@ -346,6 +346,45 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     expect(ids(s)).toEqual(['report'])
   })
 
+  it('the spine join_qa waits for early_asks_check before firing', () => {
+    const s = new Spine(graph)
+    advance(s, 'fork_qa', 'proceed')
+    s.complete('fork_qa')
+    // Complete the check and three reviews, and the verifier, but NOT early_asks_check
+    s.complete('check')
+    s.complete('health_checker')
+    s.complete('code_reviewer')
+    s.complete('qa_director')
+    s.complete('verifier')
+    // join_qa must NOT be due yet — early_asks_check has not completed
+    expect(ids(s)).not.toContain('join_qa')
+    expect(ids(s)).toContain('early_asks_check')
+    // Complete early_asks_check — now join_qa fires
+    s.complete('early_asks_check')
+    expect(ids(s)).toContain('join_qa')
+  })
+
+  it('a reloop from gate_check uncompletes early_asks_check', () => {
+    const s = new Spine(graph)
+    advance(s, 'fork_qa', 'proceed')
+    s.complete('fork_qa')
+    for (const n of ['check', 'health_checker', 'code_reviewer', 'qa_director', 'verifier', 'early_asks_check']) s.complete(n)
+    s.complete('join_qa')
+    // gate_check reloops — a send-back
+    s.verdict('gate_check', 'reloop', 'the check failed')
+    // After the reloop, the builder emits again and reaches fork_qa again
+    expect(ids(s)).toEqual(['pick_corrections'])
+    s.verdict('pick_corrections', 'skip')
+    expect(ids(s)).toEqual(['emit'])
+    s.complete('emit')
+    s.complete('materialise')
+    s.verdict('prepare_check', 'proceed')
+    s.complete('fork_qa')
+    // early_asks_check must run again (uncompleted by the reloop)
+    expect(ids(s)).toContain('early_asks_check')
+    expect(ids(s)).toContain('verifier')
+  })
+
   it('a limit stop before the review fork goes from prepare_check straight to the report, as a draft', () => {
     const s = new Spine(graph)
     advance(s, 'prepare_check', 'proceed')

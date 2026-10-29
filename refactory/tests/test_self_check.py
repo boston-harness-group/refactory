@@ -1202,7 +1202,11 @@ def test_the_full_check_still_runs_and_binds_after_a_self_check_cut_at_the_limit
     # The self-check is inconclusive, so it proceeds to fork_qa where the full check
     # finds the failure and sends back.
     assert records[0]["outcome"] == "inconclusive"
-    # Eventually the run succeeds
+    # The full check beside the reviews found the failure and sent back; the run
+    # needed multiple attempts to succeed.  The self-check records are all
+    # inconclusive (the slow file is always cut), but the run exits ok because
+    # the third emission fixes the pinned test.
+    assert len(records) >= 2
     assert result.exit_ok
 
 

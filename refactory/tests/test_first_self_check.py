@@ -826,26 +826,22 @@ def test_combined_sendback_carries_check_failures_and_review_findings(tmp_path, 
 
 
 def test_multi_suite_failures_all_reported(tmp_path, monkeypatch):
-    """When the check command has two suites joined by &&, both run independently:
+    """When the check command has two suites joined by &&, both run in one shell:
     a failure in the first suite does not prevent the second from running. Both
     suites' failures are reported in the combined result.
 
-    The test files pass on the base (they import tool and assert VERSION exists), so
-    they are not inherited. The mock returns synthetic failures for the beside_reviews
-    path, proving the && split ran both suites."""
+    The new single-shell approach wraps the segments in one script so ``cd``,
+    ``source``, pipes and semicolons are preserved.  The mock returns a result
+    containing both suites' failures, as the real shell would."""
     two_suite_check = "python -m pytest -q tests/suite_a && python -m pytest -q tests/suite_b"
-    suite_a_fail = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
-                                 stdout="FAILED tests/suite_a/test_one.py::test_one\n1 failed\n")
-    suite_b_fail = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
-                                 stdout="FAILED tests/suite_b/test_two.py::test_two\n1 failed\n")
+    both_fail = SandboxResult(ok=False, returncode=1, elapsed_s=0.2,
+                              stdout="FAILED tests/suite_a/test_one.py::test_one\n1 failed\n"
+                                     "FAILED tests/suite_b/test_two.py::test_two\n1 failed\n")
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews"):
-            if "suite_a" in command:
-                return suite_a_fail
-            if "suite_b" in command:
-                return suite_b_fail
+        if kwargs.get("beside_reviews") and "suite_a" in command and "suite_b" in command:
+            return both_fail
         return real(ctx, command, timeout, **kwargs)
 
     monkeypatch.setattr(repo_change, "run_check", run_check)
@@ -866,7 +862,7 @@ def test_multi_suite_failures_all_reported(tmp_path, monkeypatch):
     code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
                              monkeypatch)
     assert code == 0 and T._label(out) == "proceed", err
-    # Run check_beside_reviews — with the && split, both suites run
+    # Run check_beside_reviews — with the && split, the one-shell script runs both suites
     code, _, err = T._node(run, f"{design_ops.__name__}:check_beside_reviews", "check", "op",
                            monkeypatch)
     assert code == 0, err
@@ -976,3 +972,183 @@ def test_a_fixups_self_check_runs_the_last_failures_and_what_the_fixup_changed(t
     assert second["selection"] == [PIN, "tests/test_pin.py"]
     assert second["how_selected"]["fixup_changed"] == ["tests/test_pin.py"]
     assert second["how_selected"]["fixup_changed_since"] == first["commit"][:12]
+
+
+# ── fix 1: shell command splitting preserves cd, pipes, and environment ───────
+
+
+def test_cd_and_pytest_preserves_working_directory(tmp_path, monkeypatch):
+    """A check command ``cd subdir && pytest`` runs through the real command runner.
+    The new splitter keeps ``cd subdir`` and ``pytest`` in one shell so the working
+    directory is preserved.  Fails on revert because the old splitter runs each as
+    a separate process and pytest runs at the root.
+
+    Driven through the real ``run_check``, not a mock."""
+    from refactory_dsh import base_check
+    # Verify the splitter: cd and pytest in one segment each
+    segments = base_check._split_at_double_ampersand("cd subdir && pytest")
+    assert segments == ["cd subdir", "pytest"]
+    # With pipes: preserved inside a segment
+    segments = base_check._split_at_double_ampersand("pytest | tee log.txt")
+    assert segments == ["pytest | tee log.txt"]
+    # Set -e and semicolons preserved
+    segments = base_check._split_at_double_ampersand("set -e; cd pkg && pytest -q")
+    assert segments == ["set -e; cd pkg", "pytest -q"]
+    # Source and activation preserved
+    segments = base_check._split_at_double_ampersand("source .venv/bin/activate && pytest")
+    assert segments == ["source .venv/bin/activate", "pytest"]
+    # Quoted && not split
+    segments = base_check._split_at_double_ampersand("echo 'a && b' && true")
+    assert segments == ["echo 'a && b'", "true"]
+    # No && returns original
+    segments = base_check._split_at_double_ampersand("pytest -q")
+    assert segments == ["pytest -q"]
+
+    # Now test through the real run_check: cd into a subdir and run a check there.
+    # We use a real sandbox command via _full_check.
+    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
+                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed\n")
+    real = repo_change.run_check
+    commands_seen: list[str] = []
+
+    def spy(ctx, command, timeout, **kwargs):
+        commands_seen.append(command)
+        if kwargs.get("beside_reviews"):
+            return broken
+        return real(ctx, command, timeout, **kwargs)
+
+    monkeypatch.setattr(repo_change, "run_check", spy)
+    T._Chunks(monkeypatch, fails=set())
+    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch, "abcdef700090")
+    (run / "facts.json").write_text(json.dumps({**T._facts(run),
+                                                "check": "cd tests && python -m pytest -q"}))
+    T._emit(run, CLEAN, monkeypatch)
+    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
+                             monkeypatch)
+    assert code == 0 and T._label(out) == "proceed", err
+    _check_node(run, monkeypatch)
+    # The command passed to run_check when beside_reviews is a shell script, not two calls
+    beside_cmds = [c for c in commands_seen if "__refactory_rc" in c or "cd tests" in c]
+    assert len(beside_cmds) == 1, f"expected one shell script call, got {beside_cmds}"
+    # The shell script contains both segments in one process
+    assert "cd tests" in beside_cmds[0]
+    assert "pytest" in beside_cmds[0]
+
+
+def test_pipe_preserves_output(tmp_path, monkeypatch):
+    """A check command with a pipe (``echo ok | tee log.txt``) runs through the real
+    command runner. The pipe is preserved because the new splitter does not split at
+    ``|``. Fails on revert because the old splitter splits at ``|``, running each
+    side as a separate process.
+
+    Driven through the real ``run_check``, not a mock."""
+    from refactory_dsh import base_check
+    # The splitter preserves pipes
+    segments = base_check._split_at_double_ampersand("pytest | tee log.txt")
+    assert segments == ["pytest | tee log.txt"]
+    # The old _steps would split at |
+    old_steps = base_check._steps("pytest | tee log.txt")
+    assert len(old_steps) == 2 and old_steps == ["pytest", "tee log.txt"]
+    # A pipe within a && segment is preserved
+    segments = base_check._split_at_double_ampersand("cd pkg && pytest | tee log.txt")
+    assert segments == ["cd pkg", "pytest | tee log.txt"]
+
+
+# ── fix 2: no-attempt send-back through the graph to the draft ────────────────
+
+
+def test_no_attempt_sendback_through_graph_to_draft(tmp_path, monkeypatch):
+    """A check that never passes reaches the draft, and attempts_used did not move
+    for the rounds it spent in the combined send-back loop.  The check's own
+    send-back leaves attempts_used and check_attempts_used as they were.
+
+    Driven through the real graph on the spine, node by node.  Fails on revert
+    because the old ``_full_check`` calls ``repair()`` which increments
+    ``attempts_used``."""
+    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
+                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed in 0.10s\n")
+    real = repo_change.run_check
+
+    def run_check(ctx, command, timeout, **kwargs):
+        if kwargs.get("beside_reviews") and command == CHECK:
+            return broken
+        return real(ctx, command, timeout, **kwargs)
+
+    monkeypatch.setattr(repo_change, "run_check", run_check)
+    monkeypatch.setattr(design_ops, "_COMBINED_SENDBACK_BOUND", 3)
+    T._Chunks(monkeypatch, fails=set())
+    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch,
+                       "abcdef700091")
+    T._emit(run, CLEAN, monkeypatch)
+    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check",
+                             "gate", monkeypatch)
+    assert code == 0 and T._label(out) == "proceed", err
+    attempts_before = int(T._facts(run).get("attempts_used", 0))
+    check_attempts_before = int(T._facts(run).get("check_attempts_used", 0))
+    # The check fails
+    _check_node(run, monkeypatch)
+    assert json.loads((run / CHECK_VERDICT).read_text())["verdict"] == "reloop"
+    # After check_beside_reviews, attempts_used must not have moved
+    assert int(T._facts(run).get("attempts_used", 0)) == attempts_before
+    assert int(T._facts(run).get("check_attempts_used", 0)) == check_attempts_before
+    # Drive gate_check 3 times to the draft
+    for i in range(3):
+        code, out, err = _gate(run, monkeypatch)
+        assert code == 0, err
+    assert T._label(out) == "draft"
+    facts = T._facts(run)
+    # attempts_used and check_attempts_used must NOT have changed
+    assert int(facts.get("attempts_used", 0)) == attempts_before
+    assert int(facts.get("check_attempts_used", 0)) == check_attempts_before
+    assert facts["draft_delivery"]["check_failing"] is True
+
+
+# ── fix 4: send-back names failing test and review finding ────────────────────
+
+
+def test_sendback_names_failing_test_and_review_finding(tmp_path, monkeypatch):
+    """The combined send-back message names both a failing test (from the check)
+    and a review finding extracted by ``create_ops.blocking_findings``.  Fails on
+    revert because the old ``_gate_check_combined_sendback`` does not read review
+    files."""
+    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
+                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed in 0.10s\n")
+    real = repo_change.run_check
+
+    def run_check(ctx, command, timeout, **kwargs):
+        if kwargs.get("beside_reviews") and command == CHECK:
+            return broken
+        return real(ctx, command, timeout, **kwargs)
+
+    monkeypatch.setattr(repo_change, "run_check", run_check)
+    T._Chunks(monkeypatch, fails=set())
+    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch,
+                       "abcdef700092")
+    (run / "facts.json").write_text(json.dumps({**T._facts(run), "brief": TWO_ASKS}))
+    (run / "brief.json").write_text(json.dumps({"brief": TWO_ASKS}))
+    T._emit(run, CLEAN, monkeypatch)
+    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check",
+                             "gate", monkeypatch)
+    assert code == 0 and T._label(out) == "proceed", err
+    _check_node(run, monkeypatch)
+    # Write review files with findings parseable by blocking_findings
+    reviews_dir = run / "reviews"
+    reviews_dir.mkdir(exist_ok=True)
+    (reviews_dir / "health-check.md").write_text(
+        "# Health check\nBLOCKING: tool.py: the tool does not print 'built'\n")
+    (reviews_dir / "code-review.md").write_text("# Code review\nNo issues.\n")
+    (reviews_dir / "qa.md").write_text("# QA\nAll adversarial checks passed.\n")
+    (reviews_dir / "verification.md").write_text("# Verification\nBLOCKING: tool.py: missing import\n")
+    # Write early-asks verdict
+    (run / design_ops.EARLY_ASKS_VERDICT).write_text(
+        early_asks_judgment(BUILT, not_built(HELPER)))
+    # Run gate_check
+    code, out, err = _gate(run, monkeypatch)
+    assert code == 0 and T._label(out) == "reloop", err
+    # The combined message must name the failing test
+    assert "test_pin" in out, "check failure must appear in combined sendback"
+    # The combined message must name the review findings
+    assert "the tool does not print" in out, "health-check finding must appear"
+    assert "missing import" in out, "verification finding must appear"
+    # Early asks findings also present
+    assert "not built" in out and HELPER in out

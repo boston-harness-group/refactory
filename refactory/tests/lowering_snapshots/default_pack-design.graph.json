@@ -1,5 +1,5 @@
 {
-  "name": "default_pack-design",
+  "name": "mode",
   "nodes": {
     "apply_corrections": {
       "id": "apply_corrections",
@@ -250,7 +250,11 @@
       "reads": [
         "check-prep.json",
         "check-verdict.json",
-        "early-asks.json"
+        "early-asks.json",
+        "reviews/code-review.md",
+        "reviews/health-check.md",
+        "reviews/qa.md",
+        "reviews/verification.md"
       ],
       "writes": [
         "authoring-evidence.json",
@@ -268,7 +272,7 @@
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:gate_check",
       "command_timeout_s": 6540,
-      "gate_prompt": "compose one send-back from check failures and review findings without spending an attempt; a failing check skips the QA judge and overwatch by graph topology (gate_check \u2192 pick_corrections bypasses synthesize_qa \u2192 qa_judge \u2192 overwatch); at its limit, deliver the attempt as a draft marked check failing; when the check and all reviews passed, proceed",
+      "gate_prompt": "compose one send-back from check failures and review findings without spending an attempt; the combined send-back names every failing test and every review finding of the round; a failing check skips the QA judge and overwatch by graph topology (gate_check \u2192 pick_corrections bypasses synthesize_qa \u2192 qa_judge \u2192 overwatch); at its limit, deliver the attempt as a draft marked check failing; when the check and all reviews passed, proceed",
       "max_iterations": 8,
       "_type": "GateNode"
     },
@@ -418,7 +422,9 @@
         "check",
         "health_checker",
         "code_reviewer",
-        "qa_director"
+        "qa_director",
+        "early_asks_check",
+        "verifier"
       ],
       "_type": "JoinNode"
     },
@@ -806,11 +812,6 @@
       "condition": null
     },
     {
-      "source": "early_asks_check",
-      "target": "join_qa",
-      "condition": null
-    },
-    {
       "source": "emit",
       "target": "materialise",
       "condition": null
@@ -1008,11 +1009,6 @@
     {
       "source": "synthesize_strategy",
       "target": "design_doc",
-      "condition": null
-    },
-    {
-      "source": "verifier",
-      "target": "join_qa",
       "condition": null
     }
   ],

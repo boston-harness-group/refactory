@@ -1342,10 +1342,21 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                 check_attempt: str | None = None) -> Any:
     """Run the whole check on the attempt, record its evidence, and judge it.
 
-    When ``beside_reviews`` is True, the check command is split at ``&&`` boundaries
-    (via ``base_check._steps``) and each step runs independently, so a failure in an
-    earlier step does not prevent later steps from running. This collects every failure
-    in one pass. The combined result is ok only when every step passed.
+    When ``beside_reviews`` is True the command is split only at top-level ``&&``
+    (``base_check._split_at_double_ampersand``); everything else — pipes, semicolons,
+    ``||``, ``&``, newlines, redirections — stays inside its segment, so ``cd pkg &&
+    pytest | tee log`` keeps the pipe, and ``source .venv/bin/activate && pytest``
+    keeps the environment.
+
+    The segments run in **one shell process** (the working directory, environment
+    variables, pipes, semicolons, redirections and ``set -e`` are the person's).
+    Each segment's exit code is captured independently, so a failed segment does not
+    hide the next one's.  The whole command gets the check's one time limit, not one
+    per segment.  A command with no ``&&`` runs exactly once, unchanged.
+
+    **What this does not guarantee:** the segments do not short-circuit on failure
+    the way ``&&`` normally does.  ``cmd_a && cmd_b`` always runs both commands even
+    when ``cmd_a`` fails, because the purpose is to collect every failure in one pass.
     """
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh.create_ops import repair
@@ -1353,22 +1364,19 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
 
     if beside_reviews:
         from refactory_dsh import base_check as _bc
-        steps = _bc._steps(command)
-        if len(steps) > 1:
-            results = []
-            for step in steps:
-                results.append(repo_change.run_check(ctx, step, check_timeout, beside_reviews=True))
-            # Combine: ok only if all ok; merge stdout/stderr
-            from refactory_dsh.sandbox import SandboxResult
-            combined_ok = all(r.ok for r in results)
-            combined_stdout = "\n".join(r.stdout or "" for r in results).strip()
-            combined_stderr = "\n".join(r.stderr or "" for r in results).strip()
-            combined_rc = 0 if combined_ok else max((r.returncode or 0) for r in results if not r.ok)
-            combined_timed_out = any(r.timed_out for r in results)
-            combined_elapsed = sum(r.elapsed_s or 0 for r in results)
-            result = SandboxResult(ok=combined_ok, returncode=combined_rc,
-                                   stdout=combined_stdout, stderr=combined_stderr,
-                                   timed_out=combined_timed_out, elapsed_s=combined_elapsed)
+        segments = _bc._split_at_double_ampersand(command)
+        if len(segments) > 1:
+            # Build a shell script that runs every segment in one process, captures
+            # each segment's exit code, and exits non-zero when any failed.
+            script_lines = ["__refactory_rc=0"]
+            for idx, seg in enumerate(segments):
+                script_lines.append(f"( {seg} )")
+                script_lines.append(f"__rc_{idx}=$?")
+                script_lines.append(f'[ $__rc_{idx} -ne 0 ] && __refactory_rc=$__rc_{idx}')
+            script_lines.append("exit $__refactory_rc")
+            shell_script = "\n".join(script_lines)
+            result = repo_change.run_check(ctx, shell_script, check_timeout,
+                                           beside_reviews=True)
         else:
             result = repo_change.run_check(ctx, command, check_timeout, beside_reviews=True)
     else:
@@ -1423,6 +1431,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                 "check_mode": "full",
                 "targeted_command": targeted_command,
             })
+            if beside_reviews:
+                return Verdict("reloop", detail)
             return repair(ctx, [detail])
         ctx.set_fact("validation", "(the check passed)")
         ctx.write_json("check-record.json", {
@@ -1461,6 +1471,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             "command": _ccp.get("command"),
             "commit": str(ctx.facts.get("commit", "")),
         })
+        if beside_reviews:
+            return Verdict("reloop", _prep_detail)
         return repair(ctx, [_prep_detail])
 
     # A failure the unchanged base has too is not the attempt's: design mode's one rule, the
@@ -1525,6 +1537,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                     "check_mode": "full",
                     "targeted_command": targeted_command,
                 })
+                if beside_reviews:
+                    return Verdict("reloop", detail)
                 return repair(ctx, [detail])
             return "proceed"
         if filtered.new_failures and filtered.inherited:
@@ -1604,6 +1618,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         _cr_fail["base_reset"] = _base_reset_list
     ctx.write_json("check-record.json", _cr_fail)
 
+    if beside_reviews:
+        return Verdict("reloop", detail)
     return repair(ctx, [detail])
 
 
@@ -1760,76 +1776,6 @@ def _end_fixups(ctx: Any) -> None:
         ctx.set_fact("self_check_fixup_count", 0)
 
 
-def _whole_self_check(ctx: Any, command: str) -> dict[str, Any]:
-    """The whole check run once as a self-check: what it selected, ran and found.
-
-    A failure the base has too, and the brief and corrections do not name, is inherited
-    (`_the_changes_failures`). A failing run that names no test (a build error, say) is
-    the attempt's failure, recorded as ``unparsed``: it is never a pass. A run stopped at
-    its limit, or one that failed on something other than the code, says nothing about
-    the tests: the check beside the reviews decides.
-    """
-    from refactory_dsh import authoring_evidence as evidence
-    from refactory_dsh import base_check, test_selection
-    from refactory_dsh.failfast import failure_digest, self_check_failures, self_check_limit
-
-    check_timeout = int(ctx.knob("check_timeout_s", 180))
-    found = worktree.recorded(ctx.workdir)
-    root = Path(found.path) if found is not None else Path(str(ctx.facts.get("artifact")
-                                                                or ctx.workdir))
-    touched = base_check._all_changed_files(root, found.base) if found is not None else []
-    prev_record = ctx.read_json("check-record.json", {}) or {}
-    earlier = _self_checks(ctx)
-    selection = test_selection.select(touched, root, prev_record, check_command=command,
-                                      costs=test_selection.costs_from_record(earlier, root),
-                                      bounds=test_selection.lower_bounds(earlier),
-                                      alone=test_selection.run_alone(earlier))
-    entry: dict[str, Any] = {
-        "selection": list(selection.tests), "how_selected": selection.record(),
-        "ran": [], "cut": [], "commands": [], "notes": [],
-        "limit_s": float(check_timeout), "duration_s": 0.0, "timings": [],
-        "failing_ids": [], "inherited_filtered": [], "base": "",
-        "digest": "", "runners": [], "raw_tail": "", "unparsed": "", "result": None,
-    }
-    if not selection.tests:
-        return entry  # nothing it can break: the check beside the reviews decides
-    result = repo_change.run_check(ctx, command, check_timeout, triage_prep=False, prepared=True)
-    output = "\n".join(filter(None, [result.stdout or "", result.stderr or ""])).strip()
-    entry.update(commands=[command], duration_s=round(float(result.elapsed_s or 0.0), 1),
-                 result={"ok": result.ok, "returncode": result.returncode,
-                         "stdout": result.stdout or "", "stderr": result.stderr or "",
-                         "timed_out": bool(result.timed_out), "elapsed_s": result.elapsed_s,
-                         "timeout_s": result.timeout_s})
-    if result.ok:
-        entry["ran"] = list(selection.tests)
-        return entry
-    failures = sorted(self_check_failures(output))
-    if failures:
-        failing, inherited, base = _the_changes_failures(
-            ctx, command, failures, check_timeout,
-            self_check_limit(int(ctx.knob("self_check_timeout_s", 300)), check_timeout))
-        digest_text, runners, raw_tail = failure_digest([output], set(inherited))
-        entry.update(ran=list(selection.tests), failing_ids=failing, inherited_filtered=inherited,
-                     base=base, digest=digest_text if failing else "",
-                     runners=runners if failing else [], raw_tail=raw_tail if failing else "")
-        if result.timed_out:
-            entry["notes"].append(f"the whole check was stopped at its {check_timeout} s limit; "
-                                  "the failures it reported before that count")
-        return entry
-    kind = evidence.check_failure_kind(result, budget=getattr(ctx, "budget", None))
-    if result.timed_out or kind != "code_failure":
-        why = (f"the whole check was stopped at its {check_timeout} s limit"
-               if result.timed_out else f"the whole check did not fail on the code ({kind})")
-        entry.update(cut=list(selection.tests), notes=[why + "; the check beside the reviews "
-                                                       "decides"])
-        return entry
-    entry.update(ran=list(selection.tests), digest=output[-2000:],
-                 unparsed=f"the check failed (exit {result.returncode}) without naming a "
-                          "failing test")
-    return entry
-
-
-# ── a fix-up's self-check, and what both decide ───────────────────────────────
 
 
 def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[str, Any],
@@ -1841,8 +1787,8 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
     (`_fixup_changes`), not the whole attempt's: the first self-check ran everything
     already. It runs in chunks within the self-check's time limit
     (`failfast.targeted_prepass`), in the attempt's prepared worktree. When the last
-    self-check's failure named no test, nothing can be targeted, so the whole check runs
-    again (`_whole_self_check`).
+    self-check's failure named no test, nothing can be targeted, so the full check
+    beside the reviews decides.
     """
     from refactory_dsh import test_selection
     from refactory_dsh.failfast import targeted_prepass, without_failures
@@ -2243,16 +2189,26 @@ def _read_early_asks_verdict(ctx: Any) -> list[dict[str, Any]]:
 
 
 def _gate_check_early_asks(ctx: Any) -> Any:
-    """Check passed — see if the early asks judge found items not built."""
+    """Check passed — see if the early asks judge or the reviews found items not built
+    or blocking findings."""
     from refactory_dsh.run import BuildLoopStop
 
     items = _read_early_asks_verdict(ctx)
     not_built = [item for item in items if not item["built"]]
-    if not not_built:
+    review_findings = _collect_review_findings(ctx)
+    if not not_built and not review_findings:
         return "proceed"
-    # Early asks found items not built — send back with the check's result.
-    parts = ["the check passed, but the early asks judge found items not built:"]
-    parts.extend(_not_built_lines(not_built))
+    # Early asks or reviews found issues — send back.
+    parts: list[str] = []
+    if not_built:
+        parts.append("the check passed, but the early asks judge found items not built:")
+        parts.extend(_not_built_lines(not_built))
+    if review_findings:
+        if parts:
+            parts.append("")
+        parts.append("## Review findings")
+        for finding in review_findings:
+            parts.append(f"- {finding}")
     block = _brief_and_corrections_block(ctx)
     if block:
         parts.append("")
@@ -2271,16 +2227,65 @@ def _gate_check_early_asks(ctx: Any) -> Any:
     return Verdict("reloop", detail)
 
 
+def _collect_review_findings(ctx: Any) -> list[str]:
+    """Read the three review files and the verifier report, extract findings.
+
+    Uses ``create_ops.blocking_findings`` — the same parser the gates and the audit
+    already use.  A review file that exists but cannot be parsed is named in the
+    returned list rather than silently dropped.  A file that does not exist is not a
+    finding (the reviewer is optional or the branch wrote nothing).
+    """
+    from refactory_dsh.create_ops import blocking_findings
+
+    review_files = [
+        "reviews/health-check.md",
+        "reviews/code-review.md",
+        "reviews/qa.md",
+        "reviews/verification.md",
+    ]
+    all_findings: list[str] = []
+    notes: list[str] = []
+    for path in review_files:
+        if not ctx.exists(path):
+            continue
+        try:
+            text = ctx.read_text(path)
+        except Exception:
+            notes.append(f"{path}: could not read")
+            continue
+        try:
+            findings = blocking_findings(text)
+        except Exception:
+            notes.append(f"{path}: could not parse")
+            continue
+        all_findings.extend(findings)
+    # Name unparseable reviews alongside actual findings so the builder knows.
+    all_findings.extend(notes)
+    return all_findings
+
+
 def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
-    """Check failed — compose one send-back with check failures and early-asks findings.
+    """Check failed — compose one send-back with check failures, review findings
+    and early-asks findings.
 
     The combined send-back loop is bounded: when ``combined_sendback_count`` reaches 8
     (matching ``gate_check``'s ``max_iterations``), ``gate_check`` delivers a draft
     marked check-failing instead of looping further.
+
+    The message the builder receives names every failing test (from the check) and
+    every finding from the reviews and verifier (extracted by
+    ``create_ops.blocking_findings``).
     """
     from refactory_dsh.run import BuildLoopStop
 
     parts = [check_reason]
+    # Review findings
+    review_findings = _collect_review_findings(ctx)
+    if review_findings:
+        parts.append("")
+        parts.append("## Review findings")
+        for finding in review_findings:
+            parts.append(f"- {finding}")
     items = _read_early_asks_verdict(ctx)
     not_built = [item for item in items if not item["built"]]
     if not_built:

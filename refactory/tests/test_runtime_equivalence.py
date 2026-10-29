@@ -670,7 +670,10 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
     visits = observed["visits"]["order and outcome"].splitlines()
     assert "apply_corrections: completed" in visits
     assert visits.count("emit: completed") == 2, visits
-    # gate_self_check no longer exists; the self-check sends back from prepare_check
+    # The self-check sends back from prepare_check; the full check runs beside the
+    # reviews in fork_qa.  At least one reloop from prepare_check must have occurred
+    # (the first attempt's self-check finds the pinned test failing).
+    assert any("prepare_check:" in line and "reloop" in line for line in visits), visits
     assert "delivery_gate: proceed" in visits, visits
     assert any(line.startswith("fork_qa branches:") for line in visits), visits
     assert "NAME constant" in observed["artifacts"]["design.md"]
