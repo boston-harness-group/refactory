@@ -89,6 +89,12 @@ export interface WorkflowNode {
    * refuses it on the CEO-subagent route; the spine only passes it through.
    */
   workspace?: AgentWorkspace
+  /**
+   * `AgentNode`: optional tool policy. When `'none'`, the model receives no
+   * tools and the runtime captures its text reply as the node's single declared
+   * output. Absent preserves existing tool-enabled behavior.
+   */
+  tool_policy?: 'none'
   [key: string]: unknown
 }
 

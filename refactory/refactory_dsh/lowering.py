@@ -260,6 +260,12 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                     f"agent node {node.id!r} declares role {node.role!r}, which the IR "
                     f"does not have; known roles: {known}"
                 ) from exc
+            if node.tool_policy == "none" and len(node.writes) != 1:
+                raise LoweringError(
+                    f"agent node {node.id!r} declares tool_policy='none' but has "
+                    f"{len(node.writes)} write(s); a no-tools node must declare exactly "
+                    "one output for its captured reply"
+                )
             nodes[node_id] = AgentNode(
                 **common,
                 role=role,
@@ -279,6 +285,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 # Where the node works. Only a dispatched worker can give it one
                 # (`workers.lower_workflow` refuses it on the CEO-subagent route).
                 **({"workspace": dict(node.workspace)} if node.workspace is not None else {}),
+                **({"tool_policy": node.tool_policy} if node.tool_policy is not None else {}),
             )
 
     edges = [

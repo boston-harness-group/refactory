@@ -164,6 +164,7 @@ _NODE_FIELDS = frozenset(
         "outputs_only",
         "workspace",
         "system_prompt_template",
+        "tool_policy",
     }
 )
 
@@ -259,8 +260,17 @@ class Node:
     #: the runtime collects the node's output from its workspace before delivery
     #: checks it (`refactory_dsh.workspace`).
     workspace: dict[str, str] | None = None
+    #: `agent`: optional tool policy. When ``"none"``, the model receives no
+    #: tools and the runtime captures its text reply as the node's single declared
+    #: output. ``None`` (the default) preserves existing tool-enabled behavior.
+    tool_policy: str | None = None
 
     def __post_init__(self) -> None:
+        if self.tool_policy is not None and self.tool_policy != "none":
+            raise GraphError(
+                f"node {self.id!r}: unknown tool_policy {self.tool_policy!r}; "
+                "known: none (or omit for the default)"
+            )
         if self.kind not in NODE_KINDS:
             raise GraphError(f"node {self.id!r}: unknown kind {self.kind!r}")
         if not self.id:
@@ -411,6 +421,7 @@ class Node:
                if self.retry is not None else {}),
             **({"outputs_only": True} if self.outputs_only else {}),
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
+            **({"tool_policy": self.tool_policy} if self.tool_policy is not None else {}),
         }
 
     @classmethod
@@ -456,6 +467,7 @@ class Node:
             outputs_only=bool(state.get("outputs_only", False)),
             workspace=(dict(state["workspace"]) if isinstance(state.get("workspace"), dict)
                        else state.get("workspace")),
+            tool_policy=state.get("tool_policy"),
         )
 
     def with_field(self, field_name: str, value: Any) -> "Node":
@@ -463,7 +475,7 @@ class Node:
         if field_name not in _NODE_FIELDS:
             raise GraphError(f"node {self.id!r} has no field {field_name!r}")
         if field_name in ("knobs", "reads", "writes", "produces", "tools", "targets",
-                          "optional_targets", "sources", "inline_items", "feedback_keys") and isinstance(value, list):
+                          "optional_targets", "sources", "inline_items", "feedback_keys") and isinstance(value, list) and field_name != "tool_policy":
             value = tuple(value)
         return replace(self, **{field_name: value})
 

@@ -498,9 +498,7 @@ def test_claude_code_effort_medium_reaches_sdk_invocation():
 def test_claude_code_adapter_calls_sdk_boundary_with_preset_append_and_effort(tmp_path):
     """Run the patched provider against a scripted SDK query boundary, without a model call."""
     rt = Path(__file__).resolve().parent.parent.parent
-    candidates = list((rt / "node_modules/.pnpm").glob(
-        "@deepseek-ai+dsh-subagent-claude-code*/node_modules/@deepseek-ai/dsh-subagent-claude-code/lib/index.js"
-    ))
+    candidates = [(rt / "node_modules/@deepseek-ai/dsh-subagent-claude-code/lib/index.js").resolve()]
     assert len(candidates) == 1, f"Expected one installed adapter, found {candidates}"
     adapter = candidates[0]
     loader = tmp_path / "loader.mjs"

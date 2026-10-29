@@ -42,6 +42,7 @@ EXTENSION_FIELDS: frozenset[str] = frozenset({
     "subgraph_exit",
     "system_prompt",
     "workspace",
+    "tool_policy",
 })
 
 #: Frozen expected field sets per IR class.  If a field is added or removed,
@@ -52,7 +53,7 @@ FIELD_SNAPSHOT: dict[str, frozenset[str]] = {
         "id", "reads", "writes", "blocking", "resource_role",
         "role", "model", "prompt_template", "tools", "timeout",
         "max_iterations", "post_checks", "dispatch_command", "command_timeout_s",
-        "retry", "workspace", "system_prompt",
+        "retry", "workspace", "system_prompt", "tool_policy",
     }),
     "FnNode": frozenset({
         "id", "reads", "writes", "blocking", "resource_role",

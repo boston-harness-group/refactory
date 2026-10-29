@@ -101,7 +101,8 @@ def event(workdir: Path, record: dict[str, Any], state: str, summary: str) -> No
         stream.write(json.dumps(payload, separators=(',', ':')) + '\n')
 
 
-def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = 'worker') -> Path:
+def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = 'worker',
+          tool_policy: str = '') -> Path:
     identifier = 'worker-' + uuid.uuid4().hex
     path = workdir / '.refactory' / 'workers' / (identifier + '.json')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +112,14 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
               'capabilities': capabilities(route['worker_backend']),
               'usage': {'status': 'unavailable', 'tokens': None},
               'runtime': {'backend': route['worker_backend'], 'version': None}}
+    # ── no-tools receipt fields ─────────────────────────────────────────
+    if tool_policy == 'none':
+        record['requested_tool_policy'] = 'none'
+        record['enforced_tool_policy'] = 'none'
+        # This is adapter policy, not an observation of the provider request.
+        record['tool_observation_available'] = False
+        record['tools_permitted'] = []
+        record['tool_policy_source'] = 'configured-adapter-policy'
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
     return path
@@ -193,7 +202,7 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
                 workspace_root: Path | None = None, tool_home: Path | None = None,
-                system_prompt: str = "") -> None:
+                system_prompt: str = "", tool_policy: str = "") -> None:
     """Compose installed DSH services, never a parallel agent wire protocol.
 
     ``workspace_root`` confines the node's tools to its workspace (`permission_patch`).
@@ -221,6 +230,10 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 {'id': 'tool-bash', 'config': {
                     'enableRunInBackground': False, 'promoteOnTimeout': False}},
             ])
+    # ── no-tools enforcement ─────────────────────────────────────────────
+    if tool_policy == "none" and route.get('worker_backend', 'dsh') == 'dsh':
+        plugin = Path(__file__).with_name('no_tools_plugin.mjs')
+        rows.append({'insert': [{'id': 'refactory-no-tools', 'name': str(plugin)}]})
     rows.extend(provider_rows(route, provider_config))
     inner_backend = route['worker_backend']
     if inner_backend == 'openshell':
@@ -283,6 +296,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if not isinstance(node, AgentNode):
             continue
         selected = client.for_node(name, role=node.role.value)
+        if node.tool_policy == "none" and node.tools:
+            raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
         if node.tools:
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)
@@ -310,6 +325,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'model_context': selected_context}
         if node.system_prompt:
             payload['system_prompt'] = node.system_prompt
+        if getattr(node, 'tool_policy', None):
+            payload['tool_policy'] = node.tool_policy
         if is_optional:
             payload['optional'] = True
         retry = getattr(node, 'retry', None)

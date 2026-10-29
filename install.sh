@@ -149,6 +149,7 @@ fi
 # 2. Node side: install the pnpm workspace (the pinned harness plus the eight
 #    packages this repo owns), then build those packages' lib/ output. It depends
 #    on step 1 only through `docs:check`, which is why the Python side is first.
+bash "$HERE/scripts/check-dependency-patches.sh"
 (cd "$HERE" && pnpm install --frozen-lockfile && pnpm run build)
 
 # 3. the DSH profiles this checkout runs on. A profile is **machine state** — it

@@ -98,6 +98,28 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             feedback = fb_path.read_text(encoding='utf-8')
 
     node = spec['node_id']
+    tool_policy = spec.get('tool_policy')
+    if tool_policy is None:
+        tool_policy = ''
+    if tool_policy not in ('', 'none'):
+        raise ValueError(f'invalid tool_policy {tool_policy!r}')
+
+    # ── route refusal for no-tools ──
+    if tool_policy == 'none':
+        backend = spec['model_context'].get('worker_backend', 'dsh')
+        if backend not in ('dsh', 'claude_code'):
+            raise ValueError(
+                f"worker node {node!r} declares tool_policy='none', but the "
+                f"{backend!r} route cannot enforce it"
+            )
+        # Validate single-output cardinality before the model
+        if len(spec['writes']) != 1:
+            raise ValueError(
+                f"worker node {node!r} declares tool_policy='none' but has "
+                f"{len(spec['writes'])} write(s); a no-tools node must declare "
+                "exactly one output for its captured reply"
+            )
+
     from refactory_dsh.nn.executor import RunContext, render
     from refactory_dsh.agent_delivery import fill_feedback
     context = RunContext(workdir, knobs=_knobs(), facts=_read_facts(workdir))
@@ -113,6 +135,14 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # The node's own role, as the walker's session records it; a spec from before the
     # role was written keeps the generic one.
     client = DshModelClient(**spec['model_context']).for_node(node, role=spec.get('role', 'worker'))
+    if tool_policy == 'none':
+        if not callable(getattr(client, 'with_tool_policy', None)):
+            raise ValueError(
+                f"worker node {node!r} declares tool_policy='none' but the model "
+                "client does not support with_tool_policy"
+            )
+    if callable(getattr(client, 'with_tool_policy', None)):
+        client = client.with_tool_policy(tool_policy)
     # A node that declares a workspace works there (`workspace.py`): prepared before the
     # delivery bracket opens, so the contract can name it, and collected into the node's
     # outputs before the bracket closes, so delivery checks what the workspace produced.
@@ -142,12 +172,15 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             return attempt.complete(sent, workdir=workdir, system=system)
         return workspaces.ask(place, attempt, sent, workdir=workdir, system=system)
 
+    _capture_final = client.route()["worker_backend"] == "dsh"
+    if tool_policy == "none":
+        _capture_final = True
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback),
         writes=spec['writes'], reads=spec['reads'], client=client, ask=ask,
-        capture_final=client.route()["worker_backend"] == "dsh", rule=spec.get('retry'),
+        capture_final=_capture_final, rule=spec.get('retry'),
         timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None),
-        workspace=dispatch_workspace)
+        workspace=dispatch_workspace, tool_policy=tool_policy)
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():

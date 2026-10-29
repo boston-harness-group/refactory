@@ -176,6 +176,7 @@ def deliver(
     timeout_s: int | None,
     budget: Any = None,
     workspace: Callable[[bool], AbstractContextManager[Any]] | None = None,
+    tool_policy: str = "",
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
 
@@ -207,7 +208,8 @@ def deliver(
             with workspace(index > 0) if workspace is not None else nullcontext(None) as place:
                 delivery = begin(workdir, node, prompt, list(writes), reads=list(reads),
                                  model_context=_context(attempt_client),
-                                 **({"workspace": place.describe()} if place is not None else {}))
+                                 **({"workspace": place.describe()} if place is not None else {}),
+                                 tool_policy=tool_policy)
                 started = time.monotonic()
                 output = ask(attempt_client, delivery["prompt"], place)
                 if place is not None:
