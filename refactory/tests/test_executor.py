@@ -153,6 +153,29 @@ def test_a_prompt_with_stray_braces_is_left_alone(tmp_path):
     assert model.prompts[0][1].endswith('json: {"a": 1}, knob 1')
 
 
+def test_a_prompt_template_with_conditionals_renders_the_active_branch(tmp_path):
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "ask", "agent",
+        prompt_template=(
+            "{% if style == 'verbose' %}Explain in detail. "
+            "{% elif style == 'brief' %}Be brief. "
+            "{% else %}Answer. {% endif %}"
+            "Question: {{question}}"
+        ),
+        writes=("answer.txt",), knobs=("style",),
+    ))
+    for style, expected in (
+        ("verbose", "Explain in detail. Question: what?"),
+        ("brief", "Be brief. Question: what?"),
+        ("direct", "Answer. Question: what?"),
+    ):
+        model = FakeModel()
+        result = nn.execute(graph, tmp_path, knobs={"style": style}, facts={"question": "what?"}, model=model)
+        assert result.exit_ok, result.error
+        assert model.prompts[0][1].endswith(expected), f"{style}: {model.prompts[0][1]!r}"
+
+
 def test_a_path_outside_the_work_directory_is_refused(tmp_path):
     ctx = nn.RunContext(tmp_path)
     for name in ("../escape.json", "/etc/passwd"):

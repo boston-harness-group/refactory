@@ -304,7 +304,7 @@ class Verdict(str):
 
 
 def render(template: str, ctx: RunContext) -> str:
-    """Fill ``{{name}}`` from the run's knobs and facts.
+    """Fill ``{{name}}`` and evaluate ``{% if/elif/else/endif %}`` blocks.
 
     Deliberately not :meth:`str.format`: a prompt is prose full of braces, and a
     single stray one must not be able to make an agent node unrunnable.
@@ -319,7 +319,73 @@ def render(template: str, ctx: RunContext) -> str:
             return match.group(0)
         return str(values[key])
 
+    template = _render_conditionals(template, values)
     return re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", replace, template)
+
+
+def _eval_condition(expr: str, values: dict[str, Any]) -> bool:
+    """Evaluate a simple conditional expression against *values*.
+
+    Supports ``name == 'literal'``, ``name != 'literal'``, and bare ``name``
+    (truthy check).  Anything else evaluates to ``False`` so the template
+    degrades to the ``{% else %}`` branch rather than crashing a run.
+    """
+    import re
+
+    expr = expr.strip()
+
+    m = re.match(
+        r"([A-Za-z_]\w*)\s*(==|!=)\s*['\"]([^'\"]*)['\"]$", expr,
+    )
+    if m:
+        var, op, lit = m.group(1), m.group(2), m.group(3)
+        val = str(values.get(var, ""))
+        return (val == lit) if op == "==" else (val != lit)
+
+    m = re.match(r"([A-Za-z_]\w*)$", expr)
+    if m:
+        return bool(values.get(m.group(1)))
+
+    return False
+
+
+def _render_conditionals(template: str, values: dict[str, Any]) -> str:
+    """Process ``{% if %}`` / ``{% elif %}`` / ``{% else %}`` / ``{% endif %}``."""
+    import re
+
+    pattern = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}")
+
+    result: list[str] = []
+    # Each frame: (emitting: is the current branch active, settled: has any
+    # branch in this if/elif/else chain already been taken).
+    stack: list[list[bool]] = []
+    pos = 0
+
+    def _emitting() -> bool:
+        return all(frame[0] for frame in stack)
+
+    for m in pattern.finditer(template):
+        tag, expr = m.group(1), m.group(2).strip()
+
+        if _emitting():
+            result.append(template[pos:m.start()])
+        pos = m.end()
+
+        if tag == "if":
+            cond = _eval_condition(expr, values)
+            stack.append([cond, cond])
+        elif tag == "elif" and stack:
+            settled = stack[-1][1]
+            cond = not settled and _eval_condition(expr, values)
+            stack[-1] = [cond, settled or cond]
+        elif tag == "else" and stack:
+            stack[-1] = [not stack[-1][1], True]
+        elif tag == "endif" and stack:
+            stack.pop()
+
+    if _emitting():
+        result.append(template[pos:])
+    return "".join(result)
 
 
 #: The file a data node's current item is written to, for the pass that reads it.
