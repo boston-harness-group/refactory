@@ -1131,9 +1131,10 @@ def check_package(
 
     shared_project = project_for_nodes() if project_override else None
     project = project_override or project_for_nodes()
-    registry.install_workspace(project)
     if shared_project:
-        registry.install_workspace(shared_project)
+        registry.install_workspace(shared_project, project_override=project)
+    else:
+        registry.install_workspace(project)
     root = registry.workspace_root(project) / name
     if not root.is_dir():
         return [f"no directory at {root}"]

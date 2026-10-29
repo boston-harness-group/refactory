@@ -741,7 +741,7 @@ def verify_sandboxed(
         "from refactory_dsh import registry\n"
         "from refactory_dsh.nn import validate_state\n"
         # When a shared project is given alongside a staging project, install
-        # the shared workspace first (appended) and the staging workspace at
+        # the shared workspace first and the staging workspace at
         # position 0 so the staged package wins for its own name while every
         # other workspace package still resolves.
         f"_shared = {_shared_str!r}\n"
