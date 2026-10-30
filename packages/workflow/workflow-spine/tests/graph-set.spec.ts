@@ -68,7 +68,7 @@ describe('designGraphRefineLightRelooped', () => {
       expect(order.slice(0, 3)).toEqual(['prepare', 'route_refine_design', 'design_doc'])
       expect(second).toBeGreaterThan(first)
       expect(order.slice(first + 1, second)).toEqual(
-        ['synthesize_strategy', 'design_doc', 'check_design_claims', 'gate_design_review'])
+        ['classify_reloop', 'scope_reloop', 'synthesize_strategy', 'design_doc', 'check_design_claims', 'gate_design_review'])
       for (const skipped of research) expect(order).not.toContain(skipped)
     })
   })

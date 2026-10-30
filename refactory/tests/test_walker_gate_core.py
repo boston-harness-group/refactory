@@ -56,6 +56,7 @@ POST_GATE_PROCEED = [
 ]
 
 POST_GATE_RELOOP = [
+    '{"scope": "approach", "reason": "probe reloop"}',  # classify_reloop
     "one plan",
     DESIGN_DOC_ANSWER,
 ]

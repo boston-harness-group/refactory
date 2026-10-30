@@ -419,7 +419,8 @@ class DesignMode(Mode):
                       "deliverable_kind", "review_instructions", "verification_methods",
                       *repo_change.produces(), "delivery", "delivery_plan",
                       "has_pitfalls_step", "pitfalls", "pitfalls_review", "builder_tests",
-                      "claims_check_feedback", "design_review_status", "refine_context"),
+                      "claims_check_feedback", "design_review_status", "refine_context",
+                      "gate_strategy_feedback", "gate_revision_instruction"),
             notes="read the brief and the command that decides whether it is done",
         ))
 
@@ -642,6 +643,8 @@ class DesignMode(Mode):
                 "{{refine_context}}"
                 "## Pitfalls\n{{pitfalls}}\n\n"
                 "## What the design checks found\n{{design_review_feedback}}\n\n"
+                "\n## Strategy gate feedback\n{{gate_strategy_feedback}}\n\n"
+                "{{gate_revision_instruction}}\n\n"
                 + _ACCEPTANCE_BASELINE
                 + "Write the design document for this artifact: every file it will "
                 "add or change, what each one does, the interfaces between them, and how the "
@@ -700,11 +703,50 @@ class DesignMode(Mode):
             produces=("design_review_feedback", "design_review_attempts_used",
                       "design_review_rewrites", "design_review_findings", "pitfall_coverage",
                       "finding_coverage", "design_review_status", "design_card",
-                      "design_review_advisory", "design_review_blocking"),
+                      "design_review_advisory", "design_review_blocking",
+                      "gate_strategy_feedback", "reloop_scope", "reloop_scope_reason",
+                      "gate_revision_instruction"),
             knobs=("design_review_attempts",),
             max_iterations=6,
             notes="reloop to design_doc only for a missing or empty ## Changes; list "
                   "everything else on the approval card; never fail the run",
+        ))
+        # ── classify + route the person's reloop at gate_strategy ──────────
+        # classify_reloop: an LLM judge that reads the person's feedback and
+        # classifies it as `document` (wording/site/test fix) or `approach`
+        # (the strategy itself needs changing).
+        graph.add(Node(
+            "classify_reloop", "agent",
+            tool_policy="none",
+            prompt_template=(
+                "The person reviewed the design and sent it back with feedback.\n"
+                "Read their feedback above.\n\n"
+                "Classify whether they want:\n"
+                "- **document**: the feedback is about wording, formatting, structure, "
+                "missing details, a site, or a test in design.md — the technical "
+                "approach itself is fine.\n"
+                "- **approach**: the feedback rejects or changes the strategy, "
+                "architecture, algorithm choice, or component boundaries.\n\n"
+                "When in doubt, choose approach.\n\n"
+                "Write exactly one JSON object with two fields:\n"
+                "```json\n"
+                '{"scope": "document" | "approach", '
+                '"reason": "one-line reason"}\n'
+                "```"
+            ),
+            writes=("reloop-scope.json",),
+            notes="classify the person's strategy-gate feedback as document or approach",
+        ))
+        # scope_reloop: a fn-gate that reads the classifier's JSON and routes
+        # to synthesize_strategy (approach) or design_doc (document).
+        graph.add(Node(
+            "scope_reloop", "gate",
+            evaluator=f"{OPS}:scope_reloop",
+            reads=("reloop-scope.json",),
+            produces=("reloop_scope", "reloop_scope_reason", "gate_strategy_feedback",
+                      "gate_revision_instruction"),
+            max_iterations=4,
+            notes="route to synthesize_strategy (approach) or design_doc (document)",
         ))
         # design-v2 puts the person's approval on the design document, after the plan
         # exists and before any code does.
@@ -1121,7 +1163,10 @@ class DesignMode(Mode):
         graph.connect("check_design_claims", "gate_design_review")
         graph.connect("gate_design_review", "design_doc", condition="reloop")
         graph.connect("gate_design_review", "gate_strategy", condition="proceed")
-        graph.connect("gate_strategy", "synthesize_strategy", condition="reloop")
+        graph.connect("gate_strategy", "classify_reloop", condition="reloop")
+        graph.connect("classify_reloop", "scope_reloop")
+        graph.connect("scope_reloop", "synthesize_strategy", condition="approach")
+        graph.connect("scope_reloop", "design_doc", condition="document")
         graph.connect("gate_strategy", "pick_corrections", condition="proceed")
         # Every send-back to the builder goes through pick_corrections, so a correction the
         # person gives after the approval is applied to design.md before the builder's next

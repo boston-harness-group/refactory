@@ -699,6 +699,10 @@ class FakeModel:
         self.cwds: list[object] = []
         self.envs: list[object] = []
 
+    def with_tool_policy(self, policy: str) -> "FakeModel":
+        """Support agent nodes with tool_policy='none' (e.g. classify_reloop)."""
+        return self
+
     def complete(self, prompt: str, *, system: str = "", workdir: object = None, cwd: object = None,
                  env: object = None, confine: bool = False) -> str:
         self.prompts.append(prompt)
