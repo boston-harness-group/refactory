@@ -619,6 +619,172 @@ def _extract_assertion_key(assertion: str) -> str:
     return assertion.strip()
 
 
+# ── Empty-emission classifier ─────────────────────────────────────────────────
+
+class EmissionDecision:
+    """The result of classifying an empty emission.
+
+    Fields:
+        case: one of ``'reuse'``, ``'specific_failure'``, or ``'stuck'``.
+        failing_tests: test IDs from the check record's failures.
+        blockers: assertion keys or correction texts.
+        detail: human-readable explanation of the decision.
+        fingerprint: a dict with ``'failures'`` and ``'corrections'`` for
+            comparison on the next empty emission.
+    """
+
+    __slots__ = ("case", "failing_tests", "blockers", "detail", "fingerprint")
+
+    def __init__(
+        self,
+        case: str,
+        failing_tests: list[str],
+        blockers: list[str],
+        detail: str,
+        fingerprint: dict[str, Any],
+    ) -> None:
+        self.case = case
+        self.failing_tests = failing_tests
+        self.blockers = blockers
+        self.detail = detail
+        self.fingerprint = fingerprint
+
+
+def classify_empty_emission(
+    check_record: dict[str, Any],
+    corrections_pending: list[str],
+    consecutive_refusals: int,
+    current_commit: str,
+    review_findings: list[str] | None = None,
+    prev_fingerprint: dict[str, Any] | None = None,
+    send_back_reason: str = "",
+    brief_asks: list[str] | None = None,
+) -> EmissionDecision:
+    """Classify an empty emission as reuse, specific_failure, or stuck.
+
+    Pure function: takes only plain dicts, lists, ints, and strings.
+    Returns an ``EmissionDecision`` with the case, details, and a fingerprint
+    the caller records as a fact for comparison on the next empty emission.
+    """
+    if review_findings is None:
+        review_findings = []
+    if brief_asks is None:
+        brief_asks = []
+
+    # ── Build fingerprint ──────────────────────────────────────────────
+    failure_pairs: list[list[str]] = []
+    for runner in check_record.get("runners", []):
+        for f in runner.get("failures", []):
+            tid = f.get("test_id", "")
+            assertion = f.get("assertion", "")
+            if tid:
+                failure_pairs.append([tid, _extract_assertion_key(assertion)])
+    failure_pairs.sort()
+    correction_ids = sorted(corrections_pending)
+    fingerprint: dict[str, Any] = {
+        "failures": failure_pairs,
+        "corrections": correction_ids,
+    }
+
+    # ── Extract test IDs and assertion keys ────────────────────────────
+    failing_tests = [pair[0] for pair in failure_pairs]
+    assertion_keys = [pair[1] for pair in failure_pairs]
+
+    # ── Case 1: reuse ──────────────────────────────────────────────────
+    # All four guards must hold simultaneously.
+    status = check_record.get("status")
+    record_commit = check_record.get("commit", "")
+    if (
+        status == "pass"
+        and not corrections_pending
+        and current_commit == record_commit
+        and current_commit  # non-empty
+        and not review_findings
+    ):
+        return EmissionDecision(
+            case="reuse",
+            failing_tests=[],
+            blockers=[],
+            detail="evidence still valid",
+            fingerprint=fingerprint,
+        )
+
+    # ── Case 3: stuck ──────────────────────────────────────────────────
+    # Requires: at least second consecutive empty emission, previous
+    # fingerprint exists, and current fingerprint matches it.
+    if (
+        consecutive_refusals >= 1
+        and prev_fingerprint is not None
+        and fingerprint == prev_fingerprint
+        and (failure_pairs or correction_ids)  # substantive content required
+    ):
+        stuck_detail_parts = [
+            "stuck: same failure on consecutive empty emissions.",
+        ]
+        if failing_tests:
+            stuck_detail_parts.append(
+                "Failing tests: " + ", ".join(failing_tests)
+            )
+        if assertion_keys:
+            stuck_detail_parts.append(
+                "Assertions: " + ", ".join(assertion_keys)
+            )
+        if correction_ids:
+            stuck_detail_parts.append(
+                "Outstanding corrections: " + ", ".join(correction_ids)
+            )
+        return EmissionDecision(
+            case="stuck",
+            failing_tests=failing_tests,
+            blockers=assertion_keys + correction_ids,
+            detail=" ".join(stuck_detail_parts),
+            fingerprint=fingerprint,
+        )
+
+    # ── Case 2: specific failure ───────────────────────────────────────
+    detail_parts: list[str] = []
+
+    # Why this dispatch was sent back
+    if send_back_reason:
+        detail_parts.append(f"Send-back reason: {send_back_reason}")
+    if review_findings:
+        detail_parts.append(
+            "Review findings: " + "; ".join(review_findings)
+        )
+
+    # Check failures
+    if failing_tests:
+        detail_parts.append(
+            "Failing tests: " + ", ".join(failing_tests)
+        )
+    if assertion_keys:
+        for tid, akey in zip(failing_tests, assertion_keys):
+            detail_parts.append(f"  {tid}: {akey}")
+
+    # Pending corrections
+    if correction_ids:
+        detail_parts.append(
+            "Pending corrections: " + ", ".join(correction_ids)
+        )
+
+    # First attempt with nothing built
+    if not detail_parts:
+        asks_text = ", ".join(brief_asks) if brief_asks else "(no asks specified)"
+        detail_parts.append(
+            "your workspace has no change and nothing has been built yet; "
+            f"the brief asks for {asks_text}"
+        )
+
+    detail = "\n".join(detail_parts)
+    return EmissionDecision(
+        case="specific_failure",
+        failing_tests=failing_tests,
+        blockers=correction_ids,
+        detail=detail,
+        fingerprint=fingerprint,
+    )
+
+
 def detect_stuck(
     prev_record: dict[str, Any],
     curr_runners: list[dict[str, Any]],

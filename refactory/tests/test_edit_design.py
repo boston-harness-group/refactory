@@ -132,17 +132,25 @@ def test_the_revision_records_what_it_came_from():
     assert "before_score" in recorded and "after_score" in recorded
 
 
-def test_a_regression_is_refused_by_default(monkeypatch):
+def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_regression"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
     monkeypatch.setattr(sandbox, "smoke", lambda identifier, *args, **kwargs: sandbox.SandboxResult(
         ok=True, payload={"exit_ok": True, "score": 5.0 if identifier == "circle_packing/adaptive" else 1.0}))
-    with pytest.raises(CreateError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
-        edit_module.edit(
-            _edit_config(
-                name=NAME, brief="count", mode="circle_packing/adaptive", attempts=1,
-                workdir=Path(".factory/edit-run"),
-            ),
-            client=FakeModel(_answers()),
-        )
+    try:
+        with pytest.raises(CreateError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
+            edit_module.edit(
+                _edit_config(
+                    name=pkg, brief="count", mode="circle_packing/adaptive", attempts=1,
+                    workdir=tmp_path / "edit-run",
+                ),
+                client=FakeModel(create_answers(pkg, good_files(pkg))),
+            )
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 def test_a_regression_can_be_intended(monkeypatch):

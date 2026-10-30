@@ -204,12 +204,55 @@ def gate_emit(ctx: Any) -> str:
     """Send an emission materialise could not apply back to emit (#330 E5).
 
     A refused emission is not a code failure, so it does not spend a repair attempt.
-    The gate's own max_iterations still bounds retries.
+    The gate's own max_iterations still bounds retries. Classifies the empty
+    emission as reuse, specific_failure, or stuck rather than unconditionally
+    retrying.
     """
     refused = repo_change.refused(ctx)
     if not refused:
         return "proceed"
-    detail = f"materialise could not apply emit.txt, so nothing was checked: {refused}"
+
+    from refactory_dsh.failfast import classify_empty_emission
+    from refactory_dsh.run import BuildLoopStop
+
+    check_record = ctx.read_json("check-record.json", {})
+    corrections_pending: list[str] = []  # fast mode has no corrections picker
+    consecutive_refusals = int(ctx.facts.get("consecutive_refusals", 0))
+    current_commit = str(ctx.facts.get("commit", ""))
+    review_findings: list[str] = []  # fast mode has no QA/overwatch/early-asks
+    prev_fingerprint = ctx.facts.get("empty_emission_fingerprint")
+    send_back_reason = ctx.facts.get("validation", "")
+    brief_asks = list(ctx.facts.get("brief", {}).get("asks", []) if isinstance(ctx.facts.get("brief"), dict) else [])
+
+    decision = classify_empty_emission(
+        check_record=check_record,
+        corrections_pending=corrections_pending,
+        consecutive_refusals=consecutive_refusals,
+        current_commit=current_commit,
+        review_findings=review_findings,
+        prev_fingerprint=prev_fingerprint,
+        send_back_reason=send_back_reason,
+        brief_asks=brief_asks,
+    )
+
+    # Record fingerprint for next comparison.
+    ctx.set_fact("empty_emission_fingerprint", decision.fingerprint)
+
+    if decision.case == "reuse":
+        # Case 1: evidence still valid — proceed to check.
+        return "proceed"
+
+    if decision.case == "stuck":
+        # Case 3: same fingerprint, no progress — stop.
+        raise BuildLoopStop(
+            f"empty emission stuck: {decision.detail}"
+        )
+
+    # Case 2: specific failure — reloop with specific feedback.
+    detail = (
+        f"materialise could not apply emit.txt, so nothing was checked: {refused}\n"
+        f"{decision.detail}"
+    )
     ctx.set_fact("repair_feedback", detail)
     return Verdict("reloop", detail)
 

@@ -1115,13 +1115,70 @@ def apply_cwd_escaped(result: Any, outcome: dict[str, Any]) -> None:
 
 
 def _refused_verdict(ctx: Any) -> Verdict | None:
-    """The reloop for an emission materialise could not apply, or None when it applied."""
+    """The reloop for an emission materialise could not apply, or None when it applied.
+
+    Classifies the empty emission as reuse (evidence still valid), specific
+    failure (outstanding check failure, correction, or review finding), or
+    stuck (same fingerprint as previous empty emission), rather than
+    unconditionally retrying.
+    """
     refused = repo_change.refused(ctx)
     if not refused:
         return None
-    # Nothing was materialised, so there is nothing to record runtime evidence about;
-    # a refused emission is not a code failure, so it does not spend an attempt.
-    detail = f"materialise could not apply emit.txt, so nothing was checked: {refused}"
+
+    from refactory_dsh.failfast import classify_empty_emission
+    from refactory_dsh.run import BuildLoopStop
+
+    # Gather classifier inputs.
+    check_record = ctx.read_json("check-record.json", {})
+    corrections_pending = unapplied_corrections(ctx.workdir, ctx.facts) or []
+    consecutive_refusals = int(ctx.facts.get("consecutive_refusals", 0))
+    current_commit = str(ctx.facts.get("commit", ""))
+
+    # Collect review findings from facts.
+    review_findings: list[str] = []
+    for key in ("validation", "qa_gate", "overwatch_review"):
+        val = ctx.facts.get(key, "")
+        if val:
+            review_findings.append(f"{key}: {val}")
+    for item in ctx.facts.get("early_asks_not_built", []):
+        if item:
+            review_findings.append(f"early_asks: {item}")
+
+    prev_fingerprint = ctx.facts.get("empty_emission_fingerprint")
+    send_back_reason = ctx.facts.get("validation", "")
+    brief_asks = list(ctx.facts.get("brief", {}).get("asks", []) if isinstance(ctx.facts.get("brief"), dict) else [])
+
+    decision = classify_empty_emission(
+        check_record=check_record,
+        corrections_pending=corrections_pending,
+        consecutive_refusals=consecutive_refusals,
+        current_commit=current_commit,
+        review_findings=review_findings,
+        prev_fingerprint=prev_fingerprint,
+        send_back_reason=send_back_reason,
+        brief_asks=brief_asks,
+    )
+
+    # Record fingerprint for next comparison.
+    ctx.set_fact("empty_emission_fingerprint", decision.fingerprint)
+
+    if decision.case == "reuse":
+        # Case 1: evidence still valid — do NOT overwrite check-record.json.
+        ctx.set_fact("validation", "emission empty: evidence still valid, continuing")
+        return Verdict("proceed")
+
+    if decision.case == "stuck":
+        # Case 3: same fingerprint, no progress — stop with a blocker.
+        raise BuildLoopStop(
+            f"empty emission stuck: {decision.detail}"
+        )
+
+    # Case 2: specific failure — return with enriched detail.
+    detail = (
+        f"materialise could not apply emit.txt, so nothing was checked: {refused}\n"
+        f"{decision.detail}"
+    )
     ctx.write_text("check.txt", detail + "\n")
     ctx.set_fact("validation", detail)
     ctx.write_json("check-record.json", {

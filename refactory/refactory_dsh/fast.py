@@ -411,7 +411,7 @@ class DesignFastMode(DesignMode):
         graph.add(Node(
             "gate_emit", "gate", evaluator=f"{OPS}:gate_emit", resource_role="work",
             knobs=("repair_attempts",), writes=("fast-report.json", "repair.txt"),
-            produces=("repair_feedback", "repairs_used"), max_iterations=4,
+            produces=("repair_feedback", "repairs_used", "empty_emission_fingerprint"), max_iterations=4,
             notes="send an emission materialise could not apply back to emit, within the repair bound",
         ))
         _qa_nodes(graph, artifact=True, design=True)
