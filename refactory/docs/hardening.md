@@ -53,9 +53,11 @@ Design mode's builder (`emit`, in design and design_fast) works in a clone of th
 last attempt and collects its diff: it edits the repository there, runs the tests its
 change touches (the test files it changed or added, and the tests importing the modules
 it changed) and the brief's own example or CLI path as often as it needs, and stops. Its
-prompt says the check runs the full suite after it answers, so it does not run the full
-suite itself: in the live trial (dm-149) its full-suite runs took 11.6 of its 27
-minutes, and the self-check and the check ran the suite again. Materialise,
+prompt gives it the targeted command the last self-check ran (the check's options kept) and
+the seconds that self-check measured for it, and says the full check runs after it answers,
+so it does not run the whole suite itself: in the live trial (dm-149) its full-suite runs
+took 11.6 of its 27 minutes, and in design runs A1 and A2 its whole-suite runs under its own
+`timeout` were killed with no output, up to nine times a session. Materialise,
 the check, the reviews and the target guard read the derived `emit.txt` as they read
 an emitted one. create, edit and fast-create keep the emission-only builder.
 
