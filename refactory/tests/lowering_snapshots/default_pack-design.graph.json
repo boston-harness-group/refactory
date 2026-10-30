@@ -159,7 +159,6 @@
       "id": "design_doc",
       "reads": [
         "brief.json",
-        "design.md",
         "pitfalls.json",
         "research/",
         "reviews/design-review-feedback.txt",

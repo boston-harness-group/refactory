@@ -677,7 +677,7 @@ class DesignMode(Mode):
                 "\n\n## Claims check feedback\n{{claims_check_feedback}}"
             ),
             reads=("brief.json", "strategy.json", "reviews/design-review-feedback.txt",
-                   "pitfalls.json", "research/", "strategy/", "design.md"),
+                   "pitfalls.json", "research/", "strategy/"),
             writes=("design.md",),
             produces=("design",),
             notes="write the design document the code is written from",

@@ -547,8 +547,8 @@ def scope_reloop(ctx: Any) -> Any:
     DEFAULT = "approach"
     DEFAULT_REASON = "unclear classification — defaulting to approach"
     REVISE_ONLY = (
-        "If design.md already exists and you received gate feedback above, "
-        "revise only what the feedback asks for; produce the full document. "
+        "design.md in your working directory is the document to revise: read it first. "
+        "Revise only what the feedback above asks for; produce the full document. "
         "Do not reconsider the strategy."
     )
 
