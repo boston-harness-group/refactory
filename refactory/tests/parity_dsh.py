@@ -110,12 +110,32 @@ def _intent_audit(cwd: Path) -> None:
                "evidence": [{"path": "authoring-evidence.json",
                              "detail": "scripted judge inspected the executed result"}]}
         if item.get("kind") in ("correction", "constraint"):
-            row["clauses"] = [{"clause": item.get("text", ""), "sites": [],
-                               "evidence": [{"path": "authoring-evidence.json",
-                                             "detail": "the correction is built"}]}]
+            row["clauses"] = [{"clause": item.get("text", ""), "sites": [
+                {"site": "tool.py:2", "tests": ["tests/test_pin.py::test_pin"],
+                 "scope": "connected"}],
+                "evidence": [{"path": "tool.py", "detail": "the correction changes the built module"}]}]
         rows.append(row)
     (cwd / "intent-audit.json").write_text(json.dumps({"requirements": rows}))
 
+
+
+def _correction_overwatch(cwd: Path) -> None:
+    run = _run_dir(cwd)
+    baseline = json.loads((run / "authoring-evidence.json").read_text())
+    audit = json.loads((run / "correction-audit.json").read_text())
+    by_id = {item.get("id"): item for item in audit if isinstance(item, dict)}
+    corrections = []
+    for requirement in baseline.get("requirements", []):
+        if requirement.get("kind") not in ("correction", "constraint"):
+            continue
+        item = by_id.get(requirement["id"], {})
+        met = item.get("status") in ("pass", "advisory")
+        corrections.append({"id": requirement["id"], "met": met,
+                            "evidence": f"correction-audit.json reports {item.get('status', 'missing')}"})
+    verdict = "pass" if all(item["met"] for item in corrections) else "redo"
+    (cwd / "overwatch-verdict.json").write_text(
+        json.dumps({"verdict": verdict, "must_fix": [], "follow_ups": [],
+                    "corrections": corrections}))
 
 def _repo_questions(cwd: Path, answer: str) -> str:
     found = _run_dir(cwd) / "changed-functions.json"
@@ -184,9 +204,14 @@ def main(argv: list[str]) -> int:
         fcntl.flock(lock, fcntl.LOCK_EX)
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         visit = sum(1 for call in calls if call["node"] == node)
+        record = {"node": node, "visit": visit, "cwd": str(cwd), "prompt": prompt, "route": route}
+        if node == "emit":
+            receipt_path = Path(os.environ.get("REFACTORY_WORKER_RECEIPT", ""))
+            run_dir = receipt_path.parents[2] if len(receipt_path.parents) > 2 else _run_dir(cwd)
+            design = run_dir / "design.md"
+            record["available_design"] = design.read_text() if design.exists() else None
         with open(log, "a") as out:
-            out.write(json.dumps({"node": node, "visit": visit, "cwd": str(cwd), "prompt": prompt,
-                                  "route": route}) + "\n")
+            out.write(json.dumps(record) + "\n")
     answers = script.get(node)
     if not answers:
         print(f"parity_dsh: no scripted answer for node {node!r}", file=sys.stderr)
@@ -215,6 +240,8 @@ def main(argv: list[str]) -> int:
         text = _early_asks(prompt)
     elif judge == "intent_audit":
         _intent_audit(cwd)
+    elif judge == "correction_overwatch":
+        _correction_overwatch(cwd)
     if answer.get("hold_s"):
         # A completion that takes a while, so concurrent sessions overlap visibly.
         time.sleep(float(answer["hold_s"]))

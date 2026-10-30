@@ -62,6 +62,7 @@ variants). The refusal names which argument was empty.
 | `--model <id>` | the model this run uses, e.g. `deepseek-v4-pro`. |
 | `--approve <gate>=<value>` | answer a gate up front, e.g. `gate_strategy=proceed`, for a run with nobody at it; `--verdict` is an alias. In live mode, a user gate is shown at the terminal with its prompt and accepted verdicts; pick one and optionally add a multi-line note (end with a line containing only `.`) that is recorded as steering. Without `--approve`, run it and answer the gate when it reaches you. `modes` marks a person's gate `(user)`. |
 | `--headless` | run without a conversation: one task, one report, then exit, for scripts and CI. When a headless run reaches a user gate, it prints the exact `refactory steer --run <dir> --verdict <gate>=<value>` and `refactory graph-control resume --run <dir>` commands. Without it the run is live — step progress prints as it happens during each turn, and a line you type between turns reaches the CEO. |
+| `--omit-steering` | omit the steering ledger from agent prompts (benchmark runs). Gate routing, correction audits and overwatch enforcement still apply. Default: steering included. |
 | `--timeout <seconds>` | bound the interactive graph process, including authoring; 0 supplies no separate wait limit. An explicit shared elapsed allocation can impose a shorter deadline. The walker's mains, which never wait at a gate, refuse it and name `--max-elapsed-s`. |
 
 The walker's mains (`python -m refactory_dsh.design | create | edit`, below) take these same

@@ -85,6 +85,7 @@ class Run:
             True,
             self.loop.config.frozen,
             self.loop._tried(),  # noqa: SLF001 - the harness owns the population
+            seed_state=getattr(self.loop, '_original_seed_state', None),
         )
         if isinstance(outcome, list):
             self.loop.rejections.append(

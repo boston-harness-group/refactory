@@ -70,6 +70,42 @@ def _reason_priority(code: str) -> tuple[int, str]:
     return (2, code)
 
 
+def _tool_policy_escalated(seed_state: dict[str, Any], candidate_state: dict[str, Any]) -> list[str]:
+    """Check whether any node in the candidate escalates a seed's no-tools policy.
+
+    Anchored to the actual persisted original seed: a seed node with
+    ``tool_policy='none'`` must keep that policy in every candidate, and no
+    candidate may add tools to such a node. New node IDs (present only in the
+    candidate, not in the seed) are allowed tools -- they represent genuinely
+    new architecture. Returns a list of rejection reasons, or an empty list.
+    """
+    seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
+    candidate_nodes = (candidate_state.get("graph") or {}).get("nodes") or {}
+    reasons: list[str] = []
+    for node_id, seed_node in seed_nodes.items():
+        seed_policy = seed_node.get("tool_policy")
+        if seed_policy != "none":
+            continue
+        candidate_node = candidate_nodes.get(node_id)
+        if candidate_node is None:
+            # The seed node was deleted -- that is allowed (the node is gone).
+            # But if it was re-added under a different policy, we catch that below.
+            continue
+        candidate_policy = candidate_node.get("tool_policy")
+        if candidate_policy != "none":
+            reasons.append(
+                f"E-tool-policy-escalation: node {node_id!r} seed declares "
+                f"tool_policy='none'; candidate removes it or changes it"
+            )
+        candidate_tools = candidate_node.get("tools") or []
+        if candidate_tools:
+            reasons.append(
+                f"E-tool-policy-escalation: node {node_id!r} seed declares "
+                f"tool_policy='none'; candidate adds tools {candidate_tools!r}"
+            )
+    return reasons
+
+
 def candidate_id(state: dict[str, Any]) -> str:
     """A stable id for a state, so two candidates that are the same state agree.
 
@@ -532,6 +568,7 @@ class Optimizer:
         resolve_calls: bool,
         frozen: Sequence[str] | None = None,
         seen: Sequence[str] | None = None,
+        seed_state: dict[str, Any] | None = None,
     ) -> Candidate | list[str]:
         """Apply and validate one proposal: a candidate, or the reasons it failed.
 
@@ -559,6 +596,11 @@ class Optimizer:
             return [f"{exc.code}: {exc}"]
         except Exception as exc:  # an operator bug is reported, not swallowed
             return [f"E-internal: {type(exc).__name__}: {exc}"]
+
+        # ── tool-policy escalation check (anchored to the original seed) ──
+        escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
+        if escalation:
+            return escalation
 
         fixed = frozen | {name for name, value in parent.state.get("knobs", {}).items()
                           if (value.get("spec") or {}).get("frozen")}

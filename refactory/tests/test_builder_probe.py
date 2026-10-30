@@ -408,7 +408,7 @@ def test_probe_via_worker_node_execute_design(tmp_path, monkeypatch):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             captured_prompt.append(prompt)
             # Write emit.txt
             p = Path(workdir) if workdir else run
@@ -478,7 +478,7 @@ def test_probe_via_worker_node_execute_design_fast(tmp_path, monkeypatch):
             pass
         def for_node(self, node, role="worker"):
             return self
-        def complete(self, prompt, workdir=None):
+        def complete(self, prompt, *, system="", workdir=None):
             captured_prompt.append(prompt)
             p = Path(workdir) if workdir else run
             (p / "emit.txt").write_text("===FILE: answer.py===\nprint(1)\n")

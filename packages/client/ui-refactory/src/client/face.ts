@@ -27,7 +27,10 @@ import type { RefactoryConsoleRemote, RefactoryNoteKind, RefactoryPackageChoice 
 import type { BoundActions } from '@deepseek-ai/dsh-client-store'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { RefactoryActivity, RefactoryRunStatus } from '@deepseek-ai/dsh-refactory-console/types'
 import type {
+  RefactoryActivityLevel,
+  RefactoryActivityPage,
   RefactoryKnobSetting,
   RefactorySettingName,
   RefactorySettings,
@@ -131,6 +134,25 @@ export interface RefactoryControlAct {
   readonly as?: string
 }
 
+/** The console's default page of journal records: what one read may carry. */
+const ACTIVITY_PAGE = 200
+
+/**
+ * How long the live view waits for the first status read to name the stream's
+ * starting cursor before opening the stream from 0 instead. It matches the budget
+ * the previous fixed tick loop implied (200 × 5 ms), but it bounds only a read
+ * that never settles: a read that answers settles the anchor immediately.
+ */
+const ANCHOR_WAIT_MS = 1000
+
+/** One range of a run's journal to read, as the panel asks for it. */
+export interface RefactoryActivityWindow {
+  /** Journal index the page starts at; `0` when `before` is given. */
+  readonly after?: number
+  /** Journal index the page ends at: a backwards read for "Load earlier activity". */
+  readonly before?: number
+}
+
 /** The picker's injected business face, as the body receives it. */
 export interface RefactoryInjected {
   readonly listRuns?: (signal: AbortSignal) => Promise<readonly import('@deepseek-ai/dsh-refactory-console/types').RefactoryRunSummary[]>
@@ -206,14 +228,60 @@ export interface RefactoryInjected {
   ) => void
   /**
    * Read one status frame for a run.
+   *
+   * `window` is the journal range this read asks for, and it is separate from
+   * `after` because that one indexes the progress file. It only travels when the
+   * face was given a window reader: the Remote `status` method takes no journal
+   * index, so a caller that omits it gets exactly the frame that method was
+   * written to answer with. Either way the frame's `activity.events` is spliced
+   * onto the held history by its own `after`.
    * @param tabId - the tab being drawn.
    * @param run - the run id or directory.
    * @param after - how many progress lines this reader has already seen.
    * @param signal - the tab record's lifetime.
+   * @param window - the journal range to read, when the face reads journal ranges.
    */
-  readonly refresh: (tabId: TabId, run: string, after: number, signal: AbortSignal) => void
+  readonly refresh: (
+    tabId: TabId,
+    run: string,
+    after: number,
+    signal: AbortSignal,
+    window?: RefactoryActivityWindow,
+  ) => void
   /** Attach an existing run by the exact directory the CEO or terminal reported. */
   readonly watch: (tabId: TabId, run: string, signal: AbortSignal) => void
+  /**
+   * Choose how much journalled history the tab draws, and read the whole of it
+   * when the choice is `verbose`.
+   *
+   * The fetch is part of the gesture rather than of the renderer: exhausting the
+   * journal is a sequence of Remote reads, so a person switching level is what
+   * starts it, and every page it lands is the store's write (R-2.2, F-4).
+   * @param tabId - the tab being drawn.
+   * @param run - the run being read.
+   * @param level - the level to draw at.
+   * @param signal - the tab record's lifetime.
+   */
+  readonly setActivityLevel: (
+    tabId: TabId,
+    run: string,
+    level: RefactoryActivityLevel,
+    signal: AbortSignal,
+  ) => void
+  /**
+   * Ask for the page before the oldest record the tab holds.
+   * @param tabId - the tab being drawn.
+   * @param run - the run being read.
+   * @param oldest - the journal index the held history begins at, as drawn.
+   * @param signal - the tab record's lifetime.
+   */
+  readonly loadEarlierActivity: (tabId: TabId, run: string, oldest: number, signal: AbortSignal) => void
+  /**
+   * Remember the row the history window is drawn from.
+   * @param tabId - the tab being drawn.
+   * @param row - the row index of the first drawn record.
+   */
+  readonly scrollActivity: (tabId: TabId, row: number) => void
   /**
    * Read the watched run's intent ledger and the gates it is stopped at.
    * @param tabId - the tab being drawn.
@@ -328,8 +396,20 @@ export function refactoryFace(
     // A candidate read and a ledger read are two reads of the same tab and must not
     // retire each other; one control act refreshes both.
     const candidateGenerations = new Map<TabId, number>()
-    // Monotonic across bucket lifetimes: a late response from a closed tab must
-    // not match the first request when that id is used again.
+    /**
+     * The tab's own journal bookkeeping, alongside the store.
+     *
+     * Only genuinely transient facts live here: the highest cursor already asked
+     * for (so a poll and a page cannot ask for the same index twice), whether a
+     * verbose pass is in flight, and which run the level gesture asked to exhaust
+     * — because a poll must not start fetching a whole journal nobody asked for.
+     * Everything a person sees is written to the store instead.
+     */
+    const heldThrough = new Map<TabId, number>()
+    const pageGenerations = new Map<TabId, number>()
+    const exhausting = new Map<TabId, string>()
+    /** Monotonic across bucket lifetimes: a late response from a closed tab must
+     * not match the first request when that id is used again. */
     let sequence = 0
     const nextGeneration = (generations: Map<TabId, number>, tabId: TabId): number => {
       const generation = ++sequence
@@ -361,15 +441,133 @@ export function refactoryFace(
         done?.()
       })
     }
-    /** Read one run's status into the store. */
-    const readStatus = (tabId: TabId, run: string, after: number, signal: AbortSignal): void => {
+    /**
+     * One answer's journal window, as the store's page shape.
+     *
+     * A console that does not page is reported as one unpaged answer covering
+     * index 0: no `after`/`total`/`has_more`, or `paged: false` because the call
+     * only succeeded by dropping the paging options an older console refuses.
+     * Saying so is what keeps the panel from showing a page as if it were the
+     * whole journal (R-6.3, F-8).
+     * @param activity - the answer's `activity` member, or nothing.
+     * @returns the page, or `null` when the answer carried no journal at all.
+     */
+    const pageOf = (activity: RefactoryActivity | null | undefined): RefactoryActivityPage | null => {
+      if (activity === null || activity === undefined) return null
+      const paged = activity.paged !== false
+        && typeof activity.after === 'number' && typeof activity.total === 'number'
+        && typeof activity.has_more === 'boolean'
+      return {
+        after: paged ? activity.after as number : 0,
+        cursor: paged ? activity.cursor : activity.events.length,
+        events: activity.events,
+        total: paged ? activity.total as number : activity.events.length,
+        paged,
+        run: typeof activity.run_id === 'string' && activity.run_id !== '' ? activity.run_id : null,
+      }
+    }
+    /**
+     * Give one answer's journal window to the store, spliced where it belongs.
+     *
+     * A frame whose `activity.run_id` names another run is dropped rather than
+     * spliced: two runs' journal indices do not mean the same thing, so a foreign
+     * frame is a gap the run switch already refetched page 0 for (R-4.5).
+     * @param tabId - the tab being drawn.
+     * @param run - the run the answer belongs to.
+     * @param answer - the status answer whose page is to be taken.
+     * @param earlier - the answer was asked for the page before the oldest held record.
+     */
+    const takePage = (
+      tabId: TabId,
+      run: string,
+      answer: RefactoryRunStatus,
+      earlier: boolean,
+    ): void => {
+      const page = pageOf(answer.activity)
+      if (page === null) return
+      if (page.run !== null && page.run !== run && page.run !== answer.root) return
+      if (earlier) {
+        // A backwards page extends the history towards 0; it must not move the
+        // forward cursor, which is where a poll continues from.
+        actions.activityEarlier(tabId, run, page)
+        return
+      }
+      // The forward cursor follows the forward page only: `after + len` is where
+      // the next forward read continues (`cursor` may be ahead of it when the
+      // console counted records the page did not carry).
+      heldThrough.set(tabId, Math.max(heldThrough.get(tabId) ?? 0, page.after + page.events.length))
+      actions.activityPage(tabId, run, page)
+    }
+    /**
+     * Follow a verbose pass until an answer reports `has_more: false`.
+     *
+     * Pages are fetched one at a time and spliced by their own `after`, so the
+     * pass resumes from the held cursor instead of restarting: a tab switch or a
+     * run switch keeps the records already fetched, and the next gesture
+     * continues from there (R-2.3, R-4.4). The answer that says `has_more: false`
+     * — and the `total` it carries — is the completeness evidence the store's
+     * `complete` flag records.
+     * @param tabId - the tab whose level asked for the whole history.
+     * @param run - the run to exhaust.
+     * @param from - the journal index the pass continues at.
+     * @param signal - the tab record's lifetime.
+     */
+    const exhaust = (tabId: TabId, run: string, from: number, signal: AbortSignal): void => {
+      if (signal.aborted || exhausting.has(tabId)) return
+      exhausting.set(tabId, run)
+      const generation = nextGeneration(pageGenerations, tabId)
+      actions.activityPageLoading(tabId, run)
+      settle(pageGenerations, tabId, generation, remote.refactoryConsole.status(run, from, signal), (frame) => {
+        const page = pageOf(frame.activity)
+        if (page === null) return
+        takePage(tabId, run, frame, false)
+        if (exhausting.get(tabId) !== run || !page.paged) return
+        // One page per settlement, so each arrival re-renders the window rather
+        // than the history and the tab stays answerable while it pages (R-2.5).
+        if (frame.activity?.has_more === true) {
+          exhausting.delete(tabId)
+          exhaust(tabId, run, page.cursor, signal)
+        } else exhausting.delete(tabId)
+      }, undefined, (failure) => {
+        exhausting.delete(tabId)
+        actions.activityPageFailed(tabId, run, failure.message)
+      })
+    }
+    /**
+     * Read one run's status, and offer its journal window to the held history.
+     *
+     * `window` asks for a particular journal range; without one the read is the
+     * plain status call the service's method was written for. Either way the
+     * answer's page is spliced rather than the frame's summary being trusted to
+     * describe the history.
+     * @param tabId - the tab being drawn.
+     * @param run - the run id or directory.
+     * @param after - how many progress lines this reader has already seen.
+     * @param window - the journal range to read, or none for the method's default.
+     * @param signal - the tab record's lifetime.
+     */
+    const readStatus = (
+      tabId: TabId,
+      run: string,
+      after: number,
+      window: RefactoryActivityWindow | undefined,
+      signal: AbortSignal,
+      onFrame?: (frame: RefactoryRunStatus) => void,
+    ): void => {
       if (signal.aborted) return
       const generation = nextGeneration(statusGenerations, tabId)
       actions.frameLoading(tabId)
-      settle(statusGenerations, tabId, generation, remote.refactoryConsole.status(run, after, signal), (frame) => {
+      const index = window?.after ?? window?.before
+      const call = index === undefined
+        ? remote.refactoryConsole.status(run, after, signal)
+        : remote.refactoryConsole.status(run, index, signal)
+      settle(statusGenerations, tabId, generation, call, (frame) => {
         actions.framed(tabId, frame)
-      }, undefined, (failure) => { actions.frameFailed(tabId, failure.message) })
+        takePage(tabId, run, frame, false)
+        onFrame?.(frame)
+      }, undefined, (failure) => { actions.frameFailed(tabId, failure.message, failure.code, failure.details) })
     }
+
     /** Read one run's intent ledger and gates into the store. */
     const loadSteering = (tabId: TabId, run: string, signal: AbortSignal): void => {
       if (signal.aborted) return
@@ -395,8 +593,27 @@ export function refactoryFace(
       nextGeneration(candidateGenerations, tabId)
       nextGeneration(stopGenerations, tabId)
       watchers.get(tabId)?.abort()
+      // R-4.1/R-4.4: attach is the one read that starts at 0, in both cursors,
+      // and the held history it drops is the previous run's (the store does that
+      // in `watching`), so no page of one run is ever spliced onto another.
+      heldThrough.delete(tabId)
+      exhausting.delete(tabId)
       actions.watching(tabId, run.trim())
-      readStatus(tabId, run.trim(), 0, signal)
+      // Where the stream may start: the first answer's journal cursor, read
+      // below. The stream's cursor is the service's own and only advances, so
+      // starting it at 0 would make every poll re-read the journal from the top
+      // (F-2) — the read is therefore awaited before the stream opens.
+      //
+      // The wait is a promise the answer settles, not a poll of a shared cell:
+      // a fixed 5 ms × 200 tick loop gave a slow Remote read a 1 s budget and then
+      // silently fell back to `from = 0`, which re-reads the whole journal. Here
+      // the first settled answer wins, and `ANCHOR_WAIT_MS` only bounds a read
+      // that never settles at all.
+      let settleAnchor: (through: number) => void = () => {}
+      const anchor = new Promise<number>((resolve) => { settleAnchor = resolve })
+      readStatus(tabId, run.trim(), 0, {}, signal, (frame) => {
+        settleAnchor(typeof frame.activity?.cursor === 'number' ? frame.activity.cursor : 0)
+      })
       loadSteering(tabId, run.trim(), signal)
       if (console.watchStream !== undefined) {
         const controller = new AbortController()
@@ -404,14 +621,27 @@ export function refactoryFace(
         const abort = (): void => controller.abort()
         signal.addEventListener('abort', abort, { once: true })
         void (async () => {
+          // The answer settles the anchor; the timeout only bounds a read that
+          // never settles. A refusal or an abort leaves this unresolved, and the
+          // `0` fallback below is the same one the tick loop used, reached in
+          // ANCHOR_WAIT_MS rather than after a fixed number of sleeps.
+          const from = await Promise.race([
+            anchor,
+            new Promise<number>((resolve) => { setTimeout(() => resolve(0), ANCHOR_WAIT_MS) }),
+          ])
+          if (controller.signal.aborted) return
           try {
-            for await (const frame of console.watchStream!(run.trim(), 0, controller.signal)) {
+            // The stream starts where this tab's held history ends, not at 0: the
+            // service advances its own cursor from there, and a reset would ask
+            // for records the panel already holds (R-4.2, F-2).
+            for await (const frame of console.watchStream!(run.trim(), from, controller.signal)) {
               if (controller.signal.aborted || watchers.get(tabId) !== controller) return
               // Retire any older unary frame before accepting streamed state.
               nextGeneration(statusGenerations, tabId)
               nextGeneration(steeringGenerations, tabId)
               actions.framed(tabId, frame.status)
               actions.steered(tabId, frame.steering)
+              takePage(tabId, run.trim(), frame.status, false)
             }
           } catch (error) {
             if (!controller.signal.aborted) actions.noticed(tabId, {
@@ -484,6 +714,8 @@ export function refactoryFace(
           ]) generations.delete(tabId)
           starting.delete(tabId)
           running.delete(tabId)
+          heldThrough.delete(tabId)
+          exhausting.delete(tabId)
           watchers.get(tabId)?.abort()
           watchers.delete(tabId)
           actions.forget(tabId)
@@ -578,14 +810,60 @@ export function refactoryFace(
           }
         })()
       },
-      refresh(tabId, run, after, signal) {
-        readStatus(tabId, run, after, signal)
+      refresh(tabId, run, after, signal, window) {
+        // A refresh continues the journal where the tab's held history ends; the
+        // progress cursor it also carries indexes a different file (R-4.2-3).
+        readStatus(tabId, run, after, window ?? {}, signal)
         // A ledger is appended to while the run goes, so a refresh of the run is
         // also a refresh of what has been said about it.
         loadSteering(tabId, run, signal)
       },
       watch(tabId, run, signal) {
         watchRun(tabId, run, signal)
+      },
+      setActivityLevel(tabId, run, level, signal) {
+        if (signal.aborted) return
+        actions.setActivityLevel(tabId, level)
+        // Only the whole-history level fetches; the other two draw what is
+        // already held, so switching to them costs no read (R-2.7).
+        if (level !== 'verbose') { exhausting.delete(tabId); return }
+        // From 0, always — and this is a requirement, not an oversight.
+        //
+        // R-2.2 makes `verbose` mean the held history contains *every* complete
+        // record, accumulated page by page until an answer reports
+        // `has_more: false`. Starting from the held watermark would only fetch the
+        // tail, so the pass would stop as soon as it reached `total`, never reach
+        // index 0, and leave `activity.first` wherever the poll happened to leave
+        // it — a level that promises every record would quietly hold a suffix.
+        //
+        // The cost is real but paid once per gesture: a standard → verbose →
+        // standard → verbose round-trip re-fetches from 0 each time. Keeping that
+        // cheap belongs in the store, which already splices by each page's own
+        // `after` and would need to remember a completed pass per run to skip the
+        // walk; R-2.2's guarantee is the contract, and re-reading a journal the
+        // console pages in O(page_size) is bounded. Verified by T-18: choosing
+        // verbose asks [0, 200, 400] and ends with `first: 0`, `complete: true`.
+        exhaust(tabId, run, 0, signal)
+      },
+      loadEarlierActivity(tabId, run, first, signal) {
+        if (signal.aborted) return
+        // The renderer hands in where the drawn history begins: it is the one
+        // place that knows what the store holds, so this gesture needs no second
+        // copy of that fact that could disagree with what a person sees.
+        if (!Number.isSafeInteger(first) || first <= 0) return
+        // The page before the oldest held record: one page per press, walking to
+        // index 0. A descending `after` cannot use the console's advancing seek,
+        // so it is asked for as the forward page that ends where the held one
+        // begins (R-1.7a, F-6).
+        const generation = nextGeneration(pageGenerations, tabId)
+        actions.activityPageLoading(tabId, run)
+        settle(pageGenerations, tabId, generation,
+          remote.refactoryConsole.status(run, Math.max(0, first - ACTIVITY_PAGE), signal), (frame) => {
+            takePage(tabId, run, frame, true)
+          }, undefined, (failure) => { actions.activityPageFailed(tabId, run, failure.message) })
+      },
+      scrollActivity(tabId, row) {
+        actions.activityScrolled(tabId, row)
       },
       readSteering(tabId, run, signal) {
         loadSteering(tabId, run, signal)
@@ -646,7 +924,8 @@ export function refactoryFace(
         if (signal.aborted) return
         const generation = nextGeneration(stopGenerations, tabId)
         settle(stopGenerations, tabId, generation, console.stop(run, signal), () => {
-          readStatus(tabId, run, 0, signal)
+          // Continue the held history: a stop is not a new run (R-4.2).
+          readStatus(tabId, run, 0, {}, signal)
         })
       },
       setEnabled(tabId, name, enabled, signal) {

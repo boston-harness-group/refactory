@@ -54,6 +54,30 @@ def test_a_workspace_package_is_importable_by_its_normal_path(tmp_path, monkeypa
     assert package.name == "local_pkg"
 
 
+@pytest.mark.parametrize("previous_valid", [False, True])
+def test_loading_a_workspace_package_uses_the_requested_project(tmp_path, monkeypatch, previous_valid):
+    import refactory_packages
+
+    monkeypatch.setattr(refactory_packages, "__path__", list(refactory_packages.__path__))
+    name = "project_scoped_pkg"
+    previous, current = tmp_path / "previous", tmp_path / "current"
+    old = _make_package(registry.workspace_root(previous) / name, name)
+    if previous_valid:
+        (old / "__init__.py").write_text(
+            f"from refactory_dsh.nn import Package\nPACKAGE = Package(name={name!r}, description='previous')\n"
+        )
+        assert registry.load(name, previous).description == "previous"
+    else:
+        (old / "__init__.py").write_text("x = 1\n")
+        registry.install_workspace(previous)
+    _make_package(registry.workspace_root(current) / name, name)
+    assert registry.load(name, current).description == "a test package"
+    if previous_valid:
+        # Switching back must also move a workspace already on the import path.
+        assert registry.load(name, previous).description == "previous"
+        assert registry.load(name, current).description == "a test package"
+
+
 def test_the_catalogue_says_where_a_package_lives(tmp_path):
     _make_package(registry.workspace_root(tmp_path) / "local_pkg", "local_pkg")
     assert registry.where("local_pkg", tmp_path) == registry.workspace_root(tmp_path) / "local_pkg"

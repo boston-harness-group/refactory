@@ -885,3 +885,57 @@ def test_open_refuses_a_missing_workdir_without_a_traceback():
     assert result.returncode == 2
     assert "--workdir" in json.loads(result.stdout)["error"]
     assert "Traceback" not in result.stderr
+
+
+def test_status_follow_advances_its_activity_cursor(tmp_path, capsys):
+    """T-7: each follow frame is the next page, not the whole journal again (SD-6).
+
+    The run stays live while two frames are written, so the second frame starts
+    where the first one ended. The printed fields are otherwise the ones
+    ``status`` prints; only the activity page advances.
+    """
+    run = tmp_path / "followed"
+    journal = run / ".refactory/events.jsonl"
+    journal.parent.mkdir(parents=True)
+    (run / ".refactory/spine-status.json").write_text(json.dumps({"status": "executing", "nodes": ["build"]}))
+    (run / ".refactory/spine-checkpoint.json").write_text(json.dumps({"owner_pid": os.getpid()}))
+    for i in range(2):
+        journal.write_text("".join(
+            json.dumps({"schema_version": 1, "kind": "step",
+                        "at": f"2026-10-26T09:00:{i:02d}+00:00", "n": i}) + "\n"
+            for i in range(2 + 2 * i)))
+
+    frames: list[dict] = []
+    real_status, real_sleep = console.status, console.time.sleep
+
+    def recording(*args, **kwargs):
+        frame = real_status(*args, **kwargs)
+        frames.append(json.loads(json.dumps(frame)))
+        return frame
+
+    def stopping(_seconds: float) -> None:
+        # End the loop once the second frame has been written and read.
+        if len(frames) >= 2:
+            (run / ".refactory/spine-status.json").write_text(json.dumps({"status": "done"}))
+        else:
+            journal.write_text(journal.read_text() + json.dumps(
+                {"schema_version": 1, "kind": "step", "at": "2026-10-26T09:00:09+00:00", "n": 99}) + "\n")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(console, "status", recording)
+        patch.setattr(console.time, "sleep", stopping)
+        code = console.main(["status", "--run", str(run), "--follow",
+                             "--activity-after", "0", "--activity-limit", "2", "--interval", "0.1"])
+    assert code == 0
+    printed = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(frames) >= 2, frames
+    first, second = frames[0]["activity"], frames[1]["activity"]
+    assert (first["after"], first["cursor"], len(first["events"])) == (0, 2, 2)
+    # The second frame continues where the first ended: it is a page, not a rescan.
+    assert second["after"] == first["cursor"] == 2
+    assert len(second["events"]) <= first["page_size"]
+    assert [frame["activity"]["after"] for frame in frames] == sorted(
+        frame["activity"]["after"] for frame in frames)
+    # Printing is unchanged apart from the page: the frames are the printed lines.
+    assert len(printed) == len(frames)
+    assert set(printed[0]) >= set(real_status(run)) - {"text"}

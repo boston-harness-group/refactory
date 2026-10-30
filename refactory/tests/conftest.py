@@ -222,6 +222,17 @@ def _sealed(
         home = tmp_path_factory.mktemp("dsh-home")
         monkeypatch.setenv("DSH_HOME", str(home))
         monkeypatch.setenv("REFACTORY_MODEL_DSH_HOME", str(home))
+        # Clear additional env vars that reference the real DSH home so spawned
+        # subprocesses do not inherit paths the seal would catch.  DSH_PROFILE_DIR
+        # and REFACTORY_WORKER_CONTEXT are set when running inside a DSH worker.
+        for name in list(os.environ):
+            if name in ("DSH_HOME", "REFACTORY_MODEL_DSH_HOME"):
+                continue  # already replaced above
+            value = os.environ.get(name, "")
+            if ("DSH" in name or name.startswith("REFACTORY")) and _REAL_DSH_HOMES and any(
+                _REAL_DSH_HOME_IN_TEXT.search(value) for _ in [None] if value
+            ):
+                monkeypatch.delenv(name, raising=False)
         # Every run needs a model now, and refuses without one (dm-258). The sealed home
         # holds the choice a person who picked one in Settings → Models has, so a test
         # that starts a run starts it; a test of the refusal or of the first-run choice

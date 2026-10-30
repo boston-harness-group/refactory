@@ -163,6 +163,8 @@ _NODE_FIELDS = frozenset(
         "retry",
         "outputs_only",
         "workspace",
+        "system_prompt_template",
+        "tool_policy",
     }
 )
 
@@ -197,6 +199,9 @@ class Node:
     writes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     prompt_template: str = ""
+    #: Optional system-prompt template for agent nodes, rendered with knobs/facts.
+    #: Distinct from notes and the user prompt.
+    system_prompt_template: str = ""
     role: str = "ceo"
     tools: tuple[str, ...] = ()
     max_iterations: int = 1
@@ -255,8 +260,17 @@ class Node:
     #: the runtime collects the node's output from its workspace before delivery
     #: checks it (`refactory_dsh.workspace`).
     workspace: dict[str, str] | None = None
+    #: `agent`: optional tool policy. When ``"none"``, the model receives no
+    #: tools and the runtime captures its text reply as the node's single declared
+    #: output. ``None`` (the default) preserves existing tool-enabled behavior.
+    tool_policy: str | None = None
 
     def __post_init__(self) -> None:
+        if self.tool_policy is not None and self.tool_policy != "none":
+            raise GraphError(
+                f"node {self.id!r}: unknown tool_policy {self.tool_policy!r}; "
+                "known: none (or omit for the default)"
+            )
         if self.kind not in NODE_KINDS:
             raise GraphError(f"node {self.id!r}: unknown kind {self.kind!r}")
         if not self.id:
@@ -382,6 +396,7 @@ class Node:
             "writes": list(self.writes),
             "produces": list(self.produces),
             "prompt_template": self.prompt_template,
+            **({"system_prompt_template": self.system_prompt_template} if self.system_prompt_template else {}),
             "role": self.role,
             **({"resource_role": self.resource_role} if self.resource_role is not None else {}),
             "tools": list(self.tools),
@@ -406,6 +421,7 @@ class Node:
                if self.retry is not None else {}),
             **({"outputs_only": True} if self.outputs_only else {}),
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
+            **({"tool_policy": self.tool_policy} if self.tool_policy is not None else {}),
         }
 
     @classmethod
@@ -426,6 +442,7 @@ class Node:
             writes=tuple(state.get("writes") or ()),
             produces=tuple(state.get("produces") or ()),
             prompt_template=str(state.get("prompt_template", "")),
+            system_prompt_template=str(state.get("system_prompt_template", "")),
             role=str(state.get("role", "ceo")),
             resource_role=state.get("resource_role"),
             tools=tuple(state.get("tools") or ()),
@@ -450,6 +467,7 @@ class Node:
             outputs_only=bool(state.get("outputs_only", False)),
             workspace=(dict(state["workspace"]) if isinstance(state.get("workspace"), dict)
                        else state.get("workspace")),
+            tool_policy=state.get("tool_policy"),
         )
 
     def with_field(self, field_name: str, value: Any) -> "Node":
@@ -457,7 +475,7 @@ class Node:
         if field_name not in _NODE_FIELDS:
             raise GraphError(f"node {self.id!r} has no field {field_name!r}")
         if field_name in ("knobs", "reads", "writes", "produces", "tools", "targets",
-                          "optional_targets", "sources", "inline_items", "feedback_keys") and isinstance(value, list):
+                          "optional_targets", "sources", "inline_items", "feedback_keys") and isinstance(value, list) and field_name != "tool_policy":
             value = tuple(value)
         return replace(self, **{field_name: value})
 

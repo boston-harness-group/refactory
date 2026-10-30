@@ -129,6 +129,7 @@ def prepare(
     resource_limits: dict[str, Any] | None = None,
     resume: bool = False,
     headless: bool = False,
+    omit_steering: bool = False,
 ) -> tuple[str, Path]:
     """Lower the mode for a person to use, and leave the run ready to start.
 
@@ -196,7 +197,7 @@ def prepare(
             mode_id=identifier,
             intent=intent.strip() or f"Run {identifier}.",
             transform=lambda workflow, stage_dir=None: workers.lower_workflow(
-                steering.for_run(workflow, stage_dir or workdir),
+                steering.for_run(workflow, stage_dir or workdir, omit_steering=omit_steering),
                 workdir, model_context, lowering.node_declarations(state)),
             runtime="spine",
             command="refactory ceo",
@@ -208,6 +209,7 @@ def prepare(
             knobs=list(knobs or []),
             model_context=model_context,
             owner_argv=['-m', 'refactory_dsh.interactive', identifier],
+            omit_steering=omit_steering,
         )
         return name, graphs
 
@@ -303,6 +305,7 @@ def run(
     model_context: dict[str, Any] | None = None,
     resource_limits: dict[str, Any] | None = None,
     resume: bool = False,
+    omit_steering: bool = False,
 ) -> int:
     """Lower, then run the mode under the CEO with the terminal attached.
 
@@ -438,6 +441,7 @@ def run(
         if not resume:
             name, graphs = prepare(
                 identifier, workdir=workdir, intent=intent, project=project, knobs=knobs, model_context=model_context, resource_limits=resource_limits, headless=headless,
+                omit_steering=omit_steering,
             )
         for pair in list(approve or []):
             gate, separator, value = str(pair).partition("=")
@@ -717,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validation-reserve-s", type=float, default=0)
     parser.add_argument("--validation-reserve-tokens", type=int, default=0)
     parser.add_argument("--warn-tokens", type=int, default=None)
+    parser.add_argument("--omit-steering", action="store_true", default=False,
+                        help="omit the steering ledger from agent prompts (benchmark runs)")
     args = parser.parse_args(argv)
 
     from refactory_dsh import run_flags
@@ -740,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
             effort=args.effort, permission_mode=args.permission_mode,
             role_routes=args.role_routes, node_routes=args.node_routes,
             resource_limits=run_flags.resource_limits(args),
+            omit_steering=getattr(args, 'omit_steering', False),
         )
     except ModelChoiceError as exc:  # no model to run on: the message says how to choose one
         print(f"refactory: {exc}", file=sys.stderr)

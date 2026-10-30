@@ -40,7 +40,7 @@ ATTEMPTS = {
 }
 #: What a resume may still be told: its resource limits, and how it is run.
 RESUME_TAKES = frozenset({"resume", "acknowledge_failure", "max_elapsed_s", "max_tokens", "validation_reserve_s",
-                          "validation_reserve_tokens", "warn_tokens", "headless", "help"})
+                          "validation_reserve_tokens", "warn_tokens", "headless", "help", "omit_steering"})
 #: The message the spine's resume refuses changes with (`interactive.run`).
 RESUME_RETAINS = ("resume retains saved inputs, knobs, instructions and routes; changes require "
                   "explicit invalidation")
@@ -163,6 +163,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="run without a conversation: one task, one report, then exit, for scripts "
              "and CI; without it a spine run is live and a line you type between turns "
              "reaches the CEO. The walker always runs this way",
+    )
+    parser.add_argument(
+        "--omit-steering", action="store_true", default=False,
+        help="omit the steering ledger from agent prompts (benchmark runs); gate "
+             "routing, correction audits and overwatch enforcement still apply",
     )
 
 
@@ -343,4 +348,6 @@ def interactive_options(args: argparse.Namespace) -> list[str]:
             forwarded += ["--" + key.replace("_", "-"), json.dumps(value)]
     if args.headless:
         forwarded += ["--headless"]
+    if getattr(args, "omit_steering", False):
+        forwarded += ["--omit-steering"]
     return forwarded

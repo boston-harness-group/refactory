@@ -1,14 +1,5 @@
 """The workflow IR this package owns and lowers a mode state into.
 
-Re-exports the canonical IR types from remote-factory (v1) via the subtree
-at ``v1/``, extending three node classes with fields v2 needs
-that v1 does not yet carry: ``resource_role``, ``command_timeout_s``,
-``dispatch_command`` and an agent's ``retry``.
-
-The v1 types are imported through ``_v1_compat``, which adds the subtree
-root to ``sys.path``.  v1's only transitive dependency beyond stdlib is
-``structlog``, which v2 already depends on.
-
 ``Workflow.to_dict()`` is the JSON the shipped runtime reads, so its
 serialization is behavior rather than a rendering detail: ``reads`` and
 ``writes`` are sorted for byte stability, every node carries a ``_type``
@@ -17,20 +8,65 @@ discriminator, and a key is emitted only when its value is non-empty.
 
 from __future__ import annotations
 
-import refactory_dsh._v1_compat  # noqa: F401 — registers sys.path for v1 imports
-
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# Re-export v1 types that v2 uses without modification.
-from factory.workflow.primitives import (  # type: ignore[import-untyped]
-    AgentRole,
-    AgentConfig,
-    VerdictType,
-    Edge,
-)
+
+# ── types formerly re-exported from remote-factory ────────────────
+
+
+class AgentRole(str, Enum):
+    RESEARCHER = "researcher"
+    STRATEGIST = "strategist"
+    BUILDER = "builder"
+    HEALTH_CHECKER = "health_checker"
+    CODE_REVIEWER = "code_reviewer"
+    ADVERSARIAL_TESTER = "adversarial_tester"
+    FAILURE_ANALYST = "failure_analyst"
+    CEO = "ceo"
+    ARCHIVIST = "archivist"
+    REFINER = "refiner"
+
+
+class AgentConfig(BaseModel):
+    """Configuration for an agent in the pool."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    role: AgentRole
+    model: str
+    timeout: int = 600
+
+
+class VerdictType(str, Enum):
+    PROCEED = "proceed"
+    RELOOP = "reloop"
+    HALT = "halt"
+
+
+class Edge(BaseModel):
+    """Directed edge in the workflow graph with an optional labelled condition.
+
+    ``condition`` is normally one of the three ``VerdictType`` labels, but a gate
+    may name its own forward outcomes (a switch rather than a binary decision).
+    Arbitrary labels are stored verbatim and lowercased by consumers before
+    matching, so ``"DRAFT"`` from an evaluator matches ``condition="draft"``.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    source: str
+    target: str
+    condition: VerdictType | str | None = None
+
+    @property
+    def condition_label(self) -> str | None:
+        """Return the condition as a plain string, or ``None``."""
+        if self.condition is None:
+            return None
+        return self.condition.value if isinstance(self.condition, VerdictType) else self.condition
 
 # ── v2 extension fields ────────────────────────────────────────────
 #
@@ -71,6 +107,7 @@ class AgentNode(Node):
     role: AgentRole
     model: str = ""
     prompt_template: str = ""
+    system_prompt: str = ""
     tools: list[str] = Field(default_factory=list)
     timeout: int | None = None
     max_iterations: int = 1
@@ -85,6 +122,16 @@ class AgentNode(Node):
     #: the run directory, and is left out of the serialized graph, so a graph that
     #: declares no workspace is byte-identical to one lowered before the field existed.
     workspace: dict[str, str] | None = None
+    #: Optional tool policy. ``"none"`` disables all tools; ``None`` preserves defaults.
+    tool_policy: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_policy(self) -> AgentNode:
+        if self.tool_policy is not None and self.tool_policy != "none":
+            raise ValueError(
+                f"invalid tool_policy {self.tool_policy!r}; the only accepted value is 'none'"
+            )
+        return self
 
 
 class FnNode(Node):
@@ -219,6 +266,10 @@ class Workflow(BaseModel):
                 d.pop("retry")
             if "workspace" in d and d["workspace"] is None:
                 d.pop("workspace")
+            if not d.get("system_prompt"):
+                d.pop("system_prompt", None)
+            if "tool_policy" in d and d["tool_policy"] is None:
+                d.pop("tool_policy")
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

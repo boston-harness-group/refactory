@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
+CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
     'codex': ('skip', 'default', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'),
@@ -34,9 +36,10 @@ def capabilities(backend: str) -> dict[str, Any]:
     if backend not in BACKENDS:
         raise ValueError(f'unknown worker backend {backend!r}; choose {", ".join(BACKENDS)}')
     return {'model_selection': True, 'provider_selection': backend == 'dsh',
-            'reasoning_effort': backend == 'dsh', 'usage': backend == 'dsh',
+            'reasoning_effort': backend in ('dsh', 'claude_code'), 'usage': backend == 'dsh',
             'cancel': True, 'resume': False, 'inflight_steering': False,
             'images': False, 'user_questions': False,
+            'system_prompt': backend in ('dsh', 'claude_code'),
             'steering': 'next-node-boundary', 'permissions': list(PERMISSIONS[backend]),
             'progress': 'model-request' if backend == 'dsh' else 'lifecycle'}
 
@@ -51,8 +54,13 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f'unknown worker route fields: {sorted(unknown)}')
     if any(not isinstance(value, str) for value in route.values()):
         raise ValueError('worker route fields must be strings')
-    if backend != 'dsh' and (route.get('provider') or route.get('effort')):
-        raise ValueError(f'{backend} uses native provider settings and does not support provider/effort overrides')
+    if backend != 'dsh' and route.get('provider'):
+        raise ValueError(f'{backend} uses native provider settings and does not support provider overrides')
+    if route.get('effort') and backend not in ('dsh', 'claude_code'):
+        raise ValueError(f'{backend} does not support effort overrides')
+    if backend == 'claude_code' and route.get('effort') and route['effort'] not in CLAUDE_CODE_EFFORT_LEVELS:
+        accepted = ', '.join(sorted(CLAUDE_CODE_EFFORT_LEVELS))
+        raise ValueError(f'claude_code effort must be one of {accepted}; got {route["effort"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route
@@ -93,7 +101,8 @@ def event(workdir: Path, record: dict[str, Any], state: str, summary: str) -> No
         stream.write(json.dumps(payload, separators=(',', ':')) + '\n')
 
 
-def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = 'worker') -> Path:
+def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = 'worker',
+          tool_policy: str = '') -> Path:
     identifier = 'worker-' + uuid.uuid4().hex
     path = workdir / '.refactory' / 'workers' / (identifier + '.json')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +112,14 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
               'capabilities': capabilities(route['worker_backend']),
               'usage': {'status': 'unavailable', 'tokens': None},
               'runtime': {'backend': route['worker_backend'], 'version': None}}
+    # ── no-tools receipt fields ─────────────────────────────────────────
+    if tool_policy == 'none':
+        record['requested_tool_policy'] = 'none'
+        record['enforced_tool_policy'] = 'none'
+        # This is adapter policy, not an observation of the provider request.
+        record['tool_observation_available'] = False
+        record['tools_permitted'] = []
+        record['tool_policy_source'] = 'configured-adapter-policy'
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
     return path
@@ -184,16 +201,22 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
 
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
-                workspace_root: Path | None = None, tool_home: Path | None = None) -> None:
+                workspace_root: Path | None = None, tool_home: Path | None = None,
+                system_prompt: str = "", tool_policy: str = "") -> None:
     """Compose installed DSH services, never a parallel agent wire protocol.
 
     ``workspace_root`` confines the node's tools to its workspace (`permission_patch`).
     ``tool_home`` is the DSH home the node's shell is told (`workspace.tool_dsh_home`):
     the DSH process keeps its own, and a command run in a workspace never reaches it.
+    ``system_prompt`` is the rendered system text; when non-empty, a composition plugin
+    is inserted that injects it as a system-prompt section.
     """
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
+    if system_prompt:
+        plugin = Path(__file__).with_name('system_prompt_plugin.mjs')
+        rows.append({'insert': [{'id': 'refactory-system-prompt', 'name': str(plugin)}]})
     rows.extend(permission_patch(route, workspace_root=workspace_root))
     if tool_home is not None:
         rows.append({'id': 'shell-env', 'config': {'dshHome': str(tool_home)}})
@@ -207,6 +230,10 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 {'id': 'tool-bash', 'config': {
                     'enableRunInBackground': False, 'promoteOnTimeout': False}},
             ])
+    # ── no-tools enforcement ─────────────────────────────────────────────
+    if tool_policy == "none" and route.get('worker_backend', 'dsh') == 'dsh':
+        plugin = Path(__file__).with_name('no_tools_plugin.mjs')
+        rows.append({'insert': [{'id': 'refactory-no-tools', 'name': str(plugin)}]})
     rows.extend(provider_rows(route, provider_config))
     inner_backend = route['worker_backend']
     if inner_backend == 'openshell':
@@ -269,6 +296,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if not isinstance(node, AgentNode):
             continue
         selected = client.for_node(name, role=node.role.value)
+        if node.tool_policy == "none" and node.tools:
+            raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
         if node.tools:
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)
@@ -294,6 +323,10 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                                     'produces': list((declarations or {}).get(name, {}).get('produces', [])),
                                     'post_checks': [check.model_dump() for check in node.post_checks],
                                     'model_context': selected_context}
+        if node.system_prompt:
+            payload['system_prompt'] = node.system_prompt
+        if getattr(node, 'tool_policy', None):
+            payload['tool_policy'] = node.tool_policy
         if is_optional:
             payload['optional'] = True
         retry = getattr(node, 'retry', None)

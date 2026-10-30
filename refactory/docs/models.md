@@ -251,7 +251,7 @@ When the target branch has moved since the run started, delivery merges it into 
 
 With `worktree=0` (`--no-worktree`), a run writes its artifact under `.factory/artifacts/<name>`, from whole files only (an emission it cannot apply goes back to `emit`, as above), and watches its project instead: the directory Refactory runs from, where `.factory/` and `refactory.workers.json` live. `prepare` records the project's commit, branch and uncommitted changes, later steps warn when any of them changes, and `emit` fails if the project changed while it ran. This detects changes; it does not prevent them.
 
-Choose `--permission-mode default` (**Native permission policy** in the GUI) to retain the backend's native policy, which may deny file creation. Existing saved runs and profiles preserve their permission settings; historical snapshots without a recorded policy keep the native default. A backend switch resets an inherited backend-specific policy to `skip`. Codex also accepts `never`, `approve-for-me` and its full bypass name. Claude Code also accepts `dontAsk`, `acceptEdits`, `auto`, `plan` and `bypassPermissions`. Unsupported route combinations and permissions fail before launch. External per-call provider and reasoning-effort overrides are unsupported; select those through the product's native configuration. `--effort` is supported for DSH nodes.
+Choose `--permission-mode default` (**Native permission policy** in the GUI) to retain the backend's native policy, which may deny file creation. Existing saved runs and profiles preserve their permission settings; historical snapshots without a recorded policy keep the native default. A backend switch resets an inherited backend-specific policy to `skip`. Codex also accepts `never`, `approve-for-me` and its full bypass name. Claude Code also accepts `dontAsk`, `acceptEdits`, `auto`, `plan` and `bypassPermissions`. Unsupported route combinations and permissions fail before launch. External per-call provider overrides remain unsupported. `--effort` is supported for DSH and Claude Code nodes; the Claude Code adapter passes it as the Agent SDK query option. The pinned `@anthropic-ai/claude-agent-sdk` is version 0.3.263 in `pnpm-lock.yaml`; its `sdk.d.ts` declares `EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'` and `QueryOptions.effort?: EffortLevel`. The accepted values are `low`, `medium`, `high`, `xhigh` and `max`; the adapter rejects other Claude Code effort values before launch. Requested effort is recorded separately from the runtime's observed route/model metadata.
 
 | Adapter capability | DSH node | Codex node | Claude Code node |
 |---|---|---|---|
@@ -377,3 +377,11 @@ contract. The client does not undo files written before failure or certify their
 [Worker routing](worker-routing.md) documents `refactory.workers.json`, coder-only
 selection and precedence. [Live help and docs](discovery.md) provide current-build
 read-only discovery in chat and the terminal without source inspection.
+
+### Explicit no-tools agents
+
+Set `tool_policy="none"` on an agent node to disable acting tools. An omitted policy keeps existing defaults; an empty `tools` list alone does not disable them.
+
+The DSH runtime restricts the actual scoped tool registry, guards execution, and refuses a provider request if tools remain exposed. Claude Code receives `tools: []`, `mcpServers: {}`, `settingSources: []`, and `strictMcpConfig: true`. Unsupported routes, including Codex and OpenShell, refuse this policy before calling a model.
+
+A no-tools node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.

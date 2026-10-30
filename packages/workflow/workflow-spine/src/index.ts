@@ -1785,6 +1785,7 @@ export function apply(ctx: Context, config: Config): void {
         const receipt = runtimeBridge(agentCommand, workdir, commandEnv, {
           action: 'begin', node: node.id, prompt: node.prompt_template ?? '',
           reads: node.reads ?? [], writes: node.writes ?? [],
+          ...(node.tool_policy === 'none' ? { tool_policy: 'none' } : {}),
         })
         if (typeof receipt.prompt !== 'string') throw new Error('agent delivery bridge returned no prompt')
         node.prompt_template = receipt.prompt
@@ -1861,6 +1862,9 @@ export function apply(ctx: Context, config: Config): void {
       && nodes.filter(node => node._type === 'JoinNode').length <= 1
     const automatic = config.executeCommands && flatControls && nodes.length > 0 && nodes.every(node =>
       node.expand === undefined && (Boolean(commandOf(node)?.trim())
+        // These are raw graph nodes, before describe() maps dispatch_command to
+        // the view's command field. A dispatched agent needs no CEO either.
+        || (node._type === 'AgentNode' && typeof node.dispatch_command === 'string' && node.dispatch_command.trim() !== '')
         || node._type === 'ForkNode' || node._type === 'JoinNode'
         || (node._type === 'DataNode' && config.dataCommand !== '')),
     )

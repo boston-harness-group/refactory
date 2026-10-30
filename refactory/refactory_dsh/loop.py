@@ -153,6 +153,8 @@ class LoopConfig:
     #: Which runtime runs a candidate: "walker" (fast, for search) or "dsh" (the
     #: runtime that ships). Both score identically; the equivalence tests keep it so.
     evaluator: str = "walker"
+    #: Exclude the run steering ledger from candidate model prompts; controls remain binding.
+    omit_steering: bool = False
     #: Wall-clock ceiling for one inner run when the evaluator is DSH.
     dsh_timeout_s: int = 900
     #: Carry on from the journal in the run directory instead of starting over.
@@ -403,6 +405,9 @@ class Loop(OuterLoop):
         #: The held-out audit of the winner, computed once by :meth:`audit_holdout`
         #: and reported by :meth:`report`. ``None`` means it has not been computed.
         self.holdout_audit: dict[str, Any] | None = None
+        #: The original seed state, for tool-policy admission checks. Set at init,
+        #: restored from the journal on resume. Not derived from population[0].
+        self._original_seed_state: dict[str, Any] | None = None
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -512,6 +517,10 @@ class Loop(OuterLoop):
 
         self._journal("start", mode=self.mode_id, config=self.config.to_dict())
         seed = Candidate.from_state(seed_state)
+        # Persist the original seed state for tool-policy admission checks.
+        # Anchored here and restored on resume, not derived from population[0].
+        self._original_seed_state = seed_state
+        self._journal("original_seed", state=seed_state)
         self.population = [seed]
         self._journal_candidate(seed)
         self._seed_population(seed)
@@ -558,7 +567,8 @@ class Loop(OuterLoop):
                 continue
             proposal = Proposal(edit=edit, parent=seed.id, rationale="starting population")
             outcome = sampler.attempt(
-                proposal, seed, self.invariants, True, self.config.frozen, self._tried()
+                proposal, seed, self.invariants, True, self.config.frozen, self._tried(),
+                seed_state=self._original_seed_state,
             )
             if isinstance(outcome, Candidate):
                 self.population.append(outcome)
@@ -2359,6 +2369,9 @@ class Loop(OuterLoop):
                     for key, value in record.items()
                     if key != "event"
                 }
+            elif event == "original_seed":
+                # Restore the original seed state for tool-policy admission.
+                self._original_seed_state = record.get("state")
             elif event == "control":
                 # Rebuilt rather than read from `state.json`: the journal is the run's
                 # durable state, and a resumed run that forgot a rejection would

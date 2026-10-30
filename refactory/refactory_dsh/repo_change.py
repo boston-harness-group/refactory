@@ -1087,7 +1087,10 @@ def _warn_if_shared_changed(found: worktree.Worktree, when: str) -> None:
 
 
 def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], home: Path, timeout: float,
-                     budget: Any, *, amend: bool = True) -> tuple[worktree.Worktree, list[str], dict[str, Any] | None]:
+                     budget: Any, *, amend: bool = True,
+                     snapshot: Callable[[], dict[str, str]] | None = None,
+                     generate_owned: dict[str, str] | None = None,
+                     ) -> tuple[worktree.Worktree, list[str], dict[str, Any] | None]:
     """Run the run's generate command, then its setup command, in a prepared worktree.
 
     Generated files are inputs to what setup builds and checks, so generate comes first.
@@ -1095,13 +1098,22 @@ def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], ho
     amended into the attempt; without it (the base worktree base_check runs), the
     rewrite stays local. Returns the worktree, at its new head when amended, the
     problems that stop the check, and the prep-failure dict of the first failing step.
+    ``snapshot`` and ``generate_owned``, when given, record what the generate command
+    itself wrote: ``snapshot`` is taken immediately before and after it, and every file
+    whose digest changed goes into ``generate_owned``. Work the agent left in the clone
+    before the command runs is therefore not counted (`workspace.derive_emission`).
     """
     problems: list[str] = []
     prep_fail: dict[str, Any] | None = None
     generate = str(ctx.facts.get("generate") or "").strip()
     if generate:
+        before: dict[str, str] | None = snapshot() if snapshot is not None else None
         prepared = sandbox.run_command(generate, workdir=Path(found.path), timeout_s=timeout,
                                        budget=budget, env=env, home=home, exact_env=True)
+        if before is not None and generate_owned is not None:
+            after = snapshot() if snapshot is not None else {}
+            generate_owned.update({name: digest for name, digest in after.items()
+                                   if before.get(name) != digest})
         if not prepared.ok:
             detail_gen = "\n".join((prepared.problem(), prepared.stdout or "", prepared.stderr or "")).strip()
             crashed_gen, sig_label_gen = sandbox.is_signal_crash(prepared)
@@ -1113,9 +1125,9 @@ def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], ho
             if crashed_gen and gen_rc is not None and gen_rc > 0:
                 gen_rc = -(gen_rc - 128)
             prep_fail = {"step": generate, "returncode": gen_rc, "timed_out": prepared.timed_out}
-        elif amend:
+        else:
             edits = worktree.tracked_edits(found)
-            if edits:
+            if amend and edits:
                 found = worktree.amend(found, ctx.workdir, edits, "files written by the generate command")
     setup = str(ctx.facts.get("setup") or "").strip()
     if not problems and setup:
@@ -1146,6 +1158,8 @@ def prepare_check_environment(
     timeout: float,
     budget: Any = None,
     record: Path | None = None,
+    snapshot: Callable[[], dict[str, str]] | None = None,
+    generate_owned: dict[str, str] | None = None,
 ) -> tuple[worktree.Worktree, dict[str, str], list[str], dict[str, Any] | None]:
     """Install dependencies, build check environment, run generate/setup.
 
@@ -1168,6 +1182,7 @@ def prepare_check_environment(
         _ctx = _PrepCtx(facts, workdir=run)
         found, problems, cmd_fail = prepare_commands(
             _ctx, found, env, home, timeout, budget, amend=amend,
+            snapshot=snapshot, generate_owned=generate_owned,
         )
         if cmd_fail:
             prep_fail = cmd_fail

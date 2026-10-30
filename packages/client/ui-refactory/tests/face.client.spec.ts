@@ -6,7 +6,7 @@
  * Host answered with and reads the store's own state — the same handoff the body
  * sees.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
@@ -19,7 +19,7 @@ import { refactoryFace } from '../src/client/face.ts'
 import { NO_SETTINGS, createRefactoryStore } from '../src/client/store.ts'
 import type { RefactoryChoices } from '../src/client/store.ts'
 import {
-  AUTHORING, CANDIDATES, FRAME, GATED, GATED_STEERING, MODE, PACKAGE, RECEIPT, SINGLE,
+  ACTIVITY, AUTHORING, CANDIDATES, FRAME, GATED, GATED_STEERING, MODE, PACKAGE, RECEIPT, SINGLE,
   STEERED, STEERING, STRATEGIES,
   failure, fakeConsole, ok, settle,
 } from './fake-console.client.ts'
@@ -344,7 +344,11 @@ describe('refactoryFace — reading and stopping a run', () => {
     answer(scripted.status, failure('refactory/console-failed', '/runs/gone is not a run directory'))
     face.refresh(TAB, '/runs/gone', 0, signal)
     await settle()
-    expect(tab(instance)?.frame).toEqual({ kind: 'failed', message: '/runs/gone is not a run directory' })
+    // The code travels with the message so the board can tell a payload the
+    // collection cap cut from a console that printed no JSON (R-5.4).
+    expect(tab(instance)?.frame).toEqual({
+      kind: 'failed', code: 'refactory/console-failed', message: '/runs/gone is not a run directory',
+    })
   })
 
   it('does not read a status for a tab whose record has already ended', () => {
@@ -506,6 +510,147 @@ describe('refactoryFace — the watched run\'s ledger', () => {
     face.addNote(TAB, '/runs/live', 'no', 'info', controller.signal)
     face.answerGate(TAB, '/runs/live', 'approve', 'proceed', controller.signal)
     expect(scripted.steer).not.toHaveBeenCalled()
+  })
+})
+
+describe('refactoryFace — the journal history the panel holds', () => {
+  it('reads page 0 on attach, and every later read continues from the highest held cursor', async () => {
+    const { instance, scripted, face, signal } = harness()
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(0, 200, 450) }))
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    expect(scripted.status).toHaveBeenCalledWith('/runs/live', 0, signal)
+    expect(tab(instance)?.activity).toMatchObject({ through: 200, total: 450, complete: false, paged: true })
+    expect(tab(instance)?.activity?.events).toHaveLength(200)
+
+    // A poll advances the journal where the held history ends; it never resets
+    // to 0 (R-4.2, F-2).
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(200, 200, 450) }))
+    face.refresh(TAB, '/runs/live', FRAME.cursor, signal, { after: 200 })
+    await settle()
+    expect(scripted.status).toHaveBeenLastCalledWith('/runs/live', 200, signal)
+    expect(tab(instance)?.activity).toMatchObject({ through: 400, total: 450, complete: false })
+    expect(tab(instance)?.activity?.events).toHaveLength(400)
+
+    // The answering page that reports `has_more: false` is the completeness
+    // evidence the held history records (R-2.2).
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(400, 200, 450) }))
+    face.refresh(TAB, '/runs/live', FRAME.cursor, signal, { after: 400 })
+    await settle()
+    expect(tab(instance)?.activity).toMatchObject({ through: 450, total: 450, complete: true })
+    expect(tab(instance)?.activity?.events).toHaveLength(450)
+  })
+
+  it('starts the live stream where the held history ends, not at 0', async () => {
+    const { instance, scripted, face, signal } = harness()
+    const asked: number[] = []
+    const frames: unknown[] = []
+    scripted.remote.refactoryConsole.watchStream = async function* (_run, after) {
+      asked.push(after)
+      yield { status: { ...FRAME, activity: ACTIVITY(200, 200, 450) }, steering: STEERING }
+    }
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(0, 200, 450) }))
+    face.watch(TAB, '/runs/live', signal)
+    // The stream opens once the first answer names the journal cursor it starts
+    // from: the stream owns that cursor and only advances, so starting it at 0
+    // would make every poll re-read the journal from the top (F-2).
+    await vi.waitFor(() => { expect(asked).toEqual([200]) })
+    // The streamed page is spliced onto the held history, and the summary is
+    // the stream's own.
+    expect(tab(instance)?.activity).toMatchObject({ through: 400 })
+    expect(tab(instance)?.frame).toMatchObject({ kind: 'ready' })
+    void frames
+  })
+
+  it('exhausts the journal from 0 to has_more: false when verbose is chosen', async () => {
+    const { instance, scripted, face, signal } = harness()
+    scripted.status.mockImplementation(async (_run: string, after: number) =>
+      ok({ ...FRAME, activity: ACTIVITY(after, 200, 450) }) as never)
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    scripted.status.mockClear()
+    face.setActivityLevel(TAB, '/runs/live', 'verbose', signal)
+    await settle()
+    await settle()
+    await settle()
+    // From 0, one page per answer, until the answer that says there is no more.
+    expect(scripted.status.mock.calls.map(call => call[1])).toEqual([0, 200, 400])
+    expect(tab(instance)?.activityLevel).toBe('verbose')
+    expect(tab(instance)?.activity).toMatchObject({ through: 450, total: 450, complete: true })
+    expect(tab(instance)?.activity?.events.map(event => event.at)).toEqual(
+      Array.from({ length: 450 }, (_unused, index) => `t${index}`),
+    )
+  })
+
+  it('does not fetch for compact or standard, which only change what is drawn', async () => {
+    const { instance, scripted, face, signal } = harness()
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(0, 200, 450) }))
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    scripted.status.mockClear()
+    face.setActivityLevel(TAB, '/runs/live', 'compact', signal)
+    face.setActivityLevel(TAB, '/runs/live', 'standard', signal)
+    await settle()
+    expect(scripted.status).not.toHaveBeenCalled()
+    expect(tab(instance)?.activityLevel).toBe('standard')
+    expect(tab(instance)?.activity?.events).toHaveLength(200)
+  })
+
+  it('loads the page before the oldest held record, one press at a time', async () => {
+    const { instance, scripted, face, signal } = harness()
+    scripted.status.mockImplementation(async (_run: string, after: number) =>
+      ok({ ...FRAME, activity: ACTIVITY(after, 200, 450) }) as never)
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    face.refresh(TAB, '/runs/live', FRAME.cursor, signal, { after: 200 })
+    await settle()
+    expect(tab(instance)?.activity?.events).toHaveLength(400)
+    scripted.status.mockClear()
+    face.loadEarlierActivity(TAB, '/runs/live', 200, signal)
+    await settle()
+    // The previous page ending at the oldest held index (200) starts at 0.
+    expect(scripted.status).toHaveBeenCalledWith('/runs/live', 0, signal)
+    expect(tab(instance)?.activity?.events.map(event => event.at)).toEqual(
+      Array.from({ length: 400 }, (_unused, index) => `t${index}`),
+    )
+  })
+
+  it('resets both cursors and drops the held history when another run is watched', async () => {
+    const { instance, scripted, face, signal } = harness()
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(0, 200, 450) }))
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    expect(tab(instance)?.activity?.events).toHaveLength(200)
+    answer(scripted.status, ok({ ...FRAME, root: '/runs/other', activity: ACTIVITY(0, 200, 60, '/runs/other') }))
+    face.watch(TAB, '/runs/other', signal)
+    await settle()
+    // R-4.4: page 0 of the new run, and none of the old run's records.
+    expect(scripted.status).toHaveBeenLastCalledWith('/runs/other', 0, signal)
+    expect(tab(instance)?.activity?.events).toHaveLength(60)
+    expect(tab(instance)?.activity).toMatchObject({ through: 60, total: 60, complete: true })
+  })
+
+  it('treats a frame whose activity names another run as a gap rather than splicing it', async () => {
+    const { instance, scripted, face, signal } = harness()
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(0, 200, 450) }))
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    // A frame for a different journal is not this history's records (R-4.5).
+    answer(scripted.status, ok({ ...FRAME, activity: ACTIVITY(200, 200, 450, '/runs/other') }))
+    face.refresh(TAB, '/runs/live', FRAME.cursor, signal, { after: 200 })
+    await settle()
+    expect(tab(instance)?.activity?.events).toHaveLength(200)
+    expect(tab(instance)?.activity).toMatchObject({ through: 200 })
+  })
+
+  it('shows an older console\'s answer as unpaged rather than as the whole history', async () => {
+    const { instance, scripted, face, signal } = harness()
+    const { has_more: _more, total: _total, after: _after, ...unpaged } = ACTIVITY(0, 3, 3)
+    answer(scripted.status, ok({ ...FRAME, activity: { ...unpaged, paged: false } }))
+    face.watch(TAB, '/runs/live', signal)
+    await settle()
+    // R-6.3: the whole `events` it received, marked as a console that does not page.
+    expect(tab(instance)?.activity).toMatchObject({ paged: false, events: unpaged.events })
   })
 })
 

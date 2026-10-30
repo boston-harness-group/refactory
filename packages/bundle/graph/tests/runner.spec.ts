@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CONFIGURED_RUN_SERVICE } from '@deepseek-ai/dsh-workflow-spine'
 import { apply as applyRunner, type Io } from '../src/index.ts'
 import { GRAPH_STARTUP_SERVICE, type GraphStartupValues } from '../src/startup.ts'
 
@@ -83,6 +84,7 @@ async function bench(options: {
    */
   statuses?: TurnStatus[]
   stdin?: NodeJS.ReadableStream
+  automatic?: { status: TurnStatus; result: Record<string, string> }
 } = {}): Promise<Harness> {
   let out = ''
   let err = ''
@@ -166,6 +168,13 @@ async function bench(options: {
       chat: options.chat ?? false,
     } as GraphStartupValues)
   }
+  if (options.automatic !== undefined) {
+    const { status, result } = options.automatic
+    ctx.provide(CONFIGURED_RUN_SERVICE, {
+      automatic: true,
+      advance: async () => { writeStatus(runDir, status); return result },
+    })
+  }
   const io: Io = {
     stdout: process.stdout,
     stderr: process.stderr,
@@ -180,6 +189,31 @@ async function bench(options: {
 }
 
 describe('graph runner', () => {
+  it('reports a retryable automatic node failure instead of its ready cursor status', async () => {
+    const harness = await bench({
+      automatic: {
+        status: { status: 'ready', nodes: ['finish'] },
+        result: { status: 'failed', error: 'finish exited with code 1: the heap cap stopped the allocation' },
+      },
+    })
+    expect(harness.exits).toEqual([1])
+    expect(harness.err()).toContain('the heap cap stopped the allocation')
+    expect(JSON.parse(harness.out())).toMatchObject({
+      ok: false, driver: 'automatic', status: 'ready',
+      error: 'finish exited with code 1: the heap cap stopped the allocation',
+    })
+    expect(harness.createOptions).toEqual([])
+  })
+
+  it('reports successful automatic execution without creating a CEO', async () => {
+    const harness = await bench({
+      automatic: { status: { status: 'done' }, result: { status: 'done' } },
+    })
+    expect(harness.exits).toEqual([0])
+    expect(JSON.parse(harness.out())).toMatchObject({ ok: true, driver: 'automatic' })
+    expect(harness.createOptions).toEqual([])
+  })
+
   it('refuses to call an unfinished graph finished', async () => {
     // The CEO can reach quiescence with nodes still due — it backgrounded a subagent
     // and ended its turn, or a gate could not be answered. Reporting a score for that

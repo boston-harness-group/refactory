@@ -30,6 +30,7 @@ def prepare_run(
     knobs: list[str] | None = None,
     model_context: dict[str, Any] | None = None,
     owner_argv: list[str] | None = None,
+    omit_steering: bool = False,
 ) -> Path:
     """Prepare a run directory for either runtime.
 
@@ -97,6 +98,7 @@ def prepare_run(
         "configuration_fingerprints": configuration_fingerprints(
             workdir, mode_id, Path(project) if project else Path(".")
         ) if project else {},
+        **({"omit_steering": True} if omit_steering else {}),
     }
     config_path = workdir / ".refactory/run-config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)

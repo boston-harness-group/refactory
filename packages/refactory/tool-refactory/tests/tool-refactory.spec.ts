@@ -27,20 +27,20 @@ import { CONSOLE_DEFAULTS, Console } from '../src/console.ts'
  * across.
  */
 
-function runResult(stdout: string, exitCode = 0, stderr = ''): {
-  stdout: { text: string }
+function runResult(stdout: string, exitCode = 0, stderr = '', lossy = false): {
+  stdout: { text: string; lossy: boolean }
   stderr: { text: string }
   outcome: SubprocessOutcome
 } {
-  return { stdout: { text: stdout }, stderr: { text: stderr }, outcome: { exitCode, signal: null } }
+  return { stdout: { text: stdout, lossy }, stderr: { text: stderr }, outcome: { exitCode, signal: null } }
 }
 
 type Scripted = ReturnType<typeof runResult>
 
 class FakeReader {
-  constructor(private readonly read: { text: string }) {}
+  constructor(private readonly read: { text: string; lossy?: boolean }) {}
   readFrom(_fromByte: number): SubprocessOutputRead {
-    return { text: this.read.text, nextOffset: this.read.text.length, lossy: false }
+    return { text: this.read.text, nextOffset: this.read.text.length, lossy: this.read.lossy === true }
   }
 }
 
@@ -579,7 +579,7 @@ describe('Console', () => {
 
   it('names the signal when a killed console has no exit code', async () => {
     const killed: Scripted = {
-      stdout: { text: '' }, stderr: { text: '' }, outcome: { exitCode: null, signal: 'SIGTERM' },
+      stdout: { text: '', lossy: false }, stderr: { text: '' }, outcome: { exitCode: null, signal: 'SIGTERM' },
     }
     const { console } = await consoleOver(killed)
     await expect(console.run({ verb: 'modes' })).resolves.toMatchObject({
@@ -589,7 +589,7 @@ describe('Console', () => {
 
   it('reports no status at all when neither exit code nor signal is known', async () => {
     const unknown: Scripted = {
-      stdout: { text: '' }, stderr: { text: '' }, outcome: { exitCode: null, signal: null },
+      stdout: { text: '', lossy: false }, stderr: { text: '' }, outcome: { exitCode: null, signal: null },
     }
     const { console } = await consoleOver(unknown)
     await expect(console.run({ verb: 'modes' })).resolves.toMatchObject({
@@ -602,6 +602,91 @@ describe('Console', () => {
     await expect(console.run({ verb: 'modes' })).resolves.toMatchObject({
       ok: false, error: 'the console printed no JSON: warning: nothing to say',
     })
+  })
+
+  it('reports a payload the collection cap cut as truncation, naming the cap and the retained tail', async () => {
+    // T-11 (R-5.1-3, UC-7): the reader's own `lossy` fact decides this, never a
+    // guess about the text. The seam delivers the cap and a retained length and
+    // no whole-stream total, so the failure names exactly those two numbers plus
+    // the argv that reproduces it — and it is not the "printed no JSON" message.
+    const tail = '{"activity":{"events":[{"at":"2026-10-26T15:04:05+00:00","kind":"worker_'
+    const { console } = await consoleOver(runResult(tail, 0, '', true))
+    const result = await console.run({ verb: 'status', options: { run: '/runs/live', after: 0 } })
+    expect(result).toMatchObject({
+      ok: false,
+      truncation: { capBytes: 1_024, retainedBytes: tail.length },
+      argv: [
+        '/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', '/runs/live', '--after', '0',
+      ],
+    })
+    if (result.ok) throw new Error('a truncated payload is not a success')
+    expect(result.error).toBe(
+      `the console's output was truncated at the 1024-byte collection cap before it printed JSON `
+      + `(only ${tail.length} bytes were retained); raise collectBytes or page the read\n`
+      + '/repo/.venv/bin/python -m refactory_dsh.console status --run /runs/live --after 0',
+    )
+    expect(result.error).not.toContain('printed no JSON')
+    expect(Object.keys(result.truncation ?? {})).toEqual(['capBytes', 'retainedBytes'])
+  })
+
+  it('keeps a complete non-JSON stdout as the no-JSON failure, with no truncation', async () => {
+    // T-11's other half (R-5.2, RES-010 / issue 95): a child's own output ahead
+    // of the envelope is a complete stream that is not JSON, so it stays the
+    // message it always was and gains no truncation verdict.
+    const { console } = await consoleOver(runResult('child banner\n{"run_id":"live"}'))
+    const result = await console.run({ verb: 'status', options: { run: '/runs/live', after: 0 } })
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'the console printed no JSON: child banner\n{"run_id":"live"}',
+    })
+    expect(result.ok ? undefined : 'truncation' in result).toBe(false)
+  })
+
+  it('treats a lossy read whose retained tail still decodes as the answer it is', async () => {
+    // T-12 (R-5.3): the contract does not invent a failure the seam does not
+    // prove. The complete payload arrived in the retained tail, so the call is a
+    // success with no truncation — saying otherwise would report a broken read
+    // for an answer the caller can use.
+    const { console } = await consoleOver(runResult('{"run_id":"live","state":"running"}', 0, 'dropped head', true))
+    await expect(console.run({ verb: 'status', options: { run: '/runs/live', after: 0 } })).resolves.toEqual({
+      ok: true,
+      argv: ['/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', '/runs/live', '--after', '0'],
+      value: { run_id: 'live', state: 'running' },
+    })
+  })
+
+  it('drops the paging options once for a console that refuses them, and only for that refusal', async () => {
+    // T-13's boundary half (R-6.1): a console older than the paging contract
+    // exits 2 with `unrecognized arguments`. Retrying once without those flags —
+    // and naming them — keeps the run readable; looping on the refusal would not.
+    const { console, fake } = await consoleOver(runResult(''))
+    const answers = [
+      runResult('', 2, 'console: error: unrecognized arguments: --activity-after 0 --activity-limit 200'),
+      runResult('{"run_id":"live"}'),
+    ]
+    fake.handler = () => answers.shift() ?? runResult('{"run_id":"live"}')
+    await expect(console.run({
+      verb: 'status',
+      options: { run: '/runs/live', after: 0, 'activity-after': 0, 'activity-limit': 200 },
+    })).resolves.toEqual({
+      ok: true,
+      argv: ['/repo/.venv/bin/python', '-m', 'refactory_dsh.console', 'status', '--run', '/runs/live', '--after', '0'],
+      value: { run_id: 'live' },
+      suppressed: ['activity-after', 'activity-limit'],
+    })
+    expect(fake.spawns).toHaveLength(2)
+
+    // The same refusal on the retry is reported rather than retried again: one
+    // attempt per call, never a loop.
+    const { console: stubborn, fake: stubbornFake } = await consoleOver(
+      runResult('', 2, 'console: error: unrecognized arguments: --activity-after 0'),
+    )
+    await expect(stubborn.run({
+      verb: 'status', options: { run: '/runs/live', 'activity-after': 0 },
+    })).resolves.toMatchObject({
+      ok: false, error: 'console: error: unrecognized arguments: --activity-after 0',
+    })
+    expect(stubbornFake.spawns).toHaveLength(2)
   })
 })
 

@@ -361,12 +361,15 @@ class Mode:
             if callable(getattr(model, "with_budget", None)):
                 model = model.with_budget(budget)
             resource_limits = budget.limits
+        from refactory_dsh.run_preparation import saved_run_config
+
         try:
             return execute(
                 mode.graph(), Path(workdir), knobs=mode.values(), model=model,
                 facts=dict(record.get("facts") or {}), task=dict(record.get("task") or {}),
                 start=node, max_steps=max_steps, resource_limits=resource_limits,
                 enable_recovery=enable_recovery,
+                omit_steering=bool(saved_run_config(Path(workdir)).get("omit_steering", False)),
             )
         finally:
             if owns_budget and budget is not None:

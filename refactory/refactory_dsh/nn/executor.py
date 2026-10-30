@@ -1234,6 +1234,31 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
+        # ── no-tools enforcement ──────────────────────────────────────────
+        tool_policy = node.tool_policy or ""
+        if callable(getattr(client, "with_tool_policy", None)):
+            client = client.with_tool_policy(tool_policy)
+        if tool_policy == "none":
+            # Validate single-output cardinality before the model
+            if len(node.writes) != 1:
+                raise ValueError(
+                    f"agent node {node.id!r} declares tool_policy='none' but has "
+                    f"{len(node.writes)} write(s); a no-tools node must declare "
+                    "exactly one output for its captured reply"
+                )
+            if not callable(getattr(client, "with_tool_policy", None)):
+                raise ValueError(
+                    f"agent node {node.id!r} declares tool_policy='none' but the "
+                    "model client does not support with_tool_policy; cannot "
+                    "enforce the policy"
+                )
+            # Route refusal
+            backend = (client.route() if callable(getattr(client, "route", None)) else {}).get("worker_backend", "dsh")
+            if backend not in ("dsh", "claude_code"):
+                raise ValueError(
+                    f"agent node {node.id!r} declares tool_policy='none', but the "
+                    f"{backend!r} route cannot enforce it"
+                )
         # The node's own bound on its session, as the spine applies it (#307).
         if node.timeout_s is not None and callable(getattr(client, "with_wall", None)):
             client = client.with_wall(node.timeout_s)
@@ -1260,20 +1285,34 @@ class Executor:
                 else None)
 
         prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
+        system = render(node.system_prompt_template, self.ctx) if node.system_prompt_template else ""
+        # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.
+        if system:
+            from refactory_dsh.workers import capabilities as _caps
+            backend = route.get("worker_backend", "dsh")
+            if backend in ('dsh', 'codex', 'claude_code', 'openshell') and not _caps(backend).get("system_prompt"):
+                raise ValueError(
+                    f"agent node {node.id!r} has a system prompt, but the {backend!r} "
+                    "route does not support a system-prompt channel"
+                )
         if self.ctx.budget is not None and not callable(getattr(client, "with_budget", None)):
             self.ctx.budget.require_usage_capability(False)
 
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                return _ask_model(attempt, sent, system="", workdir=self.ctx.workdir)
-            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system="")
+                return _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
 
+        _capture_final = route.get("worker_backend", "dsh") == "dsh"
+        if tool_policy == "none":
+            _capture_final = True
         output, _receipt = deliver(
             self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
             reads=list(node.reads), client=client, ask=ask,
-            capture_final=route.get("worker_backend", "dsh") == "dsh", rule=node.retry,
-            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace)
+            capture_final=_capture_final, rule=node.retry,
+            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
+            tool_policy=tool_policy)
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.
@@ -1374,6 +1413,7 @@ def execute(
     start: str | None = None,
     resource_limits: Any = None,
     shared_budget: Any = None,
+    omit_steering: bool | None = None,
     enable_recovery: bool = False,
 ) -> RunResult:
     """Build a context and run the graph once.
@@ -1394,6 +1434,8 @@ def execute(
     from refactory_dsh.steering import for_run
 
     workdir = Path(workdir)
+    from refactory_dsh.evaluators import _persist_steering_option
+    _persist_steering_option(workdir, omit_steering)
     from refactory_dsh.budgets import LEDGER, ResourceLimits, RunBudget
 
     budget = shared_budget or RunBudget.inherited(model)
@@ -1406,7 +1448,7 @@ def execute(
         budget.resume()
     if budget is not None:
         model = budget.bind_model(model)
-    graph = for_run(graph, workdir)
+    graph = for_run(graph, workdir, omit_steering=omit_steering)
     ctx = RunContext(
         workdir,
         knobs=knobs,

@@ -159,6 +159,12 @@ class Workspace:
     #: Files whose line endings or end-of-file blank lines the last emission normalised,
     #: which the agent is told on its next dispatch.
     normalised: tuple[str, ...] = ()
+    #: Files the run's generate command wrote while preparing the workspace, by digest as
+    #: it left them. They are never carried: the run regenerates them, and an agent's edit
+    #: to one is reported.
+    generate_owned: dict[str, str] = field(default_factory=dict)
+    #: Files in ``generate_owned`` the agent then changed, which it is told about.
+    prepared_edits: tuple[str, ...] = ()
 
     def describe(self) -> dict[str, Any]:
         """The workspace as the execution contract and the receipt record it."""
@@ -170,6 +176,7 @@ class Workspace:
             **({"prepared": self.prepared} if self.prepared else {}),
             **({"problems": list(self.problems)} if self.problems else {}),
             **({"normalised": list(self.normalised)} if self.normalised else {}),
+            **({"prepared_edits": list(self.prepared_edits)} if self.prepared_edits else {}),
         }
 
 
@@ -299,13 +306,15 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
             synced=str(prepared.get("synced", "")), conflicts=tuple(prepared.get("conflicts") or ()),
             deletes=bool(prepared.get("deletes", True)), prepared=str(prepared.get("prepared", "")),
             problems=tuple(str(problem) for problem in prepared.get("problems") or ()),
-            skip=dict(prepared.get("skip") or {}))
+            skip=dict(prepared.get("skip") or {}),
+            generate_owned=dict(prepared.get("generate_owned") or {}))
         if workspace.problems:
             _warn(f"preparing agent node {node!r}'s workspace reported: " + "; ".join(workspace.problems))
     workspace.confine, workspace.unconfined = confine, unconfined
     workspace.env["BASH_ENV"] = str(_tool_env(root))
     previous = _json(root / "collected.json")
     workspace.normalised = tuple(previous.get("normalised") or ())
+    workspace.prepared_edits = tuple(previous.get("prepared_edits") or ())
     _write_json(root / "dispatch.json", workspace.describe())
     if not workspace.confine:
         _warn(f"agent node {node!r} works in {workspace.path} without DSH's workspace-write policy "
@@ -685,7 +694,9 @@ def _content_digest(target: Path) -> str:
 
 
 def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), deletes: bool = True,
-                    skip: dict[str, str] | None = None) -> tuple[str, list[str], list[str]]:
+                    skip: dict[str, str] | None = None,
+                    generate_owned: dict[str, str] | None = None,
+                    prepared_edits: list[str] | None = None) -> tuple[str, list[str], list[str]]:
     """The workspace's change from ``base`` as ``===FILE:`` and ``===DELETE:`` blocks.
 
     ``git diff --raw --no-renames <base>`` gives what tracked files did (committed or
@@ -696,7 +707,11 @@ def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), d
     emission would read as a block header, a deletion a run without a worktree cannot
     make) and what was carried only approximately (line endings or blank lines at the
     ends of a file, which a block normalises). A file in ``skip`` whose content is still
-    the digest recorded there is left out: the workspace's preparation made it.
+    the digest recorded there is left out while the agent leaves it as it was made. A file
+    in ``generate_owned`` is left out always, and appended to ``prepared_edits`` when the
+    caller passes one and the agent's content differs from the digest the command left: the
+    run rebuilds it, so carrying it would credit the agent with the generator's work.
+    Setup's output is not in that set: a lockfile setup refreshed is the agent's to change.
     """
     skip = skip or {}
     # Stat information the agent's tools left stale must not read as a change.
@@ -735,6 +750,7 @@ def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), d
     blocks: list[str] = []
     refused: list[str] = []
     approximate: list[str] = []
+    edits_out = prepared_edits if prepared_edits is not None else []
     total = 0
     for name in sorted(entries):
         status, old_mode, new_mode = entries[name]
@@ -743,6 +759,11 @@ def derive_emission(path: Path, base: str, *, conflicts: tuple[str, ...] = (), d
             continue
         target = path / relative
         present = target.exists() or target.is_symlink()
+        if name in (generate_owned or {}):
+            current = _content_digest(target) if present else "deleted"
+            if (generate_owned or {})[name] != current:
+                edits_out.append(name)
+            continue
         if name in skip and skip[name] == (_content_digest(target) if present else "deleted"):
             continue
         # The same refusal an emitted block's path gets (`emitted_paths`, dm-278): a control
@@ -844,9 +865,11 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         if not writes:
             raise WorkspaceError(f"agent node {workspace.node!r} collects its workspace's diff and declares "
                                  "no output to write it into")
+        prepared_edits: list[str] = []
         emission, refused, approximate = derive_emission(
             workspace.path, workspace.base, conflicts=workspace.conflicts, deletes=workspace.deletes,
-            skip=workspace.skip)
+            skip=workspace.skip, generate_owned=workspace.generate_owned,
+            prepared_edits=prepared_edits)
         answer = _path(workdir, writes[0])
         answer.parent.mkdir(parents=True, exist_ok=True)
         answer.write_text(emission)
@@ -865,6 +888,10 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
             _write_json(record, {"file": writes[0], "digest": _digest(emission), "reason": reason})
         else:
             record.unlink(missing_ok=True)
+        if prepared_edits:
+            _warn(f"agent node {workspace.node!r}: these files are rebuilt by the run's generate "
+                  f"command, so they were left out of the emission: {', '.join(prepared_edits)}")
+            summary["prepared_edits"] = prepared_edits
         if approximate:
             _warn(f"agent node {workspace.node!r}: these files' line endings or end-of-file newlines are "
                   f"normalised in the emission, as every ===FILE: block's are: {', '.join(approximate)}")
