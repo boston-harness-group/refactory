@@ -2243,8 +2243,8 @@ current. It runs in the attempt's prepared worktree through
 `repo_change.run_check(prepared=True)`.
 
 - **An attempt's first emission** runs the self-check on the tests the change touches
-  (the selection below), beside the early asks judge; the brief's own example is left to
-  the review round's full check.
+  (the selection below), before the review fork; the brief's own example is left to the
+  review round's full check.
 - **A fix-up's emission** runs the selection below in chunks within the self-check's
   time limit (`check_digest.build_probe_command`), in `prepare_check`
   (`design_ops._fixup_self_check`).
@@ -2746,7 +2746,7 @@ to 10 minutes (dm-149), so the reviews' whole time was added to every round.
    the `generate` command (its tracked-file changes amended into the attempt) and the
    `setup` build in the run's worktree. Nothing moves the commit after this. Then the
    self-check ("Self-check inside the attempt"): every attempt runs it on the tests the
-   change touches, beside the early asks judge, and an attempt that fails it goes back to the
+   change touches, before the review fork, and an attempt that fails it goes back to the
    builder without a review. It does not run the brief's own example (the canary's marker
    grep, the wordcount check): a broken example is caught by the review round's full check,
    and costs that round. A preparation that fails
