@@ -20,6 +20,12 @@
       "id": "check_design_claims",
       "_type": "FnNode"
     },
+    "classify_reloop": {
+      "id": "classify_reloop",
+      "role": "ceo",
+      "max_iterations": 1,
+      "_type": "AgentNode"
+    },
     "classify_scale": {
       "id": "classify_scale",
       "_type": "FnNode"
@@ -208,6 +214,12 @@
       "max_iterations": 8,
       "_type": "GateNode"
     },
+    "scope_reloop": {
+      "id": "scope_reloop",
+      "evaluator_type": "fn",
+      "max_iterations": 4,
+      "_type": "GateNode"
+    },
     "strategy_director": {
       "id": "strategy_director",
       "role": "ceo",
@@ -245,6 +257,11 @@
     {
       "source": "check_design_claims",
       "target": "gate_design_review",
+      "condition": null
+    },
+    {
+      "source": "classify_reloop",
+      "target": "scope_reloop",
       "condition": null
     },
     {
@@ -359,13 +376,13 @@
     },
     {
       "source": "gate_strategy",
-      "target": "pick_corrections",
-      "condition": "proceed"
+      "target": "classify_reloop",
+      "condition": "reloop"
     },
     {
       "source": "gate_strategy",
-      "target": "synthesize_strategy",
-      "condition": "reloop"
+      "target": "pick_corrections",
+      "condition": "proceed"
     },
     {
       "source": "join_qa",
@@ -456,6 +473,16 @@
       "source": "route_strategy",
       "target": "synthesize_strategy",
       "condition": "scoped"
+    },
+    {
+      "source": "scope_reloop",
+      "target": "design_doc",
+      "condition": "document"
+    },
+    {
+      "source": "scope_reloop",
+      "target": "synthesize_strategy",
+      "condition": "approach"
     },
     {
       "source": "strategy_director",

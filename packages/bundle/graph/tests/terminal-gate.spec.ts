@@ -118,7 +118,7 @@ describe('a user gate at the terminal (dm-255)', () => {
     expect(outcome.error).toBeUndefined()
     expect(outcome.verdict).toMatchObject({ status: 'routed', gate, verdict: 'proceed', answered_by: 'user' })
     expect(outcome.shown).toContain(`[gate ${gate}] ${ask}`)
-    expect(outcome.shown).toMatch(/\n {2}1\. proceed\n/)
+    expect(outcome.shown).toMatch(/\n {2}\d+\. proceed\n/)
     expect(outcome.cursor).toContain(next)
   }, 120_000)
 

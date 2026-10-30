@@ -528,6 +528,93 @@ def route_strategy(ctx: Any) -> Any:
     return Verdict("proceed", "a full design weighs perspectives before the plan")
 
 
+def scope_reloop(ctx: Any) -> Any:
+    """Route a strategy-gate reloop based on classify_reloop's classification.
+
+    Reads reloop-scope.json written by the classify_reloop agent.
+    Reads the person's reloop feedback from the intent ledger (the correction
+    entries the gate recorded), not from classify_reloop's JSON.
+    Sets facts: reloop_scope, reloop_scope_reason, gate_strategy_feedback,
+    gate_revision_instruction.
+    Returns Verdict('document') or Verdict('approach').
+    Defaults to 'approach' on any failure.
+    """
+    DEFAULT = "approach"
+    DEFAULT_REASON = "unclear classification — defaulting to approach"
+    REVISE_ONLY = (
+        "If design.md already exists and you received gate feedback above, "
+        "revise only what the feedback asks for; produce the full document. "
+        "Do not reconsider the strategy."
+    )
+
+    # ── read the person's exact feedback from the intent ledger ──
+    feedback = _gate_reloop_feedback(ctx.workdir, "gate_strategy")
+
+    try:
+        text = ctx.read_text("reloop-scope.json")
+    except (OSError, UnicodeDecodeError):
+        ctx.set_fact("reloop_scope", DEFAULT)
+        ctx.set_fact("reloop_scope_reason", DEFAULT_REASON)
+        ctx.set_fact("gate_strategy_feedback", feedback)
+        ctx.set_fact("gate_revision_instruction", "")
+        return Verdict(DEFAULT, DEFAULT_REASON)
+
+    try:
+        obj = json.loads(text) if isinstance(text, str) else {}
+    except (json.JSONDecodeError, TypeError):
+        obj = {}
+
+    scope = obj.get("scope", "") if isinstance(obj, dict) else ""
+    reason = obj.get("reason", "") if isinstance(obj, dict) else ""
+
+    if scope not in ("document", "approach"):
+        scope = DEFAULT
+        reason = reason or DEFAULT_REASON
+
+    ctx.set_fact("reloop_scope", scope)
+    ctx.set_fact("reloop_scope_reason", reason or f"classified as {scope}")
+    ctx.set_fact("gate_strategy_feedback", feedback)
+    ctx.set_fact("gate_revision_instruction", REVISE_ONLY if scope == "document" else "")
+    return Verdict(scope, reason or f"classified as {scope}")
+
+
+def _gate_reloop_feedback(workdir: Path, gate: str) -> str:
+    """The person's reloop feedback for ``gate``: correction and constraint
+    entries recorded between the gate's latest reloop verdict and the next
+    verdict (or end of ledger). Returns the person's exact words."""
+    from refactory_dsh.steering import LEDGER, parse_entries
+
+    ledger_path = Path(workdir) / LEDGER
+    if not ledger_path.exists():
+        return ""
+    entries = parse_entries(ledger_path.read_text())
+
+    # Walk forward: find the latest reloop verdict for this gate, then
+    # collect correction/constraint entries until the next verdict.
+    last_reloop_idx = None
+    for i, entry in enumerate(entries):
+        kind = entry.get("kind", "")
+        if kind == "verdict":
+            fields = {k.strip(): v.strip()
+                      for line in entry.get("text", "").splitlines()
+                      for k, sep, v in [line.partition(":")] if sep}
+            if fields.get("gate") == gate and fields.get("verdict", "").lower() == "reloop":
+                last_reloop_idx = i
+
+    if last_reloop_idx is None:
+        return ""
+
+    parts = []
+    for entry in entries[last_reloop_idx + 1:]:
+        kind = entry.get("kind", "")
+        if kind == "verdict":
+            break
+        if kind in ("correction", "constraint"):
+            if entry.get("scope") == "product" and entry.get("source") == "user-relayed":
+                parts.append(entry["text"])
+    return "\n".join(parts)
+
+
 def gate_design_review(ctx: Any) -> str:
     """Send a design back only when the build cannot proceed without a rewrite.
 
@@ -544,6 +631,13 @@ def gate_design_review(ctx: Any) -> str:
     """
     from refactory_dsh import design_contract
     from refactory_dsh.nn import Verdict
+
+    # Clear strategy-gate reloop facts so a gate_design_review → design_doc
+    # reloop does not see stale feedback or the revise-only instruction.
+    ctx.set_fact("gate_strategy_feedback", "")
+    ctx.set_fact("reloop_scope", "")
+    ctx.set_fact("reloop_scope_reason", "")
+    ctx.set_fact("gate_revision_instruction", "")
 
     # Only what the build cannot proceed without; it is the one thing that costs a round.
     problems: list[str] = []
