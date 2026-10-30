@@ -2172,7 +2172,9 @@ def gate_check(ctx: Any) -> Any:
     """Gate after the review fork: route on the check and the early asks judge together.
 
     Composes one send-back from check failures and early-asks findings without spending an
-    attempt (increments ``combined_sendback_count``, not ``attempts_used``), and returns
+    attempt (a failing check increments ``combined_sendback_count``, the early-asks
+    send-back its own ``early_asks_sendback_count``, neither touching ``attempts_used``), and
+    returns
     ``Verdict("reloop")`` without calling ``repair()``. A failing check skips the QA judge
     and the overwatch by graph topology: ``gate_check → pick_corrections`` bypasses
     ``synthesize_qa → qa_judge → overwatch``.
