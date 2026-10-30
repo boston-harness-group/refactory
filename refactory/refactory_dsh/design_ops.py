@@ -2235,7 +2235,9 @@ def _collect_review_findings(ctx: Any) -> list[str]:
     Uses ``create_ops.blocking_findings`` — the same parser the gates and the audit
     already use.  A review file that is missing, empty or unreadable is named in the
     returned list rather than silently dropped, so the builder is told that a review it
-    should have had carries no finding.
+    should have had carries no finding.  Only the three reviews every attempt has are
+    held to that: the verifier's report is optional, and its absence means the verifier
+    branch did not run.
     """
     from refactory_dsh.create_ops import blocking_findings
 
@@ -2245,11 +2247,15 @@ def _collect_review_findings(ctx: Any) -> list[str]:
         "reviews/qa.md",
         "reviews/verification.md",
     ]
+    #: The three reviews every attempt has. The verifier's report is optional: its branch
+    #: may not have run, and a report that is not there is not a missing review.
+    mandatory = {"reviews/health-check.md", "reviews/code-review.md", "reviews/qa.md"}
     all_findings: list[str] = []
     notes: list[str] = []
     for path in review_files:
         if not ctx.exists(path):
-            notes.append(f"{path}: not found")
+            if path in mandatory:
+                notes.append(f"{path}: not found")
             continue
         try:
             text = ctx.read_text(path)
@@ -2257,7 +2263,8 @@ def _collect_review_findings(ctx: Any) -> list[str]:
             notes.append(f"{path}: could not read")
             continue
         if not text.strip():
-            notes.append(f"{path}: empty")
+            if path in mandatory:
+                notes.append(f"{path}: empty")
             continue
         try:
             findings = blocking_findings(text)

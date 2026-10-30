@@ -983,7 +983,9 @@ def test_cd_and_pytest_preserves_working_directory(tmp_path, monkeypatch):
     directory is preserved.  Fails on revert because the old splitter runs each as
     a separate process and pytest runs at the root.
 
-    Driven through the real ``run_check``, not a mock."""
+    These assertions drive ``_split_at_double_ampersand`` and, where the test records it,
+    inspect the script handed to ``run_check``.  ``run_check`` is mocked here, so what they
+    pin is the segmentation and the single shell script, not a shell's execution of it."""
     from refactory_dsh import base_check
     # Verify the splitter: cd and pytest in one segment each
     segments = base_check._split_at_double_ampersand("cd subdir && pytest")
@@ -1041,7 +1043,9 @@ def test_pipe_preserves_output(tmp_path, monkeypatch):
     ``|``. Fails on revert because the old splitter splits at ``|``, running each
     side as a separate process.
 
-    Driven through the real ``run_check``, not a mock."""
+    These assertions drive ``_split_at_double_ampersand`` and, where the test records it,
+    inspect the script handed to ``run_check``.  ``run_check`` is mocked here, so what they
+    pin is the segmentation and the single shell script, not a shell's execution of it."""
     from refactory_dsh import base_check
     # The splitter preserves pipes
     segments = base_check._split_at_double_ampersand("pytest | tee log.txt")
