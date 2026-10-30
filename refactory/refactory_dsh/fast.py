@@ -403,7 +403,8 @@ class DesignFastMode(DesignMode):
             reads=("emit.txt", "source-manifest.json"),
             writes=("changes.diff", "changed-functions.json"),
             produces=("artifact", "files", "commit", "change", "emission_refused",
-                      "changed_functions", "consecutive_refusals"),
+                      "changed_functions", "consecutive_refusals",
+                      "empty_emission_fingerprint"),
             knobs=("refusal_attempts",),
             notes="commit the emitted files on the run's branch, or write the artifact directory: "
                   "a copy of source_project, when there is one",
@@ -411,7 +412,7 @@ class DesignFastMode(DesignMode):
         graph.add(Node(
             "gate_emit", "gate", evaluator=f"{OPS}:gate_emit", resource_role="work",
             knobs=("repair_attempts",), writes=("fast-report.json", "repair.txt"),
-            produces=("repair_feedback", "repairs_used"), max_iterations=4,
+            produces=("repair_feedback", "repairs_used", "empty_emission_fingerprint"), max_iterations=4,
             notes="send an emission materialise could not apply back to emit, within the repair bound",
         ))
         _qa_nodes(graph, artifact=True, design=True)
