@@ -2262,7 +2262,7 @@ The engine reads the repository's own imports; it names no test or file.
   the ones built on the whole engine (lowering smoke, the edit-design tests with
   their mode validation, the design worktree tests).
 - **The test files the fix-up changed**: the diff from the commit the last self-check
-  ran on, not the whole attempt's, which the first self-check ran whole
+  ran on, not the whole attempt's, which the first self-check already covered
   (`design_ops._fixup_changes`; the record's `how_selected.fixup_changed`).
 - **The last check's failures** that are not inherited (dm-128's set), as ids.
 - **The tests that import a module the fix-up changed**, depth 1 (`from package import name`
@@ -2367,15 +2367,14 @@ before its fix-ups (`review_feedback`).
   loops back to emit; otherwise the build early-stops as exhausted.
 - A result that says nothing (a chunk stopped at the limit, a runner it cannot
   target, nothing collected, a chunk failure that names no test) goes on to the
-  reviews and the whole check. A first self-check whose whole check fails without
-  naming a test (a build error) is the attempt's failure, not a pass: it goes back
-  with what the check printed, and the fix-up's self-check, with nothing to target,
-  runs the whole check again.
+  reviews and the whole check. A first self-check whose run fails without naming a
+  test (a build error) is the attempt's failure, not a pass: it goes back with what
+  the check printed.
 
 prepare_check's `max_iterations` follows the knobs (`design.prepare_check_iterations`,
 applied by `DesignMode.graph` and `DesignMode.state_dict`, so the walker and the
 lowered graph get the same number). Its reloops are fix-ups, early stops and
-refusals (the first self-check's go through `first_self_check`, below, under the same
+refusals (the first self-check's go through `prepare_check`, below, under the same
 bound): applied emissions are at most the attempts (`check_attempt_cap` when it is
 above `check_attempts`) plus the run's fix-ups, each after at most
 `refusal_attempts − 1` refusals, so the limit is
@@ -2746,11 +2745,11 @@ to 10 minutes (dm-149), so the reviews' whole time was added to every round.
    the reviewers both see: `repo_change.prepare_attempt` installs the environment, runs
    the `generate` command (its tracked-file changes amended into the attempt) and the
    `setup` build in the run's worktree. Nothing moves the commit after this. Then the
-   self-check ("Self-check inside the attempt"): an attempt's first runs the whole check
-   beside the early asks judge, and an attempt that fails it goes back to the builder
-   without a review. That first self-check runs only the tests the change touches, not the
-   brief's own example (the canary's marker grep, the wordcount check): a broken example is
-   caught by the review round's full check, and costs that round. A preparation that fails
+   self-check ("Self-check inside the attempt"): every attempt runs it on the tests the
+   change touches, beside the early asks judge, and an attempt that fails it goes back to the
+   builder without a review. It does not run the brief's own example (the canary's marker
+   grep, the wordcount check): a broken example is caught by the review round's full check,
+   and costs that round. A preparation that fails
    is judged right there by the whole sequential check (`check_artifact`), which reports
    it with its triage as before. It first clears what a last attempt prepared or
    decided, records the attempt in `check-prep.json`, and sets `review_feedback` (what
