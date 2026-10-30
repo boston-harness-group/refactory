@@ -822,55 +822,37 @@ def test_combined_sendback_carries_check_failures_and_review_findings(tmp_path, 
     assert int(facts_after.get("attempts_used", 0)) == attempts_before
 
 
-# ── multi-suite failures: && splitting reports all suites' failures ───────────
+# ── the check is the person's contract: && short-circuits ─────────────────────
 
 
-def test_multi_suite_failures_all_reported(tmp_path, monkeypatch):
-    """When the check command has two suites joined by &&, both run in one shell:
-    a failure in the first suite does not prevent the second from running. Both
-    suites' failures are reported in the combined result.
-
-    The new single-shell approach wraps the segments in one script so ``cd``,
-    ``source``, pipes and semicolons are preserved.  The mock returns a result
-    containing both suites' failures, as the real shell would."""
-    two_suite_check = "python -m pytest -q tests/suite_a && python -m pytest -q tests/suite_b"
-    both_fail = SandboxResult(ok=False, returncode=1, elapsed_s=0.2,
-                              stdout="FAILED tests/suite_a/test_one.py::test_one\n1 failed\n"
-                                     "FAILED tests/suite_b/test_two.py::test_two\n1 failed\n")
+def test_the_check_command_runs_exactly_as_written(tmp_path, monkeypatch):
+    """``a && b`` is one command and goes to the shell whole: a failed build stops the
+    check and ``b`` never runs.  Splitting it would run ``b`` after the failed build and
+    report failures the change did not cause, which is why the check is the person's
+    contract and is not rewritten."""
+    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
+                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed\n")
     real = repo_change.run_check
+    beside_seen: list[str] = []
 
-    def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews") and "suite_a" in command and "suite_b" in command:
-            return both_fail
+    def spy(ctx, command, timeout, **kwargs):
+        if kwargs.get("beside_reviews"):
+            beside_seen.append(command)
+            return broken
         return real(ctx, command, timeout, **kwargs)
 
-    monkeypatch.setattr(repo_change, "run_check", run_check)
+    monkeypatch.setattr(repo_change, "run_check", spy)
     T._Chunks(monkeypatch, fails=set())
-    # Test files pass on the base (they assert VERSION exists, which it does).
-    # The mock returns synthetic failures for the beside_reviews path only.
-    repo_files = {
-        **PINNED,
-        "tests/suite_a/__init__.py": "",
-        "tests/suite_a/test_one.py": "import tool\n\ndef test_one():\n    assert tool.VERSION\n",
-        "tests/suite_b/__init__.py": "",
-        "tests/suite_b/test_two.py": "import tool\n\ndef test_two():\n    assert tool.VERSION\n",
-    }
-    run = T._spine_run(T._target(tmp_path / "repo", repo_files), tmp_path, monkeypatch,
-                       "abcdef700071")
-    (run / "facts.json").write_text(json.dumps({**T._facts(run), "check": two_suite_check}))
+    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch, "abcdef700090")
+    two_steps = "cd tests && python -m pytest -q"
+    (run / "facts.json").write_text(json.dumps({**T._facts(run), "check": two_steps}))
     T._emit(run, CLEAN, monkeypatch)
     code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
                              monkeypatch)
     assert code == 0 and T._label(out) == "proceed", err
-    # Run check_beside_reviews — with the && split, the one-shell script runs both suites
-    code, _, err = T._node(run, f"{design_ops.__name__}:check_beside_reviews", "check", "op",
-                           monkeypatch)
-    assert code == 0, err
-    verdict_data = json.loads((run / CHECK_VERDICT).read_text())
-    assert verdict_data["verdict"] == "reloop"
-    # Both suites' failures must appear in the reason
-    assert "test_one" in verdict_data["reason"], "first suite's failure must be reported"
-    assert "test_two" in verdict_data["reason"], "second suite's failure must be reported"
+    _check_node(run, monkeypatch)
+    # One call, the person's exact command: no generated script, no second segment.
+    assert beside_seen == [two_steps], f"the check was rewritten: {beside_seen}"
 
 
 # ── correction 3 and dm-270: what the builder is told ─────────────────────────
@@ -972,119 +954,6 @@ def test_a_fixups_self_check_runs_the_last_failures_and_what_the_fixup_changed(t
     assert second["selection"] == [PIN, "tests/test_pin.py"]
     assert second["how_selected"]["fixup_changed"] == ["tests/test_pin.py"]
     assert second["how_selected"]["fixup_changed_since"] == first["commit"][:12]
-
-
-# ── fix 1: shell command splitting preserves cd, pipes, and environment ───────
-
-
-def test_cd_and_pytest_preserves_working_directory(tmp_path, monkeypatch):
-    """A check command ``cd subdir && pytest`` runs through the real command runner.
-    The new splitter keeps ``cd subdir`` and ``pytest`` in one shell so the working
-    directory is preserved.  Fails on revert because the old splitter runs each as
-    a separate process and pytest runs at the root.
-
-    These assertions drive ``_split_at_double_ampersand`` and, where the test records it,
-    inspect the script handed to ``run_check``.  ``run_check`` is mocked here, so what they
-    pin is the segmentation and the single shell script, not a shell's execution of it."""
-    from refactory_dsh import base_check
-    # Verify the splitter: cd and pytest in one segment each
-    segments = base_check._split_at_double_ampersand("cd subdir && pytest")
-    assert segments == ["cd subdir", "pytest"]
-    # With pipes: preserved inside a segment
-    segments = base_check._split_at_double_ampersand("pytest | tee log.txt")
-    assert segments == ["pytest | tee log.txt"]
-    # Set -e and semicolons preserved
-    segments = base_check._split_at_double_ampersand("set -e; cd pkg && pytest -q")
-    assert segments == ["set -e; cd pkg", "pytest -q"]
-    # Source and activation preserved
-    segments = base_check._split_at_double_ampersand("source .venv/bin/activate && pytest")
-    assert segments == ["source .venv/bin/activate", "pytest"]
-    # Quoted && not split
-    segments = base_check._split_at_double_ampersand("echo 'a && b' && true")
-    assert segments == ["echo 'a && b'", "true"]
-    # No && returns original
-    segments = base_check._split_at_double_ampersand("pytest -q")
-    assert segments == ["pytest -q"]
-
-    # Now test through the real run_check: cd into a subdir and run a check there.
-    # We use a real sandbox command via _full_check.
-    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
-                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed\n")
-    real = repo_change.run_check
-    commands_seen: list[str] = []
-
-    def spy(ctx, command, timeout, **kwargs):
-        commands_seen.append(command)
-        if kwargs.get("beside_reviews"):
-            return broken
-        return real(ctx, command, timeout, **kwargs)
-
-    monkeypatch.setattr(repo_change, "run_check", spy)
-    T._Chunks(monkeypatch, fails=set())
-    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch, "abcdef700090")
-    (run / "facts.json").write_text(json.dumps({**T._facts(run),
-                                                "check": "cd tests && python -m pytest -q"}))
-    T._emit(run, CLEAN, monkeypatch)
-    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
-                             monkeypatch)
-    assert code == 0 and T._label(out) == "proceed", err
-    _check_node(run, monkeypatch)
-    # The command passed to run_check when beside_reviews is a shell script, not two calls
-    beside_cmds = [c for c in commands_seen if "__refactory_rc" in c or "cd tests" in c]
-    assert len(beside_cmds) == 1, f"expected one shell script call, got {beside_cmds}"
-    # The shell script contains both segments in one process
-    assert "cd tests" in beside_cmds[0]
-    assert "pytest" in beside_cmds[0]
-
-
-def test_pipe_preserves_output(tmp_path, monkeypatch):
-    """A check command with a pipe (``echo ok | tee log.txt``) runs through the real
-    command runner. The pipe is preserved because the new splitter does not split at
-    ``|``. Fails on revert because the old splitter splits at ``|``, running each
-    side as a separate process.
-
-    These assertions drive ``_split_at_double_ampersand`` and, where the test records it,
-    inspect the script handed to ``run_check``.  ``run_check`` is mocked here, so what they
-    pin is the segmentation and the single shell script, not a shell's execution of it."""
-    from refactory_dsh import base_check
-    # The splitter preserves pipes
-    segments = base_check._split_at_double_ampersand("pytest | tee log.txt")
-    assert segments == ["pytest | tee log.txt"]
-    # The old _steps would split at |
-    old_steps = base_check._steps("pytest | tee log.txt")
-    assert len(old_steps) == 2 and old_steps == ["pytest", "tee log.txt"]
-    # A pipe within a && segment is preserved
-    segments = base_check._split_at_double_ampersand("cd pkg && pytest | tee log.txt")
-    assert segments == ["cd pkg", "pytest | tee log.txt"]
-
-    # Drive through the real run_check: a pipe command as the check, via _full_check.
-    broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
-                           stdout="FAILED tests/test_pin.py::test_pin\n1 failed\n")
-    real = repo_change.run_check
-    commands_seen: list[str] = []
-
-    def spy(ctx, command, timeout, **kwargs):
-        commands_seen.append(command)
-        if kwargs.get("beside_reviews"):
-            return broken
-        return real(ctx, command, timeout, **kwargs)
-
-    monkeypatch.setattr(repo_change, "run_check", spy)
-    T._Chunks(monkeypatch, fails=set())
-    run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch, "abcdef700090")
-    # Use a pipe in the check command — no &&, so no split
-    (run / "facts.json").write_text(json.dumps({**T._facts(run),
-                                                "check": "python -m pytest | tee check.log"}))
-    T._emit(run, CLEAN, monkeypatch)
-    code, out, err = T._node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
-                             monkeypatch)
-    assert code == 0 and T._label(out) == "proceed", err
-    _check_node(run, monkeypatch)
-    # The command with the pipe was passed as-is, not split at |
-    beside_cmds = [c for c in commands_seen if "pytest" in c and "beside" not in c]
-    # With no &&, the command runs unchanged — the pipe is preserved
-    assert any("tee" in c for c in beside_cmds), \
-        f"pipe not preserved: commands were {beside_cmds}"
 
 
 # ── fix 2: no-attempt send-back through the graph to the draft ────────────────

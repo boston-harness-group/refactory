@@ -128,65 +128,6 @@ def _steps(command: str) -> list[str]:
     return [step for step in steps if step]
 
 
-def _split_at_double_ampersand(command: str) -> list[str]:
-    """Split ``command`` only at top-level ``&&``, respecting quotes and parentheses.
-
-    Everything else — pipes (``|``), semicolons (``;``), ``||``, ``&``, newlines,
-    redirections — stays inside its segment, so a command like
-    ``cd pkg && pytest | tee log`` yields ``['cd pkg', 'pytest | tee log']``.
-    Backslashes, single and double quotes, and parenthesis nesting are all respected.
-
-    Returns the original command in a one-element list when no top-level ``&&`` appears.
-
-    **Guarantees (PR body):**
-
-    Each segment between top-level ``&&`` runs in one shell process, preserving the
-    person's working directory, environment variables, pipes, semicolons, redirections
-    and ``set -e``.  Each segment's exit code is captured independently, so a failed
-    segment does not hide the next one's.  The whole command gets the check's one time
-    limit, not one per segment.  A command with no ``&&`` runs exactly once, unchanged.
-
-    **What this does not guarantee:** the segments do not short-circuit on failure the
-    way ``&&`` normally does.  ``cmd_a && cmd_b`` always runs both commands even when
-    ``cmd_a`` fails, because the purpose is to collect every failure in one pass.
-    """
-    segments: list[str] = []
-    current = ""
-    depth = 0
-    quote = ""
-    i = 0
-    while i < len(command):
-        char = command[i]
-        if quote:
-            current += char
-            if char == "\\" and quote == '"' and i + 1 < len(command):
-                current += command[i + 1]
-                i += 1
-            elif char == quote:
-                quote = ""
-        elif char == "\\" and i + 1 < len(command):
-            current += command[i:i + 2]
-            i += 1
-        elif char in "'\"":
-            quote = char
-            current += char
-        elif char == "(":
-            depth += 1
-            current += char
-        elif char == ")":
-            depth -= 1
-            current += char
-        elif depth == 0 and char == "&" and command[i + 1:i + 2] == "&":
-            segments.append(current.strip())
-            current = ""
-            i += 1  # skip the second '&'
-        else:
-            current += char
-        i += 1
-    segments.append(current.strip())
-    return [seg for seg in segments if seg]
-
-
 def _runner(step: str) -> str | None:
     """``pytest`` or ``vitest`` when ``step`` names that runner (jest reports like vitest)."""
     import shlex

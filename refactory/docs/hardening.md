@@ -2756,7 +2756,9 @@ to 10 minutes (dm-149), so the reviews' whole time was added to every round.
    `setup` build in the run's worktree. Nothing moves the commit after this. Then the
    self-check ("Self-check inside the attempt"): an attempt's first runs the whole check
    beside the early asks judge, and an attempt that fails it goes back to the builder
-   without a review. A preparation that fails
+   without a review. That first self-check runs only the tests the change touches, not the
+   brief's own example (the canary's marker grep, the wordcount check): a broken example is
+   caught by the review round's full check, and costs that round. A preparation that fails
    is judged right there by the whole sequential check (`check_artifact`), which reports
    it with its triage as before. It first clears what a last attempt prepared or
    decided, records the attempt in `check-prep.json`, and sets `review_feedback` (what

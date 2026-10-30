@@ -29,7 +29,9 @@ EARLY_ASKS_JUDGE_MARK = "You are the early asks judge."
 #: The combined send-back loop is bounded by ``gate_check``'s ``max_iterations``:
 #: when ``combined_sendback_count`` reaches this, ``gate_check`` delivers a draft
 #: marked check-failing instead of looping further.
-_COMBINED_SENDBACK_BOUND = 8
+#: A failing check goes back at most this many times. It is the check's own attempt
+#: limit (``check_attempts``, 3 by default), not a larger number of review rounds.
+_COMBINED_SENDBACK_BOUND = 3
 
 #: What the builder says it updated on the attempt in progress (`note_updated_tests`).
 UPDATED_TESTS = "updated-tests.json"
@@ -1342,43 +1344,21 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                 check_attempt: str | None = None) -> Any:
     """Run the whole check on the attempt, record its evidence, and judge it.
 
-    When ``beside_reviews`` is True the command is split only at top-level ``&&``
-    (``base_check._split_at_double_ampersand``); everything else — pipes, semicolons,
-    ``||``, ``&``, newlines, redirections — stays inside its segment, so ``cd pkg &&
-    pytest | tee log`` keeps the pipe, and ``source .venv/bin/activate && pytest``
-    keeps the environment.
+    The command is the person's contract and runs exactly as written, in one shell:
+    ``pnpm run build && pnpm test`` stops at the build when it fails, and ``pnpm test``
+    never runs.  Running the later step anyway would report failures the change did not
+    cause and waste the time it takes to produce them.  What the check prints is the
+    first failing step's failure, and that is what goes back with the review findings.
 
-    The segments run in **one shell process** (the working directory, environment
-    variables, pipes, semicolons, redirections and ``set -e`` are the person's).
-    Each segment's exit code is captured independently, so a failed segment does not
-    hide the next one's.  The whole command gets the check's one time limit, not one
-    per segment.  A command with no ``&&`` runs exactly once, unchanged.
-
-    **What this does not guarantee:** the segments do not short-circuit on failure
-    the way ``&&`` normally does.  ``cmd_a && cmd_b`` always runs both commands even
-    when ``cmd_a`` fails, because the purpose is to collect every failure in one pass.
+    ``beside_reviews`` only says whether the check records itself as running beside the
+    reviews; it does not change the command.
     """
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh.create_ops import repair
     from refactory_dsh.failfast import detect_stuck, record_check_history
 
     if beside_reviews:
-        from refactory_dsh import base_check as _bc
-        segments = _bc._split_at_double_ampersand(command)
-        if len(segments) > 1:
-            # Build a shell script that runs every segment in one process, captures
-            # each segment's exit code, and exits non-zero when any failed.
-            script_lines = ["__refactory_rc=0"]
-            for idx, seg in enumerate(segments):
-                script_lines.append(seg)
-                script_lines.append(f"__rc_{idx}=$?")
-                script_lines.append(f'[ $__rc_{idx} -ne 0 ] && __refactory_rc=$__rc_{idx}')
-            script_lines.append("exit $__refactory_rc")
-            shell_script = "\n".join(script_lines)
-            result = repo_change.run_check(ctx, shell_script, check_timeout,
-                                           beside_reviews=True)
-        else:
-            result = repo_change.run_check(ctx, command, check_timeout, beside_reviews=True)
+        result = repo_change.run_check(ctx, command, check_timeout, beside_reviews=True)
     else:
         result = repo_change.run_check(ctx, command, check_timeout)
     detail = "\n".join((result.problem(), result.stdout or "", result.stderr or "")).strip()
@@ -2220,13 +2200,23 @@ def _gate_check_early_asks(ctx: Any) -> Any:
     ctx.set_fact("validation", detail)
     count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
     ctx.set_fact("combined_sendback_count", count)
-    if count >= _COMBINED_SENDBACK_BOUND:
+    if count >= _combined_sendback_bound(ctx):
         stop = BuildLoopStop(
             f"check failures exhausted after {count} combined send-back(s)")
         if _draft_for_stop(ctx, stop, check_failing=True) is not None:
             return "draft"
         raise stop
     return Verdict("reloop", detail)
+
+
+def _combined_sendback_bound(ctx: Any) -> int:
+    """How many combined send-backs a failing check gets: its own attempt limit.
+
+    The check used to be retried ``check_attempts`` times (3 by default); the combined
+    send-back does not spend an attempt, so it carries its own counter with the same
+    bound. A run that keeps failing stops at the third round, not an eighth.
+    """
+    return max(1, int(ctx.knob("check_attempts", _COMBINED_SENDBACK_BOUND)))
 
 
 def _collect_review_findings(ctx: Any) -> list[str]:
@@ -2315,7 +2305,7 @@ def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
     ctx.set_fact("validation", detail)
     count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
     ctx.set_fact("combined_sendback_count", count)
-    if count >= _COMBINED_SENDBACK_BOUND:
+    if count >= _combined_sendback_bound(ctx):
         stop = BuildLoopStop(
             f"check failures exhausted after {count} combined send-back(s)")
         if _draft_for_stop(ctx, stop, check_failing=True) is not None:

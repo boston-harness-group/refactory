@@ -1499,7 +1499,8 @@ def test_a_run_without_a_worktree_still_stops_at_its_check_limit(github, tmp_pat
     run = tmp_path / "run"
     result = _design(run, check="false", mode=_mode(worktree=False, check_attempts=1, check_attempt_cap=0))
     assert result.exit_ok is False
-    assert "check failures exhausted after 8 combined send-back(s)" in (result.error or "")
+    # check_attempts=1 in this mode: the send-back bound is the check"s own limit.
+    assert "check failures exhausted after 1 combined send-back(s)" in (result.error or "")
     assert "draft_delivery" not in result.facts
 
 

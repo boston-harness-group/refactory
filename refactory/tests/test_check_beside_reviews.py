@@ -156,6 +156,8 @@ def test_gate_check_routes_on_the_decision_for_this_attempt(tmp_path, monkeypatc
     # Another attempt's decision, a skip of another attempt, or a non-person skip does
     # not stand: the gate judges the attempt itself, bound to it.
     whole = []
+    # Independent routing scenarios on one ctx; the send-back bound has its own test.
+    ctx.set_fact("combined_sendback_count", 0)
     monkeypatch.setattr(design_ops, "check_artifact", lambda ctx, *, check_attempt=None:
                         whole.append(check_attempt) or nn.Verdict("reloop", "judged here"))
     for receipt in ({"status": "skipped", "source": "person", "check_attempt": "a1"},
@@ -165,6 +167,7 @@ def test_gate_check_routes_on_the_decision_for_this_attempt(tmp_path, monkeypatc
         assert design_ops.gate_check(ctx).reason.startswith("judged here")
     assert whole == ["a2", "a2"]
     # What it judged is recorded for this attempt: a rerun of the gate routes on it.
+    ctx.set_fact("combined_sendback_count", 0)
     assert design_ops.gate_check(ctx).reason.startswith("judged here")
     assert whole == ["a2", "a2"]
     # The commit moved since prepare_check: nothing here is this attempt's.
