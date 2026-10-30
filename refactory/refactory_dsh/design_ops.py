@@ -1600,6 +1600,10 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                 return Verdict("reloop", detail)
             return repair(ctx, [detail])
         ctx.set_fact("validation", "(the check passed)")
+        _checked = worktree.recorded(ctx.workdir)
+        if _checked is not None:
+            from refactory_dsh import delivery
+            delivery.record_full_check(ctx, Path(_checked.path), command)
         ctx.write_json("check-record.json", {
             "status": "pass", "validation": "(the check passed)",
             "attempt": int(ctx.facts.get("attempts_used", 0)),
