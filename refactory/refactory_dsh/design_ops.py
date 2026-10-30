@@ -26,11 +26,10 @@ from refactory_dsh.nn import Verdict
 EARLY_ASKS_VERDICT = "early-asks.json"
 EARLY_ASKS_JUDGE_MARK = "You are the early asks judge."
 
-#: The combined send-back loop is bounded by ``gate_check``'s ``max_iterations``:
-#: when ``combined_sendback_count`` reaches this, ``gate_check`` delivers a draft
-#: marked check-failing instead of looping further.
-#: A failing check goes back at most this many times. It is the check's own attempt
-#: limit (``check_attempts``, 3 by default), not a larger number of review rounds.
+#: A failing check goes back at most this many times: the check's own attempt limit
+#: (``check_attempts``, 3 by default), not a larger number of review rounds. When
+#: ``combined_sendback_count`` reaches it, ``gate_check`` delivers a draft marked
+#: check-failing instead of looping further.
 _COMBINED_SENDBACK_BOUND = 3
 
 #: What the builder says it updated on the attempt in progress (`note_updated_tests`).
@@ -2198,12 +2197,14 @@ def _gate_check_early_asks(ctx: Any) -> Any:
     detail = "\n".join(parts)
     ctx.write_text("check.txt", detail + "\n")
     ctx.set_fact("validation", detail)
-    count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
-    ctx.set_fact("combined_sendback_count", count)
+    # Its own count: the check passed, so these send-backs are not check failures and
+    # must not end in a draft marked check failing.
+    count = int(ctx.facts.get("early_asks_sendback_count") or 0) + 1
+    ctx.set_fact("early_asks_sendback_count", count)
     if count >= _combined_sendback_bound(ctx):
         stop = BuildLoopStop(
-            f"check failures exhausted after {count} combined send-back(s)")
-        if _draft_for_stop(ctx, stop, check_failing=True) is not None:
+            f"asks not built after {count} send-back(s)")
+        if _draft_for_stop(ctx, stop, check_failing=False) is not None:
             return "draft"
         raise stop
     return Verdict("reloop", detail)
@@ -2271,9 +2272,9 @@ def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
     """Check failed — compose one send-back with check failures, review findings
     and early-asks findings.
 
-    The combined send-back loop is bounded: when ``combined_sendback_count`` reaches 8
-    (matching ``gate_check``'s ``max_iterations``), ``gate_check`` delivers a draft
-    marked check-failing instead of looping further.
+    The combined send-back loop is bounded by the check's attempt limit
+    (``check_attempts``): when ``combined_sendback_count`` reaches it, ``gate_check``
+    delivers a draft marked check-failing instead of looping further.
 
     The message the builder receives names every failing test (from the check) and
     every finding from the reviews and verifier (extracted by

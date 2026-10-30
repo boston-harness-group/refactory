@@ -2242,9 +2242,9 @@ lowering snapshots (`regenerate_snapshots`), so the run's generate step keeps th
 current. It runs in the attempt's prepared worktree through
 `repo_change.run_check(prepared=True)`.
 
-- **An attempt's first emission** runs the whole check once (b48a; "The first
-  self-check, beside the early asks judge" below): the builder gets every failure in
-  one pass.
+- **An attempt's first emission** runs the self-check on the tests the change touches
+  (the selection below), beside the early asks judge; the brief's own example is left to
+  the review round's full check.
 - **A fix-up's emission** runs the selection below in chunks within the self-check's
   time limit (`check_digest.build_probe_command`), in `prepare_check`
   (`design_ops._fixup_self_check`).
@@ -2446,14 +2446,6 @@ verdict, with `judge.status: failed` in the record and a run warning. A failed j
 branch is recorded missing with its error (`reviews/early_asks_check-missing.txt`,
 written by the worker on the spine and by the fork on the walker) and read the same
 way.
-
-**Reuse.** When the first self-check goes on to the reviews (a pass, or failures all
-inherited), its whole-check result is kept (`.refactory/first-check-cache.json`) and the
-check beside the reviews uses it instead of running the check again while the commit,
-the check command, and the setup and generate commands are the ones it ran with; its
-evidence says `reused from the first self-check, commit <sha>`. Only `gate_self_check`
-keeps one, so a fix-up's partial run never stands for the whole check, which stays
-binding.
 
 **Updated tests (dm-270).** The builder names each test it updated, and the change it
 follows, on one line of its completion message (`Updated tests: …`).
@@ -2771,10 +2763,7 @@ to 10 minutes (dm-149), so the reviews' whole time was added to every round.
    keeps what it wrote into HOME points at the copy. The reviewers read and run the delivered files in the
    run's worktree meanwhile; neither sees, or deletes, what the other leaves. The copy is
    kept across attempts (moved to the new commit, the last check's files put back, its
-   installed environment kept) and removed with the base worktree. When the attempt's
-   first self-check ran the whole check on this commit, with this command, setup and
-   generate, and went on, the op uses that result instead of running the check again,
-   and its evidence says so. The op records its
+   installed environment kept) and removed with the base worktree. The op records its
    decision, with the check command it ran, in `check-verdict.json`; a node inside a
    fork may not send the run outside it. A check that raises (an unrepairable failure)
    is recorded and raised by `gate_check`, because the node runner retries a failed op

@@ -823,7 +823,7 @@ class DesignMode(Mode):
             # It runs the whole check itself when no decision stands for this attempt.
             writes=(*check_writes, *repo_change.CHECK_WRITES),
             produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
-                      "combined_sendback_count"),
+                      "combined_sendback_count", "early_asks_sendback_count"),
             knobs=check_knobs, max_iterations=8,
             notes="compose one send-back from check failures and review findings without "
                   "spending an attempt; the combined send-back names every failing test "
