@@ -837,6 +837,57 @@ def test_a_slow_file_at_the_cut_does_not_hide_cheap_failures_after_it(tmp_path, 
     assert record["selection"][-1] == "tests/test_a_slow.py" and record["cut"] == ["tests/test_a_slow.py"]
 
 
+def test_the_fixup_builder_is_given_the_self_checks_own_command_and_its_time(tmp_path):
+    """In design runs A1 and A2 the builder ran the whole suite under its own 5-minute
+    `timeout`, which killed it with no output, up to nine times a session. Its briefing now
+    carries the targeted command the self-check ran (the check's options kept, so `-n 4`
+    stays) and the seconds the self-check measured for it; the first dispatch, with nothing
+    selected yet, says to run the tests for the files it changes and names no time."""
+    repo = _target(tmp_path / "repo", PINNED)
+    check = "python -m pytest -q -n 4 tests"
+    breaks = render({"tool.py": "VERSION = 2\n"})
+    fixes = render({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"})
+    model = FakeModel(_answers(breaks, fixes))
+    run = tmp_path / "run"
+    result = _design(run, model, repo, check=check)
+    assert result.exit_ok, result.error
+
+    first, _ = _records(run)
+    [ran] = first["commands"]
+    assert "-n 4" in ran and "tests/test_pin.py" in ran
+    first_emit, second_emit = [prompt for prompt in model.prompts if EMIT in prompt]
+    assert f"Your targeted test command: {design_ops.NO_BUILDER_TESTS}\n" in first_emit
+    assert "It took about" not in first_emit
+    assert f"Your targeted test command: `{ran}`\n" in second_emit
+    assert f"It took about {max(1, round(first['duration_s']))} s when the self-check ran it." in second_emit
+    assert "{{builder_tests}}" not in first_emit + second_emit
+
+
+def test_the_targeted_command_states_a_time_only_when_the_run_measured_one(tmp_path):
+    """A self-check that ran everything states its elapsed time; one cut at its limit
+    states the sum of its files' measured times, or nothing when a file has none or only a
+    lower bound. It never guesses."""
+    repo = _target(tmp_path / "repo", {**PINNED, "tests/test_other.py": "def test_other():\n    pass\n"})
+    check = "python -m pytest -q -n 4 tests"
+    names = ["tests/test_pin.py", "tests/test_other.py"]
+
+    def prepass(**fields):
+        return SimpleNamespace(**{"selection": names, "ran_ids": names, "cut_ids": [], "notes": [],
+                                  "elapsed_s": 41.4, "timings": [], **fields})
+
+    line = design_ops.builder_tests(check, prepass(), [], repo)
+    assert line == ("`python -m pytest -q -n 4 tests/test_pin.py tests/test_other.py`\n"
+                    "It took about 41 s when the self-check ran it.")
+    cut = prepass(ran_ids=names[:1], cut_ids=names[1:])
+    assert "It took" not in design_ops.builder_tests(check, cut, [], repo)
+    timed = [{"timings": [{"tests": [name], "s": 7.0, "counted": True}]} for name in names]
+    assert "It took about 14 s" in design_ops.builder_tests(check, cut, timed, repo)
+    bounded = [{"timings": [{"tests": [names[0]], "s": 7.0, "counted": True},
+                            {"tests": [names[1]], "s": 9.0, "counted": True, "timed_out": True}]}]
+    assert "It took" not in design_ops.builder_tests(check, cut, bounded, repo)
+    assert design_ops.builder_tests(check, prepass(selection=[]), [], repo) == ""
+
+
 def test_a_fixup_runs_the_last_self_checks_failures_first(tmp_path, monkeypatch):
     _Chunks(monkeypatch, fails={PIN})
     repo = _target(tmp_path / "repo", PINNED)

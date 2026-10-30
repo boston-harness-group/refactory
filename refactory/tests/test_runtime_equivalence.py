@@ -697,6 +697,25 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
 
 
 @pytest.mark.parametrize("runtime", ["walker", "card", "resumed"])
+def test_the_fixup_builder_gets_the_self_checks_command_on_each_runtime(runs, runtime):
+    """The builder is told which tests to run, so it does not run the whole suite under its
+    own timeout. Its first briefing has no selection to give; the fix-up's carries the
+    command the self-check ran and the time it measured, and neither runtime's builder is
+    told to run the whole suite or given a fixed timeout."""
+    world = runs["worlds"][runtime]
+    calls = [json.loads(line) for line in (world.dsh / "calls.jsonl").read_text().splitlines()]
+    first, fixup = [call["prompt"] for call in calls if call["node"] == "emit"]
+    [check] = [json.loads(line) for line in (world.run / "self-check-record.jsonl").read_text().splitlines()
+               if '"outcome": "fixup"' in line]
+    [command] = check["commands"]
+    assert "Your targeted test command: none yet; run the tests for the files you change\n" in first
+    assert f"Your targeted test command: `{command}`\nIt took about " in fixup
+    for prompt in (first, fixup):
+        assert "Do not run the whole test suite: the full check runs after you finish" in prompt
+        assert "5m" not in prompt and "{{builder_tests}}" not in prompt
+
+
+@pytest.mark.parametrize("runtime", ["walker", "card", "resumed"])
 def test_correction_audit_and_overwatch_accept_only_built_correction(runs, runtime):
     """The real audit feeds the scripted overwatch in each runtime: built passes; unbuilt reloops."""
     worlds = runs["worlds"]

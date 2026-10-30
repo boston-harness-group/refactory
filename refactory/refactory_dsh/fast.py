@@ -368,7 +368,7 @@ class DesignFastMode(DesignMode):
                       "overwatch_review", "design_review_feedback", "design_review_findings",
                       "deliverable_kind", "review_instructions", "verification_methods",
                       "source_project", "source_files", "repair_feedback", "repairs_used",
-                      *repo_change.produces()),
+                      "builder_tests", *repo_change.produces()),
             notes="read the artifact brief, and say where the run works",
         ))
         _strategy_node(graph, artifact=True)
