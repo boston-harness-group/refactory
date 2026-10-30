@@ -119,17 +119,22 @@ assert _JUDGE_BASELINE != _ACCEPTANCE_BASELINE
 #: reviews report; a judge decides on substance, so a review's wording or markers decide
 #: nothing, and its gate applies the same rule to what the judge names (`judges.blocks`).
 _JUDGE_RULE = (
-    "Only these hold the change back: a defect that breaks an ask in the brief or a "
-    "correction the person gave, a failed health check (the artifact does not run as a "
-    "user runs it), or a critical or high defect (a correctness or safety bug, or a "
-    "regression: existing behaviour the change breaks, with the test or path:line that "
-    "shows it). Give each must_fix item its `severity` (`critical`, `high`, `medium` or "
-    "`low`) and what it `breaks` (`ask`, `correction`, `health` or `none`). Answer `redo` "
-    "only when at least one item is critical or high, or breaks an ask, a correction or the "
-    "health check: the gate sends the change back for nothing else, and lists medium and "
-    "low items that break none of those as follow-ups. Everything else that is real (extra "
-    "tests, docs, edge cases beyond the asks, refactors, style) is a follow-up: the pull "
-    "request lists it and it does not hold the change back.\n\n"
+    "Send the change back (`redo`, with a must_fix item) only for: an ask in the brief or a "
+    "correction the person gave that was not built (`kind` `ask`); the check failing, "
+    "including a failed health check, where the artifact does not run as a user runs it "
+    "(`kind` `check`); or a critical or high defect in product code (`kind` `defect`: "
+    "wrong behaviour, data loss, a crash or a security problem, or a regression, with the "
+    "test or path:line that shows it).\n"
+    "These are always follow-ups, never must_fix: weak or tautological test assertions and "
+    "missing edge-case tests, docs wording, style, dead code, minor refactors, and any low or "
+    "medium finding. Put them in `follow_ups`. If you list one in must_fix anyway, label it "
+    "with its `kind` (`test`, `docs` or `style`, or a `defect` of `medium` or `low` "
+    "severity): the gate moves it to the follow-ups and the pull request lists it. A weak "
+    "test is a `test` item even when it covers a correction: the correction is built.\n"
+    "Give each must_fix item its `kind` (`ask`, `check`, `defect`, `test`, `docs` or "
+    "`style`), its `severity` (`critical`, `high`, `medium` or `low`) and what it `breaks` "
+    "(`ask`, `correction`, `health` or `none`). Answer `redo` only when at least one item "
+    "holds the change back by this rule.\n\n"
 )
 
 _JUDGE_UNAVAILABLE = (
@@ -142,6 +147,7 @@ _JUDGE_UNAVAILABLE = (
 _MUST_FIX_SHAPE = (
     '{"source": "<the review it came from>", "where": "<path:line>", "what": "<the defect>", '
     '"why": "<the ask, correction or behaviour it breaks>", '
+    '"kind": "ask" | "check" | "defect" | "test" | "docs" | "style", '
     '"severity": "critical" | "high" | "medium" | "low", '
     '"breaks": "ask" | "correction" | "health" | "none"}'
 )
