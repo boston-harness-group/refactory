@@ -7,7 +7,6 @@ import { describe, expect, it } from 'vitest'
 import {
   designGraphDocumentReloop,
   designGraphApproachReloop,
-  designGraphRefineLight,
 } from './graph-shapes.ts'
 import { seededOrders, driveToEnd } from './shape-driver.ts'
 import type { GatePolicy } from './shape-driver.ts'

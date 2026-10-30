@@ -182,7 +182,10 @@ def test_a_light_refine_relooped_at_its_gate_keeps_the_pull_request_in_the_next_
     ledger = Ledger(run)
     ledger.verdict("gate_strategy", "reloop")
     ledger.note("correction", "RELOOP-NOTE: put the printing in a function")
-    second = FakeModel(["REVISED-PLAN-FROM-THE-NOTE", DESIGN_DOC_ANSWER])
+    second = FakeModel([
+        '{"scope": "approach", "reason": "approach change"}',  # classify_reloop
+        "REVISED-PLAN-FROM-THE-NOTE", DESIGN_DOC_ANSWER,
+    ])
     again = DesignMode.resume(run, model=second)
     assert again.gate_stop == "gate_strategy", (again.error, again.gate_stop)
     assert _steps(second.prompts) == {**LIGHT, "synthesize": 1}

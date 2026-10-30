@@ -416,7 +416,8 @@ class DesignMode(Mode):
                       "deliverable_kind", "review_instructions", "verification_methods",
                       *repo_change.produces(), "delivery", "delivery_plan",
                       "has_pitfalls_step", "pitfalls", "pitfalls_review",
-                      "claims_check_feedback", "design_review_status", "refine_context"),
+                      "claims_check_feedback", "design_review_status", "refine_context",
+                      "gate_strategy_feedback", "gate_revision_instruction"),
             notes="read the brief and the command that decides whether it is done",
         ))
 

@@ -357,6 +357,11 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
         # Filled by route_refine_design on a light refine; empty, design_doc's
         # prompt is unchanged.
         "refine_context": "",
+        # Filled by scope_reloop on a strategy-gate reloop; empty on first pass
+        # so design_doc's {{gate_strategy_feedback}} and {{gate_revision_instruction}}
+        # resolve to blank.
+        "gate_strategy_feedback": "",
+        "gate_revision_instruction": "",
     } if deliver else {}
     return {"name": name, "brief": brief, "check": check, "validation": "(no check has run yet)",
             "research_review": "(no research review has run yet)",

@@ -229,7 +229,7 @@ def test_the_design_graph_is_a_different_shape_from_a_package_one():
     graph = DesignMode().graph()
     assert sorted(graph.nodes) == [
         "apply_corrections", "audit_corrections", "check", "check_design_claims",
-        "classify_scale", "code_reviewer", "deliver",
+        "classify_reloop", "classify_scale", "code_reviewer", "deliver",
         "delivery_gate", "design_doc", "done",
         "early_asks_check", "emit", "fork_qa",
         "gate_check", "gate_design_review", "gate_overwatch",
@@ -238,7 +238,7 @@ def test_the_design_graph_is_a_different_shape_from_a_package_one():
         "materialise", "overwatch", "pick_corrections", "pitfalls_researcher",
         "prepare", "prepare_check", "qa_director", "qa_judge", "record_findings",
         "report", "research_director", "route_refine_design", "route_strategy",
-        "strategy_director", "synthesize_qa",
+        "scope_reloop", "strategy_director", "synthesize_qa",
         "synthesize_strategy", "verifier",
     ], "the graph is design-v2's phases, not v1's"
     assert graph.nodes["check"].call.endswith("check_beside_reviews")
