@@ -12,11 +12,14 @@ Design mode has two judges (``refactory_dsh.design``): ``qa_judge`` after the re
 fork, and ``overwatch`` before delivery. Their gates are ``design_ops.gate_qa`` and
 ``design_ops.gate_overwatch``.
 
-What holds a change back is remote-factory design-v2's rule: an ask, the health check,
-or a critical or high defect. Each must-fix item carries its ``severity`` and what it
-``breaks``; an item that is neither critical nor high and breaks none of those is a
-follow-up whatever the verdict says (`blocks`). A correction the person gave and the
-overwatch finds unmet always sends the change back.
+What holds a change back is remote-factory design-v2's rule: an ask or approved
+correction that was not built, the check failing, or a critical or high defect in product
+code. Each must-fix item carries its ``kind`` (``ask``, ``check``, ``defect``, ``test``,
+``docs`` or ``style``), its ``severity`` and what it ``breaks``. An item the judge itself
+labels ``test``, ``docs`` or ``style`` is a follow-up whatever its severity, and a
+``defect`` that is neither critical nor high and breaks nothing is one too, whatever the
+verdict says (`blocks`). A correction the person gave and the overwatch finds unmet always
+sends the change back.
 """
 
 from __future__ import annotations
@@ -48,8 +51,16 @@ UNAVAILABLE_LINE = re.compile(r"(?im)^\s*UNAVAILABLE:.*$")
 SEVERITIES = ("critical", "high", "medium", "low")
 BLOCKING_SEVERITIES = ("critical", "high")
 
-#: What a must-fix item may break; all but ``none`` block whatever its severity.
+#: What a must-fix item may break; all but ``none`` block a product defect whatever its
+#: severity.
 BREAKS = ("ask", "correction", "health", "none")
+
+#: What a must-fix item is. ``ask`` (an ask or approved correction not built) and ``check``
+#: (the check failing) always block; ``defect`` (a product-code defect) blocks when it is
+#: critical or high; the rest are never sent back, whatever their severity.
+KINDS = ("ask", "check", "defect", "test", "docs", "style")
+BLOCKING_KINDS = ("ask", "check")
+FOLLOW_UP_KINDS = ("test", "docs", "style")
 
 
 class Unreadable(ValueError):
@@ -57,8 +68,18 @@ class Unreadable(ValueError):
 
 
 def blocks(item: dict[str, str]) -> bool:
-    """Whether a must-fix item holds the change back: critical or high, or it breaks an
-    ask, a correction the person gave, or the health check."""
+    """Whether a must-fix item holds the change back.
+
+    Never when the judge labels it ``test``, ``docs`` or ``style`` (a weak assertion or a
+    missing edge-case test is a follow-up, even when it touches a correction). Always when
+    it is an unbuilt ``ask`` or a failing ``check``. Otherwise it is a product defect and
+    blocks when it is critical or high, or breaks an ask, a correction the person gave, or
+    the health check. A missing ``kind`` is a defect."""
+    kind = item.get("kind") or "defect"
+    if kind in FOLLOW_UP_KINDS:
+        return False
+    if kind in BLOCKING_KINDS:
+        return True
     return item.get("severity") in BLOCKING_SEVERITIES or item.get("breaks") not in ("none", "")
 
 
@@ -67,7 +88,7 @@ class Judgment:
     """A judge's verdict, as its gate reads it."""
 
     verdict: str
-    #: Each defect: ``source``, ``where``, ``what``, ``why``, ``severity``, ``breaks``.
+    #: Each item: ``source``, ``where``, ``what``, ``why``, ``kind``, ``severity``, ``breaks``.
     must_fix: tuple[dict[str, str], ...] = ()
     follow_ups: tuple[str, ...] = ()
     #: Findings the judge set aside: ``source``, ``finding``, ``why``.
@@ -107,9 +128,13 @@ def _record(value: Any, keys: tuple[str, ...], main: str) -> dict[str, str]:
 
 
 def _must_fix(value: Any) -> dict[str, str]:
-    """A must-fix item. A severity it does not give, or one it misspells, is high: a
-    missing label never lets a defect through. What it breaks defaults to nothing."""
-    item = _record(value, ("source", "where", "what", "why", "severity", "breaks"), "what")
+    """A must-fix item. A severity it does not give, or one it misspells, is high, and
+    a kind it does not give, or one it misspells, is a defect: a missing label never lets a
+    defect through. What it breaks defaults to nothing."""
+    item = _record(value, ("source", "where", "what", "why", "kind", "severity", "breaks"),
+                   "what")
+    kind = item["kind"].lower()
+    item["kind"] = kind if kind in KINDS else "defect"
     severity = item["severity"].lower()
     item["severity"] = severity if severity in SEVERITIES else "high"
     breaks = item["breaks"].lower()
@@ -238,7 +263,8 @@ def must_fix_line(item: dict[str, str]) -> str:
     """One must-fix item as a line of feedback: where, what, and why it matters."""
     head = f"[{item['source']}] " if item.get("source") else ""
     where = f"{item['where']}: " if item.get("where") else ""
-    label = [item.get("severity", "")]
+    label = [item.get("kind", "") if item.get("kind") not in ("", "defect", None) else "",
+             item.get("severity", "")]
     if item.get("breaks") not in ("", "none", None):
         label.append(f"breaks {item['breaks']}")
     tag = f" ({', '.join(part for part in label if part)})" if any(label) else ""
