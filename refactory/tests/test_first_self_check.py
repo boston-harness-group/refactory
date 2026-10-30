@@ -481,6 +481,54 @@ def test_an_ask_not_built_goes_back_even_when_every_test_passes(tmp_path, monkey
     assert records[0]["outcome"] == "pass" and T._count(model, T.HEALTH) >= 1
 
 
+class _BareCtx:
+    """Just enough of a node context for the send-back gates (no worktree, no run dir)."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.facts: dict[str, Any] = {}
+
+    def knob(self, name: str, default=None):
+        return default
+
+    def set_fact(self, name: str, value: Any) -> None:
+        self.facts[name] = value
+
+    def exists(self, name: str) -> bool:
+        return (self.root / name).exists()
+
+    def read_text(self, name: str) -> str:
+        return (self.root / name).read_text()
+
+    def write_text(self, name: str, text: str) -> None:
+        (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / name).write_text(text)
+
+
+def test_the_early_asks_send_back_has_its_own_bound_and_is_not_a_check_failure(
+        tmp_path, monkeypatch):
+    """The check passes every round; only the early asks judge finds items not built. Those
+    send-backs stop on their own count, never the check's, and the draft they reach is not
+    marked check failing."""
+    (tmp_path / design_ops.EARLY_ASKS_VERDICT).write_text(
+        early_asks_judgment(BUILT, not_built(HELPER)))
+    ctx = _BareCtx(tmp_path)
+    monkeypatch.setattr(design_ops, "_brief_and_corrections_block", lambda ctx: "")
+    drafts: list[bool | None] = []
+
+    def fake_draft(ctx, stop, *, check_failing=None, **kwargs):
+        drafts.append(check_failing)
+        return {"reason": str(stop)}
+
+    monkeypatch.setattr(design_ops, "_draft_for_stop", fake_draft)
+    assert design_ops._gate_check_early_asks(ctx) == "reloop"
+    assert design_ops._gate_check_early_asks(ctx) == "reloop"
+    assert design_ops._gate_check_early_asks(ctx) == "draft"
+    assert drafts == [False], "a passing check must not reach a check-failing draft"
+    assert not ctx.facts.get("combined_sendback_count")
+    assert ctx.facts["early_asks_sendback_count"] == 3
+
+
 def test_a_fully_built_attempt_goes_straight_on(tmp_path, monkeypatch):
     T._Chunks(monkeypatch, fails=set())
     model = FakeModel(T._answers(CLEAN))
