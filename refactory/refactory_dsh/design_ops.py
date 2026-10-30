@@ -2263,8 +2263,8 @@ def _collect_review_findings(ctx: Any) -> list[str]:
             notes.append(f"{path}: could not read")
             continue
         if not text.strip():
-            if path in mandatory:
-                notes.append(f"{path}: empty")
+            # An existing file that is empty is named whoever wrote it.
+            notes.append(f"{path}: empty")
             continue
         try:
             findings = blocking_findings(text)
