@@ -95,7 +95,7 @@ def test_scope_reloop_document(tmp_path):
     assert ctx.facts["reloop_scope"] == "document"
     assert ctx.facts["reloop_scope_reason"] == "wording fix"
     assert ctx.facts["gate_strategy_feedback"] == "fix the typo"
-    assert "revise only what the feedback asks" in ctx.facts["gate_revision_instruction"]
+    assert "Do not reconsider the strategy" in ctx.facts["gate_revision_instruction"]
 
 
 def test_scope_reloop_approach(tmp_path):
@@ -191,7 +191,7 @@ def test_document_reloop_then_design_review_reloop(tmp_path):
     ctx_scope = _make_ctx('{"scope": "document", "reason": "fix typo"}', tmp_path=tmp_path)
     scope_reloop(ctx_scope)
     assert ctx_scope.facts["gate_strategy_feedback"] == "fix the typo"
-    assert "revise only" in ctx_scope.facts["gate_revision_instruction"]
+    assert "Do not reconsider the strategy" in ctx_scope.facts["gate_revision_instruction"]
 
     # Step 2: simulate gate_design_review clearing the facts
     design = ("# Fix\n\n## Summary\n\nFix.\n\n## Changes\n\n- tool.py\n\n"
@@ -220,4 +220,4 @@ def test_document_reloop_then_design_review_reloop(tmp_path):
     rendered = template.replace("{{gate_strategy_feedback}}", ctx_review.facts["gate_strategy_feedback"])
     rendered = rendered.replace("{{gate_revision_instruction}}", ctx_review.facts["gate_revision_instruction"])
     assert "fix the typo" not in rendered
-    assert "revise only" not in rendered
+    assert "Do not reconsider the strategy" not in rendered
