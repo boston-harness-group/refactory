@@ -802,7 +802,7 @@ class DesignMode(Mode):
             writes=("changes.diff", "changed-functions.json", "check.txt", UPDATED_TESTS),
             produces=("artifact", "files", "commit", "change", "emission_refused",
                       "changed_functions", "consecutive_refusals", "draft_delivery",
-                      "updated_tests"),
+                      "updated_tests", "empty_emission_fingerprint"),
             knobs=("refusal_attempts",),
         ))
         # ── the check, beside the reviews ──
@@ -813,7 +813,8 @@ class DesignMode(Mode):
         check_produces = ("validation", "check_attempts_used", "review_attempts_used",
                           "attempts_used", "runtime_evidence", "base_unavailable",
                           "check_failures_history", "check_blocker_history",
-                          "convergence_extras_used", "convergence_granted", "inherited_failures")
+                          "convergence_extras_used", "convergence_granted", "inherited_failures",
+                          "empty_emission_fingerprint")
         check_writes = ("check.txt", "validation.txt", "authoring-evidence.json",
                         "check-record.json", "test-guardedness.json", CHECK_VERDICT)
         check_knobs = ("check_attempts", "check_timeout_s", "check_attempt_cap")

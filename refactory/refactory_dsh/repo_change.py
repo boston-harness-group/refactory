@@ -162,7 +162,8 @@ def materialise_node(**fields: Any) -> Node:
         "id": "materialise", "kind": "op", "call": f"{OPS}:materialise",
         "reads": (EMIT_FILE,), "writes": ("changes.diff", "changed-functions.json"),
         "produces": ("artifact", "files", "commit", "change", "emission_refused",
-                     "changed_functions", "consecutive_refusals"),
+                     "changed_functions", "consecutive_refusals",
+                     "empty_emission_fingerprint"),
         "notes": "commit the emitted files on the run's branch, or write the artifact directory",
         **fields,
     })
@@ -784,6 +785,10 @@ def materialise(ctx: Any, *, source: Path | None = None, files: tuple[str, ...] 
         # Like emission_refused: reset only when set, so a run lowered before the
         # refusal count existed still materialises.
         reset_refusals = {"consecutive_refusals": 0} if ctx.facts.get("consecutive_refusals") else {}
+        # Clear stale fingerprint so a new cycle's first empty emission gets
+        # Case 2 (specific_failure), not Case 3 (stuck) from an old fingerprint.
+        if ctx.facts.get("empty_emission_fingerprint") is not None:
+            reset_refusals["empty_emission_fingerprint"] = None
         from refactory_dsh.workspace import refusal_for
         if ctx.exists(EMIT_FILE):
             collected = refusal_for(ctx.workdir, EMIT_FILE, ctx.read_text(EMIT_FILE))

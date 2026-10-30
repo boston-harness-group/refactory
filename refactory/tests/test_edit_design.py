@@ -132,17 +132,25 @@ def test_the_revision_records_what_it_came_from():
     assert "before_score" in recorded and "after_score" in recorded
 
 
-def test_a_regression_is_refused_by_default(monkeypatch):
+def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_regression"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
     monkeypatch.setattr(sandbox, "smoke", lambda identifier, *args, **kwargs: sandbox.SandboxResult(
         ok=True, payload={"exit_ok": True, "score": 5.0 if identifier == "circle_packing/adaptive" else 1.0}))
-    with pytest.raises(CreateError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
-        edit_module.edit(
-            _edit_config(
-                name=NAME, brief="count", mode="circle_packing/adaptive", attempts=1,
-                workdir=Path(".factory/edit-run"),
-            ),
-            client=FakeModel(_answers()),
-        )
+    try:
+        with pytest.raises(CreateError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
+            edit_module.edit(
+                _edit_config(
+                    name=pkg, brief="count", mode="circle_packing/adaptive", attempts=1,
+                    workdir=tmp_path / "edit-run",
+                ),
+                client=FakeModel(create_answers(pkg, good_files(pkg))),
+            )
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 def test_a_regression_can_be_intended(monkeypatch):
@@ -277,32 +285,40 @@ def test_the_artifact_lands_beside_the_workspace_not_in_it():
     assert not Path(facts["artifact"]).is_relative_to(registry.workspace_root(Path(".")))
 
 
-def test_the_check_gate_passes_an_artifact_that_runs():
-    workdir = (ARTIFACTS / ARTIFACT).resolve()
+def test_the_check_gate_passes_an_artifact_that_runs(tmp_path):
+    art_name = "designed_pass_test"
+    workdir = (ARTIFACTS / art_name).resolve()
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True, exist_ok=True)
-    ctx = nn.RunContext(Path(".factory/design-check-ctx"))
-    ctx.facts.update({"name": ARTIFACT, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"print(1)\""})
-    import refactory_dsh.design_ops as ops
+    try:
+        ctx = nn.RunContext(tmp_path / "design-check-ctx")
+        ctx.facts.update({"name": art_name, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"print(1)\""})
+        import refactory_dsh.design_ops as ops
 
-    assert ops.check_artifact(ctx) == "proceed"
-    assert ctx.read_json("authoring-evidence.json")["validation"]["stdout"].strip() == "1"
+        assert ops.check_artifact(ctx) == "proceed"
+        assert ctx.read_json("authoring-evidence.json")["validation"]["stdout"].strip() == "1"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
-def test_the_check_gate_refuses_an_artifact_that_does_not_run():
-    workdir = (ARTIFACTS / ARTIFACT).resolve()
+def test_the_check_gate_refuses_an_artifact_that_does_not_run(tmp_path):
+    art_name = "designed_refuse_test"
+    workdir = (ARTIFACTS / art_name).resolve()
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True, exist_ok=True)
-    ctx = nn.RunContext(Path(".factory/design-check-ctx2"))
-    ctx.facts.update({"name": ARTIFACT, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"raise SystemExit(3)\""})
-    import refactory_dsh.design_ops as ops
+    try:
+        ctx = nn.RunContext(tmp_path / "design-check-ctx2")
+        ctx.facts.update({"name": art_name, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"raise SystemExit(3)\""})
+        import refactory_dsh.design_ops as ops
 
-    verdict = ops.check_artifact(ctx)
-    assert verdict == "reloop"
-    assert "exit 3" in ctx.read_text("check.txt"), (
-        "the refusal must say what the check said, or the retry is guessing"
-    )
-    assert "exit 3" in verdict.reason, "the CEO is told what the retry is told"
+        verdict = ops.check_artifact(ctx)
+        assert verdict == "reloop"
+        assert "exit 3" in ctx.read_text("check.txt"), (
+            "the refusal must say what the check said, or the retry is guessing"
+        )
+        assert "exit 3" in verdict.reason, "the CEO is told what the retry is told"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def test_the_check_runs_without_the_real_credentials(tmp_path):
