@@ -3280,8 +3280,9 @@ def gate_qa(ctx: Any) -> Any:
                 record_follow_ups(ctx, "qa", list(judgment.follow_ups))
             return routed
         # Nothing holds the change back. The items the judge named go to the pull request.
-        held = ("the QA judge asked for a redo, but nothing it named is critical or high or "
-                "breaks an ask, a correction or the health check")
+        held = ("the QA judge asked for a redo, but nothing it named holds the change back: "
+                "no unbuilt ask or correction, no failing check, no critical or high defect in "
+                "product code")
         suffix = f" ({held})" if judgment.verdict == "redo" else " (the QA judge proceeded with this listed as must-fix)"
         follow = [*judgment.follow_ups,
                   *(f"{judges.must_fix_line(item)}{suffix}" for item in judgment.must_fix)]
@@ -3467,8 +3468,9 @@ def _judge_overwatch(ctx: Any) -> Any:
                          [f"correction {judges.correction_line(item)}" for item in judgment.unmet])
         return _overwatch_back(ctx, "reloop: " + judges.feedback(judgment, "overwatch", passed=True))
     _note_unresolved(ctx, OVERWATCH_UNRESOLVED, "overwatch", [])
-    held = ("the overwatch asked for a redo, but nothing it named is critical or high or "
-            "breaks an ask, a correction or the health check")
+    held = ("the overwatch asked for a redo, but nothing it named holds the change back: no "
+            "unbuilt ask or correction, no failing check, no critical or high defect in "
+            "product code")
     suffix = f" ({held})" if judgment.verdict == "redo" else " (the overwatch passed with this listed as must-fix)"
     judged = {item["id"] for item in judgment.corrections}
     required = [item["id"] for item in (ctx.read_json(evidence.EVIDENCE, {}) or {}).get("requirements", [])
