@@ -760,7 +760,7 @@ class DesignMode(Mode):
             writes=("changes.diff", "changed-functions.json", "check.txt", UPDATED_TESTS),
             produces=("artifact", "files", "commit", "change", "emission_refused",
                       "changed_functions", "consecutive_refusals", "draft_delivery",
-                      "updated_tests"),
+                      "updated_tests", "empty_emission_fingerprint"),
             knobs=("refusal_attempts",),
         ))
         # ── the check, beside the reviews ──

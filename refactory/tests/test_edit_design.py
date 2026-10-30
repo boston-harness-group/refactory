@@ -285,32 +285,40 @@ def test_the_artifact_lands_beside_the_workspace_not_in_it():
     assert not Path(facts["artifact"]).is_relative_to(registry.workspace_root(Path(".")))
 
 
-def test_the_check_gate_passes_an_artifact_that_runs():
-    workdir = (ARTIFACTS / ARTIFACT).resolve()
+def test_the_check_gate_passes_an_artifact_that_runs(tmp_path):
+    art_name = "designed_pass_test"
+    workdir = (ARTIFACTS / art_name).resolve()
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True, exist_ok=True)
-    ctx = nn.RunContext(Path(".factory/design-check-ctx"))
-    ctx.facts.update({"name": ARTIFACT, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"print(1)\""})
-    import refactory_dsh.design_ops as ops
+    try:
+        ctx = nn.RunContext(tmp_path / "design-check-ctx")
+        ctx.facts.update({"name": art_name, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"print(1)\""})
+        import refactory_dsh.design_ops as ops
 
-    assert ops.check_artifact(ctx) == "proceed"
-    assert ctx.read_json("authoring-evidence.json")["validation"]["stdout"].strip() == "1"
+        assert ops.check_artifact(ctx) == "proceed"
+        assert ctx.read_json("authoring-evidence.json")["validation"]["stdout"].strip() == "1"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
-def test_the_check_gate_refuses_an_artifact_that_does_not_run():
-    workdir = (ARTIFACTS / ARTIFACT).resolve()
+def test_the_check_gate_refuses_an_artifact_that_does_not_run(tmp_path):
+    art_name = "designed_refuse_test"
+    workdir = (ARTIFACTS / art_name).resolve()
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True, exist_ok=True)
-    ctx = nn.RunContext(Path(".factory/design-check-ctx2"))
-    ctx.facts.update({"name": ARTIFACT, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"raise SystemExit(3)\""})
-    import refactory_dsh.design_ops as ops
+    try:
+        ctx = nn.RunContext(tmp_path / "design-check-ctx2")
+        ctx.facts.update({"name": art_name, "brief": "a checked artifact", "artifact": str(workdir), "check": "python -c \"raise SystemExit(3)\""})
+        import refactory_dsh.design_ops as ops
 
-    verdict = ops.check_artifact(ctx)
-    assert verdict == "reloop"
-    assert "exit 3" in ctx.read_text("check.txt"), (
-        "the refusal must say what the check said, or the retry is guessing"
-    )
-    assert "exit 3" in verdict.reason, "the CEO is told what the retry is told"
+        verdict = ops.check_artifact(ctx)
+        assert verdict == "reloop"
+        assert "exit 3" in ctx.read_text("check.txt"), (
+            "the refusal must say what the check said, or the retry is guessing"
+        )
+        assert "exit 3" in verdict.reason, "the CEO is told what the retry is told"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def test_the_check_runs_without_the_real_credentials(tmp_path):

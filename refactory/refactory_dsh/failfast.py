@@ -621,6 +621,29 @@ def _extract_assertion_key(assertion: str) -> str:
 
 # ── Empty-emission classifier ─────────────────────────────────────────────────
 
+#: Markers in the refusal string that indicate a genuine empty/no-change
+#: emission, as opposed to a malformed edit that tried to change things but
+#: failed syntactically.  Only no-change refusals count toward the
+#: empty-emission stuck detector (Case 3).
+_NO_CHANGE_MARKERS = (
+    "changed nothing",          # worktree.py: "the emission changed nothing"
+    "undoes the whole",         # worktree.py: "the emission undoes the whole attempt"
+    "holds no",                 # repo_change.py: "emit.txt holds no ... blocks"
+    "names only run artifacts", # worktree.py: "the emission names only run artifacts"
+)
+
+
+def is_no_change_refusal(refusal: str) -> bool:
+    """Whether the refusal indicates an emission with no net source change.
+
+    Returns ``True`` when the emission had no content, changed nothing, or was
+    a no-op.  Returns ``False`` for malformed edits (content that attempted
+    changes but failed syntactically — edit text not found, bad headers, etc.).
+    Only no-change refusals count as "empty emissions" for Case 3 (stuck).
+    """
+    return any(marker in refusal for marker in _NO_CHANGE_MARKERS)
+
+
 class EmissionDecision:
     """The result of classifying an empty emission.
 

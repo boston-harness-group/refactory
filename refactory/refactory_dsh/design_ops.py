@@ -1126,7 +1126,7 @@ def _refused_verdict(ctx: Any) -> Verdict | None:
     if not refused:
         return None
 
-    from refactory_dsh.failfast import classify_empty_emission
+    from refactory_dsh.failfast import classify_empty_emission, is_no_change_refusal
     from refactory_dsh.run import BuildLoopStop
 
     # Gather classifier inputs.
@@ -1135,9 +1135,12 @@ def _refused_verdict(ctx: Any) -> Verdict | None:
     consecutive_refusals = int(ctx.facts.get("consecutive_refusals", 0))
     current_commit = str(ctx.facts.get("commit", ""))
 
-    # Collect review findings from facts.
+    # Collect review findings from facts.  The validation fact is already
+    # passed as send_back_reason, so it is excluded here to avoid duplicating
+    # its content in the Case 2 detail message (which caused quadratic growth
+    # on successive refusals).
     review_findings: list[str] = []
-    for key in ("validation", "qa_gate", "overwatch_review"):
+    for key in ("qa_gate", "overwatch_review"):
         val = ctx.facts.get(key, "")
         if val:
             review_findings.append(f"{key}: {val}")
@@ -1145,7 +1148,12 @@ def _refused_verdict(ctx: Any) -> Verdict | None:
         if item:
             review_findings.append(f"early_asks: {item}")
 
-    prev_fingerprint = ctx.facts.get("empty_emission_fingerprint")
+    # Only track fingerprints for genuine empty/no-change emissions.
+    # Malformed edits (search text not found, bad headers, etc.) are the model
+    # trying to change things but failing syntactically — not "stuck" in the
+    # brief's sense.  The refusal bound (_count_refusal) handles those.
+    no_change = is_no_change_refusal(refused)
+    prev_fingerprint = ctx.facts.get("empty_emission_fingerprint") if no_change else None
     send_back_reason = ctx.facts.get("validation", "")
     brief_asks = list(ctx.facts.get("brief", {}).get("asks", []) if isinstance(ctx.facts.get("brief"), dict) else [])
 
@@ -1160,11 +1168,22 @@ def _refused_verdict(ctx: Any) -> Verdict | None:
         brief_asks=brief_asks,
     )
 
-    # Record fingerprint for next comparison.
-    ctx.set_fact("empty_emission_fingerprint", decision.fingerprint)
+    # Record fingerprint only for no-change refusals; malformed edits do not
+    # count toward the empty-emission stuck detector (Case 3).
+    if no_change:
+        ctx.set_fact("empty_emission_fingerprint", decision.fingerprint)
 
     if decision.case == "reuse":
         # Case 1: evidence still valid — do NOT overwrite check-record.json.
+        # Set up CHECK_PREP and CHECK_VERDICT so that check_beside_reviews
+        # (started by fork_qa on the "proceed" edge) sees a decided attempt
+        # and skips the full check — the existing pass record is the evidence
+        # being reused.
+        import uuid as _uuid
+
+        attempt = _uuid.uuid4().hex
+        _record_prepared(ctx, attempt, None)
+        _record_check_verdict(ctx, attempt, Verdict("proceed", "evidence reused"))
         ctx.set_fact("validation", "emission empty: evidence still valid, continuing")
         return Verdict("proceed")
 
@@ -1181,11 +1200,16 @@ def _refused_verdict(ctx: Any) -> Verdict | None:
     )
     ctx.write_text("check.txt", detail + "\n")
     ctx.set_fact("validation", detail)
-    ctx.write_json("check-record.json", {
+    refused_record: dict[str, Any] = {
         "status": "refused", "validation": detail,
         "attempt": int(ctx.facts.get("attempts_used", 0)),
         "check_mode": "full", "targeted_command": None,
-    })
+    }
+    # Preserve runners from the original check record so the next empty
+    # emission can compute the same failure fingerprint for Case 3 (stuck).
+    if check_record.get("runners"):
+        refused_record["runners"] = check_record["runners"]
+    ctx.write_json("check-record.json", refused_record)
     return Verdict("reloop", detail)
 
 

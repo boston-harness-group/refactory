@@ -212,7 +212,7 @@ def gate_emit(ctx: Any) -> str:
     if not refused:
         return "proceed"
 
-    from refactory_dsh.failfast import classify_empty_emission
+    from refactory_dsh.failfast import classify_empty_emission, is_no_change_refusal
     from refactory_dsh.run import BuildLoopStop
 
     check_record = ctx.read_json("check-record.json", {})
@@ -220,7 +220,9 @@ def gate_emit(ctx: Any) -> str:
     consecutive_refusals = int(ctx.facts.get("consecutive_refusals", 0))
     current_commit = str(ctx.facts.get("commit", ""))
     review_findings: list[str] = []  # fast mode has no QA/overwatch/early-asks
-    prev_fingerprint = ctx.facts.get("empty_emission_fingerprint")
+    # Only track fingerprints for genuine empty/no-change emissions.
+    no_change = is_no_change_refusal(refused)
+    prev_fingerprint = ctx.facts.get("empty_emission_fingerprint") if no_change else None
     send_back_reason = ctx.facts.get("validation", "")
     brief_asks = list(ctx.facts.get("brief", {}).get("asks", []) if isinstance(ctx.facts.get("brief"), dict) else [])
 
@@ -235,8 +237,9 @@ def gate_emit(ctx: Any) -> str:
         brief_asks=brief_asks,
     )
 
-    # Record fingerprint for next comparison.
-    ctx.set_fact("empty_emission_fingerprint", decision.fingerprint)
+    # Record fingerprint only for no-change refusals.
+    if no_change:
+        ctx.set_fact("empty_emission_fingerprint", decision.fingerprint)
 
     if decision.case == "reuse":
         # Case 1: evidence still valid — proceed to check.

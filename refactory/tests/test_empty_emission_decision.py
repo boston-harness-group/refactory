@@ -217,15 +217,21 @@ def test_first_attempt_empty_emission_names_brief_asks():
 
 
 def test_design_case1_reuses_evidence_and_proceeds(tmp_path, monkeypatch):
-    """Case 1: passing check + matching commit + no corrections + no review findings → proceed."""
+    """Case 1: passing check + matching commit + no corrections + no review findings → proceed.
+
+    Includes the validation fact (always present after a check in a real run)
+    to prove that validation alone does not block reuse — it is the send-back
+    reason, not a review finding.
+    """
     monkeypatch.setattr(repo_change, "refused", lambda ctx: "edit text not found")
     monkeypatch.setattr(design_ops, "unapplied_corrections", lambda workdir, facts: [])
 
     ctx = nn.RunContext(tmp_path, facts={
         "check": "python tool.py",
         "commit": "abc123",
+        "validation": "(the check passed)",
     }, knobs={"attempts": 3})
-    ctx._declared = ("check.txt", "check-record.json")
+    ctx._declared = ("check.txt", "check-record.json", "check-prep.json", "check-verdict.json")
     ctx._declared_facts = ("validation", "attempts_used", "empty_emission_fingerprint")
     ctx.enforce_writes = False
 
@@ -239,6 +245,11 @@ def test_design_case1_reuses_evidence_and_proceeds(tmp_path, monkeypatch):
     # Check-record must NOT be overwritten — the pass record is preserved.
     cr = ctx.read_json("check-record.json", {})
     assert cr["status"] == "pass"
+
+    # CHECK_PREP and CHECK_VERDICT must be written so check_beside_reviews
+    # sees a decided attempt and does not crash.
+    assert ctx.exists("check-prep.json")
+    assert ctx.exists("check-verdict.json")
 
     # No attempt spent.
     assert not ctx.facts.get("attempts_used")
@@ -271,7 +282,6 @@ def test_design_case2_returns_specific_failures(tmp_path, monkeypatch):
     assert "materialise could not apply" in result.reason
     assert "tests/test_foo.py::test_bar" in result.reason
     assert not ctx.facts.get("attempts_used"), "refused emission must not spend an attempt"
-    assert ctx.facts.get("empty_emission_fingerprint") is not None
 
 
 def test_design_case2_review_finding_blocks_reuse(tmp_path, monkeypatch):
@@ -297,8 +307,16 @@ def test_design_case2_review_finding_blocks_reuse(tmp_path, monkeypatch):
 
 
 def test_design_case3_stuck_raises_buildloopstop(tmp_path, monkeypatch):
-    """Case 3: same fingerprint on second refusal → BuildLoopStop with stuck test name."""
-    monkeypatch.setattr(repo_change, "refused", lambda ctx: "edit text not found")
+    """Case 3: two consecutive empty emissions with same failures → BuildLoopStop.
+
+    Simulates the production flow: the first empty emission fires Case 2 (which
+    overwrites check-record.json), then the second fires Case 3 using the
+    fingerprint recorded by the first call and the runners preserved in the
+    overwritten check-record.  The refusal string must indicate a genuine
+    no-change emission (not a malformed edit) for fingerprint tracking.
+    """
+    monkeypatch.setattr(repo_change, "refused",
+                        lambda ctx: "the emission changed nothing: every file and edit in it is already in the last attempt")
     monkeypatch.setattr(design_ops, "unapplied_corrections", lambda workdir, facts: [])
 
     check_record = {
@@ -308,26 +326,32 @@ def test_design_case3_stuck_raises_buildloopstop(tmp_path, monkeypatch):
         ]}],
     }
 
-    # First call to get the fingerprint.
-    fp = classify_empty_emission(
-        check_record=check_record,
-        corrections_pending=[],
-        consecutive_refusals=0,
-        current_commit="abc",
-    ).fingerprint
-
     ctx = nn.RunContext(tmp_path, facts={
         "check": "python tool.py",
         "commit": "abc",
-        "consecutive_refusals": 1,
-        "empty_emission_fingerprint": fp,
+        "consecutive_refusals": 0,
     }, knobs={"attempts": 3})
     ctx._declared = ("check.txt", "check-record.json")
     ctx._declared_facts = ("validation", "attempts_used", "empty_emission_fingerprint")
     ctx.enforce_writes = False
 
+    # Write the original failing check-record (as the real check would).
     ctx.write_json("check-record.json", check_record)
 
+    # First empty emission → Case 2 (specific_failure).
+    result1 = design_ops._refused_verdict(ctx)
+    assert str(result1) == "reloop", "first empty emission must be Case 2"
+    assert ctx.facts.get("empty_emission_fingerprint") is not None
+
+    # The overwritten check-record must preserve runners so the next call
+    # can compute the same fingerprint.
+    cr = ctx.read_json("check-record.json", {})
+    assert "runners" in cr, "Case 2 must preserve runners in check-record"
+
+    # Simulate the consecutive_refusals counter that _count_refusal manages.
+    ctx.set_fact("consecutive_refusals", 1)
+
+    # Second empty emission with same check-record → Case 3 (stuck).
     with pytest.raises(BuildLoopStop) as exc_info:
         design_ops._refused_verdict(ctx)
     assert "tests/test_stuck.py::test_loop" in str(exc_info.value)
@@ -384,8 +408,14 @@ def test_fast_case2_reloops_with_specifics(tmp_path, monkeypatch):
 
 
 def test_fast_case3_stuck_stops(tmp_path, monkeypatch):
-    """Case 3 in fast mode: same fingerprint on second refusal → BuildLoopStop."""
-    monkeypatch.setattr(repo_change, "refused", lambda ctx: "edit text not found")
+    """Case 3 in fast mode: two consecutive empty emissions → BuildLoopStop.
+
+    Simulates the production flow: the first empty emission fires Case 2
+    (recording the fingerprint), then the second fires Case 3.  The refusal
+    string must indicate a genuine no-change emission for fingerprint tracking.
+    """
+    monkeypatch.setattr(repo_change, "refused",
+                        lambda ctx: "the emission changed nothing: every file and edit in it is already in the last attempt")
 
     check_record = {
         "status": "fail",
@@ -394,18 +424,10 @@ def test_fast_case3_stuck_stops(tmp_path, monkeypatch):
         ]}],
     }
 
-    fp = classify_empty_emission(
-        check_record=check_record,
-        corrections_pending=[],
-        consecutive_refusals=0,
-        current_commit="abc",
-    ).fingerprint
-
     ctx = nn.RunContext(tmp_path, facts={
         "check": "python tool.py",
         "commit": "abc",
-        "consecutive_refusals": 1,
-        "empty_emission_fingerprint": fp,
+        "consecutive_refusals": 0,
     }, knobs={})
     ctx._declared = ("fast-report.json", "repair.txt")
     ctx._declared_facts = ("repair_feedback", "repairs_used", "empty_emission_fingerprint")
@@ -414,6 +436,58 @@ def test_fast_case3_stuck_stops(tmp_path, monkeypatch):
     ctx.write_json("check-record.json", check_record)
 
     from refactory_dsh import fast_ops
+
+    # First empty emission → Case 2 (specific_failure).
+    result1 = fast_ops.gate_emit(ctx)
+    assert str(result1) == "reloop", "first empty emission must be Case 2"
+    assert ctx.facts.get("empty_emission_fingerprint") is not None
+
+    # Simulate the consecutive_refusals counter that _count_refusal manages.
+    ctx.set_fact("consecutive_refusals", 1)
+
+    # Second empty emission with same check-record → Case 3 (stuck).
     with pytest.raises(BuildLoopStop) as exc_info:
         fast_ops.gate_emit(ctx)
     assert "tests/test_fast_stuck.py::test_z" in str(exc_info.value)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fingerprint lifecycle: cleared on successful materialise
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_materialise_clears_stale_fingerprint(tmp_path, monkeypatch):
+    """A successful materialise clears the fingerprint so the next cycle's first
+    empty emission gets Case 2 (specific_failure), not Case 3 from a stale match.
+
+    Correction 2: 'The first empty emission always gets Case 2 with the
+    specific failures.'
+    """
+    from refactory_dsh import repo_change as rc, worktree
+
+    # Pretend there is no worktree (directory-mode materialise).
+    monkeypatch.setattr(worktree, "recorded", lambda workdir: None)
+    monkeypatch.setattr(rc, "_materialise_directory", lambda ctx, source, files: {
+        "artifact": str(tmp_path / "art"), "files": [], "commit": "none",
+    })
+
+    ctx = nn.RunContext(tmp_path, facts={
+        "name": "test_art",
+        "empty_emission_fingerprint": {"failures": [["t::x", "> y"]], "corrections": []},
+        "consecutive_refusals": 2,
+    })
+    ctx._declared = ("emit.txt", "changes.diff", "changed-functions.json")
+    ctx._declared_facts = ("artifact", "files", "commit", "change",
+                           "emission_refused", "changed_functions",
+                           "consecutive_refusals", "empty_emission_fingerprint")
+    ctx.enforce_writes = False
+
+    result = rc.materialise(ctx)
+
+    # The fingerprint must be explicitly set to None in the return dict
+    # (not merely absent), so the executor writes it back as a fact and
+    # overwrites the stale value.  consecutive_refusals must be reset.
+    assert "empty_emission_fingerprint" in result, \
+        "materialise must return empty_emission_fingerprint to overwrite the stale fact"
+    assert result["empty_emission_fingerprint"] is None
+    assert result.get("consecutive_refusals") == 0
