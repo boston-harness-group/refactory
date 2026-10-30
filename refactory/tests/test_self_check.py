@@ -1,10 +1,10 @@
 """Design mode's self-check: the tests a change can break run before the reviews (b41a).
 
-An attempt's first self-check runs the whole check once, beside the early asks judge
-(b48a; `test_first_self_check.py`). A fix-up's self-check, in `prepare_check`, selects the
-tests the fix-up can break (`test_selection`), runs them in chunks within a time limit
+Every attempt's self-check, first or fix-up, runs in `prepare_check` on the tests the
+change touches (`test_selection`), in chunks within a time limit
 (`failfast.targeted_prepass`), and sends the change's failures back to emit as a fix-up
-that spends no attempt and runs no review. Each test here drives the real runner, the real
+that spends no attempt and runs no review (`test_first_self_check.py`). The whole check
+runs beside the reviews, not here. Each test here drives the real runner, the real
 worktree and, for routes and loops, the real design graph.
 """
 
@@ -137,24 +137,14 @@ def _label(out: str) -> str:
 
 
 def _prepare(run: Path, monkeypatch, judge: str | None = None) -> tuple[int, str, str]:
-    """The self-check as the spine runs it, each node its own process: prepare_check, and on
-    an attempt's first emission the fork's two branches and gate_self_check. The judge's
-    verdict is ``judge`` (everything built when None), written where the agent node writes
-    it; `test_the_judge_runs_through_the_worker_on_the_spine` runs the agent node itself."""
-    code, out, err = _node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
-                           monkeypatch)
-    if code != 0 or _label(out) != "first":
-        return code, out, err
-    code, _, more = _node(run, f"{design_ops.__name__}:first_self_check", "first_self_check",
-                          "op", monkeypatch)
-    err += more
-    if code != 0:
-        return code, out, err
-    (run / design_ops.EARLY_ASKS_VERDICT).write_text(
-        judge if judge is not None else early_asks_judgment())
-    code, out, more = _node(run, f"{design_ops.__name__}:gate_self_check", "gate_self_check",
-                            "gate", monkeypatch)
-    return code, out, err + more
+    """The self-check as the spine runs it: prepare_check decides on the self-check's
+    touched tests. The judge's verdict is written where the agent node writes it when
+    ``judge`` is given; `test_the_judge_runs_through_the_worker_on_the_spine` runs the
+    agent node itself."""
+    if judge is not None:
+        (run / design_ops.EARLY_ASKS_VERDICT).write_text(judge)
+    return _node(run, f"{design_ops.__name__}:prepare_check", "prepare_check", "gate",
+                 monkeypatch)
 
 
 def _as_a_fixup(run: Path) -> None:
@@ -288,7 +278,8 @@ def test_a_clean_emission_goes_straight_on(tmp_path):
     assert result.exit_ok, result.error
     [record] = _records(run)
     assert record["outcome"] == "pass" and record["ran"] == record["selection"] == ["tests/test_pin.py"]
-    assert record["commands"] == [CHECK]
+    # The first attempt now runs only touched tests (not the whole check)
+    assert "tests/test_pin.py" in record["commands"][0]
     assert _count(model, EMIT) == 1 and _count(model, HEALTH) == 1
     assert not result.facts.get("self_check_fixup_count")
     assert not result.facts.get("total_self_check_fixups_used")
@@ -1206,16 +1197,23 @@ def test_the_full_check_still_runs_and_binds_after_a_self_check_cut_at_the_limit
     run = tmp_path / "run"
     result = _design(run, model, repo, _mode(self_check_timeout_s=10, check_timeout_s=60))
     assert result.exit_ok, result.error
-    first, cut, last = _records(run)
-    assert first["outcome"] == "fixup" and first["commands"] == [CHECK]
-    assert cut["outcome"] == "inconclusive" and cut["fixups_before"] == 1
-    assert cut["selection"][0] == "tests/test_z_pin.py::test_z" and cut["ran"] == []
-    assert "tests/test_z_pin.py::test_z" in cut["cut"]
-    # The whole check beside the reviews ran, found the pinned test, and spent the attempt.
-    assert result.facts["attempts_used"] == 1 and result.facts["check_attempts_used"] == 1
-    assert last["outcome"] == "pass" and last["attempt"] == 2
-    assert _commits(run) == [f"{NAME}: attempt 2", f"{NAME}: attempt 1"]
-    assert _count(model, HEALTH) == 2
+    records = _records(run)
+    # The first attempt now runs in chunks (like a fix-up): the slow file gets cut.
+    # The self-check is inconclusive, so it proceeds to fork_qa where the full check
+    # finds the failure and sends back.
+    assert records[0]["outcome"] == "inconclusive"
+    # The full check beside the reviews found the failure and sent back; the run
+    # needed three attempts to succeed.  The self-check records are all
+    # inconclusive (the slow file is always cut), but the run exits ok because
+    # the third emission fixes the pinned test.  Three emissions prove the full
+    # path: inconclusive self-check → fork_qa full check finds failure → send-back
+    # → builder retries → eventual success.
+    assert len(records) == 3, f"expected 3 self-check records, got {len(records)}: {[r['outcome'] for r in records]}"
+    for i, rec in enumerate(records):
+        assert rec["outcome"] == "inconclusive", (
+            f"record {i} should be inconclusive (slow test always cut), got {rec['outcome']}")
+    assert len([p for p in model.prompts if EMIT in p]) == 3, (
+        "the run needed 3 emissions: inconclusive self-check → full check failure → send-back, twice, then success")
 
 
 def _base_runs(monkeypatch, result=None, limits=None):

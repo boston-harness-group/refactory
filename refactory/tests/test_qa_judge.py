@@ -198,7 +198,9 @@ def test_a_failing_check_goes_back_before_any_judge(tmp_path):
     assert len(emits) == 2
     assert len(judged) == 1 and judged[0] > emits[1], "the judge ran only on the passing attempt"
     assert len(_prompts(model, OVERWATCH_JUDGE_MARK)) == 1
-    assert result.facts.get("check_attempts_used") == 1
+    # The combined send-back from a failing check does not spend a check attempt.
+    assert not result.facts.get("check_attempts_used"), \
+        "check_attempts_used must stay at 0: the combined send-back does not spend an attempt"
     assert not result.facts.get("review_attempts_used")
 
 

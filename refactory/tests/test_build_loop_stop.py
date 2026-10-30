@@ -401,14 +401,15 @@ def _run_node_main(run, target, node_id, node_type, monkeypatch):
 
 
 def test_a_design_check_limit_ends_the_walker_run_in_a_check_failing_draft(tmp_path):
-    """Design mode runs its check beside the reviews; at the check limit the build loop
-    stops, and the applied attempt is delivered as a draft marked check failing (b45a)."""
+    """Design mode runs its check beside the reviews; the check's own send-back does
+    not spend an attempt, so at the combined-sendback bound the build loop stops and
+    the applied attempt is delivered as a draft marked check failing (b45a)."""
     from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER,
                                RESEARCH_ANSWER, REVIEW_ANSWERS, VERIFICATION_ANSWER, FakeModel,
                                git_repo, render)
 
     repo = git_repo(tmp_path / "repo")
-    emits = [render({"tool.py": f"print({i})\n"}) for i in range(8)]
+    emits = [render({"tool.py": f"print({i})\n"}) for i in range(12)]
     answers = [RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
                DESIGN_DOC_ANSWER, *emits,
                *REVIEW_ANSWERS[:3], VERIFICATION_ANSWER, REVIEW_ANSWERS[3]]
@@ -417,46 +418,48 @@ def test_a_design_check_limit_ends_the_walker_run_in_a_check_failing_draft(tmp_p
         task={"name": "stop_tool", "brief": "a tool", "check": "exit 1", "target": str(repo)})
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
-    assert fact["reason"] == "check attempts exhausted after 2 check failure(s)"
+    assert "check failures exhausted" in fact["reason"]
     assert fact["check_failing"] is True
 
 
 def test_a_design_check_limit_goes_to_the_report_as_a_draft_on_the_spine(tmp_path, monkeypatch):
     """The spine runs materialise, prepare_check, the check beside the reviews and
-    gate_check as separate processes; at the check limit gate_check routes ``draft``,
-    straight to the report, which accepts the draft (b45a, correction 2)."""
-    from refactory_dsh import lowering, worktree
+    gate_check as separate processes; at the combined-sendback bound gate_check routes
+    ``draft``, straight to the report, which accepts the draft (b45a, correction 2).
+    The check's own send-back does not spend an attempt."""
+    from refactory_dsh import design_ops, lowering, worktree
     from tests_support import git_repo, render
 
     repo = git_repo(tmp_path / "repo")
     run = tmp_path / "run"
     worktree.create(repo, "HEAD", "abcdef777777", run)
     lowering.write_declarations(_design_mode(check_attempts=1, check_attempt_cap=0).state_dict(), run)
-    (run / "facts.json").write_text(json.dumps({"name": "stop_tool", "brief": "a tool", "check": "exit 1"}))
+    # Pre-set combined_sendback_count to one below the bound so the next gate_check
+    # reaches the draft.
+    bound = design_ops._COMBINED_SENDBACK_BOUND
+    (run / "facts.json").write_text(json.dumps({
+        "name": "stop_tool", "brief": "a tool", "check": "exit 1",
+        "combined_sendback_count": bound - 1,
+    }))
     monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({"check_attempts": 1, "check_attempt_cap": 0,
                                                       "refusal_attempts": 3}))
     (run / "emit.txt").write_text(render({"tool.py": "print(1)\n"}))
     routes = _walk_on_the_spine(run, monkeypatch, *_ATTEMPT, _REPORT)
     assert routes == [*_TO_THE_CHECK, ("gate_check", 0, "draft"), ("report", 0, "")], routes
     facts = json.loads((run / "facts.json").read_text())
-    assert facts["draft_delivery"]["reason"] == "check attempts exhausted after 1 check failure(s)"
+    assert "check failures exhausted" in facts["draft_delivery"]["reason"]
     assert facts["draft_delivery"]["check_failing"] is True
     assert json.loads((run / "design.json").read_text())["draft"] is True
 
 
 #: The nodes of one attempt, as the spine runs design's graph (`DesignMode.graph`): the
-#: first self-check's fork, its judge's verdict (written as the agent node writes it,
-#: `tests_support.judge_finds_everything_built`), then the check beside the reviews.
+#: self-check in prepare_check, then the check beside the reviews in fork_qa.
 _ATTEMPT = (("refactory_dsh.design_ops:design_materialise", "materialise", "op"),
             ("refactory_dsh.design_ops:prepare_check", "prepare_check", "gate"),
-            ("refactory_dsh.design_ops:first_self_check", "first_self_check", "op"),
-            ("tests_support:judge_finds_everything_built", "early_asks_check", "op"),
-            ("refactory_dsh.design_ops:gate_self_check", "gate_self_check", "gate"),
             ("refactory_dsh.design_ops:check_beside_reviews", "check", "op"),
             ("refactory_dsh.design_ops:gate_check", "gate_check", "gate"))
-#: The attempt's routes up to the check beside the reviews, which the first self-check passes.
-_TO_THE_CHECK = [("materialise", 0, ""), ("prepare_check", 0, "first"), ("first_self_check", 0, ""),
-                 ("early_asks_check", 0, ""), ("gate_self_check", 0, "proceed"), ("check", 0, "")]
+#: The attempt's routes up to the check beside the reviews.
+_TO_THE_CHECK = [("materialise", 0, ""), ("prepare_check", 0, "proceed"), ("check", 0, "")]
 _REPORT = ("refactory_dsh.design_ops:report_judged", "report", "op")
 
 
@@ -734,7 +737,7 @@ def test_a_gate_check_that_runs_the_check_itself_drafts_at_its_limit_on_the_spin
     assert _walk_on_the_spine(run, monkeypatch, _ATTEMPT[-1], _REPORT) == [
         ("gate_check", 0, "draft"), ("report", 0, "")]
     fact = json.loads((run / "facts.json").read_text())["draft_delivery"]
-    assert fact["reason"] == "check attempts exhausted after 2 check failure(s)" and fact["check_failing"]
+    assert "check attempts exhausted" in fact["reason"] and fact["check_failing"]
 
 
 def test_a_stop_whose_commit_has_no_current_evidence_is_not_a_draft(tmp_path, monkeypatch):

@@ -2242,9 +2242,9 @@ lowering snapshots (`regenerate_snapshots`), so the run's generate step keeps th
 current. It runs in the attempt's prepared worktree through
 `repo_change.run_check(prepared=True)`.
 
-- **An attempt's first emission** runs the whole check once (b48a; "The first
-  self-check, beside the early asks judge" below): the builder gets every failure in
-  one pass.
+- **An attempt's first emission** runs the self-check on the tests the change touches
+  (the selection below), beside the early asks judge; the brief's own example is left to
+  the review round's full check.
 - **A fix-up's emission** runs the selection below in chunks within the self-check's
   time limit (`check_digest.build_probe_command`), in `prepare_check`
   (`design_ops._fixup_self_check`).
@@ -2337,7 +2337,7 @@ unavailable, and then nothing is inherited.
 ### The fix-up, and its bound
 
 The change's failures go back to emit through a reloop, as a refused emission does
-(`prepare_check`'s for a fix-up's self-check, `gate_self_check`'s for the first), by way
+(`prepare_check`'s for a fix-up's self-check, `first_self_check`'s for the first), by way
 of `pick_corrections`, which every send-back to the builder passes (dm-226):
 `validation` carries them to emit on both runtimes; the verdict's reason is
 `pick_corrections`' visit feedback, cleared when it decides, and never reaches emit. The
@@ -2375,7 +2375,7 @@ before its fix-ups (`review_feedback`).
 prepare_check's `max_iterations` follows the knobs (`design.prepare_check_iterations`,
 applied by `DesignMode.graph` and `DesignMode.state_dict`, so the walker and the
 lowered graph get the same number). Its reloops are fix-ups, early stops and
-refusals (the first self-check's go through `gate_self_check`, below, under the same
+refusals (the first self-check's go through `first_self_check`, below, under the same
 bound): applied emissions are at most the attempts (`check_attempt_cap` when it is
 above `check_attempts`) plus the run's fix-ups, each after at most
 `refusal_attempts − 1` refusals, so the limit is
@@ -2417,12 +2417,11 @@ first self-check ran 82 files in chunks, found 25 failures and cut 10 files at t
 function was defined but never called for three rounds, its tests passing, until the
 QA judge saw it.
 
-**The graph.** `prepare_check` routes an attempt's first emission `first`, to a fork:
+**The graph.** `prepare_check` runs the self-check (touched tests in chunks) and
+proceeds to `fork_qa`, which runs the full check beside the three reviews:
 
-- **`first_self_check`** (op) runs the brief's whole check once in the prepared
-  worktree and compares what fails with the base (`design_ops._whole_self_check`),
-  then writes `self-check-first.json`. `prepare_check` names the attempt it is for in
-  `self-check-ticket.json`.
+- **`check`** (op) runs the brief's whole check in a check copy beside the reviews
+  (`design_ops.check_beside_reviews`), recording its decision for `gate_check`.
 - **`early_asks_check`** (agent, an optional branch, no workspace of its own) reads
   `changes.diff` against the brief's asks and the approved corrections and writes
   `early-asks.json`: for each ask and correction, built or not built, with
@@ -2430,7 +2429,7 @@ QA judge saw it.
   judge's bar is unchanged. On the spine the worker dispatches it, as it does every
   agent node.
 
-**`gate_self_check`** (gate, after `join_self_check`) sends the attempt's own failures
+**The self-check's send-back** (after `join_self_check`) sends the attempt's own failures
 and every item the judge found not built back as one fix-up, with the self-check's
 budget and limits: the not-built items even when every test passes. Past that budget,
 failures are the early stop, which spends the attempt, and the not-built items go with
@@ -2446,17 +2445,7 @@ twice) as often as `judge_rereads` allows (1), then the attempt goes on without 
 verdict, with `judge.status: failed` in the record and a run warning. A failed judge
 branch is recorded missing with its error (`reviews/early_asks_check-missing.txt`,
 written by the worker on the spine and by the fork on the walker) and read the same
-way. `gate_self_check`'s limit is `(1 + judge_rereads) ×
-prepare_check_iterations + 1` (`design.gate_self_check_iterations`, 91 with the
-defaults): it runs once an attempt's first self-check, so it never ends a run.
-
-**Reuse.** When the first self-check goes on to the reviews (a pass, or failures all
-inherited), its whole-check result is kept (`.refactory/first-check-cache.json`) and the
-check beside the reviews uses it instead of running the check again while the commit,
-the check command, and the setup and generate commands are the ones it ran with; its
-evidence says `reused from the first self-check, commit <sha>`. Only `gate_self_check`
-keeps one, so a fix-up's partial run never stands for the whole check, which stays
-binding.
+way.
 
 **Updated tests (dm-270).** The builder names each test it updated, and the change it
 follows, on one line of its completion message (`Updated tests: …`).
@@ -2759,7 +2748,9 @@ to 10 minutes (dm-149), so the reviews' whole time was added to every round.
    `setup` build in the run's worktree. Nothing moves the commit after this. Then the
    self-check ("Self-check inside the attempt"): an attempt's first runs the whole check
    beside the early asks judge, and an attempt that fails it goes back to the builder
-   without a review. A preparation that fails
+   without a review. That first self-check runs only the tests the change touches, not the
+   brief's own example (the canary's marker grep, the wordcount check): a broken example is
+   caught by the review round's full check, and costs that round. A preparation that fails
    is judged right there by the whole sequential check (`check_artifact`), which reports
    it with its triage as before. It first clears what a last attempt prepared or
    decided, records the attempt in `check-prep.json`, and sets `review_feedback` (what
@@ -2772,10 +2763,7 @@ to 10 minutes (dm-149), so the reviews' whole time was added to every round.
    keeps what it wrote into HOME points at the copy. The reviewers read and run the delivered files in the
    run's worktree meanwhile; neither sees, or deletes, what the other leaves. The copy is
    kept across attempts (moved to the new commit, the last check's files put back, its
-   installed environment kept) and removed with the base worktree. When the attempt's
-   first self-check ran the whole check on this commit, with this command, setup and
-   generate, and went on, the op uses that result instead of running the check again,
-   and its evidence says so. The op records its
+   installed environment kept) and removed with the base worktree. The op records its
    decision, with the check command it ran, in `check-verdict.json`; a node inside a
    fork may not send the run outside it. A check that raises (an unrepairable failure)
    is recorded and raised by `gate_check`, because the node runner retries a failed op

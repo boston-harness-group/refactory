@@ -99,7 +99,15 @@ def test_graph_shape_full_mode():
     edges = [(e.source, e.target, e.condition) for e in graph.edges]
     assert ("check", "verifier", "proceed") not in edges
     assert ("prepare_check", "fork_qa", "proceed") in edges
-    assert ("verifier", "join_qa", None) in edges
+    # No explicit edge from verifier or early_asks_check to join_qa: the
+    # fork→join drains all targets, and join_qa.sources includes both for
+    # uncompleteBetween.  An explicit edge would let advance() fire join_qa
+    # before all branches complete (the defect the brief's item 3 describes).
+    assert ("verifier", "join_qa", None) not in edges
+    assert ("early_asks_check", "join_qa", None) not in edges
+    join = graph.nodes["join_qa"]
+    assert "verifier" in join.sources
+    assert "early_asks_check" in join.sources
 
 
 def test_graph_shape_fast_mode():

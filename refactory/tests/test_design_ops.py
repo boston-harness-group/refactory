@@ -503,7 +503,7 @@ def test_steer_says_what_becomes_of_a_correction_given_after_the_gate(tmp_path, 
 
 
 #: The send-backs to the builder: each goes through pick_corrections (dm-226).
-SEND_BACKS = ("prepare_check", "gate_self_check", "gate_check", "gate_qa", "gate_overwatch",
+SEND_BACKS = ("prepare_check", "gate_check", "gate_qa", "gate_overwatch",
               "delivery_gate")
 LATE = "name the reconnect counter reconnects"
 

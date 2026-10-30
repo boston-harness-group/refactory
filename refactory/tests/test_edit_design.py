@@ -231,10 +231,10 @@ def test_the_design_graph_is_a_different_shape_from_a_package_one():
         "apply_corrections", "audit_corrections", "check", "check_design_claims",
         "classify_scale", "code_reviewer", "deliver",
         "delivery_gate", "design_doc", "done",
-        "early_asks_check", "emit", "first_self_check", "fork_qa", "fork_self_check",
+        "early_asks_check", "emit", "fork_qa",
         "gate_check", "gate_design_review", "gate_overwatch",
-        "gate_pitfalls", "gate_qa", "gate_research", "gate_self_check", "gate_strategy",
-        "health_checker", "join_qa", "join_self_check",
+        "gate_pitfalls", "gate_qa", "gate_research", "gate_strategy",
+        "health_checker", "join_qa",
         "materialise", "overwatch", "pick_corrections", "pitfalls_researcher",
         "prepare", "prepare_check", "qa_director", "qa_judge", "record_findings",
         "report", "research_director", "route_refine_design", "route_strategy",
@@ -710,13 +710,17 @@ def test_a_design_run_produces_a_checked_artifact():
 
 
 def test_a_design_that_never_passes_its_check_is_delivered_as_a_check_failing_draft():
-    """Its attempts applied, so at the check limit the run is not a failure but a draft
-    marked check failing (b45a): loud in its title and its description, not in its exit."""
+    """Its attempts applied, so at the combined-sendback limit the run is not a failure
+    but a draft marked check failing (b45a): loud in its title and its description, not
+    in its exit.  The check's own send-back does not spend an attempt — the combined
+    sendback bound is the only limit on repeating it."""
     mode = DesignMode()
     workdir = Path(".factory/design-fail")
     shutil.rmtree(workdir, ignore_errors=True)
     # Each emission must be distinct so materialise does not refuse it as "changed nothing".
-    emits = [render({"tool.py": f"raise SystemExit({i})\n"}) for i in range(1, 5)]
+    # We need enough emissions to reach the combined sendback bound (8) without hitting
+    # the refusal bound first.
+    emits = [render({"tool.py": f"raise SystemExit({i})\n"}) for i in range(1, 12)]
     model = FakeModel(_design_answers(emits))
     result = mode.run(
         workdir,
@@ -726,7 +730,7 @@ def test_a_design_that_never_passes_its_check_is_delivered_as_a_check_failing_dr
     )
     assert result.exit_ok, result.error
     fact = result.facts["draft_delivery"]
-    assert fact["reason"] == "check attempts exhausted after 3 check failure(s)"
+    assert "check failures exhausted" in fact["reason"]
     assert fact["check_failing"] is True
 
 

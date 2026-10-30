@@ -21,21 +21,16 @@ from refactory_dsh import delivery, repo_change, sandbox, unbuilt_check, worktre
 from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECORD
 from refactory_dsh.nn import Verdict
 
-#: The first self-check of an attempt (b48a): `prepare_check` names the attempt it is for,
-#: `first_self_check` runs the whole check beside the early asks judge and writes what it
-#: found, and `gate_self_check` decides on both.
-SELF_CHECK_TICKET = "self-check-ticket.json"
-FIRST_SELF_CHECK = "self-check-first.json"
-
-#: The early asks judge's verdict (an agent node beside the first self-check), and the
+#: The early asks judge's verdict (an agent node beside the check in fork_qa), and the
 #: line its prompt gives it its job with.
 EARLY_ASKS_VERDICT = "early-asks.json"
 EARLY_ASKS_JUDGE_MARK = "You are the early asks judge."
 
-#: The first self-check's whole-check result, kept for the check beside the reviews to
-#: reuse while the attempt is unchanged (`_reusable_first_check`). Written by
-#: `gate_self_check` only, so a fix-up's partial run is never reused.
-FIRST_CHECK_CACHE = Path(".refactory") / "first-check-cache.json"
+#: A failing check goes back at most this many times: the check's own attempt limit
+#: (``check_attempts``, 3 by default), not a larger number of review rounds. When
+#: ``combined_sendback_count`` reaches it, ``gate_check`` delivers a draft marked
+#: check-failing instead of looping further.
+_COMBINED_SENDBACK_BOUND = 3
 
 #: What the builder says it updated on the attempt in progress (`note_updated_tests`).
 UPDATED_TESTS = "updated-tests.json"
@@ -1230,50 +1225,6 @@ def _not_built_lines(items: list[dict[str, Any]]) -> list[str]:
             for item in items if not item["built"]]
 
 
-# ── the first self-check's result, reused by the check beside the reviews ────
-
-
-def _cache_first_check(ctx: Any, result: dict[str, Any], command: str) -> None:
-    """Keep the first self-check's whole-check result for `_reusable_first_check`."""
-    path = ctx.workdir / FIRST_CHECK_CACHE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        **{key: result.get(key) for key in ("ok", "returncode", "stdout", "stderr",
-                                            "timed_out", "elapsed_s", "timeout_s")},
-        "commit": str(ctx.facts.get("commit") or ""), "command": command,
-        "setup": str(ctx.facts.get("setup") or "").strip(),
-        "generate": str(ctx.facts.get("generate") or "").strip(),
-    }))
-
-
-def _reusable_first_check(ctx: Any, command: str) -> tuple[Any, str]:
-    """``(result, evidence)``: the first self-check's whole-check result when the attempt is
-    unchanged since -- the same commit, check command, setup and generate -- else
-    ``(None, "")``. The kept result is used at most once either way."""
-    from refactory_dsh.sandbox import SandboxResult
-
-    path = ctx.workdir / FIRST_CHECK_CACHE
-    if not path.exists():
-        return None, ""
-    try:
-        cached = json.loads(path.read_text())
-    except (OSError, ValueError):
-        cached = {}
-    finally:
-        path.unlink(missing_ok=True)
-    current = {"commit": str(ctx.facts.get("commit") or ""), "command": command,
-               "setup": str(ctx.facts.get("setup") or "").strip(),
-               "generate": str(ctx.facts.get("generate") or "").strip()}
-    if not cached.get("commit") or any(cached.get(key) != value for key, value in current.items()):
-        return None, ""
-    result = SandboxResult(ok=bool(cached.get("ok")), returncode=cached.get("returncode"),
-                           stdout=cached.get("stdout") or "", stderr=cached.get("stderr") or "",
-                           timed_out=bool(cached.get("timed_out")),
-                           elapsed_s=float(cached.get("elapsed_s") or 0.0),
-                           timeout_s=cached.get("timeout_s"))
-    return result, f"reused from the first self-check, commit {cached['commit'][:12]}"
-
-
 def _design_constraints(ctx: Any) -> list[str]:
     """R5: the design's ``[left: …]`` sites, as lines that tell the builder not to undo them."""
     from refactory_dsh import design_contract
@@ -1390,20 +1341,26 @@ def check_artifact(ctx: Any, *, check_attempt: str | None = None) -> str:
 def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[str, Any],
                 targeted_command: str | None, *, beside_reviews: bool,
                 check_attempt: str | None = None) -> Any:
-    """Run the whole check on the attempt, record its evidence, and judge it."""
+    """Run the whole check on the attempt, record its evidence, and judge it.
+
+    The command is the person's contract and runs exactly as written, in one shell:
+    ``pnpm run build && pnpm test`` stops at the build when it fails, and ``pnpm test``
+    never runs.  Running the later step anyway would report failures the change did not
+    cause and waste the time it takes to produce them.  What the check prints is the
+    first failing step's failure, and that is what goes back with the review findings.
+
+    ``beside_reviews`` only says whether the check records itself as running beside the
+    reviews; it does not change the command.
+    """
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh.create_ops import repair
     from refactory_dsh.failfast import detect_stuck, record_check_history
 
-    # The first self-check ran this whole command on this attempt already, unless the
-    # attempt has changed since (`_reusable_first_check`).
-    result, _reused_evidence = _reusable_first_check(ctx, command)
-    if result is None:
-        result = (repo_change.run_check(ctx, command, check_timeout, beside_reviews=True)
-                  if beside_reviews else repo_change.run_check(ctx, command, check_timeout))
+    if beside_reviews:
+        result = repo_change.run_check(ctx, command, check_timeout, beside_reviews=True)
+    else:
+        result = repo_change.run_check(ctx, command, check_timeout)
     detail = "\n".join((result.problem(), result.stdout or "", result.stderr or "")).strip()
-    if _reused_evidence:
-        detail = f"({_reused_evidence})\n\n{detail}" if detail else f"({_reused_evidence})"
     outcome = {"command": command, "status": "pass" if result.ok else evidence.check_failure_kind(
         result, budget=getattr(ctx, "budget", None)),
         "stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode,
@@ -1414,8 +1371,6 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         # The prepared attempt this evidence belongs to: a review taken beside this
         # check binds to it (`authoring_evidence.current_problems`).
         outcome["check_attempt"] = check_attempt
-    if _reused_evidence:
-        outcome["reused"] = _reused_evidence
     apply_cwd_escaped(result, outcome)
     ctx.write_text("check.txt", detail or "ok\n")
 
@@ -1455,6 +1410,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                 "check_mode": "full",
                 "targeted_command": targeted_command,
             })
+            if beside_reviews:
+                return Verdict("reloop", detail)
             return repair(ctx, [detail])
         ctx.set_fact("validation", "(the check passed)")
         ctx.write_json("check-record.json", {
@@ -1493,6 +1450,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             "command": _ccp.get("command"),
             "commit": str(ctx.facts.get("commit", "")),
         })
+        if beside_reviews:
+            return Verdict("reloop", _prep_detail)
         return repair(ctx, [_prep_detail])
 
     # A failure the unchanged base has too is not the attempt's: design mode's one rule, the
@@ -1529,8 +1488,7 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                 inherited_detail = unbuilt_msg
             validation_msg = f"(the check passed; {inherited_detail})"
             ctx.set_fact("validation", validation_msg)
-            ctx.write_text("check.txt", validation_msg + "\n"
-                           + (f"({_reused_evidence})\n" if _reused_evidence else ""))
+            ctx.write_text("check.txt", validation_msg + "\n")
             # The receipt the reviews and the audit check is this one, which passed.
             outcome["status"] = "pass"
             outcome["inherited_failures"] = sorted(filtered.inherited)
@@ -1558,6 +1516,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
                     "check_mode": "full",
                     "targeted_command": targeted_command,
                 })
+                if beside_reviews:
+                    return Verdict("reloop", detail)
                 return repair(ctx, [detail])
             return "proceed"
         if filtered.new_failures and filtered.inherited:
@@ -1637,6 +1597,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         _cr_fail["base_reset"] = _base_reset_list
     ctx.write_json("check-record.json", _cr_fail)
 
+    if beside_reviews:
+        return Verdict("reloop", detail)
     return repair(ctx, [detail])
 
 
@@ -1684,12 +1646,10 @@ def prepare_check(ctx: Any) -> Any:
     fails is judged here by the whole check, as it always was, which reports it with its
     triage.
 
-    Then the self-check, before any review starts. An attempt's first emission goes
-    ``first``: the whole check runs once (`first_self_check`) beside the early asks judge,
-    and `gate_self_check` decides on both, so the builder never starts a fix-up from a
-    partial list (b48a). A fix-up's self-check runs here (`_fixup_self_check`): the tests
-    that failed last time and the ones the fix-up's own changes can break, in chunks
-    within the self-check's time limit.
+    Then the self-check: every attempt — first or fix-up — runs only the tests the change
+    touches (`_fixup_self_check`), not the whole check. The full check runs beside the
+    reviews in fork_qa. The brief's own example first runs in the review round's full
+    check, so a broken example costs one review round.
 
     A limit that stops the build here -- the check attempts, or all attempts, spent on a
     failing self-check or preparation -- delivers the attempt as a draft marked check
@@ -1780,8 +1740,6 @@ def _prepare_attempt(ctx: Any) -> Any:
             empty_prepass.digest_text = (
                 f"generate put back everything this attempt changed (empty diff); {why}")
             return _early_stop(ctx, empty_prepass, prev_record, saved_base_unavailable)
-    if not _fixups_used(ctx):
-        return _first_self_check_due(ctx, attempt)
     return _fixup_self_check(ctx, command, check_timeout, prev_record, saved_base_unavailable,
                              attempt)
 
@@ -1797,246 +1755,20 @@ def _end_fixups(ctx: Any) -> None:
         ctx.set_fact("self_check_fixup_count", 0)
 
 
-# ── the first self-check, beside the early asks judge (b48a) ──────────────────
-
-
-def _first_self_check_due(ctx: Any, attempt: str) -> Verdict:
-    """Send the attempt's first self-check to its fork: the whole check beside the judge.
-
-    It names the attempt the fork's result is for (`SELF_CHECK_TICKET`), and sets aside
-    whatever an earlier attempt's self-check, judge or kept check result left.
-    """
-    for name in (FIRST_SELF_CHECK, EARLY_ASKS_VERDICT):
-        ctx.path(name).unlink(missing_ok=True)
-    (ctx.workdir / FIRST_CHECK_CACHE).unlink(missing_ok=True)
-    ctx.write_json(SELF_CHECK_TICKET, {"attempt": attempt,
-                                       "commit": str(ctx.facts.get("commit") or "")})
-    ctx.set_fact("early_asks_rereads", 0)
-    ctx.set_fact("early_asks_reread", "")
-    return Verdict("first", "the attempt's first self-check runs the whole check, beside the "
-                            "early asks judge")
-
-
-def first_self_check(ctx: Any) -> dict[str, Any]:
-    """Op beside the early asks judge: the attempt's first self-check runs the whole check.
-
-    The builder gets every failure in one pass, instead of what a time-limited run in
-    chunks reaches first (b47a found 25 failures with 10 files cut, then more the cut had
-    hidden). The brief's check runs once, in the prepared worktree, and what fails is
-    compared with the base (`_the_changes_failures`); `gate_self_check` decides. When the
-    judge is asked again, the fork runs again and this result stands: the check is not
-    run twice for one commit.
-    """
-    ticket = ctx.read_json(SELF_CHECK_TICKET, {}) if ctx.exists(SELF_CHECK_TICKET) else {}
-    commit = str(ctx.facts.get("commit") or "")
-    if not ticket.get("attempt") or ticket.get("commit") != commit:
-        raise ValueError("the first self-check was not prepared for the attempt the run is at; "
-                         "prepare_check routes it")
-    done = ctx.read_json(FIRST_SELF_CHECK, {}) if ctx.exists(FIRST_SELF_CHECK) else {}
-    if done.get("attempt") == ticket["attempt"] and done.get("commit") == commit:
-        return {}
-    found = _whole_self_check(ctx, str(ctx.facts["check"]))
-    ctx.write_json(FIRST_SELF_CHECK, {"attempt": ticket["attempt"], "commit": commit, **found})
-    return {}
-
-
-def _whole_self_check(ctx: Any, command: str) -> dict[str, Any]:
-    """The whole check run once as a self-check: what it selected, ran and found.
-
-    A failure the base has too, and the brief and corrections do not name, is inherited
-    (`_the_changes_failures`). A failing run that names no test (a build error, say) is
-    the attempt's failure, recorded as ``unparsed``: it is never a pass. A run stopped at
-    its limit, or one that failed on something other than the code, says nothing about
-    the tests: the check beside the reviews decides.
-    """
-    from refactory_dsh import authoring_evidence as evidence
-    from refactory_dsh import base_check, test_selection
-    from refactory_dsh.failfast import failure_digest, self_check_failures, self_check_limit
-
-    check_timeout = int(ctx.knob("check_timeout_s", 180))
-    found = worktree.recorded(ctx.workdir)
-    root = Path(found.path) if found is not None else Path(str(ctx.facts.get("artifact")
-                                                                or ctx.workdir))
-    touched = base_check._all_changed_files(root, found.base) if found is not None else []
-    prev_record = ctx.read_json("check-record.json", {}) or {}
-    earlier = _self_checks(ctx)
-    selection = test_selection.select(touched, root, prev_record, check_command=command,
-                                      costs=test_selection.costs_from_record(earlier, root),
-                                      bounds=test_selection.lower_bounds(earlier),
-                                      alone=test_selection.run_alone(earlier))
-    entry: dict[str, Any] = {
-        "selection": list(selection.tests), "how_selected": selection.record(),
-        "ran": [], "cut": [], "commands": [], "notes": [],
-        "limit_s": float(check_timeout), "duration_s": 0.0, "timings": [],
-        "failing_ids": [], "inherited_filtered": [], "base": "",
-        "digest": "", "runners": [], "raw_tail": "", "unparsed": "", "result": None,
-    }
-    if not selection.tests:
-        return entry  # nothing it can break: the check beside the reviews decides
-    result = repo_change.run_check(ctx, command, check_timeout, triage_prep=False, prepared=True)
-    output = "\n".join(filter(None, [result.stdout or "", result.stderr or ""])).strip()
-    entry.update(commands=[command], duration_s=round(float(result.elapsed_s or 0.0), 1),
-                 result={"ok": result.ok, "returncode": result.returncode,
-                         "stdout": result.stdout or "", "stderr": result.stderr or "",
-                         "timed_out": bool(result.timed_out), "elapsed_s": result.elapsed_s,
-                         "timeout_s": result.timeout_s})
-    if result.ok:
-        entry["ran"] = list(selection.tests)
-        return entry
-    failures = sorted(self_check_failures(output))
-    if failures:
-        failing, inherited, base = _the_changes_failures(
-            ctx, command, failures, check_timeout,
-            self_check_limit(int(ctx.knob("self_check_timeout_s", 300)), check_timeout))
-        digest_text, runners, raw_tail = failure_digest([output], set(inherited))
-        entry.update(ran=list(selection.tests), failing_ids=failing, inherited_filtered=inherited,
-                     base=base, digest=digest_text if failing else "",
-                     runners=runners if failing else [], raw_tail=raw_tail if failing else "")
-        if result.timed_out:
-            entry["notes"].append(f"the whole check was stopped at its {check_timeout} s limit; "
-                                  "the failures it reported before that count")
-        return entry
-    kind = evidence.check_failure_kind(result, budget=getattr(ctx, "budget", None))
-    if result.timed_out or kind != "code_failure":
-        why = (f"the whole check was stopped at its {check_timeout} s limit"
-               if result.timed_out else f"the whole check did not fail on the code ({kind})")
-        entry.update(cut=list(selection.tests), notes=[why + "; the check beside the reviews "
-                                                       "decides"])
-        return entry
-    entry.update(ran=list(selection.tests), digest=output[-2000:],
-                 unparsed=f"the check failed (exit {result.returncode}) without naming a "
-                          "failing test")
-    return entry
-
-
-def gate_self_check(ctx: Any) -> Any:
-    """Gate after the first self-check and the early asks judge: decide on both (b48a).
-
-    The attempt's own test failures and every ask or correction the judge found not built
-    go back to emit together, as one fix-up with the self-check's budget and limits
-    (`_settle_self_check`) -- the not-built items even when every test passes, as with
-    b47a's refusal function, defined and never called while its tests passed. A judge
-    whose verdict is missing or cannot be read is asked again (``reread``: the fork runs
-    again, and the self-check's result stands) as many times as the frozen
-    ``judge_rereads`` knob allows; after that the attempt goes on without a verdict, and
-    the self-check's record and a run warning say the judge failed. Nothing about a judge
-    that did not answer reads as "everything is built". A limit stop goes to the report
-    as a draft, as from `prepare_check`.
-    """
-    from refactory_dsh.run import BuildLoopStop
-
-    for name in (CHECK_PREP, CHECK_VERDICT):
-        ctx.path(name).unlink(missing_ok=True)
-    try:
-        return _decide_first_self_check(ctx)
-    except BuildLoopStop as stop:
-        if _draft_for_stop(ctx, stop, check_failing=True) is None:
-            raise
-        return "draft"
-
-
-def _decide_first_self_check(ctx: Any) -> Any:
-    """`gate_self_check`'s work."""
-    ticket = ctx.read_json(SELF_CHECK_TICKET, {}) if ctx.exists(SELF_CHECK_TICKET) else {}
-    found = ctx.read_json(FIRST_SELF_CHECK, {}) if ctx.exists(FIRST_SELF_CHECK) else {}
-    commit = str(ctx.facts.get("commit") or "")
-    if (not ticket.get("attempt") or found.get("attempt") != ticket["attempt"]
-            or found.get("commit") != commit):
-        raise ValueError("the first self-check left no result for the attempt the run is at; "
-                         "prepare_check routes it, and first_self_check records it")
-    items, judged, reread = _read_early_asks(ctx)
-    if reread is not None:
-        return reread
-    command = str(ctx.facts["check"])
-    entry = {
-        "attempt": int(ctx.facts.get("attempts_used", 0)) + 1, "commit": commit,
-        "fixups_before": _fixups_used(ctx),
-        **{key: found.get(key) for key in ("selection", "how_selected", "ran", "cut", "commands",
-                                            "notes", "limit_s", "duration_s", "timings")},
-        "judge": judged,
-    }
-    return _settle_self_check(
-        ctx, _prepass_of(found), entry, base=str(found.get("base") or ""),
-        inherited=list(found.get("inherited_filtered") or []),
-        not_built=[item for item in items if not item["built"]],
-        unparsed=str(found.get("unparsed") or ""),
-        prev_record=ctx.read_json("check-record.json", {}) or {},
-        saved_base_unavailable=ctx.facts.get("base_unavailable") or "",
-        attempt=str(ticket["attempt"]), command=command, first_result=found.get("result"))
-
-
-def _read_early_asks(ctx: Any) -> tuple[list[dict[str, Any]], dict[str, Any], Any]:
-    """``(items, record, reread)``: the judge's items and what the record says of them, or a
-    ``reread`` verdict while the judge may be asked again."""
-    from refactory_dsh import judges, target_guard
-
-    try:
-        items = parse_early_asks(
-            judges.text_of(ctx, EARLY_ASKS_VERDICT),
-            corrections_given=bool(str(ctx.facts.get("gate_corrections") or "").strip()))
-        return items, {"status": "judged", "not_built": _not_built_lines(items),
-                       "items": len(items)}, None
-    except judges.Unreadable as exc:
-        problem = str(exc)
-    # An optional branch that failed is recorded missing, with its error (`worker_node`).
-    missing = ctx.path("reviews/early_asks_check-missing.txt")
-    if missing.exists():
-        problem += f" (the judge failed: {missing.read_text().strip()[:300]})"
-        missing.unlink(missing_ok=True)
-    used = int(ctx.facts.get("early_asks_rereads") or 0)
-    allowed = int(ctx.knob("judge_rereads", 1))
-    if used < allowed:
-        ctx.set_fact("early_asks_rereads", used + 1)
-        ctx.set_fact("early_asks_reread", (
-            f"\n## Your last verdict could not be read\n{problem}. Write `{EARLY_ASKS_VERDICT}` "
-            "again: one JSON object in the shape above and nothing else that is JSON.\n"))
-        return [], {}, Verdict("reread", f"the early asks judge's verdict could not be read "
-                                         f"({problem}); it is asked again beside the same "
-                                         "self-check result, with no builder round")
-    note = (f"the early asks judge failed: {problem}"
-            + (", also when it was asked again" if allowed else "")
-            + "; the attempt went on without its verdict")
-    target_guard.warn(note)
-    return [], {"status": "failed", "problem": note}, None
-
-
-def _prepass_of(found: dict[str, Any]) -> Any:
-    """The first self-check's result as the self-check's other paths carry one."""
-    from refactory_dsh.failfast import PrepassResult
-    from refactory_dsh.sandbox import SandboxResult
-
-    raw = found.get("result") or None
-    result = (SandboxResult(ok=bool(raw.get("ok")), returncode=raw.get("returncode") or 0,
-                            stdout=raw.get("stdout") or "", stderr=raw.get("stderr") or "",
-                            timed_out=bool(raw.get("timed_out")), elapsed_s=raw.get("elapsed_s"),
-                            timeout_s=raw.get("timeout_s")) if raw else None)
-    failing = list(found.get("failing_ids") or [])
-    return PrepassResult(
-        ran=bool(found.get("commands")), early_stop=bool(failing), targeted_command=None,
-        check_mode="full", result=result, digest_text=str(found.get("digest") or ""),
-        runners=list(found.get("runners") or []), raw_tail=str(found.get("raw_tail") or ""),
-        selection=list(found.get("selection") or []), ran_ids=list(found.get("ran") or []),
-        cut_ids=list(found.get("cut") or []), failing_ids=failing,
-        commands=list(found.get("commands") or []), notes=list(found.get("notes") or []),
-        limit_s=float(found.get("limit_s") or 0.0),
-        elapsed_s=float(found.get("duration_s") or 0.0),
-        left_out=list(found.get("inherited_filtered") or []))
-
-
-# ── a fix-up's self-check, and what both decide ───────────────────────────────
 
 
 def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[str, Any],
                       saved_base_unavailable: str, attempt: str) -> Any:
-    """A fix-up's self-check: the last failures, and what the fix-up's changes can break.
+    """An attempt's self-check: the tests the change touches, and its last failures.
 
     The selection (`test_selection.select`) is the tests the last self-check found
-    failing, the test files the fix-up changed, and the tests that import what it changed
-    (`_fixup_changes`), not the whole attempt's: the first self-check ran everything
-    already. It runs in chunks within the self-check's time limit
+    failing, the test files the change changed, and the tests that import what it changed
+    (`_fixup_changes`), not the whole attempt's. Every attempt takes this path, the first
+    one too: the whole check runs beside the reviews, not here. It runs in chunks within
+    the self-check's time limit
     (`failfast.targeted_prepass`), in the attempt's prepared worktree. When the last
-    self-check's failure named no test, nothing can be targeted, so the whole check runs
-    again (`_whole_self_check`).
+    self-check's failure named no test, nothing can be targeted, so the full check
+    beside the reviews decides.
     """
     from refactory_dsh import test_selection
     from refactory_dsh.failfast import targeted_prepass, without_failures
@@ -2049,16 +1781,6 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
     entry: dict[str, Any] = {"attempt": int(ctx.facts.get("attempts_used", 0)) + 1,
                              "commit": str(ctx.facts.get("commit") or ""),
                              "fixups_before": _fixups_used(ctx)}
-    if last.get("unparsed"):
-        whole = _whole_self_check(ctx, command)
-        entry.update({key: whole.get(key) for key in ("selection", "how_selected", "ran", "cut",
-                                                      "commands", "notes", "limit_s",
-                                                      "duration_s", "timings")})
-        return _settle_self_check(
-            ctx, _prepass_of(whole), entry, base=str(whole.get("base") or ""),
-            inherited=list(whole.get("inherited_filtered") or []), not_built=[],
-            unparsed=str(whole.get("unparsed") or ""), prev_record=prev_record,
-            saved_base_unavailable=saved_base_unavailable, attempt=attempt, command=command)
     touched, changed_since = _fixup_changes(root, found, last)
     selection = test_selection.select(touched, root, prev_record, check_command=command,
                                       first=list(last.get("failing_ids", [])),
@@ -2117,19 +1839,15 @@ def _fixup_changes(root: Path, found: Any, last: dict[str, Any]) -> tuple[list[s
 def _settle_self_check(ctx: Any, prepass: Any, entry: dict[str, Any], *, base: str,
                        inherited: list[str], not_built: list[dict[str, Any]], unparsed: str,
                        prev_record: dict[str, Any], saved_base_unavailable: str, attempt: str,
-                       command: str, first_result: dict[str, Any] | None = None) -> Any:
+                       command: str) -> Any:
     """Send what the self-check found back, or let the attempt go on to the reviews.
 
-    The attempt's own failures, a failure that named no test, and the asks and corrections
-    the early asks judge found not built all go back to emit as a fix-up, which spends no
-    attempt and runs no review, at most ``self_check_fixups`` times an attempt and that
-    many times ``check_attempts`` a run. Past the bound, failures are the early stop, which
-    spends the attempt; items the judge found not built, alone, go on to the reviews, which
-    are told of them (dm-276). Anything else -- a pass, failures the base has too, or a result
-    that says nothing (a timeout, a runner it cannot target, nothing collected) -- goes on
-    to the reviews and the whole check. The first self-check's whole-check result is kept
-    for the check beside the reviews only when it went on from there (``first_result``):
-    a fix-up's partial run never is.
+    The attempt's own failures and a failure that named no test go back to emit as a
+    fix-up, which spends no attempt and runs no review, at most ``self_check_fixups``
+    times an attempt and that many times ``check_attempts`` a run. Past the bound,
+    failures are the early stop, which spends the attempt. Anything else -- a pass,
+    failures the base has too, or a result that says nothing (a timeout, a runner it
+    cannot target, nothing collected) -- goes on to the reviews and the whole check.
     """
     from dataclasses import replace
 
@@ -2171,8 +1889,6 @@ def _settle_self_check(ctx: Any, prepass: Any, entry: dict[str, Any], *, base: s
     _record_self_check(ctx, {**entry, "outcome": outcome})
     _end_fixups(ctx)
     _record_prepared(ctx, attempt, prepass.targeted_command if prepass.ran else None)
-    if first_result is not None and outcome in ("pass", "inherited"):
-        _cache_first_check(ctx, first_result, command)
     return "proceed"
 
 
@@ -2372,20 +2088,29 @@ def _prepared_attempt(ctx: Any) -> str:
 
 
 def gate_check(ctx: Any) -> Any:
-    """Gate after the review fork: route on what the check beside the reviews decided.
+    """Gate after the review fork: route on the check and the early asks judge together.
 
-    A failed check sends the build back with the check's feedback, as before; the
-    reviews of that attempt are not read, because the next attempt is reviewed afresh.
-    A check that stopped the run (an unrepairable failure) stops it here. A check that
-    still fails at its limit, or at the overall attempts limit, delivers the attempt as a
-    draft marked check failing (`_draft_for_stop`) and goes straight to the report
-    (``draft``): the QA judge and the overwatch judge only a change whose check passed.
-    A person's skip of the check proceeds on its skip receipt for this attempt.
+    Composes one send-back from check failures and early-asks findings without spending an
+    attempt (increments ``combined_sendback_count``, not ``attempts_used``), and returns
+    ``Verdict("reloop")`` without calling ``repair()``. A failing check skips the QA judge
+    and the overwatch by graph topology: ``gate_check → pick_corrections`` bypasses
+    ``synthesize_qa → qa_judge → overwatch``.
+
+    When ``early_asks_check`` did not run (its verdict file is absent — it is an optional
+    target of ``fork_qa``), ``gate_check`` decides on the check result alone. When both
+    are present and the check passed but early asks found items not built, the early-asks
+    finding alone still sends back with the check's result.
+
+    The combined send-back loop is bounded by ``gate_check``'s ``max_iterations=8``; when
+    the bound is reached, ``gate_check`` returns ``"draft"`` and the attempt is delivered
+    as a draft marked check-failing.
+
+    A check that stopped the run (an unrepairable failure) stops it here. A person's skip
+    of the check proceeds on its skip receipt for this attempt.
 
     With no decision for this attempt and command -- the check command was corrected
-    after the check ran (`graph-control amend-command` reruns this gate), or the check
-    never recorded one -- this gate runs the whole check itself, as the sequential gate
-    did, bound to the same attempt, so the reviews beside it stay current.
+    after the check ran, or the check never recorded one -- this gate runs the whole
+    check itself, bound to the same attempt, so the reviews beside it stay current.
     """
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh.run import BuildLoopStop
@@ -2405,7 +2130,12 @@ def gate_check(ctx: Any) -> Any:
                 return "draft"
             raise stopped
         label = str(decided.get("verdict") or "")
-        return "proceed" if label == "proceed" else Verdict(label, str(decided.get("reason") or ""))
+        if label == "proceed":
+            # Check passed — also check early_asks findings.
+            return _gate_check_early_asks(ctx)
+        # Check failed — compose combined send-back.
+        reason = str(decided.get("reason") or "")
+        return _gate_check_combined_sendback(ctx, reason)
     validation = (ctx.read_json(evidence.EVIDENCE, {}) if ctx.exists(evidence.EVIDENCE)
                   else {}).get("validation", {})
     if (validation.get("status") == "skipped" and validation.get("source") == "person"
@@ -2418,7 +2148,172 @@ def gate_check(ctx: Any) -> Any:
             raise
         return "draft"
     _record_check_verdict(ctx, attempt, verdict)
-    return verdict
+    if str(verdict) == "proceed":
+        return _gate_check_early_asks(ctx)
+    return _gate_check_combined_sendback(ctx, getattr(verdict, "reason", "") or str(verdict))
+
+
+def _read_early_asks_verdict(ctx: Any) -> list[dict[str, Any]]:
+    """Read the early asks judge's verdict when present; return items or [] when absent."""
+    from refactory_dsh import judges
+
+    if not ctx.exists(EARLY_ASKS_VERDICT):
+        return []
+    try:
+        items = parse_early_asks(
+            judges.text_of(ctx, EARLY_ASKS_VERDICT),
+            corrections_given=bool(str(ctx.facts.get("gate_corrections") or "").strip()))
+        return items
+    except judges.Unreadable:
+        return []
+
+
+def _gate_check_early_asks(ctx: Any) -> Any:
+    """Check passed — see if the early asks judge found items not built.
+
+    When composing the early-asks send-back (check passed but asks not built), include
+    review findings extracted by ``create_ops.blocking_findings`` alongside the
+    early-asks items.  Review findings alone do not cause a send-back — they are
+    handled by the QA judge downstream.
+    """
+    from refactory_dsh.run import BuildLoopStop
+
+    items = _read_early_asks_verdict(ctx)
+    not_built = [item for item in items if not item["built"]]
+    if not not_built:
+        return "proceed"
+    # Early asks found items not built — send back with the check's result.
+    parts = ["the check passed, but the early asks judge found items not built:"]
+    parts.extend(_not_built_lines(not_built))
+    review_findings = _collect_review_findings(ctx)
+    if review_findings:
+        parts.append("")
+        parts.append("## Review findings")
+        for finding in review_findings:
+            parts.append(f"- {finding}")
+    block = _brief_and_corrections_block(ctx)
+    if block:
+        parts.append("")
+        parts.append(block)
+    detail = "\n".join(parts)
+    ctx.write_text("check.txt", detail + "\n")
+    ctx.set_fact("validation", detail)
+    # Its own count: the check passed, so these send-backs are not check failures and
+    # must not end in a draft marked check failing.
+    count = int(ctx.facts.get("early_asks_sendback_count") or 0) + 1
+    ctx.set_fact("early_asks_sendback_count", count)
+    if count >= _combined_sendback_bound(ctx):
+        stop = BuildLoopStop(
+            f"asks not built after {count} send-back(s)")
+        if _draft_for_stop(ctx, stop, check_failing=False) is not None:
+            return "draft"
+        raise stop
+    return Verdict("reloop", detail)
+
+
+def _combined_sendback_bound(ctx: Any) -> int:
+    """How many combined send-backs a failing check gets: its own attempt limit.
+
+    The check used to be retried ``check_attempts`` times (3 by default); the combined
+    send-back does not spend an attempt, so it carries its own counter with the same
+    bound. A run that keeps failing stops at the third round, not an eighth.
+    """
+    return max(1, int(ctx.knob("check_attempts", _COMBINED_SENDBACK_BOUND)))
+
+
+def _collect_review_findings(ctx: Any) -> list[str]:
+    """Read the three review files and the verifier report, extract findings.
+
+    Uses ``create_ops.blocking_findings`` — the same parser the gates and the audit
+    already use.  A review file that is missing, empty or unreadable is named in the
+    returned list rather than silently dropped, so the builder is told that a review it
+    should have had carries no finding.  Only the three reviews every attempt has are
+    held to that: the verifier's report is optional, and its absence means the verifier
+    branch did not run.
+    """
+    from refactory_dsh.create_ops import blocking_findings
+
+    review_files = [
+        "reviews/health-check.md",
+        "reviews/code-review.md",
+        "reviews/qa.md",
+        "reviews/verification.md",
+    ]
+    #: The three reviews every attempt has. The verifier's report is optional: its branch
+    #: may not have run, and a report that is not there is not a missing review.
+    mandatory = {"reviews/health-check.md", "reviews/code-review.md", "reviews/qa.md"}
+    all_findings: list[str] = []
+    notes: list[str] = []
+    for path in review_files:
+        if not ctx.exists(path):
+            if path in mandatory:
+                notes.append(f"{path}: not found")
+            continue
+        try:
+            text = ctx.read_text(path)
+        except Exception:
+            notes.append(f"{path}: could not read")
+            continue
+        if not text.strip():
+            # An existing file that is empty is named whoever wrote it.
+            notes.append(f"{path}: empty")
+            continue
+        try:
+            findings = blocking_findings(text)
+        except Exception:
+            notes.append(f"{path}: could not parse")
+            continue
+        all_findings.extend(findings)
+    # Name unparseable reviews alongside actual findings so the builder knows.
+    all_findings.extend(notes)
+    return all_findings
+
+
+def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
+    """Check failed — compose one send-back with check failures, review findings
+    and early-asks findings.
+
+    The combined send-back loop is bounded by the check's attempt limit
+    (``check_attempts``): when ``combined_sendback_count`` reaches it, ``gate_check``
+    delivers a draft marked check-failing instead of looping further.
+
+    The message the builder receives names every failing test (from the check) and
+    every finding from the reviews and verifier (extracted by
+    ``create_ops.blocking_findings``).
+    """
+    from refactory_dsh.run import BuildLoopStop
+
+    parts = [check_reason]
+    # Review findings
+    review_findings = _collect_review_findings(ctx)
+    if review_findings:
+        parts.append("")
+        parts.append("## Review findings")
+        for finding in review_findings:
+            parts.append(f"- {finding}")
+    items = _read_early_asks_verdict(ctx)
+    not_built = [item for item in items if not item["built"]]
+    if not_built:
+        parts.append("")
+        parts.append("## Asks and corrections not built")
+        parts.append("The early asks judge found these not built:")
+        parts.extend(_not_built_lines(not_built))
+    block = _brief_and_corrections_block(ctx)
+    if block:
+        parts.append("")
+        parts.append(block)
+    detail = "\n".join(parts)
+    ctx.write_text("check.txt", detail + "\n")
+    ctx.set_fact("validation", detail)
+    count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
+    ctx.set_fact("combined_sendback_count", count)
+    if count >= _combined_sendback_bound(ctx):
+        stop = BuildLoopStop(
+            f"check failures exhausted after {count} combined send-back(s)")
+        if _draft_for_stop(ctx, stop, check_failing=True) is not None:
+            return "draft"
+        raise stop
+    return Verdict("reloop", detail)
 
 
 def enforce_guardedness(ctx: Any) -> list[str]:

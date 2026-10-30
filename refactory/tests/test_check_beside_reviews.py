@@ -39,6 +39,8 @@ def test_the_check_is_a_branch_of_the_review_fork():
     assert ("prepare_check", "fork_qa", "proceed") in edges
     assert "check" in graph.nodes["fork_qa"].targets
     assert "check" in graph.nodes["join_qa"].sources
+    assert "early_asks_check" in graph.nodes["join_qa"].sources
+    assert "verifier" in graph.nodes["join_qa"].sources
     # The check sends the run nowhere: like the reviews, its branch drains into the join.
     assert not [e for e in edges if e[0] == "check"]
     assert ("join_qa", "gate_check", None) in edges
@@ -143,7 +145,7 @@ def test_gate_check_routes_on_the_decision_for_this_attempt(tmp_path, monkeypatc
     ctx.write_json(CHECK_PREP, {"attempt": "a2", "commit": "c1", "root": str(tmp_path)})
     ctx.write_json(CHECK_VERDICT, _decision("reloop", "tests failed"))
     verdict = design_ops.gate_check(ctx)
-    assert verdict == "reloop" and verdict.reason == "tests failed"
+    assert verdict == "reloop" and verdict.reason.startswith("tests failed")
     ctx.write_json(CHECK_VERDICT, _decision("proceed"))
     assert design_ops.gate_check(ctx) == "proceed"
     # A person who skipped the check this attempt: its skip receipt is the evidence.
@@ -154,16 +156,19 @@ def test_gate_check_routes_on_the_decision_for_this_attempt(tmp_path, monkeypatc
     # Another attempt's decision, a skip of another attempt, or a non-person skip does
     # not stand: the gate judges the attempt itself, bound to it.
     whole = []
+    # Independent routing scenarios on one ctx; the send-back bound has its own test.
+    ctx.set_fact("combined_sendback_count", 0)
     monkeypatch.setattr(design_ops, "check_artifact", lambda ctx, *, check_attempt=None:
                         whole.append(check_attempt) or nn.Verdict("reloop", "judged here"))
     for receipt in ({"status": "skipped", "source": "person", "check_attempt": "a1"},
                     {"status": "skipped", "source": "ceo", "check_attempt": "a2"}):
         ctx.write_json(CHECK_VERDICT, _decision("proceed", attempt="a1"))
         ctx.write_json(evidence.EVIDENCE, {"validation": receipt})
-        assert design_ops.gate_check(ctx).reason == "judged here"
+        assert design_ops.gate_check(ctx).reason.startswith("judged here")
     assert whole == ["a2", "a2"]
     # What it judged is recorded for this attempt: a rerun of the gate routes on it.
-    assert design_ops.gate_check(ctx).reason == "judged here"
+    ctx.set_fact("combined_sendback_count", 0)
+    assert design_ops.gate_check(ctx).reason.startswith("judged here")
     assert whole == ["a2", "a2"]
     # The commit moved since prepare_check: nothing here is this attempt's.
     ctx.set_fact("commit", "c9")
@@ -238,11 +243,10 @@ def test_prepare_check_sends_back_before_the_reviews_when_last_attempts_failures
         tmp_path, monkeypatch):
     from refactory_dsh import failfast, repo_change, test_selection
     from refactory_dsh.sandbox import SandboxResult
-    from tests_support import early_asks_judgment
 
     ctx = _ctx(tmp_path)
     monkeypatch.setattr(repo_change, "prepare_attempt", lambda ctx, timeout: [])
-    # The attempt's first self-check (b48a) runs the whole check once, beside the judge.
+    # Every attempt — first or fix-up — runs only touched tests in prepare_check.
     monkeypatch.setattr(test_selection, "select",
                         lambda *a, **k: test_selection.Selection(tests=["t.py"]))
     failed = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
@@ -255,29 +259,54 @@ def test_prepare_check_sends_back_before_the_reviews_when_last_attempts_failures
     ctx.write_json(CHECK_PREP, {"attempt": "a0", "commit": "c1", "root": str(tmp_path)})
     ctx.write_json(CHECK_VERDICT, _decision("proceed", attempt="a0"))
     ctx.set_fact("validation", "what went wrong last time")
-    assert design_ops.prepare_check(ctx) == "first"
-    assert not ctx.exists(CHECK_PREP) and not ctx.exists(CHECK_VERDICT)
-    assert design_ops.first_self_check(ctx) == {}
-    ctx.write_text(design_ops.EARLY_ASKS_VERDICT, early_asks_judgment())
-    sent_back = design_ops.gate_self_check(ctx)
-    # A still-failing test goes back as a fix-up first, spending nothing.
-    assert sent_back == "reloop" and sent_back.reason.startswith("self-check fix-up 1 of 2")
-    assert early_stops == [] and not ctx.facts.get("attempts_used")
-    assert not ctx.exists(CHECK_PREP)  # no review starts on this attempt
-    assert not ctx.exists(CHECK_VERDICT)
+    # The first attempt now goes to _fixup_self_check (like a fix-up).
+    # With an inconclusive self-check (timed out in chunks), it proceeds to fork_qa.
+    sent_back = design_ops.prepare_check(ctx)
+    # First attempt with no prior record: self-check result is inconclusive → proceed
+    assert sent_back == "proceed"
     # A fix-up's self-check runs in prepare_check, on what failed and what the fix-up changed.
     go = failfast.PrepassResult(
         ran=True, early_stop=False, targeted_command="pytest t.py::x", check_mode="full",
         result=None, digest_text="", selection=["t.py::x"], ran_ids=["t.py::x"],
         commands=["pytest t.py::x"])
     monkeypatch.setattr(failfast, "targeted_prepass", lambda *a, **k: go)
+    attempts_before = int(ctx.facts.get("attempts_used", 0))
+    check_attempts_before = int(ctx.facts.get("check_attempts_used", 0))
     assert design_ops.prepare_check(ctx) == "proceed"
     prepared = ctx.read_json(CHECK_PREP)
     assert prepared["commit"] == "c1" and prepared["root"] == str(tmp_path)
-    assert prepared["targeted_command"] == "pytest t.py::x" and prepared["attempt"]
-    # The reviewers judge the attempt against what sent it back, not against its fix-up.
-    assert ctx.facts["review_feedback"] == "what went wrong last time"
-    assert ctx.facts["self_check_fixup_count"] == 0
+    assert prepared["attempt"]
+    # The reviewers judge the attempt against what sent it back.
+    assert ctx.facts.get("review_feedback") == "what went wrong last time"
+    assert ctx.facts.get("self_check_fixup_count", 0) == 0
+    # prepare_check did not spend an attempt: it just prepared and proceeded
+    assert int(ctx.facts.get("attempts_used", 0)) == attempts_before
+    assert int(ctx.facts.get("check_attempts_used", 0)) == check_attempts_before
+
+    # Now test the send-back path: exhaust the fix-up budget so _early_stop fires.
+    # A self-check that exhausts fixups sends back with "reloop" from _early_stop,
+    # and attempts_used must not change (no attempt spent in the send-back).
+    failing = failfast.PrepassResult(
+        ran=True, early_stop=True, targeted_command="pytest t.py::x", check_mode="full",
+        result=None, digest_text="t.py::x failed", selection=["t.py::x"],
+        ran_ids=["t.py::x"], commands=["pytest t.py::x"],
+        failing_ids=["t.py::x"])
+    monkeypatch.setattr(failfast, "targeted_prepass", lambda *a, **k: failing)
+    # Exhaust fixup budget: set self_check_fixup_count to the allowed limit
+    ctx.set_fact("self_check_fixup_count", 2)
+    ctx.set_fact("total_self_check_fixups_used", 6)
+    attempts_before2 = int(ctx.facts.get("attempts_used", 0))
+    early_stops.clear()
+    sent_back2 = design_ops.prepare_check(ctx)
+    assert str(sent_back2) == "reloop", (
+        f"expected reloop when fixup budget exhausted, got {sent_back2}")
+    # _early_stop was called with the failing test IDs from the prepass
+    assert len(early_stops) == 1, f"_early_stop must be called once, was called {len(early_stops)} times"
+    assert "t.py::x" in early_stops[0], (
+        "the send-back must name the failing test from the previous round")
+    # attempts_used must not have changed during the send-back
+    assert int(ctx.facts.get("attempts_used", 0)) == attempts_before2, (
+        "prepare_check send-back must not spend an attempt")
 
 
 def test_a_failed_preparation_is_judged_by_the_whole_check_at_once(tmp_path, monkeypatch):
