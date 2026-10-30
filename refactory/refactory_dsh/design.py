@@ -66,7 +66,8 @@ BUILDER_WORKSPACE = {"kind": "clone", "of": "attempt", "collect": "diff"}
 #: and when to stop. It runs the tests its change touches and the brief's own example, not
 #: the full suite (approved 2026-10-27): in the live trial (dm-149) the builder's full-suite
 #: runs took 11.6 of its 27 minutes, and the check runs the full suite after it anyway (in
-#: design, the full check runs beside the reviews in ``fork_qa``).
+#: design, the full check runs beside the reviews in ``fork_qa``). ``{{builder_tests}}`` is the
+#: ready-to-paste command for those tests and its measured time (``design_ops.builder_tests``).
 WORKSPACE_BRIEFING = (
     "## Your workspace\n"
     "Your workspace is a prepared clone of the last attempt, with its dependencies "
@@ -76,9 +77,11 @@ WORKSPACE_BRIEFING = (
     "Run there, as often as you need, the tests your change touches: the test files you "
     "changed or added, and the tests that import the modules you changed. Run the brief's "
     "own example or CLI path there too. They run there as they run in the check.\n"
-    "Do not run the full suite yourself: the check runs it for you after you answer.\n"
-    "Wrap commands that might hang in `timeout` (for example, `timeout -k 5s 5m pytest ...`); "
-    "DSH workspace shell commands are killed after at most 10 minutes.\n"
+    "Your targeted test command: {{builder_tests}}\n"
+    "Run this targeted command (and any single test you add). Do not run the whole test "
+    "suite: the full check runs after you finish, beside the reviews.\n"
+    "If you wrap a command in `timeout`, give it about twice the time stated above; DSH "
+    "workspace shell commands are killed after at most 10 minutes.\n"
     "When you are done, stop: the workspace's diff is your answer. The runtime turns it "
     "into the next attempt, which the check and the reviews then judge. Return a short "
     "completion message.\n"
@@ -415,7 +418,7 @@ class DesignMode(Mode):
                       "overwatch_review", "design_review_feedback", "design_review_findings",
                       "deliverable_kind", "review_instructions", "verification_methods",
                       *repo_change.produces(), "delivery", "delivery_plan",
-                      "has_pitfalls_step", "pitfalls", "pitfalls_review",
+                      "has_pitfalls_step", "pitfalls", "pitfalls_review", "builder_tests",
                       "claims_check_feedback", "design_review_status", "refine_context",
                       "gate_strategy_feedback", "gate_revision_instruction"),
             notes="read the brief and the command that decides whether it is done",
@@ -822,7 +825,8 @@ class DesignMode(Mode):
         self_check_produces = (*check_produces, *repo_change.CHECK_PRODUCES,
                                "review_feedback", "review_baseline",
                                "self_check_fixup_count", "total_self_check_fixups_used",
-                               "draft_delivery", "early_asks_rereads", "early_asks_reread")
+                               "builder_tests", "draft_delivery", "early_asks_rereads",
+                               "early_asks_reread")
         graph.add(Node(
             "prepare_check", "gate", evaluator=f"{OPS}:prepare_check", role="validation",
             resource_role="final_validation",

@@ -368,12 +368,18 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
             "research_scope": research_scope, "research_scope_reason": research_scope_reason,
             "design_review_feedback": "(no design review has run yet)",
             "design_review_findings": "(no findings yet)",
+            "builder_tests": NO_BUILDER_TESTS,
             "deliverable_kind": deliverable_kind,
             "review_instructions": review_instructions,
             "verification_methods": verification_methods(deliverable_kind),
             **pitfalls_facts,
             **claims_facts,
             **UNREFUSED, **located, **planned}
+
+
+#: What the builder's briefing shows for its targeted test command before any self-check has
+#: selected tests: there is no change to select for yet.
+NO_BUILDER_TESTS = "none yet; run the tests for the files you change"
 
 
 #: What a scoped change's plan is compiled from, in place of the perspectives step.
@@ -1976,6 +1982,10 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
         self_check_timeout_s=int(ctx.knob("self_check_timeout_s", 300)),
         alone=selection.alone,
     )
+    # The builder's next briefing: the command this self-check ran, and how long it took.
+    shown = builder_tests(command, prepass, [*earlier, {"timings": prepass.timings}], root)
+    if shown:
+        ctx.set_fact("builder_tests", shown)
     inherited, base = [], ""
     if prepass.failing_ids:
         _, inherited, base = _the_changes_failures(
@@ -1994,6 +2004,40 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
                               unparsed="", prev_record=prev_record,
                               saved_base_unavailable=saved_base_unavailable, attempt=attempt,
                               command=command)
+
+
+def builder_tests(command: str, prepass: Any, entries: list[dict[str, Any]], root: Path) -> str:
+    """The builder's targeted test command, and the time it took, from a self-check that ran.
+
+    The command is the check command's own, kept with its options, for the whole selection
+    the self-check ran (`check_digest.build_probe_command`, as the self-check builds each
+    chunk's): one line the builder can paste. The self-check cuts the selection into chunks
+    only to bound its time. The time is what the self-check measured: its elapsed seconds
+    when every selected test ran, else the sum of the files' own measured seconds
+    (`test_selection.costs_from_record`) when each is known and none is a lower bound.
+    With no measurement the line says none, rather than guess. An empty string when
+    nothing was selected or the check cannot be targeted.
+    """
+    from refactory_dsh import test_selection
+    from refactory_dsh.check_digest import build_probe_command
+
+    names = list(prepass.selection)
+    ids = [name for name in names if "::" in name or " > " in name]
+    line, refusal = build_probe_command(command, ids, root=root,
+                                        test_files=[name for name in names if name not in ids])
+    if refusal or not line:
+        return ""
+    seconds: float | None = None
+    if prepass.ran_ids and not prepass.cut_ids and not prepass.notes:
+        seconds = prepass.elapsed_s
+    else:
+        files = {test_selection._file_of(name) for name in names}
+        costs = test_selection.costs_from_record(entries, root)
+        if files <= costs.keys() and not files & set(test_selection.lower_bounds(entries)):
+            seconds = sum(costs[name] for name in files)
+    if not seconds:
+        return f"`{line}`"
+    return f"`{line}`\nIt took about {max(1, round(seconds))} s when the self-check ran it."
 
 
 def _fixup_changes(root: Path, found: Any, last: dict[str, Any]) -> tuple[list[str], str]:
