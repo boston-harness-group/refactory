@@ -1,10 +1,10 @@
 """Design mode's self-check: the tests a change can break run before the reviews (b41a).
 
-An attempt's first self-check runs the whole check once, beside the early asks judge
-(b48a; `test_first_self_check.py`). A fix-up's self-check, in `prepare_check`, selects the
-tests the fix-up can break (`test_selection`), runs them in chunks within a time limit
+Every attempt's self-check, first or fix-up, runs in `prepare_check` on the tests the
+change touches (`test_selection`), in chunks within a time limit
 (`failfast.targeted_prepass`), and sends the change's failures back to emit as a fix-up
-that spends no attempt and runs no review. Each test here drives the real runner, the real
+that spends no attempt and runs no review (`test_first_self_check.py`). The whole check
+runs beside the reviews, not here. Each test here drives the real runner, the real
 worktree and, for routes and loops, the real design graph.
 """
 

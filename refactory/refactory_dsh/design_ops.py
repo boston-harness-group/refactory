@@ -1759,12 +1759,13 @@ def _end_fixups(ctx: Any) -> None:
 
 def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[str, Any],
                       saved_base_unavailable: str, attempt: str) -> Any:
-    """A fix-up's self-check: the last failures, and what the fix-up's changes can break.
+    """An attempt's self-check: the tests the change touches, and its last failures.
 
     The selection (`test_selection.select`) is the tests the last self-check found
-    failing, the test files the fix-up changed, and the tests that import what it changed
-    (`_fixup_changes`), not the whole attempt's: the first self-check ran everything
-    already. It runs in chunks within the self-check's time limit
+    failing, the test files the change changed, and the tests that import what it changed
+    (`_fixup_changes`), not the whole attempt's. Every attempt takes this path, the first
+    one too: the whole check runs beside the reviews, not here. It runs in chunks within
+    the self-check's time limit
     (`failfast.targeted_prepass`), in the attempt's prepared worktree. When the last
     self-check's failure named no test, nothing can be targeted, so the full check
     beside the reviews decides.
