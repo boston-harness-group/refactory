@@ -940,9 +940,9 @@ def test_a_builder_that_names_no_test_leaves_the_reviewers_told_so(tmp_path, mon
 
 
 def test_a_fixups_self_check_runs_the_last_failures_and_what_the_fixup_changed(tmp_path, monkeypatch):
-    """Not the whole attempt's diff: the first self-check ran everything already. The
-    fix-up changed only test_pin.py, so test_other.py, which imports the tool the attempt
-    changed, is not selected again (the attempt-wide selection held it)."""
+    """Not the whole attempt's diff: the first self-check ran the tests the attempt
+    touched. The fix-up changed only test_pin.py, so test_other.py, which imports the tool
+    the attempt changed, is not selected again (the attempt-wide selection held it)."""
     other = "import tool\n\n\ndef test_other():\n    assert tool.VERSION\n"
     T._Chunks(monkeypatch, emissions=[{PIN}, set()])
     model = FakeModel(T._answers(BREAKS, FIXES_PIN))
