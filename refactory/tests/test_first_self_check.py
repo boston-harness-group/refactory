@@ -1181,3 +1181,8 @@ def test_sendback_names_failing_test_and_review_finding(tmp_path, monkeypatch):
     assert "missing import" in out, "verification finding must appear"
     # Early asks findings also present
     assert "not built" in out and HELPER in out
+    # A review that is not there is named, not dropped silently.
+    (reviews_dir / "qa.md").unlink()
+    code, out, err = _gate(run, monkeypatch)
+    assert code == 0 and T._label(out) == "reloop", err
+    assert "reviews/qa.md: not found" in out, "a missing review must be named in the send-back"

@@ -2337,7 +2337,7 @@ unavailable, and then nothing is inherited.
 ### The fix-up, and its bound
 
 The change's failures go back to emit through a reloop, as a refused emission does
-(`prepare_check`'s for a fix-up's self-check, `gate_self_check`'s for the first), by way
+(`prepare_check`'s for a fix-up's self-check, `first_self_check`'s for the first), by way
 of `pick_corrections`, which every send-back to the builder passes (dm-226):
 `validation` carries them to emit on both runtimes; the verdict's reason is
 `pick_corrections`' visit feedback, cleared when it decides, and never reaches emit. The
@@ -2375,7 +2375,7 @@ before its fix-ups (`review_feedback`).
 prepare_check's `max_iterations` follows the knobs (`design.prepare_check_iterations`,
 applied by `DesignMode.graph` and `DesignMode.state_dict`, so the walker and the
 lowered graph get the same number). Its reloops are fix-ups, early stops and
-refusals (the first self-check's go through `gate_self_check`, below, under the same
+refusals (the first self-check's go through `first_self_check`, below, under the same
 bound): applied emissions are at most the attempts (`check_attempt_cap` when it is
 above `check_attempts`) plus the run's fix-ups, each after at most
 `refusal_attempts − 1` refusals, so the limit is
@@ -2429,7 +2429,7 @@ proceeds to `fork_qa`, which runs the full check beside the three reviews:
   judge's bar is unchanged. On the spine the worker dispatches it, as it does every
   agent node.
 
-**`gate_self_check`** (gate, after `join_self_check`) sends the attempt's own failures
+**The self-check's send-back** (after `join_self_check`) sends the attempt's own failures
 and every item the judge found not built back as one fix-up, with the self-check's
 budget and limits: the not-built items even when every test passes. Past that budget,
 failures are the early stop, which spends the attempt, and the not-built items go with
@@ -2445,9 +2445,7 @@ twice) as often as `judge_rereads` allows (1), then the attempt goes on without 
 verdict, with `judge.status: failed` in the record and a run warning. A failed judge
 branch is recorded missing with its error (`reviews/early_asks_check-missing.txt`,
 written by the worker on the spine and by the fork on the walker) and read the same
-way. `gate_self_check`'s limit is `(1 + judge_rereads) ×
-prepare_check_iterations + 1` (`design.gate_self_check_iterations`, 91 with the
-defaults): it runs once an attempt's first self-check, so it never ends a run.
+way.
 
 **Reuse.** When the first self-check goes on to the reviews (a pass, or failures all
 inherited), its whole-check result is kept (`.refactory/first-check-cache.json`) and the

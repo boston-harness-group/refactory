@@ -2233,9 +2233,9 @@ def _collect_review_findings(ctx: Any) -> list[str]:
     """Read the three review files and the verifier report, extract findings.
 
     Uses ``create_ops.blocking_findings`` — the same parser the gates and the audit
-    already use.  A review file that exists but cannot be parsed is named in the
-    returned list rather than silently dropped.  A file that does not exist is not a
-    finding (the reviewer is optional or the branch wrote nothing).
+    already use.  A review file that is missing, empty or unreadable is named in the
+    returned list rather than silently dropped, so the builder is told that a review it
+    should have had carries no finding.
     """
     from refactory_dsh.create_ops import blocking_findings
 
@@ -2249,11 +2249,15 @@ def _collect_review_findings(ctx: Any) -> list[str]:
     notes: list[str] = []
     for path in review_files:
         if not ctx.exists(path):
+            notes.append(f"{path}: not found")
             continue
         try:
             text = ctx.read_text(path)
         except Exception:
             notes.append(f"{path}: could not read")
+            continue
+        if not text.strip():
+            notes.append(f"{path}: empty")
             continue
         try:
             findings = blocking_findings(text)
