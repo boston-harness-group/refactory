@@ -66,8 +66,9 @@ BUILDER_WORKSPACE = {"kind": "clone", "of": "attempt", "collect": "diff"}
 #: and when to stop. It runs the tests its change touches and the brief's own example, not
 #: the full suite (approved 2026-10-27): in the live trial (dm-149) the builder's full-suite
 #: runs took 11.6 of its 27 minutes, and the check runs the full suite after it anyway (in
-#: design, the full check runs beside the reviews in ``fork_qa``). ``{{builder_tests}}`` is the
-#: ready-to-paste command for those tests and its measured time (``design_ops.builder_tests``).
+#: design, the full check runs beside the reviews in ``fork_qa``). The workspace has the
+#: command ``refactory-targeted-tests`` (``targeted_tests``), which runs the self-check's own
+#: selection for the builder's change; ``{{builder_tests}}`` is the time a self-check measured.
 WORKSPACE_BRIEFING = (
     "## Your workspace\n"
     "Your workspace is a prepared clone of the last attempt, with its dependencies "
@@ -77,9 +78,10 @@ WORKSPACE_BRIEFING = (
     "Run there, as often as you need, the tests your change touches: the test files you "
     "changed or added, and the tests that import the modules you changed. Run the brief's "
     "own example or CLI path there too. They run there as they run in the check.\n"
-    "Your targeted test command: {{builder_tests}}\n"
-    "Run this targeted command (and any single test you add). Do not run the whole test "
-    "suite: the full check runs after you finish, beside the reviews.\n"
+    "Before you stop, run `refactory-targeted-tests` and fix what fails. It runs exactly "
+    "what the self-check will run for your change. {{builder_tests}}\n"
+    "Do not run the whole test suite: the full check runs after you finish, beside the "
+    "reviews.\n"
     "If you wrap a command in `timeout`, give it about twice the time stated above; DSH "
     "workspace shell commands are killed after at most 10 minutes.\n"
     "When you are done, stop: the workspace's diff is your answer. The runtime turns it "
