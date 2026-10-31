@@ -682,7 +682,120 @@ def test_only_what_holds_the_change_back_sends_it_back(tmp_path, item, back):
     if not back:
         follow_ups = (tmp_path / "reviews/follow-ups.md").read_text()
         assert "[code_reviewer] tool.py:3: no --quiet flag" in follow_ups
-        assert "asked for a redo, but nothing it named is critical or high" in follow_ups
+        assert "asked for a redo, but nothing it named holds the change back" in follow_ups
+
+
+#: The finding that cost b2_pitfalls_research a second build round: a tautological
+#: assertion, which the judge sent back as breaking a correction.
+TAUTOLOGY = {"source": "verifier", "where": "tests/test_pitfalls.py:394",
+             "what": "tautological assertion: the OR is already true from line 391",
+             "why": "the correction asks that both still appear", "kind": "test",
+             "severity": "medium", "breaks": "correction"}
+
+
+@pytest.mark.parametrize("item, back", [
+    # Test-strength, docs and style findings are follow-ups, whatever they say they break
+    # or how severe they are.
+    (TAUTOLOGY, False),
+    ({**TAUTOLOGY, "severity": "high", "breaks": "none"}, False),
+    ({**TAUTOLOGY, "kind": "docs", "severity": "high"}, False),
+    ({**TAUTOLOGY, "kind": "style", "severity": "critical"}, False),
+    # An unbuilt ask, a failing check, and a high or critical product defect send it back.
+    ({**MINOR, "kind": "ask", "severity": "low"}, True),
+    ({**MINOR, "kind": "check", "severity": "low"}, True),
+    ({**MINOR, "kind": "defect", "severity": "high"}, True),
+    ({**MINOR, "kind": "defect", "severity": "critical"}, True),
+    # Any other product defect is a follow-up, and a kind the judge misspells is a defect.
+    ({**MINOR, "kind": "defect", "severity": "medium"}, False),
+    ({**MINOR, "kind": "refactor", "severity": "high"}, True),
+])
+@pytest.mark.parametrize("gate, context, judgment", [
+    ("gate_qa", _gate_ctx, qa_judgment),
+    ("gate_overwatch", _overwatch_ctx, overwatch_judgment),
+])
+def test_a_must_fix_the_judge_labels_a_test_docs_or_style_nit_is_a_follow_up(
+        tmp_path, monkeypatch, gate, context, judgment, item, back):
+    """The send-back bar by `kind`: only an unbuilt ask, a failing check or a critical or
+    high product defect goes back. What the judge itself labels test, docs or style is a
+    follow-up the pull request lists, not a build round."""
+    monkeypatch.setattr(evidence, "current_problems", lambda ctx, workers: [])
+    ctx = context(tmp_path, judgment("redo", must_fix=[item]))
+    verdict = getattr(design_ops, gate)(ctx)
+    assert str(verdict) == ("reloop" if back else "proceed")
+    if not back:
+        assert item["what"] in (tmp_path / "reviews/follow-ups.md").read_text()
+
+
+def test_the_judge_prompts_state_the_bar_and_ask_for_each_items_kind():
+    """Both judges are told what sends a change back, what is always a follow-up, and to
+    label every must-fix item with its kind."""
+    from refactory_dsh import design
+    for prompt in (design.QA_JUDGE_PROMPT, design.OVERWATCH_PROMPT):
+        assert '"kind": "ask" | "check" | "defect" | "test" | "docs" | "style"' in prompt
+        assert "weak or tautological test assertions" in prompt
+        assert "always follow-ups, never must_fix" in prompt
+
+
+def test_a_tautological_test_assertion_does_not_cost_a_build_round(tmp_path):
+    """b2_pitfalls_research: the QA judge's only must-fix was a tautological assertion in a
+    test, and it sent the change back for a second round. Now the run proceeds on the
+    first attempt and the pull request lists the finding as a follow-up."""
+    repo = git_repo(tmp_path / "repo")
+    model = FakeModel(_answers(
+        _round(_tool("built"), judge=qa_judgment("redo", must_fix=[TAUTOLOGY]),
+               overwatch=overwatch_judgment("pass"))))
+    run = tmp_path / "run"
+    result = _design(run, model, repo)
+
+    assert result.exit_ok, result.error
+    assert len(_prompts(model, EMIT_MARK)) == 1, "no second build round"
+    assert not result.facts.get("review_attempts_used")
+    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text()
+    assert (run / "reviews/qa-gate.txt").read_text().startswith("proceed:")
+
+
+def test_an_unbuilt_ask_still_sends_the_change_back(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    unbuilt = {"source": "code_reviewer", "where": "tool.py:1", "what": "the --quiet flag the "
+               "brief asks for is not built", "why": "an ask", "kind": "ask", "severity": "low",
+               "breaks": "ask"}
+    model = FakeModel(_answers(
+        _round(_tool("bilt"), judge=qa_judgment("redo", must_fix=[unbuilt])),
+        _round(_tool("built"), overwatch=overwatch_judgment("pass"))))
+    result = _design(tmp_path / "run", model, repo)
+    assert result.exit_ok, result.error
+    emits = _prompts(model, EMIT_MARK)
+    assert len(emits) == 2 and "the --quiet flag the brief asks for" in model.prompts[emits[1]]
+
+
+def test_a_high_severity_product_defect_still_sends_the_change_back(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    crash = {"source": "qa_director", "where": "tool.py:2", "what": "crashes on empty input",
+             "why": "data loss", "kind": "defect", "severity": "high", "breaks": "none"}
+    model = FakeModel(_answers(
+        _round(_tool("bilt"), judge=qa_judgment("redo", must_fix=[crash])),
+        _round(_tool("built"), overwatch=overwatch_judgment("pass"))))
+    result = _design(tmp_path / "run", model, repo)
+    assert result.exit_ok, result.error
+    emits = _prompts(model, EMIT_MARK)
+    assert len(emits) == 2 and "crashes on empty input" in model.prompts[emits[1]]
+
+
+def test_the_tautology_proceeds_on_the_spine_too(tmp_path, monkeypatch):
+    """gate_qa runs as its own process on the spine: it reads the same kind and takes the
+    same decision as the walker."""
+    run = _spine_run(tmp_path, qa_judgment("redo", must_fix=[TAUTOLOGY]))
+    code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
+    assert code == 0, err
+    assert out.split()[-1] == "proceed"
+    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text()
+    assert not json.loads((run / "facts.json").read_text()).get("review_attempts_used")
+
+    (run / judges.QA_JUDGE).write_text(qa_judgment("redo", must_fix=[
+        {**TAUTOLOGY, "kind": "check", "what": "the check fails"}]))
+    code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
+    assert code == 0, err
+    assert out.split()[-1] == "reloop" and "the check fails" in out
 
 
 def test_a_proceed_lists_the_must_fix_items_it_left(tmp_path):

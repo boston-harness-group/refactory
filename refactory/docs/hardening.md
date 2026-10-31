@@ -1001,12 +1001,19 @@ tests.
 - **The check stays binding.** `gate_check` routes before either judge runs. A failing
   check sends the build back to emit, and no judge can pass it.
 - **What holds a change back** is remote-factory design-v2's rule, the same for both
-  judges: an ask in the brief, a correction the person gave, a failed health check, or a
-  critical or high defect. Each must-fix item carries its `severity` (`critical`, `high`,
+  judges: an ask in the brief or a correction the person gave that was not built, the
+  check failing, or a critical or high defect in product code (wrong behaviour, data
+  loss, a crash, a security problem). Each must-fix item carries its `kind` (`ask`,
+  `check`, `defect`, `test`, `docs`, `style`), its `severity` (`critical`, `high`,
   `medium`, `low`) and what it `breaks` (`ask`, `correction`, `health`, `none`). An item
-  with no severity is high, so a missing label never lets a defect through. A gate sends
-  the change back only when its judge says `redo` and names an item that holds it back
-  (`judges.blocks`). Otherwise the change goes on and the items are follow-ups.
+  the judge labels `test`, `docs` or `style` is a follow-up whatever its severity (weak or
+  tautological assertions, missing edge-case tests, docs wording, style); an `ask` or
+  `check` item always holds the change back; a `defect` holds it back when it is critical
+  or high, or breaks an ask, a correction or the health check. An item with no severity is
+  high and one with no kind is a `defect`, so a missing label never lets a defect through.
+  A gate sends the change back only when its judge says `redo` and names an item that holds
+  it back (`judges.blocks`). Otherwise the change goes on and the items are follow-ups on
+  the pull request.
 - **The QA judge.**
   - `design_ops.synthesize_qa` starts each round. It sets the last round's judging files
     aside (`qa-judge.json`, `overwatch-verdict.json`, `intent-audit.json`,
