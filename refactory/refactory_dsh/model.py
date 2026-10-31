@@ -40,6 +40,59 @@ class CompletionTimeout(RuntimeError):
     ``timeout`` gets a fresh session instead (`refactory_dsh.node_retry`)."""
 
 
+class InactivityTimeout(subprocess.TimeoutExpired):
+    """The session showed no model output and ran no tool command for ``inactive_s``."""
+
+    def __init__(self, cmd: Any, inactive_s: float) -> None:
+        super().__init__(cmd, inactive_s)
+        self.inactive_s = inactive_s
+
+
+def _etime_seconds(text: str) -> float:
+    """Seconds in ps's ``[[dd-]hh:]mm:ss`` elapsed-time format."""
+    days, _, clock = text.rpartition("-")
+    parts = [float(part) for part in clock.split(":")]
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return seconds + (float(days) * 86400 if days else 0.0)
+
+
+def tool_command_running_since(root_pid: int, since: float) -> bool:
+    """Whether a process beneath ``root_pid`` started at or after ``since`` (epoch seconds).
+
+    The session's tool commands are its descendants, and a long test run starts after the
+    last model output. A helper the runtime started at the beginning predates the latest
+    output and does not count. A failed look reports no activity: the receipt still counts.
+    """
+    try:
+        table = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,etime="], capture_output=True,
+                               text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    now = time.time()
+    children: dict[int, list[tuple[int, float]]] = {}
+    for line in table.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            continue
+        try:
+            children.setdefault(int(fields[1]), []).append((int(fields[0]), now - _etime_seconds(fields[2])))
+        except ValueError:
+            continue
+    pending, seen = [root_pid], {root_pid}
+    while pending:
+        for pid, started in children.get(pending.pop(), []):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            # ps counts whole seconds, so a process can look up to a second older.
+            if started >= since - 1.0:
+                return True
+            pending.append(pid)
+    return False
+
+
 class ModelChoiceError(Exception):
     """A run has no model: no flag, no route and no stored choice (dm-258).
 
@@ -175,6 +228,20 @@ NODE_PATCH = Path(__file__).resolve().parent / "patches" / "agent-node.yml"
 #: such a workload exports the env var rather than every consumer inheriting a high
 #: ceiling. (Same env-driven pattern as REFACTORY_WORKER_BACKEND / REFACTORY_MODEL_EFFORT.)
 DEFAULT_TIMEOUT_S = int(os.environ.get("REFACTORY_MODEL_TIMEOUT_S", "1800"))
+
+#: How long a node's model session may show no sign of life before it is stopped (seconds).
+#:
+#: A node's declared `timeout_s` is a hard maximum, a backstop; this is the limit that
+#: normally ends a stuck session. A session is alive while it produces model output (the
+#: worker receipt the DSH observer rewrites on every request and finished response), or
+#: while a tool command it started is still running (a process started after the last
+#: receipt write, beneath the session). A builder busy on a 6-minute test run is alive; a
+#: silent one is stopped after this long. Overridable via ``REFACTORY_MODEL_INACTIVITY_S``,
+#: or per client with ``inactivity_s``; 0 turns it off. Applies to node sessions only.
+DEFAULT_INACTIVITY_S = int(os.environ.get("REFACTORY_MODEL_INACTIVITY_S", "600"))
+
+#: How often a session's activity is looked at (capped at a quarter of the limit).
+ACTIVITY_POLL_S = 2.0
 
 #: Overhead a node's dispatch reserves beyond its completion attempts, for process
 #: startup, sandbox discovery and delivery bookkeeping. `workers.lower_workflow`
@@ -330,6 +397,7 @@ class DshModelClient:
         routing_provenance: dict[str, Any] | None = None,
         node_wall_s: int | None = None,
         tool_policy: str = "",
+        inactivity_s: int | None = None,
     ) -> None:
         from refactory_dsh.workers import validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -373,6 +441,9 @@ class DshModelClient:
         timeout_s = inherited.get("timeout_s", timeout_s) if timeout_s == DEFAULT_TIMEOUT_S else timeout_s
         attempts = inherited.get("attempts", attempts) if attempts == DEFAULT_ATTEMPTS else attempts
         self._timeout_s = timeout_s
+        #: Set only when a caller chose it; otherwise `DEFAULT_INACTIVITY_S` applies.
+        inactivity_s = inactivity_s if inactivity_s is not None else inherited.get("inactivity_s")
+        self._inactivity_s = int(inactivity_s) if inactivity_s is not None else None
         self._worker_backend = worker_backend or os.environ.get("REFACTORY_WORKER_BACKEND", "dsh")
         self._effort = effort or (os.environ.get("REFACTORY_MODEL_EFFORT", "") if self._worker_backend == "dsh" and not routes_resolved else "")
         self._permission_mode = permission_mode
@@ -514,6 +585,8 @@ class DshModelClient:
             **({"node_wall_s": wall} if (wall := getattr(self, "_node_wall_s", None)) is not None
                else {}),
             **({"tool_policy": tp} if (tp := getattr(self, "_tool_policy", ""))
+               else {}),
+            **({"inactivity_s": ia} if (ia := getattr(self, "_inactivity_s", None)) is not None
                else {}),
         }
 
@@ -767,6 +840,12 @@ class DshModelClient:
             try:
                 proc = self._run_completion(cmd, run_dir, stop_at, budget_s, task=task, target_workdir=target_workdir)
             except subprocess.TimeoutExpired as exc:
+                if isinstance(exc, InactivityTimeout):
+                    raise CompletionTimeout(
+                        f"model completion timed out after {int(exc.inactive_s)}s of inactivity "
+                        "(no model output and no running tool command); requested runtime "
+                        "shutdown; the client does not replay a deadline"
+                    ) from exc
                 # A tool-using completion may already have changed its workdir.
                 # A deadline is not a transport failure: replaying the prompt can
                 # duplicate real work even after its subprocesses have shut down.
@@ -805,6 +884,26 @@ class DshModelClient:
             f"model completion failed on the wire {self._attempts} time(s); last cause: {last}"
         )
 
+    def _inactivity_limit(self) -> float:
+        """The inactivity limit for this session: node sessions on DSH only, else 0 (off)."""
+        if self._worker_backend != "dsh" or not self._node_id:
+            return 0
+        limit = self._inactivity_s if self._inactivity_s is not None else DEFAULT_INACTIVITY_S
+        return max(0, limit)
+
+    def _last_activity(self, pid: int, started_epoch: float, now: float) -> float:
+        """When (monotonic) the session last showed life: model output, or a tool running."""
+        receipt = getattr(self, "_worker_receipt", None)
+        written = started_epoch
+        try:
+            if receipt is not None:
+                written = max(written, receipt.stat().st_mtime)
+        except OSError:
+            pass
+        if tool_command_running_since(pid, written):
+            return now
+        return now - max(0.0, time.time() - written)
+
     def _run_completion(
         self, cmd: list[str], run_dir: Path, stop_at: float | None = None, budget_s: int | None = None,
         task: str | None = None, target_workdir: "Path | None" = None,
@@ -823,6 +922,7 @@ class DshModelClient:
         where they would exceed ``MAX_ARG_STRLEN``.
         """
         timeout_s = budget_s if budget_s is not None else self._timeout_s
+        inactivity_s = self._inactivity_limit()
         with _termination_as_exit():
             self._raise_if_cancelled()
             task_file = None
@@ -842,12 +942,24 @@ class DshModelClient:
                 )
                 try:
                     deadline = stop_at if stop_at is not None else time.monotonic() + self._timeout_s
+                    last_activity = time.monotonic()
+                    started_epoch = time.time()
+                    next_look = last_activity
+                    look_every = min(ACTIVITY_POLL_S, inactivity_s / 4) if inactivity_s else 0.0
                     while True:
                         self._raise_if_cancelled()
                         self._checkpoint()
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(cmd, timeout_s)
+                        if inactivity_s:
+                            now = time.monotonic()
+                            if now >= next_look:
+                                next_look = now + look_every
+                                last_activity = max(last_activity, self._last_activity(
+                                    proc.pid, started_epoch, now))
+                            if now - last_activity >= inactivity_s:
+                                raise InactivityTimeout(cmd, inactivity_s)
                         try:
                             stdout, stderr = proc.communicate(
                                 timeout=min(remaining, 0.1)
