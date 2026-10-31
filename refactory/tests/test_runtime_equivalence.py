@@ -697,20 +697,21 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
 
 
 @pytest.mark.parametrize("runtime", ["walker", "card", "resumed"])
-def test_the_fixup_builder_gets_the_self_checks_command_on_each_runtime(runs, runtime):
-    """The builder is told which tests to run, so it does not run the whole suite under its
-    own timeout. Its first briefing has no selection to give; the fix-up's carries the
-    command the self-check ran and the time it measured, and neither runtime's builder is
-    told to run the whole suite or given a fixed timeout."""
+def test_the_builder_is_told_to_run_the_self_checks_tests_on_each_runtime(runs, runtime):
+    """The builder runs the tests its change breaks in its own session, so the self-check does
+    not send it back to a cold one. Its very first briefing names ``refactory-targeted-tests``,
+    which runs the self-check's own selection; the fix-up's adds the time the self-check
+    measured. Neither runtime's builder is told to run the whole suite or given a fixed
+    timeout."""
     world = runs["worlds"][runtime]
     calls = [json.loads(line) for line in (world.dsh / "calls.jsonl").read_text().splitlines()]
     first, fixup = [call["prompt"] for call in calls if call["node"] == "emit"]
-    [check] = [json.loads(line) for line in (world.run / "self-check-record.jsonl").read_text().splitlines()
-               if '"outcome": "fixup"' in line]
-    [command] = check["commands"]
-    assert "Your targeted test command: none yet; run the tests for the files you change\n" in first
-    assert f"Your targeted test command: `{command}`\nIt took about " in fixup
+    told = ("Before you stop, run `refactory-targeted-tests` and fix what fails. It runs "
+            "exactly what the self-check will run for your change. ")
+    assert f"{told}No self-check has timed these tests yet.\n" in first
+    assert f"{told}The last self-check's tests took about " in fixup
     for prompt in (first, fixup):
+        assert "none yet" not in prompt and "Your targeted test command" not in prompt
         assert "Do not run the whole test suite: the full check runs after you finish" in prompt
         assert "5m" not in prompt and "{{builder_tests}}" not in prompt
 

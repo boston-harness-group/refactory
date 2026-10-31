@@ -377,9 +377,10 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
             **UNREFUSED, **located, **planned}
 
 
-#: What the builder's briefing shows for its targeted test command before any self-check has
-#: selected tests: there is no change to select for yet.
-NO_BUILDER_TESTS = "none yet; run the tests for the files you change"
+#: What the builder's briefing says about the time of its targeted tests before any self-check
+#: has measured them. The command itself (`targeted_tests.COMMAND`) is the same on every
+#: dispatch: it selects for the workspace's change as it is when the builder runs it.
+NO_BUILDER_TESTS = "No self-check has timed these tests yet."
 
 
 #: What a scoped change's plan is compiled from, in place of the perspectives step.
@@ -1956,7 +1957,6 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
     self-check's failure named no test, nothing can be targeted, so the full check
     beside the reviews decides.
     """
-    from refactory_dsh import test_selection
     from refactory_dsh.failfast import targeted_prepass, without_failures
 
     found = worktree.recorded(ctx.workdir)
@@ -1968,11 +1968,7 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
                              "commit": str(ctx.facts.get("commit") or ""),
                              "fixups_before": _fixups_used(ctx)}
     touched, changed_since = _fixup_changes(root, found, last)
-    selection = test_selection.select(touched, root, prev_record, check_command=command,
-                                      first=list(last.get("failing_ids", [])),
-                                      costs=test_selection.costs_from_record(earlier, root),
-                                      bounds=test_selection.lower_bounds(earlier),
-                                      alone=test_selection.run_alone(earlier))
+    selection = self_check_selection(root, command, touched, prev_record, earlier)
     prepass = targeted_prepass(
         prev_record, command,
         lambda cmd, timeout: repo_change.run_check(ctx, cmd, timeout, triage_prep=False,
@@ -1982,10 +1978,9 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
         self_check_timeout_s=int(ctx.knob("self_check_timeout_s", 300)),
         alone=selection.alone,
     )
-    # The builder's next briefing: the command this self-check ran, and how long it took.
-    shown = builder_tests(command, prepass, [*earlier, {"timings": prepass.timings}], root)
-    if shown:
-        ctx.set_fact("builder_tests", shown)
+    # The builder's next briefing: how long this self-check's tests took.
+    ctx.set_fact("builder_tests",
+                 builder_tests(command, prepass, [*earlier, {"timings": prepass.timings}], root))
     inherited, base = [], ""
     if prepass.failing_ids:
         _, inherited, base = _the_changes_failures(
@@ -2006,27 +2001,54 @@ def _fixup_self_check(ctx: Any, command: str, check_timeout: int, prev_record: d
                               command=command)
 
 
-def builder_tests(command: str, prepass: Any, entries: list[dict[str, Any]], root: Path) -> str:
-    """The builder's targeted test command, and the time it took, from a self-check that ran.
+def self_check_selection(root: Path, command: str, touched: list[str], prev_record: dict[str, Any],
+                         earlier: list[dict[str, Any]], *, files: list[str] | None = None) -> Any:
+    """The tests a self-check runs for a change that touched ``touched`` in ``root``.
 
-    The command is the check command's own, kept with its options, for the whole selection
-    the self-check ran (`check_digest.build_probe_command`, as the self-check builds each
-    chunk's): one line the builder can paste. The self-check cuts the selection into chunks
-    only to bound its time. The time is what the self-check measured: its elapsed seconds
-    when every selected test ran, else the sum of the files' own measured seconds
-    (`test_selection.costs_from_record`) when each is known and none is a lower bound.
-    With no measurement the line says none, rather than guess. An empty string when
-    nothing was selected or the check cannot be targeted.
+    The one selection: `_fixup_self_check` calls it for the attempt, and the builder's
+    ``refactory-targeted-tests`` (`targeted_tests`) for its workspace, so the builder runs
+    what the self-check will run. ``earlier`` are the run's self-checks so far, oldest first:
+    the last one's failing tests run first, and every one's timings order the rest.
     """
     from refactory_dsh import test_selection
+
+    last = earlier[-1] if earlier else {}
+    return test_selection.select(touched, root, prev_record, check_command=command, files=files,
+                                 first=list(last.get("failing_ids", [])),
+                                 costs=test_selection.costs_from_record(earlier, root),
+                                 bounds=test_selection.lower_bounds(earlier),
+                                 alone=test_selection.run_alone(earlier))
+
+
+def targeted_command(command: str, names: list[str], root: Path) -> tuple[str, str | None]:
+    """One line that runs the selected tests ``names`` with the check command's own options.
+
+    Built by `check_digest.build_probe_command`, as the self-check builds each chunk's:
+    ``(line, None)``, or ``("", why)`` when the check cannot be targeted.
+    """
     from refactory_dsh.check_digest import build_probe_command
 
-    names = list(prepass.selection)
     ids = [name for name in names if "::" in name or " > " in name]
-    line, refusal = build_probe_command(command, ids, root=root,
-                                        test_files=[name for name in names if name not in ids])
+    return build_probe_command(command, ids, root=root,
+                               test_files=[name for name in names if name not in ids])
+
+
+def builder_tests(command: str, prepass: Any, entries: list[dict[str, Any]], root: Path) -> str:
+    """What the builder's briefing says about the time of the tests a self-check ran.
+
+    The tests are those the self-check selected, which the builder's command runs
+    (`targeted_tests`). The time is what the self-check measured: its elapsed seconds when
+    every selected test ran, else the sum of the files' own measured seconds
+    (`test_selection.costs_from_record`) when each is known and none is a lower bound.
+    With no measurement, or a check that cannot be targeted, it says none was timed,
+    rather than guess.
+    """
+    from refactory_dsh import test_selection
+
+    names = list(prepass.selection)
+    line, refusal = targeted_command(command, names, root)
     if refusal or not line:
-        return ""
+        return NO_BUILDER_TESTS
     seconds: float | None = None
     if prepass.ran_ids and not prepass.cut_ids and not prepass.notes:
         seconds = prepass.elapsed_s
@@ -2036,8 +2058,8 @@ def builder_tests(command: str, prepass: Any, entries: list[dict[str, Any]], roo
         if files <= costs.keys() and not files & set(test_selection.lower_bounds(entries)):
             seconds = sum(costs[name] for name in files)
     if not seconds:
-        return f"`{line}`"
-    return f"`{line}`\nIt took about {max(1, round(seconds))} s when the self-check ran it."
+        return NO_BUILDER_TESTS
+    return f"The last self-check's tests took about {max(1, round(seconds))} s."
 
 
 def _fixup_changes(root: Path, found: Any, last: dict[str, Any]) -> tuple[list[str], str]:
