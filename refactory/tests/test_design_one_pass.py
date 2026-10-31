@@ -391,10 +391,11 @@ def test_the_workspace_builder_runs_the_tests_its_change_touches_not_the_full_su
                      "the test files you changed or added",
                      "the tests that import the modules you changed",
                      "Run the brief's own example or CLI path there too",
-                     "Your targeted test command: {{builder_tests}}",
-                     ("Run this targeted command (and any single test you add). Do not run the "
-                      "whole test suite: the full check runs after you finish, beside the "
-                      "reviews."),
+                     ("Before you stop, run `refactory-targeted-tests` and fix what fails. It "
+                      "runs exactly what the self-check will run for your change. "
+                      "{{builder_tests}}"),
+                     ("Do not run the whole test suite: the full check runs after you finish, "
+                      "beside the reviews."),
                      ("If you wrap a command in `timeout`, give it about twice the time stated "
                       "above")):
             assert line in emit, (key, line)

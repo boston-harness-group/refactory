@@ -53,11 +53,16 @@ Design mode's builder (`emit`, in design and design_fast) works in a clone of th
 last attempt and collects its diff: it edits the repository there, runs the tests its
 change touches (the test files it changed or added, and the tests importing the modules
 it changed) and the brief's own example or CLI path as often as it needs, and stops. Its
-prompt gives it the targeted command the last self-check ran (the check's options kept) and
-the seconds that self-check measured for it, and says the full check runs after it answers,
-so it does not run the whole suite itself: in the live trial (dm-149) its full-suite runs
-took 11.6 of its 27 minutes, and in design runs A1 and A2 its whole-suite runs under its own
-`timeout` were killed with no output, up to nine times a session. Materialise,
+prompt tells it to run `refactory-targeted-tests` before it stops and fix what fails, and
+says the full check runs after it answers, so it does not run the whole suite itself: in the
+live trial (dm-149) its full-suite runs took 11.6 of its 27 minutes, and in design runs A1 and
+A2 its whole-suite runs under its own `timeout` were killed with no output, up to nine times
+a session. That command (`targeted_tests.py`, put on the clone's PATH by `clones.prepare`, so
+both runtimes have it) reads the workspace's current diff as materialise will commit it,
+selects with the self-check's own function (`design_ops.self_check_selection`), runs that
+selection with the check's options kept, and prints what it selected and the result; so the
+failures the self-check would send the builder back for, to a new cold session, are found in
+the session it is in. It sets no limit of its own. Materialise,
 the check, the reviews and the target guard read the derived `emit.txt` as they read
 an emitted one. create, edit and fast-create keep the emission-only builder.
 
@@ -3087,6 +3092,13 @@ build-loop limit and ended with nothing delivered:
   prefixed `[draft] `; where `gh pr ready --undo` is refused, the section is
   still written.  Either way the record's `draft_note` and the delivery result
   say so.
+- Delivery reuses a passed full check when the tree it would check is the same one.
+  Each full check that passes (the run's own, and delivery's merged-result check)
+  records its git tree id and command in `.refactory/full-check-trees.json`. A merged
+  result whose tree and check command match an entry is not checked again; the
+  pull request text and `delivery.json` (`merge_check_reused_from`) name the commit
+  the result was reused from. A tree no check passed on, such as one merged onto a
+  main that has moved since, runs the check as before.
 - On a base conflict or failing merged-result check, delivery drops the merge
   (back to the run's own commit), records it as the first unresolved item, and
   continues to push and open the draft.
