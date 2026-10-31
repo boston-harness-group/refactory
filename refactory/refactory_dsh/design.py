@@ -1128,7 +1128,7 @@ class DesignMode(Mode):
             reads=("design.json", "delivery.md", "reviews/follow-ups.json"),
             writes=("delivery.json", "pull-request.md", "design.json"),
             produces=("delivery_result", "pull_request", "delivery_conflict_files",
-                      "delivery_conflict_detail", "delivery_target_tip", "delivered_commit"),
+                      "delivery_target_tip", "delivered_commit"),
             notes="push the run's branch and open its pull request, as the approval gate said",
         ))
         graph.add(Node(

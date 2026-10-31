@@ -1235,9 +1235,15 @@ loops back to the builder automatically instead of pushing behind main.
 
 **The loop.** `deliver → delivery_gate → emit → materialise`. When
 `delivery_conflict_files` is non-empty, the `delivery_gate` evaluator records
-the conflict (main's tip, the conflicted paths, and the conflict detail) in
-`pending-merge.json`, sets `validation` with the conflict description, and
-returns `reloop`. The worktree stays clean while the builder works.
+the conflict (main's tip and the conflicted paths) in `pending-merge.json`,
+sets `validation` with the conflict description, and returns `reloop`.
+Only authored files are conflicts: delivery takes main's side for every
+conflicting file, runs the run's generate command, and a file it rewrites is
+generate-owned and is regenerated in the merge commit, never sent back. The
+description names the authored files with a bounded excerpt of each file's
+conflict hunks (at most 40 lines each, about 20 KB in all, never whole files);
+the excerpts are kept in `.refactory/delivery-conflict.json`, not in a fact, so
+no prompt renders them. The worktree stays clean while the builder works.
 Materialise reads `pending-merge.json`, runs `git merge --no-commit
 <target_tip>`, resolves generated-file conflicts to theirs (main's side),
 applies the emission, and either commits the merge or aborts it — all in one

@@ -990,7 +990,7 @@ def deliver_design(ctx: Any) -> dict[str, Any]:
                        reason.pull_request, reason.pushed, title=title, finish=finish, merge=merge)
         if merge is not None and merge.conflicts:
             result["delivery_conflict_files"] = merge.conflicts
-            result["delivery_conflict_detail"] = merge.conflict_detail
+            _write_conflict_detail(ctx, merge.conflict_detail)
             result["delivery_target_tip"] = merge.target_tip
         else:
             result["delivery_conflict_files"] = []
@@ -1384,33 +1384,63 @@ def _is_ancestor(path: Path, maybe_ancestor: str, descendant: str) -> bool:
         return False
 
 
-def _capture_conflict_detail(
-    path: Path, conflicting: list[str], target_tip: str,
-) -> list[dict[str, str]]:
-    """Read base/ours/theirs stages and main's diff for each conflicting file.
+#: What a conflict send-back may carry to the builder: per file at most this many lines of the
+#: conflict hunks (each line cut), and in all this many characters. Never whole files: a
+#: generated file runs to megabytes, and the builder's prompt renders the description.
+CONFLICT_EXCERPT_LINES = 40
+CONFLICT_LINE_CHARS = 240
+CONFLICT_DETAIL_CHARS = 20_000
+CONFLICT_FILES_LISTED = 40
+CONFLICT_DETAIL = Path(".refactory") / "delivery-conflict.json"
 
-    Called from ``_merge_target`` immediately after ``conflicting`` is populated
-    and BEFORE any resolution or commit that would clear the merge index.
-    """
+
+def _conflict_excerpt(file: Path) -> str:
+    """The first ``CONFLICT_EXCERPT_LINES`` lines of a file's conflict hunks, markers included."""
+    kept: list[str] = []
+    omitted = 0
+    inside = False
     try:
-        merge_base = worktree.git(path, "merge-base", "HEAD", target_tip).strip()
-    except ValueError:
-        merge_base = ""
-    detail: list[dict[str, str]] = []
-    for cfile in conflicting:
-        entry: dict[str, str] = {"path": cfile, "base": "", "ours": "", "theirs": "", "main_diff": ""}
-        for stage, key in (("1", "base"), ("2", "ours"), ("3", "theirs")):
-            try:
-                entry[key] = worktree.git(path, "show", f":{stage}:{cfile}")
-            except ValueError:
-                pass  # missing stage (e.g. add/delete conflict)
-        if merge_base:
-            try:
-                entry["main_diff"] = worktree.git(path, "diff", f"{merge_base}..{target_tip}", "--", cfile)
-            except ValueError:
-                pass
-        detail.append(entry)
-    return detail
+        with file.open("r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                line = raw.rstrip("\n")
+                if line.startswith("<<<<<<<"):
+                    inside = True
+                if inside:
+                    if len(kept) < CONFLICT_EXCERPT_LINES:
+                        kept.append(line if len(line) <= CONFLICT_LINE_CHARS
+                                    else line[:CONFLICT_LINE_CHARS] + " ...")
+                    else:
+                        omitted += 1
+                if line.startswith(">>>>>>>"):
+                    inside = False
+    except OSError:
+        return "(the file is not readable in the merge)"
+    if not kept:
+        return "(no conflict markers: the file was added, deleted or renamed on one side)"
+    if omitted:
+        kept.append(f"... {omitted} more conflict lines omitted")
+    return "\n".join(kept)
+
+
+def _capture_conflict_detail(path: Path, conflicting: list[str]) -> list[dict[str, str]]:
+    """A bounded excerpt of each conflicting file's hunks, as git left them in the working tree.
+
+    Called from ``_merge_target`` right after ``conflicting`` is populated, before any
+    resolution. Only excerpts are kept, never the base, ours and theirs files.
+    """
+    return [{"path": name, "excerpt": _conflict_excerpt(path / name)} for name in conflicting]
+
+
+#: The modification time conflicting files are given before generate runs (1 s after the epoch).
+_UNTOUCHED_NS = 10**9
+
+
+def _rewritten(file: Path, before: bytes) -> bool:
+    """Whether generate wrote ``file``: its bytes changed, or its time moved off the marker."""
+    try:
+        return file.stat().st_mtime_ns != _UNTOUCHED_NS or file.read_bytes() != before
+    except OSError:
+        return True  # generate removed it: its output, not an authored conflict
 
 
 def _abandon_merge(path: Path, reviewed_commit: str) -> None:
@@ -1547,7 +1577,7 @@ def _merge_target(ctx: Any, path: Path, slug: str, into: str, generate: str,
         return MergeResult(abandoned="git merge failed: " + merge_error.strip()[:500])
 
     # Capture conflict detail while unmerged entries are still in the index.
-    conflict_stages = _capture_conflict_detail(path, conflicting, target_tip)
+    conflict_stages = _capture_conflict_detail(path, conflicting)
 
     if not generate:
         # No generate command — all conflicts are authored-file conflicts.
@@ -1555,7 +1585,12 @@ def _merge_target(ctx: Any, path: Path, slug: str, into: str, generate: str,
         return MergeResult(conflicts=conflicting, conflict_detail=conflict_stages,
                            target_tip=target_tip)
 
-    # ── Classify conflicts as generated or authored ──
+    # ── Classify conflicts: a file generate rewrites is the run's output, never the builder's ──
+    # Every conflicting file takes main's side, with its modification time set far back;
+    # generate then rewrites the ones it owns (changed bytes, or a write of the same bytes
+    # that moves the time). A file it leaves alone is authored. Comparing generate's output
+    # from the two sides instead would call every generated file authored whenever an
+    # authored file also conflicts, since the generated content follows that file.
     from refactory_dsh import sandbox
 
     home = Path(ctx.workdir).resolve() / ".refactory" / "merge-gen-home"
@@ -1563,154 +1598,48 @@ def _merge_target(ctx: Any, path: Path, slug: str, into: str, generate: str,
     env = worktree.check_environment(path, home)
 
     authored_conflicts: list[str] = []
-
-    # Resolve all conflicts to base's side (--theirs = target = base).
+    resolved: list[str] = []
     for cfile in conflicting:
         try:
             worktree.git(path, *worktree.NO_HOOKS, "checkout", "--theirs", "--", cfile)
-        except ValueError as exc:
-            # e.g. modify/delete conflict — classify as authored
-            authored_conflicts.append(cfile)
-            continue
-    if authored_conflicts:
-        # At least one file could not be resolved — abandon the merge.
-        _abandon_merge(path, reviewed_commit)
-        authored_detail = [d for d in conflict_stages if d["path"] in authored_conflicts]
-        return MergeResult(conflicts=authored_conflicts, conflict_detail=authored_detail,
-                           target_tip=target_tip)
-
-    # Stage to clear conflict markers so generate can run.
-    try:
-        for cfile in conflicting:
             worktree.git(path, *worktree.NO_HOOKS, "add", "--", cfile)
-        worktree.git(path, *worktree.NO_HOOKS, "-c", "commit.gpgsign=false",
-                     "commit", "--no-edit", "--no-verify", env=merge_env)
-    except ValueError as exc:
-        _abandon_merge(path, reviewed_commit)
-        return MergeResult(abandoned=f"git commit (base-side merge) failed: {exc}")
-
-    # Run generate on this tree (base side) to get content A.
-    gen_a = sandbox.run_command(generate, workdir=path, timeout_s=check_timeout_s,
-                                env=env, home=home, exact_env=True)
-    if not gen_a.ok:
-        # R1: signal crash in generate stops the merge as infrastructure.
-        crashed_a, sig_a = sandbox.is_signal_crash(gen_a)
-        if crashed_a:
-            _abandon_merge(path, reviewed_commit)
-            return MergeResult(abandoned=f"generate (base side) {sig_a}", infrastructure=True)
-        # Generate failed on the base side — classify all conflicting files as authored.
-        _abandon_merge(path, reviewed_commit)
-        return MergeResult(conflicts=conflicting, conflict_detail=conflict_stages,
-                           target_tip=target_tip)
-
-    content_a: dict[str, bytes] = {}
-    for cfile in conflicting:
-        fpath = path / cfile
-        content_a[cfile] = fpath.read_bytes() if fpath.exists() else b""
-
-    # Reset to the reviewed commit and redo with run's side.
-    worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
-
-    # Merge again.
-    try:
-        worktree.git(path, *worktree.NO_HOOKS, "-c", "commit.gpgsign=false",
-                     "merge", "--no-edit", "--no-verify", target_tip, env=merge_env)
-        # This time it merged cleanly — shouldn't happen, but handle it.
-        if generate:
-            regen_err = _regenerate_merge(ctx, path, generate, check_timeout_s, merge_env)
-            if regen_err is not None:
-                _abandon_merge(path, reviewed_commit)
-                infra2 = "[infrastructure]" in (regen_err or "")
-                return MergeResult(abandoned=regen_err, infrastructure=infra2)
-        merge_sha = worktree.git(path, "rev-parse", "HEAD").strip()
-        return MergeResult(merge_commit=merge_sha)
-    except ValueError:
-        pass  # expected — same conflicts
-
-    # Resolve to run's side (--ours = HEAD = run's branch).
-    for cfile in conflicting:
-        try:
-            worktree.git(path, *worktree.NO_HOOKS, "checkout", "--ours", "--", cfile)
+            resolved.append(cfile)
         except ValueError:
-            authored_conflicts.append(cfile)
-            continue
-    if authored_conflicts:
-        _abandon_merge(path, reviewed_commit)
-        return MergeResult(conflicts=authored_conflicts)
+            authored_conflicts.append(cfile)  # e.g. modify/delete: main's side is no file
+    before = {cfile: (path / cfile).read_bytes() for cfile in resolved}
+    for cfile in resolved:
+        os.utime(path / cfile, ns=(_UNTOUCHED_NS, _UNTOUCHED_NS))
 
-    try:
-        for cfile in conflicting:
-            worktree.git(path, *worktree.NO_HOOKS, "add", "--", cfile)
-        worktree.git(path, *worktree.NO_HOOKS, "-c", "commit.gpgsign=false",
-                     "commit", "--no-edit", "--no-verify", env=merge_env)
-    except ValueError as exc:
+    gen = sandbox.run_command(generate, workdir=path, timeout_s=check_timeout_s,
+                              env=env, home=home, exact_env=True)
+    if not gen.ok:
+        crashed, sig = sandbox.is_signal_crash(gen)
         _abandon_merge(path, reviewed_commit)
-        return MergeResult(abandoned=f"git commit (run-side merge) failed: {exc}")
-
-    # Run generate on this tree (run's side) to get content B.
-    gen_b = sandbox.run_command(generate, workdir=path, timeout_s=check_timeout_s,
-                                env=env, home=home, exact_env=True)
-    if not gen_b.ok:
-        # R1: signal crash in generate stops the merge as infrastructure.
-        crashed_b, sig_b = sandbox.is_signal_crash(gen_b)
-        if crashed_b:
-            _abandon_merge(path, reviewed_commit)
-            return MergeResult(abandoned=f"generate (run side) {sig_b}", infrastructure=True)
-        # Generate failed on the run side — classify all conflicting files as authored.
-        _abandon_merge(path, reviewed_commit)
+        if crashed:
+            return MergeResult(abandoned=f"generate {sig}", infrastructure=True)
+        # Generate fails: nothing says which files it owns, so every one is authored.
         return MergeResult(conflicts=conflicting, conflict_detail=conflict_stages,
                            target_tip=target_tip)
 
-    content_b: dict[str, bytes] = {}
-    for cfile in conflicting:
-        fpath = path / cfile
-        content_b[cfile] = fpath.read_bytes() if fpath.exists() else b""
-
-    # Classify each conflicting file.
-    for cfile in conflicting:
-        if content_a.get(cfile) != content_b.get(cfile):
-            authored_conflicts.append(cfile)
-
+    authored_conflicts += [cfile for cfile in resolved if not _rewritten(path / cfile, before[cfile])]
     if authored_conflicts:
-        # At least one authored-file conflict — abandon the merge.
-        worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
-        authored_detail = [d for d in conflict_stages if d["path"] in authored_conflicts]
-        return MergeResult(conflicts=authored_conflicts, conflict_detail=authored_detail,
-                           target_tip=target_tip)
+        _abandon_merge(path, reviewed_commit)
+        authored = [cfile for cfile in conflicting if cfile in authored_conflicts]
+        return MergeResult(conflicts=authored, target_tip=target_tip,
+                           conflict_detail=[d for d in conflict_stages if d["path"] in authored])
 
-    # All conflicting files are generated — build the final merge commit.
-    worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
-
+    # Every conflict is generated output: main's side is regenerated, and the merge commit
+    # holds that and whatever else generate rewrote on the merged tree.
     try:
-        worktree.git(path, *worktree.NO_HOOKS, "-c", "commit.gpgsign=false",
-                     "merge", "--no-edit", "--no-verify", target_tip, env=merge_env)
-    except ValueError:
-        pass  # expected — same conflicts
-
-    # Resolve conflicts using the generated content (content_a == content_b, use A).
-    for cfile in conflicting:
-        fpath = path / cfile
-        fpath.parent.mkdir(parents=True, exist_ok=True)
-        fpath.write_bytes(content_a[cfile])
-    try:
-        for cfile in conflicting:
-            worktree.git(path, *worktree.NO_HOOKS, "add", "--", cfile)
+        changed = worktree.git(path, "diff", "--name-only").split()
+        if changed:
+            worktree.git(path, *worktree.NO_HOOKS, "add", "--", *changed)
         worktree.git(path, *worktree.NO_HOOKS, "-c", "commit.gpgsign=false",
                      "commit", "--no-edit", "--no-verify", env=merge_env)
     except ValueError as exc:
         _abandon_merge(path, reviewed_commit)
-        return MergeResult(abandoned=f"git commit (final merge) failed: {exc}")
-
-    # ── Shared post-merge regeneration (both paths converge here) ──
-    if generate:
-        regen_err = _regenerate_merge(ctx, path, generate, check_timeout_s, merge_env)
-        if regen_err is not None:
-            _abandon_merge(path, reviewed_commit)
-            infra3 = "[infrastructure]" in (regen_err or "")
-            return MergeResult(abandoned=regen_err, infrastructure=infra3)
-
-    merge_sha = worktree.git(path, "rev-parse", "HEAD").strip()
-    return MergeResult(merge_commit=merge_sha)
+        return MergeResult(abandoned=f"git commit (generated-conflict merge) failed: {exc}")
+    return MergeResult(merge_commit=worktree.git(path, "rev-parse", "HEAD").strip())
 
 
 def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
@@ -2256,6 +2185,40 @@ def _body(ctx: Any, found: worktree.Worktree, *, merge: MergeResult | None = Non
 PENDING_MERGE = Path(".refactory") / "pending-merge.json"
 
 
+def _write_conflict_detail(ctx: Any, detail: list[dict[str, str]]) -> None:
+    """Keep the conflict excerpts as a file beside the run. They are not a fact: no prompt renders them."""
+    worktree._write_json(Path(ctx.workdir) / CONFLICT_DETAIL, detail)
+
+
+def _read_conflict_detail(ctx: Any) -> list[dict[str, str]]:
+    try:
+        found = json.loads((Path(ctx.workdir) / CONFLICT_DETAIL).read_text())
+    except (OSError, ValueError):
+        return []
+    return [d for d in found if isinstance(d, dict)] if isinstance(found, list) else []
+
+
+def _conflict_description(target_tip: str, files: list[str], detail: list[dict[str, str]]) -> str:
+    """The conflict send-back text, at most ``CONFLICT_DETAIL_CHARS`` characters in all."""
+    listed = ", ".join(files[:CONFLICT_FILES_LISTED])
+    if len(files) > CONFLICT_FILES_LISTED:
+        listed += f" and {len(files) - CONFLICT_FILES_LISTED} more"
+    head = (f"Merge conflict with main ({target_tip[:12]}). Conflicting authored files: {listed}.\n"
+            f"Your workspace holds the same merge, started for you: the conflicted files with "
+            f"their markers, main's other changes already merged. Resolve every conflict there so "
+            f"no <<<<<<< / >>>>>>> markers remain, and stop.\n")
+    parts = [head]
+    used = len(head)
+    for entry in detail:
+        block = f"\n### {entry.get('path', '')}\n```\n{entry.get('excerpt', '')}\n```\n"
+        if used + len(block) > CONFLICT_DETAIL_CHARS:
+            parts.append("\n(further excerpts omitted: open the conflicted files in your workspace)\n")
+            break
+        parts.append(block)
+        used += len(block)
+    return "".join(parts)[:CONFLICT_DETAIL_CHARS + 200]
+
+
 def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     """Gate evaluator: reloop to emit on authored-file conflict, proceed otherwise.
 
@@ -2283,7 +2246,7 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     if not conflict_files:
         return "proceed"
 
-    detail = ctx.facts.get("delivery_conflict_detail") or []
+    detail = _read_conflict_detail(ctx)
     target_tip = str(ctx.facts.get("delivery_target_tip") or "")
     if not target_tip:
         raise ValueError("delivery_gate: delivery_conflict_files set but delivery_target_tip missing")
@@ -2305,25 +2268,9 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     worktree._write_json(Path(ctx.workdir) / PENDING_MERGE,
                          {"target_tip": target_tip, "conflict_files": conflict_files})
 
-    # Build the description the builder receives via {{validation}}.
-    description_parts = [f"Merge conflict with main ({target_tip[:12]}). "
-                         f"Conflicting authored files: {', '.join(conflict_files)}.\n"
-                         f"Your workspace holds the same merge, started for you: the "
-                         f"conflicted files with their markers, main's other changes already "
-                         f"merged. Resolve every conflict there so no <<<<<<< / >>>>>>> "
-                         f"markers remain, and stop.\n"]
-    for entry in detail:
-        description_parts.append(f"\n### {entry['path']}\n")
-        if entry.get("base"):
-            description_parts.append(f"**Base (common ancestor):**\n```\n{entry['base']}\n```\n")
-        if entry.get("ours"):
-            description_parts.append(f"**Ours (this run's version):**\n```\n{entry['ours']}\n```\n")
-        if entry.get("theirs"):
-            description_parts.append(f"**Theirs (main's version):**\n```\n{entry['theirs']}\n```\n")
-        if entry.get("main_diff"):
-            description_parts.append(f"**What main changed:**\n```diff\n{entry['main_diff']}\n```\n")
-
-    description = "\n".join(description_parts)
+    # The description the builder receives via {{validation}}: the file names and a bounded
+    # excerpt of the hunks, never the files.
+    description = _conflict_description(target_tip, conflict_files, detail)
     ctx.set_fact("validation", description)
     return Verdict("reloop", description)
 

@@ -4663,17 +4663,155 @@ def test_base_changed_authored_file_conflict(github, tmp_path, monkeypatch):
 
     # Conflict facts are set.
     assert "authored.py" in result.facts.get("delivery_conflict_files", [])
-    assert result.facts.get("delivery_conflict_detail")
-    detail = result.facts["delivery_conflict_detail"]
-    assert any(d["path"] == "authored.py" for d in detail)
-    authored_detail = next(d for d in detail if d["path"] == "authored.py")
-    assert authored_detail.get("base")
-    assert authored_detail.get("ours")
-    assert authored_detail.get("theirs")
+    # The detail is a bounded excerpt kept in a file, never a fact (no prompt renders it).
+    assert "delivery_conflict_detail" not in result.facts
+    detail = json.loads((run / delivery.CONFLICT_DETAIL).read_text())
+    assert [d["path"] for d in detail] == ["authored.py"]
+    assert "<<<<<<<" in detail[0]["excerpt"] and "changed_by_base" in detail[0]["excerpt"]
+    assert set(detail[0]) == {"path", "excerpt"}
 
     # No push happened.
     branch = json.loads((run / "design.json").read_text())["branch"]
     assert _remote_head(github, slug, branch) == ""
+
+
+def _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit):
+    """Between the run's start and delivery, let ``edit(other_clone)`` commit to main."""
+    real = delivery.deliver_design
+    moved = []
+
+    def advance(ctx):
+        if moved:
+            return real(ctx)  # the reloop delivers again: main has already moved
+        moved.append(1)
+        other = tmp_path / "other"
+        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
+        edit(other)
+        git(other, "add", ".")
+        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
+            "commit", "-q", "-m", "main moves")
+        git(other, "push", "-q", "origin", "main")
+        return real(ctx)
+
+    monkeypatch.setattr(delivery, "deliver_design", advance)
+
+
+def test_generated_only_conflict_is_regenerated_not_sent_back(github, tmp_path, monkeypatch):
+    """A merge with main that conflicts only in a generated file ends regenerated and
+    committed, with no send-back, even when generate is not repeatable (it stamps a count).
+
+    Fails without the change: delivery runs generate once per side and calls a file whose
+    two outputs differ authored, so it sends the build back for a generated file.
+    """
+    repo = git_repo(tmp_path / "repo")
+    (repo / "gen.sh").write_text(
+        'c="${HOME:-/tmp}/gen-count"; n=$(cat "$c" 2>/dev/null || echo 0); echo $((n + 1)) > "$c"\n'
+        'echo "build $n from $(cat source.txt)" > generated.txt\n')
+    (repo / "source.txt").write_text("alpha\n")
+    (repo / "generated.txt").write_text("build 0 from alpha\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    slug = "acme/merge-gen-only"
+    bare = _published(github, slug, repo)
+
+    def edit(other):
+        (other / "generated.txt").write_text("main's own generated text\n")
+    _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit)
+
+    run = tmp_path / "run"
+    result = _design(run, {"tool.py": "print('built')\n", "source.txt": "alpha\nbeta\n"},
+                     target=str(repo), check="python tool.py", generate="bash gen.sh")
+    assert result.exit_ok, result.error
+
+    record = _record(run)
+    assert record["status"] == "opened", record
+    assert not record.get("merge_conflicts")
+    assert not result.facts.get("delivery_conflict_files")
+    assert not (run / delivery.CONFLICT_DETAIL).exists()
+    merged = git(bare, "show", f"{record['merge_commit']}:generated.txt")
+    assert merged.startswith("build ") and "alpha" in merged and "<<<<<<<" not in merged
+    assert "main's own" not in merged
+
+
+def test_mixed_conflict_sends_back_only_the_authored_file(github, tmp_path, monkeypatch):
+    """An authored file and a generated file conflict: only the authored one is sent back,
+    with a bounded excerpt of its hunks.
+
+    Fails without the change: the generated file derives from the authored one, so
+    generate's output differs between the two sides and both files are sent back.
+    """
+    repo = git_repo(tmp_path / "repo")
+    (repo / "gen.sh").write_text("cat authored.py > generated.txt\n")
+    (repo / "authored.py").write_text("line1\nline2\nline3\n")
+    subprocess.run(["bash", "gen.sh"], cwd=str(repo), check=True, capture_output=True)
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    slug = "acme/merge-mixed"
+    _published(github, slug, repo)
+
+    def edit(other):
+        (other / "authored.py").write_text("line1\nchanged_by_base\nline3\n")
+        subprocess.run(["bash", "gen.sh"], cwd=str(other), check=True, capture_output=True)
+    _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit)
+    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+
+    run = tmp_path / "run"
+    result = _design(run, {"tool.py": "print('built')\n", "authored.py": "line1\nchanged_by_run\nline3\n"},
+                     target=str(repo), check="python tool.py", generate="bash gen.sh")
+    assert result.exit_ok, result.error
+
+    assert _record(run)["status"] == "kept local"
+    assert result.facts["delivery_conflict_files"] == ["authored.py"]
+    detail = json.loads((run / delivery.CONFLICT_DETAIL).read_text())
+    assert [d["path"] for d in detail] == ["authored.py"]
+    assert "changed_by_run" in detail[0]["excerpt"] and "changed_by_base" in detail[0]["excerpt"]
+    assert len(detail[0]["excerpt"].splitlines()) <= 41
+
+
+def test_conflict_send_back_stays_bounded_with_multi_megabyte_files(github, tmp_path, monkeypatch):
+    """Multi-megabyte conflicting files reach the builder as at most a bounded excerpt each
+    and about 20 KB in all, in the file list and in the validation text the prompt renders.
+
+    Fails without the change: validation carries the base, ours and theirs files whole.
+    """
+    lines = [f"row {i} " + "x" * 40 for i in range(70_000)]  # about 3.5 MB
+
+    def variant(tag):
+        return "\n".join(f"{row} {tag}" if i % 1000 == 0 else row for i, row in enumerate(lines)) + "\n"
+
+    repo = git_repo(tmp_path / "repo")
+    for name in ("big_a.txt", "big_b.txt", "big_c.txt"):
+        (repo / name).write_text("\n".join(lines) + "\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    slug = "acme/merge-big"
+    _published(github, slug, repo)
+
+    def edit(other):
+        for name in ("big_a.txt", "big_b.txt", "big_c.txt"):
+            (other / name).write_text(variant("main"))
+    _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit)
+    gate = delivery.evaluate_delivery_conflicts
+    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+
+    run = tmp_path / "run"
+    result = _design(run, {"tool.py": "print('built')\n", **{n: variant("run") for n in
+                                                              ("big_a.txt", "big_b.txt", "big_c.txt")}},
+                     target=str(repo), check="python tool.py")
+    assert result.exit_ok, result.error
+    assert sorted(result.facts["delivery_conflict_files"]) == ["big_a.txt", "big_b.txt", "big_c.txt"]
+    assert "delivery_conflict_detail" not in result.facts
+    assert (run / delivery.CONFLICT_DETAIL).stat().st_size < 60_000
+    for entry in json.loads((run / delivery.CONFLICT_DETAIL).read_text()):
+        assert len(entry["excerpt"].splitlines()) <= 41
+
+    ctx = nn.RunContext(run, facts=dict(result.facts))
+    assert gate(ctx) == "reloop"
+    validation = ctx.facts["validation"]
+    assert 0 < len(validation) <= 20_200, len(validation)
+    assert "<<<<<<<" in validation
+    assert all(len(json.dumps(v)) < 40_000 for k, v in ctx.facts.items()
+               if k in ("validation", "delivery_conflict_files"))
 
 
 def test_merged_result_fails_check(github, tmp_path, monkeypatch, capsys):
