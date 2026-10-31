@@ -3081,6 +3081,13 @@ build-loop limit and ended with nothing delivered:
   prefixed `[draft] `; where `gh pr ready --undo` is refused, the section is
   still written.  Either way the record's `draft_note` and the delivery result
   say so.
+- Delivery reuses a passed full check when the tree it would check is the same one.
+  Each full check that passes (the run's own, and delivery's merged-result check)
+  records its git tree id and command in `.refactory/full-check-trees.json`. A merged
+  result whose tree and check command match an entry is not checked again; the
+  pull request text and `delivery.json` (`merge_check_reused_from`) name the commit
+  the result was reused from. A tree no check passed on, such as one merged onto a
+  main that has moved since, runs the check as before.
 - On a base conflict or failing merged-result check, delivery drops the merge
   (back to the run's own commit), records it as the first unresolved item, and
   continues to push and open the draft.

@@ -207,6 +207,7 @@ class MergeResult:
     conflict_detail: list[dict[str, str]] = dataclasses.field(default_factory=list)
     target_tip: str = ""              # SHA of main's tip at the time of the merge attempt
     infrastructure: bool = False      # R1: a signal crash in the merged check/generate
+    check_reused: str = ""            # commit whose full check on the same tree stood in for this one
 
 
 def knobs() -> dict[str, Knob]:
@@ -1076,6 +1077,8 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
         )
 
     if merge.merge_commit:
+        merge.check_reused = reusable_check(ctx, path, merge.merge_commit)
+    if merge.merge_commit and not merge.check_reused:
         check_failure, infra_flag = _check_merged(ctx, found, merge.merge_commit, reviewed_commit,
                                                    check_timeout_s)
         if check_failure:
@@ -1713,6 +1716,61 @@ def _merge_target(ctx: Any, path: Path, slug: str, into: str, generate: str,
     return MergeResult(merge_commit=merge_sha)
 
 
+#: The trees whose full check passed in this run, by git tree id: what the check ran on, so
+#: a later step whose tree is the same one (a delivery redone with main unmoved) reuses
+#: the result instead of running the whole suite again.
+PASSED_CHECKS = Path(".refactory") / "full-check-trees.json"
+
+
+def _passed_checks(ctx: Any) -> dict[str, Any]:
+    """The ledger, read straight from the run directory: it is bookkeeping beside the
+    run's declared files, which the check and delivery nodes need not declare."""
+    try:
+        passed = json.loads((Path(ctx.workdir) / PASSED_CHECKS).read_text())
+    except (OSError, ValueError):
+        return {}
+    return passed if isinstance(passed, dict) else {}
+
+
+def record_full_check(ctx: Any, path: Path, command: str) -> None:
+    """Note that ``command`` passed in full on ``path``'s head tree, when that is what ran.
+
+    Nothing is recorded when tracked files differ from the head: the check then ran on
+    something the tree id does not name.
+    """
+    try:
+        if worktree.git(path, "status", "--porcelain", "--untracked-files=no").strip():
+            return
+        head = worktree.git(path, "rev-parse", "HEAD").strip()
+        tree = worktree.git(path, "rev-parse", "HEAD^{tree}").strip()
+    except ValueError:
+        return
+    passed = _passed_checks(ctx)
+    passed[tree] = {"commit": head, "command": command}
+    ledger = Path(ctx.workdir) / PASSED_CHECKS
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps(passed, indent=2) + "\n")
+
+
+def reusable_check(ctx: Any, path: Path, commit: str) -> str:
+    """The commit whose passing full check covers ``commit``'s tree, or ``""``.
+
+    The same tree and the same check command: the suite would run on identical files.
+    A tree no passed check names, or a different command, runs the check as usual.
+    """
+    command = str(ctx.facts.get("check") or "").strip()
+    if not command:
+        return ""
+    try:
+        tree = worktree.git(path, "rev-parse", f"{commit}^{{tree}}").strip()
+    except ValueError:
+        return ""
+    entry = _passed_checks(ctx).get(tree)
+    if isinstance(entry, dict) and entry.get("command") == command and entry.get("commit"):
+        return str(entry["commit"])
+    return ""
+
+
 def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
                   reviewed_commit: str, check_timeout_s: float) -> tuple[str, bool]:
     """Run the check on the merged result; return (failure_reason, infrastructure_flag).
@@ -1788,6 +1846,7 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
     result = sandbox.run_command(check, workdir=path, timeout_s=check_timeout_s, budget=budget,
                                  env=env, home=home, exact_env=True)
     if result.ok:
+        record_full_check(ctx, path, check)
         return "", False
 
     # Check failed — reset to reviewed commit and report.
@@ -2093,8 +2152,10 @@ def _check_line(ctx: Any, found: worktree.Worktree, ev_data: dict[str, Any] | No
     notes: list[str] = []
     if merge is not None and merge.merge_commit:
         into = str((ctx.facts.get("delivery_plan") or {}).get("into", "")) or "the target branch"
+        reused = (f" (reused from the check on `{merge.check_reused[:12]}`, which ran on the same files)"
+                  if merge.check_reused else "")
         notes.append(f"{into} was merged in at `{merge.merge_commit[:12]}` onto the reviewed commit "
-                     f"`{found.head[:12]}`, and the check passed on the merged result")
+                     f"`{found.head[:12]}`, and the check passed on the merged result{reused}")
     inherited = ctx.facts.get("inherited_failures") or []
     if inherited:
         notes.append(f"{len(inherited)} failure(s) the unchanged base has too were not counted: "
@@ -2588,6 +2649,10 @@ def _delivered(ctx: Any, approved: dict[str, Any], found: worktree.Worktree,
         record["head"] = merge.merge_commit
         record["merge_commit"] = merge.merge_commit
         record["merge_check"] = "passed on the merged result"
+        if merge.check_reused:
+            record["merge_check_reused_from"] = merge.check_reused
+            record["merge_check"] = ("passed on the merged result (reused from the check on "
+                                     f"{merge.check_reused[:12]}, same files)")
     else:
         record["head"] = found.head
     if merge is not None and merge.conflicts:
