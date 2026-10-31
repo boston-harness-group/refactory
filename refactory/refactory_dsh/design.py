@@ -30,9 +30,19 @@ OPS = "refactory_dsh.design_ops"
 #: same isolation: each attempt gets a fresh workspace via `workspace.dispatched(fresh=True)`.
 TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 
-#: The builder session limit before its retry: the model default (1800 s), and the
-#: `builder_timeout_s` knob overrides it for a run.
-BUILDER_TIMEOUT_S = 1800
+#: The builder's hard maximum: the most wall time one of its model sessions may take. It is
+#: a backstop (the `builder_timeout_s` knob overrides it for a run); what normally stops a
+#: stuck builder is the model client's inactivity limit (`model.DEFAULT_INACTIVITY_S`, 600 s
+#: without model output or a running tool command). It was a plain 1800 s wall, which killed
+#: a builder that was busy on 5-7 minute test runs (trialR-fix-B, 2026-10-31). 4 h is more
+#: than any build the shipped modes have needed, so it is only reached by a builder that is
+#: endlessly busy; the run's own wall and budget still apply.
+BUILDER_TIMEOUT_S = 14400
+
+#: The builder's timeout retry: one fresh session on the same limits (factor 1). A stuck
+#: session is retried on inactivity, so the retry needs no longer limit, and the hard maximum
+#: is not doubled for it.
+BUILDER_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 1}
 
 #: Design mode's verifier runs beside the check, in the review fork.
 BESIDE_CHECK_VERIFIER_NOTE = (
@@ -80,6 +90,8 @@ WORKSPACE_BRIEFING = (
     "own example or CLI path there too. They run there as they run in the check.\n"
     "Before you stop, run `refactory-targeted-tests` and fix what fails. It runs exactly "
     "what the self-check will run for your change. {{builder_tests}}\n"
+    "Iterate with `refactory-targeted-tests --failed`; run plain `refactory-targeted-tests` "
+    "once before you stop.\n"
     "Do not run the whole test suite: the full check runs after you finish, beside the "
     "reviews.\n"
     "If you wrap a command in `timeout`, give it about twice the time stated above; DSH "
@@ -373,9 +385,10 @@ class DesignMode(Mode):
                             "never more than a third of check_timeout_s",
             ),
             "builder_timeout_s": Knob(
-                1800, "int", lo=60, hi=7200, frozen=True,
-                description="how long the builder's model session may run before "
-                            "timeout; its retry doubles this",
+                BUILDER_TIMEOUT_S, "int", lo=60, hi=43200, frozen=True,
+                description="the most wall time the builder's model session may take (a "
+                            "backstop: it is stopped sooner after 10 minutes with no model "
+                            "output and no running command); its retry gets the same",
             ),
             "refine_design": Knob(
                 "light", "str", values=("light", "full"), frozen=True,
@@ -798,10 +811,10 @@ class DesignMode(Mode):
             workspace=dict(BUILDER_WORKSPACE),
             # Behaviour change: emit gains timeout_s and retry, which changes the
             # candidate id; runs in flight at this commit cannot be resumed.  The
-            # spine reservation for the builder roughly doubles (1800 + 3600 plus
-            # overhead and preparation).
+            # spine reservation for the builder is its hard maximum twice (the retry
+            # has the same) plus overhead and preparation.
             timeout_s=builder_timeout(self.values()),
-            retry=TIMEOUT_RETRY,
+            retry=BUILDER_RETRY,
             knobs=("builder_timeout_s",),
             notes="make the change in a clone of the last attempt; its diff is the emission",
         ))

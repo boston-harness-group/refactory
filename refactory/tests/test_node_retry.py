@@ -465,14 +465,16 @@ def test_a_workspace_that_means_none_is_not_isolation(workspace):
 
 
 def test_design_mode_retries_its_builder_and_verifier():
-    from refactory_dsh.design import DesignMode, TIMEOUT_RETRY
+    from refactory_dsh.design import BUILDER_RETRY, BUILDER_TIMEOUT_S, DesignMode, TIMEOUT_RETRY
 
     graph = DesignMode().build()
     assert [node.id for node in graph.nodes.values() if node.retry is not None] == ["emit", "verifier"]
     assert [node.id for node in graph.nodes.values() if node.outputs_only] == ["verifier"]
     assert graph.nodes["verifier"].retry == TIMEOUT_RETRY == RULE
-    assert graph.nodes["emit"].retry == TIMEOUT_RETRY
-    assert graph.nodes["emit"].timeout_s == 1800
+    # The builder's limit is a hard maximum (inactivity stops a stuck one sooner), and its
+    # retry has the same maximum rather than twice it.
+    assert graph.nodes["emit"].retry == BUILDER_RETRY
+    assert graph.nodes["emit"].timeout_s == BUILDER_TIMEOUT_S == 14400
 
 
 def test_other_modes_declare_no_retry():
@@ -596,7 +598,7 @@ def test_retry_cannot_outrun_the_run_wall(tmp_path, runtime, monkeypatch):
 
 
 def test_the_builder_knob_sets_its_timeout_and_both_runtimes_use_it(tmp_path):
-    from refactory_dsh.design import DesignMode, TIMEOUT_RETRY
+    from refactory_dsh.design import BUILDER_RETRY as TIMEOUT_RETRY, DesignMode
     from refactory_dsh.workspace import preparation_budget_s
 
     # A person's knob, exactly as the run path applies it: the graph is built from the
@@ -619,19 +621,19 @@ def test_the_builder_knob_sets_its_timeout_and_both_runtimes_use_it(tmp_path):
 
 
 def test_walker_and_spine_give_the_builder_the_same_walls(tmp_path):
-    from refactory_dsh.design import DesignMode, TIMEOUT_RETRY
+    from refactory_dsh.design import BUILDER_RETRY as TIMEOUT_RETRY, DesignMode
     from refactory_dsh.workspace import preparation_budget_s
 
     state = DesignMode().state_dict()
     graph = Graph.from_state(state["graph"])
-    assert graph.nodes["emit"].timeout_s == 1800
+    assert graph.nodes["emit"].timeout_s == 14400
     assert graph.nodes["emit"].retry == TIMEOUT_RETRY
-    assert attempt_walls(1800, TIMEOUT_RETRY) == [1800, 3600]
+    assert attempt_walls(14400, TIMEOUT_RETRY) == [14400, 14400]
     dsh = Scripted(tmp_path / "dsh", []).client()
     lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path / "run", dsh.context(),
                                      lowering.node_declarations(state))
     check_timeout = state.get("knobs", {}).get("check_timeout_s", {}).get("value")
-    expected = (node_allowance_s(1800, TIMEOUT_RETRY) + NODE_DISPATCH_OVERHEAD_S
+    expected = (node_allowance_s(14400, TIMEOUT_RETRY) + NODE_DISPATCH_OVERHEAD_S
                 + 2 * preparation_budget_s(graph.nodes["emit"].workspace, check_timeout))
     assert lowered.nodes["emit"].command_timeout_s == expected
 

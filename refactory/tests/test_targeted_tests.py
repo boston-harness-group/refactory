@@ -169,3 +169,28 @@ def test_a_builder_on_either_runtime_finds_the_neighbour_it_broke_in_its_own_ses
     expected = design_ops.self_check_selection(Path(attempt.path), CHECK, touched, {}, [])
     assert listed["selection"] == expected.tests == [PIN]
     assert git(Path(attempt.path), "show", f"{attempt.head}:tool.py") == "VERSION = 2"
+
+
+def test_failed_reruns_only_the_last_failures_and_falls_back_without_a_record(tmp_path):
+    files = {**PINNED, "tests/test_second.py": "import tool\n\n\ndef test_second():\n    assert tool\n"}
+    run, _, _ = _run_with_worktree(tmp_path, files)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    # No record yet: --failed is the full selection, and says so.
+    full = json.loads(_command(place, "--failed", "--list").stdout)
+    assert PIN in full["selection"] and "tests/test_second.py" in full["selection"]
+    assert full["rerun_failed"] is False
+    said = _command(place, "--failed")
+    assert "no failures are recorded" in said.stdout and "tests/test_second.py" in said.stdout
+    assert said.returncode != 0
+    # The run that just failed recorded its failures; --failed reruns only those.
+    listed = json.loads(_command(place, "--failed", "--list").stdout)
+    assert listed["selection"] == [f"{PIN}::test_pin"] and listed["rerun_failed"] is True
+    again = _command(place, "--failed")
+    assert f"{PIN}::test_pin" in again.stdout and "test_second" not in again.stdout.split("running:")[1]
+    assert again.returncode != 0
+    # Fixed: the --failed run passes, the record is empty, and the next --failed is the full set.
+    (place.path / PIN).write_text("import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n")
+    assert _command(place, "--failed").returncode == 0
+    after = json.loads(_command(place, "--failed", "--list").stdout)
+    assert after["rerun_failed"] is False and "tests/test_second.py" in after["selection"]

@@ -372,7 +372,7 @@ class DesignFastMode(DesignMode):
             notes="read the artifact brief, and say where the run works",
         ))
         _strategy_node(graph, artifact=True)
-        from refactory_dsh.design import BUILDER_WORKSPACE, WORKSPACE_BRIEFING
+        from refactory_dsh.design import BUILDER_TIMEOUT_S, BUILDER_WORKSPACE, WORKSPACE_BRIEFING
         from refactory_dsh.create_ops import VERIFIER_RESPONSE_FILE
         graph.add(Node(
             "emit", "agent", role="builder", resource_role="work",
@@ -396,6 +396,8 @@ class DesignFastMode(DesignMode):
             writes=(repo_change.EMIT_FILE, VERIFIER_RESPONSE_FILE), produces=("emit",),
             feedback_keys=("repair_feedback",),
             workspace=dict(BUILDER_WORKSPACE),
+            # The hard maximum only: the model client stops a silent builder sooner.
+            timeout_s=BUILDER_TIMEOUT_S,
             notes="make the change in a clone of the last attempt; its diff is the emission",
         ))
         graph.add(repo_change.materialise_node(
