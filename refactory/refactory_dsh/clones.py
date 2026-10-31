@@ -164,6 +164,21 @@ def prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], comman
             budget: Any = None) -> dict[str, Any]:
     """Bring the node's clone at ``root`` to this dispatch; what `workspace.prepare` needs of it.
 
+    The agent also gets ``refactory-targeted-tests`` on its PATH (`targeted_tests.install`).
+    See `_prepare` for what is returned.
+    """
+    from refactory_dsh import targeted_tests
+
+    prepared = _prepare(workdir, root, of, facts=facts, command_timeout_s=command_timeout_s,
+                        budget=budget)
+    targeted_tests.install(workdir, root, prepared, facts)
+    return prepared
+
+
+def _prepare(workdir: Path, root: Path, of: str, *, facts: dict[str, Any], command_timeout_s: int,
+             budget: Any = None) -> dict[str, Any]:
+    """The clone's preparation (`prepare` adds the agent's tools to it).
+
     Returns its ``path``, the ``base`` its diff is taken from, the agent's ``env``, how it
     was ``synced``, the ``conflicts`` a pending merge left, whether it may emit
     ``deletes``, what was ``prepared``, and the ``problems`` an install, generate or
