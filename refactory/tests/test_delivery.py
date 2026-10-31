@@ -16,7 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pytest
@@ -6389,3 +6389,112 @@ def test_an_upstream_that_does_not_hold_the_base_is_not_where_the_pull_request_g
     planned = delivery.plan(repo, base=git(repo, "rev-parse", "main"), branch="refactory/run-0123456789ab",
                             rev="elsewhere")
     assert (planned["action"], planned["into"]) == ("pull_request", "main"), planned
+
+
+def _counting_tool(counter: Path) -> dict[str, str]:
+    """A check that passes and counts each run of it, whatever runs it."""
+    return {"tool.py": f"open({str(counter)!r}, 'a').write('x')\n"}
+
+
+def _redo_delivery_after_merge(github, tmp_path, monkeypatch, slug, *, move_main_again):
+    """Deliver once with main moved (the merge is pushed, then verification fails), optionally
+    move main again, redo delivery. Returns (checks run by the first delivery, checks run by
+    the redo, the redo's record, the run directory)."""
+    repo = git_repo(tmp_path / "repo")
+    (repo / "extra.txt").write_text("placeholder\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    _published(github, slug, repo)
+    counter = tmp_path / "check-runs"
+    other = tmp_path / "other"
+
+    def move_main(name):
+        if not other.exists():
+            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
+        (other / name).write_text("new\n")
+        git(other, "add", ".")
+        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
+            "commit", "-q", "-m", f"main moves: {name}")
+        git(other, "push", "-q", "origin", "main")
+
+    real = delivery.deliver_design
+    reviewed = {}
+
+    def first_delivery(ctx):
+        reviewed["found"] = worktree.recorded(ctx.workdir)
+        move_main("extra.txt")
+        (github / "stale-view").write_text("0" * 40)  # the push lands, verification fails
+        monkeypatch.setattr(delivery, "VERIFY_ATTEMPTS", 1)
+        return real(ctx)
+
+    monkeypatch.setattr(delivery, "deliver_design", first_delivery)
+    run = tmp_path / "run"
+    result = _design(run, _counting_tool(counter), target=str(repo), check="python tool.py")
+    assert "Unverified" in str(result.error), result.error
+    branch = json.loads((run / "design.json").read_text())["branch"]
+    assert _remote_head(github, slug, branch), "the first delivery must have pushed the merge"
+    first_runs = len(counter.read_text())
+
+    # The node was stopped before delivery advanced the worktree record to its merge: the
+    # run still stands at the reviewed commit, with the merge already on GitHub.
+    found = reviewed["found"]
+    git(Path(found.path), "reset", "--hard", found.head)
+    worktree._write_json(run / worktree.RECORD, asdict(found))
+    (github / "stale-view").unlink(missing_ok=True)
+    monkeypatch.setattr(delivery, "deliver_design", real)
+    monkeypatch.setattr(delivery, "VERIFY_ATTEMPTS", 5)
+    if move_main_again:
+        move_main("second.txt")
+    delivery.deliver_design(nn.RunContext(run, facts=result.facts, enforce_writes=False))
+    return first_runs, len(counter.read_text()) - first_runs, _record(run), run
+
+
+def test_a_redo_with_main_unmoved_reuses_the_merged_check(github, tmp_path, monkeypatch):
+    """The merge delivery pushed is the one it checked: a redo of it runs no suite again and says so.
+
+    Fails without the change: the redo runs the whole check on the same merged tree.
+    """
+    first, redo, record, run = _redo_delivery_after_merge(github, tmp_path, monkeypatch, "acme/reuse-check",
+                                                     move_main_again=False)
+    assert first > 0
+    assert redo == 0
+    # The run's own check and delivery's merged check each left the tree they passed on.
+    assert len(json.loads((run / delivery.PASSED_CHECKS).read_text())) == 2
+    assert record["status"] in ("opened", "already open", "updated")
+    assert record["merge_check_reused_from"], record
+    assert "reused from the check on" in record["merge_check"]
+    assert "reused from the check on" in (run / delivery.BODY).read_text()
+
+
+def test_a_redo_after_main_moved_again_reruns_the_merged_check(github, tmp_path, monkeypatch):
+    """A merge onto a main that moved is a tree no check has passed on: the check runs.
+
+    Fails if reuse ignored the tree: the redo would run no check.
+    """
+    _, redo, record, run = _redo_delivery_after_merge(github, tmp_path, monkeypatch, "acme/rerun-check",
+                                                 move_main_again=True)
+    assert redo > 0
+    assert "merge_check_reused_from" not in record
+    assert "reused from the check" not in (run / delivery.BODY).read_text()
+
+
+def test_a_passed_check_is_reused_only_for_the_same_tree_and_command(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    run = tmp_path / "run"
+    run.mkdir()
+    ctx = nn.RunContext(run, facts={"check": "python tool.py"}, enforce_writes=False)
+    assert delivery.reusable_check(ctx, repo, "HEAD") == ""
+    delivery.record_full_check(ctx, repo, "python tool.py")
+    head = git(repo, "rev-parse", "HEAD")
+    assert delivery.reusable_check(ctx, repo, "HEAD") == head
+    ctx.facts["check"] = "pytest -q"
+    assert delivery.reusable_check(ctx, repo, "HEAD") == ""
+    ctx.facts["check"] = "python tool.py"
+    (repo / "other.txt").write_text("x\n")
+    git(repo, "add", ".")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "more")
+    assert delivery.reusable_check(ctx, repo, "HEAD") == ""
+    # Tracked files that differ from the head: what ran is not what the tree id names.
+    (repo / "other.txt").write_text("changed\n")
+    delivery.record_full_check(ctx, repo, "python tool.py")
+    assert delivery.reusable_check(ctx, repo, "HEAD") == ""
