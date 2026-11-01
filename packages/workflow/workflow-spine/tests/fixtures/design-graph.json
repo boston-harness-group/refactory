@@ -367,17 +367,13 @@
     },
     {
       "source": "gate_qa",
-      "target": "qa_judge",
-      "condition": "reread"
-    },
-    {
-      "source": "gate_qa",
       "target": "qa_director_rerun",
       "condition": "coverage_rerun"
     },
     {
-      "source": "qa_director_rerun",
-      "target": "synthesize_qa"
+      "source": "gate_qa",
+      "target": "qa_judge",
+      "condition": "reread"
     },
     {
       "source": "gate_research",
@@ -448,6 +444,11 @@
       "source": "prepare_check",
       "target": "report",
       "condition": "draft"
+    },
+    {
+      "source": "qa_director_rerun",
+      "target": "synthesize_qa",
+      "condition": null
     },
     {
       "source": "qa_judge",
