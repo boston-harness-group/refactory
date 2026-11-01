@@ -277,14 +277,12 @@ def test_site_revert_caught_proceeds(tmp_path):
 
 def test_site_revert_budget_exhausted_proceeds(tmp_path):
     """Budget 0 → uncaught sites become warnings, not fix-ups, and returns None."""
-    ctx = RunContext(tmp_path, facts={"site_revert_fixup_count": 1})
+    ctx = RunContext(tmp_path, facts={"site_revert_fixup_count": 0},
+                     knobs={"site_revert_fixups": 0, "check_attempts": 3})
     ctx.write_text("design.md", DESIGN_WITH_SITES)
     prepass = _FakePrepass(selection=[
         "refactory/tests/test_qa_judge.py::test_weakened_test_blocks_while_missing_test_follows_up",
     ])
-
-    # Set budget to 0 via knob override
-    ctx._knobs = {"site_revert_fixups": 0, "check_attempts": 3}
 
     mock_results = {"pairs": [
         {"site": "refactory/refactory_dsh/judges.py:79",
