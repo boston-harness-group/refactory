@@ -113,6 +113,49 @@ try {
     }
   }
 
+  // --- ASK-3: effort isolation ---
+  {
+    const effortRoot = mkdtempSync(join(tmpdir(), 'refactory-effort-'))
+    try {
+      const effortDir = join(effortRoot, '.refactory', 'workers')
+      mkdirSync(effortDir, { recursive: true })
+      const effortPath = join(effortDir, 'effort.json')
+      writeFileSync(effortPath, JSON.stringify({
+        requested_route: { worker_backend: 'dsh', effort: 'high' },
+        worker_id: 'effort', run_id: effortRoot, node_id: 'test_node',
+        usage: { status: 'unavailable', tokens: null }
+      }))
+      const savedReceipt = process.env.REFACTORY_WORKER_RECEIPT
+      process.env.REFACTORY_WORKER_RECEIPT = effortPath
+      const effortEvents = new Map()
+      apply({
+        on: (name, callback) => effortEvents.set(name, callback),
+        subagents: { list: () => ['spawn', 'fork'] }
+      })
+      const effortRequest = effortEvents.get('agent/request')
+
+      // Root session gets the requested effort.
+      const rootAgent = { session: { id: 'root-session' } }
+      const rootRoute = await effortRequest({ agent: rootAgent }, async () => ({ provider: 'p', model: 'm' }))
+      assert.equal(rootRoute.reasoningEffort, 'high', 'root session should get the requested effort')
+
+      // Child session with its own effort keeps it.
+      const childWithEffort = { session: { id: 'child-with-effort' } }
+      const childRoute = await effortRequest({ agent: childWithEffort }, async () => ({ provider: 'p', model: 'm', reasoningEffort: 'low' }))
+      assert.equal(childRoute.reasoningEffort, 'low', 'child with own effort should keep it')
+
+      // Child session without effort gets none (not the root's).
+      const childWithoutEffort = { session: { id: 'child-without-effort' } }
+      const noEffortRoute = await effortRequest({ agent: childWithoutEffort }, async () => ({ provider: 'p', model: 'm' }))
+      assert.equal(noEffortRoute.reasoningEffort, undefined, 'child without effort should get none')
+
+      process.env.REFACTORY_WORKER_RECEIPT = savedReceipt
+      console.log('effort isolation passed')
+    } finally {
+      rmSync(effortRoot, { recursive: true, force: true })
+    }
+  }
+
   // --- T-9: journal usage is bounded; a 30-request worker stays linear ---
   {
     const linearRoot = mkdtempSync(join(tmpdir(), 'refactory-linear-'))

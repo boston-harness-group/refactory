@@ -116,7 +116,10 @@ def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
             if gate and verdict:
                 # Its id, not its text: using the answer marks it consumed in place.
                 named = _field(entry, "id")
-                went_on = (_field(entry, "source") in ("upfront", "interactive")
+                # ASK-2b: with source now always "interactive" for non-upfront
+                # verdicts, use the consumed field to distinguish pending from used.
+                went_on = (_field(entry, "source") == "upfront"
+                           or _field(entry, "consumed") == "yes"
                            or (bool(named) and named in used))
                 if approved and not went_on:
                     continue  # a pending answer after the run went on decides nothing

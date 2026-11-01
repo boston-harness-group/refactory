@@ -86,7 +86,8 @@ def test_a_gate_loops_until_its_verdict_changes(tmp_path):
 def test_a_gate_loop_is_bounded_by_max_iterations(tmp_path):
     result = nn.execute(_loop_graph("loop_ops:always_retry", max_iterations=2), tmp_path)
     assert result.exit_ok is False
-    assert "max_iterations" in (result.error or "")
+    # SWEEP-8: a reloop cap is recorded as halted, not failed.
+    assert result.halted is True
 
 
 def test_a_gate_must_return_a_declared_verdict(tmp_path):

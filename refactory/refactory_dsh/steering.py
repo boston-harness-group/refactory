@@ -228,7 +228,7 @@ class Ledger:
             "at": _now(), "kind": VERDICT_KIND, "id": uuid.uuid4().hex,
             "gate": gate, "verdict": value,
             "scope": "run" if approval else review,
-            "source": "upfront" if approval else "interactive" if answered else "steer",
+            "source": "upfront" if approval else "interactive",
             "consumed": "yes" if answered else "no",
         }
         self._decision_entry(entry)
@@ -274,8 +274,22 @@ class Ledger:
         """Record the current declared review inputs for public steering to discover.
 
         In name order, as :meth:`review` fingerprints them and the lowered graph keeps
-        them, so a walked gate and a driven one record the same visit."""
+        them, so a walked gate and a driven one record the same visit.
+
+        When a pending verdict for this gate already has a scope matching the
+        current review, skip the ``gate-visit`` entry: the gate was already visited
+        before the stop, the person already answered, and re-recording it would
+        create a second visit entry the spine does not have (ASK-2c).
+        """
         review = self.review(gate, reads)
+        # Check for a pending verdict with matching scope.
+        for entry in reversed(self.entries()):
+            if entry["kind"] == VERDICT_KIND:
+                fields = self._fields(entry)
+                if fields.get("gate") == gate:
+                    if fields.get("consumed") == "no" and fields.get("scope") == review:
+                        return review  # skip the visit — the verdict is still pending
+                    break  # latest verdict for this gate is not matching; record normally
         self._decision_entry({"at": _now(), "kind": "gate-visit", "gate": gate,
                               "review": review, "reads": json.dumps(sorted(reads))})
         return review
@@ -320,8 +334,10 @@ class Ledger:
         valid = latest.get("scope") == review and (
             value in [l.lower() for l in labels] or value == "halt"
         )
-        self._decision_entry({"at": _now(), "kind": "verdict-use", "id": decision,
-                              "gate": gate, "result": "used" if valid else "expired"})
+        # No verdict-use entry: ``_mark_consumed`` sets ``consumed: yes`` on the
+        # original verdict, which is how the spine prevents replay.  Old runs
+        # that have verdict-use entries are still guarded by the ``used`` check
+        # above; new runs use the consumed flag only (ASK-2b).
         self._mark_consumed(decision)
         return value if valid else ""
 
@@ -850,10 +866,12 @@ def main() -> int:
             if verdict not in [l.lower() for l in labels] and verdict != "halt":
                 raise SteeringError(f"gate {gate!r} does not accept {verdict!r}")
             result = ledger.verdict(gate, verdict, review=review, answered=True)
-            # Record feedback as steering in the intent ledger.
+            # Record feedback as steering in the intent ledger.  The kind matches
+            # what ``console steer --kind correction`` records for the same note,
+            # so both gate-answer paths produce the same entry kind (ASK-2a).
             feedback = str(request.get("feedback") or "").strip()
             if feedback:
-                kind = "correction" if verdict == "reloop" else "constraint" if verdict == "proceed" else "info"
+                kind = str(request.get("kind", "")) or ("correction" if verdict == "reloop" else "correction" if verdict == "proceed" else "info")
                 ledger.note(kind, feedback)
         else:
             raise SteeringError("unknown user-gate decision action")

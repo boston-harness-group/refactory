@@ -384,3 +384,105 @@ def test_halt_in_fork_branch(tmp_path):
     result = execute(graph, workdir)
     assert result.exit_ok is False
     assert result.halted is True or "halted" in (result.error or "")
+
+
+def test_gate_iteration_count_survives_resume(tmp_path):
+    """ASK-1: A resumed run still enforces the gate iteration budget."""
+    from refactory_dsh.nn.executor import execute, Verdict
+
+    # A graph with an fn-gate that always says reloop (max_iterations=2).
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:always_reloop",
+                    reads=(), max_iterations=2, notes="check"))
+    graph.connect("agent", "gate")
+    graph.connect("gate", "agent", condition="reloop")
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["first", "second", "third", "fourth"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    # The run halts because max_iterations=2 is exceeded.
+    assert result.exit_ok is False
+    assert result.halted is True
+
+    # Resume: the gate iterations should be restored from progress.json.
+    model2 = _FakeModel(["resumed"])
+    result2 = execute(graph, workdir, model=model2,
+                      task={"name": "test", "brief": "test", "check": "true"},
+                      start="gate", facts=dict(result.facts))
+    # With persisted gate iterations, the resumed run immediately refuses
+    # because the count already exceeds max_iterations.
+    assert result2.exit_ok is False
+    assert result2.halted is True
+    # The model was never called: the gate refused before dispatching
+    # the agent node. Without persistence, the gate would get a fresh
+    # budget and the model would be called again.
+    assert len(model2.prompts) == 0, (
+        "the gate did not refuse immediately; gate iterations were not restored"
+    )
+
+
+def test_agent_node_refuses_missing_declared_read(tmp_path):
+    """ASK-4a / gap 15: The spine's worker_node.py refuses a node whose declared reads
+    are missing. This test verifies the spine's check directly."""
+    from refactory_dsh.agent_delivery import _path
+    workdir = tmp_path / "run"
+    workdir.mkdir(parents=True)
+    # The spine checks reads in worker_node.py:82-84.
+    assert not _path(workdir, "nonexistent.md").exists()
+    try:
+        from refactory_dsh.worker_node import execute as worker_execute
+        spec = {"schema_version": 1, "reads": ["nonexistent.md"], "prompt": "do work",
+                "writes": ["output.txt"], "produces": ["result"], "node_id": "agent",
+                "model_context": None}
+        worker_execute(spec, workdir)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "required worker input is missing" in str(exc)
+
+
+def test_agent_node_refuses_tools_field(tmp_path):
+    """SWEEP-7: An agent node with a tools field is refused on the walker."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    node = Node("agent", "agent", prompt_template="do work",
+                writes=("output.txt",), produces=("result",))
+    node.tools = ["some_tool"]  # type: ignore[attr-defined]
+    graph.add(node)
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok is False
+    assert "tools" in (result.error or "")
+
+
+def test_reloop_cap_records_halted_not_failed(tmp_path):
+    """SWEEP-8: A reloop cap reached records halted, not failed."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:always_reloop",
+                    reads=(), max_iterations=1, notes="check"))
+    graph.connect("agent", "gate")
+    graph.connect("gate", "agent", condition="reloop")
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["first", "second"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok is False
+    assert result.halted is True
+    # Must be "halted", not "failed".
+    status_file = workdir / ".refactory/spine-status.json"
+    if status_file.exists():
+        import json
+        status = json.loads(status_file.read_text())
+        assert status.get("status") == "halted", status

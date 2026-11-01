@@ -285,29 +285,35 @@ def run_fork(executor: Executor, node: Node) -> str | None:
     # after the join begins. Order does not depend on completion timing.
     executor.record.merge_branches([child.record for child in children],
                                    [{member.id for member in branch} for branch in branches])
+    handled_optional: set[int] = set()
     for index, child in enumerate(children):
         if errors[index] and node.targets[index] in optional:
-            # A failed optional branch is missing, not failed: keep its steps in
-            # the record, but move the error to the reason so the run's final
-            # step scan (Executor.run) does not fail the run on it.
-            for step in child.steps:
-                if step.error:
-                    _record_missing(ctx.workdir, step.node, step.error)
-                    step.reason, step.error = f"missing: {step.error}", None
-            _settle_missing(ctx.workdir, branches[index], errors[index])
+            # SWEEP-2: Only the target node is optional, not the whole branch,
+            # matching the spine (lowering.py:67-73, worker_node.py:263-281).
+            # A failure on the target itself is "missing"; a failure on a
+            # subsequent node in the branch is a real failure.
+            target = node.targets[index]
+            target_failed = any(step.error and step.node == target for step in child.steps)
+            if target_failed:
+                handled_optional.add(index)
+                for step in child.steps:
+                    if step.error and step.node == target:
+                        _record_missing(ctx.workdir, step.node, step.error)
+                        step.reason, step.error = f"missing: {step.error}", None
+                _settle_missing(ctx.workdir, branches[index], errors[index])
         executor.steps.extend(child.steps)
         executor.model_calls += child.model_calls
         ctx.writes_made.extend(child.ctx.writes_made)
-    error = next((e for i, e in enumerate(errors) if e and node.targets[i] not in optional), None)
+    error = next((e for i, e in enumerate(errors)
+                  if e and (node.targets[i] not in optional or i not in handled_optional)), None)
     visited = {step.node for child in children for step in child.steps}
     missing = set(join.sources) - visited
     if error is None and missing:
         error = f"fork {node.id!r} did not complete join sources: {sorted(missing)}"
     if error is None:
         for index, child in enumerate(children):
-            target = node.targets[index]
-            # A failed optional branch is silently skipped in the fact merge.
-            if errors[index] and target in optional:
+            # A handled optional branch is silently skipped in the fact merge.
+            if errors[index] and index in handled_optional:
                 continue
             produced = {key for member in branches[index] for key in member.produces}
             for key in sorted(produced):

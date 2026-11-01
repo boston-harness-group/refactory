@@ -119,6 +119,12 @@ def always_proceed(ctx: Any) -> str:
     return "proceed"
 
 
+def always_reloop(ctx: Any) -> str:
+    """A gate that always says reloop, for testing iteration caps."""
+    from refactory_dsh.nn import Verdict
+    return Verdict("reloop", reason="needs more work")
+
+
 def fail_on_second_visit(ctx: Any) -> None:
     """Pass the first time, fail every time after: a run stopped right after a reloop."""
     visits = (ctx.read_json("visits.json", 0) or 0) + 1

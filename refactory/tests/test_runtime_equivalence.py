@@ -564,44 +564,12 @@ class Gap:
         return f"{self.name} ({self.tracker}): {self.title}"
 
 
-def _note_kind(aspect: str, key: str, side: str, value: str | None) -> str | None:
-    """The spine's record of a note given at the gate's question, rewritten to the record
-    `console steer` makes of the same note."""
-    if value is None or side != "spine":
-        return value
-    for before, after in (("[constraint]", "[correction]"), ("] constraint\n", "] correction\n"),
-                          ('"kind": "constraint"', '"kind": "correction"'),
-                          ("source: interactive", "source: steer")):
-        value = value.replace(before, after)
-    return value
-
-
-def _second_visit(aspect: str, key: str, side: str, value: str | None) -> str | None:
-    """The walker ledger's record of the gate's second visit and the verdict's use, dropped."""
-    if value is None or side != "walker" or aspect not in ("artifacts", "facts"):
-        return value
-    return re.sub(r"\n\n## \[<TIME>\] gate-visit\ngate: gate_strategy\nreview: <HASH>\nreads: [^\n]*\n\n"
-                  r"## \[<TIME>\] verdict-use\nid: <UUID>\ngate: gate_strategy\nresult: used(?=\n*$)", "", value)
-
-
-
-
-GAPS = {gap.name: gap for gap in (
-    Gap("gate-note-kind", "new, under dm-123 (#436 gap 5)",
-        "a note given with the answer at the gate's question is recorded as a `constraint` from `interactive`; "
-        "the same note through `console steer` (the walker's only channel) as a `correction` from `steer`",
-        _note_kind),
-    Gap("gate-revisited-on-resume", "dm-123 #436 gap 7",
-        "answered by steer and resume, the gate is visited twice, and the ledger records the second visit and "
-        "the verdict's use; answered at the question, once. The walker has no question to answer: it stops "
-        "at the gate, which is how the spine's `resumed` run goes too, and there the two agree",
-        _second_visit),
-)}
+GAPS: dict[str, Gap] = {}
 
 #: The gaps open in each scenario. A gap that closes makes its xfail pass, which fails:
 #: take it out of here then.
 SCENARIO_GAPS: dict[str, list[str]] = {
-    "card": ["gate-note-kind", "gate-revisited-on-resume"],
+    "card": [],
     "resumed": [],
 }
 

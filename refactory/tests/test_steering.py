@@ -151,9 +151,10 @@ def test_full_history_keeps_gate_decisions_without_replaying_a_used_answer(tmp_p
     assert ledger.take_verdict("review", review, ["proceed", "halt"]) == "proceed"
     assert ledger.take_verdict("review", review, ["proceed", "halt"]) == ""
     entries = Ledger(tmp_path).entries()
-    assert [entry["kind"] for entry in entries] == ["Initial Idea", "gate-visit", "verdict", "verdict-use"]
+    # No verdict-use entry: consumed: yes on the verdict itself prevents replay (ASK-2b).
+    assert [entry["kind"] for entry in entries] == ["Initial Idea", "gate-visit", "verdict"]
     assert "verdict: proceed" in entries[2]["text"]
-    assert "result: used" in entries[3]["text"]
+    assert "consumed: yes" in entries[2]["text"]
 
 
 def test_seeding_twice_is_refused(tmp_path):

@@ -104,32 +104,48 @@ def test_a_revision_needs_a_mode():
         edit_module.edit(_edit_config(name=NAME, brief="anything"))
 
 
-def test_a_revision_produces_a_package_and_reports_before_and_after():
-    result = edit_module.edit(
-        _edit_config(
-            name=NAME, brief="count to a target", mode="circle_packing/adaptive",
-            workdir=Path(".factory/edit-run"),
-        ),
-        client=FakeModel(_answers()),
-    )
-    assert result["revision_of"] == "circle_packing/adaptive"
-    assert result["before_score"] is not None and result["after_score"] is not None
-    assert result["regressed"] is False
-    assert f"{NAME}/counter" in registry.render_catalogue(Path("."))
+def test_a_revision_produces_a_package_and_reports_before_and_after(tmp_path):
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_revision"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
+    try:
+        result = edit_module.edit(
+            _edit_config(
+                name=pkg, brief="count to a target", mode="circle_packing/adaptive",
+                workdir=tmp_path / "edit-run",
+            ),
+            client=FakeModel(create_answers(pkg, good_files(pkg))),
+        )
+        assert result["revision_of"] == "circle_packing/adaptive"
+        assert result["before_score"] is not None and result["after_score"] is not None
+        assert result["regressed"] is False
+        assert f"{pkg}/counter" in registry.render_catalogue(Path("."))
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
-def test_the_revision_records_what_it_came_from():
-    edit_module.edit(
-        _edit_config(
-            name=NAME, brief="count", mode="circle_packing/adaptive",
-            workdir=Path(".factory/edit-run"),
-        ),
-        client=FakeModel(_answers()),
-    )
-    recorded = registry.provenance(NAME, Path("."))
-    assert recorded["revision_of"] == "circle_packing/adaptive"
-    assert recorded["brief"] == "count"
-    assert "before_score" in recorded and "after_score" in recorded
+def test_the_revision_records_what_it_came_from(tmp_path):
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_provenance"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
+    try:
+        edit_module.edit(
+            _edit_config(
+                name=pkg, brief="count", mode="circle_packing/adaptive",
+                workdir=tmp_path / "edit-run",
+            ),
+            client=FakeModel(create_answers(pkg, good_files(pkg))),
+        )
+        recorded = registry.provenance(pkg, Path("."))
+        assert recorded["revision_of"] == "circle_packing/adaptive"
+        assert recorded["brief"] == "count"
+        assert "before_score" in recorded and "after_score" in recorded
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
@@ -153,29 +169,48 @@ def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
         shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
-def test_a_regression_can_be_intended(monkeypatch):
+def test_a_regression_can_be_intended(monkeypatch, tmp_path):
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_intended"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
     monkeypatch.setattr(sandbox, "smoke", lambda identifier, *args, **kwargs: sandbox.SandboxResult(
         ok=True, payload={"exit_ok": True, "score": 5.0 if identifier == "circle_packing/adaptive" else 1.0}))
-    result = edit_module.edit(
-        _edit_config(
-            name=NAME, brief="count", mode="circle_packing/adaptive",
-            allow_regression=True, workdir=Path(".factory/edit-run"),
-        ),
-        client=FakeModel(_answers()),
-    )
-    assert result["regressed"] is None
-    assert result["before_score"] is None
-    assert "intentionally skipped" in result["revision_note"]
+    try:
+        result = edit_module.edit(
+            _edit_config(
+                name=pkg, brief="count", mode="circle_packing/adaptive",
+                allow_regression=True, workdir=tmp_path / "edit-run",
+            ),
+            client=FakeModel(create_answers(pkg, good_files(pkg))),
+        )
+        assert result["regressed"] is None
+        assert result["before_score"] is None
+        assert "intentionally skipped" in result["revision_note"]
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
-def test_a_revision_of_a_mode_that_does_not_run_is_refused(monkeypatch):
+def test_a_revision_of_a_mode_that_does_not_run_is_refused(monkeypatch, tmp_path):
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_norun"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
     monkeypatch.setattr(sandbox, "smoke", lambda *args, **kwargs: sandbox.SandboxResult(
         ok=True, payload={"exit_ok": False, "error": "it never ran", "score": None}))
-    with pytest.raises(CreateError, match="it never ran"):
-        edit_module.edit(
-            _edit_config(name=NAME, brief="count", mode="circle_packing/adaptive", attempts=1),
-            client=FakeModel(_answers()),
-        )
+    try:
+        with pytest.raises(CreateError, match="it never ran"):
+            edit_module.edit(
+                _edit_config(
+                    name=pkg, brief="count", mode="circle_packing/adaptive", attempts=1,
+                    workdir=tmp_path / "edit-run",
+                ),
+                client=FakeModel(create_answers(pkg, good_files(pkg))),
+            )
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 # ── designing software ─────────────────────────────────────────────────────
@@ -758,27 +793,35 @@ def test_a_revision_records_the_state_it_came_from(tmp_path):
     and a revision recorded that way cannot be reproduced or diffed against what it
     actually started from.
     """
-    result = edit_module.edit(
-        _edit_config(name=NAME, mode="circle_packing/adaptive",
-                   brief="restart on a stall", workdir=tmp_path / "run"),
-        client=FakeModel(_answers()),
-    )
-    assert result["revision_of"] == "circle_packing/adaptive"
-    assert result["revision_of_digest"], "no digest of the state that was revised"
+    # Use a unique package name so parallel workers cleaning ``edited_pkg``
+    # cannot break the registration step (pre-existing parallel-execution race).
+    pkg = "edited_state"
+    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    shutil.rmtree(pkg_dir, ignore_errors=True)
+    try:
+        result = edit_module.edit(
+            _edit_config(name=pkg, mode="circle_packing/adaptive",
+                       brief="restart on a stall", workdir=tmp_path / "run"),
+            client=FakeModel(create_answers(pkg, good_files(pkg))),
+        )
+        assert result["revision_of"] == "circle_packing/adaptive"
+        assert result["revision_of_digest"], "no digest of the state that was revised"
 
-    recorded = json.loads(
-        (registry.workspace_root(Path(".")) / NAME / registry.ORIGIN).read_text()
-    )
-    state = recorded["revision_of_state"]
-    assert sorted(state) == sorted(
-        registry.resolve(Path("."), "circle_packing/adaptive")[1]().state_dict()
-    )
-    assert recorded["revision_of_digest"] == result["revision_of_digest"]
+        recorded = json.loads(
+            (registry.workspace_root(Path(".")) / pkg / registry.ORIGIN).read_text()
+        )
+        state = recorded["revision_of_state"]
+        assert sorted(state) == sorted(
+            registry.resolve(Path("."), "circle_packing/adaptive")[1]().state_dict()
+        )
+        assert recorded["revision_of_digest"] == result["revision_of_digest"]
 
-    # The digest identifies the state it was recorded from.
-    from refactory_dsh.optim.base import candidate_id
+        # The digest identifies the state it was recorded from.
+        from refactory_dsh.optim.base import candidate_id
 
-    assert recorded["revision_of_digest"] == candidate_id(state)
+        assert recorded["revision_of_digest"] == candidate_id(state)
+    finally:
+        shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 # ── the comparison, on the path a person actually runs ─────────────────────

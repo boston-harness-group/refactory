@@ -36,6 +36,9 @@ from .resolve import resolve
 if TYPE_CHECKING:
     from refactory_dsh.task import Task
 
+# Sentinel for SWEEP-6 refilled feedback cleanup.
+_SENTINEL = object()
+
 # ── forkserver context (module-level, shared across all Executor instances) ──
 _forkserver_ctx = multiprocessing.get_context("forkserver")
 _forkserver_modules: set[str] = set()
@@ -490,6 +493,12 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             pkg = importlib.import_module(pkg_name)
             pkg.__path__ = list(pkg_paths)
         importlib.invalidate_caches()
+        # SWEEP-3: Run ops in the run directory, matching the spine (execute.ts:204).
+        # Set REFACTORY_PROJECT so project_for_nodes() still resolves to the
+        # launcher rather than the run directory after the chdir.
+        if not os.environ.get("REFACTORY_PROJECT"):
+            os.environ["REFACTORY_PROJECT"] = os.getcwd()
+        os.chdir(args_dict["workdir"])
 
         try:
             from refactory_dsh.budgets import ENV_LEDGER, RunBudget
@@ -652,6 +661,7 @@ class Executor:
                 "outcome": outcome,
                 "graph": self.graph.to_state(),
                 "file_fingerprints": self._file_fingerprints(),
+                "gate_iterations": dict(self._gate_iterations),
                 **({"model_context": self.ctx.model.context()} if callable(getattr(self.ctx.model, "context", None)) else {}),
                 **({"branches": branches} if branches is not None else {}),
                 **({"schedule": schedule} if schedule is not None else {}),
@@ -971,9 +981,12 @@ class Executor:
         count = visits.get(node.id, 0) + 1
         visits[node.id] = count
         if count > node.max_iterations:
-            raise ExecutionError(
-                f"gate {node.id!r} exceeded max_iterations of {node.max_iterations}; "
-                f"retry {verdict!r} was refused before dispatching {target!r}"
+            # SWEEP-8: record as halted, not failed, matching the spine
+            # (spine.ts:972-980, 1003-1006).
+            raise HaltStop(
+                node.id,
+                reason=f"max_iterations of {node.max_iterations}; "
+                f"retry {verdict!r} was refused before dispatching {target!r}",
             )
 
     # ── retry wrapper ──────────────────────────────────────────────────────
@@ -1068,15 +1081,9 @@ class Executor:
         parent is interrupted — so nothing it left running blocks the run's exit.
         A crashed op is never replayed here.
         """
-        model_info: dict[str, Any] | None = None
-        if self.ctx.model is not None:
-            from refactory_dsh.model import DshModelClient
-
-            if isinstance(self.ctx.model, DshModelClient):
-                model_info = {"kind": "dsh", "context": self.ctx.model.context()}
-            else:
-                model_info = {"kind": "other"}
-
+        # SWEEP-5: ctx.model for ops is None, matching the spine (run.py:314,
+        # 344-365) and the documented op API (create_ops.py:126). The readiness
+        # checks (design_ops.py:302-306) handle None explicitly.
         args_dict: dict[str, Any] = {
             "sys_path": list(sys.path),
             "workdir": str(self.ctx.workdir),
@@ -1088,7 +1095,6 @@ class Executor:
             "writes": tuple(node.writes),
             "reads": tuple(node.reads),
             "produces": tuple(node.produces),
-            "model_info": model_info,
             "memory": self.ctx.memory,
             "iteration": self.ctx.iteration,
             "verdicts": dict(self.ctx.verdicts),
@@ -1229,6 +1235,13 @@ class Executor:
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
+        # Refuse an agent node with a tools field, matching the spine's
+        # lowering refusal (workers.py:306-307) — SWEEP-7 / gap 15.
+        if getattr(node, "tools", None):
+            raise ValueError(
+                f"agent node {node.id!r} declares a 'tools' field; "
+                "tools are not supported on agent nodes"
+            )
         from refactory_dsh.agent_delivery import fill_feedback, with_feedback
 
         client = self.ctx.model
@@ -1269,9 +1282,14 @@ class Executor:
             self.ctx.workdir, node.id, values,
             feedback_keys=node.feedback_keys if node.feedback_keys else None,
         )
+        # SWEEP-6: Refilled feedback keys are available for rendering but not
+        # persisted as run facts, matching the spine (worker_node.py:133-134).
+        # Temporarily inject them so render() sees them, then remove after.
+        _refilled_snap: dict[str, Any] = {}
         if refilled_keys:
             for k in refilled_keys:
-                self.ctx._internal_fact(k, values[k])
+                _refilled_snap[k] = self.ctx.facts.get(k, _SENTINEL)
+                self.ctx.facts[k] = values[k]
         model_context = client.context() if callable(getattr(client, "context", None)) else None
         route = client.route() if callable(getattr(client, "route", None)) else {}
         from refactory_dsh import workspace as workspaces
@@ -1313,6 +1331,12 @@ class Executor:
             capture_final=_capture_final, rule=node.retry,
             timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
             tool_policy=tool_policy)
+        # SWEEP-6: clean up temporarily injected refilled keys.
+        for k, prev in _refilled_snap.items():
+            if prev is _SENTINEL:
+                self.ctx.facts.pop(k, None)
+            else:
+                self.ctx.facts[k] = prev
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.
@@ -1468,9 +1492,20 @@ def execute(
             record = RunRecord.from_progress(json.loads((workdir / PROGRESS).read_text()))
         except (OSError, ValueError, AttributeError):
             pass
+    # Restore gate iteration counts so a resumed run enforces the budget it
+    # accumulated before the stop, matching the spine's persistence (ASK-1).
+    gate_iterations: dict[str, int] = {}
+    if start is not None:
+        try:
+            gate_iterations = json.loads((workdir / PROGRESS).read_text()).get("gate_iterations", {})
+        except (OSError, ValueError):
+            pass
     try:
-        result = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
-                          record=record).run(start=start)
+        executor = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
+                            record=record)
+        if gate_iterations:
+            executor._gate_iterations.update(gate_iterations)
+        result = executor.run(start=start)
         if budget is not None:
             result.facts["resources"] = budget.snapshot()
         return result
