@@ -205,6 +205,8 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         child._reserve_step = reserve
         children.append(child)
 
+    _halt_exc: list[Any] = []  # HaltStop raised inside a branch, propagated after cleanup
+
     def walk(index: int) -> str | None:
         from .executor import GateStop, HaltStop
 
@@ -225,9 +227,11 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         except GateStop:
             branch_state = "refused"
             error = f"{target}: gate stop"
-        except HaltStop:
+        except HaltStop as exc:
             branch_state = "halted"
             error = f"{target}: halted"
+            _halt_exc.append(exc)
+            cancelled.set()
         except Exception as exc:
             error = f"{target}: {type(exc).__name__}: {exc}"
         if branch_state is None:
@@ -327,6 +331,12 @@ def run_fork(executor: Executor, node: Node) -> str | None:
                     ctx.facts.pop(key, None)
     # On failure, facts remain the pre-fork snapshot and resume replays the fork.
     # File side effects and completed delivery receipts remain available for audit.
+    # A HaltStop inside a branch is recorded as halted, not as a failed fork with an
+    # error string.  Re-raise it so the executor's main loop records halted=True.
+    if _halt_exc:
+        executor._record(node.id, error=str(_halt_exc[0]), branches=status, schedule=schedule,
+                         outcome="halted")
+        raise _halt_exc[0]
     executor._record(node.id if error else barrier, error=error, branches=status, schedule=schedule,
                      outcome="failed" if error else "pending")
     return error

@@ -175,6 +175,18 @@ def warn_on_stderr(ctx: Any) -> dict[str, Any]:
     return {"warned": True}
 
 
+def always_halt(ctx: Any) -> str:
+    """A gate that always returns halt, for testing halt inside a fork branch."""
+    return "halt"
+
+
+def stderr_then_raise(ctx: Any) -> None:
+    """An op that prints to stderr then raises, for testing stderr preservation."""
+    import sys as _sys
+    print("op stderr output: important debug info", file=_sys.stderr)
+    raise ValueError("op failed after printing to stderr")
+
+
 def parity_write_relative(ctx: Any) -> dict[str, Any]:
     """SWEEP-9: Write a relative path (SWEEP-3) and check ctx.model (SWEEP-5)."""
     from pathlib import Path as _P
@@ -200,3 +212,13 @@ def parity_apply_correction(ctx: Any) -> dict[str, Any]:
     correction_texts = [text for _, text in corrections]
     ctx.set_fact("corrections_applied", correction_texts)
     return {"corrections_applied": correction_texts}
+
+
+def test_apply_corrections(ctx: Any) -> dict[str, Any]:
+    """Test op that applies corrections from the ledger and records them as a fact."""
+    from pathlib import Path as _P
+    from refactory_dsh.design_ops import gate_corrections_due
+    _, corrections = gate_corrections_due(ctx.workdir)
+    correction_texts = [text for _, text in corrections]
+    _P(ctx.workdir, "design.md").write_text("# Corrected design\n")
+    return {"corrected": True, "correction_texts": correction_texts}

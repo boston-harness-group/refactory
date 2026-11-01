@@ -581,11 +581,17 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         except SystemExit:
             raise  # propagate SIGTERM
         except BaseException as exc:
+            # Include any stderr captured before the exception for error diagnosis.
+            try:
+                _err_stderr = _capture_stderr.getvalue()
+            except Exception:
+                _err_stderr = ""
             conn.send(("error", {
                 "type": type(exc).__qualname__,
                 "module": type(exc).__module__,
                 "message": str(exc),
                 "traceback": "".join(traceback_mod.format_exception(exc)),
+                "_stderr": _err_stderr,
             }))
     finally:
         conn.close()
@@ -1204,16 +1210,20 @@ class Executor:
                     pass
             return result
 
-        # Exception from child: reconstruct and re-raise.
-        return self._reraise_child_error(payload)
+        # Exception from child: reconstruct and re-raise, preserving stderr.
+        return self._reraise_child_error(payload, payload.get("_stderr", ""))
 
     @staticmethod
-    def _reraise_child_error(payload: dict[str, Any]) -> Any:
+    def _reraise_child_error(payload: dict[str, Any], stderr: str = "") -> Any:
         """Reconstruct and re-raise an exception sent by the child process."""
         exc_type_name = payload.get("type", "RuntimeError")
         exc_msg = payload.get("message", "")
         exc_tb = payload.get("traceback", "")
         exc_module = payload.get("module", "builtins")
+
+        # Preserve stderr from the child so it is visible in the error.
+        if stderr and stderr.strip():
+            exc_msg = f"{exc_msg}\nop stderr: {stderr.strip()}"
 
         reconstructed: BaseException | None = None
         try:
@@ -1465,31 +1475,47 @@ class Executor:
             verdict = self._answered_verdict(node)
         else:
             timeout = self._effective_timeout(node)
-            # SWEEP-4: Capture stdout from the fn-gate evaluator so the
-            # feedback text matches the spine's reasonOf(stdout), which uses
-            # all stdout before the verdict line (execute.ts:148-157).
-            import io
-            _old_stdout = sys.stdout
-            _capture = io.StringIO()
-            sys.stdout = _capture
-            try:
-                if timeout is not None:
-                    verdict = self._run_op_timed(node.evaluator, node, timeout)
-                else:
+            if timeout is not None:
+                # With enable_recovery, run fn gates in forkserver child
+                # processes for per-process stdout capture (thread-safe).
+                verdict = self._run_op_timed(node.evaluator, node, timeout)
+            else:
+                # SWEEP-4: Capture stdout per-call without swapping the global
+                # sys.stdout (thread-safe when fork branches run in threads).
+                # Use a thread-local StringIO redirect instead of global swap.
+                import io
+                import threading
+                _capture = io.StringIO()
+                _thread_id = threading.get_ident()
+                _real_stdout = sys.stdout
+
+                class _ThreadLocalStdout:
+                    """A stdout wrapper that redirects only the calling thread's writes."""
+                    def write(self, data):
+                        if threading.get_ident() == _thread_id:
+                            _capture.write(data)
+                        else:
+                            _real_stdout.write(data)
+                    def flush(self):
+                        if threading.get_ident() == _thread_id:
+                            _capture.flush()
+                        else:
+                            _real_stdout.flush()
+                    def __getattr__(self, name):
+                        return getattr(_real_stdout, name)
+
+                sys.stdout = _ThreadLocalStdout()
+                try:
                     fn: Callable[[RunContext], Any] = resolve(node.evaluator)
                     verdict = fn(self.ctx)
-            finally:
-                sys.stdout = _old_stdout
-            # Attach captured stdout for feedback extraction below.
-            # In the timed (child process) path, _run_op_timed already attached
-            # the child's stdout as verdict._fn_stdout; prefer that over the
-            # parent's capture which is empty for child-process ops.
-            _fn_stdout = _capture.getvalue()
-            if isinstance(verdict, str) and not getattr(verdict, '_fn_stdout', ''):
-                try:
-                    verdict._fn_stdout = _fn_stdout  # type: ignore[attr-defined]
-                except (AttributeError, TypeError):
-                    pass
+                finally:
+                    sys.stdout = _real_stdout
+                _fn_stdout = _capture.getvalue()
+                if isinstance(verdict, str) and _fn_stdout:
+                    try:
+                        verdict._fn_stdout = _fn_stdout  # type: ignore[attr-defined]
+                    except (AttributeError, TypeError):
+                        pass
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"

@@ -78,11 +78,11 @@ def test_a_worktree_off_design_fast_run_reaches_focused_qa_on_the_spine(tmp_path
     step('refactory_dsh.fast_ops:materialise_artifact', 'materialise', 'op')
     step('refactory_dsh.fast_ops:gate_emit', 'gate_emit', 'gate')
     step('refactory_dsh.fast_ops:focused_check', 'focused_check', 'op')
-    # Since #436 gap 15, a placeholder is written so downstream reads-existence
-    # checks pass even without a worktree.
-    if (run / 'test-guardedness.json').exists():
-        content = json.loads((run / 'test-guardedness.json').read_text())
-        assert 'unavailable' in content, 'non-worktree guardedness should be a placeholder'
+    # test-guardedness.json is declared in the node's writes and written through
+    # ctx.write_json with a placeholder when there is no worktree.
+    assert (run / 'test-guardedness.json').exists(), 'test-guardedness.json should be written'
+    content = json.loads((run / 'test-guardedness.json').read_text())
+    assert 'unavailable' in content, 'non-worktree guardedness should be a placeholder'
 
     workers.lower_workflow(lowering.to_workflow(mode.state_dict()), run, DshModelClient().context())
     spec = next(json.loads(path.read_text()) for path in (run / '.refactory/worker-specs').glob('*.json')

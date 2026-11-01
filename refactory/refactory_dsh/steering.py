@@ -229,7 +229,7 @@ class Ledger:
             "gate": gate, "verdict": value,
             "scope": "run" if approval else review,
             "source": "upfront" if approval else "interactive",
-            "consumed": "yes" if answered else "no",
+            "consumed": "used" if answered else "no",
         }
         self._decision_entry(entry)
         return entry
@@ -329,20 +329,24 @@ class Ledger:
                 raise SteeringError(f"upfront verdict {value!r} is not accepted by gate {gate!r}")
             return value
         decision = latest.get("id")
-        if not decision or decision in used or latest.get("consumed") == "yes":
+        if not decision or decision in used or latest.get("consumed") not in (None, "", "no"):
             return ""
         valid = latest.get("scope") == review and (
             value in [l.lower() for l in labels] or value == "halt"
         )
-        # No verdict-use entry: ``_mark_consumed`` sets ``consumed: yes`` on the
-        # original verdict, which is how the spine prevents replay.  Old runs
-        # that have verdict-use entries are still guarded by the ``used`` check
-        # above; new runs use the consumed flag only (ASK-2b).
-        self._mark_consumed(decision)
-        return value if valid else ""
+        # No verdict-use entry: ``_mark_consumed`` sets ``consumed: <reason>``
+        # on the original verdict, which is how the spine prevents replay.
+        # Old runs that have verdict-use entries are still guarded by the
+        # ``used`` check above; new runs use the consumed flag only (ASK-2b).
+        if valid:
+            self._mark_consumed(decision, "used")
+            return value
+        else:
+            self._mark_consumed(decision, "expired")
+            return ""
 
-    def _mark_consumed(self, verdict_id: str) -> None:
-        """Update the original verdict entry's consumed field from 'no' to 'yes'."""
+    def _mark_consumed(self, verdict_id: str, reason: str = "used") -> None:
+        """Update the original verdict entry's consumed field from 'no' to the given reason ('used' or 'expired')."""
         if not self.path.is_file():
             return
         text = self.path.read_text()
@@ -353,7 +357,7 @@ class Ledger:
             if stripped == f"id: {verdict_id}":
                 found_id = True
             elif found_id and stripped == "consumed: no":
-                lines[i] = line.replace("consumed: no", "consumed: yes")
+                lines[i] = line.replace("consumed: no", f"consumed: {reason}")
                 break
             elif found_id and stripped.startswith("## ["):
                 break  # Moved past the entry without finding consumed: no

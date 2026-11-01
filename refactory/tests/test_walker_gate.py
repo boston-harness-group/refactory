@@ -754,3 +754,37 @@ def test_fork_shape_refusal_conflicting_file_access_on_spine(tmp_path):
     state = {"graph": graph.to_state(), "knobs": {}}
     with pytest.raises(LoweringError, match="conflicting declared file access"):
         to_workflow(state)
+
+
+def test_halt_inside_fork_branch_recorded_as_halted(tmp_path):
+    """A halt verdict inside a fork branch must record the run as halted=True,
+    not halted=False with error='a: halted'.
+
+    Correction 1: the review reproduced that a gate returning halt inside a fork
+    branch gave halted=False, error='a: halted' on the PR head. This test verifies
+    the fix: halted=True and the status records 'halted'.
+    """
+    from refactory_dsh.nn.executor import execute
+
+    # Graph: fork with branch 'a' containing a gate that halts.
+    graph = Graph()
+    graph.add(Node("start", "op", call="loop_ops:noop"))
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "gate", gate_kind="fn", evaluator="loop_ops:always_halt",
+                    max_iterations=1))
+    graph.add(Node("b", "op", call="loop_ops:noop"))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.add(Node("end", "op", call="loop_ops:noop"))
+    graph.connect("start", "fork")
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+    graph.connect("join", "end")
+
+    result = execute(graph, tmp_path)
+    # The key assertion: halted must be True, not False with an error string.
+    assert result.halted is True, f"expected halted=True, got halted={result.halted}, error={result.error}"
+    # The status file should record halted.
+    import json
+    status = json.loads((tmp_path / ".refactory/spine-status.json").read_text())
+    assert status["status"] == "halted", f"expected status='halted', got {status['status']}"

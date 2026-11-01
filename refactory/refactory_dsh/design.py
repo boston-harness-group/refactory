@@ -823,7 +823,8 @@ class DesignMode(Mode):
             # check.txt: at the refusal bound, the check's receipt is put back for the draft
             # (`design_ops._draft_for_stop`). updated-tests.json: what the builder says it
             # updated (`design_ops.note_updated_tests`).
-            writes=("changes.diff", "changed-functions.json", "check.txt", UPDATED_TESTS),
+            writes=("changes.diff", "changed-functions.json", "check.txt", UPDATED_TESTS,
+                    "test-guardedness.json"),
             produces=("artifact", "files", "commit", "change", "emission_refused",
                       "changed_functions", "consecutive_refusals", "draft_delivery",
                       "updated_tests", "empty_emission_fingerprint"),

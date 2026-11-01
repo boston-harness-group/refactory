@@ -87,7 +87,8 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
         resource_role="final_validation",
         knobs=("check", "check_timeout_s", "check_attempt_cap"),
         reads=("emit.txt",) + (() if artifact else ("authoring-evidence.json", "smoke.json")),
-        writes=("focused-check.json", "focused-source.json", "authoring-evidence.json", "check-record.json")
+        writes=("focused-check.json", "focused-source.json", "authoring-evidence.json", "check-record.json",
+                "test-guardedness.json")
                + (("check.txt", *repo_change.CHECK_WRITES) if artifact else ()),
         produces=("focused_check", "output_path", "review_files", "runtime_evidence",
                   "base_unavailable",
@@ -403,7 +404,7 @@ class DesignFastMode(DesignMode):
         graph.add(repo_change.materialise_node(
             call=f"{OPS}:materialise_artifact", resource_role="work",
             reads=("emit.txt", "source-manifest.json"),
-            writes=("changes.diff", "changed-functions.json"),
+            writes=("changes.diff", "changed-functions.json", "test-guardedness.json"),
             produces=("artifact", "files", "commit", "change", "emission_refused",
                       "changed_functions", "consecutive_refusals",
                       "empty_emission_fingerprint"),

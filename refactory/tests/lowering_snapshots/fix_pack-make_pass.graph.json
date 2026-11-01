@@ -62,7 +62,8 @@
       ],
       "writes": [
         "changed-functions.json",
-        "changes.diff"
+        "changes.diff",
+        "test-guardedness.json"
       ],
       "blocking": true,
       "command": "python -m refactory_dsh.run refactory_dsh.repo_change:materialise",

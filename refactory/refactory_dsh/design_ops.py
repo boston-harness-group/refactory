@@ -118,10 +118,19 @@ def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
                 named = _field(entry, "id")
                 # ASK-2b: with source now always "interactive" for non-upfront
                 # verdicts, use the consumed field to distinguish pending from used.
+                # Only "used" (or legacy "yes") counts as went-on; "expired" does not,
+                # so an expired verdict's corrections are not re-applied.
+                consumed = _field(entry, "consumed")
                 went_on = (_field(entry, "source") == "upfront"
-                           or _field(entry, "consumed") == "yes"
+                           or consumed in ("yes", "used")
                            or (bool(named) and named in used))
                 if approved and not went_on:
+                    # An expired verdict (consumed: expired) closes the correction
+                    # window: its corrections must not be re-applied.  A pending
+                    # verdict (consumed: no) is simply skipped without touching
+                    # the collecting state (it decides nothing yet).
+                    if consumed == "expired":
+                        collecting = False
                     continue  # a pending answer after the run went on decides nothing
                 collecting = (gate == "gate_strategy" and verdict == "proceed")
                 if gate == "gate_strategy":
@@ -1578,12 +1587,11 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             guardedness = {"unavailable": f"the new tests could not be run on the base: {exc}"}
         if guardedness is not None:
             ctx.write_json("test-guardedness.json", guardedness)
-    # Ensure test-guardedness.json exists even without a worktree, so
-    # downstream nodes that declare it as a read do not fail (#436 gap 15).
-    # Written directly to avoid write-enforcement: the node may not declare it.
+    # test-guardedness.json is now declared in the node's writes, so we can use
+    # ctx.write_json safely.
     _tg_path = Path(ctx.workdir) / "test-guardedness.json"
     if not _tg_path.exists():
-        _tg_path.write_text(json.dumps({"unavailable": "no worktree"}) + "\n")
+        ctx.write_json("test-guardedness.json", {"unavailable": "no worktree"})
     evidence.record(ctx, outcome)
 
     # Clear base_unavailable at the start of each check attempt (R2).

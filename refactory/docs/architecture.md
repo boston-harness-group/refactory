@@ -328,6 +328,22 @@ What the two share, rather than each doing its own way:
 - **A gate waiting for a person is not a visit.** The walker reads a user gate's answer
   before the visit starts, so a gate nobody answered leaves the run `refused` with no
   started or failed node, as the spine logs none.
+- **Verdict lifecycle.** A verdict's `consumed` field tracks its state through three
+  values: `no` (pending), `used` (the walk applied it) and `expired` (consumed because
+  the scope changed or the label was invalid). `take_verdict` marks the field on the
+  original verdict entry in the ledger; old runs that wrote `consumed: yes` are treated
+  as `used` for backward compatibility. `gate_corrections_due` counts only `used` (and
+  legacy `yes`) verdicts as "went on", so an expired verdict's corrections are never
+  re-applied.
+- **Corrections with `proceed`.** A feedback note given with `proceed` at a gate
+  (e.g. `refactory steer --verdict gate=proceed --kind correction --note ...`) is
+  recorded as a correction on both runtimes. `pick_gate_corrections` collects it and
+  `apply_corrections` applies it to `design.md` before the build.
+- **Fork-shape validation on both runtimes.** The walker validates fork branches at
+  dispatch (`nn/fork.py:_branches`), and lowering validates them at lowering time
+  (`lowering.py`), both using directory-containment overlap: a branch writing `out`
+  conflicts with a sibling reading `out/x.txt`. Both refuse a branch that writes
+  inside `.refactory`.
 
 **A run that stops is a failure with a name, on both.** On DSH the graph runner reads
 the cursor's own status after the CEO's turn: anything but `done` writes a line naming

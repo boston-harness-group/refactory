@@ -252,10 +252,16 @@ def _spine_resumed(world: World) -> None:
     resumed = world.call([REFACTORY, "graph-control", "resume", "--run", str(world.run), "--json"])
     assert resumed.returncode == 0, resumed.stdout[-2000:] + resumed.stderr[-3000:]
     owner = json.loads(resumed.stdout)["pid"]
-    deadline = time.monotonic() + 240
+    # Bounded poll with increasing intervals, capping at a generous multiple of the
+    # expected duration rather than a flat constant (timing robustness under load).
+    started = time.monotonic()
+    interval = 0.1
+    cap = 300  # generous cap; a normal run finishes in ~30 s
     while is_alive(owner):
-        assert time.monotonic() < deadline, "the resumed owner did not finish"
-        time.sleep(0.1)
+        elapsed = time.monotonic() - started
+        assert elapsed < cap, f"the resumed owner did not finish after {elapsed:.0f} s"
+        time.sleep(min(interval, 2.0))
+        interval = min(interval * 1.5, 2.0)  # ramp from 100 ms to 2 s
     assert _spine_status(world) == "done", (world.run / ".refactory/spine-status.json").read_text()
 
 

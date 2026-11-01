@@ -151,10 +151,10 @@ def test_full_history_keeps_gate_decisions_without_replaying_a_used_answer(tmp_p
     assert ledger.take_verdict("review", review, ["proceed", "halt"]) == "proceed"
     assert ledger.take_verdict("review", review, ["proceed", "halt"]) == ""
     entries = Ledger(tmp_path).entries()
-    # No verdict-use entry: consumed: yes on the verdict itself prevents replay (ASK-2b).
+    # No verdict-use entry: consumed: used on the verdict itself prevents replay (ASK-2b).
     assert [entry["kind"] for entry in entries] == ["Initial Idea", "gate-visit", "verdict"]
     assert "verdict: proceed" in entries[2]["text"]
-    assert "consumed: yes" in entries[2]["text"]
+    assert "consumed: used" in entries[2]["text"]
 
 
 def test_seeding_twice_is_refused(tmp_path):
@@ -610,7 +610,7 @@ def test_outputs_in_reads_what_the_agent_nodes_wrote(tmp_path):
 
 
 def test_verdict_consumed_after_use(tmp_path):
-    """After take_verdict uses a verdict, the original entry shows consumed: yes."""
+    """After take_verdict uses a verdict, the original entry shows consumed: used."""
     ledger = Ledger.seed(tmp_path, "build a mode")
     (tmp_path / "design.md").write_text("the design")
     review = ledger.visit("gate_check", ["design.md"])
@@ -626,15 +626,15 @@ def test_verdict_consumed_after_use(tmp_path):
         if line.strip() == f"id: {verdict_id}":
             found_consumed = False
             for j in range(i, min(i + 10, len(lines))):
-                if lines[j].strip() == "consumed: yes":
+                if lines[j].strip() == "consumed: used":
                     found_consumed = True
                     break
-            assert found_consumed, f"verdict {verdict_id} should show consumed: yes"
+            assert found_consumed, f"verdict {verdict_id} should show consumed: used"
             break
 
 
 def test_verdict_consumed_after_expiry(tmp_path):
-    """An expired verdict (scope mismatch) is also marked consumed: yes."""
+    """An expired verdict (scope mismatch) is marked consumed: expired."""
     ledger = Ledger.seed(tmp_path, "build a mode")
     (tmp_path / "design.md").write_text("the design")
     review = ledger.visit("gate_check", ["design.md"])
@@ -650,10 +650,10 @@ def test_verdict_consumed_after_expiry(tmp_path):
         if line.strip() == f"id: {verdict_id}":
             found_consumed = False
             for j in range(i, min(i + 10, len(lines))):
-                if lines[j].strip() == "consumed: yes":
+                if lines[j].strip() == "consumed: expired":
                     found_consumed = True
                     break
-            assert found_consumed, "expired verdict should also show consumed: yes"
+            assert found_consumed, "expired verdict should show consumed: expired"
             break
 
 
@@ -1168,100 +1168,176 @@ def test_correction_applied_exactly_once_not_on_resume(tmp_path):
     from refactory_dsh.nn import Graph, Node
     from refactory_dsh.nn.executor import execute, GateStop
 
-    _correction_calls: list[str] = []
+    # Graph: prepare → agent → gate → apply_corrections → done
+    graph = Graph()
+    graph.add(Node("prepare", "op", call="loop_ops:noop",
+                    produces=("name", "brief", "check")))
+    graph.add(Node("agent", "agent",
+                    prompt_template="Design: {{brief}}",
+                    writes=("design.md",), produces=("design",)))
+    graph.add(Node("gate_strategy", "gate", gate_kind="user",
+                    reads=("design.md",), max_iterations=5,
+                    notes="Approve the strategy"))
+    graph.add(Node("apply_corrections", "op",
+                    call="loop_ops:test_apply_corrections",
+                    reads=("design.md",), writes=("design.md",),
+                    produces=("corrected", "correction_texts")))
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("prepare", "agent")
+    graph.connect("agent", "gate_strategy")
+    graph.connect("gate_strategy", "apply_corrections", condition="proceed")
+    graph.connect("apply_corrections", "done")
 
-    def _apply_correction_op(ctx):
-        """Track how many times apply_corrections is called and with what."""
-        _, corrections = gate_corrections_due(ctx.workdir)
-        for _, text in corrections:
-            _correction_calls.append(text)
-        (ctx.workdir / "design.md").write_text("# Corrected design\n")
-        return {"corrected": True}
+    workdir = tmp_path / "run"
 
-    # Register the op so resolve() finds it.
-    import refactory_dsh.nn.executor as _executor_mod
-    _original_resolve = _executor_mod.resolve
+    class _FakeModel:
+        def __init__(self):
+            self._calls = 0
+        def complete(self, prompt, **kw):
+            self._calls += 1
+            return "design output"
+        def route(self):
+            return {"worker_backend": "dsh"}
+        def context(self):
+            return {}
+        def for_node(self, node_id, role=None):
+            return self
 
-    def _patched_resolve(name):
-        if name == "_test_apply_corrections":
-            return _apply_correction_op
-        return _original_resolve(name)
+    model = _FakeModel()
 
-    _executor_mod.resolve = _patched_resolve
-    try:
-        # Graph: prepare → agent → gate → apply_corrections → done
-        graph = Graph()
-        graph.add(Node("prepare", "op", call="loop_ops:noop",
-                        produces=("name", "brief", "check")))
-        graph.add(Node("agent", "agent",
-                        prompt_template="Design: {{brief}}",
-                        writes=("design.md",), produces=("design",)))
-        graph.add(Node("gate_strategy", "gate", gate_kind="user",
-                        reads=("design.md",), max_iterations=5,
-                        notes="Approve the strategy"))
-        graph.add(Node("apply_corrections", "op",
-                        call="_test_apply_corrections",
-                        reads=("design.md",), writes=("design.md",),
-                        produces=("corrected",)))
-        graph.add(Node("done", "op", call="loop_ops:noop"))
-        graph.connect("prepare", "agent")
-        graph.connect("agent", "gate_strategy")
-        graph.connect("gate_strategy", "apply_corrections", condition="proceed")
-        graph.connect("apply_corrections", "done")
+    # Walker run 1: stops at the gate.
+    result1 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"})
+    assert result1.exit_ok is False
+    assert result1.gate_stop == "gate_strategy"
 
-        workdir = tmp_path / "run"
+    # Person steers: proceed + correction.
+    ledger = Ledger(workdir)
+    review = ledger.visit("gate_strategy", ["design.md"])
+    ledger.verdict("gate_strategy", "proceed")
+    ledger.note("correction", "Add a NAME constant set to 'tool'.")
 
-        class _FakeModel:
-            def __init__(self):
-                self._calls = 0
-            def complete(self, prompt, **kw):
-                self._calls += 1
-                return "design output"
-            def route(self):
-                return {"worker_backend": "dsh"}
-            def context(self):
-                return {}
-            def for_node(self, node_id, role=None):
-                return self
+    # Walker run 2: resumes at the gate, takes the verdict, runs apply_corrections.
+    result2 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"},
+                      start="gate_strategy", facts=dict(result1.facts))
+    assert result2.exit_ok is True, result2.error
+    # apply_corrections was called exactly once and saw the correction.
+    correction_texts = result2.facts.get("correction_texts", [])
+    assert len(correction_texts) == 1, f"apply_corrections saw {len(correction_texts)} corrections"
+    assert "NAME constant" in correction_texts[0]
 
-        model = _FakeModel()
+    # Verify the verdict was marked consumed: used (not just "yes").
+    ledger_text = (workdir / "intent-ledger.md").read_text()
+    assert "consumed: used" in ledger_text, \
+        "verdict should be consumed: used, not consumed: yes"
 
-        # Walker run 1: stops at the gate.
-        result1 = execute(graph, workdir, model=model,
-                          task={"name": "test", "brief": "test brief", "check": "true"})
-        assert result1.exit_ok is False
-        assert result1.gate_stop == "gate_strategy"
+    # Walker run 3: resume again — the verdict is consumed, gate stops again.
+    result3 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"},
+                      start="gate_strategy", facts=dict(result2.facts))
+    # The gate has no pending verdict → stops at the gate again.
+    assert result3.gate_stop == "gate_strategy"
 
-        # Person steers: proceed + correction.
-        ledger = Ledger(workdir)
-        review = ledger.visit("gate_strategy", ["design.md"])
-        ledger.verdict("gate_strategy", "proceed")
-        ledger.note("correction", "Add a NAME constant set to 'tool'.")
+    # Also verify the Ledger API path (the spine uses the same Ledger):
+    ledger2 = Ledger(workdir)
+    labels = ["proceed", "reloop", "halt"]
+    taken = ledger2.take_verdict("gate_strategy", review, labels)
+    assert taken == "", "a consumed verdict was replayed via Ledger API"
 
-        # Walker run 2: resumes at the gate, takes the verdict, runs apply_corrections.
-        _correction_calls.clear()
-        result2 = execute(graph, workdir, model=model,
-                          task={"name": "test", "brief": "test brief", "check": "true"},
-                          start="gate_strategy", facts=dict(result1.facts))
-        assert result2.exit_ok is True, result2.error
-        # apply_corrections was called exactly once and saw the correction.
-        assert len(_correction_calls) == 1, f"apply_corrections called {len(_correction_calls)} times"
-        assert "NAME constant" in _correction_calls[0]
 
-        # Walker run 3: resume again — the verdict is consumed, gate stops again.
-        _correction_calls.clear()
-        result3 = execute(graph, workdir, model=model,
-                          task={"name": "test", "brief": "test brief", "check": "true"},
-                          start="gate_strategy", facts=dict(result2.facts))
-        # The gate has no pending verdict → stops at the gate again.
-        # apply_corrections must not be called again (never re-applied).
-        assert result3.gate_stop == "gate_strategy"
-        assert len(_correction_calls) == 0, "correction re-applied on second resume"
+def test_stray_proceed_expires_does_not_reapply_corrections(tmp_path):
+    """The approve/correct/stray-proceed-expires case: after a successful resume,
+    a second `proceed` verdict with a different review scope (design.md changed)
+    is marked `consumed: expired`, and `gate_corrections_due` does not count it
+    as went-on, so corrections are not re-applied.
 
-        # Also verify the Ledger API path (the spine uses the same Ledger):
-        ledger2 = Ledger(workdir)
-        labels = ["proceed", "reloop", "halt"]
-        taken = ledger2.take_verdict("gate_strategy", review, labels)
-        assert taken == "", "a consumed verdict was replayed via Ledger API"
-    finally:
-        _executor_mod.resolve = _original_resolve
+    This test fails when main's steering.py (which uses consumed: yes for both
+    used and expired) and design_ops.py (which treats consumed: yes as went-on)
+    are restored.
+    """
+    from refactory_dsh.design_ops import gate_corrections_due
+    from refactory_dsh.nn import Graph, Node
+    from refactory_dsh.nn.executor import execute, GateStop
+
+    graph = Graph()
+    graph.add(Node("prepare", "op", call="loop_ops:noop",
+                    produces=("name", "brief", "check")))
+    graph.add(Node("agent", "agent",
+                    prompt_template="Design: {{brief}}",
+                    writes=("design.md",), produces=("design",)))
+    graph.add(Node("gate_strategy", "gate", gate_kind="user",
+                    reads=("design.md",), max_iterations=5,
+                    notes="Approve the strategy"))
+    graph.add(Node("apply_corrections", "op",
+                    call="loop_ops:test_apply_corrections",
+                    reads=("design.md",), writes=("design.md",),
+                    produces=("corrected", "correction_texts")))
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("prepare", "agent")
+    graph.connect("agent", "gate_strategy")
+    graph.connect("gate_strategy", "apply_corrections", condition="proceed")
+    graph.connect("apply_corrections", "done")
+
+    workdir = tmp_path / "run"
+
+    class _FakeModel:
+        def __init__(self):
+            self._calls = 0
+        def complete(self, prompt, **kw):
+            self._calls += 1
+            return "design output"
+        def route(self):
+            return {"worker_backend": "dsh"}
+        def context(self):
+            return {}
+        def for_node(self, node_id, role=None):
+            return self
+
+    model = _FakeModel()
+
+    # Walker run 1: stops at the gate.
+    result1 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"})
+    assert result1.gate_stop == "gate_strategy"
+
+    # Person steers: proceed + correction.
+    ledger = Ledger(workdir)
+    review1 = ledger.visit("gate_strategy", ["design.md"])
+    ledger.verdict("gate_strategy", "proceed")
+    ledger.note("correction", "Add a NAME constant set to 'tool'.")
+
+    # Walker run 2: resumes and applies the correction.
+    result2 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"},
+                      start="gate_strategy", facts=dict(result1.facts))
+    assert result2.exit_ok is True, result2.error
+    correction_texts = result2.facts.get("correction_texts", [])
+    assert len(correction_texts) == 1, "first resume should apply exactly 1 correction"
+
+    # Now simulate a stray proceed that expires: steer a second proceed with
+    # a scope that does not match the gate's current reads (design.md has changed).
+    # This simulates a verdict given while design.md was different.
+    ledger3 = Ledger(workdir)
+    ledger3.verdict("gate_strategy", "proceed", review="stale_scope_hash_does_not_match")
+    ledger3.note("correction", "This should NOT be applied again.")
+
+    # Walker run 3: resume at the gate.  The stray verdict's scope does not match,
+    # so it should be consumed: expired, and corrections must not be re-applied.
+    result3 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"},
+                      start="gate_strategy", facts=dict(result2.facts))
+    # The verdict expired (scope mismatch), so the gate should stop again.
+    assert result3.gate_stop == "gate_strategy", \
+        "stray proceed with wrong scope should expire, not proceed"
+
+    # Verify the verdict was marked expired.
+    ledger_text = (workdir / "intent-ledger.md").read_text()
+    assert "consumed: expired" in ledger_text, \
+        "stray verdict should be marked consumed: expired"
+
+    # Verify gate_corrections_due does not count the expired verdict as went-on.
+    _, corrections = gate_corrections_due(workdir)
+    stray_correction_texts = [t for _, t in corrections if "should NOT" in t]
+    assert len(stray_correction_texts) == 0, \
+        "gate_corrections_due re-collected the stray correction"

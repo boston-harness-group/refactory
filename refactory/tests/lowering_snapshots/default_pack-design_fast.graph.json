@@ -176,7 +176,8 @@
       ],
       "writes": [
         "changed-functions.json",
-        "changes.diff"
+        "changes.diff",
+        "test-guardedness.json"
       ],
       "blocking": true,
       "resource_role": "work",

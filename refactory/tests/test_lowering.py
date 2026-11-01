@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import lowering, registry
+from refactory_dsh.lowering import LoweringError
 from refactory_dsh.nn import Graph, Node, validate_state
 
 MODE = "circle_packing/adaptive"
@@ -528,3 +529,42 @@ def test_every_declared_callable_resolves(tmp_path):
         target = node.get("callable_name")
         if target:
             assert callable(resolve_target(target)), f"{target} does not resolve"
+
+
+# ── fork-shape validation ─────────────────────────────────────────────────
+
+
+def _fork_graph(a_writes, a_reads, b_writes, b_reads):
+    """A minimal fork graph with two branches, each with declared writes and reads."""
+    graph = Graph()
+    graph.add(Node("start", "op", call="loop_ops:noop"))
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop",
+                    writes=tuple(a_writes), reads=tuple(a_reads)))
+    graph.add(Node("b", "op", call="loop_ops:noop",
+                    writes=tuple(b_writes), reads=tuple(b_reads)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.add(Node("end", "op", call="loop_ops:noop"))
+    graph.connect("start", "fork")
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+    graph.connect("join", "end")
+    return graph
+
+
+def test_fork_directory_containment_refused():
+    """Lowering refuses a fork where branch a writes 'out' and branch b reads 'out/x.txt'
+    (directory containment overlap), matching the walker's _overlap check."""
+    graph = _fork_graph(a_writes=["out"], a_reads=[], b_writes=[], b_reads=["out/x.txt"])
+    state = {"graph": graph.to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="conflicting declared file access"):
+        lowering.to_workflow(state)
+
+
+def test_fork_refactory_write_refused():
+    """Lowering refuses a fork branch that writes inside .refactory."""
+    graph = _fork_graph(a_writes=[".refactory/foo"], a_reads=[], b_writes=[], b_reads=[])
+    state = {"graph": graph.to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="executor metadata as output"):
+        lowering.to_workflow(state)

@@ -476,3 +476,38 @@ def test_resuming_a_directory_with_no_record_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="no run to resume"):
         Two.resume(tmp_path / "nothing-here")
+
+
+def test_op_runs_in_run_directory_with_recovery(tmp_path):
+    """With enable_recovery, ops run in forkserver children: they write relative
+    paths in the run directory and get ctx.model=None, matching the spine."""
+    graph = nn.Graph()
+    graph.add(nn.Node("write", "op", call="loop_ops:write_relative",
+                      writes=("relative_output.txt",), produces=("relative_written",)))
+    graph.add(nn.Node("model_check", "op", call="loop_ops:check_model_is_none",
+                      produces=("model_is_none",)))
+    graph.connect("write", "model_check")
+
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok, result.error
+    # The op wrote in the run directory (relative path resolved there).
+    assert (tmp_path / "relative_output.txt").exists(), \
+        "relative path not written in run directory"
+    assert result.facts["relative_written"] is True
+    # ctx.model is None for ops.
+    assert result.facts["model_is_none"] is True, \
+        "ctx.model was not None inside the op"
+
+
+def test_op_stderr_preserved_on_raise(tmp_path):
+    """An op that prints to stderr then raises has its stderr included
+    in the propagated error (with enable_recovery, ops run in forkserver children)."""
+    graph = nn.Graph()
+    graph.add(nn.Node("boom", "op", call="loop_ops:stderr_then_raise"))
+
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok is False
+    assert "op stderr" in result.error, \
+        f"stderr not preserved in error: {result.error}"
+    assert "important debug info" in result.error, \
+        f"stderr content not in error: {result.error}"
