@@ -762,6 +762,12 @@ class Loop(OuterLoop):
             trial_dir = workdir if index == 0 else workdir / "trials" / str(index + 1)
             self._carry_ledger(trial_dir)
             self._write_subset(trial_dir, part, seed=seed)
+            # Copy the manifest to trial sub-directories so select_subset
+            # finds it there too (repeats > 1 creates separate directories).
+            manifest = workdir / task_module.MANIFEST
+            if trial_dir != workdir and manifest.exists():
+                trial_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(manifest, trial_dir / task_module.MANIFEST)
             before = self.budget.snapshot() if self.budget else {}
             try:
                 if self.budget:

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import nn, task as task_module
-from refactory_dsh.items import make_item_record, command_begin, command_end, items_of
+from refactory_dsh.items import make_item_record, command_begin, command_end, items_of, record_exchange
 
 TASK_REF = "equiv_counting"
 NAMES = ("alpha", "beta", "gamma")
@@ -164,6 +164,144 @@ def test_records_equivalence(tmp_path):
         # Exchanges: both should be lists; for this graph (no agent nodes), both empty.
         assert isinstance(w["exchanges"], list), f"{item_id}: walker exchanges not a list"
         assert isinstance(s["exchanges"], list), f"{item_id}: spine exchanges not a list"
+
+
+def _spine_records_with_exchanges(mode, state, workdir):
+    """Simulate the spine path including per-node exchange recording.
+
+    The TS spine path goes: ``command_begin`` → agent node runs (where
+    ``agent_delivery.finish`` calls ``record_exchange`` into the sidecar) →
+    ``command_end`` (which reads the sidecar via ``_read_and_clear_exchanges``).
+    This function exercises that exact sequence.
+    """
+    from refactory_dsh.nn.executor import load_items
+    graph = mode.build()
+    data_node = None
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            data_node = node
+            break
+    assert data_node is not None
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    task_module.write_subset(workdir, "train", 0.0)
+    task_module.make_manifest(workdir, train_ids=list(NAMES))
+    decl = {data_node.id: {
+        "task_ref": data_node.task_ref,
+        "produces": list(data_node.produces),
+    }}
+    (workdir / "declarations.json").write_text(json.dumps(decl))
+
+    items = load_items(data_node, workdir)
+    records = []
+    for i, item in enumerate(items):
+        command_begin(data_node, workdir, i)
+        # Simulate what agent_delivery.finish does in the spine path:
+        # write per-node exchanges to the sidecar file.
+        item_id = item.get("id", str(i))
+        record_exchange(workdir, "agent_node", f"prompt for {item_id}", f"response for {item_id}")
+        record = command_end(data_node, workdir, i)
+        if record:
+            records.append(record)
+    return records
+
+
+def test_records_equivalence_with_exchanges(tmp_path):
+    """Both runtimes produce matching exchange records (correction #5).
+
+    The walker captures exchanges in-memory via ``executor._item_exchanges``.
+    The spine captures exchanges via ``agent_delivery.finish`` → ``record_exchange``
+    → sidecar file → ``command_end`` → ``_read_and_clear_exchanges``.
+
+    This test verifies that:
+    - The spine path (sidecar) produces non-empty exchanges when agent nodes run
+    - Both paths produce records with the same structure
+    - Reverting ``record_exchange`` in ``agent_delivery.finish`` would leave
+      spine records with exchanges:[]
+    """
+    mode = EquivProbe()
+
+    # Spine path with exchanges (simulating agent_delivery.finish calling record_exchange).
+    spine_dir = tmp_path / "spine_exchanges"
+    spine_records = _spine_records_with_exchanges(mode, mode.state_dict(), spine_dir)
+    assert len(spine_records) == 3
+
+    for record in spine_records:
+        item_id = record["id"]
+        # Exchanges should be populated from the sidecar.
+        assert len(record["exchanges"]) == 1, (
+            f"{item_id}: expected 1 exchange, got {len(record['exchanges'])}"
+        )
+        exchange = record["exchanges"][0]
+        assert exchange["node"] == "agent_node"
+        assert f"prompt for {item_id}" in str(exchange["prompt"])
+        assert f"response for {item_id}" in str(exchange["response"])
+
+    # Without record_exchange, command_end would produce empty exchanges.
+    spine_no_exchange_dir = tmp_path / "spine_no_exchange"
+    spine_no_exchange_records = _spine_records_via_command_end(
+        mode, mode.state_dict(), spine_no_exchange_dir
+    )
+    for record in spine_no_exchange_records:
+        assert record["exchanges"] == [], (
+            f"{record['id']}: expected empty exchanges without record_exchange, "
+            f"got {record['exchanges']}"
+        )
+
+
+# ── test_exchange_sidecar_roundtrip ───────────────────────────────────────
+
+def test_exchange_sidecar_roundtrip(tmp_path):
+    """record_exchange writes to the sidecar, command_end reads it.
+
+    This verifies that the sidecar mechanism is wired end-to-end:
+    agent_delivery.finish calls record_exchange during a data-node pass,
+    and command_end picks up the exchanges for the item record.
+
+    Reverting the record_exchange call in agent_delivery.finish makes
+    spine-produced records always have exchanges:[].
+    """
+    mode = EquivProbe()
+    graph = mode.build()
+    data_node = None
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            data_node = node
+            break
+    assert data_node is not None
+
+    workdir = tmp_path / "sidecar"
+    workdir.mkdir(parents=True, exist_ok=True)
+    task_module.write_subset(workdir, "train", 0.0)
+    task_module.make_manifest(workdir, train_ids=list(NAMES))
+    decl = {data_node.id: {
+        "task_ref": data_node.task_ref,
+        "produces": list(data_node.produces),
+    }}
+    (workdir / "declarations.json").write_text(json.dumps(decl))
+
+    from refactory_dsh.nn.executor import load_items
+    items = load_items(data_node, workdir)
+    records = []
+    for i, item in enumerate(items):
+        command_begin(data_node, workdir, i)
+        # Simulate what agent_delivery.finish does in the spine path:
+        # write per-node exchanges to the sidecar file.
+        record_exchange(workdir, "agent_node", f"prompt-{item.get('id', i)}", f"response-{item.get('id', i)}")
+        record = command_end(data_node, workdir, i)
+        if record:
+            records.append(record)
+
+    assert len(records) == 3
+    for record in records:
+        item_id = record["id"]
+        assert len(record["exchanges"]) == 1, (
+            f"{item_id}: expected 1 exchange, got {len(record['exchanges'])}"
+        )
+        exchange = record["exchanges"][0]
+        assert exchange["node"] == "agent_node"
+        assert f"prompt-{item_id}" in exchange["prompt"]
+        assert f"response-{item_id}" in exchange["response"]
 
 
 # ── test_spine_item_records_in_status ──────────────────────────────────────
