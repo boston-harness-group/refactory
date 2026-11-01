@@ -162,6 +162,11 @@ class Candidate:
     parent: str | None
     state: dict[str, Any]
     edits: list[dict[str, Any]] = field(default_factory=list)
+    #: Per-edit reports, parallel to *edits*.  Only ``text_patch`` produces one
+    #: today; for other edits the corresponding slot is ``None``.  Stored on the
+    #: candidate (not on the edit dict) so it is journaled, survives stop+resume,
+    #: and does not leak into optimizer prompts.
+    edit_reports: list[dict[str, Any] | None] = field(default_factory=list)
     #: The score the search compares: the evaluator's number minus the run's size
     #: cost. Set by the loop, which is the only place the cost is known.
     score: float | None = None
@@ -190,8 +195,12 @@ class Candidate:
         *,
         parent: str | None = None,
         edits: Iterable[dict[str, Any]] = (),
+        edit_reports: Iterable[dict[str, Any] | None] = (),
     ) -> "Candidate":
-        return cls(id=candidate_id(state), parent=parent, state=state, edits=list(edits))
+        return cls(
+            id=candidate_id(state), parent=parent, state=state,
+            edits=list(edits), edit_reports=list(edit_reports),
+        )
 
     def is_structural(self) -> bool:
         return any(nn_edits.is_macro(edit.get("op", "")) or edit.get("op") in (
@@ -199,8 +208,14 @@ class Candidate:
             "set_node_field",
         ) for edit in self.edits)
 
-    def describe(self) -> dict[str, Any]:
-        return {
+    def describe(self, *, include_reports: bool = False) -> dict[str, Any]:
+        """Summarise for prompt rendering.
+
+        Reports are omitted by default so they never leak into optimizer
+        prompts.  Pass ``include_reports=True`` when an optimizer explicitly
+        asks for the per-edit outcomes.
+        """
+        d: dict[str, Any] = {
             "id": self.id,
             "parent": self.parent,
             "score": self.score,
@@ -212,6 +227,9 @@ class Candidate:
             "duration_s": self.duration_s,
             "measurements": self.measurements,
         }
+        if include_reports:
+            d["edit_reports"] = self.edit_reports
+        return d
 
 
 @dataclass
@@ -601,8 +619,9 @@ class Optimizer:
         reason = nn_edits.precheck(proposal.edit, parent.state)
         if reason:
             return [f"E-precondition: {reason}"]
+        edit_reports: list[dict[str, Any]] = []
         try:
-            state = nn_edits.apply(proposal.edit, parent.state)
+            state = nn_edits.apply(proposal.edit, parent.state, edit_reports=edit_reports)
         except nn_edits.EditError as exc:
             return [f"{exc.code}: {exc}"]
         except Exception as exc:  # an operator bug is reported, not swallowed
@@ -641,8 +660,15 @@ class Optimizer:
         issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls)
         if issues:
             return [str(issue) for issue in issues]
+        # Build the per-edit report list parallel to edits.  Parent reports
+        # are carried forward; the new report (if any) is appended.
+        parent_reports = list(parent.edit_reports) if parent.edit_reports else [
+            None for _ in parent.edits
+        ]
+        new_report = edit_reports[0] if edit_reports else None
         return Candidate.from_state(
             state,
             parent=parent.id,
             edits=[*parent.edits, proposal.edit],
+            edit_reports=[*parent_reports, new_report],
         )
