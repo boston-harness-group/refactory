@@ -210,3 +210,55 @@ def test_new_one():
     result = design_ops.enforce_guardedness(ctx)
     # A new function (not in base) should not be flagged
     assert "tests/test_mod.py" not in result
+
+
+def test_assertion_relaxed_detects_changed_expected_value():
+    """_assertion_relaxed detects when an expected value in an assert changes
+    (e.g. assert x == 42 → assert x == 0), which the brief lists as a form
+    of assertion relaxation."""
+    base = '''\
+def test_check():
+    result = compute()
+    assert result == 42
+'''
+    head = '''\
+def test_check():
+    result = compute()
+    assert result == 0
+'''
+    assert design_ops._assertion_relaxed(base, head) is True
+
+
+def test_assertion_relaxed_ignores_rename_only():
+    """_assertion_relaxed does NOT flag a variable rename with the same assertion."""
+    base = '''\
+def test_check():
+    old_var = compute()
+    assert old_var == 42
+'''
+    head = '''\
+def test_check():
+    new_var = compute()
+    assert new_var == 42
+'''
+    assert design_ops._assertion_relaxed(base, head) is False
+
+
+def test_changed_test_fns_detects_expected_value_change(tmp_path):
+    """_changed_test_fns returns a function whose assert changed its expected value."""
+    repo = _git_repo(tmp_path / "repo")
+
+    base_test = '''\
+def test_foo():
+    assert compute() == "old_correct"
+'''
+    base_commit = _commit(repo, {"tests/test_val.py": base_test}, "base")
+
+    head_test = '''\
+def test_foo():
+    assert compute() == "new_wrong"
+'''
+    _commit(repo, {"tests/test_val.py": head_test}, "head")
+
+    relaxed = design_ops._changed_test_fns(repo, base_commit, "tests/test_val.py")
+    assert "test_foo" in relaxed

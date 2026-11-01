@@ -373,7 +373,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:gate_qa",
-      "gate_prompt": "route on the QA judge's verdict: a redo for what holds the change back goes to the builder, or, at the review limit, on as a draft; an unreadable verdict is read again once; follow-ups go to the pull request",
+      "gate_prompt": "route on the QA judge's verdict: a redo for what holds the change back goes to the builder, or, at the review limit, on as a draft; an unreadable verdict is read again once; a coverage re-run adds one pass; follow-ups go to the pull request",
       "max_iterations": 12,
       "_type": "GateNode"
     },
@@ -921,6 +921,11 @@
       "source": "gate_qa",
       "target": "qa_judge",
       "condition": "reread"
+    },
+    {
+      "source": "gate_qa",
+      "target": "synthesize_qa",
+      "condition": "coverage_rerun"
     },
     {
       "source": "gate_research",

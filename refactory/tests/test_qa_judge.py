@@ -480,7 +480,8 @@ def test_the_design_graph_has_judges_and_no_free_audit_round():
     # A reread goes back to the judge alone; only a reloop reaches the builder, through
     # pick_corrections (dm-226).
     assert {(e.target, e.condition) for e in graph.out_edges("gate_qa")} == {
-        ("pick_corrections", "reloop"), ("qa_judge", "reread"), ("audit_corrections", "proceed")}
+        ("pick_corrections", "reloop"), ("qa_judge", "reread"),
+        ("synthesize_qa", "coverage_rerun"), ("audit_corrections", "proceed")}
     assert [e.target for e in graph.out_edges("audit_corrections")] == ["overwatch"]
     assert {(e.target, e.condition) for e in graph.out_edges("gate_overwatch")} == {
         ("pick_corrections", "reloop"), ("overwatch", "reread"), ("report", "proceed")}

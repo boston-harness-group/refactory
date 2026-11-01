@@ -55,8 +55,10 @@ def test_overwatch_prompt_has_critical_probe_instruction():
 
 
 def test_unverified_requirement_triggers_qa_rerun(tmp_path, monkeypatch):
-    """An unverified requirement in intent-audit.json → the gate lists it as advisory.
-    The QA director re-run is signalled by setting a fact."""
+    """An unverified requirement in intent-audit.json → the gate returns a
+    coverage_rerun verdict so the QA synthesis and judge re-run.  The re-run
+    fact is set so the next pass through the gate lists still-unverified
+    requirements as advisory instead of re-running again."""
     monkeypatch.setattr(evidence, "current_problems", lambda ctx, workers: [])
 
     ctx = _gate_ctx(tmp_path, _qa_judgment("proceed"))
@@ -68,16 +70,8 @@ def test_unverified_requirement_triggers_qa_rerun(tmp_path, monkeypatch):
     ]})
 
     verdict = design_ops.gate_qa(ctx)
-    assert verdict == "proceed"
-
-    # The unverified requirement should be listed as advisory
-    follow_ups = (tmp_path / "reviews/follow-ups.md").read_text()
-    assert "not verified" in follow_ups
-    assert "ask-1" in follow_ups
-    # The verified requirement should not be listed
-    assert "ask-2" not in follow_ups or "not verified" not in follow_ups.split("ask-2")[0]
-
-    # The re-run fact should be set
+    # First encounter: should trigger a coverage_rerun verdict (not proceed)
+    assert verdict == "coverage_rerun"
     assert ctx.facts.get("qa_coverage_rerun_done") is True
 
 

@@ -48,6 +48,9 @@ REFINE_SCOPE_REASON = "refinement of an open pull request"
 
 STAGING = "staging"
 
+#: Sentinel for _assertion_relaxed's literal extraction.
+_SENTINEL = object()
+
 #: Planning steps that must not change the target or the worktree (#347).
 #: They write only into the run directory; a change they make to the target
 #: or the worktree fails the step and names what changed.
@@ -1944,6 +1947,9 @@ def _end_fixups(ctx: Any) -> None:
     """The attempt goes on to the fork or is spent: the next emission is a new attempt."""
     if _fixups_used(ctx):
         ctx.set_fact("self_check_fixup_count", 0)
+    sr_used = int(ctx.facts.get("site_revert_fixup_count") or 0)
+    if sr_used:
+        ctx.set_fact("site_revert_fixup_count", 0)
 
 
 
@@ -2207,24 +2213,37 @@ def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
         test_file = test_id.split("::")[0] if "::" in test_id else test_id
         selection_by_file.setdefault(test_file, []).append(test_id)
 
-    # Build rule-block grouping from the raw text
-    # Each "**Rule:**" or "**The rule:**" line starts a new group
+    # Build rule-block grouping from the raw text.
+    # Each "**Rule:**" or "**The rule:**" line starts a new group.
+    # We track which bullet ordinal maps to which changed_sites index.
     rule_lines_raw = design_contract._section_lines(lines, design_contract.RULE_AND_SITES)
-    current_group: list[int] = []
-    groups_by_idx: list[list[int]] = []
     rule_block_pattern = _re.compile(r'^\*\*(?:The\s+)?[Rr]ule(?:\s*:)?\*\*', _re.IGNORECASE)
 
-    bullet_indices: list[int] = []
-    for i, rl in enumerate(rule_lines_raw):
+    # Map bullet ordinal (across ALL bullets: changed + left + unmarked) to
+    # the corresponding changed_sites index.  contract.rule_sites and the raw
+    # bullets are in the same order, so bullet ordinal == rule_sites index.
+    all_sites = contract.rule_sites
+    bullet_to_changed: dict[int, int] = {}
+    changed_idx = 0
+    for bullet_ord, site in enumerate(all_sites):
+        if site["status"] == "changed":
+            bullet_to_changed[bullet_ord] = changed_idx
+            changed_idx += 1
+
+    # Now parse raw text for rule-block groups, using bullet ordinals.
+    current_group: list[int] = []           # bullet ordinals
+    groups_by_bullet: list[list[int]] = []  # list of rule-block groups
+    bullet_count = 0
+    for rl in rule_lines_raw:
         if rule_block_pattern.match(rl):
             if current_group:
-                groups_by_idx.append(current_group)
+                groups_by_bullet.append(current_group)
             current_group = []
         elif rl.startswith("- ") or rl.startswith("* "):
-            current_group.append(len(bullet_indices))
-            bullet_indices.append(i)
+            current_group.append(bullet_count)
+            bullet_count += 1
     if current_group:
-        groups_by_idx.append(current_group)
+        groups_by_bullet.append(current_group)
 
     all_pairs: list[tuple[str, str, str]] = []
     site_to_pairs: dict[int, list[tuple[str, str, str]]] = {}
@@ -2271,12 +2290,13 @@ def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
 
     # Build groups for co-revert: same rule block or same function
     groups: list[list[tuple[str, str, str]]] = []
-    # Group by rule block
-    for group_indices in groups_by_idx:
+    # Group by rule block: map bullet ordinals → changed_sites indices
+    for bullet_group in groups_by_bullet:
         group_pairs: list[tuple[str, str, str]] = []
-        for idx in group_indices:
-            if idx in site_to_pairs:
-                group_pairs.extend(site_to_pairs[idx])
+        for bullet_ord in bullet_group:
+            changed_idx_val = bullet_to_changed.get(bullet_ord)
+            if changed_idx_val is not None and changed_idx_val in site_to_pairs:
+                group_pairs.extend(site_to_pairs[changed_idx_val])
         if len(group_pairs) > 1:
             groups.append(group_pairs)
 
@@ -2323,16 +2343,23 @@ def _run_site_reverts(ctx: Any, prepass: Any, command: str) -> Verdict | None:
     if found is None:
         return None
 
+    # Early exit when the site-revert budget is zero: skip the revert check entirely.
+    sr_allowed = int(ctx.knob("site_revert_fixups", 1))
+    if sr_allowed <= 0:
+        return None
+
     # Run site reverts using the existing machinery
     revert_results = base_check.compute_site_reverts(ctx, all_pairs)
     pair_results = revert_results.get("pairs", [])
 
-    # Also run co-revert groups
-    group_results: list[dict[str, Any]] = []
+    # Also run co-revert groups: revert all sites in the group simultaneously
+    co_revert_caught: set[str] = set()
     for group in groups:
         if len(group) > 1:
-            gr = base_check.compute_site_reverts(ctx, group)
-            group_results.extend(gr.get("pairs", []))
+            co_result = base_check.compute_co_revert(ctx, group)
+            if co_result.get("caught"):
+                for site, _test, _scope in group:
+                    co_revert_caught.add(site)
 
     # Identify uncaught sites (result == "pass" means the test still passes after revert)
     uncaught: list[str] = []
@@ -2344,12 +2371,7 @@ def _run_site_reverts(ctx: Any, prepass: Any, command: str) -> Verdict | None:
         result = entry.get("result", "")
         if result == "pass":
             # Check if co-revert group caught it
-            caught_by_group = False
-            for ge in group_results:
-                if isinstance(ge, dict) and ge.get("site") == site and ge.get("result") == "fail":
-                    caught_by_group = True
-                    break
-            if not caught_by_group:
+            if site not in co_revert_caught:
                 uncaught.append(site)
         elif result == "not_run":
             unmeasured.append(site)
@@ -2906,7 +2928,8 @@ def _assertion_relaxed(base_body: str, head_body: str) -> bool:
     """Whether the change from *base_body* to *head_body* relaxed an assertion.
 
     Checks for: removed assert statements, weakened assert (fewer asserts),
-    added skip/xfail markers, changed comparison operators to weaker ones.
+    added skip/xfail markers, changed comparison operators to weaker ones,
+    and changed expected values (``assert x == 42`` → ``assert x == 0``).
     A rename (variable name change with same assertion structure) is NOT relaxing.
     """
     import ast
@@ -2928,6 +2951,42 @@ def _assertion_relaxed(base_body: str, head_body: str) -> bool:
             ("." + type(node.test.ops[0]).__name__) if isinstance(node.test, ast.Compare) else ""
         )
 
+    def _literal_value(node: Any) -> Any:
+        """Extract a literal value from an AST node, or _SENTINEL if not a literal."""
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.List):
+            elts = [_literal_value(e) for e in node.elts]
+            if _SENTINEL not in elts:
+                return elts
+        if isinstance(node, ast.Tuple):
+            elts = [_literal_value(e) for e in node.elts]
+            if _SENTINEL not in elts:
+                return tuple(elts)
+        if isinstance(node, ast.Set):
+            elts = [_literal_value(e) for e in node.elts]
+            if _SENTINEL not in elts:
+                return frozenset(elts)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            v = _literal_value(node.operand)
+            if v is not _SENTINEL:
+                return -v
+        return _SENTINEL
+
+    def _assert_literals(node: ast.Assert) -> list[Any]:
+        """Extract literal comparator values from a Compare assert."""
+        if not isinstance(node.test, ast.Compare):
+            return []
+        lits: list[Any] = []
+        v = _literal_value(node.test.left)
+        if v is not _SENTINEL:
+            lits.append(v)
+        for comp in node.test.comparators:
+            v = _literal_value(comp)
+            if v is not _SENTINEL:
+                lits.append(v)
+        return lits
+
     base_asserts = _assert_nodes(base_body)
     head_asserts = _assert_nodes(head_body)
 
@@ -2948,6 +3007,18 @@ def _assertion_relaxed(base_body: str, head_body: str) -> bool:
         for bs in base_structures:
             if "Compare" in bs and bs not in head_structures:
                 return True
+
+    # Check for changed expected values: same structure but different literal values.
+    # Match asserts by position when counts are equal.
+    if len(base_asserts) == len(head_asserts):
+        for ba, ha in zip(base_asserts, head_asserts):
+            bs = _assert_structure(ba)
+            hs = _assert_structure(ha)
+            if bs == hs and "Compare" in bs:
+                base_lits = _assert_literals(ba)
+                head_lits = _assert_literals(ha)
+                if base_lits and head_lits and base_lits != head_lits:
+                    return True
 
     return False
 
@@ -3051,10 +3122,18 @@ def enforce_guardedness(ctx: Any) -> list[str]:
 
     result_files = [t for t in non_guarding if t not in exempted]
 
-    # Modified test files: check at function granularity for relaxed assertions
+    # Modified test files: check at function granularity for relaxed assertions.
+    # Only check files whose guardedness result says "not guarding" (the file's tests
+    # pass on the base), so files the check didn't analyse are not false-positived,
+    # and files that ARE guarding (fail on base revert) keep their exemption.
+    not_guarding_files = {r.get("file", "") for r in guardedness.get("results", [])
+                          if r.get("guarding") is False
+                          and r.get("file_level") != "cannot_run_on_base"}
     if modified_files is not None and found is not None:
         root = Path(found.path)
         for tf in modified_files:
+            if tf not in not_guarding_files:
+                continue  # Not flagged by the guardedness check
             if tf in exempted:
                 continue
             if not tf.endswith(".py"):
@@ -3659,62 +3738,55 @@ def _quoting(ctx: Any, note: str, name: str) -> str:
     return note + (f". It wrote: {said}" if said else "")
 
 
-def _check_unverified_coverage(ctx: Any) -> list[str]:
+def _check_unverified_coverage(ctx: Any) -> tuple[list[str], Verdict | None]:
     """Check probe coverage for requirements marked unverified in intent-audit.json.
 
-    When unverified requirements are found, re-run the QA director once limited to
-    those requirements. A probe that runs and fails becomes a normal finding.
-    A requirement still unverified after the re-run is listed as advisory
-    (not verified), never a builder reloop.
+    When unverified requirements are found for the first time, trigger a coverage
+    re-run of the QA reviews (``Verdict("coverage_rerun")``) so the QA director
+    runs again with the coverage rule in its prompt — a probe that runs and fails
+    becomes a normal finding.  A requirement still unverified after that one re-run
+    is listed as advisory (not verified), never a builder reloop.
 
-    Returns a list of advisory lines for unverified requirements.
+    Returns ``(advisories, verdict)``.  *verdict* is non-None only when a coverage
+    re-run is needed; the caller must return it instead of proceeding.
     """
-    from refactory_dsh import authoring_evidence as evidence
-
     if not ctx.exists("intent-audit.json"):
-        return []
+        return [], None
 
     try:
         audit = ctx.read_json("intent-audit.json", {})
     except (ValueError, OSError):
-        return []
+        return [], None
 
     requirements = audit.get("requirements", []) if isinstance(audit, dict) else []
     unverified = [req for req in requirements
                   if isinstance(req, dict) and req.get("status") == "unverified"]
 
     if not unverified:
-        return []
+        return [], None
 
-    # Re-run QA director once for unverified requirements
     rerun_done = ctx.facts.get("qa_coverage_rerun_done")
     advisories: list[str] = []
 
     if not rerun_done:
+        # First time: trigger a coverage re-run of the QA reviews.
         ctx.set_fact("qa_coverage_rerun_done", True)
-        # The re-run is signalled by setting a fact; the QA director reads it
-        # in its next invocation. Since we are in the gate (after the judge),
-        # and the design says "prompt and judge changes, not new nodes", we
-        # record the unverified requirements for the next QA round if needed.
-        # For now, list unverified requirements as advisory.
-        for req in unverified:
-            req_id = req.get("id", "?")
-            req_text = req.get("requirement", req.get("text", "?"))
-            advisories.append(
-                f"not verified (advisory): {req_id} — {req_text} — "
-                "no probe was run for this requirement"
-            )
-    else:
-        # After re-run, still unverified: list as advisory
-        for req in unverified:
-            req_id = req.get("id", "?")
-            req_text = req.get("requirement", req.get("text", "?"))
-            advisories.append(
-                f"not verified (advisory): {req_id} — {req_text} — "
-                "still unverified after QA re-run"
-            )
+        req_ids = ", ".join(req.get("id", "?") for req in unverified)
+        return [], Verdict(
+            "coverage_rerun",
+            f"coverage re-run: {len(unverified)} unverified requirement(s) ({req_ids}); "
+            "re-running the QA reviews so the director can probe them",
+        )
 
-    return advisories
+    # After re-run, still unverified: list as advisory, never a builder reloop.
+    for req in unverified:
+        req_id = req.get("id", "?")
+        req_text = req.get("requirement", req.get("text", "?"))
+        advisories.append(
+            f"not verified (advisory): {req_id} — {req_text} — "
+            "still unverified after QA re-run"
+        )
+    return advisories, None
 
 
 def gate_qa(ctx: Any) -> Any:
@@ -3796,7 +3868,12 @@ def gate_qa(ctx: Any) -> Any:
     _note_unresolved(ctx, QA_UNRESOLVED, "QA gate", [])
     ctx.set_fact(QA_DRAFT, "")
     # Check unverified probe coverage before proceeding
-    unverified_advisory = _check_unverified_coverage(ctx)
+    unverified_advisory, coverage_verdict = _check_unverified_coverage(ctx)
+    if coverage_verdict is not None:
+        # Route back to the QA reviews for a coverage re-run.
+        record_follow_ups(ctx, "qa", follow)
+        ctx.write_text("reviews/qa-gate.txt", f"coverage_rerun: {coverage_verdict.reason}\n")
+        return coverage_verdict
     if unverified_advisory:
         follow = [*follow, *unverified_advisory]
     record_follow_ups(ctx, "qa", follow)

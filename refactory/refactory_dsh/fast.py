@@ -332,6 +332,7 @@ class DesignFastMode(DesignMode):
         knobs.pop("design_review_attempts")
         knobs.pop("judge_rereads")  # design's judges; design_fast has a focused QA instead
         knobs.pop("self_check_fixups")
+        knobs.pop("site_revert_fixups")
         knobs.pop("self_check_timeout_s")
         knobs.pop("refine_design")
         # design_fast's builder has no timeout retry: its verifier also has none,

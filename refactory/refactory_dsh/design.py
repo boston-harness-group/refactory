@@ -306,7 +306,7 @@ def prepare_check_iterations(knobs: dict[str, Any]) -> int:
     most ``(self_check_fixups + site_revert_fixups) x check_attempts``, and each applied
     emission comes after at most ``refusal_attempts - 1`` refusals, so the reloops are at
     most ``(attempts + fixups + 1) x refusals + fixups + attempts``:
-    (8 + 9 + 1) x 2 + 9 + 8 = 53 with the defaults.  Past that, b39b's stop has already
+    (8 + 9 + 1) x 2 + 9 + 8 + 1 = 54 with the defaults.  Past that, b39b's stop has already
     ended the run.
     """
     attempts = int(knobs.get("check_attempts", 3))
@@ -859,6 +859,7 @@ class DesignMode(Mode):
         self_check_produces = (*check_produces, *repo_change.CHECK_PRODUCES,
                                "review_feedback", "review_baseline",
                                "self_check_fixup_count", "total_self_check_fixups_used",
+                               "site_revert_fixup_count", "total_site_revert_fixups_used",
                                "builder_tests", "draft_delivery", "early_asks_rereads",
                                "early_asks_reread")
         graph.add(Node(
@@ -869,7 +870,7 @@ class DesignMode(Mode):
             produces=self_check_produces,
             knobs=(*check_knobs, "self_check_fixups", "site_revert_fixups",
                    "self_check_timeout_s"),
-            # From the knobs, so the build loop's stop always comes first: 45 with the
+            # From the knobs, so the build loop's stop always comes first: 54 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
             max_iterations=prepare_check_iterations(defaults),
             notes="settle the commit the check and the reviews see; every attempt's "
@@ -1070,12 +1071,13 @@ class DesignMode(Mode):
                    "reviews/qa.md", "changed-functions.json"),
             writes=("reviews/qa-gate.txt", "reviews/follow-ups.json", "reviews/follow-ups.md"),
             produces=("qa_gate", "qa_judge_rereads", "qa_judge_reread", "qa_draft",
-                      "qa_unresolved"),
+                      "qa_unresolved", "qa_coverage_rerun_done"),
             knobs=("judge_rereads",),
-            max_iterations=5,
+            max_iterations=6,
             notes="route on the QA judge's verdict: a redo for what holds the change back goes "
                   "to the builder, or, at the review limit, on as a draft; an unreadable "
-                  "verdict is read again once; follow-ups go to the pull request",
+                  "verdict is read again once; a coverage re-run adds one pass; "
+                  "follow-ups go to the pull request",
         ))
         # The correction audit measures the QA judge's evidence map before the overwatch
         # reads it; it routes nothing.
@@ -1235,6 +1237,9 @@ class DesignMode(Mode):
         # A judge-only reread: the QA judge's verdict could not be read, so it is asked
         # again, with no builder round (`design_ops._read_judge`; `judge_rereads` caps it).
         graph.connect("gate_qa", "qa_judge", condition="reread")
+        # Coverage re-run: unverified requirements trigger one re-pass of the QA
+        # synthesis and judge; still unverified after that is advisory.
+        graph.connect("gate_qa", "synthesize_qa", condition="coverage_rerun")
         graph.connect("gate_qa", "audit_corrections", condition="proceed")
         graph.connect("audit_corrections", "overwatch")
         graph.connect("overwatch", "gate_overwatch")

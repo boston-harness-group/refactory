@@ -249,7 +249,10 @@ def test_a_stale_generated_file_and_a_pinned_test_are_fixed_inside_the_attempt(t
     fixes = render({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"})
     model = FakeModel(_answers(breaks, fixes))
     run = tmp_path / "run"
-    result = _design(run, model, repo, generate="python gen.py")
+    # site_revert_fixups=0: this test is about self-check fix-ups, not site-revert;
+    # disable site-revert fix-ups so they do not consume additional emit rounds.
+    result = _design(run, model, repo, mode=_mode(site_revert_fixups=0),
+                     generate="python gen.py")
     assert result.exit_ok, result.error
 
     first, second = _records(run)

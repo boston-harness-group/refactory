@@ -345,7 +345,6 @@
     "brief": "",
     "check": "",
     "refusal_attempts": 3.0,
-    "site_revert_fixups": 1.0,
     "target": "",
     "base": "",
     "worktree": 1.0,
@@ -420,17 +419,6 @@
       "values": [],
       "frozen": true,
       "description": "consecutive refused emissions before the run stops",
-      "required": false
-    },
-    "site_revert_fixups": {
-      "default": 1,
-      "kind": "int",
-      "lo": 0,
-      "hi": 3,
-      "enum": [],
-      "values": [],
-      "frozen": false,
-      "description": "how many times the site-revert pass may send an attempt back to emit when an uncaught site is found; a run gets this many times check_attempts",
       "required": false
     },
     "target": {

@@ -799,15 +799,26 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
 
+        # Extract exempted paths from "## Site revert exemptions"
+        import re
+        lines = design_text.splitlines()
+        exempt_lines = design_contract._section_lines(
+            lines, design_contract.SITE_REVERT_EXEMPTIONS)
+        exempted_paths: set[str] = set()
+        for el in exempt_lines:
+            if el.startswith("- ") or el.startswith("* "):
+                bullet = el[2:].strip()
+                m = re.match(r'`([^`]+)`', bullet)
+                if m:
+                    exempted_paths.add(m.group(1).strip())
+
         # Build pairs from design
         pairs: list[tuple[str, str, str]] = []
-        test_lines = design_contract._section_lines(
-            design_text.splitlines(), design_contract.TESTS)
+        test_lines = design_contract._section_lines(lines, design_contract.TESTS)
         test_ids: list[str] = []
         for tl in test_lines:
             if tl.startswith("- ") or tl.startswith("* "):
                 bullet = tl[2:].strip()
-                import re
                 m = re.match(r'`([^`]+)`', bullet)
                 tid = m.group(1).strip() if m else bullet.split()[0] if bullet else ""
                 if tid:
@@ -815,6 +826,10 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
 
         for site in changed_sites:
             path_text = site["path"].strip('`').strip()
+            # Skip exempted sites
+            if path_text in exempted_paths or any(
+                    path_text.startswith(e) for e in exempted_paths):
+                continue
             file_path = path_text.split(":")[0] if ":" in path_text else path_text
             matched_tests = [t for t in test_ids
                              if file_path in t.split("::")[0] or t.split("::")[0] in file_path]
@@ -824,12 +839,44 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
             else:
                 pairs.append((path_text, "", ""))
 
-        # Run the reverts using a minimal context
+        # Run the reverts using a minimal context.
+        # When using a temp worktree, update worktree.json so
+        # compute_site_reverts finds it at the right path.
         from refactory_dsh.nn import RunContext
-        ctx = RunContext(run_dir)
-        revert_results = base_check.compute_site_reverts(ctx, pairs)
-        print(json.dumps(revert_results, indent=2, default=str))
-        return 0
+        from refactory_dsh import worktree as _wt
+
+        wt_backup = None
+        if temp_worktree is not None and wt_json.is_file():
+            wt_backup = wt_json.read_text()
+            wt_data_updated = json.loads(wt_backup)
+            wt_data_updated["path"] = str(temp_worktree)
+            wt_json.write_text(json.dumps(wt_data_updated, indent=2) + "\n")
+        elif temp_worktree is not None:
+            # No worktree.json at all: create one with the temp worktree
+            wt_json.parent.mkdir(parents=True, exist_ok=True)
+            wt_data_new = {
+                "path": str(temp_worktree),
+                "branch": "",
+                "base": commit or "",
+                "head": commit or "",
+                "target": "",
+                "run": str(run_dir),
+            }
+            wt_json.write_text(json.dumps(wt_data_new, indent=2) + "\n")
+            wt_backup = ""  # marker: we created the file
+
+        try:
+            ctx = RunContext(run_dir)
+            revert_results = base_check.compute_site_reverts(ctx, pairs)
+            print(json.dumps(revert_results, indent=2, default=str))
+            return 0
+        finally:
+            # Restore original worktree.json
+            if wt_backup is not None:
+                if wt_backup:
+                    wt_json.write_text(wt_backup)
+                elif wt_json.is_file():
+                    wt_json.unlink()
 
     finally:
         if temp_worktree is not None:
