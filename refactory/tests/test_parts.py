@@ -727,6 +727,9 @@ def test_evaluate_train_honors_seed_and_items(tmp_path):
 
         run.evaluate(seed, part="train", seed=42, items=["alpha", "beta"])
 
+        assert seed.exit_ok is True, f"expected exit_ok=True, got {seed.exit_ok}; error={seed.error}"
+        assert seed.score is not None, f"expected a score, got None; error={seed.error}"
+
         records = run.item_records(seed)
         record_ids = {r["id"] for r in records}
         assert record_ids == {"alpha", "beta"}, (
@@ -780,6 +783,8 @@ def test_train_items_subset_of_manifest(tmp_path):
 
         # Valid subset succeeds.
         run.evaluate(seed, part="train", items=["alpha", "beta"])
+        assert seed.exit_ok is True, f"expected exit_ok=True, got {seed.exit_ok}; error={seed.error}"
+        assert seed.score is not None, f"expected a score, got None; error={seed.error}"
         records = run.item_records(seed)
         assert {r["id"] for r in records} == {"alpha", "beta"}
 

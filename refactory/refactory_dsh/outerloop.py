@@ -123,7 +123,12 @@ class Run:
                     "before evaluating"
                 )
             # Validate train items against manifest when both exist.
-            if manifest is not None and items is not None and "train" in manifest:
+            if manifest is not None and items is not None:
+                if "train" not in manifest:
+                    raise OuterLoopError(
+                        f"the parts manifest has no entry for 'train'; "
+                        f"items cannot be provided for a part not in the manifest"
+                    )
                 allowed = set(manifest["train"])
                 extra = set(items) - allowed
                 if extra:
@@ -133,14 +138,23 @@ class Run:
                     )
             self._loop._evaluate(candidate, seed=seed, items=items)  # noqa: SLF001
         elif part in ("val", "test"):
-            # Validate items against manifest when both exist.
-            if manifest is not None and items is not None and part in manifest:
+            # Validate items against manifest.
+            if manifest is not None and items is not None:
+                if part not in manifest:
+                    raise OuterLoopError(
+                        f"the parts manifest has no entry for {part!r}; "
+                        f"items cannot be provided for a part not in the manifest"
+                    )
                 allowed = set(manifest[part])
                 extra = set(items) - allowed
                 if extra:
                     raise OuterLoopError(
                         f"items {sorted(extra)} are not in the manifest's {part} ids"
                     )
+            elif manifest is None and items is not None:
+                raise OuterLoopError(
+                    f"no parts manifest exists; val/test items require a manifest"
+                )
             self._loop._evaluate_part(candidate, part, items, seed)  # noqa: SLF001
         else:
             raise OuterLoopError(f"unknown part {part!r}; expected 'train', 'val' or 'test'")

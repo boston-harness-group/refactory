@@ -742,7 +742,7 @@ class Loop(OuterLoop):
         if items is not None:
             workdir.mkdir(parents=True, exist_ok=True)
             task_module.make_manifest(workdir, train_ids=items)
-        result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed)
+        result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed, items=items)
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
         candidate.score = result.score - self.config.parsimony * nodes if result.exit_ok else None
@@ -794,7 +794,7 @@ class Loop(OuterLoop):
             if manifest_src.exists():
                 shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
         self._carry_ledger(workdir)
-        result, measurements = self._measure(candidate, workdir, part, seed=seed)
+        result, measurements = self._measure(candidate, workdir, part, seed=seed, items=items)
         # Score-only occasion record for optimizer-facing storage (no records,
         # no workdir).
         occasion_public = {
@@ -812,7 +812,8 @@ class Loop(OuterLoop):
                 json.dumps(result.item_records, indent=2, default=str))
 
     def _measure(
-        self, candidate: Candidate, workdir: Path, part: str, *, seed: int | None = None,
+        self, candidate: Candidate, workdir: Path, part: str, *,
+        seed: int | None = None, items: list[str] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
@@ -822,6 +823,11 @@ class Loop(OuterLoop):
         # and the loop root, not from the candidate's trial directory.
         seed_state = self.population[0].state if self.population else candidate.state
         expected_ids, seed_declares_item_scores = self._expected_item_ids(seed_state, part)
+        # When an explicit items subset was requested, narrow expected_ids to
+        # just those items so _verify_item_set does not fail on the "missing"
+        # items that were intentionally excluded.
+        if items is not None:
+            expected_ids = set(str(i) for i in items)
 
         trials = []
         last = RunResult(exit_ok=False, error="no measurement completed")
