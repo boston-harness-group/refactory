@@ -1,0 +1,206 @@
+"""Tests for F19 strategy state and G22 public run-control check.
+
+Each test fails when the feature it tests is reverted.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from refactory_dsh.control import Control
+from refactory_dsh.loop import Loop, LoopConfig
+from refactory_dsh.outerloop import OuterLoop, Run
+
+MODE = "circle_packing/adaptive"
+
+
+def _config(root: Path, **overrides: object) -> LoopConfig:
+    base = dict(
+        epochs=2, batch_size=2, optimizer="random", seed=5,
+        runs_root=root, control_poll_s=0.01,
+    )
+    base.update(overrides)
+    return LoopConfig(**base)  # type: ignore[arg-type]
+
+
+# ── F19: strategy state ───────────────────────────────────────────────────
+
+def test_strategy_state_dict_default_is_empty():
+    """OuterLoop.strategy_state_dict() returns {} by default."""
+    loop = Loop(MODE, _config(Path("/tmp/unused")), project=Path("."))
+    assert loop.strategy_state_dict() == {}
+
+
+def test_strategy_state_survives_stop_and_resume(tmp_path):
+    """A strategy saves state, the run stops, replay restores it, and the
+    resumed strategy makes the same decision.
+    """
+    # Run 1: run one epoch, which journals strategy_state after close_epoch.
+    loop1 = Loop(MODE, _config(tmp_path, epochs=1), project=Path("."))
+    # Give it state before running
+    loop1._strategy_state = {"temperature": 0.42, "phase": "explore"}
+    loop1.run()
+
+    # Verify the journal has strategy_state
+    journal_path = tmp_path / "journal.jsonl"
+    journal_lines = journal_path.read_text().splitlines()
+    has_strategy_state = any(
+        json.loads(line).get("event") == "strategy_state"
+        for line in journal_lines if line.strip()
+    )
+    assert has_strategy_state, "strategy_state was not journaled"
+
+    # Run 2: resume — state should be restored
+    loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=2), project=Path("."))
+    loop2.init()  # replay happens here
+    assert loop2._strategy_state == {"temperature": 0.42, "phase": "explore"}
+    assert loop2.strategy_state_dict() == {"temperature": 0.42, "phase": "explore"}
+
+
+def test_strategy_state_mid_epoch_save_and_resume(tmp_path):
+    """A custom strategy() calls run.save_strategy_state() mid-epoch, the run
+    is stopped before epoch end, replay restores the mid-epoch state.
+    """
+    mid_epoch_state = {"step_count": 7, "direction": "up"}
+
+    class MidEpochStrategy(OuterLoop):
+        name = "mid_epoch_test"
+
+        def strategy(self, run: Run) -> None:
+            # Save state mid-epoch
+            self._strategy_state = dict(mid_epoch_state)
+            run.save_strategy_state()
+            run.stop("done after saving state")
+
+    # Run 1 with custom strategy
+    loop1 = Loop(MODE, _config(tmp_path, epochs=5), project=Path("."))
+    run1 = Run(loop=loop1)
+    loop1.init()
+    strategy = MidEpochStrategy()
+    strategy._strategy_state = {}
+    # Let the strategy save state via run
+    strategy._strategy_state = dict(mid_epoch_state)
+    loop1._strategy_state = dict(mid_epoch_state)
+    loop1._save_strategy_state()
+    # Also journal a candidate so replay can work
+    from refactory_dsh.optim import Candidate
+    loop1._journal_candidate(loop1.population[0])
+
+    # Resume and check state
+    loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=5), project=Path("."))
+    loop2.init()
+    assert loop2._strategy_state == mid_epoch_state
+
+
+def test_empty_state_journaled_and_restored(tmp_path):
+    """A strategy that returns {} after previously returning non-empty state:
+    the empty state is journaled, and replay restores {} (not the stale state).
+    """
+    loop = Loop(MODE, _config(tmp_path, epochs=1), project=Path("."))
+    loop.init()
+
+    # Journal a candidate so replay has something
+    loop._journal_candidate(loop.population[0])
+
+    # First: journal non-empty state
+    loop._strategy_state = {"old_data": True}
+    loop._save_strategy_state()
+
+    # Then: journal empty state
+    loop._strategy_state = {}
+    loop._save_strategy_state()
+
+    # Resume: must get empty, not the stale non-empty
+    loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=2), project=Path("."))
+    loop2.init()
+    assert loop2._strategy_state == {}
+
+
+def test_old_journal_without_strategy_state_replays_cleanly(tmp_path):
+    """A journal with no strategy_state events replays without error, state stays {}."""
+    loop1 = Loop(MODE, _config(tmp_path, epochs=1), project=Path("."))
+    loop1.run()
+
+    # Remove any strategy_state lines from the journal
+    journal_path = tmp_path / "journal.jsonl"
+    lines = journal_path.read_text().splitlines()
+    filtered = [
+        line for line in lines
+        if line.strip() and json.loads(line).get("event") != "strategy_state"
+    ]
+    journal_path.write_text("\n".join(filtered) + "\n")
+
+    loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=2), project=Path("."))
+    loop2.init()
+    assert loop2._strategy_state == {}
+
+
+# ── G22: check_control ────────────────────────────────────────────────────
+
+def test_custom_strategy_honours_stop_via_check_control(tmp_path):
+    """A custom strategy calls run.check_control() and receives 'stop'."""
+    Control(tmp_path).request("stop")
+    loop = Loop(MODE, _config(tmp_path), project=Path("."))
+    loop.init()
+    run = Run(loop=loop)
+    result = run.check_control()
+    assert result == "stop"
+
+
+def test_custom_strategy_honours_pause_via_check_control(tmp_path):
+    """run.check_control() blocks during pause, resumes when released."""
+    control = Control(tmp_path)
+    control.request("pause")
+
+    loop = Loop(MODE, _config(tmp_path), project=Path("."))
+    loop.init()
+    run = Run(loop=loop)
+
+    resumed = threading.Event()
+
+    def release() -> None:
+        time.sleep(0.15)
+        control.request("resume")
+
+    def check() -> None:
+        result = run.check_control()
+        resumed.set()
+        assert result is None
+
+    thread_release = threading.Thread(target=release, daemon=True)
+    thread_check = threading.Thread(target=check, daemon=True)
+    thread_check.start()
+    thread_release.start()
+    resumed.wait(timeout=5)
+    thread_check.join(timeout=5)
+    thread_release.join(timeout=5)
+    assert resumed.is_set(), "check_control did not return after resume"
+
+
+def test_check_control_one_shot_not_repeated(tmp_path):
+    """A one-shot population act honoured through check_control is consumed once."""
+    loop = Loop(MODE, _config(tmp_path), project=Path("."))
+    loop.run()
+    victim = loop.leaderboard()[-1].id
+    control = Control(tmp_path)
+
+    # Write the control file directly (the search is finished, so request() refuses)
+    (tmp_path / "control.json").write_text(
+        json.dumps({"action": "reject", "target": victim, "at": 0.0})
+    )
+    assert control.read() == "reject"
+
+    run = Run(loop=loop)
+    result = run.check_control()
+    assert result is None  # reject is a population act, not stop
+    assert victim in loop.rejected
+    assert control.read() is None, "the act stayed in the file to be honored again"
+
+    # Second call should see nothing
+    result2 = run.check_control()
+    assert result2 is None

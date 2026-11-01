@@ -47,7 +47,7 @@ def _clean_created():
 
 
 def _config(root: Path, **overrides: object) -> LoopConfig:
-    base = dict(epochs=2, batch_size=4, optimizer="random", seed=5, runs_root=root)
+    base = dict(epochs=2, batch_size=8, optimizer="random", seed=5, runs_root=root)
     base.update(overrides)
     return LoopConfig(**base)  # type: ignore[arg-type]
 

@@ -411,6 +411,9 @@ class Loop(OuterLoop):
         #: The original seed state, for tool-policy admission checks. Set at init,
         #: restored from the journal on resume. Not derived from population[0].
         self._original_seed_state: dict[str, Any] | None = None
+        #: The strategy's own state, backing store for the default
+        #: strategy_state_dict / load_strategy_state implementations.
+        self._strategy_state: dict[str, Any] = {}
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -1751,6 +1754,16 @@ class Loop(OuterLoop):
         self._epoch_open = False
         self._journal("epoch_end", epoch=self.epoch)
 
+    def _save_strategy_state(self) -> None:
+        """Journal the strategy's current state unconditionally.
+
+        Called after close_epoch and by run.save_strategy_state(). Journals
+        even when empty, because skipping empty dicts would let a resume
+        restore a stale non-empty state from an earlier epoch.
+        """
+        strategy_state = self.strategy_state_dict()
+        self._journal("strategy_state", **strategy_state)
+
     def epoch_step(self, run: Run | None = None) -> bool:
         """One iteration, and whether there is another.
 
@@ -1772,6 +1785,7 @@ class Loop(OuterLoop):
         )
         self.on_epoch_end(run)
         self.close_epoch()
+        self._save_strategy_state()
         return another
 
     # ── report ─────────────────────────────────────────────────────────────
@@ -2496,6 +2510,10 @@ class Loop(OuterLoop):
                 # durable state, and a resumed run that forgot a rejection would
                 # resurrect a branch the person had already dismissed.
                 self._replay_control(record)
+            elif event == "strategy_state":
+                self.load_strategy_state(
+                    {k: v for k, v in record.items() if k != "event"}
+                )
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")

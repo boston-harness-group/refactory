@@ -66,7 +66,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
     "broad": (),  # filled in below with every registered name
     "structure": (),  # filled in below with primitives + macros
     "conservative": ("set_knob", "insert_after", "insert_before", "wrap"),
-    "knob_only": ("set_knob", "add_knob", "remove_knob"),
+    "knob_only": ("set_knob", "add_knob", "remove_knob", "text_patch"),
 }
 
 
@@ -349,6 +349,244 @@ def _remove_knob(state: State, edit: dict) -> State:
     return out
 
 
+# Text-patch edit semantics ported from microsoft/SkillOpt (MIT License).
+# Copyright (c) Microsoft Corporation.
+# References:
+#   skillopt/optimizer/skill.py — _apply_edit_with_report(), apply_patch_with_report()
+#   skillopt/types.py — Edit, Patch, EditOp
+# insert_before is a refactory extension not present in SkillOpt's four-op set
+# (EditOp = Literal['append', 'insert_after', 'replace', 'delete'] at types.py:26).
+
+#: SkillOpt's own per-kind on_missing choices as one named configuration.
+#: Users pass ``config=SKILLOPT_PATCH_CONFIG`` (or a copy with overrides) to
+#: get SkillOpt-compatible patch behaviour.
+SKILLOPT_PATCH_CONFIG: dict[str, Any] = {
+    "match": "exact",
+    "on_missing": {
+        "insert_after": "append",   # skill.py ~86-92: fallback to append
+        "insert_before": "skip",    # refactory extension; no SkillOpt analogue
+        "replace": "skip",          # skill.py ~97-100: skip
+        "delete": "skip",           # skill.py ~108-109: skip
+    },
+    "honour_protected": True,
+    "protected_regions": [],
+    "strip_markers": True,
+    "insert_position": "end_of_line",
+}
+
+
+_VALID_ON_MISSING = ("skip", "append", "refuse")
+_TARGET_EDIT_KINDS = ("replace", "delete", "insert_after", "insert_before")
+
+
+def _resolve_on_missing(config_on_missing: str | dict, edit_kind: str) -> str:
+    """Resolve the on_missing policy for a given edit kind."""
+    if isinstance(config_on_missing, str):
+        return config_on_missing
+    if isinstance(config_on_missing, dict):
+        return config_on_missing.get(edit_kind, "skip")
+    return "skip"
+
+
+def _text_patch(state: State, edit: dict) -> State:
+    from .knob import Knob, KnobError
+
+    name = edit.get("name")
+    entries = dict(state.get("knobs") or {})
+    if not isinstance(name, str) or name not in entries:
+        known = ", ".join(sorted(entries)) or "none"
+        raise EditError(f"no knob {name!r}; declared knobs: {known}", code="E-knob")
+    knob = Knob.from_spec(entries[name]["spec"])
+    if knob.frozen:
+        raise EditError(f"knob {name!r} is frozen and cannot be moved", code="E-knob")
+    if knob.kind != "str":
+        raise EditError(
+            f"knob {name!r} has kind {knob.kind!r}; text_patch requires kind 'str'",
+            code="E-knob",
+        )
+    text = str(entries[name]["value"])
+    original_text = text
+
+    config = dict(edit.get("config") or {})
+    match_mode = config.get("match", "exact")
+    if match_mode != "exact":
+        raise EditError(f"unsupported match mode {match_mode!r}; only 'exact' is supported", code="E-patch")
+    on_missing = config.get("on_missing", "skip")
+    # Validate on_missing
+    if isinstance(on_missing, str):
+        if on_missing not in _VALID_ON_MISSING:
+            raise EditError(f"unsupported on_missing policy {on_missing!r}", code="E-patch")
+    elif isinstance(on_missing, dict):
+        for policy_val in on_missing.values():
+            if policy_val not in _VALID_ON_MISSING:
+                raise EditError(f"unsupported on_missing policy {policy_val!r}", code="E-patch")
+    else:
+        raise EditError("on_missing must be a string or dict", code="E-patch")
+
+    honour_protected = config.get("honour_protected", True)
+    protected_regions = list(config.get("protected_regions") or [])
+    strip_markers = config.get("strip_markers", True)
+    insert_position = config.get("insert_position", "end_of_line")
+    if insert_position not in ("end_of_line", "after_target"):
+        raise EditError(f"unsupported insert_position {insert_position!r}", code="E-patch")
+
+    # Collect all marker strings for stripping
+    all_markers: list[str] = []
+    for pair in protected_regions:
+        all_markers.extend(pair)
+
+    edits_list = edit.get("edits")
+    if not isinstance(edits_list, list):
+        raise EditError("text_patch needs an 'edits' list", code="E-patch")
+
+    report: list[dict[str, Any]] = []
+
+    def _strip_content_markers(content: str) -> str:
+        if not strip_markers or not all_markers:
+            return content
+        for marker in all_markers:
+            content = content.replace(marker, "")
+        return content
+
+    def _find_protected_spans() -> list[tuple[int, int]]:
+        """Find all protected spans in the current text."""
+        spans: list[tuple[int, int]] = []
+        if not honour_protected or not protected_regions:
+            return spans
+        for start_marker, end_marker in protected_regions:
+            pos = 0
+            while True:
+                start_idx = text.find(start_marker, pos)
+                if start_idx < 0:
+                    break
+                end_idx = text.find(end_marker, start_idx)
+                if end_idx < 0:
+                    break
+                spans.append((start_idx, end_idx + len(end_marker)))
+                pos = end_idx + len(end_marker)
+        return spans
+
+    def _overlaps_protected(edit_start: int, edit_end: int) -> bool:
+        spans = _find_protected_spans()
+        for prot_start, prot_end in spans:
+            if not (edit_end <= prot_start or edit_start >= prot_end):
+                return True
+        return False
+
+    def _apply_on_missing(kind: str, content: str) -> str:
+        """Apply the on_missing policy for a given edit kind. Returns status."""
+        policy = _resolve_on_missing(on_missing, kind)
+        if policy == "refuse":
+            raise EditError(
+                f"target not found for {kind} edit and on_missing is 'refuse'",
+                code="E-patch",
+            )
+        if policy == "append":
+            return "applied_append"
+        # skip
+        return f"skipped_{kind}_target_not_found"
+
+    def _do_append(content: str) -> str:
+        """Append content, respecting protected regions. Returns modified text."""
+        nonlocal text
+        if honour_protected and protected_regions:
+            # Find earliest protected start marker position
+            earliest = len(text)
+            for start_marker, _end_marker in protected_regions:
+                idx = text.find(start_marker)
+                if idx >= 0 and idx < earliest:
+                    earliest = idx
+            if earliest < len(text):
+                text = text[:earliest] + "\n" + content + text[earliest:]
+                return text
+        text = text + "\n\n" + content + "\n"
+        return text
+
+    for i, edit_item in enumerate(edits_list):
+        kind = edit_item.get("kind")
+        if kind not in ("replace", "delete", "insert_after", "insert_before", "append"):
+            raise EditError(f"unknown edit kind {kind!r}", code="E-patch")
+
+        target = edit_item.get("target", "")
+        content = edit_item.get("content", "")
+        content = _strip_content_markers(content)
+        outcome: dict[str, Any] = {
+            "index": i,
+            "kind": kind,
+            "target": str(target)[:200] if target else "",
+            "content_preview": str(content)[:200],
+            "status": "",
+        }
+
+        if kind == "append":
+            _do_append(content)
+            outcome["status"] = "applied_append"
+            report.append(outcome)
+            continue
+
+        # For kinds that need a target: empty-target guard
+        if not target:
+            outcome["status"] = "skipped"
+            report.append(outcome)
+            continue
+
+        idx = text.find(target)
+
+        if idx < 0:
+            # Target not found — apply on_missing policy
+            status = _apply_on_missing(kind, content)
+            if status == "applied_append":
+                _do_append(content)
+            outcome["status"] = status
+            report.append(outcome)
+            continue
+
+        # Check protected region
+        if _overlaps_protected(idx, idx + len(target)):
+            outcome["status"] = "skipped_protected_region"
+            report.append(outcome)
+            continue
+
+        if kind == "replace":
+            text = text[:idx] + content + text[idx + len(target):]
+            outcome["status"] = "applied_replace"
+        elif kind == "delete":
+            text = text[:idx] + text[idx + len(target):]
+            outcome["status"] = "applied_delete"
+        elif kind == "insert_after":
+            if insert_position == "after_target":
+                text = text[:idx + len(target)] + content + text[idx + len(target):]
+            else:
+                # end_of_line: insert after the end of the line containing the target
+                eol = text.find("\n", idx + len(target))
+                if eol >= 0:
+                    text = text[:eol] + "\n" + content + text[eol:]
+                else:
+                    text = text + "\n" + content
+            outcome["status"] = "applied_insert_after"
+        elif kind == "insert_before":
+            sol = text.rfind("\n", 0, idx)
+            sol = sol + 1 if sol >= 0 else 0
+            text = text[:sol] + content + "\n" + text[sol:]
+            outcome["status"] = "applied_insert_before"
+
+        report.append(outcome)
+
+    # Coerce
+    try:
+        value = knob.coerce(text)
+    except KnobError as exc:
+        raise EditError(f"knob {name!r}: {exc}", code="E-knob") from exc
+
+    out = _finish(state, _graph(state))
+    out["knobs"][name]["value"] = value
+
+    # Attach report to edit dict
+    edit["_report"] = {"outcomes": report, "noop": original_text == text}
+
+    return out
+
+
 _primitive(
     "add_node", "node",
     "Add a node. 'position' is {after|before: id}, {start: true}, {terminal: true} "
@@ -394,6 +632,12 @@ _primitive(
     "remove_knob", "knob",
     "Remove a parameter. Any node still consuming it becomes a validation failure.",
     ("name",), _remove_knob,
+)
+_primitive(
+    "text_patch", "knob",
+    "Apply an ordered list of text edits (replace, delete, insert_after, "
+    "insert_before, append) to a str knob as one patch.",
+    ("name", "edits", "config"), _text_patch,
 )
 
 
@@ -848,6 +1092,22 @@ def random_edit(
             if value is None:
                 continue
             edit = {"op": "set_knob", "name": name, "value": value}
+        elif op == "text_patch":
+            str_movable = [
+                n for n in movable
+                if entries[n]["spec"].get("kind") == "str"
+            ]
+            if not str_movable:
+                continue
+            name = rng.choice(str_movable)
+            from .knob import Knob as _KnobTP
+
+            knob = _KnobTP.from_spec(entries[name]["spec"])
+            sampled = knob.sample(rng, entries[name]["value"])
+            if sampled is None:
+                continue
+            edit = {"op": "text_patch", "name": name,
+                    "edits": [{"kind": "append", "content": sampled}]}
         elif op in ("add_knob", "remove_knob"):
             continue  # parameter-set surgery needs a named knob; not sampled
         elif op in ("insert_after", "insert_before", "wrap"):
