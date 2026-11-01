@@ -933,7 +933,7 @@ The per-item half of a data node, from the command line.
 |---|---|---|
 | class | `ItemsError` | `` |
 | function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int') -> 'dict[str, Any]'` |
-| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None) -> 'dict[str, Any]'` |
+| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None) -> 'dict[str, Any]'` |
 | function | `command_list` | `(node: 'Node', workdir: 'Path') -> 'dict[str, Any]'` |
 | function | `command_reset` | `(workdir: 'Path', request: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |

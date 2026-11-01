@@ -134,3 +134,28 @@ because a model cannot enter a subgraph the cursor never enters.
 
 `refactory/tests/test_equivalence.py` runs one data-driven mode on both runtimes and
 compares the facts.
+
+## Failed items and the all-fail rule
+
+Each item's lifecycle (setup → subgraph → verify) is wrapped in a try/except. A
+failed item is recorded as:
+
+```json
+{"id": "…", "passed": false, "score": 0.0, "error_text": "…", "error_kind": "…"}
+```
+
+- **`error_text`** is the exception message, truncated to 4096 characters.
+- **`error_kind`** is `"timeout"` when the per-item deadline is exceeded,
+  `"RuntimeError"` for subgraph or verify failures, or the exception class name
+  for other errors.
+
+A data node fails only when **every** item it processed fails (the all-fail rule).
+The count is against items, not records, so a 3-item node with 1 failure and 2
+passes succeeds. On the walker, the check compares the number of failed items
+against the total item count. On the spine, the check uses run-local pass state
+(processed and failed counts under `.refactory/pass_state/<node_id>.json`) so it
+works whether or not the node declares `item_scores` in its `produces`.
+
+A per-item deadline covers only setup and verify (and item loading), matching the
+spine's per-command `runDataCommand` deadline. The deadline does not depend on
+`enable_recovery`.

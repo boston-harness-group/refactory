@@ -725,6 +725,9 @@ class Executor:
         visits = self._gate_iterations
         current: str | None = start or self.graph.start or None
         error: str | None = None
+        # Track step indices that belong to failed items so the post-walk
+        # error check can skip them.
+        _failed_item_step_indices: set[int] = set()
         try:
             retries = loop_edges(self.graph)
         except ValueError as exc:
@@ -796,16 +799,21 @@ class Executor:
                 _item_deadline_s = self._data_item_deadline()
 
                 # Scale step cap for data nodes: save the initial step count
-                # so we can reset per item, preventing large benchmarks from
-                # hitting the global cap.
-                _data_steps_base = len(self.steps)
+                # and the original max_steps so we can account for the kept
+                # history after the loop. Scale max_steps by item count so
+                # large benchmarks don't hit the global cap.
+                _data_steps_start = len(self.steps)
+                _subgraph_node_count = len([
+                    n for n in self.graph.nodes.values()
+                    if n.id != node.id
+                ]) or 1
+                _original_max_steps = self.max_steps
+                self.max_steps += (len(items) - 1) * _subgraph_node_count
 
                 scores: list[dict[str, Any]] = []
                 _data_halted = False
                 for index, item in enumerate(items):
-                    # Reset step counter per item pass so the cap applies
-                    # per item rather than globally (parity fix 4).
-                    self.steps = self.steps[:_data_steps_base]
+                    _item_steps_start = len(self.steps)
 
                     instance = instance_of(item)
                     item_id = str(item.get("id") or index)
@@ -813,7 +821,7 @@ class Executor:
                     _prev_handler = None
                     _prev_alarm = 0
                     try:
-                        # Arm the per-item deadline via SIGALRM.
+                        # Phase 1: arm deadline around setup + item loading only.
                         if _item_deadline_s is not None:
                             def _deadline_handler(signum: int, frame: Any) -> None:
                                 raise _ItemDeadlineError(node.id, item_id, _item_deadline_s)  # type: ignore[arg-type]
@@ -832,11 +840,25 @@ class Executor:
                         self.ctx._declared_facts = node.produces  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
                         self.ctx.write_json(CURRENT_ITEM, item)
+
+                        # Disarm deadline before walking the branch.
+                        if _alarm_armed:
+                            signal.alarm(0)
+                            _alarm_armed = False
+
+                        # Phase 2: walk the branch (no deadline active).
                         branch_error = self._walk_branch(
                             node.subgraph_entry, node.subgraph_exit, include_barrier=True, iterations={}
                         )
                         if branch_error is not None:
                             raise _BranchFailed(branch_error)
+
+                        # Phase 3: arm deadline around verify only.
+                        if _item_deadline_s is not None:
+                            signal.signal(signal.SIGALRM, _deadline_handler)
+                            signal.alarm(int(max(1, _item_deadline_s)))
+                            _alarm_armed = True
+
                         if task is not None:
                             verdict = task.verify(instance, self.ctx.workdir)
                         else:
@@ -850,15 +872,41 @@ class Executor:
                         _data_halted = True
                         break
                     except GateStop as exc:
+                        # A user gate in a data pass must pause the run
+                        # (re-raise like a halt), not become a failed item.
                         self._record(node.id, error=str(exc), outcome="refused")
+                        error = str(exc)
+                        _data_halted = True  # break out of both loops
+                        break
+                    except _ItemDeadlineError as exc:
+                        # Deadline exceeded: record as timeout, not retryable.
                         record = make_item_record(item_id, None, error=exc)
                         if record is not None:
+                            record["error_kind"] = "timeout"
                             scores.append(record)
+                        _failed_item_step_indices.update(
+                            range(_item_steps_start, len(self.steps))
+                        )
+                        continue
+                    except _BranchFailed as exc:
+                        # Wrap in RuntimeError so error_kind matches the
+                        # spine's "RuntimeError" for subgraph failures.
+                        record = make_item_record(
+                            item_id, None, error=RuntimeError(str(exc))
+                        )
+                        if record is not None:
+                            scores.append(record)
+                        _failed_item_step_indices.update(
+                            range(_item_steps_start, len(self.steps))
+                        )
                         continue
                     except Exception as exc:
                         record = make_item_record(item_id, None, error=exc)
                         if record is not None:
                             scores.append(record)
+                        _failed_item_step_indices.update(
+                            range(_item_steps_start, len(self.steps))
+                        )
                         continue
                     else:
                         record = make_item_record(item_id, verdict)
@@ -873,15 +921,23 @@ class Executor:
                             if _prev_alarm > 0:
                                 signal.alarm(_prev_alarm)
 
+                # Restore max_steps, offset by the steps the data loop added
+                # so the main walk loop's cap accounts for the kept history.
+                _data_steps_added = len(self.steps) - _data_steps_start
+                self.max_steps = _original_max_steps + _data_steps_added
+
                 if _data_halted:
                     break
-                # All-items-failed rule: the data node fails only when every item fails.
+                # All-items-failed rule: the data node fails only when every
+                # item fails. Count against total items, not records.
                 if scores:
-                    all_failed = all(r.get("error_text") is not None for r in scores)
+                    failed_count = sum(
+                        1 for r in scores if r.get("error_text") is not None
+                    )
                     if "item_scores" in node.produces:
                         self.ctx.set_fact("item_scores", scores)
-                    if all_failed:
-                        error = f"{node.id}: all {len(scores)} items failed"
+                    if failed_count == len(items):
+                        error = f"{node.id}: all {len(items)} items failed"
                         break
                 self.record.complete(node)
                 out = self.graph.out_edges(node.id)
@@ -942,8 +998,8 @@ class Executor:
                 self._record(current)
 
         if error is None:
-            for step in self.steps:
-                if step.error:
+            for step_idx, step in enumerate(self.steps):
+                if step.error and step_idx not in _failed_item_step_indices:
                     error = step.error
                     break
         if error is None and self.ctx.budget is not None:
@@ -1139,13 +1195,11 @@ class Executor:
 
         The spine's ``runDataCommand`` (execute.ts:268-278) resolves the shell's
         ``timeoutMs`` and clamps it to the remaining budget.  The walker applies
-        the same deadline to each item's lifecycle (setup + branch + verify).
-        When ``enable_recovery`` is True, the deadline is derived from the
-        budget's remaining time with a 3600 s default, matching the spine's
-        ``commandTimeoutMs`` default.  Without recovery, no deadline is applied.
+        the same deadline to each item's setup and verify phases (not the
+        branch).  The deadline is derived from the budget's remaining time
+        with a 3600 s default, matching the spine's ``commandTimeoutMs``
+        default.  It does not depend on ``enable_recovery``.
         """
-        if not self.enable_recovery:
-            return None
         raw = 3600.0
         remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
         if remaining is not None:

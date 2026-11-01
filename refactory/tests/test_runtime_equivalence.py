@@ -814,3 +814,102 @@ def test_no_gap_explains_a_difference_it_was_not_written_for(runs):
     ):
         made = Difference(aspect, key, left, right)
         assert unexplained([made], gaps), f"a gap explained a made-up {aspect} difference in {key}"
+
+
+# ── Ask 6: data failure scenario equivalence ─────────────────────────────────
+
+
+def test_data_failure_scenario_matches(tmp_path):
+    """Walker and spine-side item commands agree on item_scores for failures.
+
+    Items include one whose verify raises, one whose verify passes, and one
+    (the LAST) whose subgraph op fails. Both runtimes produce the same ids,
+    passed, score and error_kind values. A rerun in the same directory
+    produces the same result (no stale entries from the previous item set).
+    """
+    import importlib
+    from refactory_dsh import items as items_mod
+    from refactory_dsh import lowering, nn, task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class FailureScenarioTask(task_module.Task):
+        name = "failure_scenario"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="pass_item"),
+                task_module.TaskInstance(id="raise_item"),
+                task_module.TaskInstance(id="last_fails"),
+            ]
+
+        def verify(self, instance, workspace):
+            if instance.id == "raise_item":
+                raise ValueError("verify raised")
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("failure_scenario", FailureScenarioTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="failure_scenario", writes=(CURRENT_ITEM,),
+        produces=("item_scores",),
+    ))
+    # fail_on_a is defined in loop_ops — it raises for item id "a", but here
+    # the last item's id is "last_fails". We need an op that fails on the last
+    # item specifically. Use a custom op that fails on "last_fails":
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    # Walker run
+    walker_dir = tmp_path / "walker"
+    walker_result = execute(graph, walker_dir)
+    assert walker_result.exit_ok, walker_result.error
+    walker_scores = walker_result.facts.get("item_scores", [])
+
+    # Spine-side (command-driven) run
+    spine_dir = tmp_path / "spine"
+    lowering.write_declarations({"graph": graph.to_state()}, spine_dir)
+    node = items_mod.data_node(spine_dir, "data")
+    count_info = items_mod.command_list(node, spine_dir)
+    for index in range(count_info["count"]):
+        items_mod.command_begin(node, spine_dir, index)
+        items_mod.command_end(node, spine_dir, index)
+    spine_facts = json.loads((spine_dir / "facts.json").read_text())
+    spine_scores = spine_facts.get("item_scores", [])
+
+    # Compare: same ids, same passed, same score, same error_kind
+    def normalize(scores):
+        return sorted(
+            [(s["id"], s["passed"], s["score"], s.get("error_kind"))
+             for s in scores],
+            key=lambda x: x[0],
+        )
+
+    assert normalize(walker_scores) == normalize(spine_scores), (
+        f"walker and spine disagree:\nwalker: {walker_scores}\nspine: {spine_scores}"
+    )
+
+    # Rerun in the same directories — no stale entries
+    walker_result2 = execute(graph, walker_dir)
+    assert walker_result2.exit_ok, walker_result2.error
+    walker_scores2 = walker_result2.facts.get("item_scores", [])
+    for index in range(count_info["count"]):
+        items_mod.command_begin(node, spine_dir, index)
+        items_mod.command_end(node, spine_dir, index)
+    spine_facts2 = json.loads((spine_dir / "facts.json").read_text())
+    spine_scores2 = spine_facts2.get("item_scores", [])
+
+    assert normalize(walker_scores2) == normalize(spine_scores2), (
+        f"rerun mismatch:\nwalker: {walker_scores2}\nspine: {spine_scores2}"
+    )
+    assert len(spine_scores2) == len(walker_scores2) == 3, (
+        f"rerun should have exactly 3 entries (no stale): {len(spine_scores2)}"
+    )

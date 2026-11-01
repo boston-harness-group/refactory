@@ -860,9 +860,8 @@ def test_verify_timeout_becomes_failed_item(tmp_path):
     workdir = tmp_path / "run"
     ctx = RunContext(workdir, enforce_writes=True)
     # Use a very short deadline so the test doesn't take too long.
-    # We monkey-patch the deadline method to return 2 seconds.
-    executor = Executor(graph, ctx, max_steps=2000, enable_recovery=True)
-    original_deadline = executor._data_item_deadline
+    # The deadline does not depend on enable_recovery (Ask 2).
+    executor = Executor(graph, ctx, max_steps=2000)
     executor._data_item_deadline = lambda: 2.0  # 2-second deadline
     result = executor.run()
 
@@ -877,7 +876,7 @@ def test_verify_timeout_becomes_failed_item(tmp_path):
     assert slow_score["score"] == 0.0
     assert slow_score.get("error_text") is not None
     assert "timed out" in slow_score["error_text"].lower() or "deadline" in slow_score["error_text"].lower()
-    assert slow_score.get("error_kind") == "_ItemDeadlineError"
+    assert slow_score.get("error_kind") == "timeout"
 
     assert fast_score["passed"] is True
     assert fast_score["score"] == 1.0
@@ -902,3 +901,104 @@ def test_item_scores_no_double_counting_on_rerun(tmp_path):
     assert result2.exit_ok
     scores2 = result2.facts["item_scores"]
     assert len(scores2) == 2
+
+
+def test_last_item_failure_does_not_fail_run(tmp_path):
+    """A failure in the LAST item does not fail the whole run (Ask 1).
+
+    Items [b, a] with fail_on_a: the last item (a) fails but exit_ok is True,
+    item_scores has a failed and b passed, and iterations reflects all steps.
+    Fails when the step wipe is restored or the step check does not skip
+    failed-item steps.
+    """
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class LastFailTask(task_module.Task):
+        name = "last_fail_task"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="b"),
+                task_module.TaskInstance(id="a"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("last_fail_task", LastFailTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="last_fail_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:fail_on_a",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is True, f"exit_ok should be True but error: {result.error}"
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2
+    a_score = next(s for s in scores if s["id"] == "a")
+    b_score = next(s for s in scores if s["id"] == "b")
+    assert a_score["passed"] is False
+    assert a_score["score"] == 0.0
+    assert a_score.get("error_text") is not None
+    assert b_score["passed"] is True
+    assert b_score["score"] == 1.0
+    # Steps should not be wiped: iterations should reflect all steps.
+    assert result.iterations > 0
+
+
+def test_one_of_three_items_failing_without_task_succeeds(tmp_path):
+    """With no Task, 1 of 3 items failing must not fail the node (Ask 5).
+
+    3 inline items, Task verifies them all, op fail_on_a fails on item a;
+    exit_ok is True because only 1 of 3 items failed (the all-fail rule
+    counts items, not records).
+    """
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class AlwaysPassTask(task_module.Task):
+        name = "always_pass_3"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="a"),
+                task_module.TaskInstance(id="b"),
+                task_module.TaskInstance(id="c"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("always_pass_3", AlwaysPassTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="always_pass_3", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:fail_on_a",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is True, f"1 of 3 failing should not fail the node: {result.error}"
+    scores = result.facts["item_scores"]
+    assert len(scores) == 3
+    failed = [s for s in scores if s.get("error_text") is not None]
+    passed = [s for s in scores if s.get("error_text") is None]
+    assert len(failed) == 1
+    assert len(passed) == 2

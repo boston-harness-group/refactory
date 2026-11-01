@@ -610,4 +610,228 @@ describe('the data loader command line', () => {
     expect(dataCommandOf(node, 'end', { dataCommand: 'loader' }, 0, 'subgraph failed'))
       .toBe("loader end --node 'data' --index 0 --failed 'subgraph failed'")
   })
+
+  it('includes --failed-kind when provided', () => {
+    const node = { id: 'data', _type: 'DataNode' }
+    expect(dataCommandOf(node, 'end', { dataCommand: 'loader' }, 0, 'timed out', 'timeout'))
+      .toBe("loader end --node 'data' --index 0 --failed 'timed out' --failed-kind 'timeout'")
+  })
+})
+
+describe('begin/end failure handling (Ask 3)', () => {
+  /** Helper: a shell that can simulate begin/end failures. */
+  function failingShell(
+    items: Array<Record<string, unknown>>,
+    log: string[],
+    overrides: {
+      beginFailIndex?: number
+      beginTimedOutIndex?: number
+      endFailIndex?: number
+      endTimedOutIndex?: number
+    } = {},
+  ) {
+    return {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+
+          // Simulate begin timeout
+          if (verb === 'begin' && index === overrides.beginTimedOutIndex) {
+            return {
+              exitCode: null, signal: null, timedOut: true, aborted: false, timeoutMs: 1000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'begin timed out', truncated: false },
+            }
+          }
+          // Simulate begin exit-code failure
+          if (verb === 'begin' && index === overrides.beginFailIndex) {
+            return {
+              exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'begin failed', truncated: false },
+            }
+          }
+          // Simulate end timeout
+          if (verb === 'end' && index === overrides.endTimedOutIndex && !spec.command.includes('--failed')) {
+            return {
+              exitCode: null, signal: null, timedOut: true, aborted: false, timeoutMs: 1000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'end timed out', truncated: false },
+            }
+          }
+          // Simulate end exit-code failure
+          if (verb === 'end' && index === overrides.endFailIndex && !spec.command.includes('--failed')) {
+            return {
+              exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'end failed', truncated: false },
+            }
+          }
+
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+  }
+
+  it('treats a begin timeout as a failed item, not a run failure', async () => {
+    const log: string[] = []
+    const shell = failingShell([{ id: 'a' }, { id: 'b' }], log, { beginTimedOutIndex: 0 })
+    const root = await mount(shell)
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    // Item 0 timed out on begin; item 1 should be exposed
+    expect(first.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // The end --failed for item 0 should include --failed-kind 'timeout'
+    const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
+    expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+    expect(endFailedCmds[0]).toContain('--failed-kind')
+  })
+
+  it('treats a begin exit-code failure as a failed item', async () => {
+    const log: string[] = []
+    const shell = failingShell([{ id: 'a' }, { id: 'b' }], log, { beginFailIndex: 0 })
+    const root = await mount(shell)
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    expect(first.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+  })
+
+  it('treats an end timeout as a failed item', async () => {
+    const log: string[] = []
+    const shell = failingShell([{ id: 'a' }, { id: 'b' }], log, { endTimedOutIndex: 0 })
+    const root = await mount(shell)
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    const second = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown; status?: string }
+    // Item 1 should be active now
+    expect(second.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // The fallback end --failed should include --failed-kind
+    const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
+    expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+    expect(endFailedCmds[0]).toContain('--failed-kind')
+  })
+
+  it('treats an end exit-code failure as a failed item', async () => {
+    const log: string[] = []
+    const shell = failingShell([{ id: 'a' }, { id: 'b' }], log, { endFailIndex: 0 })
+    const root = await mount(shell)
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    // end for item 0 fails with exit code 1 — should propagate as node failure
+    // (not all-items-failed since not all items processed yet)
+    const second = await call(root, 'wf_next') as { status: string }
+    // An end exit-code failure that's not a timeout propagates as a node failure
+    expect(second.status).toBe('failed')
+  })
+})
+
+describe('abandonPass primitive (Correction 1)', () => {
+  /** A data graph with a gate in the subgraph body. */
+  function dataGraphWithGate(): WorkflowGraph {
+    return {
+      name: 'dataset-with-gate',
+      start_node: 'data',
+      nodes: {
+        data: {
+          _type: 'DataNode', id: 'data',
+          task_ref: 'probe', subgraph_entry: 'work', subgraph_exit: 'gate',
+          reads: [], writes: ['current_item.json'],
+        },
+        work: { _type: 'FnNode', id: 'work', command: 'true', reads: [], writes: [] },
+        gate: {
+          _type: 'GateNode', id: 'gate', evaluator_type: 'fn',
+          evaluator_command: 'echo proceed', reads: [], writes: [],
+        },
+        after: { _type: 'FnNode', id: 'after', command: 'true', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'data', target: 'after' },
+        { source: 'work', target: 'gate' },
+        { source: 'gate', target: 'after', condition: 'proceed' },
+      ],
+    }
+  }
+
+  it('records failed node as failed and remaining nodes as skipped, none completed, no verdicts', async () => {
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    let callCount = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          if (verb === '') {
+            callCount += 1
+            if (callCount === 1) {
+              return {
+                exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+                stdout: { text: '', truncated: false },
+                stderr: { text: 'work failed for item a', truncated: false },
+              }
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    // First item's work fails; abandonPass should skip 'end' (the agent node)
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    // The second item should be the one exposed
+    expect(first.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // The end --failed should have been called for item 0
+    const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
+    expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+  })
 })

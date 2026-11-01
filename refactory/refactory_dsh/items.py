@@ -221,6 +221,27 @@ def command_list(node: Node, workdir: Path) -> dict[str, Any]:
     }
 
 
+def _pass_state_path(workdir: Path, node_id: str) -> Path:
+    """Path to the run-local pass state file for a data node."""
+    return workdir / ".refactory" / "pass_state" / f"{node_id}.json"
+
+
+def _read_pass_state(workdir: Path, node_id: str) -> dict[str, int]:
+    path = _pass_state_path(workdir, node_id)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"processed": 0, "failed": 0}
+
+
+def _write_pass_state(workdir: Path, node_id: str, state: dict[str, int]) -> None:
+    path = _pass_state_path(workdir, node_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state))
+
+
 def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     """Materialise one item and prepare the workspace for its pass."""
     items = items_of(node, workdir)
@@ -229,6 +250,19 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
             f"item {index} is out of range: node {node.id!r} selected {len(items)} item(s)"
         )
     item = items[index]
+
+    # On the first item, reset pass state and clear stale item_scores.
+    if index == 0:
+        _write_pass_state(workdir, node.id, {"processed": 0, "failed": 0})
+        if SCORES_FACT in node.produces:
+            from refactory_dsh.run import edit_facts
+            edit_facts(workdir, lambda facts: facts.pop(SCORES_FACT, None))
+
+    # Track processed count in pass state.
+    ps = _read_pass_state(workdir, node.id)
+    ps["processed"] = ps.get("processed", 0) + 1
+    _write_pass_state(workdir, node.id, ps)
+
     (workdir / CURRENT_ITEM).write_text(json.dumps(item, indent=2, default=str))
     task = _task_of(node, workdir)
     if task is not None:
@@ -240,18 +274,27 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
             record = make_item_record(str(item.get("id") or index), None, error=exc)
             if record is not None and SCORES_FACT in node.produces:
                 _write_facts(workdir, SCORES_FACT, [record])
+            # Track failed count in pass state.
+            ps = _read_pass_state(workdir, node.id)
+            ps["failed"] = ps.get("failed", 0) + 1
+            _write_pass_state(workdir, node.id, ps)
             return {"error": str(exc)}
     return item
 
 
 def command_end(
-    node: Node, workdir: Path, index: int, *, failed_reason: str | None = None,
+    node: Node, workdir: Path, index: int, *,
+    failed_reason: str | None = None,
+    failed_kind: str | None = None,
 ) -> dict[str, Any]:
     """The Task's verdict on one pass, folded into the run's facts.
 
     When *failed_reason* is set (e.g. a subgraph node exited with code ≠ 0),
     ``task.verify()`` is skipped and the item is recorded as failed — matching
     the walker, which never calls verify after a branch error.
+
+    When *failed_kind* is set (e.g. ``"timeout"``), the ``error_kind`` field in
+    the record is overridden, so both runtimes record the same kind.
     """
     items = items_of(node, workdir)
     if index < 0 or index >= len(items):
@@ -266,16 +309,22 @@ def command_end(
     if failed_reason is not None:
         exc = RuntimeError(failed_reason)
         record = make_item_record(item_id, None, error=exc)
-        if record is not None and SCORES_FACT in node.produces:
-            _write_facts(workdir, SCORES_FACT, [record])
+        if record is not None:
+            if failed_kind is not None:
+                record["error_kind"] = failed_kind
+            if SCORES_FACT in node.produces:
+                _write_facts(workdir, SCORES_FACT, [record])
+        # Track failed count in pass state.
+        ps = _read_pass_state(workdir, node.id)
+        ps["failed"] = ps.get("failed", 0) + 1
+        _write_pass_state(workdir, node.id, ps)
         result: dict[str, Any] = {"error": failed_reason, **(record or {})}
-        # All-items-failed check: when this is the last item, read back
-        # item_scores and fail the node if every item has an error.
         _check_all_items_failed(node, workdir, items, index)
         return result
 
     task = _task_of(node, workdir)
     if task is None:
+        _check_all_items_failed(node, workdir, items, index)
         return {}
     try:
         verdict = task.verify(instance_of(item), workdir)
@@ -285,10 +334,15 @@ def command_end(
         record = make_item_record(item_id, None, error=exc)
         if record is not None and SCORES_FACT in node.produces:
             _write_facts(workdir, SCORES_FACT, [record])
+        # Track failed count in pass state.
+        ps = _read_pass_state(workdir, node.id)
+        ps["failed"] = ps.get("failed", 0) + 1
+        _write_pass_state(workdir, node.id, ps)
         result = {"error": str(exc), **(record or {})}
         _check_all_items_failed(node, workdir, items, index)
         return result
     if verdict is None:
+        _check_all_items_failed(node, workdir, items, index)
         return {}
     record = make_item_record(item_id, verdict)
     if record is not None and SCORES_FACT in node.produces:
@@ -303,28 +357,19 @@ def _check_all_items_failed(
     """After the last item's end, fail the node if every item has an error.
 
     This makes the spine path match the walker's all-items-failed rule: a data
-    node fails only when *every* item fails. The check reads ``item_scores``
-    from facts (which ``_write_facts`` just updated) and raises ``ItemsError``
-    when all entries carry ``error_text``.  The raised exception exits the
-    command with code 1, which the TS drain reports as a ``CommandFailure``,
-    producing ``exit_ok=False`` in ``_measure()``.
+    node fails only when *every* item it processed fails. The check uses
+    run-local pass state (processed and failed counts under
+    ``.refactory/pass_state/<node_id>.json``), not the ``item_scores`` fact,
+    so it works whether or not the node declares ``item_scores`` in its
+    ``produces``.
     """
     if index + 1 < len(items):
         return  # not the last item yet
-    if SCORES_FACT not in node.produces:
-        return
-    facts_path = workdir / FACTS
-    if not facts_path.exists():
-        return
-    try:
-        facts = json.loads(facts_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return
-    scores = facts.get(SCORES_FACT)
-    if not isinstance(scores, list) or not scores:
-        return
-    if all(isinstance(s, dict) and s.get("error_text") is not None for s in scores):
-        raise ItemsError(f"{node.id}: all {len(scores)} items failed")
+    ps = _read_pass_state(workdir, node.id)
+    processed = ps.get("processed", 0)
+    failed = ps.get("failed", 0)
+    if processed > 0 and failed == processed:
+        raise ItemsError(f"{node.id}: all {processed} items failed")
 
 
 def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -416,11 +461,12 @@ def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def _options(argv: list[str]) -> tuple[str, int, str | None]:
-    """The ``--node`` id, ``--index``, and optional ``--failed`` reason."""
+def _options(argv: list[str]) -> tuple[str, int, str | None, str | None]:
+    """The ``--node`` id, ``--index``, optional ``--failed`` reason and ``--failed-kind``."""
     node_id = ""
     index = 0
     failed_reason: str | None = None
+    failed_kind: str | None = None
     if "--node" in argv:
         position = argv.index("--node")
         if position + 1 >= len(argv):
@@ -439,9 +485,14 @@ def _options(argv: list[str]) -> tuple[str, int, str | None]:
         if position + 1 >= len(argv):
             raise ItemsError("--failed needs a value")
         failed_reason = argv[position + 1]
+    if "--failed-kind" in argv:
+        position = argv.index("--failed-kind")
+        if position + 1 >= len(argv):
+            raise ItemsError("--failed-kind needs a value")
+        failed_kind = argv[position + 1]
     if not node_id:
         raise ItemsError("--node is required: the declarations are keyed by node id")
-    return node_id, index, failed_reason
+    return node_id, index, failed_reason, failed_kind
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -463,14 +514,17 @@ def main(argv: list[str] | None = None) -> int:
             produced = command_reset(workdir, json.load(sys.stdin))
             print(json.dumps(produced, default=str))
             return 0
-        node_id, index, failed_reason = _options(argv[1:])
+        node_id, index, failed_reason, failed_kind = _options(argv[1:])
         node = data_node(workdir, node_id)
         if verb == "list":
             produced: dict[str, Any] = command_list(node, workdir)
         elif verb == "begin":
             produced = command_begin(node, workdir, index)
         else:
-            produced = command_end(node, workdir, index, failed_reason=failed_reason)
+            produced = command_end(
+                node, workdir, index,
+                failed_reason=failed_reason, failed_kind=failed_kind,
+            )
     except (ItemsError, TaskError) as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

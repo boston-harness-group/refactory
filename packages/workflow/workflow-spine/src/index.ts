@@ -1532,25 +1532,53 @@ export function apply(ctx: Context, config: Config): void {
       return {}
     }
 
-    /** Materialise the running pass's item, once per item across calls. */
-    /** Skip all due subgraph nodes by completing them sequentially until the pass finishes. */
-    const skipSubgraph = (s: Spine): void => {
-      // Keep completing whatever is due until the pass is marked finished or
-      // no more nodes can be completed (safety bound to avoid infinite loops).
-      for (let steps = 0; steps < 100; steps += 1) {
+    /**
+     * Abandon the current item pass: advance past remaining pass-body nodes
+     * without fabricating gate verdicts. Non-gate nodes are completed (the
+     * completed state is cleared by endPass's invalidateNodes for the next
+     * item). Gate nodes are skipped to avoid fabricating a verdict; the
+     * returned list must be unskipped after endPass.
+     */
+    const abandonPass = (s: Spine): string[] => {
+      const skippedGates: string[] = []
+      for (let steps = 0; steps < 200; steps += 1) {
         const p = s.passOf()
         if (p === undefined || p.finished) break
         const state = s.next()
         if (state.status !== 'ready' || state.nodes.length === 0) break
-        let completed = false
+        let advanced = false
         for (const node of state.nodes) {
-          try {
-            s.complete(node.id)
-            completed = true
-          } catch { /* not due or gate */ }
+          if (node._type === 'GateNode') {
+            // Skip gate nodes to avoid fabricating a verdict.
+            try {
+              s.skip(node.id, { source: 'person' })
+              skippedGates.push(node.id)
+              advanced = true
+            } catch { /* not skippable */ }
+          } else {
+            // Complete non-gate nodes to advance the cursor.
+            try {
+              s.complete(node.id)
+              advanced = true
+            } catch { /* not due */ }
+          }
         }
-        if (!completed) break
+        if (!advanced) break
       }
+      return skippedGates
+    }
+
+    /** Clean up gate skips added by abandonPass after endPass. */
+    const cleanupAbandonSkips = (s: Spine, skippedGates: string[]): void => {
+      for (const nodeId of skippedGates) {
+        try { s.unskip(nodeId) } catch { /* already unskipped */ }
+      }
+    }
+
+    /** Bounded stderr tail for error_text parity with the walker. */
+    const stderrTail = (failure: CommandFailure): string => {
+      const text = failure.stderr ?? failure.error ?? `failed with exit code ${String(failure.exitCode)}`
+      return text.slice(-4096)
     }
 
     const beginItem = async (): Promise<{ failure?: CommandFailure }> => {
@@ -1565,25 +1593,51 @@ export function apply(ctx: Context, config: Config): void {
       const data = spine.view(pass.node)
       recordStatus(spine, workdir, 'executing')
       const started = await runDataCommand(shell, data, 'begin', runner, pass.index)
-      if (!started.ok) return { failure: started }
+      if (!started.ok) {
+        // Begin command failed or timed out: record as a failed item, not
+        // a run failure. Abandon remaining pass-body nodes, run fallback
+        // end --failed to record the item, then continue.
+        const reason = stderrTail(started)
+        const failedKind = started.error?.includes('timed out') ? 'timeout' : undefined
+        const beginSkippedGates = abandonPass(spine)
+        await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+        materialised.delete(spine)
+        item = undefined
+        spine.endPass()
+        cleanupAbandonSkips(spine, beginSkippedGates)
+        structural.clear()
+        recordBoundary()
+        return {}
+      }
       // F4: a setup failure is signalled by a response whose only key is `error`.
       // The Python side has already written the failed-item record; skip the
-      // subgraph by completing its nodes, running end, and advancing.
+      // subgraph by recording remaining nodes as skipped, running end, and advancing.
       // The check requires `error` as the sole key so that an item dict from a
       // data source that naturally contains an `error` column is not falsely
       // treated as a setup failure.
       if (started.value != null && typeof started.value === 'object'
           && 'error' in started.value && Object.keys(started.value).length === 1) {
         materialised.set(spine, { key, item: started.value })
-        // Complete subgraph nodes to clear cursor positions so endPass succeeds.
-        skipSubgraph(spine)
+        // Record remaining subgraph nodes as skipped (no complete, no verdict on gates).
+        const setupSkippedGates = abandonPass(spine)
         // Run end command with --failed to skip verify, matching the walker.
         const setupError = String((started.value as Record<string, unknown>).error ?? 'setup failed')
         const ended = await runDataCommand(shell, data, 'end', runner, pass.index, setupError)
-        if (!ended.ok) return { failure: ended }
+        if (!ended.ok) {
+          if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
+            // End timed out or was killed: run a fallback to record the item.
+            const reason = stderrTail(ended)
+            const failedKind = ended.error?.includes('timed out') ? 'timeout' : undefined
+            await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+          } else {
+            // End exited non-zero (e.g. all-items-failed): propagate.
+            return { failure: ended }
+          }
+        }
         materialised.delete(spine)
         item = undefined
         spine.endPass()
+        cleanupAbandonSkips(spine, setupSkippedGates)
         structural.clear()
         recordBoundary()
         return {}
@@ -1614,7 +1668,24 @@ export function apply(ctx: Context, config: Config): void {
       const data = spine.view(pass.node)
       recordStatus(spine, workdir, 'executing')
       const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
-      if (!ended.ok) return { failure: ended }
+      if (!ended.ok) {
+        if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
+          // End command timed out or was killed: run a fallback end --failed
+          // to record the item as failed (not lost), then continue.
+          const reason = stderrTail(ended)
+          const failedKind = ended.error?.includes('timed out') ? 'timeout' : undefined
+          await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+          materialised.delete(spine)
+          item = undefined
+          spine.endPass()
+          structural.clear()
+          recordBoundary()
+          return {}
+        }
+        // End exited with non-zero (e.g. all-items-failed): propagate as
+        // a node failure, as the walker does.
+        return { failure: ended }
+      }
       materialised.delete(spine)
       item = undefined
       spine.endPass()
@@ -1726,22 +1797,36 @@ export function apply(ctx: Context, config: Config): void {
       const boundaryWarnings = printed.filter(({ ok }) => ok).map(({ node, line }) => `${node}: ${line}`)
       warnings.push(...boundaryWarnings)
       // F4: when a subgraph node fails during a data pass, the failure becomes
-      // a failed item instead of ending the run. Skip remaining subgraph nodes,
-      // run end with --failed to skip verify and record the failure, then continue.
+      // a failed item instead of ending the run. Record remaining subgraph
+      // nodes as skipped (no complete, no verdict), run end with --failed to
+      // skip verify and record the failure, then continue.
       if (failure !== undefined) {
         const activePass = spine.passOf()
         if (activePass !== undefined) {
           const data = spine.view(activePass.node)
-          // Complete remaining subgraph nodes so endPass succeeds.
-          skipSubgraph(spine)
+          // Record remaining pass-body nodes as skipped (no complete on gates, no verdict).
+          const subgraphSkippedGates = abandonPass(spine)
           // Run end command with --failed so the Python side skips verify and
           // writes a failure record directly, matching the walker's behavior.
-          const reason = failure.error ?? `subgraph node failed with exit code ${String(failure.exitCode)}`
-          const ended = await runDataCommand(shell, data, 'end', runner, activePass.index, reason)
-          if (!ended.ok) return { next: spine.next(), failure: ended, ran }
+          // Pass the real stderr tail so error_text matches the walker's message.
+          const reason = stderrTail(failure)
+          const failedKind = failure.error?.includes('timed out') ? 'timeout' : undefined
+          const ended = await runDataCommand(shell, data, 'end', runner, activePass.index, reason, failedKind)
+          if (!ended.ok) {
+            if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
+              // End timed out or was killed: run a fallback to record the item.
+              const fbReason = stderrTail(ended)
+              const fbKind = ended.error?.includes('timed out') ? 'timeout' : undefined
+              await runDataCommand(shell, data, 'end', runner, activePass.index, fbReason, fbKind)
+            } else {
+              // End exited with non-zero (e.g. all-items-failed): propagate.
+              return { next: spine.next(), failure: ended, ran }
+            }
+          }
           materialised.delete(spine)
           item = undefined
           spine.endPass()
+          cleanupAbandonSkips(spine, subgraphSkippedGates)
           structural.clear()
           recordBoundary()
           continue

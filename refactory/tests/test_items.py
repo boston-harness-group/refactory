@@ -673,10 +673,13 @@ def test_all_items_failed_raises_on_last_end(tmp_path):
 
     node = _declared(_data_graph(task_ref="all_fail_spine"), tmp_path)
 
+    # Begin each item to initialize pass state tracking.
+    items.command_begin(node, tmp_path, 0)
     # First item's end: writes error record, returns normally.
     result_alpha = items.command_end(node, tmp_path, 0)
     assert "error" in result_alpha
 
+    items.command_begin(node, tmp_path, 1)
     # Second (last) item's end: after writing the error record, raises
     # ItemsError because all items have error_text.
     with pytest.raises(items.ItemsError, match="all.*failed"):
@@ -706,3 +709,119 @@ def test_command_end_with_failed_reason_skips_verify(tmp_path):
     scores = facts["item_scores"]
     assert len(scores) == 1
     assert scores[0]["error_text"] is not None
+
+
+def test_all_fail_counts_items_not_records(tmp_path):
+    """The all-fail check counts items processed, not records (Ask 5).
+
+    3 items where only alpha fails in verify; command_end for the last item
+    does NOT raise ItemsError (1 of 3 is not all).
+    """
+    from refactory_dsh import task as task_module
+
+    class OneOfThreeFails(task_module.Task):
+        name = "one_of_three_fails"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="alpha"),
+                task_module.TaskInstance(id="beta"),
+                task_module.TaskInstance(id="gamma"),
+            ]
+
+        def setup(self, instance, workspace):
+            pass
+
+        def verify(self, instance, workspace):
+            if instance.id == "alpha":
+                raise ValueError("alpha failed")
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("one_of_three_fails", OneOfThreeFails)
+    node = _declared(_data_graph(task_ref="one_of_three_fails"), tmp_path)
+
+    # Drive all 3 items through begin+end.
+    for i in range(3):
+        items.command_begin(node, tmp_path, i)
+        items.command_end(node, tmp_path, i)
+
+    # The last item's end should NOT raise (1 of 3 is not all).
+    # If it raised, the test would have failed above.
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    scores = facts["item_scores"]
+    failed = [s for s in scores if s.get("error_text") is not None]
+    assert len(failed) == 1, "exactly one item should have failed"
+
+
+def test_csv_id_fallback_pinned(tmp_path):
+    """CSV items without an id column get index-based ids (Ask 8).
+
+    Targets the csv_item.setdefault('id', str(csv_index)) at executor.py:416.
+    Fails when that single line is reverted (CSV rows would have no 'id' key).
+    """
+    csv_path = tmp_path / "items.csv"
+    csv_path.write_text("value\nfoo\nbar\n")
+
+    node = nn.Node(
+        "data", "data", subgraph_entry="w", subgraph_exit="w",
+        source_path="items.csv", source_format="csv",
+    )
+    loaded = load_items(node, tmp_path)
+    assert [item["id"] for item in loaded] == ["0", "1"]
+
+
+def test_walker_index_fallback_pinned(tmp_path):
+    """Items with no id key get index-based ids from the walker (Ask 8).
+
+    Inline items [{'value':'x'},{'value':'y'}] with no 'id' key; run through
+    the walker; item_scores ids are ['0', '1']. Targets the
+    item_id = str(item.get('id') or index) at executor.py:820.
+    """
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class PassAllTask(task_module.Task):
+        name = "pass_all_index"
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("pass_all_index", PassAllTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="pass_all_index",
+        inline_items=[{"value": "x"}, {"value": "y"}],
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    assert [s["id"] for s in scores] == ["0", "1"]
+
+
+def test_failed_kind_parameter(tmp_path):
+    """command_end --failed-kind overrides error_kind (Ask 6).
+
+    When failed_kind='timeout' is passed, the record's error_kind is 'timeout'
+    instead of 'RuntimeError'.
+    """
+    _probe_task()
+    node = _declared(_data_graph(task_ref="counting"), tmp_path)
+    items.command_begin(node, tmp_path, 0)
+
+    result = items.command_end(
+        node, tmp_path, 0,
+        failed_reason="timed out", failed_kind="timeout",
+    )
+    assert result["error_kind"] == "timeout"
+    assert result["passed"] is False
