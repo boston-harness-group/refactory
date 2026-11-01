@@ -483,3 +483,164 @@ def test_reset_keeps_files_an_outside_node_also_writes(tmp_path):
 
     assert receipt['cleared_facts'] == ['computed', 'finished']
     assert json.loads((tmp_path / 'facts.json').read_text()) == {'prepared': True}
+
+
+# ── F4 failure rule: spine-side item failure tests ───────────────────────────
+
+
+def _failing_task():
+    """A Task whose verify raises on the second item."""
+    from refactory_dsh import task as task_module
+
+    class FailVerify(task_module.Task):
+        name = "fail_verify"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="alpha", metadata={"split": "train"}),
+                task_module.TaskInstance(id="beta", metadata={"split": "test"}),
+            ]
+
+        def setup(self, instance, workspace):
+            pass
+
+        def verify(self, instance, workspace):
+            if instance.id == "beta":
+                raise ValueError("beta verification failed")
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("fail_verify", FailVerify)
+    return FailVerify
+
+
+def _setup_failing_task():
+    """A Task whose setup raises on the first item."""
+    from refactory_dsh import task as task_module
+
+    class FailSetup(task_module.Task):
+        name = "fail_setup"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="alpha", metadata={"split": "train"}),
+                task_module.TaskInstance(id="beta", metadata={"split": "test"}),
+            ]
+
+        def setup(self, instance, workspace):
+            if instance.id == "alpha":
+                raise ValueError("alpha setup failed")
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=0.5)
+
+    task_module.register_task("fail_setup", FailSetup)
+    return FailSetup
+
+
+def test_command_end_failure_writes_error_record(tmp_path):
+    """command_end with a failing verify writes an error record to item_scores."""
+    _failing_task()
+    node = _declared(_data_graph(task_ref="fail_verify"), tmp_path)
+
+    # alpha succeeds
+    result_alpha = items.command_end(node, tmp_path, 0)
+    assert result_alpha["passed"] is True
+    assert result_alpha["score"] == 1.0
+
+    # beta fails
+    result_beta = items.command_end(node, tmp_path, 1)
+    assert "error" in result_beta
+    assert result_beta["passed"] is False
+    assert result_beta["score"] == 0.0
+    assert "beta verification failed" in result_beta["error_text"]
+    assert result_beta["error_kind"] == "ValueError"
+
+    # Check facts
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    scores = facts["item_scores"]
+    assert len(scores) == 2
+    beta_record = next(s for s in scores if s["id"] == "beta")
+    assert beta_record["error_text"] is not None
+
+
+def test_command_begin_failure_writes_error_record(tmp_path):
+    """command_begin with a failing setup returns an error signal."""
+    _setup_failing_task()
+    node = _declared(_data_graph(task_ref="fail_setup"), tmp_path)
+
+    result = items.command_begin(node, tmp_path, 0)
+    assert "error" in result
+    assert "alpha setup failed" in result["error"]
+
+    # The error record is in facts
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    scores = facts["item_scores"]
+    assert len(scores) == 1
+    assert scores[0]["passed"] is False
+    assert scores[0]["score"] == 0.0
+    assert "alpha setup failed" in scores[0]["error_text"]
+
+
+def test_failure_records_match_between_runtimes(tmp_path):
+    """Both paths produce identical item_scores including error records."""
+    _failing_task()
+    graph = _data_graph(task_ref="fail_verify")
+
+    # Walker path
+    walked = tmp_path / "walked"
+    result = execute(graph, walked)
+    assert result.exit_ok, result.error
+
+    # Spine (command-driven) path
+    driven = tmp_path / "driven"
+    node = _declared(graph, driven)
+    count = items.command_list(node, driven)["count"]
+    for index in range(count):
+        items.command_begin(node, driven, index)
+        items.command_end(node, driven, index)
+
+    driven_facts = json.loads((driven / "facts.json").read_text())
+    assert driven_facts["item_scores"] == result.facts["item_scores"]
+
+
+def test_csv_no_id_column_gets_index_ids_on_spine(tmp_path):
+    """CSV data with no id column gets index ids on the spine path."""
+    _probe_task()
+    csv_path = tmp_path / "items.csv"
+    csv_path.write_text("value\nfoo\nbar\n")
+
+    graph = _data_graph(
+        task_ref="counting",
+        source_path="items.csv",
+        source_format="csv",
+    )
+    node = _declared(graph, tmp_path)
+    listing = items.command_list(node, tmp_path)
+    assert listing["ids"] == ["0", "1"]
+
+    items.command_end(node, tmp_path, 0)
+    items.command_end(node, tmp_path, 1)
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    ids = [s["id"] for s in facts["item_scores"]]
+    assert ids == ["0", "1"]
+
+
+def test_item_scores_replace_on_rerun_spine(tmp_path):
+    """item_scores uses replace-by-id: running end twice does not double-count."""
+    _probe_task()
+    node = _declared(_data_graph(task_ref="counting"), tmp_path)
+
+    # First run
+    items.command_end(node, tmp_path, 0)
+    items.command_end(node, tmp_path, 1)
+
+    # Second run (rerun)
+    items.command_end(node, tmp_path, 0)
+    items.command_end(node, tmp_path, 1)
+
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    scores = facts["item_scores"]
+    # One entry per item, not four
+    assert len(scores) == 2
+    ids = [s["id"] for s in scores]
+    assert sorted(ids) == ["alpha", "beta"]

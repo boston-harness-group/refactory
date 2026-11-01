@@ -68,6 +68,10 @@ def _ensure_forkserver_preload(graph: Graph) -> None:
         _forkserver_ctx.set_forkserver_preload(sorted(_forkserver_modules))
 
 
+class _BranchFailed(Exception):
+    """A branch error string wrapped so it flows through the per-item try/except."""
+
+
 class ExecutionError(RuntimeError):
     """A run could not be carried out."""
 
@@ -396,6 +400,8 @@ def declared_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
 
             with source.open(newline="") as handle:
                 items = [dict(row) for row in csv.DictReader(handle)]
+            for csv_index, csv_item in enumerate(items):
+                csv_item.setdefault("id", str(csv_index))
         elif source_format == "directory":
             items = []
             for child in sorted(source.iterdir()):
@@ -762,50 +768,85 @@ class Executor:
                     # none, and judges each pass. Loading it is what makes `task_ref` a
                     # binding rather than a line in a prompt.
                     from refactory_dsh.task import instance_of, load_task
+                    from refactory_dsh.items import make_item_record
 
                     task = load_task(node.task_ref, self.ctx.workdir) if node.task_ref else None
                 except Exception as exc:
                     error = f"{node.id}: {type(exc).__name__}: {exc}"
                     break
+
+                from refactory_dsh.budgets import BudgetExhausted
+                _PASSTHROUGH = (BudgetExhausted, KeyboardInterrupt, SystemExit)
+
+                # Scale step cap for data nodes: save the initial step count
+                # so we can reset per item, preventing large benchmarks from
+                # hitting the global cap.
+                _data_steps_base = len(self.steps)
+
                 scores: list[dict[str, Any]] = []
-                for item in items:
+                _data_halted = False
+                for index, item in enumerate(items):
+                    # Reset step counter per item pass so the cap applies
+                    # per item rather than globally (parity fix 4).
+                    self.steps = self.steps[:_data_steps_base]
+
                     instance = instance_of(item)
-                    if task is not None:
-                        task.setup(instance, self.ctx.workdir)
-                    # The item is written as the data node, so the declaration that
-                    # governs it is the data node's — not the last node of the pass
-                    # before it.
-                    self.ctx.node_id = node.id
-                    self.ctx._declared = node.writes  # noqa: SLF001
-                    self.ctx._declared_reads = node.reads  # noqa: SLF001
-                    self.ctx._declared_facts = node.produces  # noqa: SLF001
-                    self.ctx._produced = set()  # noqa: SLF001
-                    self.ctx.write_json(CURRENT_ITEM, item)
+                    item_id = str(item.get("id") or index)
                     try:
+                        if task is not None:
+                            task.setup(instance, self.ctx.workdir)
+                        # The item is written as the data node, so the declaration that
+                        # governs it is the data node's — not the last node of the pass
+                        # before it.
+                        self.ctx.node_id = node.id
+                        self.ctx._declared = node.writes  # noqa: SLF001
+                        self.ctx._declared_reads = node.reads  # noqa: SLF001
+                        self.ctx._declared_facts = node.produces  # noqa: SLF001
+                        self.ctx._produced = set()  # noqa: SLF001
+                        self.ctx.write_json(CURRENT_ITEM, item)
                         branch_error = self._walk_branch(
                             node.subgraph_entry, node.subgraph_exit, include_barrier=True, iterations={}
                         )
-                    except GateStop as exc:
-                        branch_error = str(exc)
-                        self._record(node.id, error=branch_error, outcome="refused")
+                        if branch_error is not None:
+                            raise _BranchFailed(branch_error)
+                        if task is not None:
+                            verdict = task.verify(instance, self.ctx.workdir)
+                        else:
+                            verdict = None
+                    except _PASSTHROUGH:
+                        raise
                     except HaltStop as exc:
-                        branch_error = str(exc)
-                        self._record(node.id, error=branch_error, outcome="halted")
-                    if branch_error is not None:
-                        error = branch_error
+                        # Terminal halt ends the data node.
+                        error = str(exc)
+                        self._record(node.id, error=error, outcome="halted")
+                        _data_halted = True
                         break
-                    if task is not None:
-                        verdict = task.verify(instance, self.ctx.workdir)
-                        if verdict is not None:
-                            scores.append({
-                                "id": instance.id,
-                                "passed": verdict.passed,
-                                "score": verdict.score,
-                            })
-                if error is not None:
+                    except GateStop as exc:
+                        self._record(node.id, error=str(exc), outcome="refused")
+                        record = make_item_record(item_id, None, error=exc)
+                        if record is not None:
+                            scores.append(record)
+                        continue
+                    except Exception as exc:
+                        record = make_item_record(item_id, None, error=exc)
+                        if record is not None:
+                            scores.append(record)
+                        continue
+                    else:
+                        record = make_item_record(item_id, verdict)
+                        if record is not None:
+                            scores.append(record)
+
+                if _data_halted:
                     break
-                if scores and "item_scores" in node.produces:
-                    self.ctx.set_fact("item_scores", scores)
+                # All-items-failed rule: the data node fails only when every item fails.
+                if scores:
+                    all_failed = all(r.get("error_text") is not None for r in scores)
+                    if "item_scores" in node.produces:
+                        self.ctx.set_fact("item_scores", scores)
+                    if all_failed:
+                        error = f"{node.id}: all {len(scores)} items failed"
+                        break
                 self.record.complete(node)
                 out = self.graph.out_edges(node.id)
                 current = out[0].target if out else None

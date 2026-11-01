@@ -35,7 +35,7 @@ from typing import Any
 from refactory_dsh.paths import project_root, project_for_nodes
 from refactory_dsh.nn import Node
 from refactory_dsh.nn.executor import CURRENT_ITEM, ITEMS_OVERRIDE, load_items
-from refactory_dsh.task import Task, TaskError, instance_of, load_task
+from refactory_dsh.task import Task, TaskError, VerifyResult, instance_of, load_task
 
 #: The working directory a node command runs in, when the runtime says so.
 WORKDIR_ENV = "REFACTORY_WORKDIR"
@@ -53,6 +53,36 @@ DATA_KEY = "data"
 
 #: The key an override uses to mean "every data node of this run".
 ANY_NODE = "*"
+
+
+def make_item_record(
+    item_id: str,
+    verdict: VerifyResult | None,
+    error: Exception | None = None,
+) -> dict[str, Any] | None:
+    """Build the per-item score dict for both success and failure.
+
+    **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``.
+    **Failure path** (error is not None): ``{"id", "passed": False, "score": 0.0,
+    "error_text", "error_kind"}``.
+    **No-verdict path** (error is None, verdict is None): ``None`` — the Task chose
+    not to grade this item.
+    """
+    if error is not None:
+        return {
+            "id": item_id,
+            "passed": False,
+            "score": 0.0,
+            "error_text": str(error)[:4096],
+            "error_kind": type(error).__name__,
+        }
+    if verdict is None:
+        return None
+    return {
+        "id": item_id,
+        "passed": verdict.passed,
+        "score": verdict.score,
+    }
 
 
 def source_override(workdir: Path, node_id: str) -> dict[str, Any]:
@@ -168,7 +198,15 @@ def _write_facts(workdir: Path, fact: str, scores: list[dict[str, Any]]) -> None
 
     def add(facts: dict[str, Any]) -> None:
         previous = facts.get(fact)
-        facts[fact] = list(previous) + scores if isinstance(previous, list) else list(scores)
+        if isinstance(previous, list):
+            # Replace-by-id merge: new scores supersede previous entries with the
+            # same id, preventing double counting when a data node reruns.
+            by_id = {str(entry.get("id")): entry for entry in previous if isinstance(entry, dict)}
+            for score in scores:
+                by_id[str(score.get("id"))] = score
+            facts[fact] = list(by_id.values())
+        else:
+            facts[fact] = list(scores)
 
     # Under the facts lock, as every node's write is: a data pass can end beside a branch.
     edit_facts(workdir, add)
@@ -194,7 +232,15 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     (workdir / CURRENT_ITEM).write_text(json.dumps(item, indent=2, default=str))
     task = _task_of(node, workdir)
     if task is not None:
-        task.setup(instance_of(item), workdir)
+        try:
+            task.setup(instance_of(item), workdir)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            record = make_item_record(str(item.get("id") or index), None, error=exc)
+            if record is not None and SCORES_FACT in node.produces:
+                _write_facts(workdir, SCORES_FACT, [record])
+            return {"error": str(exc)}
     return item
 
 
@@ -206,20 +252,25 @@ def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
             f"item {index} is out of range: node {node.id!r} selected {len(items)} item(s)"
         )
     item = items[index]
+    item_id = str(item.get("id") or index)
     task = _task_of(node, workdir)
     if task is None:
         return {}
-    verdict = task.verify(instance_of(item), workdir)
+    try:
+        verdict = task.verify(instance_of(item), workdir)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        record = make_item_record(item_id, None, error=exc)
+        if record is not None and SCORES_FACT in node.produces:
+            _write_facts(workdir, SCORES_FACT, [record])
+        return {"error": str(exc), **(record or {})}
     if verdict is None:
         return {}
-    score = {
-        "id": str(item.get("id") or index),
-        "passed": verdict.passed,
-        "score": verdict.score,
-    }
-    if SCORES_FACT in node.produces:
-        _write_facts(workdir, SCORES_FACT, [score])
-    return score
+    record = make_item_record(item_id, verdict)
+    if record is not None and SCORES_FACT in node.produces:
+        _write_facts(workdir, SCORES_FACT, [record])
+    return record or {}
 
 
 def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:

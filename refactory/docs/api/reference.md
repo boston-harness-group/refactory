@@ -939,6 +939,7 @@ The per-item half of a data node, from the command line.
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
+| function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
 
@@ -949,5 +950,6 @@ The per-item half of a data node, from the command line.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
+- **`make_item_record`** — Build the per-item score dict for both success and failure.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.

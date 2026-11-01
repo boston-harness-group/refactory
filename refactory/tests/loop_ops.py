@@ -132,3 +132,14 @@ def reloop_twice(ctx: Any) -> str:
     visits = int(ctx.facts.get("passes", 0)) + 1
     ctx.set_fact("passes", visits)
     return "reloop" if visits < 3 else "proceed"
+
+
+def fail_on_a(ctx: Any) -> dict[str, Any]:
+    """Like record_item, but raises for item a — used to test branch errors."""
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "a":
+        raise RuntimeError("branch failed for item a")
+    seen = ctx.read_json("seen.json", {"ids": []}) or {"ids": []}
+    seen.setdefault("ids", []).append(str(item.get("id")))
+    ctx.write_json("seen.json", seen)
+    return {"seen": seen["ids"]}

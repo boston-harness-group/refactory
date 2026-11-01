@@ -475,3 +475,343 @@ def test_resuming_a_directory_with_no_record_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="no run to resume"):
         Two.resume(tmp_path / "nothing-here")
+
+
+# ── F4 failure rule: failed items score 0, other items continue ────────
+
+
+def _data_graph_with_task(task_ref: str, **extra) -> nn.Graph:
+    """A data node with a task, a one-node subgraph, and a report node."""
+    from refactory_dsh.nn.executor import CURRENT_ITEM
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref=task_ref, writes=(CURRENT_ITEM,), produces=("item_scores",), **extra,
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+    return graph
+
+
+def _register_failing_task(name: str, *, fail_on: set[str], fail_in: str = "verify"):
+    """Register a task where certain items fail in setup or verify."""
+    from refactory_dsh import task as task_module
+
+    class FailingTask(task_module.Task):
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="a"),
+                task_module.TaskInstance(id="b"),
+            ]
+
+        def setup(self, instance, workspace):
+            if fail_in == "setup" and instance.id in fail_on:
+                raise ValueError(f"setup failed for {instance.id}")
+
+        def verify(self, instance, workspace):
+            if fail_in == "verify" and instance.id in fail_on:
+                raise ValueError(f"verify failed for {instance.id}")
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    FailingTask.name = name
+    task_module.register_task(name, FailingTask)
+    return FailingTask
+
+
+def test_failed_item_scores_zero_and_others_continue(tmp_path):
+    """A failed verify produces score 0 with error; other items score normally."""
+    from refactory_dsh.nn.executor import execute
+
+    _register_failing_task("fail_verify_a", fail_on={"a"}, fail_in="verify")
+    graph = _data_graph_with_task("fail_verify_a")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2
+    a_score = next(s for s in scores if s["id"] == "a")
+    b_score = next(s for s in scores if s["id"] == "b")
+    assert a_score["passed"] is False
+    assert a_score["score"] == 0.0
+    assert "verify failed" in a_score["error_text"]
+    assert a_score["error_kind"] == "ValueError"
+    assert b_score["passed"] is True
+    assert b_score["score"] == 1.0
+
+
+def test_failed_setup_becomes_failed_item(tmp_path):
+    """A failed setup produces a failed item record; other items still run."""
+    from refactory_dsh.nn.executor import execute
+
+    _register_failing_task("fail_setup_a", fail_on={"a"}, fail_in="setup")
+    graph = _data_graph_with_task("fail_setup_a")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    a_score = next(s for s in scores if s["id"] == "a")
+    b_score = next(s for s in scores if s["id"] == "b")
+    assert a_score["passed"] is False
+    assert a_score["score"] == 0.0
+    assert "setup failed" in a_score["error_text"]
+    assert b_score["passed"] is True
+    assert b_score["score"] == 1.0
+
+
+def test_branch_error_becomes_failed_item(tmp_path):
+    """A subgraph op that raises during one item's pass produces a failed item."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class GoodTask(task_module.Task):
+        name = "good_task"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="a"),
+                task_module.TaskInstance(id="b"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("good_task", GoodTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="good_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    # An op that fails on item "a"
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:fail_on_a",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    a_score = next(s for s in scores if s["id"] == "a")
+    b_score = next(s for s in scores if s["id"] == "b")
+    assert a_score["passed"] is False
+    assert a_score["score"] == 0.0
+    assert a_score.get("error_text") is not None
+    assert b_score["passed"] is True
+    assert b_score["score"] == 1.0
+
+
+def test_all_items_failed_makes_node_fail(tmp_path):
+    """When every item fails, the data node fails (exit_ok=False)."""
+    from refactory_dsh.nn.executor import execute
+
+    _register_failing_task("fail_all", fail_on={"a", "b"}, fail_in="verify")
+    graph = _data_graph_with_task("fail_all")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is False
+    assert "all" in (result.error or "").lower() and "failed" in (result.error or "").lower()
+    # item_scores must still be written
+    scores = result.facts.get("item_scores", [])
+    assert len(scores) == 2
+    assert all(s.get("error_text") is not None for s in scores)
+
+
+def test_passing_item_with_score_zero_alongside_failures_succeeds(tmp_path):
+    """A passing item with score=0.0 does not trigger the all-fail rule."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class ZeroScore(task_module.Task):
+        name = "zero_score"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="a"),
+                task_module.TaskInstance(id="b"),
+            ]
+
+        def verify(self, instance, workspace):
+            if instance.id == "b":
+                raise ValueError("b failed")
+            return task_module.VerifyResult(passed=True, score=0.0)
+
+    task_module.register_task("zero_score", ZeroScore)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="zero_score", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is True
+
+
+def test_budget_exhausted_propagates_from_item(tmp_path):
+    """BudgetExhausted raised inside an item must propagate, not be swallowed."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.budgets import BudgetExhausted
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class BudgetTask(task_module.Task):
+        name = "budget_task"
+
+        def instances(self):
+            return [task_module.TaskInstance(id="a")]
+
+        def verify(self, instance, workspace):
+            raise BudgetExhausted("budget gone")
+
+    task_module.register_task("budget_task", BudgetTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="budget_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    with pytest.raises(BudgetExhausted):
+        execute(graph, tmp_path / "run")
+
+
+def test_halt_stop_propagates_from_item(tmp_path):
+    """HaltStop raised inside a data item must propagate; run is halted."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, HaltStop, execute
+
+    class HaltTask(task_module.Task):
+        name = "halt_task"
+
+        def instances(self):
+            return [task_module.TaskInstance(id="a")]
+
+        def setup(self, instance, workspace):
+            raise HaltStop("test_gate", reason="test halt")
+
+    task_module.register_task("halt_task", HaltTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="halt_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is False
+    assert result.halted is True
+
+
+def test_csv_items_without_id_get_index_ids(tmp_path):
+    """CSV items without an id column get index-based ids on the walker."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class CsvTask(task_module.Task):
+        name = "csv_task"
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("csv_task", CsvTask)
+
+    workdir = tmp_path / "run"
+    workdir.mkdir(parents=True)
+    (workdir / "items.csv").write_text("value\nfoo\nbar\n")
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="csv_task", source_path="items.csv", source_format="csv",
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    result = execute(graph, workdir)
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    ids = [s["id"] for s in scores]
+    assert ids == ["0", "1"]
+
+
+def test_large_benchmark_completes_under_step_cap(tmp_path):
+    """A 600-item data node completes without hitting the step cap (parity fix 4)."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class LargeTask(task_module.Task):
+        name = "large_task"
+
+        def instances(self):
+            return [task_module.TaskInstance(id=str(i)) for i in range(600)]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("large_task", LargeTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="end",
+        task_ref="large_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "end", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.add(nn.Node(
+        "after", "op", call="loop_ops:noop",
+    ))
+    graph.connect("work", "end")
+    graph.connect("data", "after")
+
+    result = execute(graph, tmp_path / "run", max_steps=1000)
+    assert result.exit_ok, result.error
+    assert len(result.facts["item_scores"]) == 600

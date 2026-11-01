@@ -377,6 +377,162 @@ describe('driving the loader commands around each pass', () => {
   })
 })
 
+describe('F4 failure rule: failed items in the data pass', () => {
+  it('records a failed item and continues to the next', async () => {
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: index === 0
+              ? { error: 'verify failed', id: 'a', passed: false, score: 0 }
+              : { id: 'b', passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    // The first item's end returned an error; it should have continued to the second.
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // Both items had begin and end called
+    expect(log.filter(c => c.includes(' begin ')).length).toBe(2)
+    expect(log.filter(c => c.includes(' end ')).length).toBe(2)
+  })
+
+  it('skips the subgraph when begin signals a setup failure', async () => {
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: index === 0 ? { error: 'setup failed' } : items[index],
+            end: index === 0
+              ? { error: 'setup failed', id: 'a', passed: false, score: 0 }
+              : { id: 'b', passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    // First call: list → begin for item 0 (error) → end for item 0 → begin for item 1 → work → hand over end
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    // The first item's begin returned error, so no subgraph command was dispatched for it.
+    // The second item should be the one with the agent node exposed.
+    expect(first.item).toEqual({ id: 'b' })
+
+    // No 'true' command for item 0 (subgraph was skipped)
+    const trueCommands = log.filter(c => c === 'true')
+    expect(trueCommands.length).toBe(1) // only for item b
+
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+  })
+
+  it('continues past a subgraph node failure during a data pass', async () => {
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    let callCount = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          if (verb === '') {
+            // This is the deterministic subgraph node ('true')
+            callCount += 1
+            if (callCount === 1) {
+              // First item's subgraph node fails
+              return {
+                exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+                stdout: { text: '', truncated: false },
+                stderr: { text: 'subgraph node failed', truncated: false },
+              }
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: index === 0 ? false : true, score: index === 0 ? 0 : 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    // First wf_next: list, begin 0, work (fails) → close (end 0) → begin 1, work (ok) → hand over end
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    // The second item's agent node should be exposed
+    expect(first.item).toEqual({ id: 'b' })
+    expect(first.nodes.map((n: { id: string }) => n.id)).toEqual(['end'])
+
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+
+    // Both begin and end were called for both items
+    expect(log.filter(c => c.includes(' end ')).length).toBe(2)
+  })
+})
+
 describe('the data loader command line', () => {
   it('names the node and the item, and quotes the node id', () => {
     const node = { id: 'data', _type: 'DataNode' }

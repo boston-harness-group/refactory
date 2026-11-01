@@ -1533,6 +1533,26 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     /** Materialise the running pass's item, once per item across calls. */
+    /** Skip all due subgraph nodes by completing them sequentially until the pass finishes. */
+    const skipSubgraph = (s: Spine, pass: { entry: string; exit: string }): void => {
+      // Keep completing whatever is due until the pass is marked finished or
+      // no more nodes can be completed (safety bound to avoid infinite loops).
+      for (let steps = 0; steps < 100; steps += 1) {
+        const p = s.passOf()
+        if (p === undefined || p.finished) break
+        const state = s.next()
+        if (state.nodes.length === 0) break
+        let completed = false
+        for (const node of state.nodes) {
+          try {
+            s.complete(node.id)
+            completed = true
+          } catch { /* not due or gate */ }
+        }
+        if (!completed) break
+      }
+    }
+
     const beginItem = async (): Promise<{ failure?: CommandFailure }> => {
       const pass = spine.passOf()
       if (pass === undefined) return {}
@@ -1546,6 +1566,23 @@ export function apply(ctx: Context, config: Config): void {
       recordStatus(spine, workdir, 'executing')
       const started = await runDataCommand(shell, data, 'begin', runner, pass.index)
       if (!started.ok) return { failure: started }
+      // F4: a setup failure is signalled by an `error` key in the begin response.
+      // The Python side has already written the failed-item record; skip the
+      // subgraph by completing its nodes, running end, and advancing.
+      if (started.value != null && typeof started.value === 'object' && 'error' in started.value) {
+        materialised.set(spine, { key, item: started.value })
+        // Complete subgraph nodes to clear cursor positions so endPass succeeds.
+        skipSubgraph(spine, { ...pass, entry: pass.entry, exit: pass.exit })
+        // Run end command to let the Task record the failure for this item.
+        const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
+        if (!ended.ok) return { failure: ended }
+        materialised.delete(spine)
+        item = undefined
+        spine.endPass()
+        structural.clear()
+        recordBoundary()
+        return {}
+      }
       materialised.set(spine, { key, item: started.value })
       item = started.value
       recordBoundary()
@@ -1683,7 +1720,27 @@ export function apply(ctx: Context, config: Config): void {
       recordWarnings(workdir, printed)
       const boundaryWarnings = printed.filter(({ ok }) => ok).map(({ node, line }) => `${node}: ${line}`)
       warnings.push(...boundaryWarnings)
-      if (failure !== undefined) return { next: spine.next(), failure, ran }
+      // F4: when a subgraph node fails during a data pass, the failure becomes
+      // a failed item instead of ending the run. Skip remaining subgraph nodes,
+      // run end to let the Python Task judge the incomplete answer, then continue.
+      if (failure !== undefined) {
+        const activePass = spine.passOf()
+        if (activePass !== undefined) {
+          const data = spine.view(activePass.node)
+          // Complete remaining subgraph nodes so endPass succeeds.
+          skipSubgraph(spine, activePass)
+          // Run end command to let the Task record the failure for this item.
+          const ended = await runDataCommand(shell, data, 'end', runner, activePass.index)
+          if (!ended.ok) return { next: spine.next(), failure: ended, ran }
+          materialised.delete(spine)
+          item = undefined
+          spine.endPass()
+          structural.clear()
+          recordBoundary()
+          continue
+        }
+        return { next: spine.next(), failure, ran }
+      }
       if (interactiveOpen) {
         // Preserve the one-boundary budget while allowing structural boundaries
         // and data-pass grading to settle before exposing the next ready work.

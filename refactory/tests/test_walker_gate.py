@@ -227,7 +227,12 @@ def test_gate_stop_in_fork_branch(tmp_path):
 
 
 def test_gate_stop_in_data_pass(tmp_path):
-    """GateStop in a data pass records refused, not an error."""
+    """GateStop in a data pass becomes a failed item under F4.
+
+    With the failure rule, a GateStop in a data pass is caught as a failed
+    item (score 0, error kept). Since this is the only item, all-items-failed
+    makes the node fail. The gate is recorded in the item's error_text.
+    """
     graph = Graph()
     graph.add(Node("data", "data", subgraph_entry="inner_gate", subgraph_exit="inner_gate",
                     inline_items=[{"id": "item1"}],
@@ -240,8 +245,13 @@ def test_gate_stop_in_data_pass(tmp_path):
     from refactory_dsh.nn.executor import execute
     result = execute(graph, tmp_path / "run")
     assert result.exit_ok is False
-    # The error should mention the gate, not be an uncaught exception.
-    assert "inner_gate" in (result.error or "")
+    # All items failed → the error names the data node.
+    assert "all" in (result.error or "").lower() and "failed" in (result.error or "").lower()
+    # The gate is recorded in the failed item's error_text.
+    scores = result.facts.get("item_scores", [])
+    assert len(scores) == 1
+    assert scores[0]["passed"] is False
+    assert "inner_gate" in scores[0].get("error_text", "")
 
 
 def test_second_walker_run_refused_while_first_holds_lock(tmp_path):
