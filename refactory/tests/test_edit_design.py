@@ -154,8 +154,9 @@ def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
     pkg = "edited_regression"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    # Ops run in forkserver children, so monkeypatching sandbox.smoke is invisible.
-    # Use an environment variable override that the child process reads.
+    # With enable_recovery=True the edit CLI runs ops in forkserver children,
+    # so monkeypatching sandbox.smoke is invisible.  Use an environment
+    # variable override that the child process reads.
     smoke_override = json.dumps({
         "circle_packing/adaptive": {"exit_ok": True, "score": 5.0},
         "*": {"exit_ok": True, "score": 1.0},

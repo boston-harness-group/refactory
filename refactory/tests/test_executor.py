@@ -500,8 +500,8 @@ def test_op_runs_in_run_directory_with_recovery(tmp_path):
 
 
 def test_op_runs_in_run_directory_without_recovery(tmp_path):
-    """Without enable_recovery, ops still run in forkserver children: they write
-    relative paths in the run directory and get ctx.model=None, matching the spine.
+    """Without enable_recovery, ops run in-process with CWD set to the run
+    directory and ctx.model=None, matching the spine.
 
     This verifies brief item 5: 'Op behavior must match the spine on the default
     walker path too, not only with enable_recovery.'"""
@@ -533,7 +533,7 @@ def test_op_runs_in_run_directory_without_recovery(tmp_path):
 
 def test_op_stderr_preserved_on_raise_without_recovery(tmp_path):
     """An op that prints to stderr then raises has its stderr preserved
-    even without enable_recovery (ops always run in forkserver children)."""
+    even without enable_recovery (ops run in-process with stderr capture)."""
     graph = nn.Graph()
     graph.add(nn.Node("boom", "op", call="loop_ops:stderr_then_raise"))
 
@@ -557,3 +557,69 @@ def test_op_stderr_preserved_on_raise(tmp_path):
         f"stderr not preserved in error: {result.error}"
     assert "important debug info" in result.error, \
         f"stderr content not in error: {result.error}"
+
+
+def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
+    """Brief item 5: fn gates in fork branches run in forkserver children
+    so the global sys.stdout is never swapped while concurrent branch
+    threads are running.
+
+    The child executor created for a fork branch has _in_fork_branch=True,
+    and _effective_timeout returns a timeout for fn gates (routing them
+    through _run_op_timed), while it returns None for fn gates on the main
+    thread (routing them through _run_fn_gate_inline).
+
+    This test fails if _in_fork_branch is not set on fork branch executors
+    or if _effective_timeout ignores it for fn gates.
+    """
+    import os
+
+    from refactory_dsh.nn.executor import Executor
+
+    # Directly test the _in_fork_branch flag's effect on _effective_timeout.
+    graph = nn.Graph()
+    graph.add(nn.Node("fg", "gate", gate_kind="fn",
+                      evaluator="loop_ops:pid_reporting_gate"))
+    graph.add(nn.Node("op", "op", call="loop_ops:noop"))
+
+    # Main-thread executor: fn gate has no timeout (runs inline).
+    main_exec = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
+    assert main_exec._effective_timeout(graph.nodes["fg"]) is None, \
+        "fn gate on main thread should not have a timeout"
+
+    # Fork-branch executor: fn gate gets a timeout (runs in forkserver).
+    fork_exec = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
+    fork_exec._in_fork_branch = True
+    assert fork_exec._effective_timeout(graph.nodes["fg"]) == 3600.0, \
+        "fn gate in fork branch should get a forkserver timeout"
+
+    # Ops always run inline on default path, even in fork branches.
+    assert fork_exec._effective_timeout(graph.nodes["op"]) is None, \
+        "op in fork branch should not have a forkserver timeout"
+
+    # Verify the full fork path: the fn gate in a fork branch runs in a
+    # separate process (PID differs from the parent).
+    parent_pid = os.getpid()
+    graph2 = nn.Graph()
+    graph2.add(nn.Node("start", "op", call="loop_ops:noop"))
+    graph2.add(nn.Node("fork1", "fork", targets=("b_gate", "b_op")))
+    graph2.connect("start", "fork1")
+    graph2.add(nn.Node("b_gate", "gate", gate_kind="fn",
+                        evaluator="loop_ops:pid_reporting_gate",
+                        produces=("gate_pid",)))
+    graph2.add(nn.Node("b_op", "op", call="loop_ops:noop"))
+    graph2.add(nn.Node("join1", "join", sources=("b_gate", "b_op")))
+    graph2.connect("fork1", "join1")
+    graph2.connect("b_gate", "join1", condition="proceed")
+    graph2.connect("b_op", "join1")
+    graph2.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph2.connect("join1", "done")
+
+    result = nn.execute(graph2, tmp_path, enable_recovery=False)
+    assert result.exit_ok, result.error
+    gate_pid = result.facts.get("gate_pid")
+    assert gate_pid is not None, "fn gate did not run inside the fork branch"
+    assert gate_pid != parent_pid, (
+        f"fn gate in fork branch ran in-process (PID {gate_pid} == parent {parent_pid}); "
+        "it should run in a forkserver child for thread-safe stdout capture"
+    )

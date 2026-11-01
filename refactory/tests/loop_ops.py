@@ -224,6 +224,17 @@ def parity_read_knob(ctx: Any) -> dict[str, Any]:
     return {"knob_read": ctx.knobs.get("test_knob", "")}
 
 
+def pid_reporting_gate(ctx: Any) -> str:
+    """A fn gate that records the current PID as a fact and proceeds.
+
+    Used by test_fn_gate_in_fork_branch_uses_forkserver: if the gate runs in
+    a forkserver child, its PID differs from the parent; if in-process, it matches.
+    """
+    import os
+    ctx.set_fact("gate_pid", os.getpid())
+    return "proceed"
+
+
 def test_apply_corrections(ctx: Any) -> dict[str, Any]:
     """Test op that applies corrections from the ledger and records them as a fact."""
     from pathlib import Path as _P

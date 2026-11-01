@@ -671,6 +671,11 @@ class Executor:
     _status: str = field(default="", init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
+    #: True for child executors running inside a fork branch thread.  Fn gates
+    #: in fork branches always run in forkserver children so their stdout
+    #: capture does not swap the global ``sys.stdout`` while concurrent branch
+    #: threads are running (brief item 5).
+    _in_fork_branch: bool = field(default=False, init=False, repr=False)
 
     def _record(
         self, node: str, *, error: str | None = None,
@@ -1108,42 +1113,47 @@ class Executor:
     def _effective_timeout(self, node: Node) -> float | None:
         """Derive per-op timeout from the shared formula and clamp to budget.
 
-        When ``enable_recovery`` is ``True``, every op and fn gate receives a
-        deadline.  Classified ops (smoke, check, deliver) use the shared timeout
-        formula from ``lowering.command_timeout_s()``.  Unclassified ops receive
-        a 3600-second default, as both shipped spine configurations set
+        Fn gates always run in a forkserver child with a deadline (per-process
+        stdout capture, no global ``sys.stdout`` swap).  Ops run in forkserver
+        children when ``enable_recovery`` is ``True``; without it they run
+        in-process (``_run_op_inline``) for test-compatibility (monkeypatching)
+        and this method returns ``None``.
+
+        Classified ops (smoke, check, deliver) use the shared timeout formula
+        from ``lowering.command_timeout_s()``.  Unclassified ops and fn gates
+        receive a 3600-second default, as both shipped spine configurations set
         (``packages/bundle/refactory/presets/ceo.patch.yml`` and
         ``packages/bundle/graph/cordis.patch.yml`` each pin
         ``commandTimeoutMs: 3600000``; the ``600_000`` in the spine's schema is only
-        its fallback when nothing configures one).  All
-        deadlines are clamped to the remaining run wall budget
-        (``budget.remaining_s()``) with a 1-second floor.
+        its fallback when nothing configures one).  All deadlines are clamped to
+        the remaining run wall budget (``budget.remaining_s()``) with a 1-second
+        floor when ``enable_recovery`` is ``True``.
 
         An op that exceeds its deadline is killed (SIGTERM → 5 s grace → SIGKILL
         on its process group) and raises ``OpTimeoutError`` with the node id and
         deadline.  Timeouts are never silently retried.
-
-        Limitation: fcntl file locking has higher latency than in-memory access;
-        under extreme contention (many concurrent forkserver children writing to
-        the same budget ledger), lock wait time could approach the timeout.  In
-        practice, the walker runs ops sequentially (or in fork branches with
-        ``MAX_WORKERS`` threads), so contention is minimal.
         """
-        if not self.enable_recovery:
-            return None
-        if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
+        is_fn_gate = node.kind == "gate" and node.gate_kind == "fn"
+        is_op = node.kind == "op"
+        # Fn gates in fork branches always use forkserver for per-process
+        # stdout capture (no global sys.stdout swap in concurrent threads).
+        # On the main thread (not in a fork branch), fn gates run in-process.
+        use_forkserver = (
+            (is_fn_gate and (self.enable_recovery or self._in_fork_branch))
+            or (is_op and self.enable_recovery)
+        )
+        if use_forkserver:
             from refactory_dsh.lowering import command_timeout_s as _cmd_timeout_s
 
             state = {"knobs": {n: {"value": v} for n, v in self.ctx.knobs.items()}}
             raw = _cmd_timeout_s(node, state)
             if raw is None:
                 # Unclassified ops get the spine's 3600 s default (dm-173).
-                # Budget forwarding (PC-2/PC-3) ensures ctx.budget works in
-                # the child process.
                 raw = 3600.0
-            remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
-            if remaining is not None:
-                raw = min(raw, remaining)
+            if self.enable_recovery:
+                remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
+                if remaining is not None:
+                    raw = min(raw, remaining)
             return max(1.0, float(raw))
         return None
 
@@ -1240,8 +1250,12 @@ class Executor:
             self.ctx.writes_made.extend(payload.get("writes_made", []))
             # Gap 20 / correction C: emit run_warning events for stderr lines
             # matching the spine's RUN_WARNING pattern (execute.ts:166,177-178).
-            _emit_run_warnings(self.ctx.workdir, node.id,
-                               payload.get("_stderr", ""))
+            _child_stderr = payload.get("_stderr", "")
+            _emit_run_warnings(self.ctx.workdir, node.id, _child_stderr)
+            # Pass child stderr through to the parent's stderr so it remains
+            # visible for debugging and test assertions (e.g. capfd).
+            if _child_stderr:
+                sys.stderr.write(_child_stderr)
             result = payload.get("result")
             # SWEEP-4: attach child process stdout to the result so fn-gate
             # feedback extraction in _visit_gate can use it.
@@ -1314,89 +1328,100 @@ class Executor:
         return result
 
     def _run_op_inline(self, node: Node) -> Any:
-        """Run an op or fn gate in-process matching the spine's op contract: run
-        directory is the CWD, ctx.model is None, stdout/stderr are captured
-        per-call with a thread-local redirect (no global sys.stdout swap).
+        """Run an op in-process matching the spine's op contract: run directory
+        is the CWD and ctx.model is None.
 
-        This preserves in-process semantics (monkeypatching works) while matching
-        the spine's contract for ops on the default walker path.
+        Used on the default walker path (``enable_recovery=False``).  Fn gates
+        never reach this method — they always run in a forkserver child via
+        ``_run_op_timed`` (in fork branches) or ``_run_fn_gate_inline`` (main
+        thread) for per-call stdout capture.
+
+        ``sys.stdout`` is never replaced.  Stderr is captured via
+        ``contextlib.redirect_stderr`` so it can be preserved in the error
+        message when the op raises, matching what ``_run_op_timed`` does.
         """
+        import contextlib
         import io
-        import threading
 
-        callable_target = node.evaluator if node.kind == "gate" else node.call
+        callable_target = node.call
         saved_model = self.ctx.model
         saved_cwd = os.getcwd()
         saved_workdir = self.ctx.workdir
         abs_workdir = Path(self.ctx.workdir.resolve())
         saved_project = os.environ.get("REFACTORY_PROJECT")
         self.ctx.model = None
-        # Update ctx.workdir to absolute so relative paths resolve correctly
-        # after os.chdir changes the CWD.
         self.ctx.workdir = abs_workdir
+        _capture_stderr = io.StringIO()
         try:
-            # Set REFACTORY_PROJECT so project_for_nodes() still resolves to the
-            # launcher rather than the run directory after the chdir.
             if not os.environ.get("REFACTORY_PROJECT"):
                 os.environ["REFACTORY_PROJECT"] = saved_cwd
             os.chdir(str(abs_workdir))
-            # Capture stdout/stderr per-call using thread-local redirect
-            _capture_stderr = io.StringIO()
-            _capture_stdout = io.StringIO()
-            _thread_id = threading.get_ident()
-            _real_stderr = sys.stderr
-            _real_stdout = sys.stdout
-
-            class _ThreadLocalWriter:
-                """Redirect only the calling thread's writes to a capture buffer."""
-                def __init__(self, capture, real):
-                    self._capture = capture
-                    self._real = real
-                def write(self, data):
-                    if threading.get_ident() == _thread_id:
-                        self._capture.write(data)
-                    else:
-                        self._real.write(data)
-                def flush(self):
-                    (self._capture if threading.get_ident() == _thread_id else self._real).flush()
-                def __getattr__(self, name):
-                    return getattr(self._real, name)
-
-            sys.stdout = _ThreadLocalWriter(_capture_stdout, _real_stdout)
-            sys.stderr = _ThreadLocalWriter(_capture_stderr, _real_stderr)
-            try:
-                fn = resolve(callable_target)
+            fn = resolve(callable_target)
+            with contextlib.redirect_stderr(_capture_stderr):
                 produced = fn(self.ctx)
-            except BaseException:
-                # Preserve stderr on error
-                _err_stderr = _capture_stderr.getvalue()
-                sys.stdout = _real_stdout
-                sys.stderr = _real_stderr
-                if _err_stderr and _err_stderr.strip():
-                    exc = sys.exc_info()[1]
-                    if exc is not None:
-                        try:
-                            exc.args = (f"{exc.args[0]}\nop stderr: {_err_stderr.strip()}",) + exc.args[1:]
-                        except (IndexError, AttributeError):
-                            pass
-                raise
-            finally:
-                sys.stdout = _real_stdout
-                sys.stderr = _real_stderr
-            # Emit run warnings from captured stderr, and pass through any stderr
-            # to the real stderr so it remains visible for debugging.
+            # Pass captured stderr to the real stderr and emit run_warnings.
             _captured_err = _capture_stderr.getvalue()
             _emit_run_warnings(self.ctx.workdir, node.id, _captured_err)
             if _captured_err:
-                _real_stderr.write(_captured_err)
-            # Attach captured stdout for fn-gate feedback extraction
+                sys.stderr.write(_captured_err)
+            return produced
+        except BaseException:
+            _err_stderr = _capture_stderr.getvalue()
+            if _err_stderr and _err_stderr.strip():
+                exc = sys.exc_info()[1]
+                if exc is not None:
+                    try:
+                        exc.args = (f"{exc.args[0]}\nop stderr: {_err_stderr.strip()}",) + exc.args[1:]
+                    except (IndexError, AttributeError):
+                        pass
+            raise
+        finally:
+            self.ctx.model = saved_model
+            self.ctx.workdir = saved_workdir
+            os.chdir(saved_cwd)
+            if saved_project is None:
+                os.environ.pop("REFACTORY_PROJECT", None)
+            else:
+                os.environ["REFACTORY_PROJECT"] = saved_project
+
+    def _run_fn_gate_inline(self, node: Node) -> Any:
+        """Run a fn gate in-process on the main thread (not in a fork branch).
+
+        Stdout is captured with ``contextlib.redirect_stdout`` so fn-gate
+        feedback extraction in ``_visit_gate`` can read what the gate printed.
+        This is safe on the main thread because no concurrent fork-branch
+        threads share ``sys.stdout`` at the same time.  Fn gates inside fork
+        branches use ``_run_op_timed`` (forkserver child) instead.
+
+        ctx.model is set to None and CWD is changed to the run directory,
+        matching the spine's op contract.
+        """
+        import contextlib
+        import io
+
+        callable_target = node.evaluator
+        saved_model = self.ctx.model
+        saved_cwd = os.getcwd()
+        saved_workdir = self.ctx.workdir
+        abs_workdir = Path(self.ctx.workdir.resolve())
+        saved_project = os.environ.get("REFACTORY_PROJECT")
+        self.ctx.model = None
+        self.ctx.workdir = abs_workdir
+        _capture_stdout = io.StringIO()
+        try:
+            if not os.environ.get("REFACTORY_PROJECT"):
+                os.environ["REFACTORY_PROJECT"] = saved_cwd
+            os.chdir(str(abs_workdir))
+            with contextlib.redirect_stdout(_capture_stdout):
+                verdict = resolve(callable_target)(self.ctx)
+            # Attach captured stdout for fn-gate feedback extraction.
             _child_stdout = _capture_stdout.getvalue()
-            if _child_stdout and isinstance(produced, str):
+            if _child_stdout and isinstance(verdict, str):
                 try:
-                    produced._fn_stdout = _child_stdout  # type: ignore[attr-defined]
+                    verdict._fn_stdout = _child_stdout  # type: ignore[attr-defined]
                 except (AttributeError, TypeError):
                     pass
-            return produced
+            return verdict
         finally:
             self.ctx.model = saved_model
             self.ctx.workdir = saved_workdir
@@ -1611,13 +1636,13 @@ class Executor:
         else:
             timeout = self._effective_timeout(node)
             if timeout is not None:
-                # With enable_recovery, run fn gates in forkserver child
-                # processes for per-process stdout capture (thread-safe).
+                # Forkserver child: per-process stdout capture, thread-safe,
+                # no global sys.stdout swap.  Used with enable_recovery or
+                # when running inside a fork branch thread.
                 verdict = self._run_op_timed(node.evaluator, node, timeout)
             else:
-                # Default path: run inline with per-call stdout capture
-                # (thread-safe via thread-local redirect, no global sys.stdout swap).
-                verdict = self._run_op_inline(node)
+                # Main-thread fn gate without recovery: run in-process.
+                verdict = self._run_fn_gate_inline(node)
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"
