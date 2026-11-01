@@ -934,13 +934,17 @@ class Executor:
                         if record is not None:
                             scores.append(record)
                     finally:
-                        # Disarm the per-item deadline.
+                        # Disarm the per-item deadline and restore the
+                        # previous handler/alarm.  The guard is on
+                        # _prev_handler (captured when arming), NOT on
+                        # _alarm_armed, so restoration happens even when the
+                        # alarm was disarmed before the branch walk (Ask 4).
                         if _alarm_armed:
                             signal.alarm(0)
-                            if _prev_handler is not None:
-                                signal.signal(signal.SIGALRM, _prev_handler)
-                            if _prev_alarm > 0:
-                                signal.alarm(_prev_alarm)
+                        if _prev_handler is not None:
+                            signal.signal(signal.SIGALRM, _prev_handler)
+                        if _prev_alarm > 0:
+                            signal.alarm(_prev_alarm)
 
                 # Restore max_steps, offset by the steps the data loop added
                 # so the main walk loop's cap accounts for the kept history.

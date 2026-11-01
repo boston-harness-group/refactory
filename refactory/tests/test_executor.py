@@ -1052,6 +1052,16 @@ def test_execute_from_thread_succeeds(tmp_path):
     assert result.exit_ok is True, f"expected exit_ok=True, got error: {result.error}"
     assert len(result.facts["item_scores"]) == 2
 
+    # Correction 3: verify that the unarmed deadline was reported as a
+    # run_warning event in the run's events (the same channel the spine uses).
+    import json
+    events_path = tmp_path / "run" / ".refactory" / "events.jsonl"
+    assert events_path.exists(), "run_warning event should have been written"
+    events = [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+    warnings = [e for e in events if e.get("kind") == "run_warning"]
+    assert len(warnings) >= 1, f"expected a run_warning event, got {events}"
+    assert "not on the main thread" in warnings[0].get("summary", "")
+
 
 # ── Ask 5: step-cap scaling ────────────────────────────────────────────────
 
@@ -1100,26 +1110,47 @@ def test_step_cap_scaling_exceeds_unscaled_cap(tmp_path):
     graph.connect("work", "end")
     graph.connect("data", "after")
 
-    # With scaling: should succeed
+    # With scaling: all items should pass (no errors).
     result = execute(graph, tmp_path / "run-scaled", max_steps=default_max)
     assert result.exit_ok, f"scaled run should succeed: {result.error}"
-    assert len(result.facts["item_scores"]) == n_items
+    scaled_scores = result.facts["item_scores"]
+    assert len(scaled_scores) == n_items
+    scaled_failed = [s for s in scaled_scores if s.get("error_text") is not None]
+    assert len(scaled_failed) == 0, (
+        f"scaled run should have zero failures, got {len(scaled_failed)}"
+    )
 
-    # Without scaling (revert): should fail by exceeding the cap.
-    # Run with a max_steps equal to the base, and manually prevent scaling
-    # by setting max_steps to a value that items × nodes exceeds.
-    workdir_unscaled = tmp_path / "run-unscaled"
-    ctx = RunContext(workdir_unscaled, enforce_writes=True)
-    executor = Executor(graph, ctx, max_steps=default_max)
-    # Prevent the scaling by storing the max before the data loop patches it
-    # and resetting it: monkey-patch the graph to have no items scaling.
-    # Alternatively, just run with a cap that is smaller than items × nodes.
-    result_unscaled = executor.run()
-    # The scaling should have raised max_steps. To prove the test would fail
-    # without scaling, use a cap smaller than items × 2 nodes.
-    cap_without_scaling = default_max  # 2000, but items * 2 = 2002 > 2000
-    assert n_items * 2 > cap_without_scaling, (
-        f"test miscalculated: {n_items} × 2 = {n_items * 2} should exceed {cap_without_scaling}"
+    # Without scaling (revert): should exceed the cap and fail some items.
+    # Block the scaling line (self.max_steps += …) via a subclass whose
+    # __setattr__ ignores writes to max_steps after __init__.
+    assert n_items * 2 > default_max, (
+        f"test miscalculated: {n_items} × 2 = {n_items * 2} should exceed {default_max}"
+    )
+
+    class _NoScaleExecutor(Executor):
+        """Executor that blocks the data-loop step-cap scaling."""
+        _init_done = False
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._init_done = True
+
+        def __setattr__(self, attr, value):
+            if attr == "max_steps" and getattr(self, "_init_done", False):
+                return  # block the scaling
+            super().__setattr__(attr, value)
+
+    ctx_noscale = RunContext(tmp_path / "run-noscale", enforce_writes=True)
+    ex_noscale = _NoScaleExecutor(graph, ctx_noscale, max_steps=default_max)
+    result_noscale = ex_noscale.run()
+    # Without scaling the step cap is exceeded: some items hit the cap and are
+    # recorded as failed (branch walk returns "exceeded").  The scaled run had
+    # zero failures; any failure here proves the scaling was necessary.
+    noscale_scores = result_noscale.facts.get("item_scores", [])
+    noscale_failed = [s for s in noscale_scores if s.get("error_text") is not None]
+    assert len(noscale_failed) > 0, (
+        f"without scaling some items should fail (step cap {default_max} < "
+        f"{n_items} items × 2 nodes = {n_items * 2} total steps)"
     )
 
 
@@ -1172,3 +1203,68 @@ def test_deadline_not_armed_across_branch(tmp_path):
     scores = result.facts.get("item_scores", [])
     assert len(scores) == 1
     assert scores[0]["passed"] is True
+
+
+# ── Ask 4: SIGALRM handler restored after branch failure ────────────────────
+
+
+def test_sigalrm_handler_restored_after_branch_failure(tmp_path):
+    """The previous SIGALRM handler is restored even when the branch fails (Ask 4).
+
+    When the deadline is armed, then disarmed before the branch walk, and the
+    branch fails, the finally block must still restore the previous handler.
+    Fails when restoration is gated on _alarm_armed (which is False after
+    the disarm-before-branch).
+    """
+    import signal
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, RunContext
+
+    sentinel_called = []
+
+    def sentinel_handler(signum, frame):
+        sentinel_called.append(True)
+
+    class BranchFailTask(task_module.Task):
+        name = "branch_fail_restore"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="a"),  # branch fails for "a"
+                task_module.TaskInstance(id="ok"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("branch_fail_restore", BranchFailTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="branch_fail_restore", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:fail_on_first",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    # Install a sentinel handler that must be restored after the data loop.
+    prev_handler = signal.signal(signal.SIGALRM, sentinel_handler)
+    try:
+        workdir = tmp_path / "run"
+        ctx = RunContext(workdir, enforce_writes=True)
+        executor = Executor(graph, ctx, max_steps=2000)
+        executor._data_item_deadline = lambda: 10.0
+        result = executor.run()
+
+        # After the data loop, the sentinel handler must be restored.
+        current_handler = signal.getsignal(signal.SIGALRM)
+        assert current_handler is sentinel_handler, (
+            f"SIGALRM handler was not restored; got {current_handler}"
+        )
+    finally:
+        signal.signal(signal.SIGALRM, prev_handler)
