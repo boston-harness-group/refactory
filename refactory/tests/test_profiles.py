@@ -233,7 +233,12 @@ def test_repeat_usage_includes_winner_validation(tmp_path):
                     max_tokens=9, validation_reserve_tokens=2, runs_root=tmp_path), project=Path("."))
         def evaluate(mode, state, workdir):
             loop.budget.record_usage(str(workdir), 2)
-            return RunResult(score=1)
+            from refactory_dsh import task as _task
+            subset = _task.read_subset(workdir)
+            part = subset.get("part", "train")
+            expected, _ = loop._expected_item_ids(state, part)
+            scores = [{"id": eid, "passed": True, "score": 1.0} for eid in expected]
+            return RunResult(score=1, facts={"item_scores": scores} if scores else {})
         loop.evaluator = SimpleNamespace(evaluate=evaluate)
         report = loop.run()
     assert report["exit_ok"] is True

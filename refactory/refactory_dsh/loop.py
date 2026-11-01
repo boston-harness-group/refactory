@@ -81,8 +81,9 @@ class LoopError(RuntimeError):
 def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
     """Which items each data node of a state would read.
 
-    The fields a harness's class of work lives in: the Task it binds and the source it
-    reads. Nothing else in the graph says what the run is examined on.
+    The fields a harness's class of work lives in: the Task it binds, the source it
+    reads, the limit it applies, and whether it declares item_scores. Nothing else in
+    the graph says what the run is examined on.
     """
     graph = state.get("graph") or {}
     nodes = graph.get("nodes") if isinstance(graph, dict) else None
@@ -98,6 +99,8 @@ def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
             continue
         found[str(node.get("id"))] = (
             node.get("task_ref"), node.get("source_path"), node.get("source_format"),
+            node.get("limit", 0),
+            "item_scores" in (node.get("produces") or []),
         )
     return found
 
@@ -707,6 +710,12 @@ class Loop(OuterLoop):
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
         from refactory_dsh.budgets import BudgetExhausted
+
+        # Loop-owned item channel: expected ids computed from the seed's state
+        # and the loop root, not from the candidate's trial directory.
+        seed_state = self.population[0].state if self.population else candidate.state
+        expected_ids, seed_declares_item_scores = self._expected_item_ids(seed_state, part)
+
         trials = []
         last = RunResult(exit_ok=False, error="no measurement completed")
         required = (self.config.resolved_profile.get("contract") or {}).get("required_artifacts", [])
@@ -733,6 +742,8 @@ class Loop(OuterLoop):
                     result.exit_ok = False
                     result.error = str(exc)
                     self.bound = str(exc)
+            # Post-trial item-ownership verification (works with both evaluators).
+            self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
             missing = [path for path in required if not (trial_dir / path).exists()]
             valid_score = isinstance(result.score, (int, float)) and math.isfinite(result.score)
             if missing or not valid_score:
@@ -1187,6 +1198,114 @@ class Loop(OuterLoop):
             f"({', '.join(changed)}); the class of work is the seed's, and a run points "
             f"a harness at other items with --source"
         )
+
+    # ── item-ownership verification ──────────────────────────────────────
+
+    def _expected_item_ids(self, state: dict[str, Any], part: str) -> tuple[set[str], bool]:
+        """The item ids the loop expects a trial to grade, and whether item_scores is declared.
+
+        Computed from the loop root and the seed's state — the loop-owned channel
+        the candidate cannot write. Falls back silently when the mode cannot build
+        or has no data nodes with items.
+        """
+        if not state:
+            return set(), False
+        try:
+            graph = self.mode_class(state=state).build()
+        except Exception:
+            return set(), False
+
+        from refactory_dsh.nn.executor import full_items
+
+        ids: set[str] = set()
+        seed_declares_item_scores = False
+        nodes = sorted(
+            (node for node in graph.nodes.values() if node.kind == "data"),
+            key=lambda node: node.id,
+        )
+        for node in nodes:
+            if "item_scores" in node.produces:
+                seed_declares_item_scores = True
+            try:
+                items = full_items(node, self.root)
+            except Exception:
+                continue
+            if not items:
+                continue
+            selected = task_module.partition(items, self.config.holdout).get(part, [])
+            for i, item in enumerate(selected):
+                ids.add(str(item.get("id") or i))
+        return ids, seed_declares_item_scores
+
+    def _verify_item_set(
+        self,
+        expected_ids: set[str],
+        seed_declares_item_scores: bool,
+        trial_dir: Path,
+        part: str,
+        result: "RunResult",
+    ) -> None:
+        """Post-trial check: verify the actually-graded ids match the expected set.
+
+        Three sub-checks:
+        1. Subset integrity (backstop): the trial-dir subset.json must match the
+           loop's part and holdout.
+        2. Skip-loophole closure: when the seed declares item_scores, a trial that
+           produces none is refused as E-exam.
+        3. Item-set comparison: extra ids are refused; missing ids are refused only
+           when they have no recorded per-item failure.
+        """
+        # 1. Subset integrity backstop
+        subset = task_module.read_subset(trial_dir)
+        expected_subset = {"part": part, "holdout": self.config.holdout}
+        if subset and (subset.get("part") != expected_subset["part"]
+                       or subset.get("holdout") != expected_subset["holdout"]):
+            result.exit_ok = False
+            result.error = (
+                f"E-exam: subset.json was tampered with: expected {expected_subset}, "
+                f"got {{'part': {subset.get('part')!r}, 'holdout': {subset.get('holdout')!r}}}"
+            )
+            return
+
+        # 2. Skip-loophole closure
+        has_item_scores = result.facts is not None and "item_scores" in result.facts
+        item_scores = result.facts.get("item_scores") if has_item_scores else None
+        if seed_declares_item_scores and not has_item_scores:
+            result.exit_ok = False
+            result.error = (
+                "E-exam: the seed declares item_scores but the trial produced none; "
+                "a trial may not avoid grading by producing no item_scores"
+            )
+            return
+
+        # 3. Item-set comparison
+        if not result.exit_ok or item_scores is None or not expected_ids:
+            return
+
+        graded_ids = {str(s["id"]) for s in item_scores if isinstance(s, dict) and "id" in s}
+
+        extra = graded_ids - expected_ids
+        if extra:
+            result.exit_ok = False
+            result.error = (
+                f"E-exam: the trial graded ids outside the allowed set: "
+                f"{sorted(extra)}"
+            )
+            return
+
+        missing = expected_ids - graded_ids
+        if missing:
+            # A missing item that has a recorded per-item failure is accepted
+            # (consistent with F4: failed items score 0 and keep their error).
+            # A missing item with no failure record is refused.
+            if result.error is not None:
+                # The run had an error; missing items are attributed to it.
+                return
+            result.exit_ok = False
+            result.error = (
+                f"E-exam: expected ids were not graded and have no recorded failure: "
+                f"{sorted(missing)}"
+            )
 
     # ── step ───────────────────────────────────────────────────────────────
     def step(

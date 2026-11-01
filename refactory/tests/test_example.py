@@ -12,6 +12,7 @@ change that breaks the example fails the gate rather than one narrow unit test.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import shutil
 from pathlib import Path
@@ -30,9 +31,19 @@ TARGET = "circle_packing/adaptive"
 @pytest.fixture(autouse=True)
 def _clean_created():
     root = registry.workspace_root(Path(".")) / CREATED
-    shutil.rmtree(root, ignore_errors=True)
-    yield
-    shutil.rmtree(root, ignore_errors=True)
+    # Serialize access to the shared workspace package directory so that
+    # parallel xdist workers do not race on creation and cleanup.
+    lock_path = root.parent / ".test_example_lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_path, "w")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        shutil.rmtree(root, ignore_errors=True)
+        yield
+        shutil.rmtree(root, ignore_errors=True)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def _config(root: Path, **overrides: object) -> LoopConfig:
