@@ -2663,6 +2663,10 @@ def gate_check(ctx: Any) -> Any:
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh.run import BuildLoopStop
 
+    # Reset the coverage re-run bound: a new QA round (the builder committed
+    # new code and the reviews ran again) allows one more coverage re-run.
+    ctx.set_fact("qa_coverage_rerun_done", False)
+
     attempt = _prepared_attempt(ctx)
     if not attempt:
         raise ValueError("the check was not prepared for the attempt the run is at; "
@@ -3355,6 +3359,9 @@ def _set_aside_judging(ctx: Any) -> None:
         ctx.path(name).rename(folder / name)
 
 
+QA_RERUN_REVIEW = "reviews/qa-rerun.md"
+
+
 def synthesize_qa(ctx: Any) -> dict[str, Any]:
     """Op: put this attempt's reviews, its check and its scope in one document for the QA judge.
 
@@ -3365,8 +3372,25 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
 
     It also starts the round's judging: the last round's verdicts, evidence map and audit
     are set aside (`_set_aside_judging`), and the judges' reread counts start again.
+    When a new QA round starts, `reviews/qa-rerun.md` (from a coverage re-run in the
+    previous round) is archived alongside the other judging files, so a later round
+    never merges stale probes from an earlier one.
     """
     _set_aside_judging(ctx)
+    # Archive reviews/qa-rerun.md from a previous round so stale probes are
+    # never merged into the new round's synthesis.  When qa_coverage_rerun_done
+    # is True, the file is from a valid coverage re-run in the current round and
+    # should be included; when False (reset by gate_check at the start of each
+    # new round), it is stale and must be removed.
+    rerun_path = ctx.path(QA_RERUN_REVIEW)
+    if rerun_path.is_file() and not ctx.facts.get("qa_coverage_rerun_done"):
+        import uuid
+        from datetime import datetime, timezone
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        folder = ctx.workdir / JUDGING_HISTORY / stamp
+        folder.mkdir(parents=True, exist_ok=True)
+        rerun_path.rename(folder / "qa-rerun.md")
     sections: list[str] = []
     missing: list[str] = []
     for name, who in DESIGN_QA_REVIEWS:
@@ -3411,6 +3435,13 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
         + "## The diff stat\n\n```\n" + _diff_stat(ctx) + "\n```\n\n"
         + "## The design's Changes\n\n" + (changes or "(design.md has no Changes section)") + "\n"
     )
+    # Include the coverage re-run review when the qa_director_rerun node wrote one.
+    # The graph edge qa_director_rerun → synthesize_qa guarantees it exists when
+    # the coverage_rerun path fires; on a normal path it was archived above.
+    rerun_text = ctx.read_text(QA_RERUN_REVIEW).strip() if ctx.exists(QA_RERUN_REVIEW) else ""
+    if rerun_text:
+        body += (f"\n\n## {QA_RERUN_REVIEW} (the QA director coverage re-run)"
+                 f"\n\n{rerun_text}\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)
@@ -3741,11 +3772,15 @@ def _quoting(ctx: Any, note: str, name: str) -> str:
 def _check_unverified_coverage(ctx: Any) -> tuple[list[str], Verdict | None]:
     """Check probe coverage for requirements marked unverified in intent-audit.json.
 
-    When unverified requirements are found for the first time, trigger a coverage
-    re-run of the QA reviews (``Verdict("coverage_rerun")``) so the QA director
-    runs again with the coverage rule in its prompt — a probe that runs and fails
-    becomes a normal finding.  A requirement still unverified after that one re-run
-    is listed as advisory (not verified), never a builder reloop.
+    When unverified requirements are found for the first time in a QA round,
+    trigger a coverage re-run (``Verdict("coverage_rerun")``) so the QA director
+    re-runs via the ``qa_director_rerun`` node with those requirement ids in its
+    prompt — a probe that runs and fails becomes a normal finding.  The re-run is
+    bounded to once per QA round: ``qa_coverage_rerun_done`` is set on the first
+    re-run and checked before triggering another; the bound resets when the builder
+    produces a new commit (a new QA round begins, and ``synthesize_qa`` sets it
+    aside).  A requirement still unverified after that one re-run is listed as
+    advisory (not verified), never a builder reloop.
 
     Returns ``(advisories, verdict)``.  *verdict* is non-None only when a coverage
     re-run is needed; the caller must return it instead of proceeding.
@@ -3769,13 +3804,22 @@ def _check_unverified_coverage(ctx: Any) -> tuple[list[str], Verdict | None]:
     advisories: list[str] = []
 
     if not rerun_done:
-        # First time: trigger a coverage re-run of the QA reviews.
+        # First time in this QA round: trigger a coverage re-run.
         ctx.set_fact("qa_coverage_rerun_done", True)
+        # Set the requirement ids as a fact so the qa_director_rerun prompt
+        # template can reference {{qa_coverage_rerun_ids}}.
+        lines = []
+        for req in unverified:
+            req_id = req.get("id", "?")
+            req_text = req.get("requirement", req.get("text", "?"))
+            lines.append(f"- {req_id}: {req_text}")
+        ids_text = "\n".join(lines)
+        ctx.set_fact("qa_coverage_rerun_ids", ids_text)
         req_ids = ", ".join(req.get("id", "?") for req in unverified)
         return [], Verdict(
             "coverage_rerun",
             f"coverage re-run: {len(unverified)} unverified requirement(s) ({req_ids}); "
-            "re-running the QA reviews so the director can probe them",
+            "re-running the QA director so it can probe them",
         )
 
     # After re-run, still unverified: list as advisory, never a builder reloop.

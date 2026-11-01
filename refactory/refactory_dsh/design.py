@@ -906,7 +906,8 @@ class DesignMode(Mode):
             # It runs the whole check itself when no decision stands for this attempt.
             writes=(*check_writes, *repo_change.CHECK_WRITES),
             produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
-                      "combined_sendback_count", "early_asks_sendback_count"),
+                      "combined_sendback_count", "early_asks_sendback_count",
+                      "qa_coverage_rerun_done"),
             knobs=check_knobs, max_iterations=8,
             notes="compose one send-back from check failures and review findings without "
                   "spending an attempt; the combined send-back names every failing test "
@@ -1037,6 +1038,39 @@ class DesignMode(Mode):
             produces=("qa_review",),
             notes="attack the artifact against the brief",
         ))
+        graph.add(Node(
+            "qa_director_rerun", "agent",
+            prompt_template=(
+                "Artifact directory (absolute): {{artifact}}\n"
+                "Read and run the delivered files at this exact path; do not infer it "
+                "from your working directory. {{change}}\n\n"
+                "Brief: {{brief}}\nThe check it must pass: {{check}}\n\n"
+                "## The approved design\nRead the approved design from `design.md` in the run directory.\n\n"
+                + _ACCEPTANCE_BASELINE
+                + "You are the QA director, running a coverage re-run. The previous QA "
+                "round left some requirements with no run probe. Probe ONLY the "
+                "unverified requirements listed below — do not repeat probes for "
+                "requirements that already passed.\n\n"
+                "Unverified requirements to probe:\n{{qa_coverage_rerun_ids}}\n\n"
+                "Coverage rule: every requirement listed above must be covered by at "
+                "least one probe you actually run, reported with the exact command and "
+                "its output. A probe that runs and fails is a normal finding.\n\n"
+                "Read the original QA review at `reviews/qa.md` to see what was already "
+                "covered. Write `reviews/qa-rerun.md` with each check and its exact "
+                "result. Anything that breaks an ask in the brief is written as "
+                "BLOCKING: <path>: <description> where <path> is the file the builder "
+                "must change to fix the problem.\n"
+                + SEVERITY_RULE + " " + MARKER_RULE + "\n"
+                "{{review_instructions}}\n"
+                "Changed functions:\n{{changed_functions}}\n\n"
+            ),
+            reads=("brief.json", "design.md", "reviews/qa.md",
+                   "changed-functions.json"),
+            writes=("reviews/qa-rerun.md",),
+            resource_role="final_validation",
+            outputs_only=True,
+            notes="coverage re-run: probe only the unverified requirements",
+        ))
         graph.add(Node("join_qa", "join",
                        sources=("check", "health_checker", "code_reviewer", "qa_director",
                                 "early_asks_check", "verifier"),
@@ -1071,7 +1105,8 @@ class DesignMode(Mode):
                    "reviews/qa.md", "changed-functions.json"),
             writes=("reviews/qa-gate.txt", "reviews/follow-ups.json", "reviews/follow-ups.md"),
             produces=("qa_gate", "qa_judge_rereads", "qa_judge_reread", "qa_draft",
-                      "qa_unresolved", "qa_coverage_rerun_done"),
+                      "qa_unresolved", "qa_coverage_rerun_done",
+                      "qa_coverage_rerun_ids"),
             knobs=("judge_rereads",),
             max_iterations=6,
             notes="route on the QA judge's verdict: a redo for what holds the change back goes "
@@ -1237,9 +1272,11 @@ class DesignMode(Mode):
         # A judge-only reread: the QA judge's verdict could not be read, so it is asked
         # again, with no builder round (`design_ops._read_judge`; `judge_rereads` caps it).
         graph.connect("gate_qa", "qa_judge", condition="reread")
-        # Coverage re-run: unverified requirements trigger one re-pass of the QA
-        # synthesis and judge; still unverified after that is advisory.
-        graph.connect("gate_qa", "synthesize_qa", condition="coverage_rerun")
+        # Coverage re-run: unverified requirements trigger a re-run of the QA
+        # director for those requirements, then re-synthesis and re-judge;
+        # still unverified after that is advisory.
+        graph.connect("gate_qa", "qa_director_rerun", condition="coverage_rerun")
+        graph.connect("qa_director_rerun", "synthesize_qa")
         graph.connect("gate_qa", "audit_corrections", condition="proceed")
         graph.connect("audit_corrections", "overwatch")
         graph.connect("overwatch", "gate_overwatch")

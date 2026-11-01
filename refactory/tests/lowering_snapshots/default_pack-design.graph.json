@@ -586,6 +586,28 @@
       "post_checks": [],
       "_type": "AgentNode"
     },
+    "qa_director_rerun": {
+      "id": "qa_director_rerun",
+      "reads": [
+        "brief.json",
+        "changed-functions.json",
+        "design.md",
+        "reviews/qa.md"
+      ],
+      "writes": [
+        "reviews/qa-rerun.md"
+      ],
+      "blocking": true,
+      "resource_role": "final_validation",
+      "role": "ceo",
+      "model": "",
+      "prompt_template": "Artifact directory (absolute): {{artifact}}\nRead and run the delivered files at this exact path; do not infer it from your working directory. {{change}}\n\nBrief: {{brief}}\nThe check it must pass: {{check}}\n\n## The approved design\nRead the approved design from `design.md` in the run directory.\n\nAcceptance baseline: the original brief, any approved design, and explicit user steering. Preserve user-approved non-goals. A README limitation, proposed exclusion, coordinator summary or reviewer note cannot waive a requested behavior without explicit user agreement to that change. Report conflicts instead of silently narrowing scope. Reviews must mark observed noncompliance as BLOCKING even when the limitation is documented.\n\nYou are the QA director, running a coverage re-run. The previous QA round left some requirements with no run probe. Probe ONLY the unverified requirements listed below \u2014 do not repeat probes for requirements that already passed.\n\nUnverified requirements to probe:\n{{qa_coverage_rerun_ids}}\n\nCoverage rule: every requirement listed above must be covered by at least one probe you actually run, reported with the exact command and its output. A probe that runs and fails is a normal finding.\n\nRead the original QA review at `reviews/qa.md` to see what was already covered. Write `reviews/qa-rerun.md` with each check and its exact result. Anything that breaks an ask in the brief is written as BLOCKING: <path>: <description> where <path> is the file the builder must change to fix the problem.\nEnd the first line of each BLOCKING finding with `[core]` when it breaks an ask in the brief, an acceptance criterion, a correction or constraint the person gave, or existing behaviour (a regression: name the test or file:line that shows it), and with `[non-core]` otherwise: extra tests, docs, edge cases beyond the asks, refactors and style. A finding with no tag counts as core. Non-core findings do not hold the change back; its pull request lists them as follow-ups. Write the blocking marker only at the start of a finding line, in its plain form: BLOCKING: <path>: <description>. Never wrap it in backticks, a code span, or quotation marks while explaining a check or describing the parser. When discussing the marker itself, call it \"the blocking marker\". Write every real finding as a plain line outside any fenced code block, because fenced blocks are not read as findings. When you show the format as an example rather than report a finding, put the example inside a fenced code block.\n{{review_instructions}}\nChanged functions:\n{{changed_functions}}\n\n",
+      "tools": [],
+      "timeout": null,
+      "max_iterations": 1,
+      "post_checks": [],
+      "_type": "AgentNode"
+    },
     "qa_judge": {
       "id": "qa_judge",
       "reads": [
@@ -919,13 +941,13 @@
     },
     {
       "source": "gate_qa",
-      "target": "qa_judge",
-      "condition": "reread"
+      "target": "qa_director_rerun",
+      "condition": "coverage_rerun"
     },
     {
       "source": "gate_qa",
-      "target": "synthesize_qa",
-      "condition": "coverage_rerun"
+      "target": "qa_judge",
+      "condition": "reread"
     },
     {
       "source": "gate_research",
@@ -996,6 +1018,11 @@
       "source": "prepare_check",
       "target": "report",
       "condition": "draft"
+    },
+    {
+      "source": "qa_director_rerun",
+      "target": "synthesize_qa",
+      "condition": null
     },
     {
       "source": "qa_judge",

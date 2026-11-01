@@ -481,7 +481,13 @@ def test_the_design_graph_has_judges_and_no_free_audit_round():
     # pick_corrections (dm-226).
     assert {(e.target, e.condition) for e in graph.out_edges("gate_qa")} == {
         ("pick_corrections", "reloop"), ("qa_judge", "reread"),
-        ("synthesize_qa", "coverage_rerun"), ("audit_corrections", "proceed")}
+        ("qa_director_rerun", "coverage_rerun"), ("audit_corrections", "proceed")}
+    # The coverage re-run node is an agent that writes reviews/qa-rerun.md and
+    # connects to synthesize_qa.
+    rerun_node = graph.nodes["qa_director_rerun"]
+    assert rerun_node.kind == "agent"
+    assert "reviews/qa-rerun.md" in rerun_node.writes
+    assert [e.target for e in graph.out_edges("qa_director_rerun")] == ["synthesize_qa"]
     assert [e.target for e in graph.out_edges("audit_corrections")] == ["overwatch"]
     assert {(e.target, e.condition) for e in graph.out_edges("gate_overwatch")} == {
         ("pick_corrections", "reloop"), ("overwatch", "reread"), ("report", "proceed")}

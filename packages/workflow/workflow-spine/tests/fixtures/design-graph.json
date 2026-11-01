@@ -182,6 +182,12 @@
       "max_iterations": 1,
       "_type": "AgentNode"
     },
+    "qa_director_rerun": {
+      "id": "qa_director_rerun",
+      "role": "ceo",
+      "max_iterations": 1,
+      "_type": "AgentNode"
+    },
     "qa_judge": {
       "id": "qa_judge",
       "role": "ceo",
@@ -366,8 +372,12 @@
     },
     {
       "source": "gate_qa",
-      "target": "synthesize_qa",
+      "target": "qa_director_rerun",
       "condition": "coverage_rerun"
+    },
+    {
+      "source": "qa_director_rerun",
+      "target": "synthesize_qa"
     },
     {
       "source": "gate_research",
