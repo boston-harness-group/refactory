@@ -34,6 +34,7 @@ import time
 from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Sequence
 
 from refactory_dsh import history as run_history
@@ -193,6 +194,7 @@ class LoopConfig:
     max_tokens: int | None = None
     validation_reserve_s: float = 0
     validation_reserve_tokens: int = 0
+    max_rollouts: int | None = None
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -338,6 +340,7 @@ class Loop(OuterLoop):
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
             raise LoopError("repeats must be an integer from 1 to 10")
         self.measurements = 0
+        self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
         self.budget: Any = None
         self._owns_resource_budget = False
@@ -613,6 +616,8 @@ class Loop(OuterLoop):
         for index, candidate in enumerate(batch):
             if self.evaluations >= self.config.max_evaluations:
                 break
+            if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+                break
             self._evaluate(candidate)
             self._progress(
                 "forward",
@@ -689,7 +694,9 @@ class Loop(OuterLoop):
         candidate.duration_s = result.duration_s
         candidate.model_calls = result.model_calls
         candidate.evaluated = True
+        candidate._train_item_records = list(result.item_records)  # noqa: SLF001
         self.evaluations += 1
+        self.rollouts += len(result.item_records) or 1
         self._journal(
             "score",
             id=candidate.id,
@@ -705,6 +712,36 @@ class Loop(OuterLoop):
             measurements=measurements,
         )
         self._write_candidate(candidate, workdir, mode=mode)
+
+    def _evaluate_part(
+        self, candidate: Candidate, part: str,
+        items: list[str] | None, seed: int | None,
+    ) -> None:
+        """Evaluate on val or test in a fresh occasion directory (F18)."""
+        counter = candidate.occasion_counters.get(part, 0)
+        candidate.occasion_counters[part] = counter + 1
+        workdir = self.root / "runs" / candidate.id / "occasions" / f"{part}_{counter}"
+        workdir.mkdir(parents=True, exist_ok=True)
+        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
+        if items is not None:
+            task_module.make_manifest(workdir, train_ids=items if part == "train" else [],
+                                     val_ids=items if part == "val" else None,
+                                     test_ids=items if part == "test" else None)
+        self._carry_ledger(workdir)
+        result, measurements = self._measure(candidate, workdir, part)
+        occasion = {
+            "part": part, "occasion": counter,
+            "score": result.score if result.exit_ok else None,
+            "exit_ok": result.exit_ok, "error": result.error,
+            "duration_s": result.duration_s,
+            "item_records": list(result.item_records),
+            "workdir": str(workdir),
+        }
+        candidate.parts.setdefault(part, []).append(occasion)
+        self.rollouts += len(result.item_records) or 1
+        if result.item_records:
+            (workdir / "item_records.json").write_text(
+                json.dumps(result.item_records, indent=2, default=str))
 
     def _measure(self, candidate: Candidate, workdir: Path, part: str) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
@@ -735,13 +772,13 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 break
             after = self.budget.snapshot() if self.budget else {}
+            budget_exhausted_after_trial = False
             if self.budget:
                 try:
                     self.budget.checkpoint()
                 except BudgetExhausted as exc:
-                    result.exit_ok = False
-                    result.error = str(exc)
                     self.bound = str(exc)
+                    budget_exhausted_after_trial = True
             # Post-trial item-ownership verification (works with both evaluators).
             self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
             missing = [path for path in required if not (trial_dir / path).exists()]
@@ -766,6 +803,8 @@ class Loop(OuterLoop):
             self.measurements += 1
             last = result
             if not result.exit_ok:
+                break
+            if budget_exhausted_after_trial:
                 break
         scores = [t["score"] for t in trials if t["score"] is not None]
         complete = len(trials) == self.config.repeats and all(t["exit_ok"] for t in trials)
@@ -1387,6 +1426,8 @@ class Loop(OuterLoop):
             self.bound = "epochs"
         elif self.evaluations >= self.config.max_evaluations:
             self.bound = "evaluations"
+        elif self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+            self.bound = "rollouts"
         if self.bound:
             # Journaled, not derived: the report states what bound the run, and a
             # run whose steps are separate processes reads that from the log.
@@ -1842,6 +1883,7 @@ class Loop(OuterLoop):
         exit_ok = (
             best is not None and audit.get("winner") == best.id
             and audit.get("status") in ("measured", "not_applicable")
+            and not audit.get("overfit")
         )
         payload = {
             "exit_ok": exit_ok,
@@ -2279,7 +2321,15 @@ class Loop(OuterLoop):
             # Read now, not at construction: the point of steering a search is that a
             # note added while it runs reaches the next proposal.
             steering=self._steering_block(),
+            item_records=self._parent_train_records(board),
+            parent_item_records=self._parent_train_records(board),
         )
+
+    def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """Train records for the parent/current candidate the optimizer is editing."""
+        if not board:
+            return []
+        return list(getattr(board[0], "_train_item_records", []))
 
     def _steering_block(self) -> str:
         """The run's intent ledger as the proposer reads it, empty when there is none."""

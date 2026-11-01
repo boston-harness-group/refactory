@@ -1190,6 +1190,8 @@ export function apply(ctx: Context, config: Config): void {
       } catch { /* absent file — no override to preserve */ }
       // The runtime and the owning process travel with the status: the walker writes
       // this file too (`run_state.write_status`), and a reader asks which one ran it.
+      // Include per-item records in the status when present (F6).
+      const itemRecords = spine.getItemRecords()
       const record = {
         schema_version: 1, run_id: resolve(workdir), runtime: 'spine', owner_pid: process.pid,
         at: new Date().toISOString(),
@@ -1201,6 +1203,7 @@ export function apply(ctx: Context, config: Config): void {
           last_failure: { node: failedNode.node, error: failedNode.error, at: new Date().toISOString() },
         } : {}),
         ...(completionOverride !== undefined ? { completion_override: completionOverride } : {}),
+        ...(itemRecords.length > 0 ? { item_records: itemRecords } : {}),
       }
       const path = join(dir, 'spine-status.json')
       writeFileSync(`${path}.tmp`, JSON.stringify(record, null, 2))
@@ -1573,6 +1576,10 @@ export function apply(ctx: Context, config: Config): void {
       recordStatus(spine, workdir, 'executing')
       const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
       if (!ended.ok) return { failure: ended }
+      // Capture per-item record from command_end output (F6).
+      if (ended.value != null && typeof ended.value === 'object' && 'id' in ended.value) {
+        spine.addItemRecord(ended.value as Record<string, unknown>)
+      }
       materialised.delete(spine)
       item = undefined
       spine.endPass()
@@ -1843,6 +1850,13 @@ export function apply(ctx: Context, config: Config): void {
     // A run that stopped short of its end says which nodes it never reached.
     const halted = next.status === 'done' ? next.halted : undefined
     const unreached = halted?.reason === 'incomplete' ? `never reached: ${(halted.unreached ?? []).join(', ')}` : undefined
+    // Write per-item records to workdir when the run finishes (F6).
+    if (next.status === 'done' && workdir !== undefined) {
+      const finalRecords = spine.getItemRecords()
+      if (finalRecords.length > 0) {
+        writeFileSync(join(workdir, 'item_records.json'), JSON.stringify(finalRecords, null, 2))
+      }
+    }
     recordStatus(spine, workdir, spine.isHalted() ? 'halted' : spine.isPaused() ? 'paused' : next.status === 'done' ? 'done' : 'ready', unreached)
     // The item being iterated travels with the node views, so the subagent for a
     // pass is handed the item rather than being sent to find it on disk. Under

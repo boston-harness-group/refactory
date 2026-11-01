@@ -246,6 +246,8 @@ class RunBudget:
                 if phase not in ("work", "final_validation"):
                     raise ValueError("resource phase must be work or final_validation")
                 state["phase"] = phase
+            # Track last active time for downtime gap detection (F18).
+            state["_last_active"] = time.time()
             summary = self._summary(state)
             limits = state["limits"]
             work = state["phase"] != "final_validation"
@@ -335,10 +337,27 @@ class RunBudget:
             state["started_at"] = None
 
     def resume(self, limits: ResourceLimits | None = None) -> None:
-        """Retain consumption; only an explicit caller may change the allocation."""
+        """Retain consumption; only an explicit caller may change the allocation.
+
+        Downtime after a kill is not charged: when the run was killed rather
+        than gracefully paused (``started_at`` is still set), and
+        ``_last_active`` shows a gap exceeding 300 seconds, that gap is
+        subtracted from ``elapsed_before_s`` (F18).
+        """
         with self._locked() as state:
             if limits is not None:
                 state["limits"] = asdict(limits)
+            # Subtract downtime gap only when the budget was NOT gracefully
+            # paused (started_at is still set, meaning pause() was not called).
+            if state.get("started_at") is not None:
+                last_active = state.get("_last_active")
+                if last_active is not None:
+                    gap = time.time() - last_active
+                    if gap > 300:
+                        current_elapsed = self._summary(state)["elapsed_s"]
+                        adjusted = max(0.0, current_elapsed - gap)
+                        state["elapsed_before_s"] = adjusted
+                        state["started_at"] = time.time()
             if state.get("started_at") is None:
                 state["started_at"] = time.time()
             state["exhausted"] = False

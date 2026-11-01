@@ -436,6 +436,8 @@ export class Spine {
   private pass: DataPass | undefined
   private halted: TerminalHalt | undefined
   private readonly pauseBoundaries = new Set<string>()
+  /** Per-item records collected during data-node passes (F6). */
+  private _itemRecords: Array<Record<string, unknown>> = []
 
   constructor(graph: WorkflowGraph, options?: { maxIterations?: number }) {
     this.sourceGraph = JSON.stringify(graph)
@@ -842,6 +844,16 @@ export class Spine {
    * last item, rather than by following the exit's out-edge.
    * @returns the spine's next state.
    */
+  /** The per-item records collected during data-node passes (F6). */
+  getItemRecords(): Array<Record<string, unknown>> {
+    return [...this._itemRecords]
+  }
+
+  /** Append one per-item record (F6). */
+  addItemRecord(record: Record<string, unknown>): void {
+    this._itemRecords.push(record)
+  }
+
   endPass(): SpineNext {
     const pass = this.pass
     if (pass === undefined) throw new Error('no data pass is running')

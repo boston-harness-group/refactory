@@ -622,6 +622,10 @@ class Executor:
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
+    #: Per-item exchanges captured during a data-node pass.
+    _item_exchanges: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    #: Per-item records built during the data-node loop.
+    _item_records: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
 
@@ -762,6 +766,7 @@ class Executor:
                     # none, and judges each pass. Loading it is what makes `task_ref` a
                     # binding rather than a line in a prompt.
                     from refactory_dsh.task import instance_of, load_task
+                    from refactory_dsh.items import make_item_record
 
                     task = load_task(node.task_ref, self.ctx.workdir) if node.task_ref else None
                 except Exception as exc:
@@ -781,6 +786,10 @@ class Executor:
                     self.ctx._declared_facts = node.produces  # noqa: SLF001
                     self.ctx._produced = set()  # noqa: SLF001
                     self.ctx.write_json(CURRENT_ITEM, item)
+                    # Clear per-item exchanges before each pass.
+                    self._item_exchanges = []
+                    item_error_kind: str | None = None
+                    item_error_text: str | None = None
                     try:
                         branch_error = self._walk_branch(
                             node.subgraph_entry, node.subgraph_exit, include_barrier=True, iterations={}
@@ -791,7 +800,30 @@ class Executor:
                     except HaltStop as exc:
                         branch_error = str(exc)
                         self._record(node.id, error=branch_error, outcome="halted")
+                    except TimeoutError as exc:
+                        branch_error = str(exc)
+                        item_error_kind = "timeout"
+                        item_error_text = str(exc)
+                    except Exception as exc:
+                        branch_error = str(exc)
+                        item_error_kind = type(exc).__name__
+                        item_error_text = str(exc)
                     if branch_error is not None:
+                        # Build a failed item record before breaking.
+                        item_id = str(item.get("id") or items.index(item))
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        self._item_records.append(make_item_record(
+                            item_id,
+                            passed=False,
+                            score=0.0,
+                            exchanges=list(self._item_exchanges),
+                            error_kind=item_error_kind,
+                            error_text=item_error_text,
+                            fail_reason=branch_error,
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
+                        ))
                         error = branch_error
                         break
                     if task is not None:
@@ -802,6 +834,18 @@ class Executor:
                                 "passed": verdict.passed,
                                 "score": verdict.score,
                             })
+                            metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                            self._item_records.append(make_item_record(
+                                instance.id,
+                                passed=verdict.passed,
+                                score=verdict.score,
+                                exchanges=list(self._item_exchanges),
+                                prediction=verdict.details if verdict.passed else None,
+                                label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                                label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                                fail_reason=verdict.details if not verdict.passed and verdict.details else None,
+                                metadata=metadata,
+                            ))
                 if error is not None:
                     break
                 if scores and "item_scores" in node.produces:
@@ -907,6 +951,7 @@ class Executor:
             gate_stop=gate_stop_id,
             halted=halted,
             gate_verdicts=dict(self.record.gate_verdicts),
+            item_records=list(self._item_records),
         )
 
     # ── one branch of a fork, or one pass of a data node ───────────────────
@@ -1301,8 +1346,16 @@ class Executor:
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                return _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
-            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
+                response = _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+            else:
+                response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
+            # Capture the exchange for per-item records (F6).
+            self._item_exchanges.append({
+                "node": node.id,
+                "prompt": sent,
+                "response": response,
+            })
+            return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
         if tool_policy == "none":

@@ -146,9 +146,17 @@ def test_end_folds_the_task_verdict_into_the_run_facts(tmp_path):
     _probe_task()
     node = _declared(_data_graph(task_ref="counting"), tmp_path)
 
-    assert items.command_end(node, tmp_path, 0) == {
-        "id": "alpha", "passed": True, "score": 1.0,
-    }
+    record = items.command_end(node, tmp_path, 0)
+    assert record["id"] == "alpha"
+    assert record["passed"] is True
+    assert record["score"] == 1.0
+    # F6 fields are present in the extended record.
+    assert "exchanges" in record
+    assert "prediction" in record
+    assert "fail_reason" in record
+    assert "error_kind" in record
+    assert "error_text" in record
+    assert "metadata" in record
     items.command_end(node, tmp_path, 1)
     facts = json.loads((tmp_path / "facts.json").read_text())
     assert facts["item_scores"] == [

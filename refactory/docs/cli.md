@@ -155,6 +155,7 @@ installed copy.
 | `--seed <n>` | seed the search RNG; model outputs can still vary | 0 |
 | `--elite <n>` | how many parents each round proposes against | 3 |
 | `--max-evaluations <n>` | a hard ceiling on evaluated candidates | 64 |
+| `--max-rollouts <n>` | per-item budget: how many item-level evaluations the run may perform | unlimited |
 | `--holdout <fraction>` | the share of a Task's items kept out of the search and used to audit the winner afterwards; one item cannot be split, which the audit records | 0.3 |
 | `--parsimony <cost>` | what each node of a candidate's graph costs its score: the search compares `raw_score − parsimony × nodes` | 0.01 |
 | `--attempts <n>` | retries per batch after a refusal | 3 |

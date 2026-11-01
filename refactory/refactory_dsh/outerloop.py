@@ -95,15 +95,41 @@ class Run:
         return outcome
 
     # ── the expensive primitive ────────────────────────────────────────────
-    def evaluate(self, candidate: Candidate) -> Candidate:
-        """Run the mode and score it. Spends one unit of budget."""
-        if self.loop.evaluations >= self.loop.config.max_evaluations:
-            raise OuterLoopError(
-                "the evaluation budget is spent; a strategy must ask budget_left() "
-                "before evaluating"
-            )
-        self.loop._evaluate(candidate)  # noqa: SLF001
+    def evaluate(
+        self,
+        candidate: Candidate,
+        *,
+        part: str = "train",
+        items: list[str] | None = None,
+        seed: int | None = None,
+    ) -> Candidate:
+        """Run the mode and score it. Spends one unit of budget.
+
+        When ``part`` is ``'train'``, delegates to the existing train evaluation.
+        When ``part`` is ``'val'`` or ``'test'``, evaluates on that part in a
+        fresh occasion directory without touching ``candidate.score``.
+        """
+        if part == "train":
+            if self.loop.evaluations >= self.loop.config.max_evaluations:
+                raise OuterLoopError(
+                    "the evaluation budget is spent; a strategy must ask budget_left() "
+                    "before evaluating"
+                )
+            self.loop._evaluate(candidate)  # noqa: SLF001
+        elif part in ("val", "test"):
+            self.loop._evaluate_part(candidate, part, items, seed)  # noqa: SLF001
+        else:
+            raise OuterLoopError(f"unknown part {part!r}; expected 'train', 'val' or 'test'")
         return candidate
+
+    def item_records(self, candidate: Candidate, *, part: str = "train") -> list[dict[str, Any]]:
+        """Return train records for the given candidate.
+
+        Val and test records are excluded from optimizer access by design.
+        """
+        if part != "train":
+            raise OuterLoopError("only train records are accessible to an optimizer")
+        return list(getattr(candidate, "_train_item_records", []))
 
     def keep(self, candidate: Candidate) -> Candidate:
         """Add a candidate to the search. A strategy that evaluates must also keep.
@@ -127,7 +153,11 @@ class Run:
         return self.loop.select_parents(n, by=by)
 
     def budget_left(self) -> int:
-        return max(0, self.loop.config.max_evaluations - self.loop.evaluations)
+        left = max(0, self.loop.config.max_evaluations - self.loop.evaluations)
+        if hasattr(self.loop, 'rollouts') and getattr(self.loop.config, 'max_rollouts', None) is not None:
+            rollout_left = max(0, self.loop.config.max_rollouts - self.loop.rollouts)
+            left = min(left, rollout_left)
+        return left
 
     def rejections(self) -> list[str]:
         return summarise_reasons(

@@ -175,6 +175,11 @@ class Candidate:
     duration_s: float = 0.0
     evaluated: bool = False
     measurements: dict[str, Any] = field(default_factory=dict)
+    model_calls: int = 0
+    #: Per-part evaluation results, keyed by part name (F9/F18).
+    parts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: Monotonic counter per (candidate, part) pair for occasion directories (F18).
+    occasion_counters: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_state(
@@ -263,6 +268,10 @@ class ProposalContext:
     #: default loop with extra bookkeeping. A strategy that branches puts the
     #: branch here, and a proposer that can act on it does.
     strategy: dict[str, Any] = field(default_factory=dict)
+    #: Per-item records for the parent/current candidate the optimizer is editing (F6).
+    item_records: list[dict[str, Any]] = field(default_factory=list)
+    #: Alias for the parent candidate's train records.
+    parent_item_records: list[dict[str, Any]] = field(default_factory=list)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""

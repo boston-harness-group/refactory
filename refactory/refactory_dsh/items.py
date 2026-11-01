@@ -198,6 +198,42 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     return item
 
 
+def make_item_record(
+    item_id: str,
+    *,
+    passed: bool,
+    score: float,
+    exchanges: list[dict[str, Any]] | None = None,
+    prediction: str | None = None,
+    label: str | None = None,
+    label_text: str | None = None,
+    fail_reason: str | None = None,
+    error_kind: str | None = None,
+    error_text: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a per-item record for one evaluated item.
+
+    One record per item, same shape on both runtimes.  Extends F4's existing
+    error_kind convention (exception class name or ``"timeout"``).  The
+    ``exchanges`` list carries one ``{node, prompt, response}`` dict per agent
+    call in the item's pass, so a multi-node pass records every model call.
+    """
+    return {
+        "id": item_id,
+        "passed": passed,
+        "score": score,
+        "exchanges": list(exchanges or []),
+        "prediction": prediction,
+        "label": label,
+        "label_text": label_text,
+        "fail_reason": fail_reason,
+        "error_kind": error_kind,
+        "error_text": error_text,
+        "metadata": dict(metadata or {}),
+    }
+
+
 def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     """The Task's verdict on one pass, folded into the run's facts."""
     items = items_of(node, workdir)
@@ -209,17 +245,25 @@ def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     task = _task_of(node, workdir)
     if task is None:
         return {}
-    verdict = task.verify(instance_of(item), workdir)
+    instance = instance_of(item)
+    verdict = task.verify(instance, workdir)
     if verdict is None:
         return {}
-    score = {
-        "id": str(item.get("id") or index),
-        "passed": verdict.passed,
-        "score": verdict.score,
-    }
+    item_id = str(item.get("id") or index)
+    metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+    record = make_item_record(
+        item_id,
+        passed=verdict.passed,
+        score=verdict.score,
+        prediction=verdict.details if verdict.passed else None,
+        label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+        label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+        fail_reason=verdict.details if not verdict.passed and verdict.details else None,
+        metadata=metadata,
+    )
     if SCORES_FACT in node.produces:
-        _write_facts(workdir, SCORES_FACT, [score])
-    return score
+        _write_facts(workdir, SCORES_FACT, [{"id": item_id, "passed": verdict.passed, "score": verdict.score}])
+    return record
 
 
 def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
