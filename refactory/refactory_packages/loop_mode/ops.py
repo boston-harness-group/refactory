@@ -158,7 +158,7 @@ def step(ctx: Any) -> dict[str, Any]:
     """Install the offspring the proposal step found, and keep what survives."""
     loop = _resumed(ctx)
     offered = loop.read_pending()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     kept = loop.step([candidate for candidate in offered if loop.accepts(run, candidate)], run)
     for candidate in kept:
         loop.update(run, candidate)

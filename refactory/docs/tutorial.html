@@ -472,6 +472,7 @@ options:
                                     [--validation-reserve-s VALIDATION_RESERVE_S]
                                     [--validation-reserve-tokens VALIDATION_RESERVE_TOKENS]
                                     [--max-rollouts MAX_ROLLOUTS]
+                                    [--parts-manifest PARTS_MANIFEST]
                                     [--knob NAME=VALUE] [--frozen KNOB]
                                     [--allowed-ops OP]
                                     [--role-routes ROLE_ROUTES]
@@ -480,6 +481,7 @@ options:
                                     [--profile-version PROFILE_VERSION]
                                     [--runs-root RUNS_ROOT]
                                     [--project PROJECT] [--verbose] [--resume]
+                                    [--parts PARTS_MANIFEST]
                                     [--resolved-config RESOLVED_CONFIG]
                                     mode
 
@@ -519,6 +521,7 @@ options:
   --validation-reserve-s VALIDATION_RESERVE_S
   --validation-reserve-tokens VALIDATION_RESERVE_TOKENS
   --max-rollouts MAX_ROLLOUTS
+  --parts-manifest PARTS_MANIFEST
   --knob NAME=VALUE
   --frozen KNOB
   --allowed-ops OP
@@ -530,6 +533,9 @@ options:
   --project PROJECT
   --verbose
   --resume
+  --parts PARTS_MANIFEST
+                        path to a parts.json manifest with train/val/test id
+                        lists
   --resolved-config RESOLVED_CONFIG
                         exact resolved snapshot prepared by the console
 </code></pre></details>

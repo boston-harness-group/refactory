@@ -28,6 +28,7 @@ import dataclasses
 import json
 import math
 import random
+import shutil
 import statistics
 import sys
 import time
@@ -195,6 +196,10 @@ class LoopConfig:
     validation_reserve_s: float = 0
     validation_reserve_tokens: int = 0
     max_rollouts: int | None = None
+    #: Path to a parts manifest (parts.json) with train/val/test id lists.
+    #: When set, the loop copies it to the run root and every evaluation draws
+    #: items from it.  The optimizer cannot choose val/test items.
+    parts_manifest: str | None = None
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -417,6 +422,17 @@ class Loop(OuterLoop):
         #: The strategy's own state, backing store for the default
         #: strategy_state_dict / load_strategy_state implementations.
         self._strategy_state: dict[str, Any] = {}
+        #: Loop-private storage for per-part evaluation data (records, workdirs,
+        #: scores).  Keyed by (candidate_id, part_name).  This data never reaches
+        #: optimizer-facing APIs.
+        self._part_results: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        #: Loop-private per-candidate, per-part occasion counters.
+        self._occasion_counters: dict[str, dict[str, int]] = {}
+        #: Loop-private per-candidate train item records.
+        self._train_item_records: dict[str, list[dict[str, Any]]] = {}
+        #: The loop-level parts manifest (train/val/test id lists), loaded from
+        #: config.parts_manifest or the run root.
+        self._parts_manifest: dict[str, list[str]] | None = None
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -513,6 +529,9 @@ class Loop(OuterLoop):
                 indent=2,
             )
         )
+        # Load the loop-level parts manifest if configured or already on disk.
+        self._load_parts_manifest()
+
         if resumed:
             if getattr(self, "_executing_strategy", False) and self.bound:
                 # A previous stop reason is history, not the new strategy's
@@ -542,6 +561,34 @@ class Loop(OuterLoop):
             batch_size=self.config.batch_size,
             optimizer=self.optimizer.name,
         )
+
+    def _load_parts_manifest(self) -> None:
+        """Load and install the loop-level parts manifest.
+
+        If ``config.parts_manifest`` names a file, copy it to the run root as
+        ``parts.json`` and load it.  If the run root already has a ``parts.json``
+        (e.g. from a previous run being resumed), load that.
+        """
+        dest = self.root / task_module.MANIFEST
+        if self.config.parts_manifest:
+            source = Path(self.config.parts_manifest)
+            if not source.exists():
+                raise LoopError(
+                    f"parts_manifest {self.config.parts_manifest!r} does not exist"
+                )
+            self.root.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, dest)
+        if dest.exists():
+            try:
+                data = json.loads(dest.read_text())
+                if isinstance(data, dict):
+                    self._parts_manifest = {
+                        k: [str(x) for x in v]
+                        for k, v in data.items()
+                        if isinstance(v, list)
+                    }
+            except (OSError, json.JSONDecodeError):
+                pass
 
     def _seed_population(self, seed: Candidate) -> None:
         """Fill the starting batch with neighbours of the seed.
@@ -651,8 +698,6 @@ class Loop(OuterLoop):
         note added while a candidate is running reaches the next candidate, exactly as
         it reaches the next node of an interactive run.
         """
-        import shutil
-
         from refactory_dsh.steering import LEDGER
 
         source = self.root / LEDGER
@@ -671,7 +716,9 @@ class Loop(OuterLoop):
         """
         task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
 
-    def _evaluate(self, candidate: Candidate) -> None:
+    def _evaluate(
+        self, candidate: Candidate, *, seed: int | None = None, items: list[str] | None = None,
+    ) -> None:
         """Run one candidate through the evaluator, and record what it scored.
 
         This is the loop's forward pass and the evaluator is its loss: what the
@@ -685,7 +732,17 @@ class Loop(OuterLoop):
         """
         workdir = self.root / "runs" / candidate.id
         mode = self.mode_class(state=candidate.state)
-        result, measurements = self._measure(candidate, workdir, task_module.TRAIN)
+        # Copy the loop-level manifest so select_subset finds it.
+        if self._parts_manifest is not None:
+            workdir.mkdir(parents=True, exist_ok=True)
+            manifest_src = self.root / task_module.MANIFEST
+            if manifest_src.exists():
+                shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
+        # When explicit items are given, write a per-candidate manifest.
+        if items is not None:
+            workdir.mkdir(parents=True, exist_ok=True)
+            task_module.make_manifest(workdir, train_ids=items)
+        result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed)
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
         candidate.score = result.score - self.config.parsimony * nodes if result.exit_ok else None
@@ -697,7 +754,7 @@ class Loop(OuterLoop):
         candidate.duration_s = result.duration_s
         candidate.model_calls = result.model_calls
         candidate.evaluated = True
-        candidate._train_item_records = list(result.item_records)  # noqa: SLF001
+        self._train_item_records[candidate.id] = list(result.item_records)
         self.evaluations += 1
         self.rollouts += len(result.item_records) or 1
         self._journal(
@@ -721,26 +778,34 @@ class Loop(OuterLoop):
         items: list[str] | None, seed: int | None,
     ) -> None:
         """Evaluate on val or test in a fresh occasion directory (F18)."""
-        counter = candidate.occasion_counters.get(part, 0)
-        candidate.occasion_counters[part] = counter + 1
+        counters = self._occasion_counters.setdefault(candidate.id, {})
+        counter = counters.get(part, 0)
+        counters[part] = counter + 1
         workdir = self.root / "runs" / candidate.id / "occasions" / f"{part}_{counter}"
         workdir.mkdir(parents=True, exist_ok=True)
         task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
+        # Copy or build the manifest so select_subset finds it.
         if items is not None:
             task_module.make_manifest(workdir, train_ids=items if part == "train" else [],
                                      val_ids=items if part == "val" else None,
                                      test_ids=items if part == "test" else None)
+        elif self._parts_manifest is not None:
+            manifest_src = self.root / task_module.MANIFEST
+            if manifest_src.exists():
+                shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
         self._carry_ledger(workdir)
         result, measurements = self._measure(candidate, workdir, part, seed=seed)
-        occasion = {
+        # Score-only occasion record for optimizer-facing storage (no records,
+        # no workdir).
+        occasion_public = {
             "part": part, "occasion": counter,
             "score": result.score if result.exit_ok else None,
             "exit_ok": result.exit_ok, "error": result.error,
             "duration_s": result.duration_s,
-            "item_records": list(result.item_records),
-            "workdir": str(workdir),
         }
-        candidate.parts.setdefault(part, []).append(occasion)
+        self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
+            occasion_public
+        )
         self.rollouts += len(result.item_records) or 1
         if result.item_records:
             (workdir / "item_records.json").write_text(
@@ -1142,7 +1207,7 @@ class Loop(OuterLoop):
         Going through ``propose`` and ``install`` rather than straight to the
         optimizer is what lets a strategy change one of them and keep the other.
         """
-        run = run or Run(loop=self)
+        run = run or Run(_loop=self)
         # The pair a proposer is handed, and why it is the whole population rather
         # than the elite: `describe()` carries a score and the edits that produced
         # it, not the state, so a candidate the loop does not hand over cannot be
@@ -1257,7 +1322,26 @@ class Loop(OuterLoop):
         Computed from the loop root and the seed's state — the loop-owned channel
         the candidate cannot write. Falls back silently when the mode cannot build
         or has no data nodes with items.
+
+        When a loop-level manifest exists, val/test ids are read from it instead
+        of calling ``partition().get(part)`` (which is always empty for val/test).
         """
+        # When a manifest exists, read val/test ids directly from it.
+        if self._parts_manifest is not None and part in self._parts_manifest:
+            manifest_ids = set(self._parts_manifest[part])
+            # Still need to determine seed_declares_item_scores
+            declares = False
+            if state:
+                try:
+                    graph = self.mode_class(state=state).build()
+                    for node in graph.nodes.values():
+                        if node.kind == "data" and "item_scores" in node.produces:
+                            declares = True
+                            break
+                except Exception:
+                    pass
+            return manifest_ids, declares
+
         if not state:
             return set(), False
         try:
@@ -2076,8 +2160,9 @@ class Loop(OuterLoop):
 
         Returns ``None`` when the winner does not have both val and test.
         """
-        val_parts = winner.parts.get("val", [])
-        test_parts = winner.parts.get("test", [])
+        candidate_results = self._part_results.get(winner.id, {})
+        val_parts = candidate_results.get("val", [])
+        test_parts = candidate_results.get("test", [])
         if not val_parts or not test_parts:
             return None
 
@@ -2395,7 +2480,7 @@ class Loop(OuterLoop):
         """Train records for the parent/current candidate the optimizer is editing."""
         if not board:
             return []
-        return list(getattr(board[0], "_train_item_records", []))
+        return list(self._train_item_records.get(board[0].id, []))
 
     def _steering_block(self) -> str:
         """The run's intent ledger as the proposer reads it, empty when there is none."""
@@ -2842,6 +2927,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default=str(project_root()))
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--parts", default=None, dest="parts_manifest",
+                        help="path to a parts.json manifest with train/val/test id lists")
     parser.add_argument("--resolved-config", default="", help="exact resolved snapshot prepared by the console")
     args = parser.parse_args(argv)
     project = Path(args.project)
@@ -2889,7 +2976,8 @@ def main(argv: list[str] | None = None) -> int:
         settings = snapshot["settings"]
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
-                                      "resume": args.resume, "resolved_profile": snapshot})
+                                      "resume": args.resume, "resolved_profile": snapshot,
+                                      "parts_manifest": getattr(args, "parts_manifest", None)})
     except ModelChoiceError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1

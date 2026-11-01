@@ -296,9 +296,9 @@ def test_adaptive_meta_widens_the_batch_when_it_decides_to(tmp_path):
     from refactory_dsh.outerloop import Run
 
     loop.strategy_decision = {"meta": False}
-    calm = loop.batch_size(Run(loop=loop))
+    calm = loop.batch_size(Run(_loop=loop))
     loop.strategy_decision = {"meta": True, "reason": "no progress"}
-    stalled = loop.batch_size(Run(loop=loop))
+    stalled = loop.batch_size(Run(_loop=loop))
     assert stalled > calm, (
         "the meta branch changed nothing, so the loop did not adapt to the stall"
     )
@@ -322,7 +322,7 @@ def test_reflective_merges_two_parents_rather_than_mutating_one(tmp_path):
     loop.population = [left, right]
     loop.config.elite = 2
 
-    proposals = loop.propose(Run(loop=loop), [left, right], 2)
+    proposals = loop.propose(Run(_loop=loop), [left, right], 2)
     assert proposals, "the merge branch proposed nothing"
     knobs = [p.edit.get("name") for p in proposals if p.edit.get("op") == "set_knob"]
     assert "grid" in knobs, (
@@ -342,7 +342,7 @@ def test_reflective_falls_back_when_the_parents_differ_structurally(tmp_path):
     mode = registry.resolve(Path("."), "circle_packing/adaptive")[1]()
     same = Candidate.from_state(mode.state_dict())
     loop.population = [same]
-    proposals = loop.propose(Run(loop=loop), [same, same], 2)
+    proposals = loop.propose(Run(_loop=loop), [same, same], 2)
     assert all(p.edit.get("op") != "set_knob" or p.edit.get("value") is not None
                for p in proposals)
 
@@ -379,7 +379,7 @@ def test_reflective_sampler_drops_an_edit_that_was_already_refused(tmp_path):
     loop = _loop("reflective_sampler", tmp_path / "run", epochs=1)
     edit = {"op": "set_knob", "name": "grid", "value": 24}
     loop.rejections.append(Rejection(attempt=1, edit=edit, reasons=["E-precondition: nope"]))
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     refused = [proposal for proposal in loop.propose(run, loop.select_parents(1), 4)
                if proposal.edit == edit]
     assert refused == [], (

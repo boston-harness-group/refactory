@@ -289,11 +289,12 @@ def select_subset(
 
     if part not in (TRAIN, HOLDOUT, VAL, TEST):
         return list(items)
+    if part in (VAL, TEST):
+        raise TaskError(
+            f"part {part!r} requires a parts manifest (parts.json); "
+            f"no manifest was found in {workdir}"
+        )
     effective = part
-    if part == VAL:
-        effective = TRAIN
-    elif part == TEST:
-        effective = HOLDOUT
     try:
         fraction = float(record.get("holdout", DEFAULT_HOLDOUT))
     except (TypeError, ValueError):

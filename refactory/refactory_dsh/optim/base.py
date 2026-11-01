@@ -181,12 +181,6 @@ class Candidate:
     evaluated: bool = False
     measurements: dict[str, Any] = field(default_factory=dict)
     model_calls: int = 0
-    #: Per-item train records from the last evaluation (F6).
-    _train_item_records: list[dict[str, Any]] = field(default_factory=list)
-    #: Per-part evaluation results, keyed by part name (F9/F18).
-    parts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    #: Monotonic counter per (candidate, part) pair for occasion directories (F18).
-    occasion_counters: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_state(

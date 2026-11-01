@@ -202,15 +202,24 @@ def test_records_reach_optimizer_train_only(tmp_path):
 def test_val_test_records_never_reach_optimizer(tmp_path):
     """Val and test records never appear in ProposalContext.item_records.
 
-    The optimizer's ``item_records`` come from the candidate's train evaluation
-    only.  Val and test occasion records live in ``candidate.parts`` and are
-    structurally unreachable from ``_context()``.
+    The optimizer's ``item_records`` come from the loop's private train
+    records storage.  Candidate no longer has a ``parts`` attribute, so
+    ``candidate.parts["val"]`` is an AttributeError — the stronger invariant.
     """
+    import json as _json
+
     with _patch_mode(RecordsProbe):
+        # Write a manifest so val evaluation can find items.
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(_json.dumps({
+            "train": list(NAMES),
+            "val": list(NAMES),
+        }))
         loop = Loop(
             MODE, LoopConfig(
                 epochs=1, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
+                parts_manifest=str(manifest_path),
             ),
             project=Path("."),
         )
@@ -225,20 +234,14 @@ def test_val_test_records_never_reach_optimizer(tmp_path):
 
     # Train records should be present.
     assert ctx.item_records, "item_records should contain train records"
-    # Every record in context must come from the train evaluation;
-    # the val occasion's records must NOT be there.
-    assert seed.parts.get("val"), "val evaluation should have occurred"
-    val_records = seed.parts["val"][0].get("item_records", [])
-    assert val_records, "val occasion should have item records"
-    val_only_ids = {r["id"] for r in val_records} - {r["id"] for r in getattr(seed, "_train_item_records", [])}
-    ctx_ids = {r["id"] for r in ctx.item_records}
-    # Val-only ids (if any) must not appear in the context.
-    leaked = val_only_ids & ctx_ids
-    # Even when item ids overlap (same items in train and val), the SOURCE must be train.
-    # The structural guarantee is that _context() reads from _train_item_records only,
-    # never from candidate.parts. Verify by checking the context records equal the
-    # train records exactly.
-    train_records = list(getattr(seed, "_train_item_records", []))
+
+    # Candidate has no `parts` attribute — the stronger invariant.
+    assert not hasattr(seed, "parts"), (
+        "Candidate should not have a 'parts' attribute"
+    )
+
+    # The context records must be exactly the train records from loop-private storage.
+    train_records = list(loop._train_item_records.get(seed.id, []))
     assert ctx.item_records == train_records, (
         "context item_records must be exactly the train records, not val/test"
     )

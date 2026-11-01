@@ -14,7 +14,7 @@ import pytest
 from refactory_dsh import nn, task as task_module
 from refactory_dsh.loop import Loop, LoopConfig
 from refactory_dsh.optim import Candidate
-from refactory_dsh.outerloop import Run
+from refactory_dsh.outerloop import Run, OuterLoopError
 
 MODE = "holdout_probe/probe"
 TASK_REF = "parts_counting"
@@ -89,6 +89,28 @@ def _patch_mode(mode_class):
             registry.resolve = original
 
     return patched()
+
+
+def _make_loop_with_manifest(tmp_path, manifest_dict=None):
+    """Helper: create a loop and install a parts manifest on the run root."""
+    if manifest_dict is None:
+        manifest_dict = {
+            "train": ["alpha", "beta", "gamma", "delta"],
+            "val": ["epsilon"],
+            "test": ["zeta"],
+        }
+    # Write manifest file for LoopConfig.
+    manifest_path = tmp_path / "source_manifest.json"
+    manifest_path.write_text(json.dumps(manifest_dict, indent=2))
+    loop = Loop(
+        MODE, LoopConfig(
+            epochs=1, batch_size=1, optimizer="random", seed=1,
+            runs_root=tmp_path / "run",
+            parts_manifest=str(manifest_path),
+        ),
+        project=Path("."),
+    )
+    return loop
 
 
 # ── test_manifest_from_id_lists ────────────────────────────────────────────
@@ -183,11 +205,11 @@ def test_seed_reshuffle(tmp_path):
     task_module.write_subset(tmp_path, "train", 0.3, seed=99)
     order_99 = [item["id"] for item in task_module.select_subset(items, tmp_path)]
 
-    # Same seed → same order.
+    # Same seed -> same order.
     assert order_42a == order_42b
     # Same set of ids.
     assert set(order_42a) == set(order_99)
-    # Different seed → different order (with high probability for 6 items).
+    # Different seed -> different order (with high probability for 6 items).
     assert order_42a != order_99 or len(NAMES) < 3
 
 
@@ -202,21 +224,20 @@ def test_seed_survives_measure(tmp_path):
     parameter from _write_subset/_measure makes the seed disappear.
     """
     with _patch_mode(PartsProbe):
-        loop = Loop(
-            MODE, LoopConfig(
-                epochs=1, batch_size=1, optimizer="random", seed=1,
-                runs_root=tmp_path / "run",
-            ),
-            project=Path("."),
-        )
+        loop = _make_loop_with_manifest(tmp_path)
         loop.init()
         seed_candidate = loop.population[0]
         loop._evaluate_part(seed_candidate, "val", None, seed=42)
 
-        # The occasion directory's subset.json must have the seed.
-        occasion = seed_candidate.parts["val"][0]
-        workdir = Path(occasion["workdir"])
-        subset = json.loads((workdir / task_module.SUBSET).read_text())
+        # The occasion data is now in loop-private storage.
+        val_results = loop._part_results.get(seed_candidate.id, {}).get("val", [])
+        assert len(val_results) == 1
+        occasion = val_results[0]
+        assert occasion["part"] == "val"
+
+        # Check the actual workdir's subset.json for the seed.
+        occasion_dir = loop.root / "runs" / seed_candidate.id / "occasions" / "val_0"
+        subset = json.loads((occasion_dir / task_module.SUBSET).read_text())
         assert subset.get("seed") == 42, (
             f"seed lost after _measure: subset.json = {subset}"
         )
@@ -238,19 +259,13 @@ def test_subset_json_backward_compat(tmp_path):
 # ── test_evaluate_val_and_train ────────────────────────────────────────────
 
 def test_evaluate_val_and_train(tmp_path):
-    """Evaluate on val stores in candidate.parts, not candidate.score;
+    """Evaluate on val stores in loop-private storage, not candidate.score;
     evaluate on train stores in candidate.score. Both produce item records."""
     with _patch_mode(PartsProbe):
-        loop = Loop(
-            MODE, LoopConfig(
-                epochs=1, batch_size=1, optimizer="random", seed=1,
-                runs_root=tmp_path / "run",
-            ),
-            project=Path("."),
-        )
+        loop = _make_loop_with_manifest(tmp_path)
         loop.init()
         seed = loop.population[0]
-        run = Run(loop=loop)
+        run = Run(_loop=loop)
 
         # Evaluate on train.
         run.evaluate(seed)
@@ -259,12 +274,14 @@ def test_evaluate_val_and_train(tmp_path):
 
         # Evaluate on val.
         run.evaluate(seed, part="val")
-        assert "val" in seed.parts
-        assert len(seed.parts["val"]) == 1
-        val_occasion = seed.parts["val"][0]
+        val_results = loop._part_results.get(seed.id, {}).get("val", [])
+        assert len(val_results) == 1
+        val_occasion = val_results[0]
         assert val_occasion["part"] == "val"
         assert val_occasion["occasion"] == 0
-        assert val_occasion.get("item_records") is not None
+        # Score-only: no item_records, no workdir.
+        assert "item_records" not in val_occasion
+        assert "workdir" not in val_occasion
 
 
 # ── test_evaluate_part_fresh_directories ───────────────────────────────────
@@ -272,27 +289,20 @@ def test_evaluate_val_and_train(tmp_path):
 def test_evaluate_part_fresh_directories(tmp_path):
     """Two val evaluations produce two distinct occasion directories."""
     with _patch_mode(PartsProbe):
-        loop = Loop(
-            MODE, LoopConfig(
-                epochs=1, batch_size=1, optimizer="random", seed=1,
-                runs_root=tmp_path / "run",
-            ),
-            project=Path("."),
-        )
+        loop = _make_loop_with_manifest(tmp_path)
         loop.init()
         seed = loop.population[0]
 
         loop._evaluate_part(seed, "val", None, None)
         loop._evaluate_part(seed, "val", None, None)
 
-        assert len(seed.parts["val"]) == 2
-        dir0 = seed.parts["val"][0]["workdir"]
-        dir1 = seed.parts["val"][1]["workdir"]
-        assert dir0 != dir1
-        assert Path(dir0).exists()
-        assert Path(dir1).exists()
-        assert "val_0" in dir0
-        assert "val_1" in dir1
+        val_results = loop._part_results.get(seed.id, {}).get("val", [])
+        assert len(val_results) == 2
+        # Check that occasion directories exist.
+        dir0 = loop.root / "runs" / seed.id / "occasions" / "val_0"
+        dir1 = loop.root / "runs" / seed.id / "occasions" / "val_1"
+        assert dir0.exists()
+        assert dir1.exists()
 
 
 # ── test_evaluate_backward_compat ──────────────────────────────────────────
@@ -309,7 +319,7 @@ def test_evaluate_backward_compat(tmp_path):
         )
         loop.init()
         seed = loop.population[0]
-        run = Run(loop=loop)
+        run = Run(_loop=loop)
         run.evaluate(seed)
         assert seed.evaluated is True
         assert seed.score is not None
@@ -318,7 +328,7 @@ def test_evaluate_backward_compat(tmp_path):
 # ── test_overfit_verdict_exit_code ─────────────────────────────────────────
 
 def test_overfit_verdict_exit_code(tmp_path):
-    """An overfit winner → exit_ok is False in the report.
+    """An overfit winner -> exit_ok is False in the report.
 
     Reverting the ``and not audit.get("overfit")`` conjunct at loop.py report()
     makes exit_ok True for an overfit winner, which is the revert this test catches.
@@ -374,7 +384,8 @@ def test_overfit_verdict_exit_code(tmp_path):
 # ── test_overfit_like_with_like ───────────────────────────────────────────
 
 def test_overfit_like_with_like(tmp_path):
-    """When the winner has both val and test, the audit compares val vs test.
+    """When the winner has both val and test in loop-private storage, the audit
+    compares val vs test.
 
     Construct a winner with val_score=0.85, test_score=0.4.  The audit should
     compare val vs test (like with like: both unseen by the optimizer) and
@@ -409,11 +420,13 @@ def test_overfit_like_with_like(tmp_path):
                         "required_contract": {"passed": True, "missing_artifacts": []},
                         "tokens": None, "cost": None, "workdir": str(workdir)}],
         }))
-        # Populate explicit val and test parts.
-        seed.parts["val"] = [{"part": "val", "occasion": 0, "score": 0.85,
-                              "exit_ok": True, "error": None}]
-        seed.parts["test"] = [{"part": "test", "occasion": 0, "score": 0.4,
-                               "exit_ok": True, "error": None}]
+        # Populate explicit val and test parts in loop-private storage.
+        loop._part_results[seed.id] = {
+            "val": [{"part": "val", "occasion": 0, "score": 0.85,
+                     "exit_ok": True, "error": None, "duration_s": 0.1}],
+            "test": [{"part": "test", "occasion": 0, "score": 0.4,
+                      "exit_ok": True, "error": None, "duration_s": 0.1}],
+        }
 
         report = loop.report()
 
@@ -447,3 +460,397 @@ def test_overfit_backward_compat(tmp_path):
     assert audit.get("status") in ("measured", "not_applicable", "failed", "unavailable"), (
         "audit should still use train-vs-holdout comparison"
     )
+
+
+# ======================================================================
+# NEW TESTS -- exam-integrity fixes
+# ======================================================================
+
+# ── Fix 1: test_no_optimizer_facing_path_returns_val_test_data ────────────
+
+def test_no_optimizer_facing_path_returns_val_test_data(tmp_path):
+    """No optimizer-facing API surface returns val or test item records or workdirs.
+
+    Reverting the removal of `parts` from Candidate makes this fail.
+    """
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+
+        # Evaluate on train.
+        run.evaluate(seed)
+
+        # Evaluate on val.
+        run.evaluate(seed, part="val")
+
+        # 1. Candidate has no `parts` attribute.
+        assert not hasattr(seed, "parts"), (
+            "Candidate should not have a 'parts' attribute"
+        )
+        assert not hasattr(seed, "occasion_counters"), (
+            "Candidate should not have an 'occasion_counters' attribute"
+        )
+        assert not hasattr(seed, "_train_item_records"), (
+            "Candidate should not have a '_train_item_records' attribute"
+        )
+
+        # 2. describe() has no val/test data.
+        desc = seed.describe()
+        assert "parts" not in desc
+        assert "item_records" not in desc
+
+        # 3. item_records only returns train.
+        records = run.item_records(seed)
+        assert isinstance(records, list)
+        # Asking for val or test records is an error.
+        with pytest.raises(OuterLoopError):
+            run.item_records(seed, part="val")
+
+        # 4. parents() returns Candidates with no parts.
+        parents = run.parents(1)
+        for p in parents:
+            assert not hasattr(p, "parts")
+
+        # 5. _context() has no val/test data in item_records.
+        ctx = loop._context()
+        assert isinstance(ctx.item_records, list)
+
+
+# ── Fix 1 + Correction 2: test_public_attrs_no_val_test_leak ─────────────
+
+def test_public_attrs_no_val_test_leak(tmp_path):
+    """Walk public attributes of Run, ProposalContext, and Candidate after val/test
+    evaluation: none should return val/test records or workdirs.
+
+    Run must not expose a public 'loop' attribute.
+    """
+    from refactory_dsh.optim.base import ProposalContext
+
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+
+        run.evaluate(seed)
+        run.evaluate(seed, part="val")
+        run.evaluate(seed, part="test")
+
+        # Run must not expose 'loop' as a public attribute.
+        public_run_attrs = [a for a in dir(run) if not a.startswith("_")]
+        assert "loop" not in public_run_attrs, (
+            "Run must not expose a public 'loop' attribute"
+        )
+
+        # Candidate must not have parts, occasion_counters, or _train_item_records.
+        assert not hasattr(seed, "parts")
+        assert not hasattr(seed, "occasion_counters")
+        assert not hasattr(seed, "_train_item_records")
+
+        # Walk public attributes of Candidate: none should contain val/test records.
+        for attr_name in dir(seed):
+            if attr_name.startswith("_"):
+                continue
+            attr = getattr(seed, attr_name)
+            if callable(attr):
+                continue
+            if isinstance(attr, dict):
+                assert "val" not in attr, (
+                    f"Candidate.{attr_name} contains 'val' key"
+                )
+                assert "test" not in attr, (
+                    f"Candidate.{attr_name} contains 'test' key"
+                )
+
+        # ProposalContext: no val/test records.
+        ctx = loop._context()
+        for attr_name in dir(ctx):
+            if attr_name.startswith("_"):
+                continue
+            attr = getattr(ctx, attr_name)
+            if callable(attr):
+                continue
+            if isinstance(attr, list):
+                for entry in attr:
+                    if isinstance(entry, dict):
+                        assert not (entry.get("part") in ("val", "test") and "item_records" in entry), (
+                            f"ProposalContext.{attr_name} leaks val/test records"
+                        )
+
+
+# ── Fix 2: test_val_without_manifest_raises ──────────────────────────────
+
+def test_val_without_manifest_raises(tmp_path):
+    """select_subset with part='val' or part='test' and no manifest raises TaskError.
+
+    Reverting the error-raising makes val silently return train items.
+    """
+    items = [{"id": name} for name in NAMES]
+
+    # Val without manifest.
+    task_module.write_subset(tmp_path, "val", 0.3)
+    with pytest.raises(task_module.TaskError, match="requires a parts manifest"):
+        task_module.select_subset(items, tmp_path)
+
+    # Test without manifest.
+    task_module.write_subset(tmp_path, "test", 0.3)
+    with pytest.raises(task_module.TaskError, match="requires a parts manifest"):
+        task_module.select_subset(items, tmp_path)
+
+
+# ── Fix 2: test_train_val_disjoint_from_manifest ────────────────────────
+
+def test_train_val_disjoint_from_manifest(tmp_path):
+    """Train and val item sets are disjoint and come from the manifest.
+
+    Write a manifest with disjoint train and val id lists. Evaluate on both parts.
+    Assert the evaluated item sets match the manifest and are disjoint.
+    """
+    with _patch_mode(PartsProbe):
+        manifest_dict = {
+            "train": ["alpha", "beta", "gamma"],
+            "val": ["delta", "epsilon"],
+            "test": ["zeta"],
+        }
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+
+        # Evaluate on train.
+        run.evaluate(seed)
+        train_records = run.item_records(seed)
+        train_ids = {r["id"] for r in train_records}
+
+        # Evaluate on val.
+        run.evaluate(seed, part="val")
+        val_scores = run.val_scores(seed)
+        assert len(val_scores) == 1
+        assert val_scores[0]["part"] == "val"
+
+        # The train ids should match the manifest.
+        assert train_ids == set(manifest_dict["train"]), (
+            f"train ids {train_ids} != manifest {manifest_dict['train']}"
+        )
+
+        # Train and val from manifest must be disjoint.
+        assert set(manifest_dict["train"]).isdisjoint(set(manifest_dict["val"]))
+
+
+# ── Fix 3: test_loop_owned_manifest_from_config ──────────────────────────
+
+def test_loop_owned_manifest_from_config(tmp_path):
+    """LoopConfig with parts_manifest installs the manifest at the run root.
+
+    Reverting the parts_manifest config field makes it unavailable.
+    """
+    manifest_dict = {
+        "train": ["alpha", "beta", "gamma", "delta"],
+        "val": ["epsilon"],
+        "test": ["zeta"],
+    }
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+
+        # The manifest should be copied to the run root.
+        assert (loop.root / task_module.MANIFEST).exists(), (
+            "manifest should be copied to the run root"
+        )
+        installed = json.loads((loop.root / task_module.MANIFEST).read_text())
+        assert installed["train"] == manifest_dict["train"]
+        assert installed["val"] == manifest_dict["val"]
+
+        # The loop's internal manifest should be loaded.
+        assert loop._parts_manifest is not None
+        assert loop._parts_manifest["train"] == manifest_dict["train"]
+
+        # Evaluate a candidate -- items should come from the manifest.
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        records = run.item_records(seed)
+        record_ids = {r["id"] for r in records}
+        assert record_ids == set(manifest_dict["train"]), (
+            f"evaluated train items {record_ids} != manifest {manifest_dict['train']}"
+        )
+
+
+# ── Fix 3 (F3 ownership): test_val_test_items_checked_against_manifest ──
+
+def test_val_test_items_checked_against_manifest(tmp_path):
+    """_expected_item_ids for val and test reads from the manifest.
+
+    Reverting the manifest lookup makes it return an empty set.
+    """
+    manifest_dict = {
+        "train": ["alpha", "beta", "gamma", "delta"],
+        "val": ["epsilon"],
+        "test": ["zeta"],
+    }
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+
+        seed_state = loop.population[0].state
+
+        val_ids, _ = loop._expected_item_ids(seed_state, "val")
+        assert val_ids == {"epsilon"}, (
+            f"expected val ids {{'epsilon'}}, got {val_ids}"
+        )
+
+        test_ids, _ = loop._expected_item_ids(seed_state, "test")
+        assert test_ids == {"zeta"}, (
+            f"expected test ids {{'zeta'}}, got {test_ids}"
+        )
+
+
+# ── Fix 4: test_evaluate_train_honors_seed_and_items ─────────────────────
+
+def test_evaluate_train_honors_seed_and_items(tmp_path):
+    """run.evaluate(part='train', seed=42, items=['alpha', 'beta']) honours both.
+
+    Reverting the seed/items pass-through makes both be ignored.
+    """
+    manifest_dict = {
+        "train": ["alpha", "beta", "gamma", "delta"],
+        "val": ["epsilon"],
+        "test": ["zeta"],
+    }
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+
+        run.evaluate(seed, part="train", seed=42, items=["alpha", "beta"])
+
+        records = run.item_records(seed)
+        record_ids = {r["id"] for r in records}
+        assert record_ids == {"alpha", "beta"}, (
+            f"expected items alpha, beta; got {record_ids}"
+        )
+
+        # Check seed propagated to subset.json.
+        workdir = loop.root / "runs" / seed.id
+        subset = json.loads((workdir / task_module.SUBSET).read_text())
+        assert subset.get("seed") == 42, (
+            f"seed not propagated: subset.json = {subset}"
+        )
+
+
+# ── Fix 3 constraint: test_val_test_items_arg_rejects_non_subset ─────────
+
+def test_val_test_items_arg_rejects_non_subset(tmp_path):
+    """With a manifest that has val=['epsilon'], calling run.evaluate with
+    items=['alpha'] raises OuterLoopError."""
+    manifest_dict = {
+        "train": ["alpha", "beta", "gamma", "delta"],
+        "val": ["epsilon"],
+        "test": ["zeta"],
+    }
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+
+        with pytest.raises(OuterLoopError):
+            run.evaluate(seed, part="val", items=["alpha"])
+
+
+# ── Correction 1: test_train_items_subset_of_manifest ────────────────────
+
+def test_train_items_subset_of_manifest(tmp_path):
+    """With a manifest that has train=['alpha','beta','gamma','delta'],
+    items=['alpha','beta'] succeeds; items=['alpha','x'] raises OuterLoopError."""
+    manifest_dict = {
+        "train": ["alpha", "beta", "gamma", "delta"],
+        "val": ["epsilon"],
+        "test": ["zeta"],
+    }
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+
+        # Valid subset succeeds.
+        run.evaluate(seed, part="train", items=["alpha", "beta"])
+        records = run.item_records(seed)
+        assert {r["id"] for r in records} == {"alpha", "beta"}
+
+        # Create a fresh candidate for the invalid test.
+        from refactory_dsh.optim import Candidate as C
+        cand2 = C.from_state(seed.state)
+        loop.population.append(cand2)
+
+        # Invalid items raises.
+        with pytest.raises(OuterLoopError, match="not in the manifest"):
+            run.evaluate(cand2, part="train", items=["alpha", "x"])
+
+
+# ── test_val_scores_view ─────────────────────────────────────────────────
+
+def test_val_scores_view(tmp_path):
+    """run.val_scores(candidate) returns score-level data with no records or workdirs."""
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+
+        run.evaluate(seed)
+        run.evaluate(seed, part="val")
+
+        scores = run.val_scores(seed)
+        assert len(scores) == 1
+        occ = scores[0]
+        assert occ["part"] == "val"
+        assert "score" in occ
+        assert "exit_ok" in occ
+        assert "item_records" not in occ
+        assert "workdir" not in occ
+
+
+# ── Correction 3: test_existing_run_resumes ──────────────────────────────
+
+def test_existing_run_resumes(tmp_path):
+    """A run checkpointed before this change (candidates with parts/occasion_counters)
+    still resumes without error.
+
+    Reverting the deserialization guards breaks resume of old runs.
+    """
+    with _patch_mode(PartsProbe):
+        # First run: create and evaluate.
+        loop1 = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+            ),
+            project=Path("."),
+        )
+        loop1.init()
+        loop1.forward()
+
+        # The journal should have candidate and score events; replay should work.
+        journal_path = loop1.root / "journal.jsonl"
+        lines = journal_path.read_text().splitlines()
+        assert any('"candidate"' in line for line in lines)
+
+        # Resume the run.
+        loop2 = Loop(
+            MODE, LoopConfig(
+                epochs=2, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+                resume=True,
+            ),
+            project=Path("."),
+        )
+        # Should not raise.
+        loop2.init()
+        assert len(loop2.population) >= 1
+        assert loop2.evaluations >= 1
