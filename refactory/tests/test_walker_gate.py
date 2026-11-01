@@ -599,3 +599,158 @@ def test_fork_shape_refusal_on_spine(tmp_path):
     state = {"graph": graph.to_state(), "knobs": {}}
     with pytest.raises(LoweringError, match="same produced facts"):
         to_workflow(state)
+
+
+def test_optional_branch_only_target_is_optional(tmp_path):
+    """SWEEP-2: Only the target node is optional, not the whole branch.
+
+    A fork with an optional branch of two nodes: the target (first node)
+    succeeds but the second node fails. Because only the target is optional,
+    the second node's failure is a real failure, not silently absorbed."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("target_a", "b"),
+                    optional_targets=("target_a",)))
+    # Branch A: target_a succeeds, then a_step2 fails.
+    graph.add(Node("target_a", "op", call="loop_ops:noop"))
+    graph.add(Node("a_step2", "op", call="loop_ops:boom"))
+    graph.connect("target_a", "a_step2")
+    # Branch B: succeeds.
+    graph.add(Node("b", "op", call="loop_ops:noop"))
+    # Join.
+    graph.add(Node("join", "join", sources=("a_step2", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a_step2", "join")
+    graph.connect("b", "join")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    # The failure in a_step2 (non-target) must NOT be absorbed: the run fails.
+    assert result.exit_ok is False
+    assert "boom" in (result.error or "").lower() or "fails on purpose" in (result.error or "")
+
+
+def test_optional_branch_target_fails_is_missing(tmp_path):
+    """SWEEP-2: When the target node itself fails, it is recorded as 'missing'."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("target_a", "b"),
+                    optional_targets=("target_a",)))
+    # Branch A: target_a fails (optional → missing).
+    graph.add(Node("target_a", "op", call="loop_ops:boom"))
+    graph.add(Node("a_step2", "op", call="loop_ops:noop"))
+    graph.connect("target_a", "a_step2")
+    # Branch B: succeeds.
+    graph.add(Node("b", "op", call="loop_ops:noop"))
+    # Join.
+    graph.add(Node("join", "join", sources=("a_step2", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a_step2", "join")
+    graph.connect("b", "join")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    # The target itself failed → optional → "missing", run succeeds.
+    assert result.exit_ok is True
+
+
+def test_op_runs_in_run_directory(tmp_path):
+    """SWEEP-3: Ops run in the run directory, not the forkserver's start directory.
+
+    The op writes a relative path 'relative_output.txt'; it should land in
+    the run directory (workdir), not wherever the test process started."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("op", "op", call="loop_ops:write_relative",
+                    writes=("relative_output.txt",), produces=("relative_written",)))
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir, enable_recovery=True,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    # The file should be in the run directory because the op ran there.
+    assert (workdir / "relative_output.txt").exists(), (
+        "relative_output.txt not in run directory; op did not run there"
+    )
+
+
+def test_ctx_model_is_none_for_ops(tmp_path):
+    """SWEEP-5: ctx.model for ops is None, matching the spine and the documented op API."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("op", "op", call="loop_ops:check_model_is_none",
+                    produces=("model_is_none",)))
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model, enable_recovery=True,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    assert result.facts.get("model_is_none") is True, (
+        "ctx.model was not None inside the op"
+    )
+
+
+def test_run_warning_from_op_stderr(tmp_path):
+    """Gap 20 / correction C: The walker emits run_warning events from op stderr lines
+    matching the spine's RUN_WARNING pattern."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("op", "op", call="loop_ops:warn_on_stderr",
+                    produces=("warned",)))
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir, enable_recovery=True,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    events_file = workdir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+    warnings = [e for e in events if e.get("kind") == "run_warning"]
+    assert len(warnings) > 0, "no run_warning events emitted for op stderr"
+    assert any("something happened" in w.get("summary", "") for w in warnings)
+
+
+def test_unresolved_template_key_emits_run_warning(tmp_path):
+    """Gap 20 / correction C: The walker emits run_warning events for unresolved template keys."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent",
+                    prompt_template="Hello {{missing_key}} world",
+                    writes=("output.txt",), produces=("result",)))
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    events_file = workdir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+    warnings = [e for e in events if e.get("kind") == "run_warning"]
+    assert len(warnings) > 0, "no run_warning events emitted for unresolved template key"
+    assert any("missing_key" in w.get("summary", "") for w in warnings)
+
+
+def test_fork_shape_refusal_conflicting_file_access_on_spine(tmp_path):
+    """SWEEP-1: The spine's lowering also refuses fork branches with conflicting file access."""
+    from refactory_dsh.lowering import LoweringError, to_workflow
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop", writes=("shared.txt",)))
+    graph.add(Node("b", "op", call="loop_ops:noop", writes=("shared.txt",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+
+    state = {"graph": graph.to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="conflicting declared file access"):
+        to_workflow(state)

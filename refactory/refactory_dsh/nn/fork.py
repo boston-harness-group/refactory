@@ -307,7 +307,11 @@ def run_fork(executor: Executor, node: Node) -> str | None:
     error = next((e for i, e in enumerate(errors)
                   if e and (node.targets[i] not in optional or i not in handled_optional)), None)
     visited = {step.node for child in children for step in child.steps}
-    missing = set(join.sources) - visited
+    # Nodes from handled optional branches (whose target failed) are expected
+    # to be absent; exclude them from the join-sources requirement.
+    _optional_branch_nodes = {member.id for i in handled_optional
+                              for member in branches[i]}
+    missing = set(join.sources) - visited - _optional_branch_nodes
     if error is None and missing:
         error = f"fork {node.id!r} did not complete join sources: {sorted(missing)}"
     if error is None:

@@ -39,6 +39,29 @@ if TYPE_CHECKING:
 # Sentinel for SWEEP-6 refilled feedback cleanup.
 _SENTINEL = object()
 
+# Gap 20 / correction C: the spine's RUN_WARNING pattern (execute.ts:166).
+import re as _re_mod
+_RUN_WARNING_RE = _re_mod.compile(r"^(?:[\w.-]+:\s*)?run warning:\s*\S", _re_mod.IGNORECASE)
+
+
+def _emit_run_warnings(workdir: Path, node_id: str, stderr: str) -> None:
+    """Emit ``run_warning`` events for stderr lines that match the spine's pattern.
+
+    The spine (execute.ts:177-178, index.ts:1681-1683) scans an op's stderr for
+    lines matching ``/^(?:[\\w.-]+:\\s*)?run warning:\\s*\\S/i`` and journals each as
+    a ``run_warning`` event.  The walker captures stderr from child-process ops
+    and calls this helper after a successful dispatch.
+    """
+    if not stderr:
+        return
+    from refactory_dsh.live import emit as _emit_event
+    for line in stderr.split("\n"):
+        stripped = line.strip()
+        if _RUN_WARNING_RE.match(stripped):
+            _emit_event(workdir, "run_warning", node_id=node_id,
+                        state="warning", summary=stripped)
+
+
 # ── forkserver context (module-level, shared across all Executor instances) ──
 _forkserver_ctx = multiprocessing.get_context("forkserver")
 _forkserver_modules: set[str] = set()
@@ -509,23 +532,8 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             else:
                 os.environ[ENV_LEDGER] = ledger
 
-            model: Any = None
-            model_info = args_dict.get("model_info")
-            if model_info:
-                kind = model_info.get("kind")
-                if kind == "dsh":
-                    from refactory_dsh.model import DshModelClient
-                    model = DshModelClient(**model_info["context"])
-                elif kind is not None:
-                    # Stand-in for non-DSH clients: not None so prepare/create_ops
-                    # skip readiness, and every method raises so nothing silently proceeds.
-                    class _StandIn:
-                        def __getattr__(self, name: str) -> Any:
-                            raise RuntimeError(f"model.{name}() called in child process")
-                        def complete(self, *a: Any, **kw: Any) -> str:
-                            raise RuntimeError("model.complete() called in child process")
-                    model = _StandIn()
-
+            # SWEEP-5: ctx.model for ops is None, matching the spine (run.py:314,
+            # 344-365) and the documented op API (create_ops.py:126).
             ctx = RunContext(
                 Path(args_dict["workdir"]), knobs=args_dict["knobs"],
                 facts=args_dict["facts"], task=args_dict["task"],
@@ -538,20 +546,37 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             ctx._declared_reads = tuple(args_dict.get("reads", ()))
             ctx._declared_facts = tuple(args_dict.get("produces", ()))
 
-            if model is not None:
-                ctx.model = model
             # Open the same shared ledger the parent holds, so an op that records usage
             # is charged once, in this run (dm-173).
             ctx.budget = RunBudget.from_path(ledger) if ledger else None
 
             fn = resolve(args_dict["callable_target"])
-            result = fn(ctx)
+            # Gap 20 / correction C: capture stderr so run_warning lines can
+            # be emitted by the parent, matching the spine (execute.ts:177-178).
+            # SWEEP-4: also capture stdout so the parent can extract fn-gate
+            # feedback the same way the spine does (execute.ts:148-157).
+            import io as _io
+            _old_stderr = sys.stderr
+            _old_stdout = sys.stdout
+            _capture_stderr = _io.StringIO()
+            _capture_stdout = _io.StringIO()
+            sys.stderr = _capture_stderr
+            sys.stdout = _capture_stdout
+            try:
+                result = fn(ctx)
+            finally:
+                sys.stderr = _old_stderr
+                sys.stdout = _old_stdout
+            _captured_stderr = _capture_stderr.getvalue()
+            _captured_stdout = _capture_stdout.getvalue()
 
             conn.send(("ok", {
                 "result": result,
                 "facts": dict(ctx.facts),
                 "writes_made": list(ctx.writes_made),
                 "_produced": list(ctx._produced),
+                "_stderr": _captured_stderr,
+                "_stdout": _captured_stdout,
             }))
         except SystemExit:
             raise  # propagate SIGTERM
@@ -1164,7 +1189,20 @@ class Executor:
                     self.ctx.facts[key] = value
             self.ctx._produced.update(payload.get("_produced", []))  # noqa: SLF001
             self.ctx.writes_made.extend(payload.get("writes_made", []))
-            return payload.get("result")
+            # Gap 20 / correction C: emit run_warning events for stderr lines
+            # matching the spine's RUN_WARNING pattern (execute.ts:166,177-178).
+            _emit_run_warnings(self.ctx.workdir, node.id,
+                               payload.get("_stderr", ""))
+            result = payload.get("result")
+            # SWEEP-4: attach child process stdout to the result so fn-gate
+            # feedback extraction in _visit_gate can use it.
+            _child_stdout = payload.get("_stdout", "")
+            if _child_stdout and isinstance(result, str):
+                try:
+                    result._fn_stdout = _child_stdout  # type: ignore[attr-defined]
+                except (AttributeError, TypeError):
+                    pass
+            return result
 
         # Exception from child: reconstruct and re-raise.
         return self._reraise_child_error(payload)
@@ -1320,6 +1358,26 @@ class Executor:
 
         prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
         system = render(node.system_prompt_template, self.ctx) if node.system_prompt_template else ""
+        # Gap 20 / correction C: detect unresolved template keys and emit
+        # run_warning events, matching the spine (index.ts:1800-1811).
+        # Strip the steering block before scanning (agent_delivery.py:838-845).
+        import re as _re_tmpl
+        from refactory_dsh.steering import STEERING_START, STEERING_END
+        _scan = node.prompt_template
+        _st_s = _scan.find(STEERING_START)
+        _st_e = _scan.find(STEERING_END, _st_s) if _st_s >= 0 else -1
+        if _st_s >= 0 and _st_e >= _st_s:
+            _scan = _scan[:_st_s] + _scan[_st_e + len(STEERING_END):]
+        _tmpl_keys = _re_tmpl.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', _scan)
+        _vals = {**self.ctx.knobs, **self.ctx.facts}
+        _unresolved = [k for k in _tmpl_keys if k.strip() not in _vals
+                       and k not in (refilled_keys or [])]
+        if _unresolved:
+            from refactory_dsh.live import emit as _emit_warn
+            for _uk in _unresolved:
+                _emit_warn(self.ctx.workdir, "run_warning", node_id=node.id,
+                           state="warning",
+                           summary=f"unresolved template key: {{{{{_uk}}}}}")
         # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.
         if system:
             from refactory_dsh.workers import capabilities as _caps
@@ -1423,8 +1481,11 @@ class Executor:
             finally:
                 sys.stdout = _old_stdout
             # Attach captured stdout for feedback extraction below.
+            # In the timed (child process) path, _run_op_timed already attached
+            # the child's stdout as verdict._fn_stdout; prefer that over the
+            # parent's capture which is empty for child-process ops.
             _fn_stdout = _capture.getvalue()
-            if isinstance(verdict, str):
+            if isinstance(verdict, str) and not getattr(verdict, '_fn_stdout', ''):
                 try:
                     verdict._fn_stdout = _fn_stdout  # type: ignore[attr-defined]
                 except (AttributeError, TypeError):

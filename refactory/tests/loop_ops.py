@@ -154,3 +154,49 @@ def reloop_twice(ctx: Any) -> str:
     visits = int(ctx.facts.get("passes", 0)) + 1
     ctx.set_fact("passes", visits)
     return "reloop" if visits < 3 else "proceed"
+
+
+def write_relative(ctx: Any) -> dict[str, Any]:
+    """SWEEP-3: Write a file using a relative path to prove ops run in the run directory."""
+    from pathlib import Path as _P
+    _P("relative_output.txt").write_text("written from op\n")
+    return {"relative_written": True}
+
+
+def check_model_is_none(ctx: Any) -> dict[str, Any]:
+    """SWEEP-5: Verify ctx.model is None for ops, matching the documented API."""
+    return {"model_is_none": ctx.model is None}
+
+
+def warn_on_stderr(ctx: Any) -> dict[str, Any]:
+    """Gap 20: Print a run warning to stderr for run_warning event test."""
+    import sys as _sys
+    print("run warning: something happened", file=_sys.stderr)
+    return {"warned": True}
+
+
+def parity_write_relative(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: Write a relative path (SWEEP-3) and check ctx.model (SWEEP-5)."""
+    from pathlib import Path as _P
+    _P("parity_output.txt").write_text(f"knob_val={ctx.knobs.get('test_knob', '?')}\n")
+    return {"ctx_model_is_none": ctx.model is None, "knob_applied": ctx.knobs.get("test_knob", "")}
+
+
+def parity_fn_gate(ctx: Any) -> str:
+    """SWEEP-9: fn gate that prints to stdout and reloops once, then proceeds."""
+    from refactory_dsh.nn import Verdict
+    visits = int(ctx.facts.get("parity_visits", 0)) + 1
+    ctx.set_fact("parity_visits", visits)
+    if visits < 2:
+        print("parity stdout feedback")
+        return Verdict("reloop", reason="needs another round")
+    return "proceed"
+
+
+def parity_apply_correction(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: Apply corrections from the ledger."""
+    from refactory_dsh.design_ops import gate_corrections_due
+    _, corrections = gate_corrections_due(ctx.workdir)
+    correction_texts = [text for _, text in corrections]
+    ctx.set_fact("corrections_applied", correction_texts)
+    return {"corrections_applied": correction_texts}

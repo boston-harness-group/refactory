@@ -315,7 +315,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
         _branch_consumed = [{match for n in branch for match in _re.findall(
             r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", n.prompt_template)}
             for branch in _branch_lists]
-        _branch_writes = [set(n.writes) for branch in _branch_lists for n in branch]
+        # Per-branch write and read sets for the file-overlap check (fork.py:120-122).
+        _branch_writes = [{p for n in branch for p in n.writes} for branch in _branch_lists]
+        _branch_reads = [{p for n in branch for p in n.reads} for branch in _branch_lists]
         for idx, bf in enumerate(_branch_facts):
             for other in range(idx):
                 if bf & _branch_facts[other]:
@@ -325,6 +327,13 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 if bf & _branch_consumed[other] or _branch_facts[other] & _branch_consumed[idx]:
                     raise LoweringError(
                         f"fork {fork_id!r}: a branch prompt depends on a sibling's facts"
+                    )
+                # Reads/writes overlap: a branch writing a path that another
+                # branch writes or reads (fork.py:120-122).
+                if (_branch_writes[idx] & (_branch_writes[other] | _branch_reads[other])
+                        or _branch_writes[other] & _branch_reads[idx]):
+                    raise LoweringError(
+                        f"fork {fork_id!r}: branches have conflicting declared file access"
                     )
 
     edges = [
