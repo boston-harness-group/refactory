@@ -831,14 +831,17 @@ class FailureScenarioTask(Task):
 
     def instances(self):
         return [
-            TaskInstance(id="pass_item"),
+            TaskInstance(id=""),          # no id — exercises the id fallback
             TaskInstance(id="raise_item"),
+            TaskInstance(id="timeout_item"),
             TaskInstance(id="last_fails"),
         ]
 
     def verify(self, instance, workspace):
         if instance.id == "raise_item":
             raise ValueError("verify raised")
+        if instance.id == "timeout_item":
+            time.sleep(30)  # hangs past the per-item deadline
         return VerifyResult(passed=True, score=1.0)
 '''
 
@@ -902,14 +905,16 @@ def test_data_failure_scenario_matches(tmp_path):
     """Walker and spine agree on item_scores for a data node with failures.
 
     Drives the real spine (lowering + the TS drain in index.ts, the way
-    test_equivalence.py's data-node test runs DSH).  Items include one whose
-    verify raises, one whose verify passes, and one (the LAST) whose subgraph
-    op fails.  Both runtimes produce the same ids, passed, score and error_kind
-    values.  A rerun in the same directory produces the same result (no stale
-    entries from the previous item set).  No SCENARIO_GAPS entry.
+    test_equivalence.py's data-node test runs DSH).  Items include one without
+    an id (exercises the id fallback), one whose verify raises, one whose verify
+    hangs past the deadline (error_kind "timeout"), and one (the LAST) whose
+    subgraph op fails.  Both runtimes produce the same ids, passed, score and
+    error_kind values.  A rerun in the same directory produces the same result
+    (no stale entries from the previous item set).  No SCENARIO_GAPS entry.
     """
+    from unittest.mock import patch
     from refactory_dsh import lowering, nn
-    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, execute
     from refactory_dsh.task import register_task
 
     # ── importable Task package ──
@@ -939,9 +944,10 @@ def test_data_failure_scenario_matches(tmp_path):
         ))
         graph.connect("data", "report")
 
-        # ── Walker run ──
+        # ── Walker run (deadline monkey-patched to 1 s) ──
         walker_dir = tmp_path / "walker"
-        walker_result = execute(graph, walker_dir)
+        with patch.object(Executor, "_data_item_deadline", return_value=1.0):
+            walker_result = execute(graph, walker_dir)
         assert walker_result.exit_ok, walker_result.error
         walker_scores = walker_result.facts.get("item_scores", [])
 
@@ -993,7 +999,9 @@ def test_data_failure_scenario_matches(tmp_path):
             old_env[key] = os.environ.get(key)
             os.environ[key] = value
         try:
-            rc = _run_spine(graph_path, spine_dir, python_bin, 10_000)
+            # 2 s per command: enough for normal begin/end, but timeout_item's
+            # verify (30 s sleep) will exceed it, producing error_kind "timeout".
+            rc = _run_spine(graph_path, spine_dir, python_bin, 2_000)
         finally:
             for key, value in old_env.items():
                 if value is None:
@@ -1018,14 +1026,15 @@ def test_data_failure_scenario_matches(tmp_path):
         )
 
         # ── Rerun in same directories — no stale entries ──
-        walker_result2 = execute(graph, walker_dir)
+        with patch.object(Executor, "_data_item_deadline", return_value=1.0):
+            walker_result2 = execute(graph, walker_dir)
         assert walker_result2.exit_ok, walker_result2.error
         walker_scores2 = walker_result2.facts.get("item_scores", [])
 
         for key, value in env_patch.items():
             os.environ[key] = value
         try:
-            rc2 = _run_spine(graph_path, spine_dir, python_bin, 10_000)
+            rc2 = _run_spine(graph_path, spine_dir, python_bin, 2_000)
         finally:
             for key, value in old_env.items():
                 if value is None:
@@ -1040,8 +1049,8 @@ def test_data_failure_scenario_matches(tmp_path):
         assert normalize(walker_scores2) == normalize(spine_scores2), (
             f"rerun mismatch:\nwalker: {walker_scores2}\nspine: {spine_scores2}"
         )
-        assert len(spine_scores2) == len(walker_scores2) == 3, (
-            f"rerun should have exactly 3 entries (no stale): {len(spine_scores2)}"
+        assert len(spine_scores2) == len(walker_scores2) == 4, (
+            f"rerun should have exactly 4 entries (no stale): {len(spine_scores2)}"
         )
     finally:
         sys.path.remove(str(project / ".factory" / "packages"))

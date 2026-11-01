@@ -782,6 +782,7 @@ describe('abandonPass primitive (Correction 1)', () => {
   }
 
   it('records failed node as failed and remaining nodes as skipped, none completed, no verdicts', async () => {
+    const workdir = scratch()
     const log: string[] = []
     const items = [{ id: 'a' }, { id: 'b' }]
     let callCount = 0
@@ -823,20 +824,36 @@ describe('abandonPass primitive (Correction 1)', () => {
         },
       }),
     }
-    const root = await mount(shell)
+    const root = await mount(shell, { workdir })
     // First item's work fails; abandonPass should skip 'end' (the agent node)
     const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
     // The second item should be the one exposed
     expect(first.item).toEqual({ id: 'b' })
     await call(root, 'wf_done', { node: 'end' })
-    const last = await call(root, 'wf_next') as { status: string }
+    const last = await call(root, 'wf_next') as { status: string; completed?: number; skipped?: string[] }
     expect(last.status).toBe('done')
     // The end --failed should have been called for item 0
     const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
     expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+
+    // Correction 1: the failed node's remaining body nodes were recorded as
+    // skipped during item 0's abandoned pass, but skips are cleared when
+    // advancing to the next item, so the final skipped list should be empty
+    // (item 1 completed normally).  No body nodes should be completed for item 0.
+    // Read the checkpoint to verify the spine logged the skip during abandon.
+    const checkpoint = JSON.parse(readFileSync(join(workdir, '.refactory/spine-checkpoint.json'), 'utf8'))
+    const state = checkpoint.state as Record<string, unknown>
+    // The spine log should record that body nodes were skipped during abandon
+    const spineLog = state.log as string[]
+    const skipLogEntries = spineLog.filter((e: string) => e.startsWith('skipped ') && (e.includes('work') || e.includes('end')))
+    expect(skipLogEntries.length).toBeGreaterThanOrEqual(1)
+    // No gate verdicts should exist (no gates in this graph's body, but verify
+    // the invariant holds)
+    expect(state.gate_verdicts).toEqual({})
   })
 
   it('abandonPass with a gate in the pass body records no verdict', async () => {
+    const workdir = scratch()
     const log: string[] = []
     const items = [{ id: 'a' }, { id: 'b' }]
     let workCallCount = 0
@@ -886,7 +903,7 @@ describe('abandonPass primitive (Correction 1)', () => {
         },
       }),
     }
-    const root = await mount(shell, { graph: dataGraphWithGate() })
+    const root = await mount(shell, { graph: dataGraphWithGate(), workdir })
     // First item: work fails → abandonPass → end --failed → second item
     // The gate (inner_gate) must NOT get a verdict
     const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
@@ -898,8 +915,32 @@ describe('abandonPass primitive (Correction 1)', () => {
     // end --failed was called for item 0
     const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
     expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
-    // No gate verdict should have been recorded (no 'echo proceed' for item 0's gate)
-    // The gate evaluator command should not have been executed for item 0
-    // (only work command 'true' and the data commands were run for item 0)
+    // Correction 1: the gate evaluator command must NOT have been executed
+    // for item 0 (the gate was skipped, not verdicted).
+    // Filter the log for gate evaluator commands during item 0: item 0's
+    // commands happen before any --index 1 command.
+    const firstItemEnd = log.findIndex(c => c.includes('--index 1'))
+    const item0Log = firstItemEnd >= 0 ? log.slice(0, firstItemEnd) : log
+    const gateEvalCmds = item0Log.filter(c => c.includes('echo proceed'))
+    expect(gateEvalCmds).toEqual([])
+
+    // Read checkpoint to verify the spine's log during item 0's abandoned pass.
+    const checkpoint = JSON.parse(readFileSync(join(workdir, '.refactory/spine-checkpoint.json'), 'utf8'))
+    const state = checkpoint.state as Record<string, unknown>
+
+    // The spine log should record that body nodes (including inner_gate) were
+    // skipped during item 0's abandoned pass — no verdict was fabricated for the
+    // gate during that item.
+    const spineLog = state.log as string[]
+    const skipLogEntries = spineLog.filter(
+      (e: string) => e.startsWith('skipped ') && (e.includes('inner_gate') || e.includes('end')),
+    )
+    expect(skipLogEntries.length).toBeGreaterThanOrEqual(1)
+
+    // The gate evaluator command should not have been executed for item 0.
+    // A verdict(...) fabrication for a gate during an abandoned pass would show
+    // up as an extra gate evaluator execution — verify only item 1 ran the
+    // evaluator (no 'echo proceed' was executed for item 0's gate).
+    // (gate_verdicts may have inner_gate: 'proceed' from item 1, which is valid)
   })
 })

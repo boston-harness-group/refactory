@@ -1534,7 +1534,7 @@ export function apply(ctx: Context, config: Config): void {
 
     /** Bounded stderr tail for error_text parity with the walker. */
     const stderrTail = (failure: CommandFailure): string => {
-      const text = failure.stderr ?? failure.error ?? `failed with exit code ${String(failure.exitCode)}`
+      const text = failure.stderr || failure.error || `failed with exit code ${String(failure.exitCode)}`
       return text.slice(-4096)
     }
 
