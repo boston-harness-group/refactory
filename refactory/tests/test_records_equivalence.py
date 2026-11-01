@@ -315,17 +315,15 @@ def test_spine_item_records_in_status():
     # This test verifies the Python side produces records that the spine
     # would consume: the make_item_record function produces a JSON-serializable
     # dict that matches the TS ItemRecord interface.
+    from refactory_dsh.task import VerifyResult
     record = make_item_record(
         "test-item",
-        passed=True,
-        score=0.9,
+        VerifyResult(passed=True, score=0.9, details="answer"),
         exchanges=[{"node": "agent1", "prompt": "question", "response": "answer"}],
         prediction="answer",
         label="correct",
         label_text="The correct answer",
         fail_reason=None,
-        error_kind=None,
-        error_text=None,
         metadata={"difficulty": "easy"},
     )
     # The record must be JSON-serializable.

@@ -837,6 +837,32 @@ export class Spine {
   }
 
   /**
+   * Abandon the current item pass: mark it finished without completing or
+   * verdicting any remaining pass-body node.  After this call the pass is in
+   * the `finished` state so `endPass()` can be called immediately.  Remaining
+   * pass-body nodes are recorded as skipped for this item (no completed
+   * entries, no gate verdicts).  The caller is responsible for running the
+   * grading command (`end --failed`) before calling `endPass()`.
+   */
+  abandonPass(): void {
+    if (this.pass === undefined) return
+    // Record remaining pass-body nodes as skipped for this item.
+    // No complete() calls, no verdict() calls — those would fabricate state.
+    const body = this.descendants(this.pass.entry, this.pass.exit)
+    for (const nodeId of body) {
+      if (!this.completed.includes(nodeId) && !this.skipped.includes(nodeId)) {
+        this.skipped.push(nodeId)
+        this.log.push(`skipped ${nodeId}`)
+      }
+    }
+    // Remove any pass-body cursor positions so endPass's "has not finished"
+    // guard does not fire.
+    this.cursor = this.cursor.filter(pos => !body.has(pos))
+    this.pass.finished = true
+    this.log.push(`data ${this.pass.node}: item ${this.pass.index} abandoned`)
+  }
+
+  /**
    * End one item's pass: move to the next item, or complete the data node.
    *
    * Called after the pass's own verdict is in hand, so a pass that was never judged
@@ -870,7 +896,9 @@ export class Spine {
     }
     if (pass.index + 1 < pass.count) {
       const index = pass.index + 1
-      this.invalidateNodes(this.descendants(pass.entry, pass.exit), false)
+      // clearSkips=true so that skip entries added by abandonPass() for the
+      // previous item do not carry over to the next item's pass body.
+      this.invalidateNodes(this.descendants(pass.entry, pass.exit), true)
       this.pass = { ...pass, index, finished: false }
       if (!this.cursor.includes(pass.entry)) this.cursor.push(pass.entry)
       this.log.push(`data ${pass.node}: item ${index + 1}/${pass.count}`)

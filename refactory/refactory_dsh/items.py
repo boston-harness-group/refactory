@@ -35,7 +35,7 @@ from typing import Any
 from refactory_dsh.paths import project_root, project_for_nodes
 from refactory_dsh.nn import Node
 from refactory_dsh.nn.executor import CURRENT_ITEM, ITEMS_OVERRIDE, load_items
-from refactory_dsh.task import Task, TaskError, instance_of, load_task
+from refactory_dsh.task import Task, TaskError, VerifyResult, instance_of, load_task
 
 #: The working directory a node command runs in, when the runtime says so.
 WORKDIR_ENV = "REFACTORY_WORKDIR"
@@ -90,6 +90,60 @@ def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
         return []
 
 
+def make_item_record(
+    item_id: str,
+    verdict: VerifyResult | None,
+    error: Exception | None = None,
+    *,
+    exchanges: list[dict[str, Any]] | None = None,
+    prediction: str | None = None,
+    label: str | None = None,
+    label_text: str | None = None,
+    fail_reason: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Build a per-item record for one evaluated item.
+
+    One record per item, same shape on both runtimes.  Extends F4's existing
+    error_kind convention (exception class name or ``"timeout"``).  The
+    ``exchanges`` list carries one ``{node, prompt, response}`` dict per agent
+    call in the item's pass, so a multi-node pass records every model call.
+
+    **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``.
+    **Failure path** (error is not None): ``{"id", "passed": False, "score": 0.0,
+    "error_text", "error_kind"}``.
+    **No-verdict path** (error is None, verdict is None): ``None`` — the Task chose
+    not to grade this item.
+    """
+    base: dict[str, Any] = {
+        "exchanges": list(exchanges or []),
+        "prediction": prediction,
+        "label": label,
+        "label_text": label_text,
+        "fail_reason": fail_reason,
+        "metadata": dict(metadata or {}),
+    }
+    if error is not None:
+        return {
+            "id": item_id,
+            "passed": False,
+            "score": 0.0,
+            "error_text": str(error)[:4096],
+            "error_kind": type(error).__name__,
+            **base,
+        }
+    if verdict is None:
+        return None
+    return {
+        "id": item_id,
+        "passed": verdict.passed,
+        "score": verdict.score,
+        "error_text": None,
+        "error_kind": None,
+        **base,
+    }
+
+
 def source_override(workdir: Path, node_id: str) -> dict[str, Any]:
     """What this run says the data node should read, or an empty answer.
 
@@ -135,8 +189,18 @@ def write_source(
     return path
 
 
+#: Exit code used when the all-fail rule fires. The spine distinguishes this
+#: from other ``end`` failures so it can propagate the all-fail rule as a node
+#: failure while recording other non-zero exits as failed items (Ask 3).
+ALL_FAIL_EXIT_CODE = 7
+
+
 class ItemsError(RuntimeError):
     """A data node cannot be iterated: named, because the node id alone is not a reason."""
+
+
+class AllItemsFailedError(ItemsError):
+    """Raised when every item in a data pass failed (the all-fail rule)."""
 
 
 def _declarations(workdir: Path) -> dict[str, Any]:
@@ -203,7 +267,15 @@ def _write_facts(workdir: Path, fact: str, scores: list[dict[str, Any]]) -> None
 
     def add(facts: dict[str, Any]) -> None:
         previous = facts.get(fact)
-        facts[fact] = list(previous) + scores if isinstance(previous, list) else list(scores)
+        if isinstance(previous, list):
+            # Replace-by-id merge: new scores supersede previous entries with the
+            # same id, preventing double counting when a data node reruns.
+            by_id = {str(entry.get("id")): entry for entry in previous if isinstance(entry, dict)}
+            for score in scores:
+                by_id[str(score.get("id"))] = score
+            facts[fact] = list(by_id.values())
+        else:
+            facts[fact] = list(scores)
 
     # Under the facts lock, as every node's write is: a data pass can end beside a branch.
     edit_facts(workdir, add)
@@ -218,6 +290,27 @@ def command_list(node: Node, workdir: Path) -> dict[str, Any]:
     }
 
 
+def _pass_state_path(workdir: Path, node_id: str) -> Path:
+    """Path to the run-local pass state file for a data node."""
+    return workdir / ".refactory" / "pass_state" / f"{node_id}.json"
+
+
+def _read_pass_state(workdir: Path, node_id: str) -> dict[str, int]:
+    path = _pass_state_path(workdir, node_id)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"processed": 0, "failed": 0}
+
+
+def _write_pass_state(workdir: Path, node_id: str, state: dict[str, int]) -> None:
+    path = _pass_state_path(workdir, node_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state))
+
+
 def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     """Materialise one item and prepare the workspace for its pass."""
     items = items_of(node, workdir)
@@ -226,6 +319,19 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
             f"item {index} is out of range: node {node.id!r} selected {len(items)} item(s)"
         )
     item = items[index]
+
+    # On the first item, reset pass state and clear stale item_scores.
+    if index == 0:
+        _write_pass_state(workdir, node.id, {"processed": 0, "failed": 0})
+        if SCORES_FACT in node.produces:
+            from refactory_dsh.run import edit_facts
+            edit_facts(workdir, lambda facts: facts.pop(SCORES_FACT, None))
+
+    # Track processed count in pass state.
+    ps = _read_pass_state(workdir, node.id)
+    ps["processed"] = ps.get("processed", 0) + 1
+    _write_pass_state(workdir, node.id, ps)
+
     (workdir / CURRENT_ITEM).write_text(json.dumps(item, indent=2, default=str))
     # Clear the exchange sidecar for this item's pass.
     sidecar = workdir / EXCHANGES_SIDECAR
@@ -233,69 +339,129 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         sidecar.unlink(missing_ok=True)
     task = _task_of(node, workdir)
     if task is not None:
-        task.setup(instance_of(item), workdir)
+        try:
+            task.setup(instance_of(item), workdir)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            record = make_item_record(str(item.get("id") or index), None, error=exc)
+            if record is not None and SCORES_FACT in node.produces:
+                _write_facts(workdir, SCORES_FACT, [record])
+            # Do NOT increment failed here: the subsequent `end --failed`
+            # call from the spine will increment it exactly once (Ask 1).
+            return {"error": str(exc)}
     return item
 
 
-def make_item_record(
-    item_id: str,
-    *,
-    passed: bool,
-    score: float,
-    exchanges: list[dict[str, Any]] | None = None,
-    prediction: str | None = None,
-    label: str | None = None,
-    label_text: str | None = None,
-    fail_reason: str | None = None,
-    error_kind: str | None = None,
-    error_text: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a per-item record for one evaluated item.
+def _existing_item_record(workdir: Path, item_id: str) -> dict[str, Any] | None:
+    """Return an existing item_scores record for *item_id*, or None.
 
-    One record per item, same shape on both runtimes.  Extends F4's existing
-    error_kind convention (exception class name or ``"timeout"``).  The
-    ``exchanges`` list carries one ``{node, prompt, response}`` dict per agent
-    call in the item's pass, so a multi-node pass records every model call.
+    Used to guard against double-writing: when ``command_begin``'s setup-failure
+    handler already wrote a record, ``command_end``'s ``--failed`` path should
+    not overwrite it (Ask 1).
     """
-    return {
-        "id": item_id,
-        "passed": passed,
-        "score": score,
-        "exchanges": list(exchanges or []),
-        "prediction": prediction,
-        "label": label,
-        "label_text": label_text,
-        "fail_reason": fail_reason,
-        "error_kind": error_kind,
-        "error_text": error_text,
-        "metadata": dict(metadata or {}),
-    }
+    path = workdir / FACTS
+    if not path.exists():
+        return None
+    try:
+        facts = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(facts, dict):
+        return None
+    scores = facts.get(SCORES_FACT)
+    if not isinstance(scores, list):
+        return None
+    for entry in scores:
+        if isinstance(entry, dict) and str(entry.get("id")) == item_id:
+            return entry
+    return None
 
 
-def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
-    """The Task's verdict on one pass, folded into the run's facts."""
+def command_end(
+    node: Node, workdir: Path, index: int, *,
+    failed_reason: str | None = None,
+    failed_kind: str | None = None,
+) -> dict[str, Any]:
+    """The Task's verdict on one pass, folded into the run's facts.
+
+    When *failed_reason* is set (e.g. a subgraph node exited with code ≠ 0),
+    ``task.verify()`` is skipped and the item is recorded as failed — matching
+    the walker, which never calls verify after a branch error.
+
+    When *failed_kind* is set (e.g. ``"timeout"``), the ``error_kind`` field in
+    the record is overridden, so both runtimes record the same kind.
+    """
     items = items_of(node, workdir)
     if index < 0 or index >= len(items):
         raise ItemsError(
             f"item {index} is out of range: node {node.id!r} selected {len(items)} item(s)"
         )
     item = items[index]
+    item_id = str(item.get("id") or index)
+
+    # F4 parity: when the caller says the item's subgraph failed, skip verify
+    # and write a failure record directly, as the walker does.
+    if failed_reason is not None:
+        exc = RuntimeError(failed_reason)
+        record = make_item_record(item_id, None, error=exc)
+        if record is not None:
+            if failed_kind is not None:
+                record["error_kind"] = failed_kind
+            # Guard: skip writing a second item_scores record when
+            # command_begin's setup-failure handler already wrote one for
+            # this item id (Ask 1 — preserve the original error_kind).
+            if SCORES_FACT in node.produces:
+                existing = _existing_item_record(workdir, item_id)
+                if existing is None:
+                    _write_facts(workdir, SCORES_FACT, [record])
+                else:
+                    # Use the original record so error_kind stays the
+                    # actual exception class (e.g. ValueError), not
+                    # RuntimeError from the end --failed wrapper.
+                    record = existing
+        # Track failed count in pass state.
+        ps = _read_pass_state(workdir, node.id)
+        ps["failed"] = ps.get("failed", 0) + 1
+        _write_pass_state(workdir, node.id, ps)
+        result: dict[str, Any] = {"error": failed_reason, **(record or {})}
+        _check_all_items_failed(node, workdir, items, index)
+        return result
+
     task = _task_of(node, workdir)
     if task is None:
+        _check_all_items_failed(node, workdir, items, index)
         return {}
     instance = instance_of(item)
-    verdict = task.verify(instance, workdir)
-    if verdict is None:
-        return {}
-    item_id = str(item.get("id") or index)
-    metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
     # Read per-node exchanges from the sidecar (written by agent execution).
     exchanges = _read_and_clear_exchanges(workdir)
+    metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+    try:
+        verdict = task.verify(instance, workdir)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        record = make_item_record(
+            item_id, None, error=exc,
+            exchanges=exchanges,
+            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+            metadata=metadata,
+        )
+        if record is not None and SCORES_FACT in node.produces:
+            _write_facts(workdir, SCORES_FACT, [record])
+        # Track failed count in pass state.
+        ps = _read_pass_state(workdir, node.id)
+        ps["failed"] = ps.get("failed", 0) + 1
+        _write_pass_state(workdir, node.id, ps)
+        result = {"error": str(exc), **(record or {})}
+        _check_all_items_failed(node, workdir, items, index)
+        return result
+    if verdict is None:
+        _check_all_items_failed(node, workdir, items, index)
+        return {}
     record = make_item_record(
-        item_id,
-        passed=verdict.passed,
-        score=verdict.score,
+        item_id, verdict,
         exchanges=exchanges,
         prediction=verdict.details if verdict.passed else None,
         label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
@@ -303,9 +469,31 @@ def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         fail_reason=verdict.details if not verdict.passed and verdict.details else None,
         metadata=metadata,
     )
-    if SCORES_FACT in node.produces:
-        _write_facts(workdir, SCORES_FACT, [{"id": item_id, "passed": verdict.passed, "score": verdict.score}])
-    return record
+    if record is not None and SCORES_FACT in node.produces:
+        _write_facts(workdir, SCORES_FACT, [record])
+    _check_all_items_failed(node, workdir, items, index)
+    return record or {}
+
+
+def _check_all_items_failed(
+    node: Node, workdir: Path, items: list[dict[str, Any]], index: int,
+) -> None:
+    """After the last item's end, fail the node if every item has an error.
+
+    This makes the spine path match the walker's all-items-failed rule: a data
+    node fails only when *every* item it processed fails. The check uses
+    run-local pass state (processed and failed counts under
+    ``.refactory/pass_state/<node_id>.json``), not the ``item_scores`` fact,
+    so it works whether or not the node declares ``item_scores`` in its
+    ``produces``.
+    """
+    if index + 1 < len(items):
+        return  # not the last item yet
+    ps = _read_pass_state(workdir, node.id)
+    processed = ps.get("processed", 0)
+    failed = ps.get("failed", 0)
+    if processed > 0 and failed == processed:
+        raise AllItemsFailedError(f"{node.id}: all {processed} items failed")
 
 
 def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -397,10 +585,12 @@ def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def _options(argv: list[str]) -> tuple[str, int]:
-    """The ``--node`` id and ``--index`` one command line names."""
+def _options(argv: list[str]) -> tuple[str, int, str | None, str | None]:
+    """The ``--node`` id, ``--index``, optional ``--failed`` reason and ``--failed-kind``."""
     node_id = ""
     index = 0
+    failed_reason: str | None = None
+    failed_kind: str | None = None
     if "--node" in argv:
         position = argv.index("--node")
         if position + 1 >= len(argv):
@@ -414,16 +604,26 @@ def _options(argv: list[str]) -> tuple[str, int]:
             index = int(argv[position + 1])
         except ValueError as exc:
             raise ItemsError(f"--index takes an item number, not {argv[position + 1]!r}") from exc
+    if "--failed" in argv:
+        position = argv.index("--failed")
+        if position + 1 >= len(argv):
+            raise ItemsError("--failed needs a value")
+        failed_reason = argv[position + 1]
+    if "--failed-kind" in argv:
+        position = argv.index("--failed-kind")
+        if position + 1 >= len(argv):
+            raise ItemsError("--failed-kind needs a value")
+        failed_kind = argv[position + 1]
     if not node_id:
         raise ItemsError("--node is required: the declarations are keyed by node id")
-    return node_id, index
+    return node_id, index, failed_reason, failed_kind
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     usage = (
         "usage: python -m refactory_dsh.items "
-        "{list|begin|end} --node <id> [--index <n>] | reset < redo-plan.json"
+        "{list|begin|end} --node <id> [--index <n>] [--failed <reason>] | reset < redo-plan.json"
     )
     if not argv or argv[0] not in ("list", "begin", "end", "reset"):
         print(usage, file=sys.stderr)
@@ -438,14 +638,22 @@ def main(argv: list[str] | None = None) -> int:
             produced = command_reset(workdir, json.load(sys.stdin))
             print(json.dumps(produced, default=str))
             return 0
-        node_id, index = _options(argv[1:])
+        node_id, index, failed_reason, failed_kind = _options(argv[1:])
         node = data_node(workdir, node_id)
         if verb == "list":
             produced: dict[str, Any] = command_list(node, workdir)
         elif verb == "begin":
             produced = command_begin(node, workdir, index)
         else:
-            produced = command_end(node, workdir, index)
+            produced = command_end(
+                node, workdir, index,
+                failed_reason=failed_reason, failed_kind=failed_kind,
+            )
+    except AllItemsFailedError as exc:
+        # The all-fail rule gets its own exit code so the spine can
+        # distinguish it from other end failures (Ask 3).
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return ALL_FAIL_EXIT_CODE
     except (ItemsError, TaskError) as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

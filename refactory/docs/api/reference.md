@@ -931,19 +931,21 @@ The per-item half of a data node, from the command line.
 
 | kind | name | signature |
 |---|---|---|
+| class | `AllItemsFailedError` | `` |
 | class | `ItemsError` | `` |
 | function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int') -> 'dict[str, Any]'` |
-| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int') -> 'dict[str, Any]'` |
+| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None) -> 'dict[str, Any]'` |
 | function | `command_list` | `(node: 'Node', workdir: 'Path') -> 'dict[str, Any]'` |
 | function | `command_reset` | `(workdir: 'Path', request: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
-| function | `make_item_record` | `(item_id: 'str', *, passed: 'bool', score: 'float', exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, error_kind: 'str \| None' = None, error_text: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
+| function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
 
+- **`AllItemsFailedError`** — Raised when every item in a data pass failed (the all-fail rule).
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
 - **`command_begin`** — Materialise one item and prepare the workspace for its pass.
 - **`command_end`** — The Task's verdict on one pass, folded into the run's facts.

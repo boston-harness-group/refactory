@@ -45,17 +45,15 @@ task_module.register_task(TASK_REF, RecordsCounting)
 
 def test_item_record_shape():
     """The extended ``make_item_record`` has all required keys including F6 fields."""
+    from refactory_dsh.task import VerifyResult
     record = make_item_record(
         "item-1",
-        passed=True,
-        score=1.0,
+        VerifyResult(passed=True, score=1.0, details="answer"),
         exchanges=[{"node": "agent", "prompt": "hello", "response": "world"}],
         prediction="answer",
         label="correct",
         label_text="Label text",
         fail_reason=None,
-        error_kind=None,
-        error_text=None,
         metadata={"tag": "test"},
     )
     # All required keys are present.

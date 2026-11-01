@@ -51,6 +51,14 @@ export { BUILD_STAMP, computeSourceStamp, validateBuild } from './build-stamp.ts
 export const name = 'workflow-spine'
 export const inject = ['tools', 'systemPrompt']
 
+/**
+ * The exit code the Python items module uses when the all-fail rule fires.
+ * The spine distinguishes this from other non-zero `end` exits so it can
+ * propagate the all-fail rule as a node failure while recording other
+ * non-zero exits as failed items (Ask 3).
+ */
+const ALL_FAIL_EXIT_CODE = 7
+
 /** Configured-only driver: the same drain/status path used by `wf_next`. */
 export const CONFIGURED_RUN_SERVICE = 'workflowConfiguredRun'
 
@@ -1535,7 +1543,12 @@ export function apply(ctx: Context, config: Config): void {
       return {}
     }
 
-    /** Materialise the running pass's item, once per item across calls. */
+    /** Bounded stderr tail for error_text parity with the walker. */
+    const stderrTail = (failure: CommandFailure): string => {
+      const text = failure.stderr || failure.error || `failed with exit code ${String(failure.exitCode)}`
+      return text.slice(-4096)
+    }
+
     const beginItem = async (): Promise<{ failure?: CommandFailure }> => {
       const pass = spine.passOf()
       if (pass === undefined) return {}
@@ -1548,7 +1561,62 @@ export function apply(ctx: Context, config: Config): void {
       const data = spine.view(pass.node)
       recordStatus(spine, workdir, 'executing')
       const started = await runDataCommand(shell, data, 'begin', runner, pass.index)
-      if (!started.ok) return { failure: started }
+      if (!started.ok) {
+        // Begin command failed or timed out: record as a failed item, not
+        // a run failure. Abandon remaining pass-body nodes, run fallback
+        // end --failed to record the item, then continue.
+        const reason = stderrTail(started)
+        const failedKind = started.error?.includes('timed out') ? 'timeout' : undefined
+        spine.abandonPass()
+        const fallback = await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+        // Ask 2: check the fallback's result — when the all-fail rule fires
+        // in the fallback, propagate as a node failure.
+        if (!fallback.ok && !fallback.error?.includes('timed out') && !fallback.error?.includes('was aborted')) {
+          return { failure: fallback }
+        }
+        materialised.delete(spine)
+        item = undefined
+        spine.endPass()
+        structural.clear()
+        recordBoundary()
+        return {}
+      }
+      // F4: a setup failure is signalled by a response whose only key is `error`.
+      // The Python side has already written the failed-item record; skip the
+      // subgraph by recording remaining nodes as skipped, running end, and advancing.
+      // The check requires `error` as the sole key so that an item dict from a
+      // data source that naturally contains an `error` column is not falsely
+      // treated as a setup failure.
+      if (started.value != null && typeof started.value === 'object'
+          && 'error' in started.value && Object.keys(started.value).length === 1) {
+        materialised.set(spine, { key, item: started.value })
+        // Record remaining subgraph nodes as skipped (no complete, no verdict on gates).
+        spine.abandonPass()
+        // Run end command with --failed to skip verify, matching the walker.
+        const setupError = String((started.value as Record<string, unknown>).error ?? 'setup failed')
+        const ended = await runDataCommand(shell, data, 'end', runner, pass.index, setupError)
+        if (!ended.ok) {
+          if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
+            // End timed out or was killed: run a fallback to record the item.
+            const reason = stderrTail(ended)
+            const failedKind = ended.error?.includes('timed out') ? 'timeout' : undefined
+            const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+            // Ask 2: check the fallback result.
+            if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+              return { failure: fb }
+            }
+          } else {
+            // End exited non-zero (e.g. all-items-failed): propagate.
+            return { failure: ended }
+          }
+        }
+        materialised.delete(spine)
+        item = undefined
+        spine.endPass()
+        structural.clear()
+        recordBoundary()
+        return {}
+      }
       materialised.set(spine, { key, item: started.value })
       item = started.value
       recordBoundary()
@@ -1575,7 +1643,45 @@ export function apply(ctx: Context, config: Config): void {
       const data = spine.view(pass.node)
       recordStatus(spine, workdir, 'executing')
       const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
-      if (!ended.ok) return { failure: ended }
+      if (!ended.ok) {
+        if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
+          // End command timed out or was killed: run a fallback end --failed
+          // to record the item as failed (not lost), then continue.
+          const reason = stderrTail(ended)
+          const failedKind = ended.error?.includes('timed out') ? 'timeout' : undefined
+          const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+          // Ask 2: check the fallback result.
+          if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+            return { failure: fb }
+          }
+          materialised.delete(spine)
+          item = undefined
+          spine.endPass()
+          structural.clear()
+          recordBoundary()
+          return {}
+        }
+        // Ask 3: distinguish the all-fail exit from other end failures.
+        // The all-fail rule uses exit code 7; propagate as a node failure.
+        // Any other non-zero exit is a crash in verify or the end command
+        // itself — record the item as failed via end --failed and continue.
+        if (ended.exitCode === ALL_FAIL_EXIT_CODE) {
+          return { failure: ended }
+        }
+        // Non-all-fail end exit: record as failed item, not a run failure.
+        spine.abandonPass()
+        const reason = stderrTail(ended)
+        const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason)
+        if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+          return { failure: fb }
+        }
+        materialised.delete(spine)
+        item = undefined
+        spine.endPass()
+        structural.clear()
+        recordBoundary()
+        return {}
+      }
       // Capture per-item record from command_end output (F6).
       if (ended.value != null && typeof ended.value === 'object' && 'id' in ended.value) {
         spine.addItemRecord(ended.value as Record<string, unknown>)
@@ -1597,6 +1703,11 @@ export function apply(ctx: Context, config: Config): void {
       if (state.status === 'done' || spine.isPaused()) return { next: state, item, ran }
       const started = await beginItem()
       if (started.failure !== undefined) return { next: state, failure: started.failure, ran }
+      // If beginItem() handled a setup failure and advanced to the next item
+      // via endPass(), the current item is not yet materialised. Re-enter the
+      // loop so beginItem() runs for the new item before its subgraph is
+      // dispatched (Ask 6 / setup-failure + subgraph-failure equivalence).
+      if (spine.passOf() !== undefined && !materialised.has(spine)) continue
       applyControls(spine, workdir, commandEnv, dataCommand, agentCommand)
       state = spine.next()
       if (spine.isHalted() || spine.isPaused()) return { next: state, item, ran }
@@ -1690,7 +1801,46 @@ export function apply(ctx: Context, config: Config): void {
       recordWarnings(workdir, printed)
       const boundaryWarnings = printed.filter(({ ok }) => ok).map(({ node, line }) => `${node}: ${line}`)
       warnings.push(...boundaryWarnings)
-      if (failure !== undefined) return { next: spine.next(), failure, ran }
+      // F4: when a subgraph node fails during a data pass, the failure becomes
+      // a failed item instead of ending the run. Record remaining subgraph
+      // nodes as skipped (no complete, no verdict), run end with --failed to
+      // skip verify and record the failure, then continue.
+      if (failure !== undefined) {
+        const activePass = spine.passOf()
+        if (activePass !== undefined) {
+          const data = spine.view(activePass.node)
+          // Abandon remaining pass-body nodes (no complete, no verdict).
+          spine.abandonPass()
+          // Run end command with --failed so the Python side skips verify and
+          // writes a failure record directly, matching the walker's behavior.
+          // Pass the real stderr tail so error_text matches the walker's message.
+          const reason = stderrTail(failure)
+          const failedKind = failure.error?.includes('timed out') ? 'timeout' : undefined
+          const ended = await runDataCommand(shell, data, 'end', runner, activePass.index, reason, failedKind)
+          if (!ended.ok) {
+            if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
+              // End timed out or was killed: run a fallback to record the item.
+              const fbReason = stderrTail(ended)
+              const fbKind = ended.error?.includes('timed out') ? 'timeout' : undefined
+              const fb = await runDataCommand(shell, data, 'end', runner, activePass.index, fbReason, fbKind)
+              // Ask 2: check the fallback result.
+              if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+                return { next: spine.next(), failure: fb, ran }
+              }
+            } else {
+              // End exited with non-zero (e.g. all-items-failed): propagate.
+              return { next: spine.next(), failure: ended, ran }
+            }
+          }
+          materialised.delete(spine)
+          item = undefined
+          spine.endPass()
+          structural.clear()
+          recordBoundary()
+          continue
+        }
+        return { next: spine.next(), failure, ran }
+      }
       if (interactiveOpen) {
         // Preserve the one-boundary budget while allowing structural boundaries
         // and data-pass grading to settle before exposing the next ready work.
