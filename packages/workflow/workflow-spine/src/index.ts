@@ -1532,49 +1532,6 @@ export function apply(ctx: Context, config: Config): void {
       return {}
     }
 
-    /**
-     * Abandon the current item pass: advance past remaining pass-body nodes
-     * without fabricating gate verdicts. Non-gate nodes are completed (the
-     * completed state is cleared by endPass's invalidateNodes for the next
-     * item). Gate nodes are skipped to avoid fabricating a verdict; the
-     * returned list must be unskipped after endPass.
-     */
-    const abandonPass = (s: Spine): string[] => {
-      const skippedGates: string[] = []
-      for (let steps = 0; steps < 200; steps += 1) {
-        const p = s.passOf()
-        if (p === undefined || p.finished) break
-        const state = s.next()
-        if (state.status !== 'ready' || state.nodes.length === 0) break
-        let advanced = false
-        for (const node of state.nodes) {
-          if (node._type === 'GateNode') {
-            // Skip gate nodes to avoid fabricating a verdict.
-            try {
-              s.skip(node.id, { source: 'person' })
-              skippedGates.push(node.id)
-              advanced = true
-            } catch { /* not skippable */ }
-          } else {
-            // Complete non-gate nodes to advance the cursor.
-            try {
-              s.complete(node.id)
-              advanced = true
-            } catch { /* not due */ }
-          }
-        }
-        if (!advanced) break
-      }
-      return skippedGates
-    }
-
-    /** Clean up gate skips added by abandonPass after endPass. */
-    const cleanupAbandonSkips = (s: Spine, skippedGates: string[]): void => {
-      for (const nodeId of skippedGates) {
-        try { s.unskip(nodeId) } catch { /* already unskipped */ }
-      }
-    }
-
     /** Bounded stderr tail for error_text parity with the walker. */
     const stderrTail = (failure: CommandFailure): string => {
       const text = failure.stderr ?? failure.error ?? `failed with exit code ${String(failure.exitCode)}`
@@ -1599,12 +1556,11 @@ export function apply(ctx: Context, config: Config): void {
         // end --failed to record the item, then continue.
         const reason = stderrTail(started)
         const failedKind = started.error?.includes('timed out') ? 'timeout' : undefined
-        const beginSkippedGates = abandonPass(spine)
+        spine.abandonPass()
         await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
         materialised.delete(spine)
         item = undefined
         spine.endPass()
-        cleanupAbandonSkips(spine, beginSkippedGates)
         structural.clear()
         recordBoundary()
         return {}
@@ -1619,7 +1575,7 @@ export function apply(ctx: Context, config: Config): void {
           && 'error' in started.value && Object.keys(started.value).length === 1) {
         materialised.set(spine, { key, item: started.value })
         // Record remaining subgraph nodes as skipped (no complete, no verdict on gates).
-        const setupSkippedGates = abandonPass(spine)
+        spine.abandonPass()
         // Run end command with --failed to skip verify, matching the walker.
         const setupError = String((started.value as Record<string, unknown>).error ?? 'setup failed')
         const ended = await runDataCommand(shell, data, 'end', runner, pass.index, setupError)
@@ -1637,7 +1593,6 @@ export function apply(ctx: Context, config: Config): void {
         materialised.delete(spine)
         item = undefined
         spine.endPass()
-        cleanupAbandonSkips(spine, setupSkippedGates)
         structural.clear()
         recordBoundary()
         return {}
@@ -1804,8 +1759,8 @@ export function apply(ctx: Context, config: Config): void {
         const activePass = spine.passOf()
         if (activePass !== undefined) {
           const data = spine.view(activePass.node)
-          // Record remaining pass-body nodes as skipped (no complete on gates, no verdict).
-          const subgraphSkippedGates = abandonPass(spine)
+          // Abandon remaining pass-body nodes (no complete, no verdict).
+          spine.abandonPass()
           // Run end command with --failed so the Python side skips verify and
           // writes a failure record directly, matching the walker's behavior.
           // Pass the real stderr tail so error_text matches the walker's message.
@@ -1826,7 +1781,6 @@ export function apply(ctx: Context, config: Config): void {
           materialised.delete(spine)
           item = undefined
           spine.endPass()
-          cleanupAbandonSkips(spine, subgraphSkippedGates)
           structural.clear()
           recordBoundary()
           continue

@@ -959,32 +959,20 @@ def test_last_item_failure_does_not_fail_run(tmp_path):
 def test_one_of_three_items_failing_without_task_succeeds(tmp_path):
     """With no Task, 1 of 3 items failing must not fail the node (Ask 5).
 
-    3 inline items, Task verifies them all, op fail_on_a fails on item a;
-    exit_ok is True because only 1 of 3 items failed (the all-fail rule
-    counts items, not records).
+    3 inline items, NO Task, op fail_on_a fails on item a; exit_ok is True
+    because only 1 of 3 items failed (the all-fail rule counts items, not
+    records).  Without a Task, successful items produce no record, so
+    ``scores`` has only the 1 failure.  The old code checked
+    ``failed_count == len(scores)`` which would be ``1 == 1`` → all fail.
+    The fix checks ``failed_count == len(items)`` → ``1 == 3`` → OK.
     """
-    from refactory_dsh import task as task_module
     from refactory_dsh.nn.executor import CURRENT_ITEM, execute
-
-    class AlwaysPassTask(task_module.Task):
-        name = "always_pass_3"
-
-        def instances(self):
-            return [
-                task_module.TaskInstance(id="a"),
-                task_module.TaskInstance(id="b"),
-                task_module.TaskInstance(id="c"),
-            ]
-
-        def verify(self, instance, workspace):
-            return task_module.VerifyResult(passed=True, score=1.0)
-
-    task_module.register_task("always_pass_3", AlwaysPassTask)
 
     graph = nn.Graph()
     graph.add(nn.Node(
         "data", "data", subgraph_entry="work", subgraph_exit="work",
-        task_ref="always_pass_3", writes=(CURRENT_ITEM,), produces=("item_scores",),
+        inline_items=[{"id": "a"}, {"id": "b"}, {"id": "c"}],
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
     ))
     graph.add(nn.Node(
         "work", "op", call="loop_ops:fail_on_a",
@@ -997,8 +985,7 @@ def test_one_of_three_items_failing_without_task_succeeds(tmp_path):
     result = execute(graph, tmp_path / "run")
     assert result.exit_ok is True, f"1 of 3 failing should not fail the node: {result.error}"
     scores = result.facts["item_scores"]
-    assert len(scores) == 3
+    # Without a Task, only the failed item has a score record.
     failed = [s for s in scores if s.get("error_text") is not None]
-    passed = [s for s in scores if s.get("error_text") is None]
     assert len(failed) == 1
-    assert len(passed) == 2
+    assert failed[0]["id"] == "a"

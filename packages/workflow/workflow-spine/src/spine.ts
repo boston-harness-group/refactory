@@ -835,6 +835,24 @@ export class Spine {
   }
 
   /**
+   * Abandon the current item pass: mark it finished without completing or
+   * verdicting any remaining pass-body node.  After this call the pass is in
+   * the `finished` state so `endPass()` can be called immediately.  No nodes
+   * are marked completed, no gate verdicts are fabricated, and no skip entries
+   * are created.  The caller is responsible for running the grading command
+   * (`end --failed`) before calling `endPass()`.
+   */
+  abandonPass(): void {
+    if (this.pass === undefined) return
+    // Remove any pass-body cursor positions so endPass's "has not finished"
+    // guard does not fire.  The body will be invalidated by endPass anyway.
+    const body = this.descendants(this.pass.entry, this.pass.exit)
+    this.cursor = this.cursor.filter(pos => !body.has(pos))
+    this.pass.finished = true
+    this.log.push(`data ${this.pass.node}: item ${this.pass.index} abandoned`)
+  }
+
+  /**
    * End one item's pass: move to the next item, or complete the data node.
    *
    * Called after the pass's own verdict is in hand, so a pass that was never judged

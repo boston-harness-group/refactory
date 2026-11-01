@@ -143,3 +143,14 @@ def fail_on_a(ctx: Any) -> dict[str, Any]:
     seen.setdefault("ids", []).append(str(item.get("id")))
     ctx.write_json("seen.json", seen)
     return {"seen": seen["ids"]}
+
+
+def fail_on_last_fails(ctx: Any) -> dict[str, Any]:
+    """Like record_item, but raises for item 'last_fails' — data failure equivalence."""
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "last_fails":
+        raise RuntimeError("branch failed for last_fails")
+    seen = ctx.read_json("seen.json", {"ids": []}) or {"ids": []}
+    seen.setdefault("ids", []).append(str(item.get("id")))
+    ctx.write_json("seen.json", seen)
+    return {"seen": seen["ids"]}

@@ -818,98 +818,230 @@ def test_no_gap_explains_a_difference_it_was_not_written_for(runs):
 
 # ── Ask 6: data failure scenario equivalence ─────────────────────────────────
 
+#: The failure-scenario Task as a standalone module, written to a temp directory
+#: so both in-process (walker) and subprocess (spine → items.py) can import it.
+_FAILURE_TASK_SOURCE = '''\
+"""A Task for the data failure equivalence scenario."""
+import time
+from pathlib import Path
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class FailureScenarioTask(Task):
+    name = "failure_scenario"
+
+    def instances(self):
+        return [
+            TaskInstance(id="pass_item"),
+            TaskInstance(id="raise_item"),
+            TaskInstance(id="last_fails"),
+        ]
+
+    def verify(self, instance, workspace):
+        if instance.id == "raise_item":
+            raise ValueError("verify raised")
+        return VerifyResult(passed=True, score=1.0)
+'''
+
+#: The subgraph op: a Python callable the walker runs in-process and the spine
+#: runs as a command.  Reads current_item.json and appends its id to seen.json.
+_FAILURE_OP_SOURCE = '''\
+"""Op for the data failure equivalence scenario."""
+import json
+from pathlib import Path
+
+def record(ctx):
+    item = ctx.read_json("current_item.json", {}) or {}
+    seen_path = Path(ctx.workdir) / "seen.json"
+    seen = json.loads(seen_path.read_text()) if seen_path.exists() else {"ids": []}
+    seen["ids"].append(item.get("id", ""))
+    ctx.write_json("seen.json", seen)
+    ctx.set_fact("value", seen)
+    if item.get("id") == "last_fails":
+        raise RuntimeError("op failed for last_fails")
+'''
+
+DATA_DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain.mts"
+
+
+def _write_failure_package(project: Path) -> None:
+    """Write the failure-scenario Task and op as a proper package."""
+    pkg = project / ".factory" / "packages" / "failure_scenario"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(
+        'from refactory_dsh.nn import Package\n'
+        'from .task import FailureScenarioTask\n'
+        'PACKAGE = Package(\n'
+        '    name="failure_scenario",\n'
+        '    description="data failure scenario",\n'
+        '    modes=(),\n'
+        '    ops=("refactory_packages.failure_scenario.ops",),\n'
+        ')\n'
+    )
+    (pkg / "task.py").write_text(_FAILURE_TASK_SOURCE)
+    (pkg / "ops.py").write_text(_FAILURE_OP_SOURCE)
+
+
+def _run_spine(graph_json: Path, workdir: Path, python_bin_dir: str, timeout_ms: int) -> int:
+    """Drive the TS spine drain (index.ts) via data-drain.mts."""
+    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir)}
+    # The lowered graph's node commands use bare `python`, so the venv bin
+    # directory must lead PATH — matching what graph-startup does.
+    env["PATH"] = f"{python_bin_dir}:{env.get('PATH', '')}"
+    result = subprocess.run(
+        [str(NODE), "--import", "tsx/esm", str(DATA_DRAIN),
+         str(graph_json), str(workdir), f"{python_bin_dir}/python", str(timeout_ms)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=120,
+        env=env,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(f"spine drain failed:\nstdout: {result.stdout[-2000:]}\nstderr: {result.stderr[-2000:]}\n")
+    return result.returncode
+
 
 def test_data_failure_scenario_matches(tmp_path):
-    """Walker and spine-side item commands agree on item_scores for failures.
+    """Walker and spine agree on item_scores for a data node with failures.
 
-    Items include one whose verify raises, one whose verify passes, and one
-    (the LAST) whose subgraph op fails. Both runtimes produce the same ids,
-    passed, score and error_kind values. A rerun in the same directory
-    produces the same result (no stale entries from the previous item set).
+    Drives the real spine (lowering + the TS drain in index.ts, the way
+    test_equivalence.py's data-node test runs DSH).  Items include one whose
+    verify raises, one whose verify passes, and one (the LAST) whose subgraph
+    op fails.  Both runtimes produce the same ids, passed, score and error_kind
+    values.  A rerun in the same directory produces the same result (no stale
+    entries from the previous item set).  No SCENARIO_GAPS entry.
     """
-    import importlib
-    from refactory_dsh import items as items_mod
-    from refactory_dsh import lowering, nn, task as task_module
+    from refactory_dsh import lowering, nn
     from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+    from refactory_dsh.task import register_task
 
-    class FailureScenarioTask(task_module.Task):
-        name = "failure_scenario"
+    # ── importable Task package ──
+    project = tmp_path / "project"
+    _write_failure_package(project)
+    sys.path.insert(0, str(project / ".factory" / "packages"))
+    try:
+        # Import so the walker can use the registered name too.
+        from failure_scenario.task import FailureScenarioTask  # type: ignore[import-not-found]
+        register_task("failure_scenario", FailureScenarioTask)
 
-        def instances(self):
-            return [
-                task_module.TaskInstance(id="pass_item"),
-                task_module.TaskInstance(id="raise_item"),
-                task_module.TaskInstance(id="last_fails"),
-            ]
+        task_ref = "refactory_packages.failure_scenario.task:FailureScenarioTask"
 
-        def verify(self, instance, workspace):
-            if instance.id == "raise_item":
-                raise ValueError("verify raised")
-            return task_module.VerifyResult(passed=True, score=1.0)
+        graph = nn.Graph()
+        graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="failure_scenario",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        graph.add(nn.Node(
+            "work", "op", call="loop_ops:fail_on_last_fails",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        graph.connect("data", "report")
 
-    task_module.register_task("failure_scenario", FailureScenarioTask)
+        # ── Walker run ──
+        walker_dir = tmp_path / "walker"
+        walker_result = execute(graph, walker_dir)
+        assert walker_result.exit_ok, walker_result.error
+        walker_scores = walker_result.facts.get("item_scores", [])
 
-    graph = nn.Graph()
-    graph.add(nn.Node(
-        "data", "data", subgraph_entry="work", subgraph_exit="work",
-        task_ref="failure_scenario", writes=(CURRENT_ITEM,),
-        produces=("item_scores",),
-    ))
-    # fail_on_a is defined in loop_ops — it raises for item id "a", but here
-    # the last item's id is "last_fails". We need an op that fails on the last
-    # item specifically. Use a custom op that fails on "last_fails":
-    graph.add(nn.Node(
-        "work", "op", call="loop_ops:record_item",
-        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
-    ))
-    graph.add(nn.Node(
-        "report", "op", call="loop_ops:write_best",
-        writes=("best.json",), produces=("best",),
-    ))
-    graph.connect("data", "report")
+        # ── Spine run (real TS drain via data_drain_fixture.mts) ──
+        spine_dir = tmp_path / "spine"
+        spine_dir.mkdir(parents=True, exist_ok=True)
 
-    # Walker run
-    walker_dir = tmp_path / "walker"
-    walker_result = execute(graph, walker_dir)
-    assert walker_result.exit_ok, walker_result.error
-    walker_scores = walker_result.facts.get("item_scores", [])
+        # The spine graph uses a command, not a call.  Build a graph whose work
+        # node has a command that calls the op through refactory_dsh.run (as
+        # the spine runs FnNodes).
+        spine_graph = nn.Graph()
+        spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=task_ref,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:fail_on_last_fails",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        spine_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        spine_graph.connect("data", "report")
 
-    # Spine-side (command-driven) run
-    spine_dir = tmp_path / "spine"
-    lowering.write_declarations({"graph": graph.to_state()}, spine_dir)
-    node = items_mod.data_node(spine_dir, "data")
-    count_info = items_mod.command_list(node, spine_dir)
-    for index in range(count_info["count"]):
-        items_mod.command_begin(node, spine_dir, index)
-        items_mod.command_end(node, spine_dir, index)
-    spine_facts = json.loads((spine_dir / "facts.json").read_text())
-    spine_scores = spine_facts.get("item_scores", [])
-
-    # Compare: same ids, same passed, same score, same error_kind
-    def normalize(scores):
-        return sorted(
-            [(s["id"], s["passed"], s["score"], s.get("error_kind"))
-             for s in scores],
-            key=lambda x: x[0],
+        state = {"graph": spine_graph.to_state()}
+        lowering.write_declarations(state, spine_dir)
+        graph_path, workflow = lowering.write_mode_graph(
+            state, tmp_path / "graphs", name="failure_scenario",
         )
 
-    assert normalize(walker_scores) == normalize(spine_scores), (
-        f"walker and spine disagree:\nwalker: {walker_scores}\nspine: {spine_scores}"
-    )
+        python_bin = str(REPO_ROOT / ".venv/bin")
+        # The subprocesses (items.py, refactory_dsh.run) need to import
+        # the Task package (refactory_packages.failure_scenario.*) and
+        # the test ops (loop_ops).  REFACTORY_PROJECT lets the runner's
+        # install_workspace_packages find the package; the tests dir on
+        # PYTHONPATH makes loop_ops importable the way pytest does.
+        extra_path = os.pathsep.join([
+            str(project / ".factory" / "packages"),
+            str(HERE),
+        ])
+        env_patch = {
+            "REFACTORY_PROJECT": str(project),
+            "PYTHONPATH": extra_path,
+        }
+        old_env = {}
+        for key, value in env_patch.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            rc = _run_spine(graph_path, spine_dir, python_bin, 10_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
-    # Rerun in the same directories — no stale entries
-    walker_result2 = execute(graph, walker_dir)
-    assert walker_result2.exit_ok, walker_result2.error
-    walker_scores2 = walker_result2.facts.get("item_scores", [])
-    for index in range(count_info["count"]):
-        items_mod.command_begin(node, spine_dir, index)
-        items_mod.command_end(node, spine_dir, index)
-    spine_facts2 = json.loads((spine_dir / "facts.json").read_text())
-    spine_scores2 = spine_facts2.get("item_scores", [])
+        assert rc == 0, "spine drain failed"
+        spine_facts = json.loads((spine_dir / "facts.json").read_text())
+        spine_scores = spine_facts.get("item_scores", [])
 
-    assert normalize(walker_scores2) == normalize(spine_scores2), (
-        f"rerun mismatch:\nwalker: {walker_scores2}\nspine: {spine_scores2}"
-    )
-    assert len(spine_scores2) == len(walker_scores2) == 3, (
-        f"rerun should have exactly 3 entries (no stale): {len(spine_scores2)}"
-    )
+        # ── Compare ──
+        def normalize(scores):
+            return sorted(
+                [(s["id"], s["passed"], s["score"], s.get("error_kind"))
+                 for s in scores],
+                key=lambda x: x[0],
+            )
+
+        assert normalize(walker_scores) == normalize(spine_scores), (
+            f"walker and spine disagree:\nwalker: {walker_scores}\nspine: {spine_scores}"
+        )
+
+        # ── Rerun in same directories — no stale entries ──
+        walker_result2 = execute(graph, walker_dir)
+        assert walker_result2.exit_ok, walker_result2.error
+        walker_scores2 = walker_result2.facts.get("item_scores", [])
+
+        for key, value in env_patch.items():
+            os.environ[key] = value
+        try:
+            rc2 = _run_spine(graph_path, spine_dir, python_bin, 10_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert rc2 == 0, "spine drain rerun failed"
+        spine_facts2 = json.loads((spine_dir / "facts.json").read_text())
+        spine_scores2 = spine_facts2.get("item_scores", [])
+
+        assert normalize(walker_scores2) == normalize(spine_scores2), (
+            f"rerun mismatch:\nwalker: {walker_scores2}\nspine: {spine_scores2}"
+        )
+        assert len(spine_scores2) == len(walker_scores2) == 3, (
+            f"rerun should have exactly 3 entries (no stale): {len(spine_scores2)}"
+        )
+    finally:
+        sys.path.remove(str(project / ".factory" / "packages"))

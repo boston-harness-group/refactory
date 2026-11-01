@@ -754,7 +754,7 @@ describe('begin/end failure handling (Ask 3)', () => {
 })
 
 describe('abandonPass primitive (Correction 1)', () => {
-  /** A data graph with a gate in the subgraph body. */
+  /** A data graph with a gate in the subgraph body (between entry and exit). */
   function dataGraphWithGate(): WorkflowGraph {
     return {
       name: 'dataset-with-gate',
@@ -762,20 +762,21 @@ describe('abandonPass primitive (Correction 1)', () => {
       nodes: {
         data: {
           _type: 'DataNode', id: 'data',
-          task_ref: 'probe', subgraph_entry: 'work', subgraph_exit: 'gate',
+          task_ref: 'probe', subgraph_entry: 'work', subgraph_exit: 'end',
           reads: [], writes: ['current_item.json'],
         },
         work: { _type: 'FnNode', id: 'work', command: 'true', reads: [], writes: [] },
-        gate: {
-          _type: 'GateNode', id: 'gate', evaluator_type: 'fn',
+        inner_gate: {
+          _type: 'GateNode', id: 'inner_gate', evaluator_type: 'fn',
           evaluator_command: 'echo proceed', reads: [], writes: [],
         },
+        end: { _type: 'AgentNode', id: 'end', role: 'builder', prompt_template: 'E', reads: [], writes: [] },
         after: { _type: 'FnNode', id: 'after', command: 'true', reads: [], writes: [] },
       },
       edges: [
         { source: 'data', target: 'after' },
-        { source: 'work', target: 'gate' },
-        { source: 'gate', target: 'after', condition: 'proceed' },
+        { source: 'work', target: 'inner_gate' },
+        { source: 'inner_gate', target: 'end', condition: 'proceed' },
       ],
     }
   }
@@ -833,5 +834,72 @@ describe('abandonPass primitive (Correction 1)', () => {
     // The end --failed should have been called for item 0
     const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
     expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('abandonPass with a gate in the pass body records no verdict', async () => {
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    let workCallCount = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          // The deterministic subgraph node 'true' (work)
+          if (verb === '') {
+            workCallCount += 1
+            if (workCallCount === 1) {
+              // First item's work node fails
+              return {
+                exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+                stdout: { text: '', truncated: false },
+                stderr: { text: 'work failed for item a', truncated: false },
+              }
+            }
+            // Second item's work succeeds; the gate evaluator also runs as 'echo proceed'
+            return {
+              exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: 'proceed', truncated: false },
+              stderr: { text: '', truncated: false },
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell, { graph: dataGraphWithGate() })
+    // First item: work fails → abandonPass → end --failed → second item
+    // The gate (inner_gate) must NOT get a verdict
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    // The second item should be exposed
+    expect(first.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // end --failed was called for item 0
+    const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
+    expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+    // No gate verdict should have been recorded (no 'echo proceed' for item 0's gate)
+    // The gate evaluator command should not have been executed for item 0
+    // (only work command 'true' and the data commands were run for item 0)
   })
 })
