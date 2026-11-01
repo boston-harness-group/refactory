@@ -866,7 +866,8 @@ def check_review_questions(
 
 #: Every per-test result compute_site_reverts gives; anything else fails the site.
 _KNOWN_REVERT_RESULTS = frozenset({
-    "fail", "pass", "not_in_diff", "no_tests", "collection_error", "import_only",
+    "fail", "pass", "not_in_diff", "no_tests", "no_test_selected",
+    "collection_error", "import_only",
     "new_file", "comment_only", "test_file", "not_run"})
 
 
@@ -1350,6 +1351,11 @@ def correction_audit_problems(ctx: Any, *, removed_sites: bool = False) -> list[
                         problems.append(
                             f"{key} clause {ci + 1}: site {site} is not in the diff"
                         )
+                elif any(r == "no_test_selected" for r in test_results):
+                    sr["status"] = "advisory"
+                    clause_advisories.append(
+                        f"{key} clause {ci + 1}: site {site}: no test selected (advisory)"
+                    )
                 elif any(r == "no_tests" for r in test_results):
                     sr["status"] = "fail"
                     if site not in exempted_sites:

@@ -546,6 +546,72 @@ def find_near_miss_markers(site_text: str) -> list[str]:
     return suggestions
 
 
+@dataclasses.dataclass
+class SiteParsed:
+    """A parsed site path from a Rule-and-sites bullet.
+
+    ``file`` is the repository-relative path (no backticks, no description).
+    ``line`` is the line number or range (e.g. ``"201"`` or ``"989-1022"``),
+    empty when the bullet names only a file.
+    ``func`` is the function name from a second backticked token (e.g.
+    ``"command_end()"``), empty when no function is named.
+    ``site_key`` is the site identifier as ``_pairs_from_design`` and
+    ``compute_site_reverts`` use it: ``"path:line"`` when a line is given,
+    or just ``"path"``.
+    """
+    file: str
+    line: str
+    func: str
+    site_key: str
+
+
+def parse_site_path(path_text: str) -> SiteParsed:
+    r"""Extract file path, optional line/range, and function name from a site's ``path`` text.
+
+    Handles the forms real designs write::
+
+        `refactory/refactory_dsh/items.py:201` — `command_end()`: description
+        `refactory/refactory_dsh/items.py` — `make_item_record()` (new function): description
+        refactory/refactory_dsh/judges.py:79 — blocks() branch
+
+    The first backtick-delimited token is the path+line; the second (when
+    present) is the function name.  When no backtick pair is found, falls
+    back to splitting on the em dash ``' — '``.
+    """
+    text = path_text.strip()
+    # Try backtick-delimited tokens first
+    backtick_tokens = re.findall(r'`([^`]+)`', text)
+    if backtick_tokens:
+        raw_path = backtick_tokens[0].strip()
+        func = backtick_tokens[1].strip() if len(backtick_tokens) >= 2 else ""
+        # Strip marker text from func (e.g. "[changed]")
+        if func.startswith("[") or func.startswith("*"):
+            func = ""
+    else:
+        # No backticks: split on em dash
+        idx = text.find(' \u2014 ')
+        raw = text[:idx].strip() if idx >= 0 else text
+        # Also try regular dash after em dash
+        if idx < 0:
+            idx2 = text.find(' - ')
+            raw = text[:idx2].strip() if idx2 >= 0 else text
+        raw_path = raw
+        func = ""
+
+    # Split path and line
+    # Match path:line or path:start-end at the end
+    m = re.match(r'^(.+?):(\d+(?:-\d+)?)$', raw_path)
+    if m:
+        file_path = m.group(1).strip()
+        line = m.group(2).strip()
+    else:
+        file_path = raw_path
+        line = ""
+
+    site_key = f"{file_path}:{line}" if line else file_path
+    return SiteParsed(file=file_path, line=line, func=func, site_key=site_key)
+
+
 def prompt_contract() -> str:
     """The text the design_doc prompt appends: the light template.
 

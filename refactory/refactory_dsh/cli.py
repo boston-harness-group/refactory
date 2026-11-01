@@ -800,7 +800,6 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
             return 1
 
         # Extract exempted paths from "## Site revert exemptions"
-        import re
         lines = design_text.splitlines()
         exempt_lines = design_contract._section_lines(
             lines, design_contract.SITE_REVERT_EXEMPTIONS)
@@ -808,36 +807,60 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
         for el in exempt_lines:
             if el.startswith("- ") or el.startswith("* "):
                 bullet = el[2:].strip()
-                m = re.match(r'`([^`]+)`', bullet)
-                if m:
-                    exempted_paths.add(m.group(1).strip())
+                parsed_exempt = design_contract.parse_site_path(bullet)
+                exempted_paths.add(parsed_exempt.site_key)
 
-        # Build pairs from design
+        # Build pairs from design using shared parser and import-map selection
+        from refactory_dsh import test_selection as _ts
+        from refactory_dsh.design_ops import _tests_for_source
+
+        design_test_ids = design_contract.test_names(design_text)
+
+        # Build import map scoped to diff-selected test files
+        repo_files = _ts.repository_files(repo_root)
+
+        # Compute targeted selection from the commit's diff against its base
+        if commit:
+            try:
+                base_commit = subprocess.run(
+                    ["git", "-C", str(repo_root), "merge-base", commit, "HEAD"],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout.strip()
+                if not base_commit:
+                    base_commit = commit + "~1"
+            except Exception:
+                base_commit = commit + "~1"
+            try:
+                diff_output_raw = subprocess.run(
+                    ["git", "-C", str(repo_root), "diff", "--name-only", base_commit, commit],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout
+                touched = [f.strip() for f in diff_output_raw.splitlines() if f.strip()]
+            except Exception:
+                touched = []
+        else:
+            touched = []
+
+        check_cmd = ""  # CLI replay: no check command
+        scope = _ts.pytest_scope(check_cmd, repo_root) if check_cmd else None
+        imports = _ts.import_map(repo_root, repo_files, scope=scope)
+
         pairs: list[tuple[str, str, str]] = []
-        test_lines = design_contract._section_lines(lines, design_contract.TESTS)
-        test_ids: list[str] = []
-        for tl in test_lines:
-            if tl.startswith("- ") or tl.startswith("* "):
-                bullet = tl[2:].strip()
-                m = re.match(r'`([^`]+)`', bullet)
-                tid = m.group(1).strip() if m else bullet.split()[0] if bullet else ""
-                if tid:
-                    test_ids.append(tid)
-
         for site in changed_sites:
-            path_text = site["path"].strip('`').strip()
+            parsed = design_contract.parse_site_path(site["path"])
+            site_key = parsed.site_key
+            file_path = parsed.file
             # Skip exempted sites
-            if path_text in exempted_paths or any(
-                    path_text.startswith(e) for e in exempted_paths):
+            if site_key in exempted_paths or any(
+                    site_key.startswith(e) for e in exempted_paths):
                 continue
-            file_path = path_text.split(":")[0] if ":" in path_text else path_text
-            matched_tests = [t for t in test_ids
-                             if file_path in t.split("::")[0] or t.split("::")[0] in file_path]
-            if matched_tests:
-                for t in matched_tests:
-                    pairs.append((path_text, t, "connected"))
+            # Use import-map-based test mapping (selection=None for CLI replay)
+            tests = _tests_for_source(file_path, imports, None, design_test_ids)
+            if tests:
+                for t in tests:
+                    pairs.append((site_key, t, "connected"))
             else:
-                pairs.append((path_text, "", ""))
+                pairs.append((site_key, "", ""))
 
         # Run the reverts using a minimal context.
         # When using a temp worktree, update worktree.json so

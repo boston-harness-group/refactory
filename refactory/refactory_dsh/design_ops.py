@@ -2153,6 +2153,63 @@ def _settle_self_check(ctx: Any, prepass: Any, entry: dict[str, Any], *, base: s
     return "proceed"
 
 
+def _tests_for_source(
+    source_file: str, imports: dict[str, set[str]],
+    selection: list[str] | None, design_test_ids: list[str],
+) -> list[str]:
+    """Find tests for *source_file* via import-map and design's Tests section.
+
+    *imports* is ``test_selection.import_map(root, files, scope=scope)`` —
+    each test file → the set of source files it imports.
+
+    When *selection* is given (in-run mode) the result is intersected with it:
+    only tests from the prepass selection whose file imports the source are
+    returned.  In the CLI replay *selection* is ``None`` and every importing
+    test file is used (scoped earlier by the diff-based selection).
+
+    Design-named tests whose file imports the source are always included,
+    regardless of *selection*.
+    """
+    from refactory_dsh import test_selection as _ts
+
+    # Reverse the import map: which test files import source_file?
+    importing_tests: set[str] = set()
+    for test_file, imported_sources in imports.items():
+        if source_file in imported_sources:
+            importing_tests.add(test_file)
+
+    result_ids: list[str] = []
+    if selection is not None:
+        # In-run: intersect with the prepass selection
+        sel_by_file: dict[str, list[str]] = {}
+        for tid in selection:
+            tf = tid.split("::")[0] if "::" in tid else tid
+            sel_by_file.setdefault(tf, []).append(tid)
+        for tf in importing_tests:
+            if tf in sel_by_file:
+                result_ids.extend(sel_by_file[tf])
+    else:
+        # CLI replay: use all importing test files
+        result_ids.extend(sorted(importing_tests))
+
+    # Design-named tests: include tests whose file imports the source
+    # (strong match), or whose file name contains the source's base name
+    # (fallback for the brief's "plus test ids the design's Tests section
+    # names for that file or function").
+    import os.path
+    source_base = os.path.splitext(os.path.basename(source_file))[0]
+    for tid in design_test_ids:
+        if tid in result_ids:
+            continue
+        tf = tid.split("::")[0] if "::" in tid else tid
+        if tf in importing_tests:
+            result_ids.append(tid)
+        elif source_base and source_base in os.path.basename(tf):
+            result_ids.append(tid)
+
+    return result_ids
+
+
 def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
         list[tuple[str, str, str]], list[list[tuple[str, str, str]]], set[str]]:
     """Extract ``(site, test, scope)`` pairs from the design's Rule and sites section.
@@ -2163,7 +2220,7 @@ def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
     co-reverts sites in the same function.  Designs write bold-line rule
     blocks followed by site bullets, not ``###`` sub-headings.
     """
-    from refactory_dsh import design_contract
+    from refactory_dsh import design_contract, test_selection as _ts
 
     design_text = ctx.read_text("design.md") if ctx.exists("design.md") else ""
     if not design_text:
@@ -2178,50 +2235,33 @@ def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
     for line in exempt_lines:
         if line.startswith("- ") or line.startswith("* "):
             bullet = line[2:].strip()
-            # Extract backticked path
-            m = _re.match(r'`([^`]+)`', bullet)
-            if m:
-                exempted_paths.add(m.group(1).strip())
-            else:
-                idx = bullet.find(' — ')
-                exempted_paths.add(bullet[:idx].strip() if idx >= 0
-                                   else bullet.split()[0] if bullet else "")
+            parsed_exempt = design_contract.parse_site_path(bullet)
+            exempted_paths.add(parsed_exempt.site_key)
 
     # Build pairs from [changed] sites, excluding exempted ones
     changed_sites = [site for site in contract.rule_sites if site["status"] == "changed"]
 
-    # Parse the tests section for file-to-test mapping
-    test_lines = design_contract._section_lines(lines, design_contract.TESTS)
-    test_map: dict[str, list[str]] = {}  # file_path -> [test_ids]
-    for tl in test_lines:
-        if not (tl.startswith("- ") or tl.startswith("* ")):
-            continue
-        bullet = tl[2:].strip()
-        # Extract test id from backticked text like `path/to/test.py::test_name`
-        m = _re.match(r'`([^`]+)`', bullet)
-        test_id = m.group(1).strip() if m else bullet.split()[0] if bullet else ""
-        if not test_id:
-            continue
-        # Map the test's file to the test id
-        test_file = test_id.split("::")[0] if "::" in test_id else test_id
-        # Also map the site's file path to this test
-        test_map.setdefault(test_file, []).append(test_id)
+    # Parse the design's Tests section for test ids
+    design_test_ids = design_contract.test_names(design_text)
 
-    # Prepass selection: tests selected by the self-check for each file
-    selection_by_file: dict[str, list[str]] = {}
-    for test_id in prepass.selection:
-        test_file = test_id.split("::")[0] if "::" in test_id else test_id
-        selection_by_file.setdefault(test_file, []).append(test_id)
+    # Build the import map: which test files import which source files
+    found = worktree.recorded(ctx.workdir)
+    if found is not None:
+        attempt_path = Path(found.path)
+        repo_files = _ts.repository_files(attempt_path)
+        check_cmd = ctx.facts.get("check_command", "")
+        scope = _ts.pytest_scope(check_cmd, attempt_path) if check_cmd else None
+        imports = _ts.import_map(attempt_path, repo_files, scope=scope)
+    else:
+        imports = {}
 
     # Build rule-block grouping from the raw text.
     # Each "**Rule:**" or "**The rule:**" line starts a new group.
-    # We track which bullet ordinal maps to which changed_sites index.
     rule_lines_raw = design_contract._section_lines(lines, design_contract.RULE_AND_SITES)
     rule_block_pattern = _re.compile(r'^\*\*(?:The\s+)?[Rr]ule(?:\s*:)?\*\*', _re.IGNORECASE)
 
     # Map bullet ordinal (across ALL bullets: changed + left + unmarked) to
-    # the corresponding changed_sites index.  contract.rule_sites and the raw
-    # bullets are in the same order, so bullet ordinal == rule_sites index.
+    # the corresponding changed_sites index.
     all_sites = contract.rule_sites
     bullet_to_changed: dict[int, int] = {}
     changed_idx = 0
@@ -2249,41 +2289,26 @@ def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
     site_to_pairs: dict[int, list[tuple[str, str, str]]] = {}
 
     for site_idx, site in enumerate(changed_sites):
-        path_text = site["path"]
-        # Strip backticks: the parser may return `path` — description
-        # Extract the backticked portion first
-        bt_match = _re.match(r'`([^`]+)`', path_text)
-        if bt_match:
-            path_text = bt_match.group(1).strip()
-        else:
-            # Strip leading/trailing backticks and description after em-dash
-            path_text = path_text.strip('`').strip()
-            dash_idx = path_text.find(' — ')
-            if dash_idx >= 0:
-                path_text = path_text[:dash_idx].strip()
-        # Skip exempted sites
-        if path_text in exempted_paths or any(path_text.startswith(e) for e in exempted_paths):
-            continue
-        # Extract file path (before the colon-line number)
-        file_path = path_text.split(":")[0] if ":" in path_text else path_text
+        parsed = design_contract.parse_site_path(site["path"])
+        site_key = parsed.site_key
+        file_path = parsed.file
 
-        # Gather tests: from prepass selection by file path prefix + design's Tests entries
-        tests: set[str] = set()
-        for sel_file, sel_tests in selection_by_file.items():
-            if sel_file == file_path or sel_file.startswith(file_path.rstrip("/") + "/"):
-                tests.update(sel_tests)
-        for tm_file, tm_tests in test_map.items():
-            if file_path in tm_file or tm_file in file_path:
-                tests.update(tm_tests)
+        # Skip exempted sites
+        if site_key in exempted_paths or any(site_key.startswith(e) for e in exempted_paths):
+            continue
+
+        # Find tests via import map + design Tests section
+        tests = _tests_for_source(
+            file_path, imports, list(prepass.selection), design_test_ids)
 
         pairs_for_site: list[tuple[str, str, str]] = []
         if tests:
             for t in tests:
-                pair = (path_text, t, "connected")
+                pair = (site_key, t, "connected")
                 pairs_for_site.append(pair)
         else:
             # No tests found for this site
-            pairs_for_site.append((path_text, "", ""))
+            pairs_for_site.append((site_key, "", ""))
 
         site_to_pairs[site_idx] = pairs_for_site
         all_pairs.extend(pairs_for_site)
@@ -2300,15 +2325,12 @@ def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
         if len(group_pairs) > 1:
             groups.append(group_pairs)
 
-    # Group sites in the same function
+    # Group sites in the same function (same file)
     func_groups: dict[str, list[tuple[str, str, str]]] = {}
     for site_idx, pairs_for_site in site_to_pairs.items():
         site = changed_sites[site_idx]
-        path_text = site["path"].strip('`').strip()
-        # Extract function from path if it has line info
-        file_part = path_text.split(":")[0] if ":" in path_text else path_text
-        # Check if multiple sites share the same file (same function approximation)
-        func_key = file_part
+        parsed = design_contract.parse_site_path(site["path"])
+        func_key = parsed.file
         func_groups.setdefault(func_key, []).extend(pairs_for_site)
     for key, fpairs in func_groups.items():
         if len(fpairs) > 1 and fpairs not in groups:
@@ -2364,19 +2386,24 @@ def _run_site_reverts(ctx: Any, prepass: Any, command: str) -> Verdict | None:
     # Identify uncaught sites (result == "pass" means the test still passes after revert)
     uncaught: list[str] = []
     unmeasured: list[str] = []
+    no_test_selected: list[str] = []
     for entry in pair_results:
         if not isinstance(entry, dict):
             continue
         site = entry.get("site", "")
         result = entry.get("result", "")
-        if result == "pass":
+        if result == "no_test_selected":
+            no_test_selected.append(site)
+        elif result == "pass":
             # Check if co-revert group caught it
             if site not in co_revert_caught:
                 uncaught.append(site)
         elif result == "not_run":
             unmeasured.append(site)
 
-    # Record in check record
+    # Record advisories in check record
+    if no_test_selected:
+        _record_site_revert_advisory(ctx, no_test_selected, label="no_test_selected")
     if unmeasured:
         _record_site_revert_advisory(ctx, unmeasured)
 

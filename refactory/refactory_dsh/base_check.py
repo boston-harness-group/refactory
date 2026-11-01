@@ -1794,10 +1794,15 @@ def compute_site_reverts(
 
     for site, test_name, scope in pairs:
         cache_key_str = f"{head}|{site}|{test_name}"
-        if not isinstance(test_name, str) or not test_name.strip():
+        if not isinstance(test_name, str):
             # A citation that names no test: a wrong test id, measured without a run.
             record({"site": site, "test": test_name,
                     "result": "no_tests", "catches_site": False}, cache_key_str)
+            continue
+        if not test_name.strip():
+            # No test was selected for this site (advisory, not a fix-up).
+            record({"site": site, "test": test_name,
+                    "result": "no_test_selected", "catches_site": False}, cache_key_str)
             continue
         cached = cache.get(cache_key_str)
         # "unavailable" is what earlier versions cached for an unmeasured pair.
