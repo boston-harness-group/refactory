@@ -159,7 +159,9 @@ FULL_REVIEW_CONTEXT = REVIEW_CONTEXT.replace("{{repair_feedback}}", "{{validatio
 
 AUDIT_INSTRUCTIONS = (
     "\nWrite intent-audit.json as {\"requirements\":[{\"id\":\"baseline id\", "
-    "\"requirement\":\"the concrete ask(s) checked\", \"status\":\"pass|fail|unverified|excluded\", "
+    "\"requirement\":\"the concrete ask(s) checked\", \"status\":\"pass|fail|unverified|excluded\" "
+    "(a requirement with no run probe evidence — no command the reviewer actually executed "
+    "and whose output it reported — gets status `unverified`, not `pass`), "
     "\"clauses\":[{\"clause\":\"one distinct obligation\", "
     "\"sites\":[{\"site\":\"path:line\", \"tests\":[\"test_file::test_name\"], \"scope\":\"connected\"}], "
     "\"evidence\":[{\"path\":\"file\", \"detail\":\"finding\"}]}], "

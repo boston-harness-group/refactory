@@ -569,6 +569,18 @@ def build_parser() -> argparse.ArgumentParser:
     pin_sub.add_parser("list", help="list all pins with commit, creation time and driver checkout")
     pin_sub.add_parser("prune", help="remove pins no run refers to")
 
+    # ── replay site reverts ──
+    replay = sub.add_parser(
+        "replay-site-reverts",
+        help="replay site-revert verification on an existing run directory",
+        description="Replay the site-revert pass on an existing run directory. "
+                    "When --commit is given and the original worktree is gone, "
+                    "a temporary worktree of that commit is checked out, used, "
+                    "and removed.",
+    )
+    replay.add_argument("--run-dir", required=True, help="path to the existing run directory")
+    replay.add_argument("--commit", default="", help="commit hash (required when the original worktree is gone)")
+
     return parser
 
 
@@ -658,6 +670,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_model(args)
     if args.verb == "pin":
         return _cmd_pin(args)
+    if args.verb == "replay-site-reverts":
+        return _cmd_replay_site_reverts(args)
     if args.verb == "package":  # handled before argparse; kept for completeness
         return _forward("refactory_dsh.registry", [])
     parser.error(f"unknown verb {args.verb!r}")  # pragma: no cover - argparse rejects first
@@ -712,6 +726,128 @@ def _cmd_pin(args: argparse.Namespace) -> int:
         return 0
     print("usage: refactory pin {list,prune}", file=sys.stderr)
     return 2
+
+
+def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
+    """Replay site-revert verification on an existing run directory.
+
+    When --commit is given, check out a temporary worktree of that commit,
+    run the replay against it, and remove it in a finally block.
+    """
+    import subprocess
+    import tempfile
+
+    run_dir = Path(args.run_dir).resolve()
+    if not run_dir.is_dir():
+        print(f"refactory: run directory not found: {run_dir}", file=sys.stderr)
+        return 1
+
+    design_path = run_dir / "design.md"
+    if not design_path.is_file():
+        print(f"refactory: design.md not found in {run_dir}", file=sys.stderr)
+        return 1
+
+    from refactory_dsh import base_check, design_contract
+
+    design_text = design_path.read_text()
+    contract = design_contract.parse(design_text)
+
+    # Extract [changed] sites
+    changed_sites = [site for site in contract.rule_sites if site["status"] == "changed"]
+    if not changed_sites:
+        print(json.dumps({"status": "no_changed_sites", "pairs": []}))
+        return 0
+
+    # Determine worktree path
+    commit = args.commit
+    temp_worktree = None
+
+    try:
+        # Find the repo root from the run directory
+        repo_root = None
+        # Check if there's a worktree.json
+        wt_json = run_dir / ".refactory" / "worktree.json"
+        if wt_json.is_file():
+            wt_data = json.loads(wt_json.read_text())
+            wt_path = wt_data.get("path", "")
+            if wt_path and Path(wt_path).is_dir():
+                repo_root = Path(wt_path)
+
+        if repo_root is None and commit:
+            # Use a temporary worktree
+            # Find the closest git repo
+            cwd = Path.cwd()
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=10, cwd=str(cwd),
+            )
+            if result.returncode == 0:
+                git_root = Path(result.stdout.strip())
+                temp_dir = tempfile.mkdtemp(prefix="refactory-replay-")
+                temp_worktree = Path(temp_dir) / "worktree"
+                subprocess.run(
+                    ["git", "-C", str(git_root), "worktree", "add",
+                     str(temp_worktree), commit],
+                    check=True, capture_output=True, timeout=60,
+                )
+                repo_root = temp_worktree
+            else:
+                print("refactory: no git repository found and --commit given", file=sys.stderr)
+                return 1
+        elif repo_root is None:
+            print("refactory: no worktree found; use --commit to check out a temporary one",
+                  file=sys.stderr)
+            return 1
+
+        # Build pairs from design
+        pairs: list[tuple[str, str, str]] = []
+        test_lines = design_contract._section_lines(
+            design_text.splitlines(), design_contract.TESTS)
+        test_ids: list[str] = []
+        for tl in test_lines:
+            if tl.startswith("- ") or tl.startswith("* "):
+                bullet = tl[2:].strip()
+                import re
+                m = re.match(r'`([^`]+)`', bullet)
+                tid = m.group(1).strip() if m else bullet.split()[0] if bullet else ""
+                if tid:
+                    test_ids.append(tid)
+
+        for site in changed_sites:
+            path_text = site["path"].strip('`').strip()
+            file_path = path_text.split(":")[0] if ":" in path_text else path_text
+            matched_tests = [t for t in test_ids
+                             if file_path in t.split("::")[0] or t.split("::")[0] in file_path]
+            if matched_tests:
+                for t in matched_tests:
+                    pairs.append((path_text, t, "connected"))
+            else:
+                pairs.append((path_text, "", ""))
+
+        # Run the reverts using a minimal context
+        from refactory_dsh.nn import RunContext
+        ctx = RunContext(run_dir)
+        revert_results = base_check.compute_site_reverts(ctx, pairs)
+        print(json.dumps(revert_results, indent=2, default=str))
+        return 0
+
+    finally:
+        if temp_worktree is not None:
+            try:
+                # Find git root for worktree removal
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0:
+                    git_root = Path(result.stdout.strip())
+                    subprocess.run(
+                        ["git", "-C", str(git_root), "worktree", "remove",
+                         "--force", str(temp_worktree)],
+                        capture_output=True, timeout=30,
+                    )
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":  # pragma: no cover - the entry point

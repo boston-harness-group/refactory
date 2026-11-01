@@ -694,9 +694,9 @@ TAUTOLOGY = {"source": "verifier", "where": "tests/test_pitfalls.py:394",
 
 
 @pytest.mark.parametrize("item, back", [
-    # Test-strength, docs and style findings are follow-ups, whatever they say they break
-    # or how severe they are.
-    (TAUTOLOGY, False),
+    # A weakened test with breaks set blocks; a merely missing test is a follow-up.
+    (TAUTOLOGY, True),
+    ({**TAUTOLOGY, "breaks": "none"}, False),
     ({**TAUTOLOGY, "severity": "high", "breaks": "none"}, False),
     ({**TAUTOLOGY, "kind": "docs", "severity": "high"}, False),
     ({**TAUTOLOGY, "kind": "style", "severity": "critical"}, False),
@@ -728,30 +728,38 @@ def test_a_must_fix_the_judge_labels_a_test_docs_or_style_nit_is_a_follow_up(
 
 def test_the_judge_prompts_state_the_bar_and_ask_for_each_items_kind():
     """Both judges are told what sends a change back, what is always a follow-up, and to
-    label every must-fix item with its kind."""
+    label every must-fix item with its kind. The prompt distinguishes weakened tests
+    (block) from missing tests (follow-up)."""
     from refactory_dsh import design
     for prompt in (design.QA_JUDGE_PROMPT, design.OVERWATCH_PROMPT):
         assert '"kind": "ask" | "check" | "defect" | "test" | "docs" | "style"' in prompt
-        assert "weak or tautological test assertions" in prompt
-        assert "always follow-ups, never must_fix" in prompt
+        assert "weakened existing test" in prompt
+        assert "merely missing test" in prompt
 
 
-def test_a_tautological_test_assertion_does_not_cost_a_build_round(tmp_path):
-    """b2_pitfalls_research: the QA judge's only must-fix was a tautological assertion in a
-    test, and it sent the change back for a second round. Now the run proceeds on the
-    first attempt and the pull request lists the finding as a follow-up."""
+def test_a_weakened_test_costs_a_build_round(tmp_path):
+    """A weakened test with breaks='correction' now blocks: the QA judge's must-fix
+    causes a second build round, because the gate blocks kind='test' when breaks is set."""
     repo = git_repo(tmp_path / "repo")
     model = FakeModel(_answers(
-        _round(_tool("built"), judge=qa_judgment("redo", must_fix=[TAUTOLOGY]),
-               overwatch=overwatch_judgment("pass"))))
+        _round(_tool("bilt"), judge=qa_judgment("redo", must_fix=[TAUTOLOGY])),
+        _round(_tool("built"), overwatch=overwatch_judgment("pass"))))
     run = tmp_path / "run"
     result = _design(run, model, repo)
 
     assert result.exit_ok, result.error
-    assert len(_prompts(model, EMIT_MARK)) == 1, "no second build round"
-    assert not result.facts.get("review_attempts_used")
-    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text()
-    assert (run / "reviews/qa-gate.txt").read_text().startswith("proceed:")
+    assert len(_prompts(model, EMIT_MARK)) == 2, "a weakened test causes a second build round"
+    assert result.facts.get("review_attempts_used") == 1
+
+
+def test_weakened_test_blocks_while_missing_test_follows_up():
+    """Directly call judges.blocks: a weakened test (breaks set) blocks, a merely
+    missing test (breaks='none') does not."""
+    assert judges.blocks({"kind": "test", "breaks": "correction"}) is True
+    assert judges.blocks({"kind": "test", "breaks": "ask"}) is True
+    assert judges.blocks({"kind": "test", "breaks": "none"}) is False
+    assert judges.blocks({"kind": "test", "breaks": ""}) is False
+    assert judges.blocks({"kind": "test"}) is False
 
 
 def test_an_unbuilt_ask_still_sends_the_change_back(tmp_path):
@@ -781,15 +789,22 @@ def test_a_high_severity_product_defect_still_sends_the_change_back(tmp_path):
     assert len(emits) == 2 and "crashes on empty input" in model.prompts[emits[1]]
 
 
-def test_the_tautology_proceeds_on_the_spine_too(tmp_path, monkeypatch):
-    """gate_qa runs as its own process on the spine: it reads the same kind and takes the
-    same decision as the walker."""
+def test_the_tautology_blocks_on_the_spine_too(tmp_path, monkeypatch):
+    """gate_qa runs as its own process on the spine: a weakened test (TAUTOLOGY with
+    breaks='correction') now blocks on the spine just as on the walker."""
     run = _spine_run(tmp_path, qa_judgment("redo", must_fix=[TAUTOLOGY]))
     code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
     assert code == 0, err
+    assert out.split()[-1] == "reloop"
+    assert TAUTOLOGY["what"] in out
+    assert json.loads((run / "facts.json").read_text()).get("review_attempts_used") == 1
+
+    # A merely missing test (breaks='none') still proceeds on the spine
+    (run / judges.QA_JUDGE).write_text(qa_judgment("redo", must_fix=[
+        {**TAUTOLOGY, "breaks": "none"}]))
+    code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
+    assert code == 0, err
     assert out.split()[-1] == "proceed"
-    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text()
-    assert not json.loads((run / "facts.json").read_text()).get("review_attempts_used")
 
     (run / judges.QA_JUDGE).write_text(qa_judgment("redo", must_fix=[
         {**TAUTOLOGY, "kind": "check", "what": "the check fails"}]))

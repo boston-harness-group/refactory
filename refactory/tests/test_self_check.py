@@ -330,8 +330,8 @@ def test_the_worst_case_ends_in_the_build_loop_stop_not_the_iteration_limit(tmp_
     assert result.facts["draft_delivery"]["reason"] == "check attempts exhausted after 3 check failure(s)"
     assert result.facts["draft_delivery"]["check_failing"] is True
     assert [entry["outcome"] for entry in _records(run)] == ["fixup", "fixup", "exhausted"] * 3
-    # Every emission was a prepare_check reloop but the last: 26 of them, against 45.
-    assert _count(model, EMIT) == 27 and DesignMode().build().nodes["prepare_check"].max_iterations == 45
+    # Every emission was a prepare_check reloop but the last: 26 of them, against 54.
+    assert _count(model, EMIT) == 27 and DesignMode().build().nodes["prepare_check"].max_iterations == 54
 
 
 # ── the base: only the change's failures go back ──────────────────────────────
@@ -586,7 +586,7 @@ def test_on_the_spine_the_fixups_carry_across_processes_and_the_bound_spends_the
     workflow = lowering.to_workflow(DesignMode().state_dict())
     assert ("prepare_check", "pick_corrections", "reloop") in {
         (e.source, e.target, e.condition) for e in workflow.edges}
-    assert workflow.nodes["prepare_check"].max_iterations == 45
+    assert workflow.nodes["prepare_check"].max_iterations == 54
 
 
 def test_the_run_cap_on_fixups_ends_them_for_the_run(tmp_path, monkeypatch):
@@ -1453,15 +1453,17 @@ def test_an_amendment_puts_the_worktree_back_first(tmp_path):
 def test_prepare_checks_limit_follows_the_knobs_to_their_bounds():
     from refactory_dsh.design import prepare_check_iterations
 
-    assert prepare_check_iterations({}) == 45 == DesignMode().graph().nodes["prepare_check"].max_iterations
+    # With site_revert_fixups=1 default: fixups = (2+1)*3 = 9, (8+9+1)*2 + 9+8+1 = 54
+    assert prepare_check_iterations({}) == 54 == DesignMode().graph().nodes["prepare_check"].max_iterations
     widest = _mode(check_attempts=5, self_check_fixups=5)
-    # (8 + 25 + 1) x 2 + 25 + 8 reloops at most, so 102.
-    assert widest.graph().nodes["prepare_check"].max_iterations == 102
+    # fixups = (5+1)*5 = 30, (8+30+1)*2 + 30+8+1 = 117
+    assert widest.graph().nodes["prepare_check"].max_iterations == 117
     state = widest.state_dict()
-    assert state["graph"]["nodes"]["prepare_check"]["max_iterations"] == 102
-    assert lowering.to_workflow(state).nodes["prepare_check"].max_iterations == 102
+    assert state["graph"]["nodes"]["prepare_check"]["max_iterations"] == 117
+    assert lowering.to_workflow(state).nodes["prepare_check"].max_iterations == 117
     capped = _mode(check_attempts=5, self_check_fixups=5, check_attempt_cap=20)
-    assert capped.graph().nodes["prepare_check"].max_iterations == (20 + 25 + 1) * 2 + 25 + 20 + 1
+    # fixups = (5+1)*5 = 30, (20+30+1)*2 + 30+20+1 = 153
+    assert capped.graph().nodes["prepare_check"].max_iterations == (20 + 30 + 1) * 2 + 30 + 20 + 1
 
 
 def test_the_worst_case_at_the_knobs_bounds_still_ends_in_the_stop(tmp_path, monkeypatch):

@@ -70,12 +70,16 @@ class Unreadable(ValueError):
 def blocks(item: dict[str, str]) -> bool:
     """Whether a must-fix item holds the change back.
 
-    Never when the judge labels it ``test``, ``docs`` or ``style`` (a weak assertion or a
-    missing edge-case test is a follow-up, even when it touches a correction). Always when
-    it is an unbuilt ``ask`` or a failing ``check``. Otherwise it is a product defect and
-    blocks when it is critical or high, or breaks an ask, a correction the person gave, or
-    the health check. A missing ``kind`` is a defect."""
+    A weakened existing test — ``kind`` ``test`` with ``breaks`` set to a non-empty,
+    non-``'none'`` value — blocks: loosening an assertion is a defect that breaks the
+    requirement it covered.  A merely missing test (``kind`` ``test`` with ``breaks``
+    ``'none'`` or empty) is a follow-up, as are ``docs`` and ``style`` items.
+    Always when it is an unbuilt ``ask`` or a failing ``check``. Otherwise it is a
+    product defect and blocks when it is critical or high, or breaks an ask, a correction
+    the person gave, or the health check. A missing ``kind`` is a defect."""
     kind = item.get("kind") or "defect"
+    if kind == "test" and item.get("breaks") not in ("none", "", None):
+        return True
     if kind in FOLLOW_UP_KINDS:
         return False
     if kind in BLOCKING_KINDS:

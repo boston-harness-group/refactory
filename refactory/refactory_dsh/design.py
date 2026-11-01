@@ -139,12 +139,16 @@ _JUDGE_RULE = (
     "(`kind` `check`); or a critical or high defect in product code (`kind` `defect`: "
     "wrong behaviour, data loss, a crash or a security problem, or a regression, with the "
     "test or path:line that shows it).\n"
-    "These are always follow-ups, never must_fix: weak or tautological test assertions and "
-    "missing edge-case tests, docs wording, style, dead code, minor refactors, and any low or "
-    "medium finding. Put them in `follow_ups`. If you list one in must_fix anyway, label it "
-    "with its `kind` (`test`, `docs` or `style`, or a `defect` of `medium` or `low` "
-    "severity): the gate moves it to the follow-ups and the pull request lists it. A weak "
-    "test is a `test` item even when it covers a correction: the correction is built.\n"
+    "A weakened existing test — an assertion removed, relaxed, or made trivially true, an "
+    "expected value changed to match new behaviour, or a test marked skip/xfail — is "
+    "`must_fix` with `kind` `test` and `breaks` set to what it breaks (e.g. `correction`); "
+    "the gate blocks it. A merely missing test, a missing edge-case test, or a tautological "
+    "new test is a follow-up with `kind` `test` and `breaks` `none`.\n"
+    "These are always follow-ups, never must_fix: docs wording, style, dead code, minor "
+    "refactors, and any low or medium finding. Put them in `follow_ups`. If you list one in "
+    "must_fix anyway, label it with its `kind` (`test`, `docs` or `style`, or a `defect` of "
+    "`medium` or `low` severity): the gate moves it to the follow-ups and the pull request "
+    "lists it.\n"
     "Give each must_fix item its `kind` (`ask`, `check`, `defect`, `test`, `docs` or "
     "`style`), its `severity` (`critical`, `high`, `medium` or `low`) and what it `breaks` "
     "(`ask`, `correction`, `health` or `none`). Answer `redo` only when at least one item "
@@ -264,7 +268,8 @@ OVERWATCH_PROMPT = (
     + "You are the overwatch. Verify acceptance rather than repeating the reviews: take "
     "each ask in the brief and each correction above and say what proves it (a test "
     "that fails without the change, or a command and its output) or that nothing does. "
-    "Run your own spot checks on what the reviews and the map claim. Do not promote a "
+    "Run the 2\u20133 most critical requirements yourself, with the exact command and its "
+    "output. Run your own spot checks on what the reviews and the map claim. Do not promote a "
     "syntax check, file-presence check, self-report or label-string check into semantic "
     "evidence. If required validation is unavailable, keep that requirement unverified "
     "and say what would unblock it.\n\n"
@@ -298,14 +303,16 @@ def prepare_check_iterations(knobs: dict[str, Any]) -> int:
 
     It reloops for a fix-up, an early stop or a refused emission. Attempts reach at most
     ``check_attempt_cap`` (when it is above ``check_attempts``), the run's fix-ups are at
-    most ``self_check_fixups x check_attempts``, and each applied emission comes after at
-    most ``refusal_attempts - 1`` refusals, so the reloops are at most
-    ``(attempts + fix-ups + 1) x refusals + fix-ups + attempts``: (8 + 6 + 1) x 2 + 6 + 8
-    = 44 with the defaults. Past that, b39b's stop has already ended the run.
+    most ``(self_check_fixups + site_revert_fixups) x check_attempts``, and each applied
+    emission comes after at most ``refusal_attempts - 1`` refusals, so the reloops are at
+    most ``(attempts + fixups + 1) x refusals + fixups + attempts``:
+    (8 + 9 + 1) x 2 + 9 + 8 = 53 with the defaults.  Past that, b39b's stop has already
+    ended the run.
     """
     attempts = int(knobs.get("check_attempts", 3))
     reach = max(attempts, int(knobs.get("check_attempt_cap", 8)))
-    fixups = int(knobs.get("self_check_fixups", 2)) * attempts
+    fixups = (int(knobs.get("self_check_fixups", 2))
+              + int(knobs.get("site_revert_fixups", 1))) * attempts
     refusals = max(int(knobs.get("refusal_attempts", 3)) - 1, 0)
     return (reach + fixups + 1) * refusals + fixups + reach + 1
 
@@ -378,6 +385,12 @@ class DesignMode(Mode):
                 description="how many times the self-check may send an attempt back to emit, "
                             "spending nothing, before the early stop spends it; a run gets "
                             "this many times check_attempts",
+            ),
+            "site_revert_fixups": Knob(
+                1, "int", lo=0, hi=3,
+                description="how many times the site-revert pass may send an attempt back "
+                            "to emit when an uncaught site is found; a run gets this many "
+                            "times check_attempts",
             ),
             "self_check_timeout_s": Knob(
                 300, "int", lo=10, hi=600,
@@ -854,7 +867,8 @@ class DesignMode(Mode):
             reads=("brief.json",),
             writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD),
             produces=self_check_produces,
-            knobs=(*check_knobs, "self_check_fixups", "self_check_timeout_s"),
+            knobs=(*check_knobs, "self_check_fixups", "site_revert_fixups",
+                   "self_check_timeout_s"),
             # From the knobs, so the build loop's stop always comes first: 45 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
             max_iterations=prepare_check_iterations(defaults),
@@ -1004,7 +1018,12 @@ class DesignMode(Mode):
                 "the exit code. Include conflicting nearby numbers, unsupported counts, "
                 "and alternative sign/unit encodings when the interface parses them. "
                 "Accepted output must match the request; unsupported input must fail "
-                "clearly without silently substituting a valid case. Write "
+                "clearly without silently substituting a valid case.\n\n"
+                "Coverage rule: every requirement in the brief, and every runtime when the "
+                "brief names both, must be covered by at least one probe you actually run, "
+                "reported with the exact command and its output. A requirement with no run "
+                "probe is NOT_VERIFIED.\n\n"
+                "Write "
                 "`reviews/qa.md` with each check and its exact result. Anything that "
                 "breaks an ask in the brief is written as BLOCKING: <path>: <description> where <path> is the file the builder must change to fix the problem. A defect in the code is reported against the code file, even when the requirement it misses comes from design.md or the brief. A problem in a run document (design.md, strategy.json, or another file an earlier step wrote) is reported with that document's path.\n"
                 + SEVERITY_RULE + " " + MARKER_RULE + "\n"

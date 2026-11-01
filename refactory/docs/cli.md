@@ -293,3 +293,9 @@ entry and survives a resume.
 |---|---|
 | `refactory pin list` | List all pins with commit (first 12 chars), creation time and driver checkout. |
 | `refactory pin prune` | Remove pins no run refers to. Also removes their `graph-pin-<commit12>` profiles from the person's DSH home. Never removes a pin that a live or resumable run refers to. |
+
+## Site-revert replay
+
+| Command | Description |
+|---|---|
+| `refactory replay-site-reverts --run-dir <path> [--commit <hash>]` | Replay site-revert verification on an existing run directory. Reads `design.md` from the run directory, extracts `[changed]` sites, and runs the revert pass. When `--commit` is given and the original worktree is gone, a temporary worktree of that commit is checked out, used, and removed. Prints the results as JSON to stdout. |
