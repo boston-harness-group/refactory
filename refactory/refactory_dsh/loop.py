@@ -1762,7 +1762,7 @@ class Loop(OuterLoop):
         restore a stale non-empty state from an earlier epoch.
         """
         strategy_state = self.strategy_state_dict()
-        self._journal("strategy_state", **strategy_state)
+        self._journal("strategy_state", state=strategy_state)
 
     def epoch_step(self, run: Run | None = None) -> bool:
         """One iteration, and whether there is another.
@@ -2511,9 +2511,14 @@ class Loop(OuterLoop):
                 # resurrect a branch the person had already dismissed.
                 self._replay_control(record)
             elif event == "strategy_state":
-                self.load_strategy_state(
-                    {k: v for k, v in record.items() if k != "event"}
-                )
+                # New format: state nested under "state" key.
+                # Old format (attempt 1): state keys spread as top-level record keys.
+                if "state" in record:
+                    self.load_strategy_state(record["state"])
+                else:
+                    self.load_strategy_state(
+                        {k: v for k, v in record.items() if k != "event"}
+                    )
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")

@@ -376,7 +376,6 @@ SKILLOPT_PATCH_CONFIG: dict[str, Any] = {
 
 
 _VALID_ON_MISSING = ("skip", "append", "refuse")
-_TARGET_EDIT_KINDS = ("replace", "delete", "insert_after", "insert_before")
 
 
 def _resolve_on_missing(config_on_missing: str | dict, edit_kind: str) -> str:
@@ -425,6 +424,13 @@ def _text_patch(state: State, edit: dict) -> State:
 
     honour_protected = config.get("honour_protected", True)
     protected_regions = list(config.get("protected_regions") or [])
+    # Reject empty markers — text.find("", pos) always returns pos, causing infinite loops.
+    for pair in protected_regions:
+        if len(pair) != 2 or not pair[0] or not pair[1]:
+            raise EditError(
+                "protected_regions markers must be non-empty [start, end] pairs",
+                code="E-patch",
+            )
     strip_markers = config.get("strip_markers", True)
     insert_position = config.get("insert_position", "end_of_line")
     if insert_position not in ("end_of_line", "after_target"):
@@ -473,7 +479,7 @@ def _text_patch(state: State, edit: dict) -> State:
                 return True
         return False
 
-    def _apply_on_missing(kind: str, content: str) -> str:
+    def _apply_on_missing(kind: str) -> str:
         """Apply the on_missing policy for a given edit kind. Returns status."""
         policy = _resolve_on_missing(on_missing, kind)
         if policy == "refuse":
@@ -486,8 +492,8 @@ def _text_patch(state: State, edit: dict) -> State:
         # skip
         return f"skipped_{kind}_target_not_found"
 
-    def _do_append(content: str) -> str:
-        """Append content, respecting protected regions. Returns modified text."""
+    def _do_append(content: str) -> None:
+        """Append content, respecting protected regions."""
         nonlocal text
         if honour_protected and protected_regions:
             # Find earliest protected start marker position
@@ -498,9 +504,8 @@ def _text_patch(state: State, edit: dict) -> State:
                     earliest = idx
             if earliest < len(text):
                 text = text[:earliest] + "\n" + content + text[earliest:]
-                return text
+                return
         text = text + "\n\n" + content + "\n"
-        return text
 
     for i, edit_item in enumerate(edits_list):
         kind = edit_item.get("kind")
@@ -534,7 +539,7 @@ def _text_patch(state: State, edit: dict) -> State:
 
         if idx < 0:
             # Target not found — apply on_missing policy
-            status = _apply_on_missing(kind, content)
+            status = _apply_on_missing(kind)
             if status == "applied_append":
                 _do_append(content)
             outcome["status"] = status

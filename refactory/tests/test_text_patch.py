@@ -255,8 +255,7 @@ def test_per_edit_outcome_report():
     assert report["outcomes"][0]["kind"] == "replace"
     assert report["outcomes"][0]["status"] == "applied_replace"
     assert report["outcomes"][1]["index"] == 1
-    assert report["outcomes"][1]["status"] == "skipped_replace_target_not_found" or \
-           report["outcomes"][1]["status"] == "skipped_delete_target_not_found"
+    assert report["outcomes"][1]["status"] == "skipped_delete_target_not_found"
     assert report["outcomes"][2]["index"] == 2
     assert report["outcomes"][2]["status"] == "applied_append"
 
@@ -321,3 +320,15 @@ def test_empty_target_skipped():
     result = _apply(state, edit)
     assert _value(result) == "hello world"
     assert edit["_report"]["outcomes"][0]["status"] == "skipped"
+
+
+def test_empty_protected_region_marker_refused():
+    """protected_regions with an empty-string marker raises EditError."""
+    state = _state("hello world")
+    edit = _patch(
+        [{"kind": "replace", "target": "hello", "content": "hi"}],
+        config={"protected_regions": [["", "<!-- END -->"]]},
+    )
+    with pytest.raises(EditError) as exc_info:
+        _apply(state, edit)
+    assert exc_info.value.code == "E-patch"

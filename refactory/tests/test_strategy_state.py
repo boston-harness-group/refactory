@@ -68,33 +68,56 @@ def test_strategy_state_mid_epoch_save_and_resume(tmp_path):
     """
     mid_epoch_state = {"step_count": 7, "direction": "up"}
 
-    class MidEpochStrategy(OuterLoop):
-        name = "mid_epoch_test"
+    def _custom_strategy(self, run: Run) -> None:
+        """A custom strategy that saves state mid-epoch and stops."""
+        self._strategy_state = dict(mid_epoch_state)
+        run.save_strategy_state()
+        run.stop("done after saving state")
 
-        def strategy(self, run: Run) -> None:
-            # Save state mid-epoch
-            self._strategy_state = dict(mid_epoch_state)
-            run.save_strategy_state()
-            run.stop("done after saving state")
-
-    # Run 1 with custom strategy
+    # Run 1 with the custom strategy override via monkeypatch
     loop1 = Loop(MODE, _config(tmp_path, epochs=5), project=Path("."))
-    run1 = Run(loop=loop1)
-    loop1.init()
-    strategy = MidEpochStrategy()
-    strategy._strategy_state = {}
-    # Let the strategy save state via run
-    strategy._strategy_state = dict(mid_epoch_state)
-    loop1._strategy_state = dict(mid_epoch_state)
-    loop1._save_strategy_state()
-    # Also journal a candidate so replay can work
-    from refactory_dsh.optim import Candidate
-    loop1._journal_candidate(loop1.population[0])
+    import types
+    loop1.strategy = types.MethodType(_custom_strategy, loop1)
+    loop1.run()
+
+    # Verify the journal has strategy_state
+    journal_path = tmp_path / "journal.jsonl"
+    journal_lines = journal_path.read_text().splitlines()
+    has_strategy_state = any(
+        json.loads(line).get("event") == "strategy_state"
+        for line in journal_lines if line.strip()
+    )
+    assert has_strategy_state, "strategy_state was not journaled"
 
     # Resume and check state
     loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=5), project=Path("."))
     loop2.init()
     assert loop2._strategy_state == mid_epoch_state
+    assert loop2.strategy_state_dict() == mid_epoch_state
+
+
+def test_strategy_state_with_event_key_survives_resume(tmp_path):
+    """A strategy state dict containing the key 'event' is valid JSON-serialisable
+    data; it must not crash the write path or lose data on the read path.
+    """
+    state_with_event = {"event": "custom_milestone", "counter": 3}
+
+    def _custom_strategy(self, run: Run) -> None:
+        self._strategy_state = dict(state_with_event)
+        run.save_strategy_state()
+        run.stop("saved")
+
+    loop1 = Loop(MODE, _config(tmp_path, epochs=5), project=Path("."))
+    import types
+    loop1.strategy = types.MethodType(_custom_strategy, loop1)
+    loop1.run()
+
+    # Resume and verify state is fully restored — including the 'event' key
+    loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=5), project=Path("."))
+    loop2.init()
+    assert loop2._strategy_state == state_with_event
+    assert loop2.strategy_state_dict()["event"] == "custom_milestone"
+    assert loop2.strategy_state_dict()["counter"] == 3
 
 
 def test_empty_state_journaled_and_restored(tmp_path):
