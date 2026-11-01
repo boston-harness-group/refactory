@@ -66,7 +66,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
     "broad": (),  # filled in below with every registered name
     "structure": (),  # filled in below with primitives + macros
     "conservative": ("set_knob", "insert_after", "insert_before", "wrap"),
-    "knob_only": ("set_knob", "add_knob", "remove_knob", "text_patch"),
+    "knob_only": ("set_knob", "add_knob", "remove_knob"),
 }
 
 
@@ -369,9 +369,39 @@ SKILLOPT_PATCH_CONFIG: dict[str, Any] = {
         "delete": "skip",           # skill.py ~108-109: skip
     },
     "honour_protected": True,
-    "protected_regions": [],
+    "protected_regions": [
+        # SkillOpt always protects SLOW_UPDATE and APPENDIX markers.
+        # skill.py: SLOW_UPDATE_HEADER / APPENDIX_HEADER constants.
+        ["<!-- SLOW_UPDATE -->", "<!-- /SLOW_UPDATE -->"],
+        ["<!-- APPENDIX -->", "<!-- /APPENDIX -->"],
+    ],
     "strip_markers": True,
     "insert_position": "end_of_line",
+    # SkillOpt-specific formatting policies:
+    # skill.py: insert_after uses a blank-line separator (target\n\ncontent\nnext).
+    "insert_after_separator": "\n\n",
+    # skill.py: append always adds a trailing newline.
+    "trailing_newline": True,
+    # skill.py: append strips trailing whitespace from the text first.
+    "append_strip_trailing": True,
+    # skill.py: content is whitespace-stripped before application.
+    "content_strip": True,
+    # skill.py: unknown edit kinds are silently skipped, not refused.
+    "unknown_kind_policy": "skip",
+    # SkillOpt's own status names (skill.py _apply_edit_with_report).
+    "status_names": {
+        "applied_replace": "applied_replace",
+        "applied_delete": "applied_delete",
+        "applied_insert_after": "applied_insert_after",
+        "applied_insert_before": "applied_insert_before",
+        "applied_append": "applied_append",
+        "skipped_protected_region": "skipped_protected",
+        "skipped": "skipped",
+    },
+    # Blank-line separation between appended content and a protected region.
+    "append_protected_separator": "\n\n",
+    # insert_after with an empty target falls back to append.
+    "insert_after_empty_target_policy": "append",
 }
 
 
@@ -436,6 +466,18 @@ def _text_patch(state: State, edit: dict) -> State:
     if insert_position not in ("end_of_line", "after_target"):
         raise EditError(f"unsupported insert_position {insert_position!r}", code="E-patch")
 
+    # SkillOpt-fidelity parameters (brief fix 2).
+    insert_after_sep: str = config.get("insert_after_separator", "\n")
+    trailing_newline: bool = config.get("trailing_newline", True)
+    append_strip_trailing: bool = config.get("append_strip_trailing", False)
+    content_strip: bool = config.get("content_strip", False)
+    unknown_kind_policy: str = config.get("unknown_kind_policy", "refuse")
+    status_names: dict[str, str] = config.get("status_names") or {}
+    append_protected_sep: str = config.get("append_protected_separator", "\n\n")
+    insert_after_empty_target_policy: str = config.get(
+        "insert_after_empty_target_policy", "skip",
+    )
+
     # Collect all marker strings for stripping
     all_markers: list[str] = []
     for pair in protected_regions:
@@ -446,6 +488,8 @@ def _text_patch(state: State, edit: dict) -> State:
         raise EditError("text_patch needs an 'edits' list", code="E-patch")
 
     report: list[dict[str, Any]] = []
+
+    _KNOWN_KINDS = {"replace", "delete", "insert_after", "insert_before", "append"}
 
     def _strip_content_markers(content: str) -> str:
         if not strip_markers or not all_markers:
@@ -488,13 +532,19 @@ def _text_patch(state: State, edit: dict) -> State:
                 code="E-patch",
             )
         if policy == "append":
-            return "applied_append"
+            return _status("applied_append")
         # skip
-        return f"skipped_{kind}_target_not_found"
+        return _status(f"skipped_{kind}_target_not_found")
+
+    def _status(canonical: str) -> str:
+        """Map a canonical status to the configured name (SkillOpt compat)."""
+        return status_names.get(canonical, canonical)
 
     def _do_append(content: str) -> None:
         """Append content, respecting protected regions."""
         nonlocal text
+        if append_strip_trailing:
+            text = text.rstrip()
         if honour_protected and protected_regions:
             # Find earliest protected start marker position
             earliest = len(text)
@@ -503,18 +553,30 @@ def _text_patch(state: State, edit: dict) -> State:
                 if idx >= 0 and idx < earliest:
                     earliest = idx
             if earliest < len(text):
-                text = text[:earliest] + "\n" + content + text[earliest:]
+                text = text[:earliest].rstrip() + append_protected_sep + content + append_protected_sep + text[earliest:]
                 return
-        text = text + "\n\n" + content + "\n"
+        if trailing_newline:
+            text = text + "\n\n" + content + "\n"
+        else:
+            text = text + "\n\n" + content
 
     for i, edit_item in enumerate(edits_list):
         kind = edit_item.get("kind")
-        if kind not in ("replace", "delete", "insert_after", "insert_before", "append"):
+        if kind not in _KNOWN_KINDS:
+            if unknown_kind_policy == "skip":
+                outcome_skip: dict[str, Any] = {
+                    "index": i, "kind": kind, "target": "", "content_preview": "",
+                    "status": _status("skipped_unknown_kind"),
+                }
+                report.append(outcome_skip)
+                continue
             raise EditError(f"unknown edit kind {kind!r}", code="E-patch")
 
         target = edit_item.get("target", "")
         content = edit_item.get("content", "")
         content = _strip_content_markers(content)
+        if content_strip:
+            content = content.strip()
         outcome: dict[str, Any] = {
             "index": i,
             "kind": kind,
@@ -525,13 +587,19 @@ def _text_patch(state: State, edit: dict) -> State:
 
         if kind == "append":
             _do_append(content)
-            outcome["status"] = "applied_append"
+            outcome["status"] = _status("applied_append")
             report.append(outcome)
             continue
 
         # For kinds that need a target: empty-target guard
         if not target:
-            outcome["status"] = "skipped"
+            # insert_after with an empty target can fall back to append
+            if kind == "insert_after" and insert_after_empty_target_policy == "append":
+                _do_append(content)
+                outcome["status"] = _status("applied_append")
+                report.append(outcome)
+                continue
+            outcome["status"] = _status("skipped")
             report.append(outcome)
             continue
 
@@ -540,7 +608,7 @@ def _text_patch(state: State, edit: dict) -> State:
         if idx < 0:
             # Target not found — apply on_missing policy
             status = _apply_on_missing(kind)
-            if status == "applied_append":
+            if status == _status("applied_append"):
                 _do_append(content)
             outcome["status"] = status
             report.append(outcome)
@@ -548,16 +616,16 @@ def _text_patch(state: State, edit: dict) -> State:
 
         # Check protected region
         if _overlaps_protected(idx, idx + len(target)):
-            outcome["status"] = "skipped_protected_region"
+            outcome["status"] = _status("skipped_protected_region")
             report.append(outcome)
             continue
 
         if kind == "replace":
             text = text[:idx] + content + text[idx + len(target):]
-            outcome["status"] = "applied_replace"
+            outcome["status"] = _status("applied_replace")
         elif kind == "delete":
             text = text[:idx] + text[idx + len(target):]
-            outcome["status"] = "applied_delete"
+            outcome["status"] = _status("applied_delete")
         elif kind == "insert_after":
             if insert_position == "after_target":
                 text = text[:idx + len(target)] + content + text[idx + len(target):]
@@ -565,15 +633,15 @@ def _text_patch(state: State, edit: dict) -> State:
                 # end_of_line: insert after the end of the line containing the target
                 eol = text.find("\n", idx + len(target))
                 if eol >= 0:
-                    text = text[:eol] + "\n" + content + text[eol:]
+                    text = text[:eol] + insert_after_sep + content + text[eol:]
                 else:
-                    text = text + "\n" + content
-            outcome["status"] = "applied_insert_after"
+                    text = text + insert_after_sep + content
+            outcome["status"] = _status("applied_insert_after")
         elif kind == "insert_before":
             sol = text.rfind("\n", 0, idx)
             sol = sol + 1 if sol >= 0 else 0
             text = text[:sol] + content + "\n" + text[sol:]
-            outcome["status"] = "applied_insert_before"
+            outcome["status"] = _status("applied_insert_before")
 
         report.append(outcome)
 
@@ -586,8 +654,10 @@ def _text_patch(state: State, edit: dict) -> State:
     out = _finish(state, _graph(state))
     out["knobs"][name]["value"] = value
 
-    # Attach report to edit dict
-    edit["_report"] = {"outcomes": report, "noop": original_text == text}
+    # Return the report alongside the state.  The caller (apply()) places it
+    # in the _edit_reports collector when one is provided, rather than mutating
+    # the edit dict — see brief fix 1.
+    out["_text_patch_report"] = {"outcomes": report, "noop": original_text == text}
 
     return out
 
@@ -882,7 +952,13 @@ _macro("loop", "Wrap a step in a gate that can send control back to it, so the s
        ("target", "gate"), _pre_loop, _expand_loop)
 
 
-PRESETS["broad"] = tuple(sorted(list(_PRIMITIVES) + list(_MACROS)))
+#: text_patch is excluded from every preset that random search samples from so that
+#: seeded random-optimizer runs are unchanged.  Use it via explicit ``text_patch``
+#: edits, not via random sampling.
+_RANDOM_EXCLUDED = {"text_patch"}
+PRESETS["broad"] = tuple(sorted(
+    n for n in list(_PRIMITIVES) + list(_MACROS) if n not in _RANDOM_EXCLUDED
+))
 PRESETS["structure"] = PRESETS["broad"]
 
 
@@ -963,8 +1039,18 @@ def precheck(edit: dict, state: Mapping[str, Any]) -> str | None:
     return None
 
 
-def apply(edit: dict, state: Mapping[str, Any]) -> State:
-    """Apply ``edit`` and return a new state, leaving ``state`` untouched."""
+def apply(
+    edit: dict,
+    state: Mapping[str, Any],
+    *,
+    edit_reports: list[dict[str, Any]] | None = None,
+) -> State:
+    """Apply ``edit`` and return a new state, leaving ``state`` untouched.
+
+    If *edit_reports* is given it collects per-edit reports (currently only
+    ``text_patch`` produces one).  Reports are **not** mutated onto the edit
+    dict.
+    """
     if not isinstance(edit, dict):
         raise EditError(f"an edit must be an object, got {type(edit).__name__}", code="E-op")
     name = edit.get("op")
@@ -978,10 +1064,17 @@ def apply(edit: dict, state: Mapping[str, Any]) -> State:
         assert spec.expand is not None
         out = dict(state)
         for step in spec.expand(edit, dict(state)):
-            out = apply(step, out)
+            out = apply(step, out, edit_reports=edit_reports)
         return out
     assert spec.apply is not None
-    return spec.apply(dict(state), edit)
+    out = spec.apply(dict(state), edit)
+    # text_patch stashes its report on the returned state dict under a private
+    # key.  Pull it out so the state stays clean and the caller sees the report
+    # in the collector, not on the edit dict.
+    report = out.pop("_text_patch_report", None)
+    if report is not None and edit_reports is not None:
+        edit_reports.append(report)
+    return out
 
 
 #: What a person's `NAME=VALUE` says for a bool knob.
@@ -1097,22 +1190,6 @@ def random_edit(
             if value is None:
                 continue
             edit = {"op": "set_knob", "name": name, "value": value}
-        elif op == "text_patch":
-            str_movable = [
-                n for n in movable
-                if entries[n]["spec"].get("kind") == "str"
-            ]
-            if not str_movable:
-                continue
-            name = rng.choice(str_movable)
-            from .knob import Knob as _KnobTP
-
-            knob = _KnobTP.from_spec(entries[name]["spec"])
-            sampled = knob.sample(rng, entries[name]["value"])
-            if sampled is None:
-                continue
-            edit = {"op": "text_patch", "name": name,
-                    "edits": [{"kind": "append", "content": sampled}]}
         elif op in ("add_knob", "remove_knob"):
             continue  # parameter-set surgery needs a named knob; not sampled
         elif op in ("insert_after", "insert_before", "wrap"):

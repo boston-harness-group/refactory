@@ -12,6 +12,7 @@ import pytest
 
 from refactory_dsh.nn import edits
 from refactory_dsh.nn.edits import EditError, SKILLOPT_PATCH_CONFIG, apply
+from refactory_dsh.optim.base import Candidate, Proposal
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -44,6 +45,13 @@ def _patch(edits_list: list[dict], *, config: dict | None = None, name: str = "p
     if config is not None:
         edit["config"] = config
     return edit
+
+
+def _apply_with_report(state: dict, edit: dict) -> tuple[dict, list]:
+    """Apply and return (new_state, edit_reports)."""
+    reports: list = []
+    result = apply(edit, state, edit_reports=reports)
+    return result, reports
 
 
 def _apply(state: dict, edit: dict) -> dict:
@@ -113,9 +121,9 @@ def test_on_missing_skip():
         [{"kind": "replace", "target": "MISSING", "content": "X"}],
         config={"on_missing": "skip"},
     )
-    result = _apply(state, edit)
+    result, reports = _apply_with_report(state, edit)
     assert _value(result) == "hello world"
-    assert edit["_report"]["outcomes"][0]["status"] == "skipped_replace_target_not_found"
+    assert reports[0]["outcomes"][0]["status"] == "skipped_replace_target_not_found"
 
 
 def test_on_missing_append():
@@ -125,9 +133,9 @@ def test_on_missing_append():
         [{"kind": "replace", "target": "MISSING", "content": "APPENDED"}],
         config={"on_missing": "append"},
     )
-    result = _apply(state, edit)
+    result, reports = _apply_with_report(state, edit)
     assert "APPENDED" in _value(result)
-    assert edit["_report"]["outcomes"][0]["status"] == "applied_append"
+    assert reports[0]["outcomes"][0]["status"] == "applied_append"
 
 
 def test_on_missing_refuse():
@@ -154,34 +162,13 @@ def test_on_missing_per_kind_dict():
         ],
         config={"on_missing": {"insert_after": "append", "replace": "skip"}},
     )
-    result = _apply(state, edit)
+    result, reports = _apply_with_report(state, edit)
     val = _value(result)
     assert "FALLBACK" in val
     assert "NOPE" not in val
-    outcomes = edit["_report"]["outcomes"]
+    outcomes = reports[0]["outcomes"]
     assert outcomes[0]["status"] == "applied_append"
     assert outcomes[1]["status"] == "skipped_replace_target_not_found"
-
-
-def test_skillopt_patch_config():
-    """SKILLOPT_PATCH_CONFIG: missing insert_after → append, missing replace → skip."""
-    state = _state("hello world")
-    edit = _patch(
-        [
-            {"kind": "insert_after", "target": "NONEXISTENT", "content": "FALLBACK_IA"},
-            {"kind": "replace", "target": "NONEXISTENT", "content": "SHOULD_SKIP"},
-            {"kind": "delete", "target": "NONEXISTENT"},
-        ],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result = _apply(state, edit)
-    val = _value(result)
-    assert "FALLBACK_IA" in val
-    assert "SHOULD_SKIP" not in val
-    outcomes = edit["_report"]["outcomes"]
-    assert outcomes[0]["status"] == "applied_append"
-    assert outcomes[1]["status"] == "skipped_replace_target_not_found"
-    assert outcomes[2]["status"] == "skipped_delete_target_not_found"
 
 
 # ── protected regions ─────────────────────────────────────────────────────
@@ -197,9 +184,9 @@ def test_protected_region_skips_edit():
             "protected_regions": [["<!-- PROTECTED -->", "<!-- /PROTECTED -->"]],
         },
     )
-    result = _apply(state, edit)
+    result, reports = _apply_with_report(state, edit)
     assert _value(result) == text  # unchanged
-    assert edit["_report"]["outcomes"][0]["status"] == "skipped_protected_region"
+    assert reports[0]["outcomes"][0]["status"] == "skipped_protected_region"
 
 
 def test_marker_stripping_from_content():
@@ -241,15 +228,15 @@ def test_append_before_protected_region():
 # ── outcome report ────────────────────────────────────────────────────────
 
 def test_per_edit_outcome_report():
-    """multi-edit patch returns report list with index, kind, status per edit."""
+    """multi-edit patch returns report via edit_reports collector, not edit dict."""
     state = _state("alpha beta gamma")
     edit = _patch([
         {"kind": "replace", "target": "beta", "content": "BETA"},
         {"kind": "delete", "target": "MISSING"},
         {"kind": "append", "content": "tail"},
     ])
-    _apply(state, edit)
-    report = edit["_report"]
+    _result, reports = _apply_with_report(state, edit)
+    report = reports[0]
     assert len(report["outcomes"]) == 3
     assert report["outcomes"][0]["index"] == 0
     assert report["outcomes"][0]["kind"] == "replace"
@@ -260,12 +247,12 @@ def test_per_edit_outcome_report():
     assert report["outcomes"][2]["status"] == "applied_append"
 
 
-def test_outcome_report_persisted_in_edit_record():
-    """The _report dict on the edit is serialisable (for journaling)."""
+def test_outcome_report_serialisable():
+    """The report dict is serialisable (for journaling)."""
     state = _state("hello world")
     edit = _patch([{"kind": "replace", "target": "world", "content": "earth"}])
-    _apply(state, edit)
-    report = edit["_report"]
+    _result, reports = _apply_with_report(state, edit)
+    report = reports[0]
     # Must be JSON-serialisable
     serialised = json.dumps(report)
     assert "applied_replace" in serialised
@@ -280,8 +267,97 @@ def test_noop_patch():
         [{"kind": "replace", "target": "MISSING", "content": "X"}],
         config={"on_missing": "skip"},
     )
+    _result, reports = _apply_with_report(state, edit)
+    assert reports[0]["noop"] is True
+
+
+# ── report not in edit dict (brief fix 1) ─────────────────────────────────
+
+def test_report_not_in_edit_dict():
+    """After apply(), the edit dict has no _report key.  Fails when the report
+    leak is reintroduced (edit dict mutation returns).
+    """
+    state = _state("hello world")
+    edit = _patch([{"kind": "replace", "target": "world", "content": "earth"}])
     _apply(state, edit)
-    assert edit["_report"]["noop"] is True
+    assert "_report" not in edit
+
+
+def test_report_not_in_describe():
+    """A Candidate's describe() output contains no report text by default.
+    Reports live in candidate.edit_reports and are omitted from describe()
+    unless explicitly requested.
+    """
+    state = _state("hello world")
+    edit = _patch([{"kind": "replace", "target": "world", "content": "earth"}])
+    reports: list = []
+    result = apply(edit, state, edit_reports=reports)
+    candidate = Candidate.from_state(
+        result,
+        parent=None,
+        edits=[edit],
+        edit_reports=[reports[0] if reports else None],
+    )
+    desc = candidate.describe()
+    desc_text = json.dumps(desc, default=str)
+    # The default describe() must not contain report data
+    assert "applied_replace" not in desc_text
+    assert "outcomes" not in desc_text
+    assert "noop" not in desc_text
+    # But include_reports=True does expose it
+    desc_with = candidate.describe(include_reports=True)
+    assert "edit_reports" in desc_with
+    assert desc_with["edit_reports"][0] is not None
+
+
+def test_report_survives_stop_resume(tmp_path):
+    """A candidate with edit_reports is journaled, then replayed from a fresh
+    journal walk; the restored candidate's edit_reports match the originals.
+    """
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    state = _state("hello world")
+    edit = _patch([{"kind": "replace", "target": "world", "content": "earth"}])
+    reports: list = []
+    result = apply(edit, state, edit_reports=reports)
+    report = reports[0]
+
+    config = LoopConfig(
+        epochs=1, batch_size=2, optimizer="random", seed=5,
+        runs_root=tmp_path,
+    )
+    loop = Loop("circle_packing/adaptive", config, project=tmp_path.parent)
+    loop.init()
+
+    # Manually create a candidate with edit_reports and journal it
+    candidate = Candidate.from_state(
+        result,
+        parent=loop.population[0].id,
+        edits=[edit],
+        edit_reports=[report],
+    )
+    loop._journal_candidate(candidate)
+
+    # Also journal the seed candidate so replay has at least one
+    loop._journal_candidate(loop.population[0])
+
+    # Now replay from scratch
+    config2 = LoopConfig(
+        epochs=2, batch_size=2, optimizer="random", seed=5,
+        runs_root=tmp_path, resume=True,
+    )
+    loop2 = Loop("circle_packing/adaptive", config2, project=tmp_path.parent)
+    loop2.init()
+
+    # Find the replayed candidate
+    restored = None
+    for c in loop2.population:
+        if c.id == candidate.id:
+            restored = c
+            break
+    assert restored is not None, "candidate not found after replay"
+    assert len(restored.edit_reports) == 1
+    assert restored.edit_reports[0] == report
 
 
 # ── guards and invariants ─────────────────────────────────────────────────
@@ -317,9 +393,9 @@ def test_empty_target_skipped():
     """edit with empty target is skipped, not matched universally."""
     state = _state("hello world")
     edit = _patch([{"kind": "replace", "target": "", "content": "X"}])
-    result = _apply(state, edit)
+    result, reports = _apply_with_report(state, edit)
     assert _value(result) == "hello world"
-    assert edit["_report"]["outcomes"][0]["status"] == "skipped"
+    assert reports[0]["outcomes"][0]["status"] == "skipped"
 
 
 def test_empty_protected_region_marker_refused():
@@ -332,3 +408,196 @@ def test_empty_protected_region_marker_refused():
     with pytest.raises(EditError) as exc_info:
         _apply(state, edit)
     assert exc_info.value.code == "E-patch"
+
+
+# ── SKILLOPT_PATCH_CONFIG byte-exact tests (brief fix 2) ──────────────────
+# Each test cites the SkillOpt source it reproduces.
+# Source: microsoft/SkillOpt  skillopt/optimizer/skill.py
+
+def test_skillopt_insert_after_formatting():
+    """insert_after with SKILLOPT_PATCH_CONFIG on 'a\\nb' targeting 'a' with
+    content 'X' produces 'a\\n\\nX\\nb' (blank-line separator).
+    Cites: skillopt/optimizer/skill.py insert_after logic (~L80-92).
+    """
+    state = _state("a\nb")
+    edit = _patch(
+        [{"kind": "insert_after", "target": "a", "content": "X"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result = _apply(state, edit)
+    assert _value(result) == "a\n\nX\nb"
+
+
+def test_skillopt_append_trailing_newline():
+    """append with SKILLOPT_PATCH_CONFIG produces output ending in '\\n'.
+    Cites: skillopt/optimizer/skill.py append semantics (~L70-78).
+    """
+    state = _state("hello")
+    edit = _patch(
+        [{"kind": "append", "content": "world"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result = _apply(state, edit)
+    val = _value(result)
+    assert val.endswith("\n")
+    assert val == "hello\n\nworld\n"
+
+
+def test_skillopt_append_strips_trailing_whitespace():
+    """Input 'hello   ' with append content 'X' under SKILLOPT_PATCH_CONFIG
+    first strips trailing whitespace, then appends.
+    Cites: skillopt/optimizer/skill.py append strips trailing ws (~L70).
+    """
+    state = _state("hello   ")
+    edit = _patch(
+        [{"kind": "append", "content": "X"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result = _apply(state, edit)
+    val = _value(result)
+    # The trailing whitespace is stripped before appending
+    assert val == "hello\n\nX\n"
+
+
+def test_skillopt_content_whitespace_stripped():
+    """Content '  earth  ' is stripped to 'earth' under SKILLOPT_PATCH_CONFIG.
+    Cites: skillopt/optimizer/skill.py content is whitespace-stripped (~L65).
+    """
+    state = _state("hello world")
+    edit = _patch(
+        [{"kind": "replace", "target": "world", "content": "  earth  "}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result = _apply(state, edit)
+    val = _value(result)
+    # Content should be stripped: "  earth  " → "earth"
+    assert val == "hello earth"
+    assert "  earth  " not in val
+
+
+def test_skillopt_append_before_protected_blank_line_separation():
+    """Append before a protected region under SKILLOPT_PATCH_CONFIG produces
+    blank-line separation ('\\n\\n') between content and the marker.
+    Cites: skillopt/optimizer/skill.py protected region handling.
+    """
+    text = "content\n<!-- SLOW_UPDATE -->do not touch<!-- /SLOW_UPDATE -->"
+    state = _state(text)
+    edit = _patch(
+        [{"kind": "append", "content": "NEW"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result = _apply(state, edit)
+    val = _value(result)
+    prot_idx = val.find("<!-- SLOW_UPDATE -->")
+    new_idx = val.find("NEW")
+    assert new_idx < prot_idx
+    # blank-line separation between content and protected region
+    between = val[new_idx + len("NEW"):prot_idx]
+    assert "\n\n" in between
+
+
+def test_skillopt_insert_after_empty_target_falls_back_to_append():
+    """insert_after with empty target under SKILLOPT_PATCH_CONFIG falls back
+    to append.
+    Cites: skillopt/optimizer/skill.py insert_after empty target fallback.
+    """
+    state = _state("hello")
+    edit = _patch(
+        [{"kind": "insert_after", "target": "", "content": "X"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result, reports = _apply_with_report(state, edit)
+    val = _value(result)
+    assert "X" in val
+    assert reports[0]["outcomes"][0]["status"] == "applied_append"
+
+
+def test_skillopt_unknown_edit_kind_skipped():
+    """An unknown edit kind under SKILLOPT_PATCH_CONFIG is skipped (not refused).
+    Cites: skillopt/optimizer/skill.py unknown edit kinds are silently skipped.
+    """
+    state = _state("hello")
+    edit = _patch(
+        [{"kind": "unknown_op", "target": "hello", "content": "X"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    # Should not raise
+    result, reports = _apply_with_report(state, edit)
+    assert _value(result) == "hello"  # unchanged
+    assert reports[0]["outcomes"][0]["status"] == "skipped_unknown_kind"
+
+
+def test_skillopt_status_names():
+    """Status strings in the report match SkillOpt's names when
+    SKILLOPT_PATCH_CONFIG is used.
+    Cites: skillopt/optimizer/skill.py _apply_edit_with_report status names.
+    """
+    state = _state("hello world")
+    edit = _patch(
+        [
+            {"kind": "replace", "target": "world", "content": "earth"},
+            {"kind": "append", "content": "end"},
+        ],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    _result, reports = _apply_with_report(state, edit)
+    outcomes = reports[0]["outcomes"]
+    assert outcomes[0]["status"] == "applied_replace"
+    assert outcomes[1]["status"] == "applied_append"
+
+
+def test_skillopt_default_protected_markers():
+    """SKILLOPT_PATCH_CONFIG protects SLOW_UPDATE and APPENDIX markers by default.
+    Cites: skillopt/optimizer/skill.py SLOW_UPDATE_HEADER / APPENDIX_HEADER.
+    """
+    text = "content\n<!-- SLOW_UPDATE -->secret<!-- /SLOW_UPDATE -->\nmore\n<!-- APPENDIX -->app<!-- /APPENDIX -->"
+    state = _state(text)
+    # Try to replace inside SLOW_UPDATE
+    edit = _patch(
+        [{"kind": "replace", "target": "secret", "content": "CHANGED"}],
+        config=dict(SKILLOPT_PATCH_CONFIG),
+    )
+    result, reports = _apply_with_report(state, edit)
+    assert _value(result) == text  # unchanged — protected
+    assert reports[0]["outcomes"][0]["status"] == "skipped_protected"
+
+
+# ── general defaults tests ────────────────────────────────────────────────
+
+def test_general_defaults_refuse_unknown_kind():
+    """The general default (no config) refuses an unknown edit kind with EditError."""
+    state = _state("hello")
+    edit = _patch([{"kind": "unknown_op", "target": "hello", "content": "X"}])
+    with pytest.raises(EditError) as exc_info:
+        _apply(state, edit)
+    assert exc_info.value.code == "E-patch"
+
+
+def test_general_insert_after_single_newline():
+    """The general default insert_after uses '\\n' separator (not '\\n\\n')."""
+    state = _state("a\nb")
+    edit = _patch([{"kind": "insert_after", "target": "a", "content": "X"}])
+    result = _apply(state, edit)
+    assert _value(result) == "a\nX\nb"
+
+
+# ── random optimizer exclusion (brief fix 3) ──────────────────────────────
+
+def test_seeded_random_search_draws_same_ops_as_main():
+    """With a fixed seed, random search draws exactly the same operations as
+    main (text_patch is excluded from every preset, including 'broad').
+    Fails if any preset includes text_patch.
+    """
+    import random as stdlib_random
+
+    for preset in edits.PRESETS:
+        ops = edits.enabled(preset)
+        assert "text_patch" not in ops, f"text_patch found in preset {preset!r}"
+
+    # Verify seeded random search produces deterministic results without text_patch
+    rng1 = stdlib_random.Random(42)
+    rng2 = stdlib_random.Random(42)
+    state = _state("hello world")
+    edit1 = edits.random_edit(state, preset="broad", rng=rng1)
+    edit2 = edits.random_edit(state, preset="broad", rng=rng2)
+    assert edit1 == edit2, "seeded random search is not deterministic"

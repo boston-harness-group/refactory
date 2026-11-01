@@ -2411,6 +2411,7 @@ class Loop(OuterLoop):
             id=candidate.id,
             parent=candidate.parent,
             edits=candidate.edits,
+            edit_reports=candidate.edit_reports,
             state=candidate.state,
         )
 
@@ -2448,6 +2449,7 @@ class Loop(OuterLoop):
                     record["state"],
                     parent=record.get("parent"),
                     edits=record.get("edits") or (),
+                    edit_reports=record.get("edit_reports") or (),
                 )
                 if candidate.id not in by_id:
                     by_id[candidate.id] = candidate
@@ -2511,14 +2513,8 @@ class Loop(OuterLoop):
                 # resurrect a branch the person had already dismissed.
                 self._replay_control(record)
             elif event == "strategy_state":
-                # New format: state nested under "state" key.
-                # Old format (attempt 1): state keys spread as top-level record keys.
                 if "state" in record:
                     self.load_strategy_state(record["state"])
-                else:
-                    self.load_strategy_state(
-                        {k: v for k, v in record.items() if k != "event"}
-                    )
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")

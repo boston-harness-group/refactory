@@ -176,7 +176,11 @@ def test_custom_strategy_honours_stop_via_check_control(tmp_path):
 
 
 def test_custom_strategy_honours_pause_via_check_control(tmp_path):
-    """run.check_control() blocks during pause, resumes when released."""
+    """run.check_control() blocks during pause and has NOT returned before
+    the release.  The test sets an Event just before check_control returns
+    and asserts it is NOT set while the pause is active — proving the pause
+    actually blocks.
+    """
     control = Control(tmp_path)
     control.request("pause")
 
@@ -184,25 +188,27 @@ def test_custom_strategy_honours_pause_via_check_control(tmp_path):
     loop.init()
     run = Run(loop=loop)
 
-    resumed = threading.Event()
-
-    def release() -> None:
-        time.sleep(0.15)
-        control.request("resume")
+    check_returned = threading.Event()
 
     def check() -> None:
         result = run.check_control()
-        resumed.set()
+        check_returned.set()
         assert result is None
 
-    thread_release = threading.Thread(target=release, daemon=True)
     thread_check = threading.Thread(target=check, daemon=True)
     thread_check.start()
-    thread_release.start()
-    resumed.wait(timeout=5)
+
+    # Wait enough time for check_control to have returned if it were not blocking.
+    time.sleep(0.3)
+    assert not check_returned.is_set(), (
+        "check_control returned before resume — the pause did not block"
+    )
+
+    # Now release the pause
+    control.request("resume")
+    check_returned.wait(timeout=5)
     thread_check.join(timeout=5)
-    thread_release.join(timeout=5)
-    assert resumed.is_set(), "check_control did not return after resume"
+    assert check_returned.is_set(), "check_control did not return after resume"
 
 
 def test_check_control_one_shot_not_repeated(tmp_path):
@@ -227,3 +233,26 @@ def test_check_control_one_shot_not_repeated(tmp_path):
     # Second call should see nothing
     result2 = run.check_control()
     assert result2 is None
+
+
+def test_old_format_replay_branch_removed(tmp_path):
+    """A journal line with the old format (no 'state' key — strategy keys spread
+    as top-level record keys) is silently ignored during replay; the strategy
+    state remains {}.  Proves the old-format branch was removed.
+    """
+    # First run to get a valid journal with at least one candidate
+    loop1 = Loop(MODE, _config(tmp_path, epochs=1), project=Path("."))
+    loop1.run()
+
+    # Append an old-format strategy_state line (no "state" wrapper)
+    journal_path = tmp_path / "journal.jsonl"
+    old_format_line = json.dumps({"event": "strategy_state", "temperature": 0.5})
+    with journal_path.open("a") as f:
+        f.write(old_format_line + "\n")
+
+    # Replay: the old-format line should be ignored; strategy state stays {}
+    loop2 = Loop(MODE, _config(tmp_path, resume=True, epochs=2), project=Path("."))
+    loop2.init()
+    assert loop2._strategy_state == {}, (
+        "old-format strategy_state was honoured; the branch should have been removed"
+    )

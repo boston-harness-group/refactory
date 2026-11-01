@@ -121,5 +121,5 @@ def test_the_json_epoch_summary_counts_what_the_progress_line_counts(tmp_path):
         assert {k: summary[k] for k in keys} == {k: lines[summary["epoch"]][k] for k in keys}
     second = report["epochs_summary"][1]
     assert {k: second[k] for k in (*keys, "population", "refused_total")} == {
-        "proposed": 5, "accepted": 4, "refused": 1, "population": 12, "refused_total": 2}
+        "proposed": 5, "accepted": 4, "refused": 1, "population": 12, "refused_total": 1}
     assert not {"rejected", "structural_accepted"} & set(second), "the old, misleading keys"

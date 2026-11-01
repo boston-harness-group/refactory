@@ -283,9 +283,10 @@ class OuterLoop:
     def load_strategy_state(self, state: dict[str, Any]) -> None:
         """Restore strategy state from a journaled dict.
 
-        Called during replay, after the population is restored. Override to
-        restore instance variables from the dict. The default stores it in
-        ``_strategy_state``.
+        Called during the journal walk (replay), each time a
+        ``strategy_state`` event is encountered.  The last such event wins.
+        Override to restore instance variables from the dict. The default
+        stores it in ``_strategy_state``.
         """
         self._strategy_state = dict(state)
 
