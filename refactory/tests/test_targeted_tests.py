@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -194,3 +197,82 @@ def test_failed_reruns_only_the_last_failures_and_falls_back_without_a_record(tm
     assert _command(place, "--failed").returncode == 0
     after = json.loads(_command(place, "--failed", "--list").stdout)
     assert after["rerun_failed"] is False and "tests/test_second.py" in after["selection"]
+
+
+SLOW = "tests/test_zslow.py"
+
+
+def _start(place: workspace.Workspace) -> subprocess.Popen:
+    """The plain command, in its own process group so a kill takes everything it started."""
+    return subprocess.Popen(["refactory-targeted-tests"], cwd=place.path, env=_agent_env(place),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
+
+
+def _kill_when(proc: subprocess.Popen, ready) -> str:
+    """Wait until ``ready()``, then kill the command and what it started; what it had printed."""
+    try:
+        deadline = time.monotonic() + 300
+        while not ready():
+            assert proc.poll() is None and time.monotonic() < deadline, "the run never got there"
+            time.sleep(0.2)
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+    out, _ = proc.communicate(timeout=60)
+    return out
+
+
+def _slow_workspace(tmp_path: Path) -> workspace.Workspace:
+    """A change that fails ``test_pin`` and then reaches a test that never finishes: the shape
+    of a run the builder's own ``timeout`` kills."""
+    files = {**PINNED, SLOW: "import time\nimport tool\n\n\ndef test_slow():\n    time.sleep(300)\n"}
+    run, _, _ = _run_with_worktree(tmp_path, files)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    return place
+
+
+def test_an_interrupted_run_leaves_the_failures_it_found_and_failed_reruns_only_those(tmp_path):
+    """The builder's own ``timeout`` killed runs of this command before they finished, and a
+    failure was recorded only when a run finished, so ``--failed`` found nothing, ran the full
+    selection, and was killed too. Each failing test is recorded as it fails: a killed run
+    leaves its failures, ``--failed`` reruns only those and says the last run did not finish."""
+    place = _slow_workspace(tmp_path)
+    stream = place.root / targeted_tests.FAILURES
+    out = _kill_when(_start(place), lambda: stream.exists() and stream.read_text().strip())
+    assert "PASSED" not in out and "FAILED (exit" not in out
+    listed = json.loads(_command(place, "--failed", "--list").stdout)
+    assert listed["selection"] == [f"{PIN}::test_pin"] and listed["rerun_failed"] is True
+    # The next run says why it reruns so few, and runs only the failure (the slow test is not run).
+    again = _command(place, "--failed")
+    assert "the last run here did not finish" in again.stdout, again.stdout
+    assert "1 test(s) had failed by then, and only those are rerun" in again.stdout
+    assert f"{PIN}::test_pin" in again.stdout and SLOW not in again.stdout.split("running:")[1]
+    assert again.returncode != 0 and "FAILED (exit" in again.stdout
+
+
+def test_a_run_killed_before_any_failure_leaves_nothing_and_failed_runs_the_full_selection(tmp_path):
+    place = _slow_workspace(tmp_path)
+    (place.path / PIN).write_text("import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n")
+    last = place.root / targeted_tests.LAST_RUN
+    _kill_when(_start(place), lambda: last.exists() and json.loads(last.read_text())["finished"] is False)
+    listed = json.loads(_command(place, "--failed", "--list").stdout)
+    assert listed["rerun_failed"] is False and SLOW in listed["selection"]
+
+
+def test_the_command_prints_the_selection_size_and_the_last_time_before_it_runs(tmp_path):
+    run, _, _ = _run_with_worktree(tmp_path, PINNED)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    first = _command(place).stdout
+    plan = "this run: 1 test file(s), 0 test id(s) named; no earlier run here has been timed."
+    assert plan in first and first.index(plan) < first.index("running:")
+    (place.path / PIN).write_text("import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n")
+    second = _command(place).stdout
+    assert re.search(r"this run: 1 test file\(s\), 0 test id\(s\) named; the last finished run "
+                     r"here took about \d+ s\.", second), second
+    assert second.index("the last finished run") < second.index("running:")
+    # A longer run is told in minutes, and an id counts as an id in its file.
+    assert targeted_tests._took(330) == "the last finished run here took about 6 min"
+    assert targeted_tests._size([f"{PIN}::test_pin", "tests/test_other.py"]) == (
+        "2 test file(s), 1 test id(s) named")

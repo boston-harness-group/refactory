@@ -714,6 +714,8 @@ def test_the_builder_is_told_to_run_the_self_checks_tests_on_each_runtime(runs, 
         assert "none yet" not in prompt and "Your targeted test command" not in prompt
         assert "Do not run the whole test suite: the full check runs after you finish" in prompt
         assert "5m" not in prompt and "{{builder_tests}}" not in prompt
+        assert "Do not wrap `refactory-targeted-tests` in `timeout`." in prompt
+        assert "twice the time stated" not in prompt
 
 
 @pytest.mark.parametrize("runtime", ["walker", "card", "resumed"])
