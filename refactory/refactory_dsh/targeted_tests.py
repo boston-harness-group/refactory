@@ -13,14 +13,20 @@ those failures in the session it is in. It is put on the PATH of a clone workspa
 3. It runs that selection with the check command's own options kept (`-n 4` and so on),
    as `design_ops.targeted_command` builds it, and prints what it selected and the result.
 
-With ``--failed`` it reruns only the tests that failed in its last run in this workspace
-(recorded in ``LAST_RUN``, from the run's own ``FAILED``/``ERROR`` lines), so a builder can
-iterate on a failure without rerunning what passed; with no record it runs the full
-selection. The builder runs the plain command once before it stops.
+With ``--failed`` it reruns only the tests that failed in its last run in this workspace,
+so a builder can iterate on a failure without rerunning what passed. A failure is recorded
+the moment it happens (``FAILURES``: a small pytest plugin appends each failing id as the
+test fails, and the output's ``FAILED``/``ERROR`` lines are appended as they stream), so a
+run that is killed before it finishes still leaves a record: ``--failed`` then reruns what
+failed so far and says the last run did not finish. It runs the full selection only when
+nothing at all was recorded. Before it runs, it prints the size of the selection and how long
+the last finished run took, when that is known. The builder runs the plain command once
+before it stops.
 
 It runs the whole selection in one command. The self-check cuts the selection into chunks
 only to bound its time, so a builder may run more than the self-check reaches, never less.
-It sets no limit of its own.
+It sets no limit of its own, and a builder must not add one: the workspace already bounds
+every command.
 
 The command's inputs are what the run knew when the dispatch began, written to the node's
 workspace root (`CONTEXT`): the check command, the last check's record and the earlier
@@ -33,8 +39,10 @@ import argparse
 import json
 import re
 import shlex
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +53,50 @@ COMMAND = "refactory-targeted-tests"
 BIN = "bin"
 CONTEXT = "targeted-tests.json"
 
-#: What the last run in this workspace failed on, next to `CONTEXT`.
+#: What the last run in this workspace failed on, next to `CONTEXT`: ``finished``, the
+#: ``failed`` ids and the ``seconds`` the last finished run took. Written when a run starts
+#: (unfinished) and again when it ends.
 LAST_RUN = "targeted-tests-last.json"
+
+#: The failing ids of the run in progress, one per line, appended as each test fails, so a
+#: killed run leaves them. Next to `CONTEXT`.
+FAILURES = "targeted-tests-failures.txt"
+
+#: Where the pytest plugin is written (under the node's workspace root), and its module name.
+PLUGINS = "plugins"
+PLUGIN = "refactory_failure_log"
+FAILURE_LOG_ENV = "REFACTORY_FAILURE_LOG"
+
+#: The pytest plugin: it appends each failing test's id to the file named by
+#: ``REFACTORY_FAILURE_LOG`` as the test fails. The process that owns the log takes the
+#: variable out of the environment, so a pytest run by a test, or an xdist worker, never writes
+#: to it. xdist reports every worker's result to the controller, which is the one that writes.
+_PLUGIN_SOURCE = '''"""Written by refactory (targeted_tests.py): record each failing test as it fails."""
+import os
+
+_log = None
+
+
+def pytest_configure(config):
+    global _log
+    if not os.environ.get("PYTEST_XDIST_WORKER"):
+        _log = os.environ.pop("REFACTORY_FAILURE_LOG", None)
+
+
+def _record(report):
+    if _log and report.failed:
+        with open(_log, "a") as handle:
+            handle.write(report.nodeid + "\\n")
+            handle.flush()
+
+
+def pytest_runtest_logreport(report):
+    _record(report)
+
+
+def pytest_collectreport(report):
+    _record(report)
+'''
 
 #: A failing test as pytest's short summary names it: ``FAILED tests/x.py::test_y - why``.
 _FAILED = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.MULTILINE)
@@ -86,6 +136,8 @@ def install(workdir: Path, root: Path, prepared: dict[str, Any], facts: dict[str
         f"PYTHONDONTWRITEBYTECODE=1 exec {shlex.quote(sys.executable)} -I -m "
         f"refactory_dsh.targeted_tests {shlex.quote(str(root / CONTEXT))} \"$@\"\n")
     script.chmod(0o755)
+    (root / PLUGINS).mkdir(parents=True, exist_ok=True)
+    (root / PLUGINS / f"{PLUGIN}.py").write_text(_PLUGIN_SOURCE)
     env = prepared.setdefault("env", {})
     ambient = env.get("PATH") or ""
     env["PATH"] = f"{directory}:{ambient}" if ambient else str(directory)
@@ -119,8 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         prog=COMMAND, description="Run the tests the self-check will run for your change.")
     parser.add_argument("context", help="the node's workspace inputs (written by refactory)")
     parser.add_argument("--failed", action="store_true",
-                        help="rerun only the tests that failed in the last run here "
-                             "(the full selection when none is recorded)")
+                        help="rerun only the tests that failed in the last run here, "
+                             "finished or not (the full selection when none is recorded)")
     parser.add_argument("--list", action="store_true",
                         help="print the selection and the command as JSON; run nothing")
     args = parser.parse_args(argv)
@@ -135,7 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(context["path"])
     record = Path(args.context).with_name(LAST_RUN)
     tests = list(chosen.tests)
-    rerun = _last_failures(record) if args.failed else []
+    last = _last_run(record)
+    rerun = last["failed"] if args.failed else []
     if rerun:
         tests = rerun
     line, refusal = (design_ops.targeted_command(check, tests, root) if tests else ("", None))
@@ -143,12 +196,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"touched": touched, "selection": tests, "command": line,
                           "refusal": refusal, "rerun_failed": bool(rerun)}))
         return 0
-    if args.failed and not rerun:
+    if args.failed and last["finished"] is False:
+        print(f"{COMMAND}: the last run here did not finish (it was stopped or timed out); "
+              + (f"{len(rerun)} test(s) had failed by then, and only those are rerun."
+                 if rerun else "no failure had been recorded, so the full selection runs."))
+    elif args.failed and not rerun:
         print(f"{COMMAND}: no failures are recorded from a last run here; running the full "
               "selection.")
     print(f"{COMMAND}: {len(touched)} changed file(s) in your workspace; the self-check will "
           f"run {len(chosen.tests)} test file(s) or id(s) for them"
           + (f"; rerunning the {len(rerun)} that failed last time:" if rerun else ":"))
+    print(f"{COMMAND}: this run: {_size(tests)}; {_took(last['seconds'])}.", flush=True)
     for name in tests[:40]:
         print(f"  {name}")
     if len(tests) > 40:
@@ -161,8 +219,11 @@ def main(argv: list[str] | None = None) -> int:
               "runs after you finish.")
         return 2
     print(f"{COMMAND}: running: {line}", flush=True)
-    code, failed = _run_and_collect(line, root)
-    _remember(record, failed)
+    stream = record.with_name(FAILURES)
+    _begin(record, stream, last["seconds"])
+    started = time.monotonic()
+    code, failed = _run_and_collect(line, root, stream, record.with_name(PLUGINS))
+    _remember(record, failed, time.monotonic() - started)
     if code:
         print(f"{COMMAND}: FAILED (exit {code}): these are what the self-check would send you "
               "back for. Fix them and run this again.", flush=True)
@@ -172,32 +233,107 @@ def main(argv: list[str] | None = None) -> int:
     return code
 
 
-def _run_and_collect(line: str, root: Path) -> tuple[int, list[str]]:
+def _size(tests: list[str]) -> str:
+    """How much a run covers: its test files, and the ids named inside them."""
+    files = {name.split("::")[0].split(" > ")[0] for name in tests}
+    ids = sum(1 for name in tests if "::" in name or " > " in name)
+    return f"{len(files)} test file(s), {ids} test id(s) named"
+
+
+def _took(seconds: Any) -> str:
+    """What the last finished run took, as the builder should plan around it."""
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return "no earlier run here has been timed"
+    if seconds < 90:
+        return f"the last finished run here took about {max(1, round(seconds))} s"
+    return f"the last finished run here took about {round(seconds / 60)} min"
+
+
+def _run_and_collect(line: str, root: Path, stream: Path,
+                     plugins: Path) -> tuple[int, list[str]]:
     """Run ``line`` with its output passed through as it arrives; the exit code, and the
-    tests it reported failing."""
-    proc = subprocess.Popen(line, shell=True, cwd=root, stdout=subprocess.PIPE,
+    tests it reported failing.
+
+    Each failing test is appended to ``stream`` as it fails: by the pytest plugin the run
+    loads, and, for what the plugin does not see, by the output's own ``FAILED``/``ERROR``
+    lines as they arrive. A run that is killed leaves what it had found.
+    """
+    # A command run from inside another pytest worker is not itself an xdist worker.
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith(("PYTEST_XDIST_", "PYTEST_CURRENT_TEST"))}
+    env[FAILURE_LOG_ENV] = str(stream)
+    if (plugins / f"{PLUGIN}.py").is_file():
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(plugins), env.get("PYTHONPATH")]))
+        env["PYTEST_ADDOPTS"] = " ".join(filter(None, [f"-p {PLUGIN}", env.get("PYTEST_ADDOPTS")]))
+    proc = subprocess.Popen(line, shell=True, cwd=root, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, errors="replace")
     seen: list[str] = []
     assert proc.stdout is not None
     for text in proc.stdout:
         print(text, end="", flush=True)
         seen.append(text)
+        found = _FAILED.findall(text)
+        if found:
+            known = set(_read(stream))
+            _append(stream, [name for name in dict.fromkeys(found) if name not in known])
     code = proc.wait()
-    return code, list(dict.fromkeys(_FAILED.findall("".join(seen))))
+    return code, list(dict.fromkeys([*_read(stream), *_FAILED.findall("".join(seen))]))
 
 
-def _remember(path: Path, failed: list[str]) -> None:
-    """Record what the last run failed on (empty when it passed)."""
+def _append(path: Path, names: list[str]) -> None:
+    if not names:
+        return
     try:
-        path.write_text(json.dumps({"failed": failed}))
+        with path.open("a") as handle:
+            handle.write("".join(f"{name}\n" for name in names))
     except OSError:
         pass
 
 
-def _last_failures(path: Path) -> list[str]:
-    """The tests the last run failed on; empty when there is no record or it passed."""
-    failed = _json(path).get("failed")
-    return [str(name) for name in failed] if isinstance(failed, list) else []
+def _read(path: Path) -> list[str]:
+    """The ids recorded so far in a run's stream, once each, in the order they failed."""
+    try:
+        return list(dict.fromkeys(line for line in path.read_text().splitlines() if line))
+    except OSError:
+        return []
+
+
+def _begin(record: Path, stream: Path, seconds: Any) -> None:
+    """Mark a run as started and unfinished; it is marked finished only when it ends.
+
+    The last finished run's time is kept, so a run that is then killed still leaves it.
+    """
+    try:
+        stream.write_text("")
+        record.write_text(json.dumps({"finished": False, "failed": [], "seconds": seconds}))
+    except OSError:
+        pass
+
+
+def _remember(path: Path, failed: list[str], seconds: float) -> None:
+    """Record what the run failed on (empty when it passed), and how long it took."""
+    try:
+        path.write_text(json.dumps({"finished": True, "failed": failed, "seconds": seconds}))
+    except OSError:
+        pass
+
+
+def _last_run(path: Path) -> dict[str, Any]:
+    """What the last run here left: ``finished`` (``None`` when nothing is recorded), the
+    ``failed`` ids and the ``seconds`` of the last finished run.
+
+    A finished run's ids are in its record; an unfinished run's are whatever its stream
+    holds, which is what it had found when it stopped.
+    """
+    data = _json(path)
+    seconds = data.get("seconds")
+    if not data:
+        return {"finished": None, "failed": [], "seconds": None}
+    if data.get("finished") is False:
+        return {"finished": False, "failed": _read(path.with_name(FAILURES)), "seconds": seconds}
+    failed = data.get("failed")
+    return {"finished": True, "seconds": seconds,
+            "failed": [str(name) for name in failed] if isinstance(failed, list) else []}
 
 
 def _json(path: Path) -> dict[str, Any]:

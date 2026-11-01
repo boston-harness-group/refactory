@@ -396,13 +396,19 @@ def test_the_workspace_builder_runs_the_tests_its_change_touches_not_the_full_su
                       "{{builder_tests}}"),
                      ("Do not run the whole test suite: the full check runs after you finish, "
                       "beside the reviews."),
-                     ("If you wrap a command in `timeout`, give it about twice the time stated "
-                      "above")):
+                     "Do not wrap `refactory-targeted-tests` in `timeout`. Each command is "
+                     "already bounded by the workspace's 10-minute per-command cap",
+                     "If you wrap another command that might hang in `timeout`, give it about "
+                     "twice the time it needs"):
             assert line in emit, (key, line)
         # The only mention of the whole suite is the one telling the builder not to run it,
-        # and no fixed timeout is suggested: the time stated above is the guide.
+        # and no timeout is suggested for the targeted command.
         assert emit.count("whole test suite") == 1, key
         assert "full suite" not in emit and "5m" not in emit and "timeout -k" not in emit, key
+        # `timeout` is named only to forbid it on the targeted command and to bound other
+        # commands by what they need: the builder is never told to choose one for this command.
+        assert "twice the time stated" not in emit, key
+        assert emit.count("`timeout`") == 2, key
         assert "check command runs there" not in emit, key
     assert "revert that change in the workspace and run the same test again: it must fail" in (
         EMIT_CHECKLIST)

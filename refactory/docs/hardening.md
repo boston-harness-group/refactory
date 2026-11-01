@@ -62,7 +62,13 @@ both runtimes have it) reads the workspace's current diff as materialise will co
 selects with the self-check's own function (`design_ops.self_check_selection`), runs that
 selection with the check's options kept, and prints what it selected and the result; so the
 failures the self-check would send the builder back for, to a new cold session, are found in
-the session it is in. It sets no limit of its own. Materialise,
+the session it is in. It sets no limit of its own, and the briefing tells the builder not to
+wrap it in `timeout` (a graph-wide change selects about five minutes of tests, and in run
+streak-B a builder's `timeout 300` killed it about ten times). It records each failing test
+as it fails (a pytest plugin it puts on the run, plus the output's own `FAILED`/`ERROR` lines),
+so a killed run still leaves a record: `--failed` reruns what failed so far and says the last
+run did not finish, and runs the full selection only when nothing was recorded. Before it runs
+it prints the size of the selection and how long the last finished run took. Materialise,
 the check, the reviews and the target guard read the derived `emit.txt` as they read
 an emitted one. create, edit and fast-create keep the emission-only builder.
 
