@@ -21,6 +21,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
 import time
 import traceback as traceback_mod
 from dataclasses import dataclass, field
@@ -92,6 +93,22 @@ def _ensure_forkserver_preload(graph: Graph) -> None:
     if not modules.issubset(_forkserver_modules):
         _forkserver_modules = _forkserver_modules | modules
         _forkserver_ctx.set_forkserver_preload(sorted(_forkserver_modules))
+
+
+class _BranchFailed(Exception):
+    """A branch error string wrapped so it flows through the per-item try/except."""
+
+
+class _ItemDeadlineError(Exception):
+    """An item's lifecycle (setup + branch + verify) exceeded its deadline."""
+
+    def __init__(self, node_id: str, item_id: str, deadline_s: float):
+        self.node_id = node_id
+        self.item_id = item_id
+        self.deadline_s = deadline_s
+        super().__init__(
+            f"item '{item_id}' of '{node_id}' timed out after {deadline_s:.1f}s"
+        )
 
 
 class ExecutionError(RuntimeError):
@@ -422,6 +439,8 @@ def declared_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
 
             with source.open(newline="") as handle:
                 items = [dict(row) for row in csv.DictReader(handle)]
+            for csv_index, csv_item in enumerate(items):
+                csv_item.setdefault("id", str(csv_index))
         elif source_format == "directory":
             items = []
             for child in sorted(source.iterdir()):
@@ -770,6 +789,9 @@ class Executor:
         visits = self._gate_iterations
         current: str | None = start or self.graph.start or None
         error: str | None = None
+        # Track step indices that belong to failed items so the post-walk
+        # error check can skip them.
+        _failed_item_step_indices: set[int] = set()
         try:
             retries = loop_edges(self.graph)
         except ValueError as exc:
@@ -825,50 +847,186 @@ class Executor:
                     # none, and judges each pass. Loading it is what makes `task_ref` a
                     # binding rather than a line in a prompt.
                     from refactory_dsh.task import instance_of, load_task
+                    from refactory_dsh.items import make_item_record
 
                     task = load_task(node.task_ref, self.ctx.workdir) if node.task_ref else None
                 except Exception as exc:
                     error = f"{node.id}: {type(exc).__name__}: {exc}"
                     break
-                scores: list[dict[str, Any]] = []
-                for item in items:
-                    instance = instance_of(item)
-                    if task is not None:
-                        task.setup(instance, self.ctx.workdir)
-                    # The item is written as the data node, so the declaration that
-                    # governs it is the data node's — not the last node of the pass
-                    # before it.
-                    self.ctx.node_id = node.id
-                    self.ctx._declared = node.writes  # noqa: SLF001
-                    self.ctx._declared_reads = node.reads  # noqa: SLF001
-                    self.ctx._declared_facts = node.produces  # noqa: SLF001
-                    self.ctx._produced = set()  # noqa: SLF001
-                    self.ctx.write_json(CURRENT_ITEM, item)
+
+                from refactory_dsh.budgets import BudgetExhausted
+                _PASSTHROUGH = (BudgetExhausted, KeyboardInterrupt, SystemExit)
+
+                # Per-item command deadline: the same wall the spine's
+                # runDataCommand applies (execute.ts:268-278). Derived from
+                # the budget's remaining time, defaulting to 3600 s.
+                _item_deadline_s = self._data_item_deadline()
+
+                # Ask 4: SIGALRM can only be armed on the main thread.
+                # Off the main thread, skip arming and emit a run_warning
+                # event so the unarmed deadline is recorded in the run's
+                # events (the same channel the spine uses for warnings).
+                _on_main_thread = threading.current_thread() is threading.main_thread()
+                if _item_deadline_s is not None and not _on_main_thread:
+                    _item_deadline_s = None  # disable deadline
                     try:
+                        from refactory_dsh import live
+                        live.emit(
+                            self.ctx.workdir, "run_warning",
+                            node_id=node.id, state="warning",
+                            summary=(
+                                "per-item deadline is not armed because the "
+                                "executor is not on the main thread"
+                            ),
+                        )
+                    except Exception:
+                        pass  # best-effort warning
+
+                # Scale step cap for data nodes: save the initial step count
+                # and the original max_steps so we can account for the kept
+                # history after the loop. Scale max_steps by item count so
+                # large benchmarks don't hit the global cap.
+                _data_steps_start = len(self.steps)
+                _subgraph_node_count = len([
+                    n for n in self.graph.nodes.values()
+                    if n.id != node.id
+                ]) or 1
+                _original_max_steps = self.max_steps
+                self.max_steps += (len(items) - 1) * _subgraph_node_count
+
+                scores: list[dict[str, Any]] = []
+                _data_halted = False
+                for index, item in enumerate(items):
+                    _item_steps_start = len(self.steps)
+
+                    instance = instance_of(item)
+                    item_id = str(item.get("id") or index)
+                    _alarm_armed = False
+                    _prev_handler = None
+                    _prev_alarm = 0
+                    try:
+                        # Phase 1: arm deadline around setup + item loading only.
+                        if _item_deadline_s is not None:
+                            def _deadline_handler(signum: int, frame: Any) -> None:
+                                raise _ItemDeadlineError(node.id, item_id, _item_deadline_s)  # type: ignore[arg-type]
+                            _prev_handler = signal.signal(signal.SIGALRM, _deadline_handler)
+                            _prev_alarm = signal.alarm(int(max(1, _item_deadline_s)))
+                            _alarm_armed = True
+
+                        if task is not None:
+                            task.setup(instance, self.ctx.workdir)
+                        # The item is written as the data node, so the declaration that
+                        # governs it is the data node's — not the last node of the pass
+                        # before it.
+                        self.ctx.node_id = node.id
+                        self.ctx._declared = node.writes  # noqa: SLF001
+                        self.ctx._declared_reads = node.reads  # noqa: SLF001
+                        self.ctx._declared_facts = node.produces  # noqa: SLF001
+                        self.ctx._produced = set()  # noqa: SLF001
+                        self.ctx.write_json(CURRENT_ITEM, item)
+
+                        # Disarm deadline before walking the branch.
+                        if _alarm_armed:
+                            signal.alarm(0)
+                            _alarm_armed = False
+
+                        # Phase 2: walk the branch (no deadline active).
                         branch_error = self._walk_branch(
                             node.subgraph_entry, node.subgraph_exit, include_barrier=True, iterations={}
                         )
-                    except GateStop as exc:
-                        branch_error = str(exc)
-                        self._record(node.id, error=branch_error, outcome="refused")
+                        if branch_error is not None:
+                            raise _BranchFailed(branch_error)
+
+                        # Phase 3: arm deadline around verify only.
+                        if _item_deadline_s is not None:
+                            signal.signal(signal.SIGALRM, _deadline_handler)
+                            signal.alarm(int(max(1, _item_deadline_s)))
+                            _alarm_armed = True
+
+                        if task is not None:
+                            verdict = task.verify(instance, self.ctx.workdir)
+                        else:
+                            verdict = None
+                    except _PASSTHROUGH:
+                        raise
                     except HaltStop as exc:
-                        branch_error = str(exc)
-                        self._record(node.id, error=branch_error, outcome="halted")
-                    if branch_error is not None:
-                        error = branch_error
+                        # Terminal halt ends the data node.
+                        error = str(exc)
+                        self._record(node.id, error=error, outcome="halted")
+                        _data_halted = True
                         break
-                    if task is not None:
-                        verdict = task.verify(instance, self.ctx.workdir)
-                        if verdict is not None:
-                            scores.append({
-                                "id": instance.id,
-                                "passed": verdict.passed,
-                                "score": verdict.score,
-                            })
-                if error is not None:
+                    except GateStop as exc:
+                        # A user gate in a data pass must pause the run
+                        # (re-raise like a halt), not become a failed item.
+                        self._record(node.id, error=str(exc), outcome="refused")
+                        error = str(exc)
+                        _data_halted = True  # break out of both loops
+                        break
+                    except _ItemDeadlineError as exc:
+                        # Deadline exceeded: record as timeout, not retryable.
+                        record = make_item_record(item_id, None, error=exc)
+                        if record is not None:
+                            record["error_kind"] = "timeout"
+                            scores.append(record)
+                        _failed_item_step_indices.update(
+                            range(_item_steps_start, len(self.steps))
+                        )
+                        continue
+                    except _BranchFailed as exc:
+                        # Wrap in RuntimeError so error_kind matches the
+                        # spine's "RuntimeError" for subgraph failures.
+                        record = make_item_record(
+                            item_id, None, error=RuntimeError(str(exc))
+                        )
+                        if record is not None:
+                            scores.append(record)
+                        _failed_item_step_indices.update(
+                            range(_item_steps_start, len(self.steps))
+                        )
+                        continue
+                    except Exception as exc:
+                        record = make_item_record(item_id, None, error=exc)
+                        if record is not None:
+                            scores.append(record)
+                        _failed_item_step_indices.update(
+                            range(_item_steps_start, len(self.steps))
+                        )
+                        continue
+                    else:
+                        record = make_item_record(item_id, verdict)
+                        if record is not None:
+                            scores.append(record)
+                    finally:
+                        # Disarm the per-item deadline and restore the
+                        # previous handler/alarm.  The guard is on
+                        # _prev_handler (captured when arming), NOT on
+                        # _alarm_armed, so restoration happens even when the
+                        # alarm was disarmed before the branch walk (Ask 4).
+                        if _alarm_armed:
+                            signal.alarm(0)
+                        if _prev_handler is not None:
+                            signal.signal(signal.SIGALRM, _prev_handler)
+                        if _prev_alarm > 0:
+                            signal.alarm(_prev_alarm)
+
+                # Restore max_steps, offset by the steps the data loop added
+                # so the main walk loop's cap accounts for the kept history.
+                _data_steps_added = len(self.steps) - _data_steps_start
+                self.max_steps = _original_max_steps + _data_steps_added
+
+                if _data_halted:
                     break
-                if scores and "item_scores" in node.produces:
-                    self.ctx.set_fact("item_scores", scores)
+                # All-items-failed rule: the data node fails only when every
+                # item fails. Count against total items, not records.
+                if scores:
+                    failed_count = sum(
+                        1 for r in scores if r.get("error_text") is not None
+                    )
+                    if "item_scores" in node.produces:
+                        self.ctx.set_fact("item_scores", scores)
+                    if failed_count == len(items):
+                        error = f"{node.id}: all {len(items)} items failed"
+                        break
                 self.record.complete(node)
                 out = self.graph.out_edges(node.id)
                 current = out[0].target if out else None
@@ -928,8 +1086,8 @@ class Executor:
                 self._record(current)
 
         if error is None:
-            for step in self.steps:
-                if step.error:
+            for step_idx, step in enumerate(self.steps):
+                if step.error and step_idx not in _failed_item_step_indices:
                     error = step.error
                     break
         if error is None and self.ctx.budget is not None:
@@ -1156,6 +1314,22 @@ class Executor:
                     raw = min(raw, remaining)
             return max(1.0, float(raw))
         return None
+
+    def _data_item_deadline(self) -> float | None:
+        """Per-item command deadline for data nodes, matching the spine.
+
+        The spine's ``runDataCommand`` (execute.ts:268-278) resolves the shell's
+        ``timeoutMs`` and clamps it to the remaining budget.  The walker applies
+        the same deadline to each item's setup and verify phases (not the
+        branch).  The deadline is derived from the budget's remaining time
+        with a 3600 s default, matching the spine's ``commandTimeoutMs``
+        default.  It does not depend on ``enable_recovery``.
+        """
+        raw = 3600.0
+        remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
+        if remaining is not None:
+            raw = min(raw, remaining)
+        return max(1.0, float(raw))
 
     # ── child-process-based op timeout ─────────────────────────────────────
     def _run_op_timed(self, callable_target: str, node: Node, timeout: float) -> Any:

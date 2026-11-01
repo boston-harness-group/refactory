@@ -227,7 +227,12 @@ def test_gate_stop_in_fork_branch(tmp_path):
 
 
 def test_gate_stop_in_data_pass(tmp_path):
-    """GateStop in a data pass records refused, not an error."""
+    """GateStop in a data pass pauses the run (re-raises), not a failed item.
+
+    A user gate inside a data pass must still pause the run, matching the
+    walker's behavior outside a data pass. The gate stop propagates up to the
+    main walk loop, which records 'refused' and sets gate_stop.
+    """
     graph = Graph()
     graph.add(Node("data", "data", subgraph_entry="inner_gate", subgraph_exit="inner_gate",
                     inline_items=[{"id": "item1"}],
@@ -240,8 +245,10 @@ def test_gate_stop_in_data_pass(tmp_path):
     from refactory_dsh.nn.executor import execute
     result = execute(graph, tmp_path / "run")
     assert result.exit_ok is False
-    # The error should mention the gate, not be an uncaught exception.
-    assert "inner_gate" in (result.error or "")
+    assert result.gate_stop == "inner_gate"
+    # No failed-item record in scores (not a failed item, a gate pause).
+    scores = result.facts.get("item_scores", [])
+    assert not any(s.get("passed") is False for s in scores)
 
 
 def test_second_walker_run_refused_while_first_holds_lock(tmp_path):

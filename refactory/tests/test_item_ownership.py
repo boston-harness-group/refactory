@@ -379,3 +379,42 @@ def test_normal_loop_unchanged(tmp_path):
     # The expected ids method works and returns a non-empty set
     assert expected_ids, "expected ids should not be empty for dataset_probe"
     assert seed_declares, "dataset_probe declares item_scores"
+
+
+@pytest.mark.parametrize("evaluator_name", ["walker", "dsh"])
+def test_post_trial_accepts_present_failed_item(tmp_path, evaluator_name):
+    """A failed item that is present in item_scores (with error_text) is accepted.
+
+    F4: a failed item scores 0, keeps its error, and is present in the graded set.
+    F3's post-trial check sees it as graded (it has an id), so no missing-id refusal.
+    """
+    expected = _expected_item_ids_for_mode(tmp_path)
+    assert expected, "test requires at least one expected item"
+
+    scores = []
+    for i, eid in enumerate(sorted(expected)):
+        if i == 0:
+            # First item is a failed item with error_text
+            scores.append({
+                "id": eid, "passed": False, "score": 0.0,
+                "error_text": "verify failed", "error_kind": "ValueError",
+            })
+        else:
+            scores.append({"id": eid, "passed": True, "score": 1.0})
+
+    result = _measure_with_evaluator(tmp_path, evaluator_name, scores)
+    assert result.exit_ok
+
+
+@pytest.mark.parametrize("evaluator_name", ["walker", "dsh"])
+def test_post_trial_accepts_index_ids_from_csv(tmp_path, evaluator_name):
+    """A trial with index ids ("0", "1", …) from a CSV source passes F3's check."""
+    expected = _expected_item_ids_for_mode(tmp_path)
+    assert expected, "test requires at least one expected item"
+
+    # Use the expected ids exactly — this proves that the expected_ids set
+    # and the graded ids match when index ids are used.
+    scores = [{"id": eid, "passed": True, "score": 1.0} for eid in expected]
+
+    result = _measure_with_evaluator(tmp_path, evaluator_name, scores)
+    assert result.exit_ok

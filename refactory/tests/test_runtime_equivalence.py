@@ -1268,3 +1268,352 @@ def test_halt_inside_fork_branch_both_runtimes(tmp_path):
         f"stdout={spine_result.stdout!r}, stderr={spine_result.stderr!r}"
     )
     # Both runtimes agree: the run is halted.
+
+
+# ── Ask 6: data failure scenario equivalence ─────────────────────────────────
+
+#: The failure-scenario Task as a standalone module, written to a temp directory
+#: so both in-process (walker) and subprocess (spine → items.py) can import it.
+_FAILURE_TASK_SOURCE = '''\
+"""A Task for the data failure equivalence scenario."""
+import time
+from pathlib import Path
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class FailureScenarioTask(Task):
+    name = "failure_scenario"
+
+    def instances(self):
+        return [
+            TaskInstance(id=""),          # no id — exercises the id fallback
+            TaskInstance(id="raise_item"),
+            TaskInstance(id="timeout_item"),
+            TaskInstance(id="setup_fails"),
+            TaskInstance(id="last_fails"),
+        ]
+
+    def setup(self, instance, workspace):
+        if instance.id == "setup_fails":
+            raise ValueError("setup failed for setup_fails")
+
+    def verify(self, instance, workspace):
+        if instance.id == "raise_item":
+            raise ValueError("verify raised")
+        if instance.id == "timeout_item":
+            time.sleep(30)  # hangs past the per-item deadline
+        return VerifyResult(passed=True, score=1.0)
+'''
+
+#: Task where every item fails — for the all-items-failed equivalence case.
+_ALL_FAIL_TASK_SOURCE = '''\
+"""A Task where every item fails, for the all-items-failed equivalence case."""
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class AllFailTask(Task):
+    name = "all_fail_equiv"
+
+    def instances(self):
+        return [
+            TaskInstance(id="fail_a"),
+            TaskInstance(id="fail_b"),
+        ]
+
+    def verify(self, instance, workspace):
+        raise ValueError(f"{instance.id} verify failed")
+'''
+
+#: The subgraph op: a Python callable the walker runs in-process and the spine
+#: runs as a command.  Reads current_item.json and appends its id to seen.json.
+_FAILURE_OP_SOURCE = '''\
+"""Op for the data failure equivalence scenario."""
+import json
+from pathlib import Path
+
+def record(ctx):
+    item = ctx.read_json("current_item.json", {}) or {}
+    seen_path = Path(ctx.workdir) / "seen.json"
+    seen = json.loads(seen_path.read_text()) if seen_path.exists() else {"ids": []}
+    seen["ids"].append(item.get("id", ""))
+    ctx.write_json("seen.json", seen)
+    ctx.set_fact("value", seen)
+    if item.get("id") == "last_fails":
+        raise RuntimeError("op failed for last_fails")
+'''
+
+DATA_DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain.mts"
+
+
+def _write_failure_package(project: Path) -> None:
+    """Write the failure-scenario Task and op as a proper package."""
+    pkg = project / ".factory" / "packages" / "failure_scenario"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(
+        'from refactory_dsh.nn import Package\n'
+        'from .task import FailureScenarioTask\n'
+        'from .all_fail_task import AllFailTask\n'
+        'PACKAGE = Package(\n'
+        '    name="failure_scenario",\n'
+        '    description="data failure scenario",\n'
+        '    modes=(),\n'
+        '    ops=("refactory_packages.failure_scenario.ops",),\n'
+        ')\n'
+    )
+    (pkg / "task.py").write_text(_FAILURE_TASK_SOURCE)
+    (pkg / "all_fail_task.py").write_text(_ALL_FAIL_TASK_SOURCE)
+    (pkg / "ops.py").write_text(_FAILURE_OP_SOURCE)
+
+
+def _run_spine(graph_json: Path, workdir: Path, python_bin_dir: str, timeout_ms: int) -> int:
+    """Drive the TS spine drain (index.ts) via data-drain.mts."""
+    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir)}
+    # The lowered graph's node commands use bare `python`, so the venv bin
+    # directory must lead PATH — matching what graph-startup does.
+    env["PATH"] = f"{python_bin_dir}:{env.get('PATH', '')}"
+    result = subprocess.run(
+        [str(NODE), "--import", "tsx/esm", str(DATA_DRAIN),
+         str(graph_json), str(workdir), f"{python_bin_dir}/python", str(timeout_ms)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=120,
+        env=env,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(f"spine drain failed:\nstdout: {result.stdout[-2000:]}\nstderr: {result.stderr[-2000:]}\n")
+    return result.returncode
+
+
+def test_data_failure_scenario_matches(tmp_path):
+    """Walker and spine agree on item_scores for a data node with failures.
+
+    Drives the real spine (lowering + the TS drain in index.ts, the way
+    test_equivalence.py's data-node test runs DSH).  Items include one without
+    an id (exercises the id fallback), one whose verify raises, one whose verify
+    hangs past the deadline (error_kind "timeout"), and one (the LAST) whose
+    subgraph op fails.  Both runtimes produce the same ids, passed, score and
+    error_kind values.  A rerun in the same directory produces the same result
+    (no stale entries from the previous item set).  No SCENARIO_GAPS entry.
+    """
+    from unittest.mock import patch
+    from refactory_dsh import lowering, nn
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, execute
+    from refactory_dsh.task import register_task
+
+    # ── importable Task package ──
+    project = tmp_path / "project"
+    _write_failure_package(project)
+    sys.path.insert(0, str(project / ".factory" / "packages"))
+    try:
+        # Import so the walker can use the registered name too.
+        from failure_scenario.task import FailureScenarioTask  # type: ignore[import-not-found]
+        register_task("failure_scenario", FailureScenarioTask)
+
+        task_ref = "refactory_packages.failure_scenario.task:FailureScenarioTask"
+
+        graph = nn.Graph()
+        graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="failure_scenario",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        graph.add(nn.Node(
+            "work", "op", call="loop_ops:fail_on_last_fails",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        graph.connect("data", "report")
+
+        # ── Walker run (deadline monkey-patched to 1 s) ──
+        walker_dir = tmp_path / "walker"
+        with patch.object(Executor, "_data_item_deadline", return_value=1.0):
+            walker_result = execute(graph, walker_dir)
+        assert walker_result.exit_ok, walker_result.error
+        walker_scores = walker_result.facts.get("item_scores", [])
+
+        # ── Spine run (real TS drain via data_drain_fixture.mts) ──
+        spine_dir = tmp_path / "spine"
+        spine_dir.mkdir(parents=True, exist_ok=True)
+
+        # The spine graph uses a command, not a call.  Build a graph whose work
+        # node has a command that calls the op through refactory_dsh.run (as
+        # the spine runs FnNodes).
+        spine_graph = nn.Graph()
+        spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=task_ref,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:fail_on_last_fails",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        spine_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        spine_graph.connect("data", "report")
+
+        state = {"graph": spine_graph.to_state()}
+        lowering.write_declarations(state, spine_dir)
+        graph_path, workflow = lowering.write_mode_graph(
+            state, tmp_path / "graphs", name="failure_scenario",
+        )
+
+        python_bin = str(REPO_ROOT / ".venv/bin")
+        # The subprocesses (items.py, refactory_dsh.run) need to import
+        # the Task package (refactory_packages.failure_scenario.*) and
+        # the test ops (loop_ops).  REFACTORY_PROJECT lets the runner's
+        # install_workspace_packages find the package; the tests dir on
+        # PYTHONPATH makes loop_ops importable the way pytest does.
+        extra_path = os.pathsep.join([
+            str(project / ".factory" / "packages"),
+            str(HERE),
+        ])
+        env_patch = {
+            "REFACTORY_PROJECT": str(project),
+            "PYTHONPATH": extra_path,
+        }
+        old_env = {}
+        for key, value in env_patch.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            # 2 s per command: enough for normal begin/end, but timeout_item's
+            # verify (30 s sleep) will exceed it, producing error_kind "timeout".
+            rc = _run_spine(graph_path, spine_dir, python_bin, 2_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert rc == 0, "spine drain failed"
+        spine_facts = json.loads((spine_dir / "facts.json").read_text())
+        spine_scores = spine_facts.get("item_scores", [])
+
+        # ── Compare ──
+        def normalize(scores):
+            return sorted(
+                [(s["id"], s["passed"], s["score"], s.get("error_kind"))
+                 for s in scores],
+                key=lambda x: x[0],
+            )
+
+        assert normalize(walker_scores) == normalize(spine_scores), (
+            f"walker and spine disagree:\nwalker: {walker_scores}\nspine: {spine_scores}"
+        )
+
+        # ── Rerun in same directories — no stale entries ──
+        with patch.object(Executor, "_data_item_deadline", return_value=1.0):
+            walker_result2 = execute(graph, walker_dir)
+        assert walker_result2.exit_ok, walker_result2.error
+        walker_scores2 = walker_result2.facts.get("item_scores", [])
+
+        for key, value in env_patch.items():
+            os.environ[key] = value
+        try:
+            rc2 = _run_spine(graph_path, spine_dir, python_bin, 2_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert rc2 == 0, "spine drain rerun failed"
+        spine_facts2 = json.loads((spine_dir / "facts.json").read_text())
+        spine_scores2 = spine_facts2.get("item_scores", [])
+
+        assert normalize(walker_scores2) == normalize(spine_scores2), (
+            f"rerun mismatch:\nwalker: {walker_scores2}\nspine: {spine_scores2}"
+        )
+        assert len(spine_scores2) == len(walker_scores2) == 5, (
+            f"rerun should have exactly 5 entries (no stale): {len(spine_scores2)}"
+        )
+
+        # ── Ask 6: setup_fails item should have an error record ──
+        setup_fail_walker = next(
+            (s for s in walker_scores if s["id"] == "setup_fails"), None
+        )
+        setup_fail_spine = next(
+            (s for s in spine_scores if s["id"] == "setup_fails"), None
+        )
+        assert setup_fail_walker is not None, "walker missing setup_fails"
+        assert setup_fail_spine is not None, "spine missing setup_fails"
+        assert setup_fail_walker["passed"] is False
+        assert setup_fail_spine["passed"] is False
+        # Both should have an error_kind for the setup failure
+        assert setup_fail_walker.get("error_kind") is not None
+        assert setup_fail_spine.get("error_kind") is not None
+
+        # ── Ask 6: all-items-failed sub-case ──
+        from failure_scenario.all_fail_task import AllFailTask  # type: ignore[import-not-found]
+        register_task("all_fail_equiv", AllFailTask)
+
+        all_fail_task_ref = "refactory_packages.failure_scenario.all_fail_task:AllFailTask"
+
+        af_graph = nn.Graph()
+        af_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="all_fail_equiv",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        af_graph.add(nn.Node(
+            "work", "op", call="loop_ops:record_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        af_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        af_graph.connect("data", "report")
+
+        # Walker: should fail (all items failed)
+        af_walker_dir = tmp_path / "af_walker"
+        af_walker_result = execute(af_graph, af_walker_dir)
+        assert af_walker_result.exit_ok is False, "walker should fail when all items fail"
+        assert "all" in (af_walker_result.error or "").lower()
+
+        # Spine: should fail
+        af_spine_dir = tmp_path / "af_spine"
+        af_spine_dir.mkdir(parents=True, exist_ok=True)
+
+        af_spine_graph = nn.Graph()
+        af_spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=all_fail_task_ref,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        af_spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:record_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        af_spine_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        af_spine_graph.connect("data", "report")
+
+        af_state = {"graph": af_spine_graph.to_state()}
+        lowering.write_declarations(af_state, af_spine_dir)
+        af_graph_path, _ = lowering.write_mode_graph(
+            af_state, tmp_path / "af_graphs", name="all_fail",
+        )
+
+        for key, value in env_patch.items():
+            os.environ[key] = value
+        try:
+            af_rc = _run_spine(af_graph_path, af_spine_dir, python_bin, 2_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        # The spine should also fail (non-zero exit)
+        assert af_rc != 0, "spine should fail when all items fail"
+
+    finally:
+        sys.path.remove(str(project / ".factory" / "packages"))

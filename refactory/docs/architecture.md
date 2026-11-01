@@ -643,7 +643,9 @@ and running the subgraph once per item with the item written to `current_item.js
 The loader is one implementation (`nn.executor.load_items`); the walker runs the whole
 item loop in one process, while DSH's spine drives it from outside through
 `refactory_dsh.items list|begin|end`, because a subgraph the cursor enters has to be
-walked one node at a time.
+walked one node at a time. A failed item is recorded with `error_text` and
+`error_kind` and does not end the run; the node fails only when every item fails
+(the all-fail rule).
 
 ### The exceptions this package needs
 

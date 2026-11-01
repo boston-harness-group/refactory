@@ -134,3 +134,37 @@ because a model cannot enter a subgraph the cursor never enters.
 
 `refactory/tests/test_equivalence.py` runs one data-driven mode on both runtimes and
 compares the facts.
+
+## Failed items and the all-fail rule
+
+Each item's lifecycle (setup → subgraph → verify) is wrapped in a try/except. A
+failed item is recorded as:
+
+```json
+{"id": "…", "passed": false, "score": 0.0, "error_text": "…", "error_kind": "…"}
+```
+
+- **`error_kind`** is the exception class name (e.g. `"ValueError"`,
+  `"RuntimeError"`), or `"timeout"` when the per-item deadline is exceeded. On the
+  walker, `error_kind` is the class name of the actual exception raised during setup,
+  verify or the subgraph walk (a setup `ValueError` records `"ValueError"`; a branch
+  failure wrapped in `RuntimeError` records `"RuntimeError"`). On the spine, `error_kind`
+  is `"RuntimeError"` for subgraph and verify failures recorded through `end --failed`
+  (because the wrapping at `items.py` uses `RuntimeError`), except when the original
+  record was written by `command_begin`'s setup handler (which preserves the original
+  class).
+- **`error_text`** describes the failure, truncated to 4096 characters. On the walker,
+  it is the exception message. On the spine, it is the failing command's stderr tail
+  (bounded to 4096 chars), passed to `end --failed`. The two texts describe the same
+  failure but are not word-for-word identical.
+
+A data node fails only when **every** item it processed fails (the all-fail rule).
+The count is against items, not records, so a 3-item node with 1 failure and 2
+passes succeeds. On the walker, the check compares the number of failed items
+against the total item count. On the spine, the check uses run-local pass state
+(processed and failed counts under `.refactory/pass_state/<node_id>.json`) so it
+works whether or not the node declares `item_scores` in its `produces`.
+
+A per-item deadline covers only setup and verify (and item loading), matching the
+spine's per-command `runDataCommand` deadline. The deadline does not depend on
+`enable_recovery`.
