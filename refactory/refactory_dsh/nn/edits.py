@@ -102,7 +102,7 @@ def _finish(state: Mapping[str, Any], graph: Graph) -> State:
 #: refused for baking its items in, and a search that could set these would be held to
 #: a weaker rule than the thing it edits: `inline_items` scores the items it was given,
 #: and a moved `task_ref` or `source_path` changes the exam the candidate is graded on.
-ITEM_SOURCE_FIELDS = ("task_ref", "source_path", "source_format", "inline_items")
+ITEM_SOURCE_FIELDS = ("task_ref", "source_path", "source_format", "inline_items", "limit", "produces")
 
 
 def _refuse_baked_items(graph: Graph) -> None:
