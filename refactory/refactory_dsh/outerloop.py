@@ -144,6 +144,32 @@ class Run:
     def stop(self, reason: str) -> None:
         self.stopped = reason or "stopped"
 
+    def check_control(self) -> str | None:
+        """Check for pause and stop requests from a person.
+
+        Call at iteration boundaries — the top of a strategy's while-loop —
+        not from inside evaluation callbacks. Returns ``'stop'`` when a person
+        asked the run to stop, or ``None`` otherwise. A pause blocks here
+        until released; the caller does not see it.
+
+        One-shot population acts (keep, reject, adopt) are honoured and
+        consumed. This delegates to the loop's control handler, so the
+        consume-once semantics are preserved.
+        """
+        return self.loop._apply_control()  # noqa: SLF001
+
+    def save_strategy_state(self) -> None:
+        """Journal the strategy's current state immediately.
+
+        Call from inside a custom ``strategy()`` override to persist state
+        at any point — not only at the epoch boundary.  The journaled state
+        is the return value of ``strategy_state_dict()`` at call time.
+        Replay restores the last journaled ``strategy_state`` event,
+        regardless of whether it was written by this method or by the
+        epoch-end journal.
+        """
+        self.loop._save_strategy_state()  # noqa: SLF001
+
     def log(self, message: str) -> None:
         self.log_lines.append(str(message))
         (self.loop.root / "strategy.log").parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +189,7 @@ class OuterLoop:
     overridable = (
         "strategy", "select_parents", "propose", "batch_size", "install", "accepts",
         "update", "should_stop", "on_epoch_end", "report", "memory",
+        "strategy_state_dict", "load_strategy_state",
     )
 
     def configure(
@@ -237,6 +264,31 @@ class OuterLoop:
     def memory(self) -> Iterable[Any]:
         """Declared memory namespaces, if this loop keeps anything across runs."""
         return ()
+
+    def strategy_state_dict(self) -> dict[str, Any]:
+        """The strategy's own state, journaled each epoch for resume.
+
+        Separate from ``state_dict()`` (which is the search's read-only view):
+        a strategy may track convergence history, temperature schedules, or
+        multi-phase progress that the search itself does not model.
+
+        Override and return a JSON-serialisable dict. The default is empty,
+        making this opt-in: strategies that do not need state do not override.
+        The returned dict is journaled after each epoch and whenever
+        ``run.save_strategy_state()`` is called, and restored by
+        ``load_strategy_state`` during replay.
+        """
+        return dict(self._strategy_state)
+
+    def load_strategy_state(self, state: dict[str, Any]) -> None:
+        """Restore strategy state from a journaled dict.
+
+        Called during the journal walk (replay), each time a
+        ``strategy_state`` event is encountered.  The last such event wins.
+        Override to restore instance variables from the dict. The default
+        stores it in ``_strategy_state``.
+        """
+        self._strategy_state = dict(state)
 
 
 def run_strategy(loop: Any) -> dict[str, Any]:

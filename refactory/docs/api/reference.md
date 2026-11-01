@@ -129,7 +129,7 @@ The edit algebra: every structural change is typed data.
 |---|---|---|
 | class | `EditError` | `(message: 'str', code: 'str' = 'E-shape') -> 'None'` |
 | class | `EditSpec` | `(name: 'str', kind: 'str', description: 'str', fields: 'tuple[str, ...]', macro: 'bool' = False, precondition: 'Callable[[dict, State], str \| None] \| None' = None, expand: 'Callable[[dict, State], list[dict]] \| None' = None, apply: 'Callable[[State, dict], State] \| None' = None) -> None` |
-| function | `apply` | `(edit: 'dict', state: 'Mapping[str, Any]') -> 'State'` |
+| function | `apply` | `(edit: 'dict', state: 'Mapping[str, Any]', *, edit_reports: 'list[dict[str, Any]] \| None' = None) -> 'State'` |
 | function | `apply_many` | `(edits: 'Iterable[dict]', state: 'Mapping[str, Any]') -> 'State'` |
 | function | `catalogue` | `(preset: 'str' = 'broad') -> 'list[dict[str, Any]]'` |
 | function | `configure` | `(state: 'Mapping[str, Any]', name: 'str', value: 'Any') -> 'State'` |

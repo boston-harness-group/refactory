@@ -418,7 +418,13 @@ def test_every_macro_expands_to_primitives_only():
 
 
 def test_presets_are_closed():
-    assert nn.edits.names() == sorted(nn.edits.PRESETS["broad"])
+    # text_patch is deliberately excluded from every preset that random search
+    # samples from (including broad) so seeded runs stay unchanged — correction 3.
+    all_names = nn.edits.names()
+    broad = sorted(nn.edits.PRESETS["broad"])
+    assert "text_patch" in all_names, "text_patch must be a registered edit"
+    assert "text_patch" not in broad, "text_patch must not be in 'broad' preset"
+    assert sorted(set(all_names) - {"text_patch"}) == broad
     for name in nn.edits.PRESETS["knob_only"]:
         assert nn.edits._specs()[name].kind == "knob"  # noqa: SLF001
     with pytest.raises(nn.edits.EditError):
