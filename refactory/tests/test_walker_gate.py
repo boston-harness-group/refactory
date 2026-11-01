@@ -426,8 +426,8 @@ def test_gate_iteration_count_survives_resume(tmp_path):
 
 
 def test_agent_node_refuses_missing_declared_read(tmp_path):
-    """ASK-4a / gap 15: The spine's worker_node.py refuses a node whose declared reads
-    are missing. This test verifies the spine's check directly."""
+    """ASK-4a / gap 15: Both runtimes refuse a node whose declared reads are missing.
+    Tests the spine's worker_node.py check AND the walker's executor._visit_agent check."""
     from refactory_dsh.agent_delivery import _path
     workdir = tmp_path / "run"
     workdir.mkdir(parents=True)
@@ -442,6 +442,25 @@ def test_agent_node_refuses_missing_declared_read(tmp_path):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "required worker input is missing" in str(exc)
+
+
+def test_walker_refuses_missing_declared_read(tmp_path):
+    """ASK-4a / gap 15: The walker's executor._visit_agent refuses missing reads,
+    matching the spine's worker_node.py:82-84."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    reads=("nonexistent.md",),
+                    writes=("output.txt",), produces=("result",)))
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok is False
+    assert "required worker input is missing" in (result.error or "")
+    # The model was never called: the check fires before dispatch.
+    assert len(model.prompts) == 0
 
 
 def test_agent_node_refuses_tools_field(tmp_path):
@@ -486,3 +505,97 @@ def test_reloop_cap_records_halted_not_failed(tmp_path):
         import json
         status = json.loads(status_file.read_text())
         assert status.get("status") == "halted", status
+
+
+def test_fn_gate_stdout_is_feedback(tmp_path):
+    """SWEEP-4: An fn-gate that prints to stdout has that text used as feedback,
+    matching the spine's reasonOf(stdout) behavior (execute.ts:148-157).
+    The stdout text before the verdict line becomes the reloop feedback."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:reloop_with_stdout",
+                    reads=(), max_iterations=2, notes="check",
+                    produces=("passes",)))
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("agent", "gate")
+    graph.connect("gate", "agent", condition="reloop")
+    graph.connect("gate", "done", condition="proceed")
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["first", "second"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    # The second agent prompt should contain the feedback from stdout.
+    # The feedback is consumed when the agent node completes, so it won't
+    # be in the final progress.json, but it should have been in the prompt.
+    assert len(model.prompts) == 2, f"expected 2 prompts, got {len(model.prompts)}"
+    # The second prompt should contain the stdout text as feedback.
+    assert "extra context from stdout" in model.prompts[1], (
+        f"stdout feedback not in second prompt: {model.prompts[1][:500]}"
+    )
+
+
+def test_graph_state_events_emitted(tmp_path):
+    """ASK-4b / gap 20: The walker emits graph_state events, matching the spine."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    events_file = workdir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+    graph_state_events = [e for e in events if e.get("kind") == "graph_state"]
+    assert len(graph_state_events) > 0, "no graph_state events emitted"
+    # Should have at least an executing and done status.
+    statuses = [e.get("status") for e in graph_state_events]
+    assert "executing" in statuses or "running" in statuses
+    assert "done" in statuses
+
+
+def test_fork_shape_refusal_on_walker(tmp_path):
+    """SWEEP-1: The walker refuses fork branches that produce the same facts."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("b", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    assert result.exit_ok is False
+    assert "same produced facts" in (result.error or "")
+
+
+def test_fork_shape_refusal_on_spine(tmp_path):
+    """SWEEP-1: The spine's lowering also refuses fork branches with same produced facts."""
+    from refactory_dsh.lowering import LoweringError, to_workflow
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("b", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+
+    state = {"graph": graph.to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="same produced facts"):
+        to_workflow(state)

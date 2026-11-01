@@ -288,6 +288,45 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 **({"tool_policy": node.tool_policy} if node.tool_policy is not None else {}),
             )
 
+    # SWEEP-1: Validate fork-shape rules at lowering so the spine refuses the same
+    # shapes the walker does (nn/fork.py:112-122). Branches that produce the same
+    # facts, overlap in reads/writes, or read a sibling's facts are refused.
+    import re as _re
+    for fork_id, fork_node in graph.nodes.items():
+        if fork_node.kind != "fork":
+            continue
+        # Collect each branch's members.
+        fork_edges = graph.out_edges(fork_id)
+        barrier = fork_edges[0].target if fork_edges else None
+        _branch_lists: list[list[Any]] = []
+        for target in fork_node.targets:
+            seen: set[str] = set()
+            pending = [target]
+            while pending:
+                current = pending.pop()
+                if current == barrier or current in seen:
+                    continue
+                if current not in graph.nodes:
+                    continue
+                seen.add(current)
+                pending.extend(e.target for e in graph.out_edges(current))
+            _branch_lists.append([graph.nodes[n] for n in sorted(seen)])
+        _branch_facts = [{name for n in branch for name in n.produces} for branch in _branch_lists]
+        _branch_consumed = [{match for n in branch for match in _re.findall(
+            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", n.prompt_template)}
+            for branch in _branch_lists]
+        _branch_writes = [set(n.writes) for branch in _branch_lists for n in branch]
+        for idx, bf in enumerate(_branch_facts):
+            for other in range(idx):
+                if bf & _branch_facts[other]:
+                    raise LoweringError(
+                        f"fork {fork_id!r}: branches declare the same produced facts"
+                    )
+                if bf & _branch_consumed[other] or _branch_facts[other] & _branch_consumed[idx]:
+                    raise LoweringError(
+                        f"fork {fork_id!r}: a branch prompt depends on a sibling's facts"
+                    )
+
     edges = [
         Edge(source=edge.source, target=edge.target, condition=edge.condition)
         for edge in sorted(graph.edges, key=lambda e: e.key())

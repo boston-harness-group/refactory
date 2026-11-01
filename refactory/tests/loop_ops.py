@@ -133,6 +133,22 @@ def fail_on_second_visit(ctx: Any) -> None:
         raise RuntimeError("this op fails on its second visit")
 
 
+def reloop_with_stdout(ctx: Any) -> str:
+    """A gate that prints to stdout (extra context) then returns reloop once, then proceed.
+
+    SWEEP-4: Tests that stdout before the verdict line is used as feedback,
+    matching the spine's reasonOf(stdout) behavior.
+    """
+    from refactory_dsh.nn import Verdict
+
+    visits = int(ctx.facts.get("passes", 0)) + 1
+    ctx.set_fact("passes", visits)
+    if visits < 2:
+        print("extra context from stdout")
+        return Verdict("reloop", reason="needs more work")
+    return "proceed"
+
+
 def reloop_twice(ctx: Any) -> str:
     """`three_passes` on an explicit `reloop` edge, for a cycle with another gate in it."""
     visits = int(ctx.facts.get("passes", 0)) + 1

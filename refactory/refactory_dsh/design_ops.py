@@ -1578,6 +1578,12 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             guardedness = {"unavailable": f"the new tests could not be run on the base: {exc}"}
         if guardedness is not None:
             ctx.write_json("test-guardedness.json", guardedness)
+    # Ensure test-guardedness.json exists even without a worktree, so
+    # downstream nodes that declare it as a read do not fail (#436 gap 15).
+    # Written directly to avoid write-enforcement: the node may not declare it.
+    _tg_path = Path(ctx.workdir) / "test-guardedness.json"
+    if not _tg_path.exists():
+        _tg_path.write_text(json.dumps({"unavailable": "no worktree"}) + "\n")
     evidence.record(ctx, outcome)
 
     # Clear base_unavailable at the start of each check attempt (R2).

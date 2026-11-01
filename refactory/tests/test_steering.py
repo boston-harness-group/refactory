@@ -1148,3 +1148,41 @@ def test_the_dsh_runtime_loads_the_ledger_into_its_agent_nodes(tmp_path, monkeyp
     assert "build a mode for circle packing" in prompts, (
         "the DSH graph's agent nodes did not carry the ledger"
     )
+
+
+def test_correction_applied_exactly_once_not_on_resume(tmp_path):
+    """Correction B: A correction given at gate_strategy with --kind correction
+    and then a resume reaches apply_corrections exactly once and a resumed run
+    never re-applies it."""
+    from refactory_dsh.design_ops import gate_corrections_due
+
+    workdir = tmp_path / "run"
+    ledger = Ledger.seed(workdir, "build a tool")
+    # A gate visit and a proceed verdict, as the walker generates.
+    review = ledger.visit("gate_strategy", ["design.md"])
+    ledger.verdict("gate_strategy", "proceed")
+    # A correction, as `console steer --verdict gate_strategy=proceed --kind correction --note ...` produces.
+    ledger.note("correction", "Add a NAME constant set to 'tool'.")
+
+    # The correction should be due.
+    approval, corrections = gate_corrections_due(workdir)
+    assert len(corrections) == 1
+    assert "NAME constant" in corrections[0][1]
+
+    # Consume the verdict (simulates the gate taking it on resume).
+    labels = ["proceed", "reloop", "halt"]
+    taken = ledger.take_verdict("gate_strategy", review, labels)
+    assert taken == "proceed"
+
+    # After consumption, the correction is still due (the approval is consumed).
+    approval2, corrections2 = gate_corrections_due(workdir)
+    assert len(corrections2) == 1
+    assert corrections2[0][1] == corrections[0][1]
+
+    # A second take_verdict returns empty (already consumed — never re-applied).
+    taken2 = ledger.take_verdict("gate_strategy", review, labels)
+    assert taken2 == "", "a consumed verdict was replayed"
+
+    # The corrections due are the same (the approval did not change).
+    approval3, corrections3 = gate_corrections_due(workdir)
+    assert corrections3 == corrections2, "corrections changed after replay attempt"

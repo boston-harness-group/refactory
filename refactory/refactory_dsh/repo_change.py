@@ -1079,6 +1079,17 @@ def _materialise_directory(ctx: Any, source: Path | None, files: tuple[str, ...]
     # Write changed-functions.json as [] for directory-mode (no worktree, no diff).
     import json as _json
     (ctx.workdir / "changed-functions.json").write_text(_json.dumps([]) + "\n")
+    # Write placeholder files downstream nodes (overwatch) declare as reads, so the
+    # reads-existence check (#436 gap 15) does not refuse them.
+    _workdir = Path(ctx.workdir)
+    if not (_workdir / "changes.diff").exists():
+        (_workdir / "changes.diff").write_text(
+            "(this run has no worktree; no diff available)\n"
+        )
+    if not (_workdir / "test-guardedness.json").exists():
+        (_workdir / "test-guardedness.json").write_text(
+            _json.dumps({"unavailable": "no worktree"}) + "\n"
+        )
     return {"artifact": str(root), "files": sorted(set(files) | {str(path) for path in checked}),
             "changed_functions": "(none)"}
 

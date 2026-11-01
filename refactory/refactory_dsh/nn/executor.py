@@ -697,13 +697,23 @@ class Executor:
                       failed: str | None = None) -> None:
         """Write the run's facts and its status where the spine writes them (`facts.json`,
         `.refactory/spine-status.json`), so a walked run reads as a driven one does.
-        Best effort, as the progress record is."""
+        Best effort, as the progress record is.
+
+        ASK-4b / gap 20: Also emit a ``graph_state`` event, matching the spine
+        (index.ts:1218). Only ``control`` events stay out (gap 19).
+        """
         from refactory_dsh.run import write_facts
 
         try:
             write_facts(self.ctx.workdir, self.ctx.facts)
             self.record.write_status(self.ctx.workdir, self.graph, status, nodes, error=error, failed=failed)
             self._status = status
+            # Emit graph_state event matching the spine (index.ts:1218).
+            from refactory_dsh.live import emit as _emit_event
+            _emit_event(self.ctx.workdir, "graph_state", status=status,
+                        running_nodes=nodes,
+                        **({"error": error} if error else {}),
+                        **({"failed_node": failed} if failed else {}))
         except OSError:  # pragma: no cover - an unwritable run directory
             pass
 
@@ -1242,7 +1252,13 @@ class Executor:
                 f"agent node {node.id!r} declares a 'tools' field; "
                 "tools are not supported on agent nodes"
             )
-        from refactory_dsh.agent_delivery import fill_feedback, with_feedback
+        from refactory_dsh.agent_delivery import _path, fill_feedback, with_feedback
+
+        # ASK-4a / gap 15: Refuse a node whose declared reads are missing,
+        # matching the spine's worker_node.py:82-84.
+        for name in node.reads:
+            if not _path(self.ctx.workdir, name).exists():
+                raise ValueError(f'required worker input is missing: {name}')
 
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
@@ -1325,18 +1341,20 @@ class Executor:
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
         if tool_policy == "none":
             _capture_final = True
-        output, _receipt = deliver(
-            self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
-            reads=list(node.reads), client=client, ask=ask,
-            capture_final=_capture_final, rule=node.retry,
-            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
-            tool_policy=tool_policy)
-        # SWEEP-6: clean up temporarily injected refilled keys.
-        for k, prev in _refilled_snap.items():
-            if prev is _SENTINEL:
-                self.ctx.facts.pop(k, None)
-            else:
-                self.ctx.facts[k] = prev
+        try:
+            output, _receipt = deliver(
+                self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
+                reads=list(node.reads), client=client, ask=ask,
+                capture_final=_capture_final, rule=node.retry,
+                timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
+                tool_policy=tool_policy)
+        finally:
+            # SWEEP-6: clean up temporarily injected refilled keys, even on error.
+            for k, prev in _refilled_snap.items():
+                if prev is _SENTINEL:
+                    self.ctx.facts.pop(k, None)
+                else:
+                    self.ctx.facts[k] = prev
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.
@@ -1389,11 +1407,28 @@ class Executor:
             verdict = self._answered_verdict(node)
         else:
             timeout = self._effective_timeout(node)
-            if timeout is not None:
-                verdict = self._run_op_timed(node.evaluator, node, timeout)
-            else:
-                fn: Callable[[RunContext], Any] = resolve(node.evaluator)
-                verdict = fn(self.ctx)
+            # SWEEP-4: Capture stdout from the fn-gate evaluator so the
+            # feedback text matches the spine's reasonOf(stdout), which uses
+            # all stdout before the verdict line (execute.ts:148-157).
+            import io
+            _old_stdout = sys.stdout
+            _capture = io.StringIO()
+            sys.stdout = _capture
+            try:
+                if timeout is not None:
+                    verdict = self._run_op_timed(node.evaluator, node, timeout)
+                else:
+                    fn: Callable[[RunContext], Any] = resolve(node.evaluator)
+                    verdict = fn(self.ctx)
+            finally:
+                sys.stdout = _old_stdout
+            # Attach captured stdout for feedback extraction below.
+            _fn_stdout = _capture.getvalue()
+            if isinstance(verdict, str):
+                try:
+                    verdict._fn_stdout = _fn_stdout  # type: ignore[attr-defined]
+                except (AttributeError, TypeError):
+                    pass
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"
@@ -1407,7 +1442,33 @@ class Executor:
             # Terminal halt
             self.record.gate(self.graph, node.id, verdict, target=None, retry=False)
             raise HaltStop(node.id, reason=reason)
-        why = str(getattr(verdict, "reason", "") or "")
+        # SWEEP-4: Match the spine's feedback text (execute.ts:reasonOf).
+        # On the spine, run.py prints Verdict.reason to stdout first, then the
+        # verdict label; reasonOf() takes all lines before the last non-empty one.
+        # On the walker, stdout capture gets what the fn-gate printed (no label).
+        # Combine captured stdout with Verdict.reason, as the spine would see them.
+        _captured_stdout = getattr(verdict, '_fn_stdout', '').strip()
+        _verdict_reason = str(getattr(verdict, "reason", "") or "")
+        if _captured_stdout:
+            # Captured stdout is what the fn printed. The spine would also see the
+            # reason (from Verdict) and the label. Build the full text as the spine
+            # would, then apply reasonOf.
+            from refactory_dsh.run import _clipped as _clip_reason
+            _full_stdout_parts: list[str] = []
+            if _captured_stdout:
+                _full_stdout_parts.append(_captured_stdout)
+            if _verdict_reason:
+                _full_stdout_parts.append(_clip_reason(_verdict_reason))
+            _full_stdout_parts.append(str(verdict).strip())
+            _full_stdout = '\n'.join(_full_stdout_parts)
+            # reasonOf: all lines before the last non-empty one (the verdict label).
+            _lines = _full_stdout.split('\n')
+            _last = len(_lines) - 1
+            while _last >= 0 and _lines[_last].strip() == '':
+                _last -= 1
+            why = '\n'.join(_lines[:max(_last, 0)]).strip()
+        else:
+            why = _verdict_reason
         from refactory_dsh.run import _clipped
 
         retry = self._is_retry(node.id, selected.target, selected.condition or "")
@@ -1486,19 +1547,15 @@ def execute(
     ctx.budget = budget
     # A run that goes on from where it stopped goes on with its record: the nodes it
     # completed, its gates' verdicts and any feedback a reloop left.
+    # Read progress.json once, reuse for both RunRecord and gate_iterations (non-core).
     record = RunRecord()
-    if start is not None:
-        try:
-            record = RunRecord.from_progress(json.loads((workdir / PROGRESS).read_text()))
-        except (OSError, ValueError, AttributeError):
-            pass
-    # Restore gate iteration counts so a resumed run enforces the budget it
-    # accumulated before the stop, matching the spine's persistence (ASK-1).
     gate_iterations: dict[str, int] = {}
     if start is not None:
         try:
-            gate_iterations = json.loads((workdir / PROGRESS).read_text()).get("gate_iterations", {})
-        except (OSError, ValueError):
+            _progress = json.loads((workdir / PROGRESS).read_text())
+            record = RunRecord.from_progress(_progress)
+            gate_iterations = _progress.get("gate_iterations", {})
+        except (OSError, ValueError, AttributeError):
             pass
     try:
         executor = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
