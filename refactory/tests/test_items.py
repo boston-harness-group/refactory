@@ -644,3 +644,65 @@ def test_item_scores_replace_on_rerun_spine(tmp_path):
     assert len(scores) == 2
     ids = [s["id"] for s in scores]
     assert sorted(ids) == ["alpha", "beta"]
+
+
+def test_all_items_failed_raises_on_last_end(tmp_path):
+    """When every item fails, command_end for the last item raises ItemsError.
+
+    This makes the spine match the walker's all-items-failed rule: exit code 1
+    tells the TS drain the data node failed, producing exit_ok=False.
+    """
+    from refactory_dsh import task as task_module
+
+    class AllFail(task_module.Task):
+        name = "all_fail_spine"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="alpha", metadata={"split": "train"}),
+                task_module.TaskInstance(id="beta", metadata={"split": "test"}),
+            ]
+
+        def setup(self, instance, workspace):
+            pass
+
+        def verify(self, instance, workspace):
+            raise ValueError(f"{instance.id} failed")
+
+    task_module.register_task("all_fail_spine", AllFail)
+
+    node = _declared(_data_graph(task_ref="all_fail_spine"), tmp_path)
+
+    # First item's end: writes error record, returns normally.
+    result_alpha = items.command_end(node, tmp_path, 0)
+    assert "error" in result_alpha
+
+    # Second (last) item's end: after writing the error record, raises
+    # ItemsError because all items have error_text.
+    with pytest.raises(items.ItemsError, match="all.*failed"):
+        items.command_end(node, tmp_path, 1)
+
+
+def test_command_end_with_failed_reason_skips_verify(tmp_path):
+    """command_end --failed skips verify and writes a failure record.
+
+    This is the spine-side parity fix for subgraph failures: the walker never
+    calls verify after a branch error, so command_end with failed_reason should
+    not call verify either.
+    """
+    _probe_task()
+    node = _declared(_data_graph(task_ref="counting"), tmp_path)
+
+    # Call end with failed_reason — verify should be skipped.
+    result = items.command_end(node, tmp_path, 0, failed_reason="subgraph crashed")
+    assert "error" in result
+    assert result["passed"] is False
+    assert result["score"] == 0.0
+    assert "subgraph crashed" in result["error_text"]
+    assert result["error_kind"] == "RuntimeError"
+
+    # The error record is in facts.
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    scores = facts["item_scores"]
+    assert len(scores) == 1
+    assert scores[0]["error_text"] is not None

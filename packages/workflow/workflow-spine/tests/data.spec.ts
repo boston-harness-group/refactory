@@ -530,6 +530,68 @@ describe('F4 failure rule: failed items in the data pass', () => {
 
     // Both begin and end were called for both items
     expect(log.filter(c => c.includes(' end ')).length).toBe(2)
+    // The first item's end command should include --failed since the subgraph failed
+    const endCommands = log.filter(c => c.includes(' end '))
+    expect(endCommands[0]).toContain('--failed')
+    // The second item's end command should NOT include --failed
+    expect(endCommands[1]).not.toContain('--failed')
+  })
+
+  it('fails the data node when all items fail (all-items-failed rule)', async () => {
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    let subgraphCallCount = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          if (verb === '') {
+            // This is the deterministic subgraph node ('true')
+            subgraphCallCount += 1
+            // Both items' subgraph nodes fail
+            return {
+              exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'subgraph failed', truncated: false },
+            }
+          }
+          // On the last item's end, the all-items-failed check raises → exit code 1.
+          if (verb === 'end' && index === 1) {
+            return {
+              exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'ItemsError: data: all 2 items failed', truncated: false },
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { error: 'subgraph failed', id: items[index]?.id, passed: false, score: 0 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    const result = await call(root, 'wf_next') as { status: string; stderr?: string }
+    // The data node should have failed because all items failed
+    expect(result.status).toBe('failed')
+    expect(subgraphCallCount).toBe(2)
   })
 })
 
@@ -541,5 +603,11 @@ describe('the data loader command line', () => {
       .toBe("loader begin --node 'data' --index 3")
     expect(dataCommandOf({ id: "it's", _type: 'DataNode' }, 'list', { dataCommand: 'loader' }))
       .toBe(String.raw`loader list --node 'it'\''s'`)
+  })
+
+  it('includes --failed when a failure reason is provided', () => {
+    const node = { id: 'data', _type: 'DataNode' }
+    expect(dataCommandOf(node, 'end', { dataCommand: 'loader' }, 0, 'subgraph failed'))
+      .toBe("loader end --node 'data' --index 0 --failed 'subgraph failed'")
   })
 })

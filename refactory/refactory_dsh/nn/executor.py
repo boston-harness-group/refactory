@@ -72,6 +72,18 @@ class _BranchFailed(Exception):
     """A branch error string wrapped so it flows through the per-item try/except."""
 
 
+class _ItemDeadlineError(Exception):
+    """An item's lifecycle (setup + branch + verify) exceeded its deadline."""
+
+    def __init__(self, node_id: str, item_id: str, deadline_s: float):
+        self.node_id = node_id
+        self.item_id = item_id
+        self.deadline_s = deadline_s
+        super().__init__(
+            f"item '{item_id}' of '{node_id}' timed out after {deadline_s:.1f}s"
+        )
+
+
 class ExecutionError(RuntimeError):
     """A run could not be carried out."""
 
@@ -778,6 +790,11 @@ class Executor:
                 from refactory_dsh.budgets import BudgetExhausted
                 _PASSTHROUGH = (BudgetExhausted, KeyboardInterrupt, SystemExit)
 
+                # Per-item command deadline: the same wall the spine's
+                # runDataCommand applies (execute.ts:268-278). Derived from
+                # the budget's remaining time, defaulting to 3600 s.
+                _item_deadline_s = self._data_item_deadline()
+
                 # Scale step cap for data nodes: save the initial step count
                 # so we can reset per item, preventing large benchmarks from
                 # hitting the global cap.
@@ -792,7 +809,18 @@ class Executor:
 
                     instance = instance_of(item)
                     item_id = str(item.get("id") or index)
+                    _alarm_armed = False
+                    _prev_handler = None
+                    _prev_alarm = 0
                     try:
+                        # Arm the per-item deadline via SIGALRM.
+                        if _item_deadline_s is not None:
+                            def _deadline_handler(signum: int, frame: Any) -> None:
+                                raise _ItemDeadlineError(node.id, item_id, _item_deadline_s)  # type: ignore[arg-type]
+                            _prev_handler = signal.signal(signal.SIGALRM, _deadline_handler)
+                            _prev_alarm = signal.alarm(int(max(1, _item_deadline_s)))
+                            _alarm_armed = True
+
                         if task is not None:
                             task.setup(instance, self.ctx.workdir)
                         # The item is written as the data node, so the declaration that
@@ -836,6 +864,14 @@ class Executor:
                         record = make_item_record(item_id, verdict)
                         if record is not None:
                             scores.append(record)
+                    finally:
+                        # Disarm the per-item deadline.
+                        if _alarm_armed:
+                            signal.alarm(0)
+                            if _prev_handler is not None:
+                                signal.signal(signal.SIGALRM, _prev_handler)
+                            if _prev_alarm > 0:
+                                signal.alarm(_prev_alarm)
 
                 if _data_halted:
                     break
@@ -1097,6 +1133,24 @@ class Executor:
                 raw = min(raw, remaining)
             return max(1.0, float(raw))
         return None
+
+    def _data_item_deadline(self) -> float | None:
+        """Per-item command deadline for data nodes, matching the spine.
+
+        The spine's ``runDataCommand`` (execute.ts:268-278) resolves the shell's
+        ``timeoutMs`` and clamps it to the remaining budget.  The walker applies
+        the same deadline to each item's lifecycle (setup + branch + verify).
+        When ``enable_recovery`` is True, the deadline is derived from the
+        budget's remaining time with a 3600 s default, matching the spine's
+        ``commandTimeoutMs`` default.  Without recovery, no deadline is applied.
+        """
+        if not self.enable_recovery:
+            return None
+        raw = 3600.0
+        remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
+        if remaining is not None:
+            raw = min(raw, remaining)
+        return max(1.0, float(raw))
 
     # ── child-process-based op timeout ─────────────────────────────────────
     def _run_op_timed(self, callable_target: str, node: Node, timeout: float) -> Any:

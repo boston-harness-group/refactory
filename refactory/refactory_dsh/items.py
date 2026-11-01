@@ -244,8 +244,15 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     return item
 
 
-def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
-    """The Task's verdict on one pass, folded into the run's facts."""
+def command_end(
+    node: Node, workdir: Path, index: int, *, failed_reason: str | None = None,
+) -> dict[str, Any]:
+    """The Task's verdict on one pass, folded into the run's facts.
+
+    When *failed_reason* is set (e.g. a subgraph node exited with code ≠ 0),
+    ``task.verify()`` is skipped and the item is recorded as failed — matching
+    the walker, which never calls verify after a branch error.
+    """
     items = items_of(node, workdir)
     if index < 0 or index >= len(items):
         raise ItemsError(
@@ -253,6 +260,20 @@ def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         )
     item = items[index]
     item_id = str(item.get("id") or index)
+
+    # F4 parity: when the caller says the item's subgraph failed, skip verify
+    # and write a failure record directly, as the walker does.
+    if failed_reason is not None:
+        exc = RuntimeError(failed_reason)
+        record = make_item_record(item_id, None, error=exc)
+        if record is not None and SCORES_FACT in node.produces:
+            _write_facts(workdir, SCORES_FACT, [record])
+        result: dict[str, Any] = {"error": failed_reason, **(record or {})}
+        # All-items-failed check: when this is the last item, read back
+        # item_scores and fail the node if every item has an error.
+        _check_all_items_failed(node, workdir, items, index)
+        return result
+
     task = _task_of(node, workdir)
     if task is None:
         return {}
@@ -264,13 +285,46 @@ def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         record = make_item_record(item_id, None, error=exc)
         if record is not None and SCORES_FACT in node.produces:
             _write_facts(workdir, SCORES_FACT, [record])
-        return {"error": str(exc), **(record or {})}
+        result = {"error": str(exc), **(record or {})}
+        _check_all_items_failed(node, workdir, items, index)
+        return result
     if verdict is None:
         return {}
     record = make_item_record(item_id, verdict)
     if record is not None and SCORES_FACT in node.produces:
         _write_facts(workdir, SCORES_FACT, [record])
+    _check_all_items_failed(node, workdir, items, index)
     return record or {}
+
+
+def _check_all_items_failed(
+    node: Node, workdir: Path, items: list[dict[str, Any]], index: int,
+) -> None:
+    """After the last item's end, fail the node if every item has an error.
+
+    This makes the spine path match the walker's all-items-failed rule: a data
+    node fails only when *every* item fails. The check reads ``item_scores``
+    from facts (which ``_write_facts`` just updated) and raises ``ItemsError``
+    when all entries carry ``error_text``.  The raised exception exits the
+    command with code 1, which the TS drain reports as a ``CommandFailure``,
+    producing ``exit_ok=False`` in ``_measure()``.
+    """
+    if index + 1 < len(items):
+        return  # not the last item yet
+    if SCORES_FACT not in node.produces:
+        return
+    facts_path = workdir / FACTS
+    if not facts_path.exists():
+        return
+    try:
+        facts = json.loads(facts_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    scores = facts.get(SCORES_FACT)
+    if not isinstance(scores, list) or not scores:
+        return
+    if all(isinstance(s, dict) and s.get("error_text") is not None for s in scores):
+        raise ItemsError(f"{node.id}: all {len(scores)} items failed")
 
 
 def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -362,10 +416,11 @@ def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def _options(argv: list[str]) -> tuple[str, int]:
-    """The ``--node`` id and ``--index`` one command line names."""
+def _options(argv: list[str]) -> tuple[str, int, str | None]:
+    """The ``--node`` id, ``--index``, and optional ``--failed`` reason."""
     node_id = ""
     index = 0
+    failed_reason: str | None = None
     if "--node" in argv:
         position = argv.index("--node")
         if position + 1 >= len(argv):
@@ -379,16 +434,21 @@ def _options(argv: list[str]) -> tuple[str, int]:
             index = int(argv[position + 1])
         except ValueError as exc:
             raise ItemsError(f"--index takes an item number, not {argv[position + 1]!r}") from exc
+    if "--failed" in argv:
+        position = argv.index("--failed")
+        if position + 1 >= len(argv):
+            raise ItemsError("--failed needs a value")
+        failed_reason = argv[position + 1]
     if not node_id:
         raise ItemsError("--node is required: the declarations are keyed by node id")
-    return node_id, index
+    return node_id, index, failed_reason
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     usage = (
         "usage: python -m refactory_dsh.items "
-        "{list|begin|end} --node <id> [--index <n>] | reset < redo-plan.json"
+        "{list|begin|end} --node <id> [--index <n>] [--failed <reason>] | reset < redo-plan.json"
     )
     if not argv or argv[0] not in ("list", "begin", "end", "reset"):
         print(usage, file=sys.stderr)
@@ -403,14 +463,14 @@ def main(argv: list[str] | None = None) -> int:
             produced = command_reset(workdir, json.load(sys.stdin))
             print(json.dumps(produced, default=str))
             return 0
-        node_id, index = _options(argv[1:])
+        node_id, index, failed_reason = _options(argv[1:])
         node = data_node(workdir, node_id)
         if verb == "list":
             produced: dict[str, Any] = command_list(node, workdir)
         elif verb == "begin":
             produced = command_begin(node, workdir, index)
         else:
-            produced = command_end(node, workdir, index)
+            produced = command_end(node, workdir, index, failed_reason=failed_reason)
     except (ItemsError, TaskError) as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

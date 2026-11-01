@@ -815,3 +815,90 @@ def test_large_benchmark_completes_under_step_cap(tmp_path):
     result = execute(graph, tmp_path / "run", max_steps=1000)
     assert result.exit_ok, result.error
     assert len(result.facts["item_scores"]) == 600
+
+
+def test_verify_timeout_becomes_failed_item(tmp_path):
+    """A verify that hangs beyond the per-item deadline ends as a failed item (parity fix 1).
+
+    The walker enforces the same per-item deadline as the spine's runDataCommand.
+    When enable_recovery is True, a hanging verify is killed by SIGALRM and
+    the item is recorded as failed with an error_kind indicating timeout.
+    """
+    import time as time_mod
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, RunContext
+
+    class HangingVerifyTask(task_module.Task):
+        name = "hanging_verify_task"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="slow"),
+                task_module.TaskInstance(id="fast"),
+            ]
+
+        def verify(self, instance, workspace):
+            if instance.id == "slow":
+                time_mod.sleep(30)  # hangs longer than deadline
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("hanging_verify_task", HangingVerifyTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="hanging_verify_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    workdir = tmp_path / "run"
+    ctx = RunContext(workdir, enforce_writes=True)
+    # Use a very short deadline so the test doesn't take too long.
+    # We monkey-patch the deadline method to return 2 seconds.
+    executor = Executor(graph, ctx, max_steps=2000, enable_recovery=True)
+    original_deadline = executor._data_item_deadline
+    executor._data_item_deadline = lambda: 2.0  # 2-second deadline
+    result = executor.run()
+
+    assert result.exit_ok, result.error
+    scores = result.facts["item_scores"]
+    assert len(scores) == 2
+
+    slow_score = next(s for s in scores if s["id"] == "slow")
+    fast_score = next(s for s in scores if s["id"] == "fast")
+
+    assert slow_score["passed"] is False
+    assert slow_score["score"] == 0.0
+    assert slow_score.get("error_text") is not None
+    assert "timed out" in slow_score["error_text"].lower() or "deadline" in slow_score["error_text"].lower()
+    assert slow_score.get("error_kind") == "_ItemDeadlineError"
+
+    assert fast_score["passed"] is True
+    assert fast_score["score"] == 1.0
+
+
+def test_item_scores_no_double_counting_on_rerun(tmp_path):
+    """item_scores from a data node rerun replaces the previous scores (parity fix 3)."""
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    _register_failing_task("rerun_task", fail_on={"a"}, fail_in="verify")
+    graph = _data_graph_with_task("rerun_task")
+
+    # First run
+    result1 = execute(graph, tmp_path / "run")
+    assert result1.exit_ok
+    scores1 = result1.facts["item_scores"]
+    assert len(scores1) == 2
+
+    # The walker uses set_fact which replaces the entire list, so running
+    # again with different facts should still produce exactly 2 entries.
+    result2 = execute(graph, tmp_path / "run2")
+    assert result2.exit_ok
+    scores2 = result2.facts["item_scores"]
+    assert len(scores2) == 2

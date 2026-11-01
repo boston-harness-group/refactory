@@ -1566,15 +1566,20 @@ export function apply(ctx: Context, config: Config): void {
       recordStatus(spine, workdir, 'executing')
       const started = await runDataCommand(shell, data, 'begin', runner, pass.index)
       if (!started.ok) return { failure: started }
-      // F4: a setup failure is signalled by an `error` key in the begin response.
+      // F4: a setup failure is signalled by a response whose only key is `error`.
       // The Python side has already written the failed-item record; skip the
       // subgraph by completing its nodes, running end, and advancing.
-      if (started.value != null && typeof started.value === 'object' && 'error' in started.value) {
+      // The check requires `error` as the sole key so that an item dict from a
+      // data source that naturally contains an `error` column is not falsely
+      // treated as a setup failure.
+      if (started.value != null && typeof started.value === 'object'
+          && 'error' in started.value && Object.keys(started.value).length === 1) {
         materialised.set(spine, { key, item: started.value })
         // Complete subgraph nodes to clear cursor positions so endPass succeeds.
         skipSubgraph(spine)
-        // Run end command to let the Task record the failure for this item.
-        const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
+        // Run end command with --failed to skip verify, matching the walker.
+        const setupError = String((started.value as Record<string, unknown>).error ?? 'setup failed')
+        const ended = await runDataCommand(shell, data, 'end', runner, pass.index, setupError)
         if (!ended.ok) return { failure: ended }
         materialised.delete(spine)
         item = undefined
@@ -1722,15 +1727,17 @@ export function apply(ctx: Context, config: Config): void {
       warnings.push(...boundaryWarnings)
       // F4: when a subgraph node fails during a data pass, the failure becomes
       // a failed item instead of ending the run. Skip remaining subgraph nodes,
-      // run end to let the Python Task judge the incomplete answer, then continue.
+      // run end with --failed to skip verify and record the failure, then continue.
       if (failure !== undefined) {
         const activePass = spine.passOf()
         if (activePass !== undefined) {
           const data = spine.view(activePass.node)
           // Complete remaining subgraph nodes so endPass succeeds.
           skipSubgraph(spine)
-          // Run end command to let the Task record the failure for this item.
-          const ended = await runDataCommand(shell, data, 'end', runner, activePass.index)
+          // Run end command with --failed so the Python side skips verify and
+          // writes a failure record directly, matching the walker's behavior.
+          const reason = failure.error ?? `subgraph node failed with exit code ${String(failure.exitCode)}`
+          const ended = await runDataCommand(shell, data, 'end', runner, activePass.index, reason)
           if (!ended.ok) return { next: spine.next(), failure: ended, ran }
           materialised.delete(spine)
           item = undefined

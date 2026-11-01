@@ -246,9 +246,11 @@ export function dataCommandOf(
   verb: string,
   config: { dataCommand: string },
   index?: number,
+  failedReason?: string,
 ): string {
   const position = index === undefined ? '' : ` --index ${String(index)}`
-  return `${config.dataCommand} ${verb} --node ${quoted(node.id)}${position}`
+  const failed = failedReason === undefined ? '' : ` --failed ${quoted(failedReason)}`
+  return `${config.dataCommand} ${verb} --node ${quoted(node.id)}${position}${failed}`
 }
 
 /**
@@ -271,8 +273,9 @@ export async function runDataCommand(
   verb: string,
   config: CommandRunnerConfig & { dataCommand: string },
   index?: number,
+  failedReason?: string,
 ): Promise<{ ok: true; value: Record<string, unknown> } | CommandFailure> {
-  const command = dataCommandOf(node, verb, config, index)
+  const command = dataCommandOf(node, verb, config, index, failedReason)
   const allowance = resourceCheck(node, config)
   const resolved = shell.resolve(requestFor(node, command, config))
   const spec = allowance === undefined ? resolved : { ...resolved, timeoutMs: Math.min(resolved.timeoutMs, allowance) }
