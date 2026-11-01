@@ -627,6 +627,23 @@ def smoke(
     exercises the *default* path only, so a mode whose new input path is broken --
     the one the brief asked for -- scores on the fixture and is accepted.
     """
+    # Test-only override: when the walker runs every op in a forkserver child,
+    # monkeypatching in the parent is invisible to the child.  Tests that need
+    # to control the smoke result set _REFACTORY_TEST_SMOKE_OVERRIDE to a JSON
+    # payload and the function returns it directly.
+    _override = os.environ.get("_REFACTORY_TEST_SMOKE_OVERRIDE")
+    if _override:
+        import json as _json
+        _data = _json.loads(_override)
+        # Allow per-identifier overrides: {"circle_packing/adaptive": {...}, ...}
+        if identifier in _data:
+            _payload = _data[identifier]
+        elif "*" in _data:
+            _payload = _data["*"]
+        else:
+            _payload = _data
+        return SandboxResult(ok=True, payload=_payload)
+
     project = Path(project or project_for_nodes())
     client = (
         "from refactory_dsh.model import DshModelClient\n"

@@ -509,6 +509,13 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
+        # Apply the parent's environment snapshot: the forkserver child inherits
+        # the forkserver's env (created once), but the parent may have set vars
+        # (e.g. via monkeypatch.setenv in tests) that the child needs to see.
+        env_snapshot = args_dict.get("env_snapshot")
+        if env_snapshot:
+            os.environ.clear()
+            os.environ.update(env_snapshot)
         # Restore the parent's sys.path so resolve() finds the same modules, and pick up
         # a workspace package installed since the forkserver preloaded.
         sys.path[:] = args_dict["sys_path"]
@@ -970,6 +977,10 @@ class Executor:
         A fork stops *before* its barrier, because the barrier is the node the walk
         continues at. A data node's pass includes its ``subgraph_exit``: that node is
         the last one of the subgraph, not the one after it.
+
+        Nested forks and joins within a branch are handled inline: when a fork is
+        encountered, ``run_fork`` is called recursively; when a join is encountered,
+        it is recorded and the walk continues to the next node.
         """
         current: str | None = start
         visits = self._gate_iterations if iterations is None else iterations
@@ -985,6 +996,31 @@ class Executor:
                 return f"node {current!r} does not exist"
             if len(self.steps) >= self.max_steps or (self._reserve_step and not self._reserve_step()):
                 return f"the run exceeded {self.max_steps} steps"
+            # Nested fork inside a branch: delegate to run_fork.
+            if node.kind == "fork":
+                from .fork import run_fork
+
+                self.steps.append(Step(node.id, node.kind, 0.0))
+                self.record.complete(node)
+                try:
+                    error = run_fork(self, node)
+                except GateStop as exc:
+                    return str(exc)
+                except HaltStop:
+                    raise
+                except Exception as exc:
+                    return f"{node.id}: {type(exc).__name__}: {exc}"
+                if error is not None:
+                    return error
+                current = self.graph.out_edges(node.id)[0].target
+                continue
+            # Nested join inside a branch: step over it.
+            if node.kind == "join":
+                self.steps.append(Step(node.id, node.kind, 0.0))
+                self.record.complete(node)
+                out = self.graph.out_edges(node.id)
+                current = out[0].target if out else None
+                continue
             self.ctx.iteration = len(self.steps)
             self.ctx.node_id = current
             self.ctx._declared = node.writes  # noqa: SLF001 - the run owns the context
@@ -1125,9 +1161,16 @@ class Executor:
         # SWEEP-5: ctx.model for ops is None, matching the spine (run.py:314,
         # 344-365) and the documented op API (create_ops.py:126). The readiness
         # checks (design_ops.py:302-306) handle None explicitly.
+        # Resolve workdir to absolute: the child does os.chdir(workdir) and
+        # relative paths would resolve against the new CWD otherwise.
+        _abs_workdir = str(self.ctx.workdir.resolve())
+        # Forward the current environment snapshot: forkserver children inherit
+        # the forkserver's env, not the parent's current one.  Tests that use
+        # monkeypatch.setenv need the child to see those changes.
         args_dict: dict[str, Any] = {
             "sys_path": list(sys.path),
-            "workdir": str(self.ctx.workdir),
+            "workdir": _abs_workdir,
+            "env_snapshot": dict(os.environ),
             "facts": dict(self.ctx.facts),
             "knobs": dict(self.ctx.knobs),
             "task": dict(self.ctx.task),
@@ -1270,6 +1313,99 @@ class Executor:
             self.ctx.budget.checkpoint()
         return result
 
+    def _run_op_inline(self, node: Node) -> Any:
+        """Run an op or fn gate in-process matching the spine's op contract: run
+        directory is the CWD, ctx.model is None, stdout/stderr are captured
+        per-call with a thread-local redirect (no global sys.stdout swap).
+
+        This preserves in-process semantics (monkeypatching works) while matching
+        the spine's contract for ops on the default walker path.
+        """
+        import io
+        import threading
+
+        callable_target = node.evaluator if node.kind == "gate" else node.call
+        saved_model = self.ctx.model
+        saved_cwd = os.getcwd()
+        saved_workdir = self.ctx.workdir
+        abs_workdir = Path(self.ctx.workdir.resolve())
+        saved_project = os.environ.get("REFACTORY_PROJECT")
+        self.ctx.model = None
+        # Update ctx.workdir to absolute so relative paths resolve correctly
+        # after os.chdir changes the CWD.
+        self.ctx.workdir = abs_workdir
+        try:
+            # Set REFACTORY_PROJECT so project_for_nodes() still resolves to the
+            # launcher rather than the run directory after the chdir.
+            if not os.environ.get("REFACTORY_PROJECT"):
+                os.environ["REFACTORY_PROJECT"] = saved_cwd
+            os.chdir(str(abs_workdir))
+            # Capture stdout/stderr per-call using thread-local redirect
+            _capture_stderr = io.StringIO()
+            _capture_stdout = io.StringIO()
+            _thread_id = threading.get_ident()
+            _real_stderr = sys.stderr
+            _real_stdout = sys.stdout
+
+            class _ThreadLocalWriter:
+                """Redirect only the calling thread's writes to a capture buffer."""
+                def __init__(self, capture, real):
+                    self._capture = capture
+                    self._real = real
+                def write(self, data):
+                    if threading.get_ident() == _thread_id:
+                        self._capture.write(data)
+                    else:
+                        self._real.write(data)
+                def flush(self):
+                    (self._capture if threading.get_ident() == _thread_id else self._real).flush()
+                def __getattr__(self, name):
+                    return getattr(self._real, name)
+
+            sys.stdout = _ThreadLocalWriter(_capture_stdout, _real_stdout)
+            sys.stderr = _ThreadLocalWriter(_capture_stderr, _real_stderr)
+            try:
+                fn = resolve(callable_target)
+                produced = fn(self.ctx)
+            except BaseException:
+                # Preserve stderr on error
+                _err_stderr = _capture_stderr.getvalue()
+                sys.stdout = _real_stdout
+                sys.stderr = _real_stderr
+                if _err_stderr and _err_stderr.strip():
+                    exc = sys.exc_info()[1]
+                    if exc is not None:
+                        try:
+                            exc.args = (f"{exc.args[0]}\nop stderr: {_err_stderr.strip()}",) + exc.args[1:]
+                        except (IndexError, AttributeError):
+                            pass
+                raise
+            finally:
+                sys.stdout = _real_stdout
+                sys.stderr = _real_stderr
+            # Emit run warnings from captured stderr, and pass through any stderr
+            # to the real stderr so it remains visible for debugging.
+            _captured_err = _capture_stderr.getvalue()
+            _emit_run_warnings(self.ctx.workdir, node.id, _captured_err)
+            if _captured_err:
+                _real_stderr.write(_captured_err)
+            # Attach captured stdout for fn-gate feedback extraction
+            _child_stdout = _capture_stdout.getvalue()
+            if _child_stdout and isinstance(produced, str):
+                try:
+                    produced._fn_stdout = _child_stdout  # type: ignore[attr-defined]
+                except (AttributeError, TypeError):
+                    pass
+            return produced
+        finally:
+            self.ctx.model = saved_model
+            self.ctx.workdir = saved_workdir
+            os.chdir(saved_cwd)
+            if saved_project is None:
+                os.environ.pop("REFACTORY_PROJECT", None)
+            else:
+                os.environ["REFACTORY_PROJECT"] = saved_project
+
     def _dispatch(self, node: Node, answer: str | None = None) -> tuple[str | None, str | None]:
         """Execute a node after resource admission and the durable start marker. ``answer``
         is a user gate's, read before its visit started."""
@@ -1278,8 +1414,7 @@ class Executor:
             if timeout is not None:
                 produced = self._run_op_timed(node.call, node, timeout)
             else:
-                fn = resolve(node.call)
-                produced = fn(self.ctx)
+                produced = self._run_op_inline(node)
             if isinstance(produced, dict):
                 for key, value in produced.items():
                     self.ctx.set_fact(key, value)
@@ -1480,42 +1615,9 @@ class Executor:
                 # processes for per-process stdout capture (thread-safe).
                 verdict = self._run_op_timed(node.evaluator, node, timeout)
             else:
-                # SWEEP-4: Capture stdout per-call without swapping the global
-                # sys.stdout (thread-safe when fork branches run in threads).
-                # Use a thread-local StringIO redirect instead of global swap.
-                import io
-                import threading
-                _capture = io.StringIO()
-                _thread_id = threading.get_ident()
-                _real_stdout = sys.stdout
-
-                class _ThreadLocalStdout:
-                    """A stdout wrapper that redirects only the calling thread's writes."""
-                    def write(self, data):
-                        if threading.get_ident() == _thread_id:
-                            _capture.write(data)
-                        else:
-                            _real_stdout.write(data)
-                    def flush(self):
-                        if threading.get_ident() == _thread_id:
-                            _capture.flush()
-                        else:
-                            _real_stdout.flush()
-                    def __getattr__(self, name):
-                        return getattr(_real_stdout, name)
-
-                sys.stdout = _ThreadLocalStdout()
-                try:
-                    fn: Callable[[RunContext], Any] = resolve(node.evaluator)
-                    verdict = fn(self.ctx)
-                finally:
-                    sys.stdout = _real_stdout
-                _fn_stdout = _capture.getvalue()
-                if isinstance(verdict, str) and _fn_stdout:
-                    try:
-                        verdict._fn_stdout = _fn_stdout  # type: ignore[attr-defined]
-                    except (AttributeError, TypeError):
-                        pass
+                # Default path: run inline with per-call stdout capture
+                # (thread-safe via thread-local redirect, no global sys.stdout swap).
+                verdict = self._run_op_inline(node)
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"

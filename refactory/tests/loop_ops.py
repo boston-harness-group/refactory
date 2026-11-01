@@ -214,6 +214,16 @@ def parity_apply_correction(ctx: Any) -> dict[str, Any]:
     return {"corrections_applied": correction_texts}
 
 
+def parity_nested_fork_fail(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: An op that always fails, for the optional-branch-first-node-failure path."""
+    raise ValueError("optional branch first node failure (expected)")
+
+
+def parity_read_knob(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: An op that reads the test_knob knob value."""
+    return {"knob_read": ctx.knobs.get("test_knob", "")}
+
+
 def test_apply_corrections(ctx: Any) -> dict[str, Any]:
     """Test op that applies corrections from the ledger and records them as a fact."""
     from pathlib import Path as _P

@@ -77,13 +77,17 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
             if current == fork.id or current not in graph.nodes:
                 raise ExecutionError(f"fork {fork.id!r} has an invalid branch at {current!r}")
             node = graph.nodes[current]
-            if node.kind not in ("op", "agent", "gate"):
+            if node.kind not in ("op", "agent", "gate", "fork", "join"):
                 raise ExecutionError(
                     f"fork {fork.id!r}: nested {node.kind!r} node {current!r} is not "
                     "supported inside a Python fork branch"
                 )
             seen.add(current)
             pending.extend(edge.target for edge in graph.out_edges(current))
+            # Include nested fork targets so their nodes and produced facts are
+            # accounted for in the branch (matching the spine's lowering).
+            if node.kind == "fork" and node.targets:
+                pending.extend(node.targets)
         if not seen or seen & owned:
             raise ExecutionError(f"fork {fork.id!r} has empty or overlapping branches at {target!r}")
         owned.update(seen)

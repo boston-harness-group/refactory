@@ -154,8 +154,13 @@ def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
     pkg = "edited_regression"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    monkeypatch.setattr(sandbox, "smoke", lambda identifier, *args, **kwargs: sandbox.SandboxResult(
-        ok=True, payload={"exit_ok": True, "score": 5.0 if identifier == "circle_packing/adaptive" else 1.0}))
+    # Ops run in forkserver children, so monkeypatching sandbox.smoke is invisible.
+    # Use an environment variable override that the child process reads.
+    smoke_override = json.dumps({
+        "circle_packing/adaptive": {"exit_ok": True, "score": 5.0},
+        "*": {"exit_ok": True, "score": 1.0},
+    })
+    monkeypatch.setenv("_REFACTORY_TEST_SMOKE_OVERRIDE", smoke_override)
     try:
         with pytest.raises(CreateError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
             edit_module.edit(
@@ -175,8 +180,11 @@ def test_a_regression_can_be_intended(monkeypatch, tmp_path):
     pkg = "edited_intended"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    monkeypatch.setattr(sandbox, "smoke", lambda identifier, *args, **kwargs: sandbox.SandboxResult(
-        ok=True, payload={"exit_ok": True, "score": 5.0 if identifier == "circle_packing/adaptive" else 1.0}))
+    smoke_override = json.dumps({
+        "circle_packing/adaptive": {"exit_ok": True, "score": 5.0},
+        "*": {"exit_ok": True, "score": 1.0},
+    })
+    monkeypatch.setenv("_REFACTORY_TEST_SMOKE_OVERRIDE", smoke_override)
     try:
         result = edit_module.edit(
             _edit_config(
@@ -198,8 +206,8 @@ def test_a_revision_of_a_mode_that_does_not_run_is_refused(monkeypatch, tmp_path
     pkg = "edited_norun"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    monkeypatch.setattr(sandbox, "smoke", lambda *args, **kwargs: sandbox.SandboxResult(
-        ok=True, payload={"exit_ok": False, "error": "it never ran", "score": None}))
+    smoke_override = json.dumps({"*": {"exit_ok": False, "error": "it never ran", "score": None}})
+    monkeypatch.setenv("_REFACTORY_TEST_SMOKE_OVERRIDE", smoke_override)
     try:
         with pytest.raises(CreateError, match="it never ran"):
             edit_module.edit(

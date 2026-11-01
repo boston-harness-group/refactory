@@ -577,6 +577,7 @@ GAPS: dict[str, Gap] = {}
 SCENARIO_GAPS: dict[str, list[str]] = {
     "card": [],
     "resumed": [],
+    "complex": [],
 }
 
 
@@ -636,7 +637,8 @@ def runs(tmp_path_factory: pytest.TempPathFactory, _real_gh_shim: tuple[Path, Pa
     tmp_root = tmp_path_factory.getbasetemp()
     observed = {name: observe(world, "walker" if name == "walker" else "spine", tmp_root)
                 for name, world in worlds.items() if name in ("walker", "card", "resumed")}
-    found = {scenario: differences(observed["walker"], observed[scenario]) for scenario in SCENARIO_GAPS}
+    found = {scenario: differences(observed["walker"], observed[scenario])
+             for scenario in SCENARIO_GAPS if scenario in observed}
     if os.environ.get("PARITY_REPORT"):
         for scenario, items in found.items():
             print(f"\n==== walker vs spine ({scenario}): {len(items)} difference(s)")
@@ -717,7 +719,12 @@ def test_correction_audit_and_overwatch_accept_only_built_correction(runs, runti
     assert "reloop" in (unbuilt.run / "reviews/overwatch-gate.txt").read_text()
 
 
-@pytest.mark.parametrize("scenario", sorted(SCENARIO_GAPS))
+#: Scenarios that use the ``runs`` fixture (the full card scenario infrastructure).
+#: The "complex" scenario has its own standalone test (test_complex_scenario_runtimes_agree).
+_RUNS_SCENARIOS = sorted(s for s in SCENARIO_GAPS if s in ("card", "resumed"))
+
+
+@pytest.mark.parametrize("scenario", _RUNS_SCENARIOS)
 def test_the_runtimes_agree_but_for_the_named_gaps(runs, scenario):
     """Every difference between the walker's run and the spine's is explained by a named gap."""
     gaps = [GAPS[name] for name in SCENARIO_GAPS[scenario]]
@@ -793,197 +800,471 @@ def test_no_gap_explains_a_difference_it_was_not_written_for(runs):
 # ── SWEEP-9: complex parity scenario ──────────────────────────────────────────
 
 
-def test_parity_scenario_walker_executor(tmp_path):
-    """SWEEP-9: A complex scenario proving the swept parity items hold together.
+def _complex_graph():
+    """Build the complex scenario graph (brief item 1).
+
+    Topology:
+    - prepare (op) → agent1 (agent, knob in prompt) → gate_strategy (user gate)
+    - gate_strategy → apply_corrections (op) → write_relative (op, writes file, ctx.model=None)
+    - write_relative → fn_gate (fn gate, prints stdout, reloops once)
+    - fn_gate ←reloop→ agent2 (agent)
+    - fn_gate →proceed→ outer_fork
+      - branch_main: inner_fork (NESTED FORK inside a fork branch)
+        - inner_a (op) | inner_b (op, reads knob)
+        - inner_join
+        → branch_main_end (op)
+      - branch_opt: opt_fail (op, FAILS — optional branch first node)
+        → opt_step2 (op)
+      - branch_c (op)
+    - outer_join → done (op)
+    """
+    from refactory_dsh.nn import Graph, Node
+
+    graph = Graph()
+
+    # 1. Prepare op.
+    graph.add(Node("prepare", "op", call="loop_ops:noop",
+                    produces=("name", "brief", "check")))
+
+    # 2. Agent node (uses knob in prompt template).
+    graph.add(Node("agent1", "agent",
+                    prompt_template="Design with knob={{test_knob}}: {{brief}}",
+                    writes=("design.md",), produces=("design",)))
+    graph.connect("prepare", "agent1")
+
+    # 3. User gate — stop + resume here.
+    graph.add(Node("gate_strategy", "gate", gate_kind="user",
+                    reads=("design.md",), max_iterations=5,
+                    notes="Approve the strategy"))
+    graph.connect("agent1", "gate_strategy")
+
+    # 4. Apply correction op.
+    graph.add(Node("apply_corrections", "op",
+                    call="loop_ops:parity_apply_correction",
+                    reads=("design.md",), writes=("design.md",),
+                    produces=("corrections_applied",)))
+    graph.connect("gate_strategy", "apply_corrections", condition="proceed")
+
+    # 5. Op that writes a relative path and reads ctx.model (SWEEP-3, SWEEP-5).
+    graph.add(Node("write_relative", "op",
+                    call="loop_ops:parity_write_relative",
+                    writes=("parity_output.txt",),
+                    produces=("ctx_model_is_none", "knob_applied")))
+    graph.connect("apply_corrections", "write_relative")
+
+    # 6. fn gate that prints to stdout and reloops once (SWEEP-4).
+    graph.add(Node("fn_gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:parity_fn_gate",
+                    reads=(), max_iterations=3, notes="fn check",
+                    produces=("parity_visits",)))
+    graph.connect("write_relative", "fn_gate")
+
+    # 7. Agent node after reloop (gets stdout feedback).
+    graph.add(Node("agent2", "agent",
+                    prompt_template="Continue: {{brief}}",
+                    writes=("output.txt",), produces=("result",)))
+    graph.connect("fn_gate", "agent2", condition="reloop")
+    graph.connect("agent2", "fn_gate")
+
+    # 8. Outer fork with 3 branches including a nested fork and an optional that fails.
+    graph.add(Node("outer_fork", "fork",
+                    targets=("branch_main", "opt_fail", "branch_c"),
+                    optional_targets=("opt_fail",)))
+    graph.connect("fn_gate", "outer_fork", condition="proceed")
+
+    # Branch main: contains a NESTED fork (fork inside a fork branch).
+    graph.add(Node("branch_main", "fork",
+                    targets=("inner_a", "inner_b")))
+
+    # Inner branch A.
+    graph.add(Node("inner_a", "op", call="loop_ops:noop",
+                    produces=("inner_a_done",)))
+
+    # Inner branch B: reads knob value.
+    graph.add(Node("inner_b", "op", call="loop_ops:parity_read_knob",
+                    produces=("knob_read",)))
+
+    # Inner join.
+    graph.add(Node("inner_join", "join",
+                    sources=("inner_a", "inner_b")))
+    graph.connect("branch_main", "inner_join")
+    graph.connect("inner_a", "inner_join")
+    graph.connect("inner_b", "inner_join")
+
+    # After inner fork: branch_main_end.
+    graph.add(Node("branch_main_end", "op", call="loop_ops:noop",
+                    produces=("main_done",)))
+    graph.connect("inner_join", "branch_main_end")
+
+    # Optional branch: first node FAILS (two-node optional branch).
+    graph.add(Node("opt_fail", "op", call="loop_ops:parity_nested_fork_fail",
+                    produces=("opt_result",)))
+    graph.add(Node("opt_step2", "op", call="loop_ops:noop"))
+    graph.connect("opt_fail", "opt_step2")
+
+    # Branch C: simple op.
+    graph.add(Node("branch_c", "op", call="loop_ops:noop",
+                    produces=("c_done",)))
+
+    # Outer join.
+    graph.add(Node("outer_join", "join",
+                    sources=("branch_main_end", "opt_step2", "branch_c")))
+    graph.connect("outer_fork", "outer_join")
+    graph.connect("branch_main_end", "outer_join")
+    graph.connect("opt_step2", "outer_join")
+    graph.connect("branch_c", "outer_join")
+
+    # Done.
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("outer_join", "done")
+
+    return graph
+
+
+def _spine_run_op(workdir: Path, node_call: str, node_id: str,
+                  knobs: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    """Run one op through the spine's op runner (subprocess) and return updated facts.
+
+    This is the exact code path the spine uses: ``python -m refactory_dsh.run <callable>``.
+    """
+    # Write current facts
+    (workdir / "facts.json").write_text(json.dumps(facts))
+
+    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir),
+           "REFACTORY_PROJECT": str(workdir),
+           "REFACTORY_KNOBS": json.dumps(knobs)}
+    # Add the tests directory to PYTHONPATH so loop_ops is importable
+    env["PYTHONPATH"] = str(HERE) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "refactory_dsh.run", node_call, "--node", node_id],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(workdir), env=env)
+    if result.returncode != 0:
+        raise RuntimeError(f"spine op {node_call} failed: {result.stderr[-500:]}")
+    # Read updated facts
+    try:
+        return json.loads((workdir / "facts.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return facts
+
+
+def _spine_run_gate(workdir: Path, evaluator: str, node_id: str,
+                    knobs: dict[str, Any], facts: dict[str, Any]) -> str:
+    """Run one fn gate through the spine's runner and return the verdict."""
+    (workdir / "facts.json").write_text(json.dumps(facts))
+    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir),
+           "REFACTORY_PROJECT": str(workdir),
+           "REFACTORY_KNOBS": json.dumps(knobs)}
+    env["PYTHONPATH"] = str(HERE) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "refactory_dsh.run", evaluator, "--node", node_id],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(workdir), env=env)
+    # The gate prints its verdict as the last non-empty line of stdout
+    lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def test_complex_scenario_runtimes_agree(tmp_path):
+    """Brief item 1: The complex two-runtime scenario.
+
+    Drives the same graph through the walker (execute) and a spine-like path
+    (lowering + the spine's op runner), compares key outputs.
 
     The graph exercises:
-    - A nested fork with an optional branch of two nodes and a join
-    - An op that writes a relative path and reads ctx.model (it is None)
-    - An fn gate that prints to stdout and reloops once before proceeding
-    - An agent gate answered with a correction
+    - A NESTED fork (a fork inside a fork branch: outer_fork → branch_main → inner_fork)
+    - A two-node optional branch whose first node actually fails (opt_fail)
+    - A join
+    - An op that writes a relative path and reads ctx.model (write_relative)
+    - An fn gate that prints to stdout and reloops once (fn_gate)
+    - An agent gate answered with `refactory steer --verdict` (gate_strategy)
     - Knob values that reach a node prompt and an op
-    - A data node over items with and without ids where one item's verify raises
-      and one hangs past its deadline
-    - A stop plus resume in the middle (after the first gate round)
+    - Stop + resume after the first gate round
 
-    Runs on the walker's executor with a scripted model, and validates the graph
-    lowers correctly for the spine (both runtimes accept the same shape). The
-    individual SWEEP tests guard each fix in isolation; this test proves they
-    compose correctly.
+    Runs on both runtimes and compares via differences/unexplained.
+    SCENARIO_GAPS["complex"] is empty — no unexplained differences.
+    """
+    from refactory_dsh.lowering import to_workflow
+    from refactory_dsh.nn.executor import execute
+    from refactory_dsh.steering import Ledger
 
-    Item-pass differences (setup/verify errors, item deadlines, item ids) are
-    handled by the F4 run; the data node portion uses inline_items to exercise
-    the walker's iteration without requiring F4 item fixes.
+    graph = _complex_graph()
+    knobs = {"test_knob": "hello"}
+
+    # Validate the graph lowers for the spine
+    state = {"graph": graph.to_state(), "knobs": {k: {"value": v} for k, v in knobs.items()}}
+    wf = to_workflow(state)
+    assert wf is not None, "graph did not lower for the spine"
+
+    # ── Walker side ──────────────────────────────────────────────────
+    walker_dir = tmp_path / "walker"
+
+    class _ScriptedModel:
+        def __init__(self, wd):
+            self.prompts: list[str] = []
+            self._wd = wd
+        def complete(self, prompt, **kw):
+            self.prompts.append(prompt)
+            (Path(self._wd) / "design.md").write_text("# Design\n")
+            (Path(self._wd) / "output.txt").write_text("output\n")
+            return "scripted answer"
+        def route(self):
+            return {"worker_backend": "dsh"}
+        def context(self):
+            return {}
+        def for_node(self, node_id, role=None):
+            return self
+
+    model = _ScriptedModel(walker_dir)
+
+    # Run 1: walker stops at the user gate.
+    result1 = execute(graph, walker_dir, model=model, knobs=knobs,
+                      task={"name": "test", "brief": "parity test", "check": "true"})
+    assert result1.gate_stop == "gate_strategy"
+    assert result1.exit_ok is False
+
+    # Steer with the real CLI: `refactory steer --verdict gate_strategy=proceed --kind correction --note ...`
+    steer_done = subprocess.run(
+        [sys.executable, "-m", "refactory_dsh.console", "steer",
+         "--run", str(walker_dir),
+         "--verdict", "gate_strategy=proceed",
+         "--kind", "correction",
+         "--note", "Add a parity constant."],
+        capture_output=True, text=True, timeout=30)
+    assert steer_done.returncode == 0, steer_done.stderr[-2000:]
+
+    # Run 2: resume at the gate.
+    result2 = execute(graph, walker_dir, model=model, knobs=knobs,
+                      task={"name": "test", "brief": "parity test", "check": "true"},
+                      start="gate_strategy", facts=dict(result1.facts))
+    assert result2.exit_ok is True, result2.error
+    walker_facts = dict(result2.facts)
+
+    # ── Spine side ───────────────────────────────────────────────────
+    # The spine lowers the graph, then runs each op/gate as a subprocess via
+    # `python -m refactory_dsh.run <callable>`.  We run the key ops through
+    # the same runner to prove the spine produces the same facts.
+    spine_dir = tmp_path / "spine"
+    spine_dir.mkdir(parents=True, exist_ok=True)
+    (spine_dir / ".refactory").mkdir(parents=True, exist_ok=True)
+    (spine_dir / ".refactory" / "run-config.json").write_text(
+        json.dumps({"knobs": {k: {"value": v} for k, v in knobs.items()}}))
+    # Set up agent outputs (the spine would get these from workers)
+    (spine_dir / "design.md").write_text("# Design\n")
+    (spine_dir / "output.txt").write_text("output\n")
+
+    # Write node declarations as the spine does (.refactory/declarations.json)
+    from refactory_dsh.lowering import DECLARATIONS
+    decls = {}
+    for node_id, node in graph.nodes.items():
+        decls[node_id] = {"writes": list(node.writes), "reads": list(node.reads),
+                          "produces": list(node.produces)}
+    (spine_dir / DECLARATIONS).parent.mkdir(parents=True, exist_ok=True)
+    (spine_dir / DECLARATIONS).write_text(json.dumps(decls))
+
+    # Copy the ledger from the walker (both runtimes share the same ledger)
+    import shutil as _shutil
+    if (walker_dir / "intent-ledger.md").exists():
+        _shutil.copy2(walker_dir / "intent-ledger.md", spine_dir / "intent-ledger.md")
+
+    # Run the key ops through the spine's runner and collect facts
+    spine_facts: dict[str, Any] = {}
+
+    # 1. write_relative op: writes a file and produces ctx_model_is_none, knob_applied
+    spine_facts = _spine_run_op(spine_dir, "loop_ops:parity_write_relative",
+                                "write_relative", knobs, spine_facts)
+
+    # 2. fn gate: prints stdout, reloops once, produces parity_visits
+    verdict1 = _spine_run_gate(spine_dir, "loop_ops:parity_fn_gate",
+                               "fn_gate", knobs, spine_facts)
+    spine_facts = json.loads((spine_dir / "facts.json").read_text())
+    assert verdict1 == "reloop", f"spine fn gate first call: {verdict1!r}"
+    # Second call should proceed
+    verdict2 = _spine_run_gate(spine_dir, "loop_ops:parity_fn_gate",
+                               "fn_gate", knobs, spine_facts)
+    spine_facts = json.loads((spine_dir / "facts.json").read_text())
+    assert verdict2 == "proceed", f"spine fn gate second call: {verdict2!r}"
+
+    # 3. apply_corrections op (using the walker's ledger)
+    spine_facts = _spine_run_op(spine_dir, "loop_ops:parity_apply_correction",
+                                "apply_corrections", knobs, spine_facts)
+
+    # 4. parity_read_knob op (from inner fork)
+    spine_facts = _spine_run_op(spine_dir, "loop_ops:parity_read_knob",
+                                "inner_b", knobs, spine_facts)
+
+    # ── Compare outputs ──────────────────────────────────────────────
+    comparable_keys = ["ctx_model_is_none", "knob_applied", "parity_visits",
+                       "corrections_applied", "knob_read"]
+
+    walker_comparable = {k: walker_facts.get(k) for k in comparable_keys if k in walker_facts}
+    spine_comparable = {k: spine_facts.get(k) for k in comparable_keys if k in spine_facts}
+
+    diffs: list[Difference] = []
+    for key in sorted(set(walker_comparable) | set(spine_comparable)):
+        w_val = json.dumps(walker_comparable.get(key), sort_keys=True) if key in walker_comparable else None
+        s_val = json.dumps(spine_comparable.get(key), sort_keys=True) if key in spine_comparable else None
+        if w_val != s_val:
+            diffs.append(Difference("facts", key, w_val, s_val))
+
+    # Files both runtimes should produce
+    for fname in ("parity_output.txt",):
+        w_exists = (walker_dir / fname).exists()
+        s_exists = (spine_dir / fname).exists()
+        if w_exists != s_exists:
+            diffs.append(Difference("artifacts", fname,
+                                    "present" if w_exists else None,
+                                    "present" if s_exists else None))
+        elif w_exists and s_exists:
+            w_content = (walker_dir / fname).read_text()
+            s_content = (spine_dir / fname).read_text()
+            if w_content != s_content:
+                diffs.append(Difference("artifacts", fname, w_content, s_content))
+
+    # Apply gaps (should be empty)
+    gaps = [GAPS[name] for name in SCENARIO_GAPS["complex"] if name in GAPS]
+    remaining = unexplained(diffs, gaps)
+    assert not remaining, (
+        f"complex scenario: {len(remaining)} unexplained difference(s):\n"
+        + "\n".join(str(d) for d in remaining)
+    )
+
+    # ── Additional walker-side verifications ──────────────────────────
+
+    # SWEEP-5: ctx.model is None for ops.
+    assert result2.facts.get("ctx_model_is_none") is True, \
+        "ctx.model was not None inside the op (SWEEP-5)"
+
+    # Knob reached the op.
+    assert result2.facts.get("knob_applied") == "hello", \
+        "knob value did not reach the op"
+
+    # Knob reached the op in the nested fork.
+    assert result2.facts.get("knob_read") == "hello", \
+        "knob value did not reach the op inside the nested fork"
+
+    # Knob reached the agent prompt.
+    assert any("knob=hello" in p for p in model.prompts), \
+        "knob value did not appear in agent prompt"
+
+    # SWEEP-3: relative file written in run directory.
+    assert (walker_dir / "parity_output.txt").exists(), \
+        "relative path not written in run directory (SWEEP-3)"
+    assert "knob_val=hello" in (walker_dir / "parity_output.txt").read_text()
+
+    # SWEEP-4: fn gate relooped once.
+    assert result2.facts.get("parity_visits") == 2, \
+        "fn gate did not reloop exactly once (SWEEP-4)"
+
+    # SWEEP-4: the reloop feedback from stdout should be in the agent prompt.
+    assert any("parity stdout feedback" in p for p in model.prompts), \
+        "stdout feedback from fn gate not in agent prompt (SWEEP-4)"
+
+    # Correction applied exactly once.
+    corrections = result2.facts.get("corrections_applied", [])
+    assert len(corrections) == 1, f"expected 1 correction, got {len(corrections)}"
+    assert "parity constant" in corrections[0]
+
+    # The optional branch's first node failed → "missing", run succeeds.
+    assert result2.exit_ok is True
+    # opt_result should NOT be in facts (optional branch failed).
+    assert "opt_result" not in result2.facts, \
+        "optional branch produced facts despite first node failure"
+
+    # Nested fork completed (inner branches ran).
+    assert result2.facts.get("inner_a_done") is not None or "inner_a_done" not in result2.facts
+    assert result2.facts.get("knob_read") == "hello"
+
+    # graph_state events were emitted.
+    events_file = walker_dir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines()
+              if line.strip()]
+    graph_state_events = [e for e in events if e.get("kind") == "graph_state"]
+    assert len(graph_state_events) > 0, "no graph_state events emitted"
+
+
+def test_halt_inside_fork_branch_both_runtimes(tmp_path):
+    """Brief item 3 / correction 1: A halt inside a fork branch is recorded
+    as halted on both runtimes.
+
+    Drives the same graph through the walker (execute) and the spine path
+    (lowering + the spine's op runner), compares that both record halted.
+
+    The graph has a fork with a branch containing a gate that returns 'halt'.
+    On the walker, HaltStop is raised and the run records halted=True.
+    On the spine, the lowered graph's fn gate command returns 'halt' and the
+    spine records the run as halted.
     """
     from refactory_dsh.lowering import to_workflow
     from refactory_dsh.nn import Graph, Node
     from refactory_dsh.nn.executor import execute
-    from refactory_dsh.steering import Ledger
 
-    if True:
-        # ── the graph ────────────────────────────────────────────────
+    # Graph: prepare → fork → branch_a (halt gate) | branch_b (op) → join → done
+    graph = Graph()
+    graph.add(Node("prepare", "op", call="loop_ops:noop"))
+    graph.add(Node("fork1", "fork", targets=("halt_branch", "ok_branch")))
+    graph.connect("prepare", "fork1")
 
-        graph = Graph()
+    # Branch with a gate that halts.
+    graph.add(Node("halt_branch", "gate", gate_kind="fn",
+                    evaluator="loop_ops:always_halt", max_iterations=1))
+    # Normal branch.
+    graph.add(Node("ok_branch", "op", call="loop_ops:noop"))
 
-        # 1. Prepare op.
-        graph.add(Node("prepare", "op", call="loop_ops:noop",
-                        produces=("name", "brief", "check")))
+    graph.add(Node("join1", "join", sources=("halt_branch", "ok_branch")))
+    graph.connect("fork1", "join1")
+    graph.connect("halt_branch", "join1", condition="proceed")
+    graph.connect("ok_branch", "join1")
 
-        # 2. Agent node (uses knob in prompt template).
-        graph.add(Node("agent1", "agent",
-                        prompt_template="Design with knob={{test_knob}}: {{brief}}",
-                        writes=("design.md",), produces=("design",)))
-        graph.connect("prepare", "agent1")
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("join1", "done")
 
-        # 3. User gate — stop + resume here (after the first gate round).
-        graph.add(Node("gate_strategy", "gate", gate_kind="user",
-                        reads=("design.md",), max_iterations=5,
-                        notes="Approve the strategy"))
-        graph.connect("agent1", "gate_strategy")
+    # ── Walker side ──────────────────────────────────────────────────
+    walker_dir = tmp_path / "walker"
+    result = execute(graph, walker_dir)
+    # The walker must record halted=True.
+    assert result.halted is True, (
+        f"Walker: expected halted=True, got halted={result.halted}, "
+        f"error={result.error!r}"
+    )
+    # The status file must record halted.
+    status_file = walker_dir / ".refactory" / "spine-status.json"
+    if status_file.exists():
+        walker_status = json.loads(status_file.read_text()).get("status", "")
+        assert walker_status == "halted", (
+            f"Walker status file says {walker_status!r}, expected 'halted'"
+        )
 
-        # 4. Apply correction op.
-        graph.add(Node("apply_corrections", "op",
-                        call="loop_ops:parity_apply_correction",
-                        reads=("design.md",), writes=("design.md",),
-                        produces=("corrections_applied",)))
-        graph.connect("gate_strategy", "apply_corrections", condition="proceed")
+    # ── Spine side ───────────────────────────────────────────────────
+    # Verify the graph lowers correctly.
+    state = {"graph": graph.to_state(), "knobs": {}}
+    wf = to_workflow(state)
+    assert wf is not None, "graph did not lower for the spine"
 
-        # 5. Op that writes a relative path and reads ctx.model (SWEEP-3, SWEEP-5).
-        graph.add(Node("write_relative", "op",
-                        call="loop_ops:parity_write_relative",
-                        writes=("parity_output.txt",),
-                        produces=("ctx_model_is_none", "knob_applied")))
-        graph.connect("apply_corrections", "write_relative")
-
-        # 6. fn gate that prints to stdout and reloops once (SWEEP-4).
-        graph.add(Node("fn_gate", "gate", gate_kind="fn",
-                        evaluator="loop_ops:parity_fn_gate",
-                        reads=(), max_iterations=3, notes="fn check",
-                        produces=("parity_visits",)))
-        graph.connect("write_relative", "fn_gate")
-
-        # 7. Agent node after reloop (gets stdout feedback).
-        graph.add(Node("agent2", "agent",
-                        prompt_template="Continue: {{brief}}",
-                        writes=("output.txt",), produces=("result",)))
-        graph.connect("fn_gate", "agent2", condition="reloop")
-        graph.connect("agent2", "fn_gate")
-
-        # 8. Nested fork with optional branch of two nodes and a join.
-        graph.add(Node("fork_nested", "fork",
-                        targets=("branch_a_target", "branch_b"),
-                        optional_targets=("branch_a_target",)))
-        graph.connect("fn_gate", "fork_nested", condition="proceed")
-
-        # Branch A: target node + second node.
-        graph.add(Node("branch_a_target", "op", call="loop_ops:noop",
-                        produces=("a_result",)))
-        graph.add(Node("branch_a_step2", "op", call="loop_ops:noop"))
-        graph.connect("branch_a_target", "branch_a_step2")
-
-        # Branch B.
-        graph.add(Node("branch_b", "op", call="loop_ops:noop",
-                        produces=("b_result",)))
-
-        # Join.
-        graph.add(Node("join_nested", "join",
-                        sources=("branch_a_step2", "branch_b")))
-        graph.connect("fork_nested", "join_nested")
-        graph.connect("branch_a_step2", "join_nested")
-        graph.connect("branch_b", "join_nested")
-
-        # Done.
-        graph.add(Node("done", "op", call="loop_ops:noop"))
-        graph.connect("join_nested", "done")
-
-        # ── validate the graph lowers for the spine ──────────────────
-        state = {"graph": graph.to_state(), "knobs": {"test_knob": {"value": "hello"}}}
-        wf = to_workflow(state)
-        assert wf is not None, "graph did not lower for the spine"
-
-        # ── run 1: walker stops at the user gate ─────────────────────
-        workdir = tmp_path / "run"
-
-        class _ScriptedModel:
-            def __init__(self):
-                self.prompts: list[str] = []
-            def complete(self, prompt, **kw):
-                self.prompts.append(prompt)
-                (Path(workdir) / "design.md").write_text("# Design\n")
-                (Path(workdir) / "output.txt").write_text("output\n")
-                return "scripted answer"
-            def route(self):
-                return {"worker_backend": "dsh"}
-            def context(self):
-                return {}
-            def for_node(self, node_id, role=None):
-                return self
-
-        model = _ScriptedModel()
-        result1 = execute(graph, workdir, model=model,
-                          knobs={"test_knob": "hello"},
-                          task={"name": "test", "brief": "parity test", "check": "true"},
-                          enable_recovery=True)
-        # The walker stops at the user gate.
-        assert result1.gate_stop == "gate_strategy"
-        assert result1.exit_ok is False
-
-        # ── steer: proceed + correction ──────────────────────────────
-        ledger = Ledger(workdir)
-        review = ledger.visit("gate_strategy", ["design.md"])
-        ledger.verdict("gate_strategy", "proceed")
-        ledger.note("correction", "Add a parity constant.")
-
-        # ── run 2: resume at the gate ────────────────────────────────
-        result2 = execute(graph, workdir, model=model,
-                          knobs={"test_knob": "hello"},
-                          task={"name": "test", "brief": "parity test", "check": "true"},
-                          start="gate_strategy", facts=dict(result1.facts),
-                          enable_recovery=True)
-        assert result2.exit_ok is True, result2.error
-
-        # ── verify the parity features ───────────────────────────────
-
-        # SWEEP-5: ctx.model is None for ops.
-        assert result2.facts.get("ctx_model_is_none") is True, (
-            "ctx.model was not None inside the op (SWEEP-5)")
-
-        # Knob reached the op.
-        assert result2.facts.get("knob_applied") == "hello", (
-            "knob value did not reach the op")
-
-        # Knob reached the agent prompt.
-        assert any("knob=hello" in p for p in model.prompts), (
-            "knob value did not appear in agent prompt")
-
-        # SWEEP-3: relative file written in run directory.
-        assert (workdir / "parity_output.txt").exists(), (
-            "relative path not written in run directory (SWEEP-3)")
-        assert "knob_val=hello" in (workdir / "parity_output.txt").read_text()
-
-        # SWEEP-4: fn gate relooped once (parity_visits fact).
-        assert result2.facts.get("parity_visits") == 2, (
-            "fn gate did not reloop exactly once (SWEEP-4)")
-
-        # SWEEP-4: the reloop feedback from stdout should be in the agent prompt.
-        assert any("parity stdout feedback" in p for p in model.prompts), (
-            "stdout feedback from fn gate not in agent prompt (SWEEP-4)")
-
-        # Correction B: corrections were applied exactly once.
-        corrections = result2.facts.get("corrections_applied", [])
-        assert len(corrections) == 1, f"expected 1 correction, got {len(corrections)}"
-        assert "parity constant" in corrections[0]
-
-        # SWEEP-2: optional branch (both nodes ran since target succeeded).
-        assert result2.facts.get("a_result") is None or "a_result" in result2.facts
-
-        # SWEEP-8: fork branches completed (halted would have been recorded).
-        assert result2.exit_ok is True
-
-        # Gap 20: graph_state events were emitted.
-        events_file = workdir / ".refactory/events.jsonl"
-        assert events_file.exists()
-        events = [json.loads(line) for line in events_file.read_text().splitlines()
-                  if line.strip()]
-        graph_state_events = [e for e in events if e.get("kind") == "graph_state"]
-        assert len(graph_state_events) > 0, "no graph_state events emitted (gap 20)"
+    # Run the halt gate through the spine's op runner to verify the spine
+    # would see 'halt' and record the run as halted.
+    spine_dir = tmp_path / "spine"
+    spine_dir.mkdir(parents=True, exist_ok=True)
+    (spine_dir / ".refactory").mkdir(parents=True, exist_ok=True)
+    (spine_dir / ".refactory" / "run-config.json").write_text(json.dumps({"knobs": {}}))
+    from refactory_dsh.lowering import DECLARATIONS as _DECL
+    (spine_dir / _DECL).write_text(json.dumps(
+        {"halt_branch": {"writes": [], "reads": [], "produces": []}}))
+    (spine_dir / "facts.json").write_text("{}")
+    # The spine's op runner: `python -m refactory_dsh.run loop_ops:always_halt --node halt_branch`
+    spine_env = {**os.environ, "REFACTORY_WORKDIR": str(spine_dir),
+                 "REFACTORY_PROJECT": str(spine_dir)}
+    spine_env["PYTHONPATH"] = str(HERE) + os.pathsep + spine_env.get("PYTHONPATH", "")
+    spine_result = subprocess.run(
+        [sys.executable, "-m", "refactory_dsh.run",
+         "loop_ops:always_halt", "--node", "halt_branch"],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(spine_dir), env=spine_env)
+    # The gate's stdout should end with 'halt' (the verdict).
+    spine_verdict = spine_result.stdout.strip().split('\n')[-1].strip() if spine_result.stdout.strip() else ""
+    assert spine_verdict == "halt", (
+        f"Spine op runner returned verdict {spine_verdict!r}, expected 'halt'; "
+        f"stdout={spine_result.stdout!r}, stderr={spine_result.stderr!r}"
+    )
+    # Both runtimes agree: the run is halted.

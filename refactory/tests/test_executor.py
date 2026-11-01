@@ -499,6 +499,52 @@ def test_op_runs_in_run_directory_with_recovery(tmp_path):
         "ctx.model was not None inside the op"
 
 
+def test_op_runs_in_run_directory_without_recovery(tmp_path):
+    """Without enable_recovery, ops still run in forkserver children: they write
+    relative paths in the run directory and get ctx.model=None, matching the spine.
+
+    This verifies brief item 5: 'Op behavior must match the spine on the default
+    walker path too, not only with enable_recovery.'"""
+    graph = nn.Graph()
+    graph.add(nn.Node("write", "op", call="loop_ops:write_relative",
+                      writes=("relative_output.txt",), produces=("relative_written",)))
+    graph.add(nn.Node("model_check", "op", call="loop_ops:check_model_is_none",
+                      produces=("model_is_none",)))
+    graph.connect("write", "model_check")
+
+    # A model is passed but ops must NOT see it (ctx.model=None).
+    class _Model:
+        def complete(self, prompt, **kw):
+            return "answer"
+        def route(self):
+            return {"worker_backend": "dsh"}
+        def context(self):
+            return {}
+    result = nn.execute(graph, tmp_path, model=_Model(), enable_recovery=False)
+    assert result.exit_ok, result.error
+    # The op wrote in the run directory (relative path resolved there).
+    assert (tmp_path / "relative_output.txt").exists(), \
+        "relative path not written in run directory on default path"
+    assert result.facts["relative_written"] is True
+    # ctx.model is None for ops.
+    assert result.facts["model_is_none"] is True, \
+        "ctx.model was not None inside op on default path"
+
+
+def test_op_stderr_preserved_on_raise_without_recovery(tmp_path):
+    """An op that prints to stderr then raises has its stderr preserved
+    even without enable_recovery (ops always run in forkserver children)."""
+    graph = nn.Graph()
+    graph.add(nn.Node("boom", "op", call="loop_ops:stderr_then_raise"))
+
+    result = nn.execute(graph, tmp_path, enable_recovery=False)
+    assert result.exit_ok is False
+    assert "op stderr" in result.error, \
+        f"stderr not preserved in error on default path: {result.error}"
+    assert "important debug info" in result.error, \
+        f"stderr content not in error on default path: {result.error}"
+
+
 def test_op_stderr_preserved_on_raise(tmp_path):
     """An op that prints to stderr then raises has its stderr included
     in the propagated error (with enable_recovery, ops run in forkserver children)."""
