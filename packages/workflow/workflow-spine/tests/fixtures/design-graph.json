@@ -365,6 +365,11 @@
       "condition": "reread"
     },
     {
+      "source": "gate_qa",
+      "target": "synthesize_qa",
+      "condition": "coverage_rerun"
+    },
+    {
       "source": "gate_research",
       "target": "classify_scale",
       "condition": "proceed"

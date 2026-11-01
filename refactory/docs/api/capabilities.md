@@ -8047,6 +8047,11 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "target": "qa_judge"
     },
     {
+      "condition": "coverage_rerun",
+      "source": "gate_qa",
+      "target": "synthesize_qa"
+    },
+    {
       "condition": "proceed",
       "source": "gate_research",
       "target": "classify_scale"
@@ -8416,7 +8421,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "judge_rereads",
         "review_attempts"
       ],
-      "notes": "route on the QA judge's verdict: a redo for what holds the change back goes to the builder, or, at the review limit, on as a draft; an unreadable verdict is read again once; follow-ups go to the pull request",
+      "notes": "route on the QA judge's verdict: a redo for what holds the change back goes to the builder, or, at the review limit, on as a draft; an unreadable verdict is read again once; a coverage re-run adds one pass; follow-ups go to the pull request",
       "role": "ceo"
     },
     {
@@ -8988,7 +8993,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "99a26fcfca782324fb7a78a8387539a24e18ad2db7c38ed84c79e659f7c20d2d"
+    "reviewed_schema": "71b261cd7035ff52bd8ef0cbe279c8df5b4226ff8b5b84a8bd5983d52b7b9ba8"
   }
 }
 ```
@@ -9355,18 +9360,6 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "value": "",
       "values": []
     },
-    "site_revert_fixups": {
-      "default": 1,
-      "description": "how many times the site-revert pass may send an attempt back to emit when an uncaught site is found; a run gets this many times check_attempts",
-      "frozen": false,
-      "kind": "int",
-      "range": [
-        0,
-        3
-      ],
-      "value": 1,
-      "values": []
-    },
     "source_project": {
       "default": "",
       "description": "an existing directory copied into the artifact directory before the change is applied, instead of a worktree; it takes no target, base or setup",
@@ -9433,7 +9426,7 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small artifact with one sequential strategist, coder and QA agent, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none (`worktree=0` writes .factory/artifacts instead; `source_project` copies a directory there). The check runs in that worktree before focused QA. It has no approval gate, so it opens no pull request: the branch is left for you to push. The coder works in a prepared clone of the last attempt, whose diff becomes the attempt.",
-    "reviewed_schema": "3a65e16feafe92d71da29ee1f827682a76f7fe284715eec17e7816ed303afcd3"
+    "reviewed_schema": "5cf531ee4f16c72c81714341da874ea34e912b54f6e0f76369f97ce5c77a9447"
   }
 }
 ```
