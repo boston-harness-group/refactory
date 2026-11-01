@@ -860,6 +860,36 @@ and the fail-open case when no run is open.
 
 ---
 
+## Data node per-item error isolation (F4, PR #554)
+
+A data node wraps each item's lifecycle (setup → subgraph → verify) in a
+try/except. A failed item is recorded with `error_kind` (the exception class name,
+e.g. `"ValueError"` or `"RuntimeError"`, or `"timeout"` for deadline exceeded) and
+`error_text` (the failure description, truncated to 4096 characters). On the walker,
+`error_kind` is the class name of the actual exception and `error_text` is its
+message. On the spine, `error_kind` is `"RuntimeError"` for subgraph and verify
+failures recorded through `end --failed` (except when the original record was written
+by `command_begin`'s setup handler, which preserves the original class), and
+`error_text` is the failing command's stderr tail. The two texts describe the same
+failure but are not word-for-word identical. The data node fails only when **every**
+item it processed fails (the all-fail rule): the count is against items, not records,
+so a 3-item node with 1 failure and 2 passes succeeds.
+
+A per-item deadline covers only setup and verify (and item loading), matching the
+spine's per-command `runDataCommand` deadline. The deadline does not wrap the
+subgraph walk (which would make it retryable by `_try_visit`'s recovery). It does
+not depend on `enable_recovery`. On both runtimes, a deadline exceeded records
+`error_kind = "timeout"`.
+
+On the spine, when a subgraph node fails or a begin/end command times out, the
+remaining pass-body nodes are recorded as skipped (no nodes are marked completed, no
+gate verdicts are fabricated) and a fallback `end --failed` records the item. The
+failing command's real stderr tail (bounded to 4096 chars) is passed to `end --failed`
+so `error_text` carries a description of the same failure the walker's exception
+message describes (but not word-for-word identical).
+
+---
+
 ## Build-loop stop signal and refusal bound (dm-202, dm-203)
 
 ### The b36b evidence
