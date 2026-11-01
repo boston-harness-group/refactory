@@ -1534,14 +1534,14 @@ export function apply(ctx: Context, config: Config): void {
 
     /** Materialise the running pass's item, once per item across calls. */
     /** Skip all due subgraph nodes by completing them sequentially until the pass finishes. */
-    const skipSubgraph = (s: Spine, pass: { entry: string; exit: string }): void => {
+    const skipSubgraph = (s: Spine): void => {
       // Keep completing whatever is due until the pass is marked finished or
       // no more nodes can be completed (safety bound to avoid infinite loops).
       for (let steps = 0; steps < 100; steps += 1) {
         const p = s.passOf()
         if (p === undefined || p.finished) break
         const state = s.next()
-        if (state.nodes.length === 0) break
+        if (state.status !== 'ready' || state.nodes.length === 0) break
         let completed = false
         for (const node of state.nodes) {
           try {
@@ -1572,7 +1572,7 @@ export function apply(ctx: Context, config: Config): void {
       if (started.value != null && typeof started.value === 'object' && 'error' in started.value) {
         materialised.set(spine, { key, item: started.value })
         // Complete subgraph nodes to clear cursor positions so endPass succeeds.
-        skipSubgraph(spine, { ...pass, entry: pass.entry, exit: pass.exit })
+        skipSubgraph(spine)
         // Run end command to let the Task record the failure for this item.
         const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
         if (!ended.ok) return { failure: ended }
@@ -1728,7 +1728,7 @@ export function apply(ctx: Context, config: Config): void {
         if (activePass !== undefined) {
           const data = spine.view(activePass.node)
           // Complete remaining subgraph nodes so endPass succeeds.
-          skipSubgraph(spine, activePass)
+          skipSubgraph(spine)
           // Run end command to let the Task record the failure for this item.
           const ended = await runDataCommand(shell, data, 'end', runner, activePass.index)
           if (!ended.ok) return { next: spine.next(), failure: ended, ran }
