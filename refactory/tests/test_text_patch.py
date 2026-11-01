@@ -410,156 +410,111 @@ def test_empty_protected_region_marker_refused():
     assert exc_info.value.code == "E-patch"
 
 
-# ── SKILLOPT_PATCH_CONFIG byte-exact tests (brief fix 2) ──────────────────
-# Each test cites the SkillOpt source it reproduces.
-# Source: microsoft/SkillOpt  skillopt/optimizer/skill.py
+# ── SKILLOPT_PATCH_CONFIG byte-exact tests ────────────────────────────────
+# Every expected value below is a literal copied from running microsoft/SkillOpt's
+# own code: skillopt/optimizer/skill.py apply_patch_with_report() (MIT License,
+# Copyright (c) Microsoft Corporation) on the same input, with "op" for "kind".
+# Line numbers cite that file.
 
-def test_skillopt_insert_after_formatting():
-    """insert_after with SKILLOPT_PATCH_CONFIG on 'a\\nb' targeting 'a' with
-    content 'X' produces 'a\\n\\nX\\nb' (blank-line separator).
-    Cites: skillopt/optimizer/skill.py insert_after logic (~L80-92).
-    """
-    state = _state("a\nb")
+_SU = "<!-- SLOW_UPDATE_START -->s<!-- SLOW_UPDATE_END -->"  # skill.py:14-15
+
+
+def _skillopt(text: str, edits_list: list[dict]) -> tuple[str, list[str]]:
+    """Apply under SKILLOPT_PATCH_CONFIG; return (text, statuses)."""
+    result, reports = _apply_with_report(
+        _state(text), _patch(edits_list, config=dict(SKILLOPT_PATCH_CONFIG)),
+    )
+    return _value(result), [o["status"] for o in reports[0]["outcomes"]]
+
+
+@pytest.mark.parametrize(
+    ("text", "edits_list", "expected_text", "expected_statuses"),
+    [
+        # skill.py:118-122 insert_after: content on its own line after the target's line.
+        ("a\nb", [{"kind": "insert_after", "target": "a", "content": "X"}],
+         "a\n\nX\nb", ["applied_insert_after"]),
+        # skill.py:120 last line without a newline: insert_at = len(skill).
+        ("a target", [{"kind": "insert_after", "target": "target", "content": "X"}],
+         "a target\nX\n", ["applied_insert_after"]),
+        # skill.py:105-106 append: rstrip, blank line, content, trailing newline.
+        ("hello   ", [{"kind": "append", "content": "X"}],
+         "hello\n\nX\n", ["applied_append"]),
+        # skill.py:79 content is .strip()ped.
+        ("abc", [{"kind": "replace", "target": "b", "content": "  X  \n"}],
+         "aXc", ["applied_replace"]),
+        # skill.py:78-79 strip first, then markers removed: the newline survives.
+        ("abc", [{"kind": "replace", "target": "b",
+                  "content": "X\n<!-- SLOW_UPDATE_START -->"}],
+         "aX\nc", ["applied_replace"]),
+        # skill.py:99-104 append before the protected region; its tail is kept as is.
+        ("body  \n" + _SU + "  \n", [{"kind": "append", "content": "X"}],
+         "body\n\nX\n\n" + _SU + "  \n", ["applied_append_before_protected_region"]),
+        # skill.py:109-115 missing insert_after target with a protected region.
+        ("body\n" + _SU, [{"kind": "insert_after", "target": "zz", "content": "X"}],
+         "body\n\nX\n\n" + _SU, ["applied_insert_after_fallback_before_protected_region"]),
+        # skill.py:109, 116-117 empty insert_after target, no protected region.
+        ("abc  ", [{"kind": "insert_after", "target": "", "content": "X"}],
+         "abc\n\nX\n", ["applied_insert_after_fallback_append"]),
+        # skill.py:94-96 target inside a protected region.
+        ("body\n" + _SU, [{"kind": "replace", "target": "s", "content": "X"}],
+         "body\n" + _SU, ["skipped_protected_region"]),
+        # skill.py:94-96 the protected check precedes dispatch, so append is skipped too.
+        ("body\n" + _SU, [{"kind": "append", "target": "s", "content": "X"}],
+         "body\n" + _SU, ["skipped_protected_region"]),
+        # skill.py:56 only the target's start is tested: a target running into the
+        # region is applied.
+        ("body\n" + _SU, [{"kind": "replace", "target": "body\n<!-- SLOW", "content": "X"}],
+         "X_UPDATE_START -->s<!-- SLOW_UPDATE_END -->", ["applied_replace"]),
+        # skill.py:125-145 skip statuses for each op.
+        ("abc", [
+            {"kind": "bogus", "target": "a", "content": "X"},
+            {"kind": "replace", "target": "", "content": "X"},
+            {"kind": "replace", "target": "z", "content": "X"},
+            {"kind": "delete", "target": ""},
+            {"kind": "delete", "target": "z"},
+            {"kind": "delete", "target": "b"},
+        ], "ac", [
+            "skipped_unknown_op", "skipped_replace_missing_target",
+            "skipped_replace_target_not_found", "skipped_delete_missing_target",
+            "skipped_delete_target_not_found", "applied_delete",
+        ]),
+        # skill.py:173-184 a failing edit is reported as "error" and the patch goes on.
+        ("a\nb", [
+            {"kind": "replace", "target": "a", "content": 5},
+            {"kind": "insert_after", "target": "b", "content": " Y "},
+        ], "a\nb\nY\n", ["error", "applied_insert_after"]),
+    ],
+)
+def test_skillopt_config_matches_skillopt(text, edits_list, expected_text, expected_statuses):
+    assert _skillopt(text, edits_list) == (expected_text, expected_statuses)
+
+
+def test_skillopt_default_protected_markers():
+    """SKILLOPT_PATCH_CONFIG protects exactly SkillOpt's marker pairs (skill.py:14-20)."""
+    assert SKILLOPT_PATCH_CONFIG["protected_regions"] == [
+        ["<!-- SLOW_UPDATE_START -->", "<!-- SLOW_UPDATE_END -->"],
+        ["<!-- APPENDIX_START -->", "<!-- APPENDIX_END -->"],
+    ]
+
+
+def test_attempt_stores_text_patch_report_on_candidate():
+    """Optimizer.attempt keeps the text_patch report on candidate.edit_reports."""
+    from refactory_dsh.optim.base import Optimizer
+
+    parent = Candidate.from_state(_state("a\nb"))
     edit = _patch(
         [{"kind": "insert_after", "target": "a", "content": "X"}],
         config=dict(SKILLOPT_PATCH_CONFIG),
     )
-    result = _apply(state, edit)
-    assert _value(result) == "a\n\nX\nb"
-
-
-def test_skillopt_append_trailing_newline():
-    """append with SKILLOPT_PATCH_CONFIG produces output ending in '\\n'.
-    Cites: skillopt/optimizer/skill.py append semantics (~L70-78).
-    """
-    state = _state("hello")
-    edit = _patch(
-        [{"kind": "append", "content": "world"}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result = _apply(state, edit)
-    val = _value(result)
-    assert val.endswith("\n")
-    assert val == "hello\n\nworld\n"
-
-
-def test_skillopt_append_strips_trailing_whitespace():
-    """Input 'hello   ' with append content 'X' under SKILLOPT_PATCH_CONFIG
-    first strips trailing whitespace, then appends.
-    Cites: skillopt/optimizer/skill.py append strips trailing ws (~L70).
-    """
-    state = _state("hello   ")
-    edit = _patch(
-        [{"kind": "append", "content": "X"}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result = _apply(state, edit)
-    val = _value(result)
-    # The trailing whitespace is stripped before appending
-    assert val == "hello\n\nX\n"
-
-
-def test_skillopt_content_whitespace_stripped():
-    """Content '  earth  ' is stripped to 'earth' under SKILLOPT_PATCH_CONFIG.
-    Cites: skillopt/optimizer/skill.py content is whitespace-stripped (~L65).
-    """
-    state = _state("hello world")
-    edit = _patch(
-        [{"kind": "replace", "target": "world", "content": "  earth  "}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result = _apply(state, edit)
-    val = _value(result)
-    # Content should be stripped: "  earth  " → "earth"
-    assert val == "hello earth"
-    assert "  earth  " not in val
-
-
-def test_skillopt_append_before_protected_blank_line_separation():
-    """Append before a protected region under SKILLOPT_PATCH_CONFIG produces
-    blank-line separation ('\\n\\n') between content and the marker.
-    Cites: skillopt/optimizer/skill.py protected region handling.
-    """
-    text = "content\n<!-- SLOW_UPDATE -->do not touch<!-- /SLOW_UPDATE -->"
-    state = _state(text)
-    edit = _patch(
-        [{"kind": "append", "content": "NEW"}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result = _apply(state, edit)
-    val = _value(result)
-    prot_idx = val.find("<!-- SLOW_UPDATE -->")
-    new_idx = val.find("NEW")
-    assert new_idx < prot_idx
-    # blank-line separation between content and protected region
-    between = val[new_idx + len("NEW"):prot_idx]
-    assert "\n\n" in between
-
-
-def test_skillopt_insert_after_empty_target_falls_back_to_append():
-    """insert_after with empty target under SKILLOPT_PATCH_CONFIG falls back
-    to append.
-    Cites: skillopt/optimizer/skill.py insert_after empty target fallback.
-    """
-    state = _state("hello")
-    edit = _patch(
-        [{"kind": "insert_after", "target": "", "content": "X"}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result, reports = _apply_with_report(state, edit)
-    val = _value(result)
-    assert "X" in val
-    assert reports[0]["outcomes"][0]["status"] == "applied_append"
-
-
-def test_skillopt_unknown_edit_kind_skipped():
-    """An unknown edit kind under SKILLOPT_PATCH_CONFIG is skipped (not refused).
-    Cites: skillopt/optimizer/skill.py unknown edit kinds are silently skipped.
-    """
-    state = _state("hello")
-    edit = _patch(
-        [{"kind": "unknown_op", "target": "hello", "content": "X"}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    # Should not raise
-    result, reports = _apply_with_report(state, edit)
-    assert _value(result) == "hello"  # unchanged
-    assert reports[0]["outcomes"][0]["status"] == "skipped_unknown_kind"
-
-
-def test_skillopt_status_names():
-    """Status strings in the report match SkillOpt's names when
-    SKILLOPT_PATCH_CONFIG is used.
-    Cites: skillopt/optimizer/skill.py _apply_edit_with_report status names.
-    """
-    state = _state("hello world")
-    edit = _patch(
-        [
-            {"kind": "replace", "target": "world", "content": "earth"},
-            {"kind": "append", "content": "end"},
-        ],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    _result, reports = _apply_with_report(state, edit)
-    outcomes = reports[0]["outcomes"]
-    assert outcomes[0]["status"] == "applied_replace"
-    assert outcomes[1]["status"] == "applied_append"
-
-
-def test_skillopt_default_protected_markers():
-    """SKILLOPT_PATCH_CONFIG protects SLOW_UPDATE and APPENDIX markers by default.
-    Cites: skillopt/optimizer/skill.py SLOW_UPDATE_HEADER / APPENDIX_HEADER.
-    """
-    text = "content\n<!-- SLOW_UPDATE -->secret<!-- /SLOW_UPDATE -->\nmore\n<!-- APPENDIX -->app<!-- /APPENDIX -->"
-    state = _state(text)
-    # Try to replace inside SLOW_UPDATE
-    edit = _patch(
-        [{"kind": "replace", "target": "secret", "content": "CHANGED"}],
-        config=dict(SKILLOPT_PATCH_CONFIG),
-    )
-    result, reports = _apply_with_report(state, edit)
-    assert _value(result) == text  # unchanged — protected
-    assert reports[0]["outcomes"][0]["status"] == "skipped_protected"
+    result = Optimizer().attempt(Proposal(edit=edit, parent=parent.id), parent, (), False)
+    assert isinstance(result, Candidate), result
+    assert result.state["knobs"]["prompt"]["value"] == "a\n\nX\nb"
+    assert result.edits == [edit]
+    assert len(result.edit_reports) == 1
+    report = result.edit_reports[0]
+    assert report is not None
+    assert [o["status"] for o in report["outcomes"]] == ["applied_insert_after"]
+    assert report["noop"] is False
 
 
 # ── general defaults tests ────────────────────────────────────────────────

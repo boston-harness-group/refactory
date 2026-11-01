@@ -363,31 +363,38 @@ def _remove_knob(state: State, edit: dict) -> State:
 SKILLOPT_PATCH_CONFIG: dict[str, Any] = {
     "match": "exact",
     "on_missing": {
-        "insert_after": "append",   # skill.py ~86-92: fallback to append
+        "insert_after": "append",   # skill.py:109-117 missing target falls back to append
         "insert_before": "skip",    # refactory extension; no SkillOpt analogue
-        "replace": "skip",          # skill.py ~97-100: skip
-        "delete": "skip",           # skill.py ~108-109: skip
+        "replace": "skip",          # skill.py:128-130
+        "delete": "skip",           # skill.py:138-140
     },
     "honour_protected": True,
     "protected_regions": [
-        # SkillOpt always protects SLOW_UPDATE and APPENDIX markers.
-        # skill.py: SLOW_UPDATE_HEADER / APPENDIX_HEADER constants.
-        ["<!-- SLOW_UPDATE -->", "<!-- /SLOW_UPDATE -->"],
-        ["<!-- APPENDIX -->", "<!-- /APPENDIX -->"],
+        # skill.py:14-20 SLOW_UPDATE_START/END and APPENDIX_START/END, protected
+        # together as _PROTECTED_REGIONS (skill.py:27-30).
+        ["<!-- SLOW_UPDATE_START -->", "<!-- SLOW_UPDATE_END -->"],
+        ["<!-- APPENDIX_START -->", "<!-- APPENDIX_END -->"],
     ],
-    "strip_markers": True,
+    # skill.py:43-58, 94-96: an edit is skipped when its target's first occurrence
+    # starts inside [first start marker, end of first end marker) of any region,
+    # checked before the op is dispatched (append and unknown ops included).
+    "protected_check": "target_start",
+    "strip_markers": True,           # skill.py:66-73
     "insert_position": "end_of_line",
-    # SkillOpt-specific formatting policies:
-    # skill.py: insert_after uses a blank-line separator (target\n\ncontent\nnext).
+    # skill.py:118-122: content goes on its own line after the target's line:
+    # line + "\n" + content + "\n" + rest.
     "insert_after_separator": "\n\n",
-    # skill.py: append always adds a trailing newline.
-    "trailing_newline": True,
-    # skill.py: append strips trailing whitespace from the text first.
-    "append_strip_trailing": True,
-    # skill.py: content is whitespace-stripped before application.
+    # skill.py:120: a target on a last line with no newline gets text + "\n" +
+    # content + "\n".
+    "insert_after_eof": "line",
+    "trailing_newline": True,        # skill.py:106
+    "append_strip_trailing": True,   # skill.py:106 skill.rstrip()
+    # skill.py:79: content is .strip()ped, then markers removed (skill.py:78).
     "content_strip": True,
-    # skill.py: unknown edit kinds are silently skipped, not refused.
-    "unknown_kind_policy": "skip",
+    "unknown_kind_policy": "skip",   # skill.py:144-145
+    # skill.py:173-184: an exception in one edit is reported as status "error"
+    # and the patch continues.
+    "edit_error_policy": "report",
     # SkillOpt's own status names (skill.py _apply_edit_with_report).
     "status_names": {
         "applied_replace": "applied_replace",
@@ -395,12 +402,22 @@ SKILLOPT_PATCH_CONFIG: dict[str, Any] = {
         "applied_insert_after": "applied_insert_after",
         "applied_insert_before": "applied_insert_before",
         "applied_append": "applied_append",
-        "skipped_protected_region": "skipped_protected",
+        "applied_append_before_protected_region": "applied_append_before_protected_region",
+        "applied_insert_after_fallback_append": "applied_insert_after_fallback_append",
+        "applied_insert_after_fallback_before_protected_region":
+            "applied_insert_after_fallback_before_protected_region",
+        "skipped_protected_region": "skipped_protected_region",
+        "skipped_unknown_kind": "skipped_unknown_op",
+        "skipped_replace_missing_target": "skipped_replace_missing_target",
+        "skipped_replace_target_not_found": "skipped_replace_target_not_found",
+        "skipped_delete_missing_target": "skipped_delete_missing_target",
+        "skipped_delete_target_not_found": "skipped_delete_target_not_found",
         "skipped": "skipped",
+        "error": "error",
     },
-    # Blank-line separation between appended content and a protected region.
+    # skill.py:101-104, 111-115: blank lines around content placed before a region.
     "append_protected_separator": "\n\n",
-    # insert_after with an empty target falls back to append.
+    # skill.py:109: insert_after with an empty target falls back like a missing one.
     "insert_after_empty_target_policy": "append",
 }
 
@@ -477,6 +494,15 @@ def _text_patch(state: State, edit: dict) -> State:
     insert_after_empty_target_policy: str = config.get(
         "insert_after_empty_target_policy", "skip",
     )
+    protected_check: str = config.get("protected_check", "overlap")
+    if protected_check not in ("overlap", "target_start"):
+        raise EditError(f"unsupported protected_check {protected_check!r}", code="E-patch")
+    insert_after_eof: str = config.get("insert_after_eof", "separator")
+    if insert_after_eof not in ("separator", "line"):
+        raise EditError(f"unsupported insert_after_eof {insert_after_eof!r}", code="E-patch")
+    edit_error_policy: str = config.get("edit_error_policy", "raise")
+    if edit_error_policy not in ("raise", "report"):
+        raise EditError(f"unsupported edit_error_policy {edit_error_policy!r}", code="E-patch")
 
     # Collect all marker strings for stripping
     all_markers: list[str] = []
@@ -523,28 +549,50 @@ def _text_patch(state: State, edit: dict) -> State:
                 return True
         return False
 
-    def _apply_on_missing(kind: str) -> str:
-        """Apply the on_missing policy for a given edit kind. Returns status."""
+    def _missing_policy(kind: str) -> str:
+        """The on_missing policy for *kind*; raises when it is 'refuse'."""
         policy = _resolve_on_missing(on_missing, kind)
         if policy == "refuse":
             raise EditError(
                 f"target not found for {kind} edit and on_missing is 'refuse'",
                 code="E-patch",
             )
-        if policy == "append":
-            return _status("applied_append")
-        # skip
-        return _status(f"skipped_{kind}_target_not_found")
+        return policy
 
-    def _status(canonical: str) -> str:
-        """Map a canonical status to the configured name (SkillOpt compat)."""
-        return status_names.get(canonical, canonical)
+    def _status(canonical: str, fallback: str | None = None) -> str:
+        """Map a canonical status to the configured name (SkillOpt compat).
 
-    def _do_append(content: str) -> None:
-        """Append content, respecting protected regions."""
+        *fallback* is the canonical status used when *canonical* has no
+        configured name, so finer-grained statuses keep their old names under
+        the general defaults.
+        """
+        if canonical in status_names:
+            return status_names[canonical]
+        if fallback is not None:
+            return status_names.get(fallback, fallback)
+        return canonical
+
+    def _target_start_protected(target: str) -> bool:
+        """SkillOpt's test (skill.py:43-58): first occurrence of *target* starts
+        inside [first start marker, end of first end marker) of any region."""
+        target_idx = text.find(target)
+        if target_idx == -1:
+            return False
+        for start_marker, end_marker in protected_regions:
+            start_idx = text.find(start_marker)
+            end_idx = text.find(end_marker)
+            if start_idx == -1 or end_idx == -1:
+                continue
+            if start_idx <= target_idx < end_idx + len(end_marker):
+                return True
+        return False
+
+    def _do_append(content: str) -> bool:
+        """Append content, respecting protected regions.
+
+        Returns True when the content went before a protected region.
+        """
         nonlocal text
-        if append_strip_trailing:
-            text = text.rstrip()
         if honour_protected and protected_regions:
             # Find earliest protected start marker position
             earliest = len(text)
@@ -553,72 +601,93 @@ def _text_patch(state: State, edit: dict) -> State:
                 if idx >= 0 and idx < earliest:
                     earliest = idx
             if earliest < len(text):
-                text = text[:earliest].rstrip() + append_protected_sep + content + append_protected_sep + text[earliest:]
-                return
+                text = (text[:earliest].rstrip() + append_protected_sep + content
+                        + append_protected_sep + text[earliest:])
+                return True
+        if append_strip_trailing:
+            text = text.rstrip()
         if trailing_newline:
             text = text + "\n\n" + content + "\n"
         else:
             text = text + "\n\n" + content
+        return False
 
-    for i, edit_item in enumerate(edits_list):
+    def _fallback_append(kind: str, content: str) -> str:
+        """A missing target's append fallback; returns the status."""
+        if _do_append(content):
+            return _status(f"applied_{kind}_fallback_before_protected_region", "applied_append")
+        return _status(f"applied_{kind}_fallback_append", "applied_append")
+
+    def _one(i: int, edit_item: Any) -> dict[str, Any]:
+        nonlocal text
         kind = edit_item.get("kind")
-        if kind not in _KNOWN_KINDS:
+        target = edit_item.get("target", "")
+        content = edit_item.get("content", "")
+        skillopt_order = protected_check == "target_start"
+        if not skillopt_order and kind not in _KNOWN_KINDS:
             if unknown_kind_policy == "skip":
-                outcome_skip: dict[str, Any] = {
+                return {
                     "index": i, "kind": kind, "target": "", "content_preview": "",
                     "status": _status("skipped_unknown_kind"),
                 }
-                report.append(outcome_skip)
-                continue
             raise EditError(f"unknown edit kind {kind!r}", code="E-patch")
 
-        target = edit_item.get("target", "")
-        content = edit_item.get("content", "")
-        content = _strip_content_markers(content)
+        # skill.py:78-79 strips whitespace first, then removes markers.
         if content_strip:
             content = content.strip()
+        content = _strip_content_markers(content)
         outcome: dict[str, Any] = {
             "index": i,
             "kind": kind,
-            "target": str(target)[:200] if target else "",
+            # skill.py:89 slices the target as given (a non-str target is an error).
+            "target": target[:200] if skillopt_order else (str(target)[:200] if target else ""),
             "content_preview": str(content)[:200],
             "status": "",
         }
 
+        if skillopt_order:
+            # skill.py:94-96 protected check precedes op dispatch.
+            if honour_protected and target and _target_start_protected(target):
+                outcome["status"] = _status("skipped_protected_region")
+                return outcome
+            if kind not in _KNOWN_KINDS:
+                if unknown_kind_policy == "skip":
+                    outcome["status"] = _status("skipped_unknown_kind")
+                    return outcome
+                raise EditError(f"unknown edit kind {kind!r}", code="E-patch")
+
         if kind == "append":
-            _do_append(content)
-            outcome["status"] = _status("applied_append")
-            report.append(outcome)
-            continue
+            if _do_append(content):
+                outcome["status"] = _status(
+                    "applied_append_before_protected_region", "applied_append",
+                )
+            else:
+                outcome["status"] = _status("applied_append")
+            return outcome
 
         # For kinds that need a target: empty-target guard
         if not target:
             # insert_after with an empty target can fall back to append
             if kind == "insert_after" and insert_after_empty_target_policy == "append":
-                _do_append(content)
-                outcome["status"] = _status("applied_append")
-                report.append(outcome)
-                continue
-            outcome["status"] = _status("skipped")
-            report.append(outcome)
-            continue
+                outcome["status"] = _fallback_append(kind, content)
+                return outcome
+            outcome["status"] = _status(f"skipped_{kind}_missing_target", "skipped")
+            return outcome
 
         idx = text.find(target)
 
         if idx < 0:
             # Target not found — apply on_missing policy
-            status = _apply_on_missing(kind)
-            if status == _status("applied_append"):
-                _do_append(content)
-            outcome["status"] = status
-            report.append(outcome)
-            continue
+            if _missing_policy(kind) == "append":
+                outcome["status"] = _fallback_append(kind, content)
+            else:
+                outcome["status"] = _status(f"skipped_{kind}_target_not_found")
+            return outcome
 
         # Check protected region
-        if _overlaps_protected(idx, idx + len(target)):
+        if not skillopt_order and _overlaps_protected(idx, idx + len(target)):
             outcome["status"] = _status("skipped_protected_region")
-            report.append(outcome)
-            continue
+            return outcome
 
         if kind == "replace":
             text = text[:idx] + content + text[idx + len(target):]
@@ -634,6 +703,9 @@ def _text_patch(state: State, edit: dict) -> State:
                 eol = text.find("\n", idx + len(target))
                 if eol >= 0:
                     text = text[:eol] + insert_after_sep + content + text[eol:]
+                elif insert_after_eof == "line":
+                    # skill.py:120-122: no newline after the target's line.
+                    text = text + "\n" + content + "\n"
                 else:
                     text = text + insert_after_sep + content
             outcome["status"] = _status("applied_insert_after")
@@ -642,8 +714,22 @@ def _text_patch(state: State, edit: dict) -> State:
             sol = sol + 1 if sol >= 0 else 0
             text = text[:sol] + content + "\n" + text[sol:]
             outcome["status"] = _status("applied_insert_before")
+        return outcome
 
-        report.append(outcome)
+    for i, edit_item in enumerate(edits_list):
+        if edit_error_policy == "report":
+            # skill.py:173-184: one failing edit is reported and the patch goes on.
+            try:
+                report.append(_one(i, edit_item))
+            except EditError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                report.append({
+                    "index": i, "kind": "", "target": "", "content_preview": "",
+                    "status": _status("error"), "error": str(exc),
+                })
+        else:
+            report.append(_one(i, edit_item))
 
     # Coerce
     try:
