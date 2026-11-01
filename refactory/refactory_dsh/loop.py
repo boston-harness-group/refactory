@@ -658,7 +658,7 @@ class Loop(OuterLoop):
         workdir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, workdir / LEDGER)
 
-    def _write_subset(self, workdir: Path, part: str) -> None:
+    def _write_subset(self, workdir: Path, part: str, *, seed: int | None = None) -> None:
         """Name the part of the items this candidate is evaluated on.
 
         Written into the candidate's own run directory before the evaluator starts,
@@ -666,7 +666,7 @@ class Loop(OuterLoop):
         that could set it would choose its own exam, and there would be no item left
         for the audit to hold out.
         """
-        task_module.write_subset(workdir, part, self.config.holdout)
+        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
 
     def _evaluate(self, candidate: Candidate) -> None:
         """Run one candidate through the evaluator, and record what it scored.
@@ -728,7 +728,7 @@ class Loop(OuterLoop):
                                      val_ids=items if part == "val" else None,
                                      test_ids=items if part == "test" else None)
         self._carry_ledger(workdir)
-        result, measurements = self._measure(candidate, workdir, part)
+        result, measurements = self._measure(candidate, workdir, part, seed=seed)
         occasion = {
             "part": part, "occasion": counter,
             "score": result.score if result.exit_ok else None,
@@ -743,7 +743,9 @@ class Loop(OuterLoop):
             (workdir / "item_records.json").write_text(
                 json.dumps(result.item_records, indent=2, default=str))
 
-    def _measure(self, candidate: Candidate, workdir: Path, part: str) -> tuple[Any, dict[str, Any]]:
+    def _measure(
+        self, candidate: Candidate, workdir: Path, part: str, *, seed: int | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
         from refactory_dsh.budgets import BudgetExhausted
@@ -759,7 +761,7 @@ class Loop(OuterLoop):
         for index in range(self.config.repeats):
             trial_dir = workdir if index == 0 else workdir / "trials" / str(index + 1)
             self._carry_ledger(trial_dir)
-            self._write_subset(trial_dir, part)
+            self._write_subset(trial_dir, part, seed=seed)
             before = self.budget.snapshot() if self.budget else {}
             try:
                 if self.budget:
@@ -1880,6 +1882,12 @@ class Loop(OuterLoop):
         audit = self.audit_holdout()
         board = self.leaderboard()
         best = board[0] if board else None
+        # When the winner has explicit val/test parts, use audit_parts for a
+        # like-with-like overfit comparison (both unseen by the optimizer).
+        if best is not None:
+            parts_audit = self.audit_parts(best)
+            if parts_audit is not None:
+                audit = parts_audit
         exit_ok = (
             best is not None and audit.get("winner") == best.id
             and audit.get("status") in ("measured", "not_applicable")
@@ -2037,6 +2045,44 @@ class Loop(OuterLoop):
             overfit=audit["overfit"],
         )
         return audit
+
+    def audit_parts(self, winner: Candidate) -> dict[str, Any] | None:
+        """Overfit check comparing val vs test scores (like with like).
+
+        When the winner has been evaluated on both 'val' and 'test' parts,
+        the overfit check compares the latest val score vs the latest test
+        score.  Both are unseen by the optimizer, so the comparison is
+        *like with like*.
+
+        Returns ``None`` when the winner does not have both val and test.
+        """
+        val_parts = winner.parts.get("val", [])
+        test_parts = winner.parts.get("test", [])
+        if not val_parts or not test_parts:
+            return None
+
+        val_score = val_parts[-1].get("score")
+        test_score = test_parts[-1].get("score")
+
+        if val_score is None or test_score is None:
+            return {
+                "status": "failed",
+                "val": val_score,
+                "test": test_score,
+                "winner": winner.id,
+                "note": "val or test score is missing",
+            }
+
+        gap = val_score - test_score
+        return {
+            "status": "measured",
+            "val": val_score,
+            "test": test_score,
+            "gap": gap,
+            "overfit": gap > OVERFIT_THRESHOLD,
+            "threshold": OVERFIT_THRESHOLD,
+            "winner": winner.id,
+        }
 
     def _holdout_score(self, winner: Candidate) -> tuple[float | None, str]:
         """Run the winner on the held-out part, in a directory of its own.

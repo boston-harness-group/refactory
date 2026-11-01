@@ -940,6 +940,7 @@ The per-item half of a data node, from the command line.
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `make_item_record` | `(item_id: 'str', *, passed: 'bool', score: 'float', exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, error_kind: 'str \| None' = None, error_text: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
+| function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
 
@@ -951,5 +952,6 @@ The per-item half of a data node, from the command line.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
 - **`make_item_record`** — Build a per-item record for one evaluated item.
+- **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.

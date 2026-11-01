@@ -54,6 +54,41 @@ DATA_KEY = "data"
 #: The key an override uses to mean "every data node of this run".
 ANY_NODE = "*"
 
+#: Sidecar file for per-item exchanges within a data-node pass.
+#: Written by agent execution (walker or spine commands), read by ``command_end``.
+EXCHANGES_SIDECAR = ".refactory/item_exchanges.json"
+
+
+def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> None:
+    """Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+
+    Called from agent execution in both runtimes so that ``command_end`` can
+    include per-node exchanges in the item record.
+    """
+    path = workdir / EXCHANGES_SIDECAR
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+    existing.append({"node": node, "prompt": prompt, "response": response})
+    path.write_text(json.dumps(existing, default=str))
+
+
+def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
+    """Read per-item exchanges from the sidecar, then remove the file."""
+    path = workdir / EXCHANGES_SIDECAR
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        path.unlink(missing_ok=True)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
 
 def source_override(workdir: Path, node_id: str) -> dict[str, Any]:
     """What this run says the data node should read, or an empty answer.
@@ -192,6 +227,10 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         )
     item = items[index]
     (workdir / CURRENT_ITEM).write_text(json.dumps(item, indent=2, default=str))
+    # Clear the exchange sidecar for this item's pass.
+    sidecar = workdir / EXCHANGES_SIDECAR
+    if sidecar.exists():
+        sidecar.unlink(missing_ok=True)
     task = _task_of(node, workdir)
     if task is not None:
         task.setup(instance_of(item), workdir)
@@ -251,10 +290,13 @@ def command_end(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         return {}
     item_id = str(item.get("id") or index)
     metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+    # Read per-node exchanges from the sidecar (written by agent execution).
+    exchanges = _read_and_clear_exchanges(workdir)
     record = make_item_record(
         item_id,
         passed=verdict.passed,
         score=verdict.score,
+        exchanges=exchanges,
         prediction=verdict.details if verdict.passed else None,
         label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
         label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,

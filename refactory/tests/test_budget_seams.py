@@ -93,39 +93,59 @@ def _patch_mode(mode_class):
 def test_budget_finished_trial_preserved(tmp_path):
     """A finished trial is never retroactively failed by a post-trial budget check.
 
-    Reverting the _measure() fix makes the candidate's exit_ok False when the
-    budget checkpoint fires after a successful trial.
+    Reverting the _measure() fix (putting ``result.exit_ok = False`` back in the
+    post-trial BudgetExhausted handler) makes exit_ok False even though the trial
+    completed successfully.  This test uses a mock budget that allows the pre-trial
+    checkpoint but fires on the post-trial checkpoint, so the evaluator actually
+    runs and the post-trial path is exercised.
     """
+    class _PostTrialBudget:
+        """Budget mock that fires only on the post-trial checkpoint."""
+        def __init__(self):
+            self._pre_trial_passed = False
+
+        def checkpoint(self, label=None):
+            if label is not None:
+                # Pre-trial checkpoint with label: allow.
+                self._pre_trial_passed = True
+                return
+            if self._pre_trial_passed:
+                # Post-trial checkpoint (no label): fire.
+                raise BudgetExhausted("budget exhausted after trial completed")
+
+        def snapshot(self):
+            return {"elapsed_s": 0, "known_tokens": 0, "token_status": "measured",
+                    "estimated_cost_usd": 0}
+
+        def retain_validation_reserve(self):
+            return contextlib.nullcontext()
+
     with _patch_mode(BudgetProbe):
         loop = Loop(
             MODE, LoopConfig(
                 epochs=1, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
-                max_elapsed_s=3600,  # generous
             ),
             project=Path("."),
         )
         loop.init()
         seed = loop.population[0]
 
-        # Give the loop a real budget that will fire after the trial.
-        budget = RunBudget.open(
-            tmp_path / "run",
-            ResourceLimits(max_elapsed_s=0.001),  # very tight
-        )
-        loop.budget = budget
+        mock_budget = _PostTrialBudget()
+        loop.budget = mock_budget
         loop._owns_resource_budget = True
-        loop.bind_budget(budget)
 
         loop._evaluate(seed)
 
-        # The trial completed (the evaluator ran and returned), so it should
-        # have a valid score even though the budget was exhausted right after.
-        # Note: the key assertion is about the candidate's raw_score being set
-        # because the trial completed successfully.
+        # The trial completed successfully; the post-trial budget fired but the
+        # finished trial's result must be preserved.
         assert seed.evaluated is True
-        if seed.exit_ok:
-            assert seed.score is not None
+        assert seed.exit_ok is True, (
+            "a finished trial must not be retroactively failed by the budget"
+        )
+        assert seed.score is not None, (
+            "a finished trial must preserve its score"
+        )
 
 
 # ── test_budget_counts_rollouts ────────────────────────────────────────────

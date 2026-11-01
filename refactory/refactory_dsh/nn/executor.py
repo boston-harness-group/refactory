@@ -1355,6 +1355,9 @@ class Executor:
                 "prompt": sent,
                 "response": response,
             })
+            # Also write to the sidecar so command_end (spine path) picks it up.
+            from refactory_dsh.items import record_exchange
+            record_exchange(self.ctx.workdir, node.id, sent, response)
             return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"

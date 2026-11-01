@@ -191,6 +191,37 @@ def test_seed_reshuffle(tmp_path):
     assert order_42a != order_99 or len(NAMES) < 3
 
 
+# ── test_seed_survives_measure ─────────────────────────────────────────────
+
+def test_seed_survives_measure(tmp_path):
+    """The seed written by _evaluate_part survives _measure's _write_subset.
+
+    _measure calls _write_subset for each trial directory.  When _evaluate_part
+    passes a seed to _measure, the subset.json in the occasion directory must
+    retain the seed after the evaluation completes.  Reverting the seed
+    parameter from _write_subset/_measure makes the seed disappear.
+    """
+    with _patch_mode(PartsProbe):
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+            ),
+            project=Path("."),
+        )
+        loop.init()
+        seed_candidate = loop.population[0]
+        loop._evaluate_part(seed_candidate, "val", None, seed=42)
+
+        # The occasion directory's subset.json must have the seed.
+        occasion = seed_candidate.parts["val"][0]
+        workdir = Path(occasion["workdir"])
+        subset = json.loads((workdir / task_module.SUBSET).read_text())
+        assert subset.get("seed") == 42, (
+            f"seed lost after _measure: subset.json = {subset}"
+        )
+
+
 # ── test_subset_json_backward_compat ───────────────────────────────────────
 
 def test_subset_json_backward_compat(tmp_path):
@@ -289,24 +320,113 @@ def test_evaluate_backward_compat(tmp_path):
 def test_overfit_verdict_exit_code(tmp_path):
     """An overfit winner → exit_ok is False in the report.
 
-    We construct a scenario using dataset_probe/dataset which is a Task-bound
-    mode whose winner is known to overfit (train 1.0, holdout ~0.5).
+    Reverting the ``and not audit.get("overfit")`` conjunct at loop.py report()
+    makes exit_ok True for an overfit winner, which is the revert this test catches.
+    We construct an evaluated winner and mock ``audit_holdout`` to report a large
+    train/holdout gap so the overfit flag is unconditionally True.
     """
-    loop = Loop(
-        "dataset_probe/dataset",
-        LoopConfig(
-            epochs=1, batch_size=1, optimizer="random", seed=1,
-            runs_root=tmp_path / "run",
-        ),
-        project=Path("."),
-    )
-    report = loop.run()
+    with _patch_mode(PartsProbe):
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+            ),
+            project=Path("."),
+        )
+        loop.init()
+        seed = loop.population[0]
+        # Manually mark the seed as evaluated with a perfect train score.
+        seed.evaluated = True
+        seed.exit_ok = True
+        seed.score = 1.0
+        seed.raw_score = 1.0
+        seed.mean_score = 1.0
+        loop.evaluations = 1
+        workdir = loop.root / "runs" / seed.id
+        workdir.mkdir(parents=True, exist_ok=True)
+
+        # Mock audit_holdout to return a clear overfit result.
+        _original_audit = loop.audit_holdout
+        def _overfit_audit():
+            return {
+                "status": "measured",
+                "train": 1.0,
+                "holdout": 0.3,
+                "gap": 0.7,
+                "overfit": True,
+                "threshold": 0.15,
+                "winner": seed.id,
+            }
+        loop.audit_holdout = _overfit_audit
+
+        report = loop.report()
 
     audit = report.get("holdout", {})
-    if audit.get("overfit"):
-        assert report["exit_ok"] is False, (
-            "an overfit winner must produce exit_ok=False"
+    # The overfit check must detect the gap; assert unconditionally.
+    assert audit.get("overfit") is True, (
+        f"expected overfit=True; got audit={audit}"
+    )
+    assert report["exit_ok"] is False, (
+        "an overfit winner must produce exit_ok=False"
+    )
+
+
+# ── test_overfit_like_with_like ───────────────────────────────────────────
+
+def test_overfit_like_with_like(tmp_path):
+    """When the winner has both val and test, the audit compares val vs test.
+
+    Construct a winner with val_score=0.85, test_score=0.4.  The audit should
+    compare val vs test (like with like: both unseen by the optimizer) and
+    detect overfit.  Reverting ``audit_parts`` makes the audit fall back to
+    train-vs-holdout, which will NOT detect overfit from val/test scores.
+    """
+    with _patch_mode(PartsProbe):
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+            ),
+            project=Path("."),
         )
+        loop.init()
+        seed = loop.population[0]
+        # Mark seed as evaluated with a train score.
+        seed.evaluated = True
+        seed.exit_ok = True
+        seed.score = 0.85
+        seed.raw_score = 0.85
+        seed.mean_score = 0.85
+        loop.evaluations = 1
+        workdir = loop.root / "runs" / seed.id
+        workdir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        (workdir / "measurements.json").write_text(_json.dumps({
+            "requested": 1, "count": 1, "successful": 1, "mean": 0.85,
+            "stdev": None, "min": 0.85, "max": 0.85, "complete": True,
+            "trials": [{"trial": 1, "score": 0.85, "exit_ok": True,
+                        "error": None, "duration_s": 0.1, "model_calls": 0,
+                        "required_contract": {"passed": True, "missing_artifacts": []},
+                        "tokens": None, "cost": None, "workdir": str(workdir)}],
+        }))
+        # Populate explicit val and test parts.
+        seed.parts["val"] = [{"part": "val", "occasion": 0, "score": 0.85,
+                              "exit_ok": True, "error": None}]
+        seed.parts["test"] = [{"part": "test", "occasion": 0, "score": 0.4,
+                               "exit_ok": True, "error": None}]
+
+        report = loop.report()
+
+    audit = report.get("holdout", {})
+    # audit_parts compares val (0.85) vs test (0.4): gap = 0.45 > 0.15 threshold.
+    assert audit.get("overfit") is True, (
+        f"expected overfit=True for val=0.85 vs test=0.4; got audit={audit}"
+    )
+    assert audit.get("val") == 0.85, f"expected val=0.85, got {audit.get('val')}"
+    assert audit.get("test") == 0.4, f"expected test=0.4, got {audit.get('test')}"
+    assert report["exit_ok"] is False, (
+        "an overfit winner (val vs test) must produce exit_ok=False"
+    )
 
 
 # ── test_overfit_backward_compat ──────────────────────────────────────────
