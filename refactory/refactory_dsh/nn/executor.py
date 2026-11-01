@@ -1350,14 +1350,13 @@ class Executor:
             else:
                 response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
             # Capture the exchange for per-item records (F6).
+            # The walker keeps exchanges in memory; the sidecar file is only
+            # for the spine path (where separate processes share state via disk).
             self._item_exchanges.append({
                 "node": node.id,
                 "prompt": sent,
                 "response": response,
             })
-            # Also write to the sidecar so command_end (spine path) picks it up.
-            from refactory_dsh.items import record_exchange
-            record_exchange(self.ctx.workdir, node.id, sent, response)
             return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
