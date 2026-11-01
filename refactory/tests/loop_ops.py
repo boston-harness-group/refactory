@@ -154,3 +154,25 @@ def fail_on_last_fails(ctx: Any) -> dict[str, Any]:
     seen.setdefault("ids", []).append(str(item.get("id")))
     ctx.write_json("seen.json", seen)
     return {"seen": seen["ids"]}
+
+
+def slow_op(ctx: Any) -> dict[str, Any]:
+    """Like record_item, but sleeps 3 seconds — tests deadline not armed across branch."""
+    import time
+    time.sleep(3)
+    item = ctx.read_json("current_item.json", {}) or {}
+    seen = ctx.read_json("seen.json", {"ids": []}) or {"ids": []}
+    seen.setdefault("ids", []).append(str(item.get("id")))
+    ctx.write_json("seen.json", seen)
+    return {"seen": seen["ids"]}
+
+
+def fail_on_setup_fails(ctx: Any) -> dict[str, Any]:
+    """Like record_item, but raises for item 'setup_fails' — equivalence test."""
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "setup_fails":
+        raise RuntimeError("branch failed for setup_fails")
+    seen = ctx.read_json("seen.json", {"ids": []}) or {"ids": []}
+    seen.setdefault("ids", []).append(str(item.get("id")))
+    ctx.write_json("seen.json", seen)
+    return {"seen": seen["ids"]}

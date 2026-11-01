@@ -825,3 +825,127 @@ def test_failed_kind_parameter(tmp_path):
     )
     assert result["error_kind"] == "timeout"
     assert result["passed"] is False
+
+
+# ── Ask 1: spine double-count fix ────────────────────────────────────────────
+
+
+def test_setup_failure_counted_once(tmp_path):
+    """With items [setup fails, passes], pass_state reports failed=1, not 2.
+
+    Proves Ask 1: command_begin's setup handler no longer increments failed,
+    so only command_end's --failed path counts the failure. The item_scores
+    record preserves the original ValueError error_kind (not RuntimeError).
+    Fails when the failed increment is re-added to command_begin.
+    """
+    _setup_failing_task()
+    node = _declared(_data_graph(task_ref="fail_setup"), tmp_path)
+
+    # Item 0: setup raises ValueError → command_begin returns {"error": ...}
+    result0 = items.command_begin(node, tmp_path, 0)
+    assert "error" in result0
+
+    # The spine then fires end --failed for item 0.
+    items.command_end(node, tmp_path, 0, failed_reason="alpha setup failed")
+
+    # Item 1: setup succeeds
+    items.command_begin(node, tmp_path, 1)
+    items.command_end(node, tmp_path, 1)
+
+    # Pass state: processed=2, failed=1 (not 2)
+    ps = items._read_pass_state(tmp_path, node.id)
+    assert ps["processed"] == 2, f"expected processed=2, got {ps}"
+    assert ps["failed"] == 1, f"expected failed=1 (not double-counted), got {ps}"
+
+    # The item_scores record for item 0 preserves the original error_kind
+    facts = json.loads((tmp_path / "facts.json").read_text())
+    scores = facts["item_scores"]
+    alpha_record = next(s for s in scores if s["id"] == "alpha")
+    assert alpha_record["error_kind"] == "ValueError", (
+        f"expected ValueError (the original exception), got {alpha_record['error_kind']}"
+    )
+
+
+# ── Ask 5: pass-state reset and stale item_scores ───────────────────────────
+
+
+def test_pass_state_reset_at_item_zero(tmp_path):
+    """A rerun starting at item 0 resets pass_state (Ask 5).
+
+    After a full run (2 items, 1 failed), beginning item 0 again resets the
+    pass state to {processed: 1, failed: 0}, so the all-fail check on the
+    rerun is judged on its own items.
+    """
+    _setup_failing_task()
+    node = _declared(_data_graph(task_ref="fail_setup"), tmp_path)
+
+    # First run: items 0 and 1
+    items.command_begin(node, tmp_path, 0)
+    items.command_end(node, tmp_path, 0, failed_reason="setup failed")
+    items.command_begin(node, tmp_path, 1)
+    items.command_end(node, tmp_path, 1)
+    ps_after_first = items._read_pass_state(tmp_path, node.id)
+    assert ps_after_first["processed"] == 2
+
+    # Rerun: begin item 0 again
+    items.command_begin(node, tmp_path, 0)
+    ps_after_rerun_begin = items._read_pass_state(tmp_path, node.id)
+    assert ps_after_rerun_begin == {"processed": 1, "failed": 0}, (
+        f"pass state should be reset at item 0, got {ps_after_rerun_begin}"
+    )
+
+
+def test_stale_item_scores_cleared_on_rerun(tmp_path):
+    """After a 3-item run, a rerun with 2 items has exactly 2 entries (Ask 5).
+
+    Stale item_scores from the first run must not survive into the rerun.
+    """
+    from refactory_dsh import task as task_module
+
+    class ThreeItems(task_module.Task):
+        name = "three_items"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="a"),
+                task_module.TaskInstance(id="b"),
+                task_module.TaskInstance(id="c"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("three_items", ThreeItems)
+
+    class TwoItems(task_module.Task):
+        name = "two_items"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="x"),
+                task_module.TaskInstance(id="y"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=0.5)
+
+    task_module.register_task("two_items", TwoItems)
+
+    # First run with 3 items
+    node3 = _declared(_data_graph(task_ref="three_items"), tmp_path)
+    for i in range(3):
+        items.command_begin(node3, tmp_path, i)
+        items.command_end(node3, tmp_path, i)
+    facts3 = json.loads((tmp_path / "facts.json").read_text())
+    assert len(facts3["item_scores"]) == 3
+
+    # Rerun with 2 different items (different task)
+    node2 = _declared(_data_graph(task_ref="two_items"), tmp_path)
+    for i in range(2):
+        items.command_begin(node2, tmp_path, i)
+        items.command_end(node2, tmp_path, i)
+    facts2 = json.loads((tmp_path / "facts.json").read_text())
+    ids = [s["id"] for s in facts2["item_scores"]]
+    assert sorted(ids) == ["x", "y"], (
+        f"expected exactly the 2 new ids, got {ids}"
+    )

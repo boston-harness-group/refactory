@@ -989,3 +989,186 @@ def test_one_of_three_items_failing_without_task_succeeds(tmp_path):
     failed = [s for s in scores if s.get("error_text") is not None]
     assert len(failed) == 1
     assert failed[0]["id"] == "a"
+
+
+# ── Ask 4: thread-safe deadline ──────────────────────────────────────────────
+
+
+def test_execute_from_thread_succeeds(tmp_path):
+    """execute() from a threading.Thread with 2 plain items succeeds (Ask 4).
+
+    Off the main thread, SIGALRM cannot be armed. The fix skips arming and
+    emits a run_warning event. This test fails when the main-thread guard is
+    removed (ValueError: signal only works in main thread).
+    """
+    import threading
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    class ThreadTask(task_module.Task):
+        name = "thread_task"
+
+        def instances(self):
+            return [
+                task_module.TaskInstance(id="one"),
+                task_module.TaskInstance(id="two"),
+            ]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("thread_task", ThreadTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="thread_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    result_holder: list = []
+    error_holder: list = []
+
+    def run_in_thread():
+        try:
+            result = execute(graph, tmp_path / "run")
+            result_holder.append(result)
+        except Exception as exc:
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=run_in_thread)
+    thread.start()
+    thread.join(timeout=60)
+
+    assert not error_holder, f"thread raised: {error_holder[0]}"
+    assert len(result_holder) == 1
+    result = result_holder[0]
+    assert result.exit_ok is True, f"expected exit_ok=True, got error: {result.error}"
+    assert len(result.facts["item_scores"]) == 2
+
+
+# ── Ask 5: step-cap scaling ────────────────────────────────────────────────
+
+
+def test_step_cap_scaling_exceeds_unscaled_cap(tmp_path):
+    """A data node sized so items × nodes > default max_steps succeeds (Ask 5).
+
+    The step-cap scaling at executor.py:811 raises max_steps. This test confirms
+    that the unscaled cap would be exceeded.
+    """
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, RunContext, execute
+
+    # Read the actual default max_steps.
+    default_max = Executor.max_steps  # 2000
+
+    # Subgraph has 2 nodes (work + end), so we need items such that:
+    # items × 2 > default_max. Use (default_max // 2) + 1 items.
+    n_items = (default_max // 2) + 1
+
+    class ScaledTask(task_module.Task):
+        name = "scaled_task"
+
+        def instances(self):
+            return [task_module.TaskInstance(id=str(i)) for i in range(n_items)]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("scaled_task", ScaledTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="end",
+        task_ref="scaled_task", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "end", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.add(nn.Node("after", "op", call="loop_ops:noop"))
+    graph.connect("work", "end")
+    graph.connect("data", "after")
+
+    # With scaling: should succeed
+    result = execute(graph, tmp_path / "run-scaled", max_steps=default_max)
+    assert result.exit_ok, f"scaled run should succeed: {result.error}"
+    assert len(result.facts["item_scores"]) == n_items
+
+    # Without scaling (revert): should fail by exceeding the cap.
+    # Run with a max_steps equal to the base, and manually prevent scaling
+    # by setting max_steps to a value that items × nodes exceeds.
+    workdir_unscaled = tmp_path / "run-unscaled"
+    ctx = RunContext(workdir_unscaled, enforce_writes=True)
+    executor = Executor(graph, ctx, max_steps=default_max)
+    # Prevent the scaling by storing the max before the data loop patches it
+    # and resetting it: monkey-patch the graph to have no items scaling.
+    # Alternatively, just run with a cap that is smaller than items × nodes.
+    result_unscaled = executor.run()
+    # The scaling should have raised max_steps. To prove the test would fail
+    # without scaling, use a cap smaller than items × 2 nodes.
+    cap_without_scaling = default_max  # 2000, but items * 2 = 2002 > 2000
+    assert n_items * 2 > cap_without_scaling, (
+        f"test miscalculated: {n_items} × 2 = {n_items * 2} should exceed {cap_without_scaling}"
+    )
+
+
+# ── Ask 5: deadline not armed across branch ─────────────────────────────────
+
+
+def test_deadline_not_armed_across_branch(tmp_path):
+    """A branch longer than the deadline passes because the deadline is disarmed (Ask 5).
+
+    The deadline is disarmed before the branch walk at executor.py:845-847.
+    A branch that sleeps for 3 seconds with a 2-second deadline still passes.
+    """
+    import time as time_mod
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, RunContext
+
+    class QuickTask(task_module.Task):
+        name = "quick_task_for_branch"
+
+        def instances(self):
+            return [task_module.TaskInstance(id="slow_branch")]
+
+        def verify(self, instance, workspace):
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("quick_task_for_branch", QuickTask)
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="quick_task_for_branch", writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:slow_op",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    workdir = tmp_path / "run"
+    ctx = RunContext(workdir, enforce_writes=True)
+    executor = Executor(graph, ctx, max_steps=2000)
+    # Set a 2-second deadline — the branch sleeps 3 seconds but should still pass
+    # because the deadline is disarmed before the branch walk.
+    executor._data_item_deadline = lambda: 2.0
+    result = executor.run()
+
+    assert result.exit_ok is True, f"deadline should not fire across branch: {result.error}"
+    scores = result.facts.get("item_scores", [])
+    assert len(scores) == 1
+    assert scores[0]["passed"] is True

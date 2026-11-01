@@ -740,16 +740,124 @@ describe('begin/end failure handling (Ask 3)', () => {
   })
 
   it('treats an end exit-code failure as a failed item', async () => {
+    // Ask 3: a non-all-fail end exit (code 1) records the item as failed
+    // via end --failed and continues the run, not fails it.
     const log: string[] = []
     const shell = failingShell([{ id: 'a' }, { id: 'b' }], log, { endFailIndex: 0 })
     const root = await mount(shell)
     await call(root, 'wf_next')
     await call(root, 'wf_done', { node: 'end' })
-    // end for item 0 fails with exit code 1 — should propagate as node failure
-    // (not all-items-failed since not all items processed yet)
-    const second = await call(root, 'wf_next') as { status: string }
-    // An end exit-code failure that's not a timeout propagates as a node failure
-    expect(second.status).toBe('failed')
+    const second = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown; status?: string }
+    // The run should continue to item 1 (not fail)
+    expect(second.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // The end --failed fallback should have been called for item 0
+    const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
+    expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('all-fail exit from primary end fails the run', async () => {
+    // Ask 3: the all-fail exit code (7) propagates as a node failure.
+    const log: string[] = []
+    const items = [{ id: 'a' }]
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          // Primary end for item 0: exit with code 7 (all-fail)
+          if (verb === 'end' && !spec.command.includes('--failed')) {
+            return {
+              exitCode: 7, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'AllItemsFailedError: data: all 1 items failed', truncated: false },
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    const result = await call(root, 'wf_next') as { status: string }
+    expect(result.status).toBe('failed')
+  })
+
+  it('fallback end --failed that fires all-fail rule fails the run', async () => {
+    // Ask 2: when the only item's verify hangs (end times out), and the
+    // fallback end --failed exits with the all-fail exit code (7), the run
+    // finishes with status 'failed'.
+    const log: string[] = []
+    const items = [{ id: 'a' }]
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          // Primary end times out (verify hangs)
+          if (verb === 'end' && !spec.command.includes('--failed')) {
+            return {
+              exitCode: null, signal: null, timedOut: true, aborted: false, timeoutMs: 1000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'end timed out', truncated: false },
+            }
+          }
+          // Fallback end --failed exits with code 7 (all-fail)
+          if (verb === 'end' && spec.command.includes('--failed')) {
+            return {
+              exitCode: 7, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+              stdout: { text: '', truncated: false },
+              stderr: { text: 'AllItemsFailedError: data: all 1 items failed', truncated: false },
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell)
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    const result = await call(root, 'wf_next') as { status: string }
+    expect(result.status).toBe('failed')
   })
 })
 
@@ -850,6 +958,16 @@ describe('abandonPass primitive (Correction 1)', () => {
     // No gate verdicts should exist (no gates in this graph's body, but verify
     // the invariant holds)
     expect(state.gate_verdicts).toEqual({})
+    // Ask 5: abandonPass never marks nodes completed — the spine log shows
+    // that during item 0's abandoned pass, body nodes were recorded as
+    // "skipped", not "completed". A "completed work" or "completed end" entry
+    // should only appear for item 1 (the passing item), not for item 0.
+    // Count: there should be exactly one "completed work" and one
+    // "completed end" (from item 1), proving abandonPass did not add more.
+    const completedWorkEntries = spineLog.filter((e: string) => e === 'completed work')
+    const completedEndEntries = spineLog.filter((e: string) => e === 'completed end')
+    expect(completedWorkEntries).toHaveLength(1) // only from item 1
+    expect(completedEndEntries).toHaveLength(1) // only from item 1
   })
 
   it('abandonPass with a gate in the pass body records no verdict', async () => {
@@ -942,5 +1060,65 @@ describe('abandonPass primitive (Correction 1)', () => {
     // up as an extra gate evaluator execution — verify only item 1 ran the
     // evaluator (no 'echo proceed' was executed for item 0's gate).
     // (gate_verdicts may have inner_gate: 'proceed' from item 1, which is valid)
+  })
+})
+
+describe('spine error_text and stderr tail (Ask 5)', () => {
+  it('spine error_text contains stderr tail', async () => {
+    // Ask 5: when a subgraph node's stderr says "work failed for item a",
+    // the end --failed command receives that text.
+    const workdir = scratch()
+    const log: string[] = []
+    const items = [{ id: 'a' }, { id: 'b' }]
+    let callCount = 0
+    const shell = {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          if (verb === '') {
+            callCount += 1
+            if (callCount === 1) {
+              return {
+                exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+                stdout: { text: '', truncated: false },
+                stderr: { text: 'work failed for item a', truncated: false },
+              }
+            }
+          }
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(shell, { workdir })
+    const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
+    expect(first.item).toEqual({ id: 'b' })
+    await call(root, 'wf_done', { node: 'end' })
+    const last = await call(root, 'wf_next') as { status: string }
+    expect(last.status).toBe('done')
+    // The end --failed command should have received the stderr tail
+    const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
+    expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
+    // The stderr tail "work failed for item a" should appear in the --failed argument
+    expect(endFailedCmds[0]).toContain('work failed for item a')
   })
 })

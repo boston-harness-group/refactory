@@ -130,8 +130,18 @@ def write_source(
     return path
 
 
+#: Exit code used when the all-fail rule fires. The spine distinguishes this
+#: from other ``end`` failures so it can propagate the all-fail rule as a node
+#: failure while recording other non-zero exits as failed items (Ask 3).
+ALL_FAIL_EXIT_CODE = 7
+
+
 class ItemsError(RuntimeError):
     """A data node cannot be iterated: named, because the node id alone is not a reason."""
+
+
+class AllItemsFailedError(ItemsError):
+    """Raised when every item in a data pass failed (the all-fail rule)."""
 
 
 def _declarations(workdir: Path) -> dict[str, Any]:
@@ -274,12 +284,35 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
             record = make_item_record(str(item.get("id") or index), None, error=exc)
             if record is not None and SCORES_FACT in node.produces:
                 _write_facts(workdir, SCORES_FACT, [record])
-            # Track failed count in pass state.
-            ps = _read_pass_state(workdir, node.id)
-            ps["failed"] = ps.get("failed", 0) + 1
-            _write_pass_state(workdir, node.id, ps)
+            # Do NOT increment failed here: the subsequent `end --failed`
+            # call from the spine will increment it exactly once (Ask 1).
             return {"error": str(exc)}
     return item
+
+
+def _existing_item_record(workdir: Path, item_id: str) -> dict[str, Any] | None:
+    """Return an existing item_scores record for *item_id*, or None.
+
+    Used to guard against double-writing: when ``command_begin``'s setup-failure
+    handler already wrote a record, ``command_end``'s ``--failed`` path should
+    not overwrite it (Ask 1).
+    """
+    path = workdir / FACTS
+    if not path.exists():
+        return None
+    try:
+        facts = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(facts, dict):
+        return None
+    scores = facts.get(SCORES_FACT)
+    if not isinstance(scores, list):
+        return None
+    for entry in scores:
+        if isinstance(entry, dict) and str(entry.get("id")) == item_id:
+            return entry
+    return None
 
 
 def command_end(
@@ -312,8 +345,18 @@ def command_end(
         if record is not None:
             if failed_kind is not None:
                 record["error_kind"] = failed_kind
+            # Guard: skip writing a second item_scores record when
+            # command_begin's setup-failure handler already wrote one for
+            # this item id (Ask 1 — preserve the original error_kind).
             if SCORES_FACT in node.produces:
-                _write_facts(workdir, SCORES_FACT, [record])
+                existing = _existing_item_record(workdir, item_id)
+                if existing is None:
+                    _write_facts(workdir, SCORES_FACT, [record])
+                else:
+                    # Use the original record so error_kind stays the
+                    # actual exception class (e.g. ValueError), not
+                    # RuntimeError from the end --failed wrapper.
+                    record = existing
         # Track failed count in pass state.
         ps = _read_pass_state(workdir, node.id)
         ps["failed"] = ps.get("failed", 0) + 1
@@ -369,7 +412,7 @@ def _check_all_items_failed(
     processed = ps.get("processed", 0)
     failed = ps.get("failed", 0)
     if processed > 0 and failed == processed:
-        raise ItemsError(f"{node.id}: all {processed} items failed")
+        raise AllItemsFailedError(f"{node.id}: all {processed} items failed")
 
 
 def command_reset(workdir: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -525,6 +568,11 @@ def main(argv: list[str] | None = None) -> int:
                 node, workdir, index,
                 failed_reason=failed_reason, failed_kind=failed_kind,
             )
+    except AllItemsFailedError as exc:
+        # The all-fail rule gets its own exit code so the spine can
+        # distinguish it from other end failures (Ask 3).
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return ALL_FAIL_EXIT_CODE
     except (ItemsError, TaskError) as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

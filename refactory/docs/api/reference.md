@@ -931,6 +931,7 @@ The per-item half of a data node, from the command line.
 
 | kind | name | signature |
 |---|---|---|
+| class | `AllItemsFailedError` | `` |
 | class | `ItemsError` | `` |
 | function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int') -> 'dict[str, Any]'` |
 | function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None) -> 'dict[str, Any]'` |
@@ -943,6 +944,7 @@ The per-item half of a data node, from the command line.
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
 
+- **`AllItemsFailedError`** — Raised when every item in a data pass failed (the all-fail rule).
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
 - **`command_begin`** — Materialise one item and prepare the workspace for its pass.
 - **`command_end`** — The Task's verdict on one pass, folded into the run's facts.

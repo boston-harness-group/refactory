@@ -834,8 +834,13 @@ class FailureScenarioTask(Task):
             TaskInstance(id=""),          # no id — exercises the id fallback
             TaskInstance(id="raise_item"),
             TaskInstance(id="timeout_item"),
+            TaskInstance(id="setup_fails"),
             TaskInstance(id="last_fails"),
         ]
+
+    def setup(self, instance, workspace):
+        if instance.id == "setup_fails":
+            raise ValueError("setup failed for setup_fails")
 
     def verify(self, instance, workspace):
         if instance.id == "raise_item":
@@ -843,6 +848,24 @@ class FailureScenarioTask(Task):
         if instance.id == "timeout_item":
             time.sleep(30)  # hangs past the per-item deadline
         return VerifyResult(passed=True, score=1.0)
+'''
+
+#: Task where every item fails — for the all-items-failed equivalence case.
+_ALL_FAIL_TASK_SOURCE = '''\
+"""A Task where every item fails, for the all-items-failed equivalence case."""
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class AllFailTask(Task):
+    name = "all_fail_equiv"
+
+    def instances(self):
+        return [
+            TaskInstance(id="fail_a"),
+            TaskInstance(id="fail_b"),
+        ]
+
+    def verify(self, instance, workspace):
+        raise ValueError(f"{instance.id} verify failed")
 '''
 
 #: The subgraph op: a Python callable the walker runs in-process and the spine
@@ -873,6 +896,7 @@ def _write_failure_package(project: Path) -> None:
     (pkg / "__init__.py").write_text(
         'from refactory_dsh.nn import Package\n'
         'from .task import FailureScenarioTask\n'
+        'from .all_fail_task import AllFailTask\n'
         'PACKAGE = Package(\n'
         '    name="failure_scenario",\n'
         '    description="data failure scenario",\n'
@@ -881,6 +905,7 @@ def _write_failure_package(project: Path) -> None:
         ')\n'
     )
     (pkg / "task.py").write_text(_FAILURE_TASK_SOURCE)
+    (pkg / "all_fail_task.py").write_text(_ALL_FAIL_TASK_SOURCE)
     (pkg / "ops.py").write_text(_FAILURE_OP_SOURCE)
 
 
@@ -1049,8 +1074,92 @@ def test_data_failure_scenario_matches(tmp_path):
         assert normalize(walker_scores2) == normalize(spine_scores2), (
             f"rerun mismatch:\nwalker: {walker_scores2}\nspine: {spine_scores2}"
         )
-        assert len(spine_scores2) == len(walker_scores2) == 4, (
-            f"rerun should have exactly 4 entries (no stale): {len(spine_scores2)}"
+        assert len(spine_scores2) == len(walker_scores2) == 5, (
+            f"rerun should have exactly 5 entries (no stale): {len(spine_scores2)}"
         )
+
+        # ── Ask 6: setup_fails item should have an error record ──
+        setup_fail_walker = next(
+            (s for s in walker_scores if s["id"] == "setup_fails"), None
+        )
+        setup_fail_spine = next(
+            (s for s in spine_scores if s["id"] == "setup_fails"), None
+        )
+        assert setup_fail_walker is not None, "walker missing setup_fails"
+        assert setup_fail_spine is not None, "spine missing setup_fails"
+        assert setup_fail_walker["passed"] is False
+        assert setup_fail_spine["passed"] is False
+        # Both should have an error_kind for the setup failure
+        assert setup_fail_walker.get("error_kind") is not None
+        assert setup_fail_spine.get("error_kind") is not None
+
+        # ── Ask 6: all-items-failed sub-case ──
+        from failure_scenario.all_fail_task import AllFailTask  # type: ignore[import-not-found]
+        register_task("all_fail_equiv", AllFailTask)
+
+        all_fail_task_ref = "refactory_packages.failure_scenario.all_fail_task:AllFailTask"
+
+        af_graph = nn.Graph()
+        af_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="all_fail_equiv",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        af_graph.add(nn.Node(
+            "work", "op", call="loop_ops:record_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        af_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        af_graph.connect("data", "report")
+
+        # Walker: should fail (all items failed)
+        af_walker_dir = tmp_path / "af_walker"
+        af_walker_result = execute(af_graph, af_walker_dir)
+        assert af_walker_result.exit_ok is False, "walker should fail when all items fail"
+        assert "all" in (af_walker_result.error or "").lower()
+
+        # Spine: should fail
+        af_spine_dir = tmp_path / "af_spine"
+        af_spine_dir.mkdir(parents=True, exist_ok=True)
+
+        af_spine_graph = nn.Graph()
+        af_spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=all_fail_task_ref,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        af_spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:record_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        af_spine_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        af_spine_graph.connect("data", "report")
+
+        af_state = {"graph": af_spine_graph.to_state()}
+        lowering.write_declarations(af_state, af_spine_dir)
+        af_graph_path, _ = lowering.write_mode_graph(
+            af_state, tmp_path / "af_graphs", name="all_fail",
+        )
+
+        for key, value in env_patch.items():
+            os.environ[key] = value
+        try:
+            af_rc = _run_spine(af_graph_path, af_spine_dir, python_bin, 2_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        # The spine should also fail (non-zero exit)
+        assert af_rc != 0, "spine should fail when all items fail"
+
     finally:
         sys.path.remove(str(project / ".factory" / "packages"))

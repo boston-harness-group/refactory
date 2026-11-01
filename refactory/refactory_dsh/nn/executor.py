@@ -21,6 +21,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
 import time
 import traceback as traceback_mod
 from dataclasses import dataclass, field
@@ -797,6 +798,26 @@ class Executor:
                 # runDataCommand applies (execute.ts:268-278). Derived from
                 # the budget's remaining time, defaulting to 3600 s.
                 _item_deadline_s = self._data_item_deadline()
+
+                # Ask 4: SIGALRM can only be armed on the main thread.
+                # Off the main thread, skip arming and emit a run_warning
+                # event so the unarmed deadline is recorded in the run's
+                # events (the same channel the spine uses for warnings).
+                _on_main_thread = threading.current_thread() is threading.main_thread()
+                if _item_deadline_s is not None and not _on_main_thread:
+                    _item_deadline_s = None  # disable deadline
+                    try:
+                        from refactory_dsh import live
+                        live.emit(
+                            self.ctx.workdir, "run_warning",
+                            node_id=node.id, state="warning",
+                            summary=(
+                                "per-item deadline is not armed because the "
+                                "executor is not on the main thread"
+                            ),
+                        )
+                    except Exception:
+                        pass  # best-effort warning
 
                 # Scale step cap for data nodes: save the initial step count
                 # and the original max_steps so we can account for the kept

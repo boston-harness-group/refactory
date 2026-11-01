@@ -51,6 +51,14 @@ export { BUILD_STAMP, computeSourceStamp, validateBuild } from './build-stamp.ts
 export const name = 'workflow-spine'
 export const inject = ['tools', 'systemPrompt']
 
+/**
+ * The exit code the Python items module uses when the all-fail rule fires.
+ * The spine distinguishes this from other non-zero `end` exits so it can
+ * propagate the all-fail rule as a node failure while recording other
+ * non-zero exits as failed items (Ask 3).
+ */
+const ALL_FAIL_EXIT_CODE = 7
+
 /** Configured-only driver: the same drain/status path used by `wf_next`. */
 export const CONFIGURED_RUN_SERVICE = 'workflowConfiguredRun'
 
@@ -1557,7 +1565,12 @@ export function apply(ctx: Context, config: Config): void {
         const reason = stderrTail(started)
         const failedKind = started.error?.includes('timed out') ? 'timeout' : undefined
         spine.abandonPass()
-        await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+        const fallback = await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+        // Ask 2: check the fallback's result — when the all-fail rule fires
+        // in the fallback, propagate as a node failure.
+        if (!fallback.ok && !fallback.error?.includes('timed out') && !fallback.error?.includes('was aborted')) {
+          return { failure: fallback }
+        }
         materialised.delete(spine)
         item = undefined
         spine.endPass()
@@ -1584,7 +1597,11 @@ export function apply(ctx: Context, config: Config): void {
             // End timed out or was killed: run a fallback to record the item.
             const reason = stderrTail(ended)
             const failedKind = ended.error?.includes('timed out') ? 'timeout' : undefined
-            await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+            const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+            // Ask 2: check the fallback result.
+            if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+              return { failure: fb }
+            }
           } else {
             // End exited non-zero (e.g. all-items-failed): propagate.
             return { failure: ended }
@@ -1629,7 +1646,11 @@ export function apply(ctx: Context, config: Config): void {
           // to record the item as failed (not lost), then continue.
           const reason = stderrTail(ended)
           const failedKind = ended.error?.includes('timed out') ? 'timeout' : undefined
-          await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+          const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason, failedKind)
+          // Ask 2: check the fallback result.
+          if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+            return { failure: fb }
+          }
           materialised.delete(spine)
           item = undefined
           spine.endPass()
@@ -1637,9 +1658,26 @@ export function apply(ctx: Context, config: Config): void {
           recordBoundary()
           return {}
         }
-        // End exited with non-zero (e.g. all-items-failed): propagate as
-        // a node failure, as the walker does.
-        return { failure: ended }
+        // Ask 3: distinguish the all-fail exit from other end failures.
+        // The all-fail rule uses exit code 7; propagate as a node failure.
+        // Any other non-zero exit is a crash in verify or the end command
+        // itself — record the item as failed via end --failed and continue.
+        if (ended.exitCode === ALL_FAIL_EXIT_CODE) {
+          return { failure: ended }
+        }
+        // Non-all-fail end exit: record as failed item, not a run failure.
+        spine.abandonPass()
+        const reason = stderrTail(ended)
+        const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason)
+        if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+          return { failure: fb }
+        }
+        materialised.delete(spine)
+        item = undefined
+        spine.endPass()
+        structural.clear()
+        recordBoundary()
+        return {}
       }
       materialised.delete(spine)
       item = undefined
@@ -1658,6 +1696,11 @@ export function apply(ctx: Context, config: Config): void {
       if (state.status === 'done' || spine.isPaused()) return { next: state, item, ran }
       const started = await beginItem()
       if (started.failure !== undefined) return { next: state, failure: started.failure, ran }
+      // If beginItem() handled a setup failure and advanced to the next item
+      // via endPass(), the current item is not yet materialised. Re-enter the
+      // loop so beginItem() runs for the new item before its subgraph is
+      // dispatched (Ask 6 / setup-failure + subgraph-failure equivalence).
+      if (spine.passOf() !== undefined && !materialised.has(spine)) continue
       applyControls(spine, workdir, commandEnv, dataCommand, agentCommand)
       state = spine.next()
       if (spine.isHalted() || spine.isPaused()) return { next: state, item, ran }
@@ -1772,7 +1815,11 @@ export function apply(ctx: Context, config: Config): void {
               // End timed out or was killed: run a fallback to record the item.
               const fbReason = stderrTail(ended)
               const fbKind = ended.error?.includes('timed out') ? 'timeout' : undefined
-              await runDataCommand(shell, data, 'end', runner, activePass.index, fbReason, fbKind)
+              const fb = await runDataCommand(shell, data, 'end', runner, activePass.index, fbReason, fbKind)
+              // Ask 2: check the fallback result.
+              if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
+                return { next: spine.next(), failure: fb, ran }
+              }
             } else {
               // End exited with non-zero (e.g. all-items-failed): propagate.
               return { next: spine.next(), failure: ended, ran }
