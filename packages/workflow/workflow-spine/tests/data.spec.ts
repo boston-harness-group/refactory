@@ -784,9 +784,12 @@ describe('begin/end failure handling (Ask 3)', () => {
               stderr: { text: 'AllItemsFailedError: data: all 1 items failed', truncated: false },
             }
           }
+          // The fallback end --failed succeeds with a valid record, so only the
+          // all-fail exit from the primary end can fail the run.
           const answers: Record<string, unknown> = {
             list: { count: items.length, ids: items.map(i => i.id) },
             begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: false, score: 0 },
           }
           const text = verb in answers ? JSON.stringify(answers[verb]) : ''
           return {
@@ -858,6 +861,125 @@ describe('begin/end failure handling (Ask 3)', () => {
     await call(root, 'wf_done', { node: 'end' })
     const result = await call(root, 'wf_next') as { status: string }
     expect(result.status).toBe('failed')
+  })
+
+  /** Exit results for the scripted shell below. */
+  const exited = (exitCode: number, stderr: string) => ({
+    exitCode, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+    stdout: { text: '', truncated: false },
+    stderr: { text: stderr, truncated: false },
+  })
+  const timedOut = (stderr: string) => ({
+    exitCode: null, signal: null, timedOut: true, aborted: false, timeoutMs: 1000,
+    stdout: { text: '', truncated: false },
+    stderr: { text: stderr, truncated: false },
+  })
+  const allFailed = () => exited(7, 'AllItemsFailedError: data: all 1 items failed')
+
+  /**
+   * A one-item loader whose answers `script` may override per command: a
+   * result to return, or undefined for the loader's normal JSON answer.
+   */
+  function scriptedShell(
+    log: string[],
+    script: (verb: string, command: string) => ReturnType<typeof exited> | ReturnType<typeof timedOut> | undefined,
+  ) {
+    const items = [{ id: 'a' }]
+    return {
+      resolve: (request: { command: string; workdir?: string; env?: Record<string, string> }) => ({
+        command: request.command,
+        workdir: request.workdir ?? process.cwd(),
+        timeoutMs: 10_000,
+        onExpiry: 'kill',
+        stdoutMaxBytes: 1_000_000,
+        env: request.env,
+      }),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          log.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
+          const scripted = script(verb, spec.command)
+          if (scripted !== undefined) return scripted
+          const answers: Record<string, unknown> = {
+            list: { count: items.length, ids: items.map(i => i.id) },
+            begin: items[index] ?? {},
+            end: { id: items[index]?.id, passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+  }
+
+  it('a begin failure whose fallback end --failed fires the all-fail rule fails the run', async () => {
+    // Ask 2: the only item's begin exits non-zero; its fallback end --failed
+    // exits 7, and that result is checked rather than dropped.
+    const log: string[] = []
+    const shell = scriptedShell(log, (verb, command) => {
+      if (verb === 'begin') return exited(1, 'begin failed')
+      if (verb === 'end' && command.includes('--failed')) return allFailed()
+      return undefined
+    })
+    const root = await mount(shell)
+    const result = await call(root, 'wf_next') as { status: string }
+    expect(result.status).toBe('failed')
+    expect(log.filter(c => c.includes(' end ') && c.includes('--failed'))).toHaveLength(1)
+  })
+
+  it('a non-all-fail end exit whose fallback fires the all-fail rule fails the run', async () => {
+    // Ask 3: the primary end exits 1 (not all-fail), so the item is recorded
+    // through end --failed; that fallback exits 7 and must fail the run.
+    const log: string[] = []
+    const shell = scriptedShell(log, (verb, command) => {
+      if (verb !== 'end') return undefined
+      return command.includes('--failed') ? allFailed() : exited(1, 'end failed')
+    })
+    const root = await mount(shell)
+    await call(root, 'wf_next')
+    await call(root, 'wf_done', { node: 'end' })
+    const result = await call(root, 'wf_next') as { status: string }
+    expect(result.status).toBe('failed')
+    expect(log.filter(c => c.includes(' end ') && c.includes('--failed'))).toHaveLength(1)
+  })
+
+  it('a setup failure whose end --failed times out and whose fallback fires all-fail fails the run', async () => {
+    // Ask 2: begin reports a setup error; the end --failed recording it times
+    // out; the second fallback (--failed-kind timeout) exits 7.
+    const log: string[] = []
+    const shell = scriptedShell(log, (verb, command) => {
+      if (verb === 'begin') {
+        return { ...exited(0, ''), stdout: { text: JSON.stringify({ error: 'setup broke' }), truncated: false } }
+      }
+      if (verb !== 'end') return undefined
+      return command.includes('--failed-kind') ? allFailed() : timedOut('end timed out')
+    })
+    const root = await mount(shell)
+    const result = await call(root, 'wf_next') as { status: string }
+    expect(result.status).toBe('failed')
+    expect(log.filter(c => c.includes(' end ') && c.includes('--failed-kind'))).toHaveLength(1)
+  })
+
+  it('a node failure whose end --failed times out and whose fallback fires all-fail fails the run', async () => {
+    // Ask 2: the subgraph's work node fails; the end --failed recording it
+    // times out; the second fallback (--failed-kind timeout) exits 7.
+    const log: string[] = []
+    let nodeRuns = 0
+    const shell = scriptedShell(log, (verb, command) => {
+      // Only the subgraph's work node fails; the data node's successor would pass.
+      if (verb === '' && ++nodeRuns === 1) return exited(1, 'work failed for item a')
+      if (verb !== 'end') return undefined
+      return command.includes('--failed-kind') ? allFailed() : timedOut('end timed out')
+    })
+    const root = await mount(shell)
+    const result = await call(root, 'wf_next') as { status: string }
+    expect(result.status).toBe('failed')
+    expect(log.filter(c => c.includes(' end ') && c.includes('--failed-kind'))).toHaveLength(1)
   })
 })
 
@@ -932,6 +1054,14 @@ describe('abandonPass primitive (Correction 1)', () => {
         },
       }),
     }
+    // Capture the spine's own state as each item's pass closes: endPass clears
+    // the body's marks for the next item, so item 0's record exists only here.
+    const atClose: Array<Record<string, unknown>> = []
+    const endPass = Spine.prototype.endPass
+    vi.spyOn(Spine.prototype, 'endPass').mockImplementation(function (this: Spine) {
+      atClose.push(this.state())
+      return endPass.call(this)
+    })
     const root = await mount(shell, { workdir })
     // First item's work fails; abandonPass should skip 'end' (the agent node)
     const first = await call(root, 'wf_next') as { nodes: Array<{ id: string }>; item?: unknown }
@@ -944,30 +1074,17 @@ describe('abandonPass primitive (Correction 1)', () => {
     const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
     expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
 
-    // Correction 1: the failed node's remaining body nodes were recorded as
-    // skipped during item 0's abandoned pass, but skips are cleared when
-    // advancing to the next item, so the final skipped list should be empty
-    // (item 1 completed normally).  No body nodes should be completed for item 0.
-    // Read the checkpoint to verify the spine logged the skip during abandon.
-    const checkpoint = JSON.parse(readFileSync(join(workdir, '.refactory/spine-checkpoint.json'), 'utf8'))
-    const state = checkpoint.state as Record<string, unknown>
-    // The spine log should record that body nodes were skipped during abandon
-    const spineLog = state.log as string[]
-    const skipLogEntries = spineLog.filter((e: string) => e.startsWith('skipped ') && (e.includes('work') || e.includes('end')))
-    expect(skipLogEntries.length).toBeGreaterThanOrEqual(1)
-    // No gate verdicts should exist (no gates in this graph's body, but verify
-    // the invariant holds)
-    expect(state.gate_verdicts).toEqual({})
-    // Ask 5: abandonPass never marks nodes completed — the spine log shows
-    // that during item 0's abandoned pass, body nodes were recorded as
-    // "skipped", not "completed". A "completed work" or "completed end" entry
-    // should only appear for item 1 (the passing item), not for item 0.
-    // Count: there should be exactly one "completed work" and one
-    // "completed end" (from item 1), proving abandonPass did not add more.
-    const completedWorkEntries = spineLog.filter((e: string) => e === 'completed work')
-    const completedEndEntries = spineLog.filter((e: string) => e === 'completed end')
-    expect(completedWorkEntries).toHaveLength(1) // only from item 1
-    expect(completedEndEntries).toHaveLength(1) // only from item 1
+    // Correction 1: when item 0's pass closes, the spine records its body
+    // nodes as skipped and none as completed (abandonPass fabricates nothing).
+    expect(atClose).toHaveLength(2)
+    const abandoned = atClose[0]!
+    expect(abandoned.completed).not.toContain('work')
+    expect(abandoned.completed).not.toContain('end')
+    expect(abandoned.skipped).toEqual(expect.arrayContaining(['work', 'end']))
+    expect(abandoned.gate_verdicts).toEqual({})
+    // Item 1 ran normally: its pass closes with both body nodes completed.
+    expect(atClose[1]!.completed).toEqual(expect.arrayContaining(['work', 'end']))
+    expect(atClose[1]!.skipped).toEqual([])
   })
 
   it('abandonPass with a gate in the pass body records no verdict', async () => {
