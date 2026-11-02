@@ -1,0 +1,34 @@
+{
+  "name": "skillopt-replay",
+  "nodes": {
+    "check": {
+      "id": "check",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.skillopt.ops:replay_noop",
+      "callable_name": "refactory_packages.skillopt.ops:replay_noop",
+      "notes": "",
+      "_type": "FnNode"
+    }
+  },
+  "edges": [],
+  "start_node": "check",
+  "terminal": true,
+  "knob_values": {
+    "recording_dir": ""
+  },
+  "knob_specs": {
+    "recording_dir": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "path to arm A's recording directory",
+      "required": false
+    }
+  }
+}
