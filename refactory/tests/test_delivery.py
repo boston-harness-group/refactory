@@ -32,111 +32,58 @@ LOGIN = "octo"
 
 
 @pytest.fixture(autouse=True)
-def _delivery_inline_dispatch(monkeypatch):
-    """Delivery tests monkeypatch delivery-module internals (``_gh``, ``_push``,
-    ``deliver_design``), which a forkserver child cannot see.  Route ops and fn
-    gates through in-process dispatch so the patches are visible.
+def _delivery_ops_in_process(monkeypatch):
+    """Run ops in the parent process so delivery-module monkeypatches are visible.
 
-    This is a **test** fixture that applies only to this module.  Every other
-    test module exercises the production forkserver path.
+    Delivery tests monkeypatch ``delivery._gh``, ``delivery._push`` and
+    ``delivery.deliver_design`` to exercise error paths (push refused, repo
+    creation failure, empty change, etc.).  Forkserver children cannot see these
+    patches.  This fixture replaces ``_run_op_timed`` with an in-process call
+    for this module only; every other test module exercises the production
+    forkserver dispatch.
     """
     from refactory_dsh.nn.executor import Executor, resolve
 
-    _original_dispatch = Executor._dispatch
-
-    def _inline_op(self, node):
-        """Run an op in-process so parent-side monkeypatches are visible."""
+    def _in_process_op(self, call, node, timeout):
         import contextlib, io
-
-        saved_model = self.ctx.model
-        saved_cwd = os.getcwd()
-        saved_workdir = self.ctx.workdir
-        abs_workdir = Path(self.ctx.workdir.resolve())
-        saved_project = os.environ.get("REFACTORY_PROJECT")
+        saved = self.ctx.model, os.getcwd(), self.ctx.workdir
         self.ctx.model = None
-        self.ctx.workdir = abs_workdir
-        _capture_stderr = io.StringIO()
+        self.ctx.workdir = Path(self.ctx.workdir).resolve()
+        saved_project = os.environ.get("REFACTORY_PROJECT")
         try:
             if not os.environ.get("REFACTORY_PROJECT"):
-                os.environ["REFACTORY_PROJECT"] = saved_cwd
-            os.chdir(str(abs_workdir))
-            fn = resolve(node.call)
-            with contextlib.redirect_stderr(_capture_stderr):
-                produced = fn(self.ctx)
-            # Write captured stderr to real stderr so capsys can see it.
-            _captured_err = _capture_stderr.getvalue()
-            if _captured_err:
-                sys.stderr.write(_captured_err)
-            return produced
-        except BaseException:
-            _err_stderr = _capture_stderr.getvalue()
-            if _err_stderr and _err_stderr.strip():
-                exc = sys.exc_info()[1]
-                if exc is not None:
-                    try:
-                        exc.args = (f"{exc.args[0]}\nop stderr: {_err_stderr.strip()}",) + exc.args[1:]
-                    except (IndexError, AttributeError):
-                        pass
-            raise
+                os.environ["REFACTORY_PROJECT"] = saved[1]
+            os.chdir(str(self.ctx.workdir))
+            fn = resolve(call)
+            if node.kind == "gate":
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    result = fn(self.ctx)
+                captured = buf.getvalue()
+                if captured and isinstance(result, str):
+                    from refactory_dsh.nn import Verdict
+                    if not isinstance(result, Verdict):
+                        result = Verdict(result)
+                    result._fn_stdout = captured
+            else:
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    result = fn(self.ctx)
+                captured = buf.getvalue()
+                if captured:
+                    sys.stderr.write(captured)
+                from refactory_dsh.nn.executor import _emit_run_warnings
+                _emit_run_warnings(self.ctx.workdir, node.id, captured)
+            return result
         finally:
-            self.ctx.model = saved_model
-            self.ctx.workdir = saved_workdir
-            os.chdir(saved_cwd)
+            self.ctx.model, _, self.ctx.workdir = saved
+            os.chdir(saved[1])
             if saved_project is None:
                 os.environ.pop("REFACTORY_PROJECT", None)
             else:
                 os.environ["REFACTORY_PROJECT"] = saved_project
 
-    def _inline_fn_gate(self, node):
-        """Run an fn gate in-process so parent-side monkeypatches are visible."""
-        import contextlib, io
-
-        saved_model = self.ctx.model
-        saved_cwd = os.getcwd()
-        saved_workdir = self.ctx.workdir
-        abs_workdir = Path(self.ctx.workdir.resolve())
-        saved_project = os.environ.get("REFACTORY_PROJECT")
-        self.ctx.model = None
-        self.ctx.workdir = abs_workdir
-        _capture_stdout = io.StringIO()
-        try:
-            if not os.environ.get("REFACTORY_PROJECT"):
-                os.environ["REFACTORY_PROJECT"] = saved_cwd
-            os.chdir(str(abs_workdir))
-            with contextlib.redirect_stdout(_capture_stdout):
-                verdict = resolve(node.evaluator)(self.ctx)
-            _child_stdout = _capture_stdout.getvalue()
-            if _child_stdout and isinstance(verdict, str):
-                from refactory_dsh.nn import Verdict
-                if not isinstance(verdict, Verdict):
-                    verdict = Verdict(verdict)
-                verdict._fn_stdout = _child_stdout
-            return verdict
-        finally:
-            self.ctx.model = saved_model
-            self.ctx.workdir = saved_workdir
-            os.chdir(saved_cwd)
-            if saved_project is None:
-                os.environ.pop("REFACTORY_PROJECT", None)
-            else:
-                os.environ["REFACTORY_PROJECT"] = saved_project
-
-    def _patched_dispatch(self, node, answer=None):
-        if node.kind == "op":
-            produced = _inline_op(self, node)
-            if isinstance(produced, dict):
-                for key, value in produced.items():
-                    self.ctx.set_fact(key, value)
-            out = self.graph.out_edges(node.id)
-            return (out[0].target if out else None), None
-        elif node.kind == "gate" and node.gate_kind == "fn":
-            verdict_obj = _inline_fn_gate(self, node)
-            # Pass the Verdict (or str) directly so _visit_gate
-            # preserves _fn_stdout for feedback extraction.
-            return self._visit_gate(node, verdict_obj)
-        return _original_dispatch(self, node, answer)
-
-    monkeypatch.setattr(Executor, "_dispatch", _patched_dispatch)
+    monkeypatch.setattr(Executor, "_run_op_timed", _in_process_op)
 
 
 # ── PR title and body unit tests ───────────────────────────────────────────
