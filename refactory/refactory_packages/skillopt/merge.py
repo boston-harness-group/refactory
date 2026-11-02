@@ -117,7 +117,7 @@ def rank(
         return merged_edits
 
     call_key = ("rank", epoch, 0, 0)
-    user = prompts.format_rank_user(skill_text, merged_edits, budget)
+    user = prompts.format_rank_user(skill_text, merged_edits, budget, meta_skill)
     output = client.complete(
         user, system=prompts.RANK_SYSTEM, call_key=call_key,
     )

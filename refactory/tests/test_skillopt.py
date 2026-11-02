@@ -264,18 +264,17 @@ def _run_loop(
     client: FakeClient | ReplayClient | None = None,
     config_overrides: dict[str, Any] | None = None,
     skillopt_options: dict[str, Any] | None = None,
-) -> tuple[Loop, dict[str, Any]]:
+    preload_state: dict[str, Any] | None = None,
+) -> tuple[SkillOptLoop, dict[str, Any]]:
     """Set up and run a SkillOptLoop, returning (loop, report)."""
     cfg = _config(tmp_path, **(config_overrides or {}))
     client = client or FakeClient()
     with _patch_mode(SkillProbe):
-        loop = Loop(MODE_ID, cfg, project=Path("."))
-        # Replace the strategy with our SkillOptLoop by configuring the loop
-        # as a SkillOptLoop
-        # Actually, let's create a SkillOptLoop directly
         loop = SkillOptLoop(MODE_ID, cfg, project=Path("."))
         options = dict(skillopt_options or {})
         loop.configure(model=client, **options)
+        if preload_state is not None:
+            loop.load_strategy_state(preload_state)
         report = loop.run()
     return loop, report
 
@@ -387,62 +386,97 @@ def test_no_edit_step_skipped(tmp_path):
 
 
 def test_cached_skill_hash_not_rescored(tmp_path):
-    """Two epochs produce the same patched skill → only 1 val_evaluate."""
-    # Both epochs produce the same edit, resulting in the same skill hash
-    fixed_edit = json.dumps({
-        "batch_size": 1,
-        "patch": {
-            "reasoning": "same edit",
-            "edits": [{"op": "append", "content": "## Fixed Rule\nDo this."}],
-        },
-    })
-    responses: dict[tuple, str] = {}
-    for epoch in range(1, 3):
-        for gi in range(10):
-            responses[("analyst_failure", epoch, gi, 0)] = fixed_edit
-            responses[("analyst_success", epoch, gi, 0)] = json.dumps({
-                "batch_size": 0, "patch": {"reasoning": "none", "edits": []},
-            })
+    """Val cache prevents re-evaluation of the same skill hash.
 
-    client = FakeClient(responses=responses)
-    loop, report = _run_loop(
-        tmp_path, client=client,
-        skillopt_options={"max_epochs": 2},
+    Run 1: discover the patched-candidate hash that epoch 1 produces.
+    Run 2: pre-populate val_cache with that hash → epoch 1 must find
+    a val_cache_hit instead of re-evaluating.
+    """
+    # Run 1: discover the hash the edit produces
+    client1 = FakeClient()
+    loop1, _ = _run_loop(
+        tmp_path / "run1", client=client1,
+        skillopt_options={"max_epochs": 1},
     )
+    trace1 = _read_trace(tmp_path / "run1")
+    val_evals1 = [e for e in trace1 if e["step_type"] == "val_evaluate"]
+    assert len(val_evals1) >= 1, "run 1 must evaluate val"
+    target_hash = val_evals1[0]["skill_hash"]
 
-    trace = _read_trace(tmp_path)
-    val_evals = [e for e in trace if e["step_type"] == "val_evaluate"]
-    cache_hits = [e for e in trace if e["step_type"] == "val_cache_hit"]
+    # Run 2: pre-populate val_cache with the target hash
+    client2 = FakeClient()  # same default responses → same edit
+    loop2, _ = _run_loop(
+        tmp_path / "run2", client=client2,
+        skillopt_options={"max_epochs": 1},
+        preload_state={"val_cache": {target_hash: 0.99}},
+    )
+    trace2 = _read_trace(tmp_path / "run2")
+    cache_hits = [e for e in trace2 if e["step_type"] == "val_cache_hit"]
+    val_evals2 = [e for e in trace2 if e["step_type"] == "val_evaluate"]
 
-    # The first epoch evaluates, second should hit cache
-    assert len(val_evals) >= 1, "first epoch must evaluate val"
-    assert len(cache_hits) >= 1, "second epoch should hit val cache"
+    assert len(cache_hits) >= 1, "pre-populated hash must trigger val_cache_hit"
+    # The cached hash should NOT appear as a val_evaluate
+    evaluated_hashes = {e["skill_hash"] for e in val_evals2}
+    assert target_hash not in evaluated_hashes, (
+        "the cached hash was re-evaluated; the val cache is not being consulted"
+    )
 
 
 def test_accept_only_if_strictly_better(tmp_path):
-    """Equal score → reject. Strictly better → accept."""
-    # The initial val score is whatever the task gives (0.5 by default)
-    # Patched candidate gets the same score → reject
-    client = FakeClient()
-    loop, report = _run_loop(
-        tmp_path, client=client,
+    """Equal score → reject.  Strictly better → accept."""
+    import hashlib
+
+    # ── Part A: equal score → reject ──────────────────────────────────────
+    client_eq = FakeClient()
+    loop_eq, _ = _run_loop(
+        tmp_path / "equal", client=client_eq,
         skillopt_options={"max_epochs": 1},
     )
-
-    trace = _read_trace(tmp_path)
-    # Check that either accept or reject happened
-    gate_events = [
-        e for e in trace
+    trace_eq = _read_trace(tmp_path / "equal")
+    gate_events_eq = [
+        e for e in trace_eq
         if e["step_type"] in ("val_gate_accept", "val_gate_reject")
     ]
-    assert len(gate_events) >= 1, "val gate must make a decision"
+    assert len(gate_events_eq) >= 1, "val gate must make a decision"
+    # With the default SkillTask (score=0.5 everywhere), all evaluations are
+    # equal → reject, so the gate must reject.
+    for evt in gate_events_eq:
+        assert evt["step_type"] == "val_gate_reject", (
+            "equal score must be rejected (not >=)"
+        )
+        assert evt["cand_score"] <= evt["current_score"]
 
-    # The gate event records both scores - check the logic
-    for evt in gate_events:
-        if evt["step_type"] == "val_gate_accept":
-            assert evt["cand_score"] > evt["current_score"]
-        elif evt["step_type"] == "val_gate_reject":
-            assert evt["cand_score"] <= evt["current_score"]
+    # ── Part B: strictly better → accept ──────────────────────────────────
+    # Pre-populate val_cache: give the patched candidate a score higher than
+    # the initial val score (0.5).  This proves acceptance on >.
+    # First discover the patched hash (same edit as run 1).
+    trace1_evals = [e for e in trace_eq if e["step_type"] in ("val_evaluate", "val_cache_hit")]
+    patched_hash = None
+    for ev in trace1_evals:
+        if ev.get("skill_hash"):
+            patched_hash = ev["skill_hash"]
+            break
+    assert patched_hash is not None, "must find the patched candidate hash"
+
+    # Run with val_cache assigning the patched hash a score > 0.5
+    client_gt = FakeClient()
+    loop_gt, _ = _run_loop(
+        tmp_path / "better", client=client_gt,
+        skillopt_options={"max_epochs": 1},
+        preload_state={"val_cache": {patched_hash: 0.9}},
+    )
+    trace_gt = _read_trace(tmp_path / "better")
+    gate_events_gt = [
+        e for e in trace_gt
+        if e["step_type"] in ("val_gate_accept", "val_gate_reject")
+    ]
+    assert len(gate_events_gt) >= 1, "val gate must make a decision"
+    accepts = [e for e in gate_events_gt if e["step_type"] == "val_gate_accept"]
+    assert len(accepts) >= 1, "strictly better score must be accepted"
+    for evt in accepts:
+        assert evt["cand_score"] > evt["current_score"], (
+            "val_gate_accept must record cand_score > current_score"
+        )
 
 
 def test_slow_update_from_epoch_2(tmp_path):
@@ -461,8 +495,8 @@ def test_slow_update_from_epoch_2(tmp_path):
 
     # Epoch 2 should have slow_update with sample_ids
     slow_sample = [e for e in trace if e["step_type"] == "slow_update_sample"]
-    if slow_sample:
-        assert "sample_ids" in slow_sample[0]
+    assert len(slow_sample) >= 1, "epoch 2 must have a slow_update_sample decision"
+    assert "sample_ids" in slow_sample[0]
 
     # Check the skill contains markers after epoch 1
     state_dict = loop.strategy_state_dict()
@@ -490,15 +524,29 @@ def test_meta_skill_reaches_next_epoch_prompts(tmp_path):
         skillopt_options={"max_epochs": 3},
     )
 
-    # Check that epoch 3 analyst prompts contain the meta skill content
+    # Check that epoch 3 analyst prompts contain the meta skill content.
+    # We MUST have epoch 3 analyst calls for this test to be meaningful.
     epoch3_analyst_calls = [
         c for c in client.calls
         if c.get("call_key") and c["call_key"][0].startswith("analyst_") and c["call_key"][1] == 3
     ]
-    if epoch3_analyst_calls:
-        combined_prompts = " ".join(c.get("prompt", "") for c in epoch3_analyst_calls)
-        assert meta_content in combined_prompts, (
-            f"meta skill content '{meta_content}' not found in epoch 3 analyst prompts"
+    assert len(epoch3_analyst_calls) > 0, (
+        "epoch 3 must have analyst calls for meta skill propagation to be tested"
+    )
+    combined_prompts = " ".join(c.get("prompt", "") for c in epoch3_analyst_calls)
+    assert meta_content in combined_prompts, (
+        f"meta skill content '{meta_content}' not found in epoch 3 analyst prompts"
+    )
+
+    # Also verify meta_skill also reaches rank prompts
+    epoch3_rank_calls = [
+        c for c in client.calls
+        if c.get("call_key") and c["call_key"][0] == "rank" and c["call_key"][1] == 3
+    ]
+    if epoch3_rank_calls:
+        rank_prompt = epoch3_rank_calls[0].get("prompt", "")
+        assert meta_content in rank_prompt, (
+            f"meta skill content '{meta_content}' not found in epoch 3 rank prompt"
         )
 
     trace = _read_trace(tmp_path)
@@ -553,7 +601,7 @@ def test_stop_resume_same_decision(tmp_path):
 
 
 def test_pause_stop_honoured(tmp_path):
-    """Write control.json with stop → loop terminates, state saved."""
+    """Write control.json with stop → loop terminates with control_stop bound."""
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
 
@@ -569,9 +617,11 @@ def test_pause_stop_honoured(tmp_path):
         loop.configure(model=client, max_epochs=5)
         report = loop.run()
 
-    # Loop should have terminated due to stop control
-    assert report.get("bound") in ("control_stop", "a person asked the run to stop", "max_epochs"), (
-        f"unexpected bound: {report.get('bound')}"
+    # Loop must have terminated due to stop control — not max_epochs
+    bound = report.get("bound", "")
+    assert bound in ("control_stop", "a person asked the run to stop"), (
+        f"expected control_stop or equivalent, got {bound!r}; "
+        "the run reached max_epochs instead of honouring the stop control"
     )
 
     # Trace file should exist (even if minimal)

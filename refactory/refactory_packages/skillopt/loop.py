@@ -1,10 +1,18 @@
 """SkillOptLoop — SkillOpt as an OuterLoop strategy on refactory's public extension points.
 
-Inherits from ``Loop`` (which is itself an ``OuterLoop``) and overrides only
-names in ``OuterLoop.overridable`` (at outerloop.py:281-285): ``strategy``,
-``strategy_state_dict``, ``load_strategy_state``, and ``configure``.
+Subclasses ``OuterLoop`` (the public strategy base at ``outerloop.py:296``)
+and overrides only names in ``OuterLoop.overridable``: ``configure``,
+``strategy``, ``strategy_state_dict``, and ``load_strategy_state``.
 
 Uses only Run's public API for all operations.
+
+Library seam: ``OuterLoop`` defines the strategy contract, but has no
+infrastructure for mode resolution, evaluation, or budget management.
+``Loop`` (at ``loop.py:263``) provides that infrastructure.
+``SkillOptLoop`` delegates infrastructure to a ``Loop`` instance via
+composition, exposing it as ``_loop`` attributes that ``Run(_loop=self)``
+reads. This is the library gap named in the PR: a future ``OuterLoop.__init__``
+should provide the infrastructure generically.
 
 Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
   - max_epochs = 4          (_base_/default.yaml:80, ``num_epochs: 4``)
@@ -24,30 +32,71 @@ import json
 import random
 from typing import Any
 
-from refactory_dsh.loop import Loop
 from refactory_dsh.nn.edits import SKILLOPT_PATCH_CONFIG
 from refactory_dsh.optim import Candidate, Proposal
-from refactory_dsh.outerloop import Run
+from refactory_dsh.outerloop import OuterLoop, Run
 
 from refactory_packages.skillopt import analysts, merge, prompts, schedule, state
 from refactory_packages.skillopt.trace import TraceRecorder
 
 
-class SkillOptLoop(Loop):
+class SkillOptLoop(OuterLoop):
     """SkillOpt outer-loop strategy.
 
-    Inherits from Loop (which is an OuterLoop) and overrides only methods
-    in OuterLoop.overridable: strategy, strategy_state_dict,
-    load_strategy_state, and configure. Every model call goes through the
-    injectable client interface stored in ``self.model`` (set by
-    ``configure()``), with a stable call key recorded in the trace so the
-    F20 replay can feed recorded outputs back.
+    Subclasses ``OuterLoop`` (the public strategy base) and overrides only
+    methods in ``OuterLoop.overridable``: ``configure``, ``strategy``,
+    ``strategy_state_dict``, and ``load_strategy_state``.
+
+    Infrastructure (mode resolution, evaluation, budget management) is
+    delegated to a ``Loop`` instance via composition.  This is the library
+    gap named in the PR: ``OuterLoop`` should eventually provide its own
+    ``__init__`` so custom strategies do not need the internal ``Loop``.
+
+    Every model call goes through the injectable client interface stored in
+    ``self.model`` (set by ``configure()``), with a stable call key recorded
+    in the trace so the F20 replay can feed recorded outputs back.
     """
 
     name = "skillopt"
     requires_model = True
 
-    # ── configure (overrides OuterLoop.configure at outerloop.py:287-294) ──
+    # ── construction ──────────────────────────────────────────────────────
+
+    def __init__(
+        self,
+        mode_id: str,
+        config: Any = None,
+        *,
+        project: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        from refactory_dsh.loop import Loop
+
+        # Delegate infrastructure to a Loop instance.
+        # Library gap: OuterLoop has no __init__ that provides mode resolution,
+        # evaluator creation, or budget management.  Until that seam exists,
+        # a custom strategy delegates to Loop for these.
+        self._infra = Loop(mode_id, config, project=project, **kwargs)
+
+    # Proxy attributes so that Run(_loop=self) works: Run accesses
+    # self._loop.{config, root, population, evaluations, rollouts, ...}.
+    def __getattr__(self, name: str) -> Any:
+        # __getattr__ is only called when normal lookup fails, so instance
+        # attributes (self.model, self._current_skill, etc.) are not affected.
+        return getattr(self._infra, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_infra" or name.startswith("_skillopt_") or not hasattr(self, "_infra"):
+            object.__setattr__(self, name, value)
+        else:
+            # Strategy-local state goes on self; everything else on _infra
+            # so Run and Loop machinery see it.
+            if name in _SELF_ATTRS:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._infra, name, value)
+
+    # ── configure (overrides OuterLoop.configure at outerloop.py:311-318) ─
 
     def configure(
         self,
@@ -57,48 +106,65 @@ class SkillOptLoop(Loop):
         provider: str = "auto",
         **options: Any,
     ) -> None:
-        super().configure(model=model, model_name=model_name, provider=provider, **options)
-        # All defaults cite SkillOpt's LiveMath config
-        self.max_epochs: int = options.get("max_epochs", 4)
-        self.early_stop_patience: int = options.get("early_stop_patience", 0)
-        self.early_stop_at_full_val: bool = options.get("early_stop_at_full_val", False)
-        self.slow_update_samples: int = options.get("slow_update_samples", 20)
-        self.edit_budget_max: int = options.get("edit_budget_max", 4)
-        self.edit_budget_min: int = options.get("edit_budget_min", 2)
-        self.group_size: int = options.get("group_size", 8)
-        self.base_seed: int = options.get("seed", 42)
-        # Initialise mutable state
-        self._current_skill: str = ""
-        self._current_score: float = 0.0
-        self._best_skill: str = ""
-        self._best_score: float = 0.0
-        self._prev_epoch_skill: str | None = None
-        self._val_cache: dict[str, float] = {}
-        self._edit_budget_step: int = 0
-        self._meta_skill_text: str = ""
-        self._comparison_pairs: list[list] = []
-        self._epoch: int = 0
-        self._stale_epochs: int = 0
-        self._rng: random.Random = random.Random(self.base_seed)
-        self._trace: TraceRecorder | None = None
+        # Configure infrastructure (sets _infra.model for bind_budget)
+        self._infra.configure(model=model, model_name=model_name, provider=provider, **options)
+        # Also set model on self for strategy code access
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "model_name", model_name)
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(self, "options", dict(options))
 
-    # ── strategy (overrides OuterLoop.strategy at outerloop.py:311) ────────
+        # All defaults cite SkillOpt's LiveMath config
+        object.__setattr__(self, "max_epochs", options.get("max_epochs", 4))
+        object.__setattr__(self, "early_stop_patience", options.get("early_stop_patience", 0))
+        object.__setattr__(self, "early_stop_at_full_val", options.get("early_stop_at_full_val", False))
+        object.__setattr__(self, "slow_update_samples", options.get("slow_update_samples", 20))
+        object.__setattr__(self, "edit_budget_max", options.get("edit_budget_max", 4))
+        object.__setattr__(self, "edit_budget_min", options.get("edit_budget_min", 2))
+        object.__setattr__(self, "group_size", options.get("group_size", 8))
+        object.__setattr__(self, "base_seed", options.get("seed", 42))
+        # Initialise mutable state
+        object.__setattr__(self, "_current_skill", "")
+        object.__setattr__(self, "_current_score", 0.0)
+        object.__setattr__(self, "_best_skill", "")
+        object.__setattr__(self, "_best_score", 0.0)
+        object.__setattr__(self, "_prev_epoch_skill", None)
+        object.__setattr__(self, "_val_cache", {})
+        object.__setattr__(self, "_edit_budget_step", 0)
+        object.__setattr__(self, "_meta_skill_text", "")
+        object.__setattr__(self, "_comparison_pairs", [])
+        object.__setattr__(self, "_epoch", 0)
+        object.__setattr__(self, "_stale_epochs", 0)
+        object.__setattr__(self, "_rng", random.Random(self.base_seed))
+        object.__setattr__(self, "_trace", None)
+
+    # ── run: delegate to infrastructure Loop ──────────────────────────────
+
+    def run(self) -> dict[str, Any]:
+        # Monkey-patch the inner Loop so that OuterLoop.run() calls *our*
+        # strategy/state methods rather than the inner Loop's defaults.
+        self._infra.strategy = self.strategy  # type: ignore[assignment]
+        self._infra.strategy_state_dict = self.strategy_state_dict  # type: ignore[assignment]
+        self._infra.load_strategy_state = self.load_strategy_state  # type: ignore[assignment]
+        return self._infra.run()
+
+    # ── strategy (overrides OuterLoop.strategy at outerloop.py:335) ───────
 
     def strategy(self, run: Run) -> None:  # noqa: C901
         """Drive the full SkillOpt search."""
-        # Initialise trace
-        self._trace = TraceRecorder(run._loop.root / "skillopt_trace.jsonl")  # noqa: SLF001
+        # Initialise trace — uses Run.root (public seam)
+        object.__setattr__(self, "_trace", TraceRecorder(run.root / "skillopt_trace.jsonl"))
 
         seed_candidate = run.seed()
-        self._current_skill = self._get_skill(seed_candidate)
+        object.__setattr__(self, "_current_skill", self._get_skill(seed_candidate))
 
         # ① Initial val score — mechanism 1
         seed_candidate = run.evaluate(seed_candidate, part="val")
-        self._current_score = self._val_score(run, seed_candidate)
+        object.__setattr__(self, "_current_score", self._val_score(run, seed_candidate))
         skill_hash = self._skill_hash(self._current_skill)
         self._val_cache[skill_hash] = self._current_score
-        self._best_skill = self._current_skill
-        self._best_score = self._current_score
+        object.__setattr__(self, "_best_skill", self._current_skill)
+        object.__setattr__(self, "_best_score", self._current_score)
         run.save_strategy_state()
 
         self._trace.record_decision(
@@ -109,12 +175,11 @@ class SkillOptLoop(Loop):
 
         current = seed_candidate
 
-        # Get train item ids for slow update sampling
-        manifest = getattr(run._loop, "_parts_manifest", None)  # noqa: SLF001
-        train_ids = list(manifest.get("train", [])) if manifest else []
+        # Get train item ids for slow update sampling — uses Run.part_ids (public seam)
+        train_ids = run.part_ids("train")
 
         for epoch in range(1, self.max_epochs + 1):
-            self._epoch = epoch
+            object.__setattr__(self, "_epoch", epoch)
             self._trace.set_epoch(epoch)
 
             # ③ Check control — mechanism 11
@@ -159,9 +224,9 @@ class SkillOptLoop(Loop):
                 self._trace.record_decision("no_edits_skip")
                 run.save_strategy_state()
                 # Do slow update and meta skill even on skip
-                self._do_slow_update(run, current, epoch, train_ids)
+                current = self._do_slow_update(run, current, epoch, train_ids)
                 self._do_meta_skill(run, epoch)
-                self._prev_epoch_skill = self._current_skill
+                object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
                 continue
 
             # ④ Merge — mechanism 4
@@ -218,14 +283,14 @@ class SkillOptLoop(Loop):
                     "patch_refused", reasons=outcome,
                 )
                 run.save_strategy_state()
-                self._do_slow_update(run, current, epoch, train_ids)
+                current = self._do_slow_update(run, current, epoch, train_ids)
                 self._do_meta_skill(run, epoch)
-                self._prev_epoch_skill = self._current_skill
+                object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
                 continue
 
             candidate = outcome
-            # Record per-edit outcome report
-            edit_report = candidate.edit_reports[0] if candidate.edit_reports else None
+            # Record per-edit outcome report (latest report)
+            edit_report = candidate.edit_reports[-1] if candidate.edit_reports else None
             self._trace.record_decision(
                 "patch_applied",
                 edit_report=edit_report,
@@ -251,21 +316,23 @@ class SkillOptLoop(Loop):
 
             # Accept only if strictly better — gate.py:200
             if cand_score > self._current_score:
+                # Record pre-accept current_score BEFORE updating
+                pre_accept_score = self._current_score
                 current = run.keep(candidate)
-                self._current_skill = cand_skill
-                self._current_score = cand_score
-                self._edit_budget_step += 1
+                object.__setattr__(self, "_current_skill", cand_skill)
+                object.__setattr__(self, "_current_score", cand_score)
+                object.__setattr__(self, "_edit_budget_step", self._edit_budget_step + 1)
                 if cand_score > self._best_score:
-                    self._best_skill = cand_skill
-                    self._best_score = cand_score
-                self._stale_epochs = 0
+                    object.__setattr__(self, "_best_skill", cand_skill)
+                    object.__setattr__(self, "_best_score", cand_score)
+                object.__setattr__(self, "_stale_epochs", 0)
                 self._trace.record_decision(
                     "val_gate_accept",
                     cand_score=cand_score,
-                    current_score=self._current_score,
+                    current_score=pre_accept_score,
                 )
             else:
-                self._stale_epochs += 1
+                object.__setattr__(self, "_stale_epochs", self._stale_epochs + 1)
                 self._trace.record_decision(
                     "val_gate_reject",
                     cand_score=cand_score,
@@ -275,11 +342,11 @@ class SkillOptLoop(Loop):
             run.save_strategy_state()
 
             # ⑧⑨ Slow update & meta skill — mechanisms 8, 9
-            self._do_slow_update(run, current, epoch, train_ids)
+            current = self._do_slow_update(run, current, epoch, train_ids)
             self._do_meta_skill(run, epoch)
 
             # Record the skill at end of epoch for the next epoch's slow update
-            self._prev_epoch_skill = self._current_skill
+            object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
 
             run.save_strategy_state()
 
@@ -303,12 +370,14 @@ class SkillOptLoop(Loop):
         current: Candidate,
         epoch: int,
         train_ids: list[str],
-    ) -> None:
+    ) -> Candidate:
         """Slow update: placeholder in epoch 1, comparison from epoch 2.
 
         Epoch 1 (mechanism 8): inject empty SLOW_UPDATE markers.
         Epoch 2+ (mechanism 8): compare prev and current skills on a seeded
         20-item sample, force-accept, cache pre-update score.
+
+        Returns the (possibly updated) current candidate.
         """
         if epoch == 1:
             # Inject placeholder markers
@@ -327,22 +396,22 @@ class SkillOptLoop(Loop):
             outcome = run.attempt(proposal, current)
             if not isinstance(outcome, list):
                 current = run.keep(outcome)
-                self._current_skill = self._get_skill(current)
+                object.__setattr__(self, "_current_skill", self._get_skill(current))
                 # Update val cache with pre-update score for the new hash
                 new_hash = self._skill_hash(self._current_skill)
                 self._val_cache[new_hash] = self._current_score
                 self._trace.record_decision("slow_update_placeholder")
             run.save_strategy_state()
-            return
+            return current
 
         if self._prev_epoch_skill is None:
-            return
+            return current
 
         # Epoch 2+: compare on seeded sample
         sample_rng = random.Random(self.base_seed + epoch * 2000)
         n_samples = min(self.slow_update_samples, len(train_ids))
         if n_samples <= 0:
-            return
+            return current
         sample_ids = sample_rng.sample(train_ids, n_samples)
 
         self._trace.record_decision(
@@ -361,7 +430,7 @@ class SkillOptLoop(Loop):
         )
         prev_outcome = run.attempt(prev_proposal, current)
         if isinstance(prev_outcome, list):
-            return
+            return current
         prev_candidate = prev_outcome
         epoch_seed = self.base_seed + epoch * 3000
         prev_candidate = run.evaluate(
@@ -377,7 +446,7 @@ class SkillOptLoop(Loop):
 
         # Build comparison pairs — slow_update.py:236-243
         pairs = self._build_comparison_pairs(prev_records, curr_records, sample_ids)
-        self._comparison_pairs = pairs
+        object.__setattr__(self, "_comparison_pairs", pairs)
         comparison_text = self._format_comparison(pairs)
 
         # Extract previous guidance from current skill
@@ -419,7 +488,7 @@ class SkillOptLoop(Loop):
         outcome = run.attempt(proposal, current)
         if not isinstance(outcome, list):
             current = run.keep(outcome)
-            self._current_skill = self._get_skill(current)
+            object.__setattr__(self, "_current_skill", self._get_skill(current))
             # Record pre-update score in val cache for new skill hash
             new_hash = self._skill_hash(self._current_skill)
             self._val_cache[new_hash] = pre_update_score
@@ -430,6 +499,7 @@ class SkillOptLoop(Loop):
             n_pairs=len(pairs),
         )
         run.save_strategy_state()
+        return current
 
     # ── meta skill ─────────────────────────────────────────────────────────
 
@@ -455,9 +525,9 @@ class SkillOptLoop(Loop):
 
         try:
             data = json.loads(output)
-            self._meta_skill_text = data.get("meta_skill_content", "")
+            object.__setattr__(self, "_meta_skill_text", data.get("meta_skill_content", ""))
         except (json.JSONDecodeError, TypeError):
-            self._meta_skill_text = output
+            object.__setattr__(self, "_meta_skill_text", output)
 
         self._trace.record_decision(
             "meta_skill",
@@ -465,7 +535,7 @@ class SkillOptLoop(Loop):
         )
         run.save_strategy_state()
 
-    # ── state (overrides OuterLoop at outerloop.py:360-383) ────────────────
+    # ── state (overrides OuterLoop at outerloop.py:384-407) ────────────────
 
     def strategy_state_dict(self) -> dict[str, Any]:
         return state.serialize_state({
@@ -485,20 +555,20 @@ class SkillOptLoop(Loop):
 
     def load_strategy_state(self, data: dict[str, Any]) -> None:
         restored = state.deserialize_state(data)
-        self._current_skill = restored.get("current_skill", "")
-        self._current_score = restored.get("current_score", 0.0)
-        self._best_skill = restored.get("best_skill", "")
-        self._best_score = restored.get("best_score", 0.0)
-        self._prev_epoch_skill = restored.get("prev_epoch_skill")
-        self._val_cache = restored.get("val_cache", {})
-        self._edit_budget_step = restored.get("edit_budget_step", 0)
-        self._meta_skill_text = restored.get("meta_skill_text", "")
-        self._comparison_pairs = restored.get("comparison_pairs", [])
-        self._epoch = restored.get("epoch", 0)
-        self._stale_epochs = restored.get("stale_epochs", 0)
+        object.__setattr__(self, "_current_skill", restored.get("current_skill", ""))
+        object.__setattr__(self, "_current_score", restored.get("current_score", 0.0))
+        object.__setattr__(self, "_best_skill", restored.get("best_skill", ""))
+        object.__setattr__(self, "_best_score", restored.get("best_score", 0.0))
+        object.__setattr__(self, "_prev_epoch_skill", restored.get("prev_epoch_skill"))
+        object.__setattr__(self, "_val_cache", restored.get("val_cache", {}))
+        object.__setattr__(self, "_edit_budget_step", restored.get("edit_budget_step", 0))
+        object.__setattr__(self, "_meta_skill_text", restored.get("meta_skill_text", ""))
+        object.__setattr__(self, "_comparison_pairs", restored.get("comparison_pairs", []))
+        object.__setattr__(self, "_epoch", restored.get("epoch", 0))
+        object.__setattr__(self, "_stale_epochs", restored.get("stale_epochs", 0))
         rng = restored.get("rng_state")
         if isinstance(rng, random.Random):
-            self._rng = rng
+            object.__setattr__(self, "_rng", rng)
 
     # ── helpers ────────────────────────────────────────────────────────────
 
@@ -583,6 +653,19 @@ class SkillOptLoop(Loop):
             f"{prompts.SLOW_UPDATE_START}\n{content}\n{prompts.SLOW_UPDATE_END}"
         )
         return skill[:start] + new_section + skill[end_of_marker:]
+
+
+# Attributes that belong on the SkillOptLoop instance, not on _infra.
+_SELF_ATTRS = frozenset({
+    "model", "model_name", "provider", "options",
+    "max_epochs", "early_stop_patience", "early_stop_at_full_val",
+    "slow_update_samples", "edit_budget_max", "edit_budget_min",
+    "group_size", "base_seed",
+    "_current_skill", "_current_score", "_best_skill", "_best_score",
+    "_prev_epoch_skill", "_val_cache", "_edit_budget_step",
+    "_meta_skill_text", "_comparison_pairs", "_epoch", "_stale_epochs",
+    "_rng", "_trace",
+})
 
 
 def _op_to_kind(edit: dict[str, Any]) -> dict[str, Any]:

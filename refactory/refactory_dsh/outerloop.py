@@ -204,6 +204,30 @@ class Run:
         self._loop.update(self, candidate)  # noqa: SLF001
         return candidate
 
+    # ── the run directory ───────────────────────────────────────────────────
+    @property
+    def root(self) -> Path:
+        """The run's root directory.
+
+        A strategy may write trace files or other artefacts beside the
+        journal.  Exposed so a strategy does not reach through ``_loop``.
+        """
+        return self._loop.root
+
+    def part_ids(self, part: str = "train") -> list[str]:
+        """Item ids declared for *part* in the parts manifest.
+
+        Returns an empty list when no manifest exists.  Only ``'train'``
+        ids are exposed to optimiser-facing code; ``'val'`` and ``'test'``
+        ids are withheld for the same reason ``item_records`` refuses them.
+        """
+        if part != "train":
+            raise OuterLoopError("only train ids are accessible to an optimizer")
+        manifest = getattr(self._loop, '_parts_manifest', None)  # noqa: SLF001
+        if manifest is None:
+            return []
+        return list(manifest.get(part, []))
+
     # ── the state of the search ────────────────────────────────────────────
     def seed(self) -> Candidate:
         return self._loop.population[0]
@@ -279,6 +303,7 @@ class OuterLoop:
 
     #: Steps a subclass may override. Each has a working default.
     overridable = (
+        "configure",
         "strategy", "select_parents", "propose", "batch_size", "install", "accepts",
         "update", "should_stop", "on_epoch_end", "report", "memory",
         "strategy_state_dict", "load_strategy_state",

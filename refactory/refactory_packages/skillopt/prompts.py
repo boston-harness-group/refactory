@@ -376,12 +376,15 @@ def format_rank_user(
     skill_text: str,
     edits: list[dict],
     budget: int,
+    meta_skill: str = "",
 ) -> str:
     """Build the user message for a rank call."""
     parts = [f"## Current Skill\n\n{skill_text}\n\n## Edit Pool\n"]
     for i, edit in enumerate(edits):
         parts.append(f"\n[{i}] {_json_dumps(edit)}\n")
     parts.append(f"\n## Budget\n\nSelect the top {budget} edits.")
+    if meta_skill:
+        parts.append(f"\n\n{format_meta_skill_context(meta_skill)}")
     return "".join(parts)
 
 
