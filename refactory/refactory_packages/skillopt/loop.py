@@ -4,15 +4,13 @@ Subclasses ``OuterLoop`` (the public strategy base at ``outerloop.py:296``)
 and overrides only names in ``OuterLoop.overridable``: ``configure``,
 ``strategy``, ``strategy_state_dict``, and ``load_strategy_state``.
 
-Uses only Run's public API for all operations.
-
-Library seam: ``OuterLoop`` defines the strategy contract, but has no
-infrastructure for mode resolution, evaluation, or budget management.
-``Loop`` (at ``loop.py:263``) provides that infrastructure.
-``SkillOptLoop`` delegates infrastructure to a ``Loop`` instance via
-composition, exposing it as ``_loop`` attributes that ``Run(_loop=self)``
-reads. This is the library gap named in the PR: a future ``OuterLoop.__init__``
-should provide the infrastructure generically.
+The loop machinery (``Loop``) is the caller: it constructs the strategy
+object, calls ``configure(model=…, **strategy_options)`` after construction,
+creates a ``Run`` and passes it to ``strategy(run)``.  The strategy keeps
+its own state as plain instance attributes and interacts with the machinery
+**only** through ``Run``'s public API — no ``__getattr__`` proxy, no
+monkey-patching, no ``_infra`` attribute.  This is the "custom strategy"
+seam named in the PR.
 
 Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
   - max_epochs = 4          (_base_/default.yaml:80, ``num_epochs: 4``)
@@ -109,6 +107,12 @@ class SkillOptLoop(OuterLoop):
         self._trace: TraceRecorder | None = None
         # Per-phase marker for resume (ask 3)
         self._phase: str = ""
+        # Cached intermediate outputs for resume (so we don't re-run model
+        # calls for already-completed phases within the resume epoch).
+        self._cached_failure_patches: list[dict] = []
+        self._cached_success_patches: list[dict] = []
+        self._cached_merged: dict = {}
+        self._cached_ranked: list[dict] = []
 
     # ── strategy (overrides OuterLoop.strategy) ─────────────────────────────
 
@@ -178,8 +182,11 @@ class SkillOptLoop(OuterLoop):
             self._epoch = epoch
             self._trace.set_epoch(epoch)
 
-            # Skip completed epochs on resume
+            # Skip completed epochs on resume.  An epoch whose phase is
+            # "epoch_done" is fully complete — skip it just like earlier ones.
             if epoch < resume_epoch:
+                continue
+            if epoch == resume_epoch and resume_phase == "epoch_done":
                 continue
 
             # ③ Check control — mechanism 11
@@ -220,21 +227,14 @@ class SkillOptLoop(OuterLoop):
                     epoch=epoch,
                     trace=self._trace,
                 )
+                # Cache for resume
+                self._cached_failure_patches = failure_patches
+                self._cached_success_patches = success_patches
                 run.save_strategy_state()
             else:
-                # On resume past analysts, we still need records for later phases
-                analyst_seed = batch_seed(self.base_seed, epoch)
-                failure_patches, success_patches = analysts.reflect(
-                    client=self.model,
-                    records=records,
-                    skill_text=self._current_skill,
-                    edit_budget=self.analyst_edit_budget,
-                    meta_skill=self._meta_skill_text,
-                    seed=analyst_seed,
-                    group_size=self.group_size,
-                    epoch=epoch,
-                    trace=self._trace,
-                )
+                # Resume past analysts: restore from cached state (no model calls)
+                failure_patches = self._cached_failure_patches
+                success_patches = self._cached_success_patches
 
             # ⑥ No-edit skip — mechanism 6
             if not failure_patches and not success_patches:
@@ -257,18 +257,12 @@ class SkillOptLoop(OuterLoop):
                     trace=self._trace,
                     merge_batch_size=self.merge_batch_size,
                 )
+                # Cache for resume
+                self._cached_merged = merged
                 run.save_strategy_state()
             else:
-                merged = merge.hierarchical_merge(
-                    client=self.model,
-                    skill_text=self._current_skill,
-                    failure_patches=failure_patches,
-                    success_patches=success_patches,
-                    meta_skill=self._meta_skill_text,
-                    epoch=epoch,
-                    trace=self._trace,
-                    merge_batch_size=self.merge_batch_size,
-                )
+                # Resume past merge: restore from cached state (no model calls)
+                merged = self._cached_merged
 
             # Rank
             if not self._past_phase(resume_epoch, resume_phase, epoch, "rank"):
@@ -296,109 +290,109 @@ class SkillOptLoop(OuterLoop):
                     edit_budget=budget,
                     n_edits=len(ranked),
                 )
+                # Cache for resume
+                self._cached_ranked = ranked
                 run.save_strategy_state()
             else:
-                budget = schedule.edit_budget(
-                    self._edit_budget_step + 1,
-                    self.max_epochs,
-                    self.edit_budget_max,
-                    self.edit_budget_min,
+                # Resume past rank: restore from cached state (no model calls,
+                # no double-increment of _edit_budget_step).
+                ranked = self._cached_ranked
+
+            # ⑤ Patch — mechanism 5
+            if not self._past_phase(resume_epoch, resume_phase, epoch, "patch"):
+                self._phase = "patch"
+                text_edits = [_op_to_kind(e) for e in ranked]
+                proposal = Proposal(
+                    edit={
+                        "op": "text_patch",
+                        "name": "skill",
+                        "edits": text_edits,
+                        "config": dict(SKILLOPT_PATCH_CONFIG),
+                    },
+                    rationale="skillopt epoch {} patch".format(epoch),
+                    parent=current.id,
                 )
-                self._edit_budget_step = self._edit_budget_step + 1
-                ranked = merge.rank(
-                    client=self.model,
-                    skill_text=self._current_skill,
-                    merged_edits=merge.patch_edits(merged),
-                    budget=budget,
-                    meta_skill=self._meta_skill_text,
-                    epoch=epoch,
-                    trace=self._trace,
-                )
+                outcome = run.attempt(proposal, current)
+                if isinstance(outcome, list):
+                    self._trace.record_decision(
+                        "patch_refused", reasons=outcome,
+                    )
+                    run.save_strategy_state()
+                    current = self._end_epoch(run, current, epoch, train_ids)
+                    self._phase = "epoch_done"
+                    run.save_strategy_state()
+                    continue
+
+                candidate = outcome
+                edit_report = candidate.edit_reports[-1] if candidate.edit_reports else None
                 self._trace.record_decision(
-                    "ranked_edits",
-                    budget_step=self._edit_budget_step,
-                    edit_budget=budget,
+                    "patch_applied",
+                    edit_report=edit_report,
                     n_edits=len(ranked),
                 )
 
-            # ⑤ Patch — mechanism 5
-            self._phase = "patch"
-            text_edits = [_op_to_kind(e) for e in ranked]
-            proposal = Proposal(
-                edit={
-                    "op": "text_patch",
-                    "name": "skill",
-                    "edits": text_edits,
-                    "config": dict(SKILLOPT_PATCH_CONFIG),
-                },
-                rationale="skillopt epoch {} patch".format(epoch),
-                parent=current.id,
-            )
-            outcome = run.attempt(proposal, current)
-            if isinstance(outcome, list):
-                self._trace.record_decision(
-                    "patch_refused", reasons=outcome,
-                )
+                cand_skill = self._get_skill(candidate)
+                cand_hash = self._skill_hash(cand_skill)
                 run.save_strategy_state()
-                current = self._end_epoch(run, current, epoch, train_ids)
-                self._phase = "epoch_done"
-                continue
-
-            candidate = outcome
-            edit_report = candidate.edit_reports[-1] if candidate.edit_reports else None
-            self._trace.record_decision(
-                "patch_applied",
-                edit_report=edit_report,
-                n_edits=len(ranked),
-            )
-
-            cand_skill = self._get_skill(candidate)
-            cand_hash = self._skill_hash(cand_skill)
+            else:
+                # Resume past patch: the candidate is the current (patch was
+                # already applied and accepted/rejected in the original run).
+                candidate = current
+                cand_skill = self._current_skill
+                cand_hash = self._skill_hash(cand_skill)
 
             # ⑦ Val gate — mechanism 7
-            self._phase = "val_gate"
-            if cand_hash in self._val_cache:
-                cand_score = self._val_cache[cand_hash]
-                self._trace.record_decision(
-                    "val_cache_hit", skill_hash=cand_hash, score=cand_score,
-                )
-            else:
-                candidate = run.evaluate(candidate, part="val")
-                cand_score = self._val_score(run, candidate)
-                self._val_cache[cand_hash] = cand_score
-                self._trace.record_decision(
-                    "val_evaluate", skill_hash=cand_hash, score=cand_score,
-                )
+            if not self._past_phase(resume_epoch, resume_phase, epoch, "val_gate"):
+                self._phase = "val_gate"
+                if cand_hash in self._val_cache:
+                    cand_score = self._val_cache[cand_hash]
+                    self._trace.record_decision(
+                        "val_cache_hit", skill_hash=cand_hash, score=cand_score,
+                    )
+                else:
+                    candidate = run.evaluate(candidate, part="val")
+                    cand_score = self._val_score(run, candidate)
+                    self._val_cache[cand_hash] = cand_score
+                    self._trace.record_decision(
+                        "val_evaluate", skill_hash=cand_hash, score=cand_score,
+                    )
 
-            if cand_score > self._current_score:
-                pre_accept_score = self._current_score
-                current = run.keep(candidate)
-                self._current_skill = cand_skill
-                self._current_score = cand_score
-                if cand_score > self._best_score:
-                    self._best_skill = cand_skill
-                    self._best_score = cand_score
-                self._stale_epochs = 0
-                self._trace.record_decision(
-                    "val_gate_accept",
-                    cand_score=cand_score,
-                    current_score=pre_accept_score,
-                )
-            else:
-                self._stale_epochs = self._stale_epochs + 1
-                self._trace.record_decision(
-                    "val_gate_reject",
-                    cand_score=cand_score,
-                    current_score=self._current_score,
-                )
+                if cand_score > self._current_score:
+                    pre_accept_score = self._current_score
+                    current = run.keep(candidate)
+                    self._current_skill = cand_skill
+                    self._current_score = cand_score
+                    if cand_score > self._best_score:
+                        self._best_skill = cand_skill
+                        self._best_score = cand_score
+                    self._stale_epochs = 0
+                    self._trace.record_decision(
+                        "val_gate_accept",
+                        cand_score=cand_score,
+                        current_score=pre_accept_score,
+                    )
+                else:
+                    self._stale_epochs = self._stale_epochs + 1
+                    self._trace.record_decision(
+                        "val_gate_reject",
+                        cand_score=cand_score,
+                        current_score=self._current_score,
+                    )
 
-            run.save_strategy_state()
+                run.save_strategy_state()
 
             # ⑧⑨ Slow update & meta skill — mechanisms 8, 9
-            current = self._end_epoch(run, current, epoch, train_ids)
+            if not self._past_phase(resume_epoch, resume_phase, epoch, "slow_update"):
+                current = self._end_epoch(run, current, epoch, train_ids)
 
             self._phase = "epoch_done"
             run.save_strategy_state()
+
+            # Clear resume markers after the resume epoch so subsequent
+            # epochs run normally.
+            if epoch == resume_epoch:
+                resume_epoch = 0
+                resume_phase = ""
 
             # ⑩ Early stop — mechanism 10
             if self.early_stop_at_full_val and self._best_score >= 1.0 - 1e-9:
@@ -647,6 +641,11 @@ class SkillOptLoop(OuterLoop):
             "epoch": self._epoch,
             "stale_epochs": self._stale_epochs,
             "phase": self._phase,
+            # Cached intermediate outputs for mid-epoch resume.
+            "cached_failure_patches": self._cached_failure_patches,
+            "cached_success_patches": self._cached_success_patches,
+            "cached_merged": self._cached_merged,
+            "cached_ranked": self._cached_ranked,
         })
 
     def load_strategy_state(self, data: dict[str, Any]) -> None:
@@ -663,6 +662,11 @@ class SkillOptLoop(OuterLoop):
         self._epoch = restored.get("epoch", 0)
         self._stale_epochs = restored.get("stale_epochs", 0)
         self._phase = restored.get("phase", "")
+        # Cached intermediate outputs for mid-epoch resume.
+        self._cached_failure_patches = restored.get("cached_failure_patches", [])
+        self._cached_success_patches = restored.get("cached_success_patches", [])
+        self._cached_merged = restored.get("cached_merged", {})
+        self._cached_ranked = restored.get("cached_ranked", [])
 
     # ── helpers ────────────────────────────────────────────────────────────
 

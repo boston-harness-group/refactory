@@ -859,6 +859,13 @@ class Executor:
                 _original_max_steps = self.max_steps
                 self.max_steps += (len(items) - 1) * _subgraph_node_count
 
+                # Read part/seed from subset.json once for all items (ask 5).
+                from refactory_dsh.task import read_subset as _read_subset_walker
+                _walker_subset = _read_subset_walker(self.ctx.workdir)
+                _walker_part = _walker_subset.get("part") or None
+                _walker_seed_raw = _walker_subset.get("seed")
+                _walker_seed = int(_walker_seed_raw) if _walker_seed_raw is not None else None
+
                 scores: list[dict[str, Any]] = []
                 _data_halted = False
                 for index, item in enumerate(items):
@@ -879,7 +886,10 @@ class Executor:
                             _alarm_armed = True
 
                         if task is not None:
-                            task.setup(instance, self.ctx.workdir)
+                            try:
+                                task.setup(instance, self.ctx.workdir, part=_walker_part, seed=_walker_seed)
+                            except TypeError:
+                                task.setup(instance, self.ctx.workdir)
                         # The item is written as the data node, so the declaration that
                         # governs it is the data node's — not the last node of the pass
                         # before it.
@@ -911,7 +921,10 @@ class Executor:
                             _alarm_armed = True
 
                         if task is not None:
-                            verdict = task.verify(instance, self.ctx.workdir)
+                            try:
+                                verdict = task.verify(instance, self.ctx.workdir, part=_walker_part, seed=_walker_seed)
+                            except TypeError:
+                                verdict = task.verify(instance, self.ctx.workdir)
                         else:
                             verdict = None
                     except _PASSTHROUGH:

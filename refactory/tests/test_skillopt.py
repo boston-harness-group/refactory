@@ -1387,22 +1387,34 @@ def test_cli_runs_skillopt_end_to_end(tmp_path):
 
 def test_resume_skips_completed_phases(tmp_path):
     """A resumed run skips initial setup and continues at the saved
-    epoch/phase. Uses the real --resume journal path.
+    epoch/phase.  Uses the real ``--resume`` journal path.
 
-    Fails when reverted because the strategy would repeat initial val.
+    Asserts:
+    - The resumed run does NOT repeat initial_val.
+    - The next model call key equals the one an uninterrupted run would make.
+
+    Fails when reverted because the strategy would repeat initial val and
+    model call keys would diverge.
     """
-    # Run 1: complete 1 epoch
+    # Run A: uninterrupted 3-epoch reference run.
+    client_ref = FakeClient()
+    _, _ = _run_loop(
+        tmp_path / "ref", client=client_ref,
+        skillopt_options={"max_epochs": 3},
+    )
+    ref_keys = [c["call_key"] for c in client_ref.calls]
+
+    # Run B1: complete 1 epoch then stop (real journal).
     client1 = FakeClient()
-    strategy1, report1 = _run_loop(
-        tmp_path, client=client1,
+    _, _ = _run_loop(
+        tmp_path / "split", client=client1,
         skillopt_options={"max_epochs": 1},
     )
-    trace1 = _read_trace(tmp_path)
-    calls1 = [c["call_key"] for c in client1.calls]
+    keys_run1 = [c["call_key"] for c in client1.calls]
 
-    # Run 2: resume with --resume and run 2 more epochs
+    # Run B2: resume from the journal (--resume) and run epochs 2-3.
     client2 = FakeClient()
-    cfg2 = _config(tmp_path, resume=True)
+    cfg2 = _config(tmp_path / "split", resume=True)
     with _patch_mode(SkillProbe):
         loop2 = strategies.create(
             "skillopt", MODE_ID, cfg2,
@@ -1411,60 +1423,118 @@ def test_resume_skips_completed_phases(tmp_path):
         )
         report2 = loop2.run()
 
-    # The resumed run should NOT repeat initial val
-    # (epoch 1 is already done, so epochs 2 and 3 run)
-    trace2_path = tmp_path / "run" / "skillopt_trace.jsonl"
-    trace2 = []
-    if trace2_path.exists():
-        for line in trace2_path.read_text().splitlines():
-            if line.strip():
-                trace2.append(json.loads(line))
+    keys_run2 = [c["call_key"] for c in client2.calls]
 
-    # Count initial_val decisions — should be exactly 1 total (from run 1)
-    initial_vals_in_trace2 = [
-        e for e in trace2 if e["type"] == "decision" and e["step_type"] == "initial_val"
-    ]
-    # The trace file is shared — but the resume should have skipped initial_val
-    # The strategy's _phase should show it progressed
+    # The resumed run must NOT have repeated initial_val — no call keys from
+    # the first run should appear in the second run's calls.
+    assert len(keys_run2) > 0, "resumed run must make model calls"
+    run1_keys_set = set(tuple(k) if isinstance(k, list) else k for k in keys_run1)
+    for k in keys_run2:
+        key_tuple = tuple(k) if isinstance(k, list) else k
+        assert key_tuple not in run1_keys_set, (
+            f"resumed run repeated call key {k} from the first run"
+        )
+
+    # The concatenation of run1 + run2 call keys must match the reference
+    # run's call keys, proving "the next model call key equals the one an
+    # uninterrupted run would make."
+    combined = keys_run1 + keys_run2
+    assert combined == ref_keys, (
+        f"combined call keys differ from uninterrupted reference:\n"
+        f"  combined: {combined}\n  reference: {ref_keys}"
+    )
+
+    # The resumed run must have progressed past epoch 1.
     strategy2 = loop2._custom_strategy
     state2 = strategy2.strategy_state_dict()
-    # If it resumed correctly, epoch should be >= 2
     assert state2["epoch"] >= 2, (
         f"resumed run should have progressed past epoch 1, got epoch={state2['epoch']}"
     )
 
 
 def test_resume_mid_epoch_continues_at_saved_phase(tmp_path):
-    """Stop mid-epoch (after train, before merge). Resume. Assert the
-    resumed run picks up at the right phase.
+    """Stop mid-epoch (after train/analysts, before merge).  Resume via the
+    real ``--resume`` journal path.  Assert the resumed run picks up at
+    the right phase and does not re-run completed model calls.
 
-    Fails when reverted because there would be no per-phase markers.
+    Fails when reverted because there would be no per-phase markers and the
+    resumed run would restart the epoch from the beginning.
     """
-    # Run 1 epoch to get state with a specific phase
+    # Run A: uninterrupted 2-epoch reference run.
+    client_ref = FakeClient()
+    _, _ = _run_loop(
+        tmp_path / "ref", client=client_ref,
+        skillopt_options={"max_epochs": 2},
+    )
+    ref_keys = [c["call_key"] for c in client_ref.calls]
+
+    # Run B1: run 1 epoch, then manually tweak the saved journal state to
+    # pretend we stopped mid-epoch 1 (after analysts, before merge).
+    # We do this by running 1 epoch normally and then modifying the saved
+    # strategy state in the journal.
     client1 = FakeClient()
     strategy1, _ = _run_loop(
-        tmp_path / "run1", client=client1,
+        tmp_path / "mid", client=client1,
         skillopt_options={"max_epochs": 1},
     )
-    state1 = strategy1.strategy_state_dict()
 
-    # The state should contain a 'phase' field
-    assert "phase" in state1, "strategy state must include 'phase' for resume"
+    # The strategy saved state with phase="epoch_done" and epoch=1.
+    # Override to simulate a mid-epoch stop: phase="analysts" at epoch 1.
+    # This means train and analysts are done; merge/rank/patch/etc are not.
+    # Write the modified state into the journal so --resume picks it up.
+    journal_path = tmp_path / "mid" / "run" / "journal.jsonl"
+    assert journal_path.exists(), "journal must exist after run 1"
+    lines = journal_path.read_text().splitlines()
+    # Find the LAST strategy_state entry and modify only that one,
+    # so the journal replay's final state has phase="analysts" at epoch 1.
+    new_lines = []
+    last_ss_idx = -1
+    for i, line in enumerate(lines):
+        if line.strip():
+            entry = json.loads(line)
+            if entry.get("event") == "strategy_state":
+                last_ss_idx = i
+    for i, line in enumerate(lines):
+        if line.strip():
+            entry = json.loads(line)
+            if i == last_ss_idx and entry.get("event") == "strategy_state":
+                st = entry["state"]
+                st["phase"] = "analysts"
+                st["epoch"] = 1
+                entry["state"] = st
+            new_lines.append(json.dumps(entry))
+    journal_path.write_text("\n".join(new_lines) + "\n")
 
-    # When epoch > 0 and phase is set, resume should skip completed phases
-    # Set state to mid-epoch: epoch=1, phase="train" (after train, before analysts)
-    mid_state = dict(state1)
-    mid_state["epoch"] = 1
-    mid_state["phase"] = "train"
+    # Run B2: resume from the modified journal.
+    client2 = FakeClient()
+    cfg2 = _config(tmp_path / "mid", resume=True)
+    with _patch_mode(SkillProbe):
+        loop2 = strategies.create(
+            "skillopt", MODE_ID, cfg2,
+            strategy_options={"max_epochs": 2},
+            project=Path("."), model=client2,
+        )
+        report2 = loop2.run()
 
-    # Create a new strategy with this state
-    strategy2 = SkillOptLoop()
-    strategy2.configure(model=FakeClient(), max_epochs=2)
-    strategy2.load_strategy_state(mid_state)
+    keys_run2 = [c["call_key"] for c in client2.calls]
 
-    loaded = strategy2.strategy_state_dict()
-    assert loaded["phase"] == "train"
-    assert loaded["epoch"] == 1
+    # The resumed run should NOT have re-run analyst model calls for epoch 1
+    # (those are past the saved phase).  The first call should be merge or
+    # later, not analyst.
+    epoch1_analyst_calls = [
+        k for k in keys_run2
+        if k is not None and k[0].startswith("analyst_") and k[1] == 1
+    ]
+    assert len(epoch1_analyst_calls) == 0, (
+        f"resumed run re-ran epoch 1 analyst calls: {epoch1_analyst_calls}"
+    )
+
+    # The state should show progress into epoch 2.
+    strategy2 = loop2._custom_strategy
+    state2 = strategy2.strategy_state_dict()
+    assert state2["epoch"] >= 2, (
+        f"resumed run should have progressed to epoch 2, got epoch={state2['epoch']}"
+    )
 
 
 # ── Ask 4: Batch seed matches SkillOpt formula ──────────────────────────
@@ -1540,84 +1610,286 @@ task_module.register_task("seed_aware_test", SeedAwareTask)
 
 
 def test_task_receives_part_and_seed_walker(tmp_path):
-    """The walker passes part and seed to Task.instances().
+    """The walker passes part and seed to Task.instances(), setup() and verify().
 
-    Fails when reverted because Task.instances() would receive no arguments.
+    Drives the real walker (``nn.executor.execute``) with a data node bound
+    to a seed-aware Task, so it exercises the full ``load_items → task_items``
+    chain and the ``setup/verify`` calls.
+
+    Fails when reverted because Task.instances/setup/verify would receive no
+    part/seed arguments.
     """
-    from refactory_dsh.nn.executor import task_items, full_items
-    from refactory_dsh.task import write_subset
+    from refactory_dsh.nn import Graph, Node
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+    from refactory_dsh.task import register_task, write_subset
 
     # Reset class-level tracking
     SeedAwareTask._seen_part = None
     SeedAwareTask._seen_seed = None
+    SeedAwareTask._setup_part = None
+    SeedAwareTask._setup_seed = None
+    SeedAwareTask._verify_part = None
+    SeedAwareTask._verify_seed = None
 
-    # Create a workdir with a subset.json
-    workdir = tmp_path / "workdir"
+    # Register the task
+    register_task("seed_aware_test", SeedAwareTask)
+
+    # Build a graph with a data node using the seed-aware task
+    graph = Graph()
+    graph.add(Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="seed_aware_test",
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
+    ))
+    graph.add(Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(Node(
+        "finish", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "finish")
+
+    # Write subset.json with part and seed
+    workdir = tmp_path / "walker"
     workdir.mkdir(parents=True, exist_ok=True)
     write_subset(workdir, "train", 0.3, seed=42)
 
-    # Call task_items with part and seed
-    task = SeedAwareTask()
-    items = task_items(task, part="train", seed=42)
+    # Run the walker
+    result = execute(graph, workdir)
+    assert result.exit_ok, result.error
 
-    assert SeedAwareTask._seen_part == "train"
-    assert SeedAwareTask._seen_seed == 42
-    assert len(items) == 4
+    # Verify instances() received part and seed
+    assert SeedAwareTask._seen_part == "train", (
+        f"task.instances did not receive part='train', got {SeedAwareTask._seen_part!r}"
+    )
+    assert SeedAwareTask._seen_seed == 42, (
+        f"task.instances did not receive seed=42, got {SeedAwareTask._seen_seed!r}"
+    )
 
-    # Without seed, items should be in default order
-    SeedAwareTask._seen_part = None
-    SeedAwareTask._seen_seed = None
-    items_no_seed = task_items(task, part=None, seed=None)
-    assert SeedAwareTask._seen_part is None
-    assert SeedAwareTask._seen_seed is None
+    # Verify setup() received part and seed
+    assert SeedAwareTask._setup_part == "train", (
+        f"task.setup did not receive part='train', got {SeedAwareTask._setup_part!r}"
+    )
+    assert SeedAwareTask._setup_seed == 42, (
+        f"task.setup did not receive seed=42, got {SeedAwareTask._setup_seed!r}"
+    )
 
-    # With seed, items may be in different order
-    items_with_seed = task_items(task, part="train", seed=99)
-    assert SeedAwareTask._seen_seed == 99
+    # Verify verify() received part and seed
+    assert SeedAwareTask._verify_part == "train", (
+        f"task.verify did not receive part='train', got {SeedAwareTask._verify_part!r}"
+    )
+    assert SeedAwareTask._verify_seed == 42, (
+        f"task.verify did not receive seed=42, got {SeedAwareTask._verify_seed!r}"
+    )
 
 
 def test_task_receives_part_and_seed_spine(tmp_path):
     """The spine's real drain pipeline (lowering + TS drain) passes part and
     seed to Task.setup()/verify().
 
+    Uses the real drain (lowering + TS drain) as the existing real-spine data
+    scenarios do (test_runtime_equivalence.py), not direct items.py calls.
+
     Fails when reverted because setup/verify would receive no part/seed.
     """
-    from refactory_dsh.items import command_begin, command_end
-    from refactory_dsh.nn import Node
-    from refactory_dsh.task import write_subset
+    import os
+    import shutil
+    import subprocess
+    import sys
 
-    # Reset class-level tracking
-    SeedAwareTask._setup_part = None
-    SeedAwareTask._setup_seed = None
-    SeedAwareTask._verify_part = None
-    SeedAwareTask._verify_seed = None
+    from refactory_dsh import lowering, nn
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+    from refactory_dsh.paths import REPO_ROOT
+    from refactory_dsh.task import register_task, write_subset
 
-    # Build a data node with our seed-aware task
-    node = Node(
-        "data", "data",
-        task_ref="seed_aware_test",
-        subgraph_entry="work", subgraph_exit="work",
-        produces=("item_scores",),
-    )
+    NODE_BIN = shutil.which("node")
+    DATA_DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain.mts"
+    cordis_dir = REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis"
 
-    workdir = tmp_path / "workdir"
-    workdir.mkdir(parents=True, exist_ok=True)
-    write_subset(workdir, "train", 0.3, seed=77)
+    if NODE_BIN is None or not cordis_dir.exists():
+        pytest.skip("spine drain needs Node and installed workspace (pnpm install)")
 
-    # Run command_begin (calls task.setup)
-    result = command_begin(node, workdir, 0)
-    assert SeedAwareTask._setup_part == "train", (
-        f"task.setup did not receive part='train', got {SeedAwareTask._setup_part!r}"
-    )
-    assert SeedAwareTask._setup_seed == 77, (
-        f"task.setup did not receive seed=77, got {SeedAwareTask._setup_seed!r}"
-    )
+    # ── Write a Task package that records part/seed to a sidecar file ──
+    _SEED_TASK_SOURCE = '''\
+"""A Task whose setup/verify records part and seed to a sidecar file."""
+import json
+from pathlib import Path
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
 
-    # Run command_end (calls task.verify)
-    result = command_end(node, workdir, 0)
-    assert SeedAwareTask._verify_part == "train", (
-        f"task.verify did not receive part='train', got {SeedAwareTask._verify_part!r}"
+class SeedRecorderTask(Task):
+    name = "seed_recorder"
+
+    def instances(self, *, part=None, seed=None):
+        return [TaskInstance(id="s1"), TaskInstance(id="s2")]
+
+    def setup(self, instance, workspace, *, part=None, seed=None):
+        sidecar = Path(workspace) / "_seed_sidecar.json"
+        data = json.loads(sidecar.read_text()) if sidecar.exists() else {"setups": [], "verifies": []}
+        data["setups"].append({"id": instance.id, "part": part, "seed": seed})
+        sidecar.write_text(json.dumps(data))
+
+    def verify(self, instance, workspace, *, part=None, seed=None):
+        sidecar = Path(workspace) / "_seed_sidecar.json"
+        data = json.loads(sidecar.read_text()) if sidecar.exists() else {"setups": [], "verifies": []}
+        data["verifies"].append({"id": instance.id, "part": part, "seed": seed})
+        sidecar.write_text(json.dumps(data))
+        return VerifyResult(passed=True, score=1.0)
+'''
+
+    _SEED_OP_SOURCE = '''\
+"""Op for seed-recorder scenario."""
+import json
+from pathlib import Path
+
+def record(ctx):
+    item = ctx.read_json("current_item.json", {}) or {}
+    seen_path = Path(ctx.workdir) / "seen.json"
+    seen = json.loads(seen_path.read_text()) if seen_path.exists() else {"ids": []}
+    seen["ids"].append(item.get("id", ""))
+    ctx.write_json("seen.json", seen)
+    ctx.set_fact("value", seen)
+'''
+
+    project = tmp_path / "project"
+    pkg = project / ".factory" / "packages" / "seed_recorder"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(
+        'from refactory_dsh.nn import Package\n'
+        'PACKAGE = Package(\n'
+        '    name="seed_recorder",\n'
+        '    description="seed recorder task",\n'
+        '    modes=(),\n'
+        '    ops=("refactory_packages.seed_recorder.ops",),\n'
+        ')\n'
     )
-    assert SeedAwareTask._verify_seed == 77, (
-        f"task.verify did not receive seed=77, got {SeedAwareTask._verify_seed!r}"
-    )
+    (pkg / "task.py").write_text(_SEED_TASK_SOURCE)
+    (pkg / "ops.py").write_text(_SEED_OP_SOURCE)
+
+    sys.path.insert(0, str(project / ".factory" / "packages"))
+    try:
+        from seed_recorder.task import SeedRecorderTask  # type: ignore[import-not-found]
+        register_task("seed_recorder", SeedRecorderTask)
+
+        task_ref_spine = "refactory_packages.seed_recorder.task:SeedRecorderTask"
+
+        # ── Build graphs ──
+        # Walker graph uses the registered name "seed_recorder"; spine graph
+        # uses the fully-qualified module path for subprocess import.
+        walker_graph = nn.Graph()
+        walker_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="seed_recorder",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        walker_graph.add(nn.Node(
+            "work", "op", call="loop_ops:record_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        walker_graph.add(nn.Node(
+            "finish", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        walker_graph.connect("data", "finish")
+
+        spine_graph = nn.Graph()
+        spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=task_ref_spine,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:record_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        spine_graph.add(nn.Node(
+            "finish", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        spine_graph.connect("data", "finish")
+
+        # ── Walker run (verifies walker passes part/seed) ──
+        walker_dir = tmp_path / "walker"
+        walker_dir.mkdir(parents=True, exist_ok=True)
+        write_subset(walker_dir, "train", 0.3, seed=77)
+        walker_result = execute(walker_graph, walker_dir)
+        assert walker_result.exit_ok, walker_result.error
+        walker_sidecar = walker_dir / "_seed_sidecar.json"
+        assert walker_sidecar.exists(), "walker did not produce sidecar"
+        walker_data = json.loads(walker_sidecar.read_text())
+        assert len(walker_data["setups"]) >= 1
+        assert len(walker_data["verifies"]) >= 1
+        assert walker_data["setups"][0]["part"] == "train"
+        assert walker_data["setups"][0]["seed"] == 77
+        assert walker_data["verifies"][0]["part"] == "train"
+        assert walker_data["verifies"][0]["seed"] == 77
+
+        # ── Spine run (real TS drain via data-drain.mts) ──
+        spine_dir = tmp_path / "spine"
+        spine_dir.mkdir(parents=True, exist_ok=True)
+        write_subset(spine_dir, "train", 0.3, seed=77)
+
+        state = {"graph": spine_graph.to_state()}
+        lowering.write_declarations(state, spine_dir)
+        graph_path, _ = lowering.write_mode_graph(
+            state, tmp_path / "graphs", name="seed_recorder",
+        )
+
+        python_bin = str(REPO_ROOT / ".venv/bin")
+        HERE = Path(__file__).resolve().parent
+        extra_path = os.pathsep.join([
+            str(project / ".factory" / "packages"),
+            str(HERE),
+        ])
+        env_patch = {
+            "REFACTORY_PROJECT": str(project),
+            "PYTHONPATH": extra_path,
+        }
+        old_env = {}
+        for key, value in env_patch.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            env = {**os.environ, "REFACTORY_WORKDIR": str(spine_dir)}
+            env["PATH"] = f"{python_bin}:{env.get('PATH', '')}"
+            result = subprocess.run(
+                [str(NODE_BIN), "--import", "tsx/esm", str(DATA_DRAIN),
+                 str(graph_path), str(spine_dir), f"{python_bin}/python", "10000"],
+                capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
+                env=env,
+            )
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert result.returncode == 0, (
+            f"spine drain failed:\nstdout: {result.stdout[-2000:]}\n"
+            f"stderr: {result.stderr[-2000:]}"
+        )
+
+        # ── Verify spine task received part/seed ──
+        spine_sidecar = spine_dir / "_seed_sidecar.json"
+        assert spine_sidecar.exists(), "spine did not produce sidecar"
+        spine_data = json.loads(spine_sidecar.read_text())
+        assert len(spine_data["setups"]) >= 1, "spine had no setup calls"
+        assert len(spine_data["verifies"]) >= 1, "spine had no verify calls"
+        assert spine_data["setups"][0]["part"] == "train", (
+            f"spine task.setup did not receive part='train', got {spine_data['setups'][0]['part']!r}"
+        )
+        assert spine_data["setups"][0]["seed"] == 77, (
+            f"spine task.setup did not receive seed=77, got {spine_data['setups'][0]['seed']!r}"
+        )
+        assert spine_data["verifies"][0]["part"] == "train", (
+            f"spine task.verify did not receive part='train', got {spine_data['verifies'][0]['part']!r}"
+        )
+        assert spine_data["verifies"][0]["seed"] == 77, (
+            f"spine task.verify did not receive seed=77, got {spine_data['verifies'][0]['seed']!r}"
+        )
+    finally:
+        # Clean up sys.path
+        if str(project / ".factory" / "packages") in sys.path:
+            sys.path.remove(str(project / ".factory" / "packages"))
