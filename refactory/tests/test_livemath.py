@@ -481,3 +481,160 @@ def test_lowering_works():
     serialized = json.dumps(workflow.to_dict(), indent=2)
     parsed = json.loads(serialized)
     assert parsed  # non-empty
+
+
+# ── pinned SkillOpt outputs ───────────────────────────────────────────────
+# Every literal below was produced by running SkillOpt's own functions
+# (skillopt/envs/livemathematicianbench/*) on the inputs shown, not by this port.
+
+# skillopt/envs/livemathematicianbench/prompts/rollout_system.md, byte for byte
+# (note the trailing newline).
+_SKILLOPT_ROLLOUT_SYSTEM_MD = (
+    "You are an expert mathematical reasoning agent solving multiple-choice questions.\n"
+    "\n"
+    "{skill_section}## Task Format\n"
+    "You will receive one mathematics multiple-choice question and its answer choices.\n"
+    "Reason carefully about quantifiers, hypotheses, extremal wording, and exact equality"
+    " conditions.\n"
+    "\n"
+    "## Answer Format\n"
+    "Think step by step, then provide your final answer inside <answer>...</answer> tags.\n"
+    "Inside the tags, output only the single choice label, such as A or C.\n"
+    "\n"
+    "Example:\n"
+    "<answer>B</answer>\n"
+)
+
+_SHUFFLE_ITEM = {
+    "id": "202501:1",
+    "choices": [
+        {"label": "A", "text": "Diverges"},
+        {"label": "B", "text": "Converges conditionally"},
+        {"label": "C", "text": "Converges absolutely"},
+        {"label": "D", "text": "Oscillates"},
+    ],
+    "correct_choice": {"label": "B", "text": "Converges conditionally"},
+}
+
+
+def _render_system(skill: str) -> str:
+    import types
+
+    from refactory_dsh.nn.executor import render
+    from refactory_packages.livemath.mode import Solver
+    from refactory_packages.livemath.ops import format_prompt
+
+    facts = format_prompt(_GatingCtx({"skill": skill}))
+    node = Solver().build().nodes["solve"]
+    return render(node.system_prompt_template, types.SimpleNamespace(knobs={"skill": skill}, facts=facts))
+
+
+def test_system_prompt_template_is_skillopt_file_byte_exact():
+    from refactory_packages.livemath.mode import SYSTEM_PROMPT
+
+    assert SYSTEM_PROMPT == _SKILLOPT_ROLLOUT_SYSTEM_MD.replace("{skill_section}", "{{skill_section}}")
+
+
+def test_rendered_system_prompt_without_skill_matches_skillopt():
+    # SkillOpt rollout.py:16-21 _build_system("")
+    assert _render_system("") == _SKILLOPT_ROLLOUT_SYSTEM_MD.format(skill_section="")
+
+
+def test_rendered_system_prompt_with_skill_matches_skillopt():
+    # SkillOpt rollout.py:16-21 _build_system("  Check edge cases.\n")
+    assert _render_system("  Check edge cases.\n") == (
+        "You are an expert mathematical reasoning agent solving multiple-choice questions.\n"
+        "\n"
+        "## Skill\nCheck edge cases.\n\n"
+        "## Task Format\n"
+        "You will receive one mathematics multiple-choice question and its answer choices.\n"
+        "Reason carefully about quantifiers, hypotheses, extremal wording, and exact equality"
+        " conditions.\n"
+        "\n"
+        "## Answer Format\n"
+        "Think step by step, then provide your final answer inside <answer>...</answer> tags.\n"
+        "Inside the tags, output only the single choice label, such as A or C.\n"
+        "\n"
+        "Example:\n"
+        "<answer>B</answer>\n"
+    )
+
+
+def test_shuffle_matches_skillopt_literal_orders():
+    # SkillOpt dataloader.py:196-198 _item_shuffle_seed and :200-226 _shuffle_item_choices
+    from refactory_packages.livemath.shuffling import item_shuffle_seed, shuffle_item_choices
+
+    assert item_shuffle_seed("202501:1", 42) == 16574492107308482448
+    expected = {
+        42: (["Diverges", "Converges conditionally", "Oscillates", "Converges absolutely"],
+             {"label": "B", "text": "Converges conditionally"}),
+        7: (["Oscillates", "Diverges", "Converges absolutely", "Converges conditionally"],
+            {"label": "D", "text": "Converges conditionally"}),
+        43: (["Converges conditionally", "Oscillates", "Converges absolutely", "Diverges"],
+             {"label": "A", "text": "Converges conditionally"}),
+    }
+    for seed, (texts, correct) in expected.items():
+        out = shuffle_item_choices(_SHUFFLE_ITEM, seed)  # default: shuffle on
+        assert out["choices"] == [
+            {"label": label, "text": text} for label, text in zip("ABCD", texts)
+        ], seed
+        assert out["correct_choice"] == correct, seed
+
+
+def test_task_instances_default_shuffle_matches_skillopt_seed_42():
+    """LiveMathTask's default shuffles (SkillOpt default.yaml:20) with SkillOpt's
+    per-item order for seed 42 (dataloader.py:200-226 over load_items' fixture output)."""
+    from refactory_packages.livemath.tasks import LiveMathTask
+
+    expected = {
+        "202501:1": (["Diverges", "Converges conditionally", "Oscillates",
+                      "Converges absolutely"], "B"),
+        "202501:2": (["0", "3", "2", "1"], "B"),
+        "202503:1": (["$2\\pi i$", "$0$", "$-2\\pi i$", "$\\pi i$"], "A"),
+        "202503:2": (["6", "5", "3", "4"], "D"),
+        "202503:3": (["No, only closed", "Yes, by Heine-Borel", "No, only bounded",
+                      "It depends on $n$"], "B"),
+    }
+    got = {
+        inst.id: ([c["text"] for c in inst.metadata["choices"]], inst.metadata["label"])
+        for inst in LiveMathTask(data_path=str(FIXTURE_DIR)).instances(seed=42)
+    }
+    assert got == expected
+
+
+def test_load_items_skips_rows_like_skillopt(tmp_path):
+    """SkillOpt dataloader.py:139 keeps a row only with a question, choices and a
+    correct label; SkillOpt's load_items on these rows keeps 202509:1 and 202509:6."""
+    from refactory_packages.livemath.tasks import load_items
+
+    rows = [
+        {"month": "202509", "no": 1, "question": "Q1", "choices": ["x", "y"], "correct_choice": "A"},
+        {"month": "202509", "no": 2, "question": "", "choices": ["x"], "correct_choice": "A"},
+        {"month": "202509", "no": 3, "question": "Q3", "choices": ["x", "y"], "correct_choice": {}},
+        {"month": "202509", "no": 4, "question": "Q4", "choices": [], "correct_choice": "A"},
+        {"month": "202509", "no": 5, "question": "Q5", "choices": [" "], "correct_choice": "A"},
+        {"month": "202509", "no": 6, "question": "Q6", "choices": ["p", "q"], "correct_choice": "B"},
+    ]
+    (tmp_path / "qa_202509_final.json").write_text(json.dumps(rows))
+    assert [item["id"] for item in load_items(str(tmp_path))] == ["202509:1", "202509:6"]
+
+
+# ── SkillOpt solver defaults on the solve node ────────────────────────────
+
+def test_solve_node_carries_skillopt_exec_timeout():
+    """exec_timeout 300 (SkillOpt configs/livemathematicianbench/default.yaml:17)
+    is the solve node's timeout, in the graph and in the lowered node."""
+    from refactory_packages.livemath.mode import Solver
+
+    assert Solver().build().nodes["solve"].timeout_s == 300
+    workflow = lowering.to_workflow(Solver().state_dict(), name="livemath-solver")
+    assert workflow.to_dict()["nodes"]["solve"]["timeout"] == 300
+
+
+def test_solve_timeout_is_configurable():
+    from refactory_packages.livemath.mode import Solver
+
+    class Slow(Solver):
+        solve_timeout_s = 900
+
+    assert Slow().build().nodes["solve"].timeout_s == 900

@@ -4,11 +4,18 @@ The solver graph: data → [format_prompt → solve] → finish.
 
 System prompt ported from SkillOpt (MIT) —
 skillopt/envs/livemathematicianbench/prompts/rollout_system.md.
-Solver model defaults from configs/_base_/default.yaml:
-  model = gpt-5.5 (_base_/default.yaml:7)
-  reasoning_effort = medium (_base_/default.yaml:10)
+SkillOpt solver defaults:
+  exec_timeout = 300 s (configs/livemathematicianbench/default.yaml:17) -- applied
+    as the solve node's ``timeout_s`` (``Solver.solve_timeout_s``).
+  max_completion_tokens = 16384 (livemathematicianbench/default.yaml:16) and
+  reasoning_effort = medium (_base_/default.yaml:10) -- an agent node carries no
+    per-node token cap or effort; both are run settings (``--effort medium``, or
+    ``node_routes`` for ``solve``), not part of this graph.
+  model = gpt-5.5 (_base_/default.yaml:7) -- likewise a run setting.
 """
 from __future__ import annotations
+
+from typing import ClassVar
 
 from refactory_dsh import nn
 
@@ -16,7 +23,8 @@ OPS = "refactory_packages.livemath.ops"
 TASK = "refactory_packages.livemath.tasks:LiveMathTask"
 
 # Ported from skillopt/envs/livemathematicianbench/prompts/rollout_system.md (MIT)
-# {skill_section} replaced by {{skill_section}} for template rendering.
+# {skill_section} replaced by {{skill_section}} for template rendering. The file
+# ends with a newline, which SkillOpt's _build_system (rollout.py:16-21) keeps.
 SYSTEM_PROMPT = (
     "You are an expert mathematical reasoning agent solving multiple-choice questions.\n"
     "\n"
@@ -29,8 +37,11 @@ SYSTEM_PROMPT = (
     "Inside the tags, output only the single choice label, such as A or C.\n"
     "\n"
     "Example:\n"
-    "<answer>B</answer>"
+    "<answer>B</answer>\n"
 )
+
+# SkillOpt configs/livemathematicianbench/default.yaml:17 (exec_timeout)
+SOLVE_TIMEOUT_S = 300
 
 
 class Solver(nn.Mode):
@@ -38,6 +49,9 @@ class Solver(nn.Mode):
 
     name = "solver"
     description = "solve a LiveMathematicianBench item with a single agent call"
+    #: The solve node's wall limit; a subclass (or a graph edit of ``timeout_s``)
+    #: changes it.
+    solve_timeout_s: ClassVar[int] = SOLVE_TIMEOUT_S
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
@@ -74,6 +88,7 @@ class Solver(nn.Mode):
             writes=("answer.txt",),
             tool_policy="none",
             role="solver",
+            timeout_s=self.solve_timeout_s,
         ))
         graph.add(nn.Node(
             "finish", "op",
