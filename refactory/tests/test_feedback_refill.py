@@ -419,10 +419,9 @@ def test_walker_refill_does_not_raise(tmp_path, monkeypatch):
     executor = nn.Executor(graph, ctx)
     executor.run()
 
-    # If _internal_fact was not used, set_fact would raise ExecutionError
-    # because validation is not in _declared_facts.
-    assert "validation" in ctx.facts
-    assert "test_bar" in ctx.facts["validation"]
+    # SWEEP-6: Refilled feedback keys are available during rendering but NOT
+    # persisted as run facts, matching the spine (worker_node.py:133-134).
+    assert "validation" not in ctx.facts
 
 
 def test_worker_refill_without_spec_keys(tmp_path, monkeypatch):

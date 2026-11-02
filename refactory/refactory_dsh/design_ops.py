@@ -116,10 +116,23 @@ def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
             if gate and verdict:
                 # Its id, not its text: using the answer marks it consumed in place.
                 named = _field(entry, "id")
-                went_on = (_field(entry, "source") in ("upfront", "interactive")
+                # ASK-2b: with source now always "interactive" for non-upfront
+                # verdicts, use the consumed field to distinguish pending from used.
+                # Only "used" (or legacy "yes") counts as went-on; "expired" does not,
+                # so an expired verdict's corrections are not re-applied.
+                consumed = _field(entry, "consumed")
+                went_on = (_field(entry, "source") == "upfront"
+                           or consumed in ("yes", "used")
                            or (bool(named) and named in used))
+                # An expired verdict must never set collecting or approval,
+                # even when it is the very first verdict (no prior approval).
+                if consumed == "expired" and not went_on:
+                    collecting = False
+                    continue
                 if approved and not went_on:
-                    continue  # a pending answer after the run went on decides nothing
+                    # A pending verdict (consumed: no) after the run already
+                    # went on is simply skipped (it decides nothing yet).
+                    continue
                 collecting = (gate == "gate_strategy" and verdict == "proceed")
                 if gate == "gate_strategy":
                     approval = named or str(entry.get("at"))

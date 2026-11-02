@@ -183,7 +183,7 @@ def wire_verification(graph: Any, *, check_node: str, proceed_target: str,
     graph.add(Node(
         "verifier", "agent",
         prompt_template=FULL_VERIFIER_PROMPT,
-        reads=("brief.json", "test-guardedness.json", "changes.diff"),
+        reads=("brief.json", "changes.diff"),
         writes=("reviews/verification.md",),
         produces=("verification",),
         role="code_reviewer",

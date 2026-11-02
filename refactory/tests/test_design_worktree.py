@@ -536,6 +536,19 @@ def test_without_a_worktree_a_run_takes_whole_files_only(repo, tmp_path, monkeyp
     assert (Path(result.facts["artifact"]) / "tool.py").read_text() == "print('built')\n"
 
 
+def test_without_a_worktree_the_full_check_writes_no_guardedness_placeholder(repo, tmp_path, monkeypatch):
+    """Only a worktree run can run the new tests on the base, so only it writes
+    test-guardedness.json; the whole check (`design_ops._full_check`) writes no stand-in."""
+    monkeypatch.setenv("REFACTORY_PROJECT", str(repo))
+    model = FakeModel(_answers(render({"tool.py": "print('built')\n"})))
+    result = _design(tmp_path / "run", model, _mode(worktree=False))
+    assert result.exit_ok, result.error
+    # The full check ran (the run succeeded), verify it left no guardedness stand-in.
+    assert (tmp_path / "run" / "check-record.json").exists(), "the whole check ran"
+    assert not (tmp_path / "run" / "test-guardedness.json").exists(), \
+        "test-guardedness.json should not be written on no-worktree runs"
+
+
 @pytest.mark.parametrize("answer, reason", [
     ("print('no blocks')\n", "holds no ===FILE:"),
     ("===EDIT: a path with spaces===\n", "malformed block header"),

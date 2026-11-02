@@ -97,7 +97,8 @@ def test_the_fn_gate_refuses_a_thin_draft(tmp_path):
 
     result = mode.evaluate(work, task={"topic": "x"})
     assert result.exit_ok is False
-    assert "max_iterations" in (result.error or ""), result.error
+    # SWEEP-8: a reloop cap is recorded as halted, not failed.
+    assert result.halted is True, result.error
     assert not (work / "final.md").exists(), "a thin draft reached the person"
     assert not (work / "rejected.md").exists(), "a thin draft reached the person"
 

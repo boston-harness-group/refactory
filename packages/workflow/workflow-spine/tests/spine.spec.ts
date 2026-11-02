@@ -1611,3 +1611,55 @@ describe('a fork with nothing to fan out to', () => {
     expect(spine.state().skipped).toEqual(['c1', 'fork'])
   })
 })
+
+describe('a fork whose branches differ in length (nested fork, optional node)', () => {
+  const fn = (id: string): WorkflowGraph['nodes'][string] =>
+    ({ _type: 'FnNode', id, command: `run ${id}`, reads: [], writes: [] }) as WorkflowGraph['nodes'][string]
+  const graph: WorkflowGraph = {
+    name: 'uneven',
+    start_node: 'outer',
+    nodes: {
+      outer: { _type: 'ForkNode', id: 'outer', targets: ['inner', 'opt', 'c'], optional_targets: ['opt'] },
+      inner: { _type: 'ForkNode', id: 'inner', targets: ['a', 'b'] },
+      a: fn('a'), b: fn('b'), c: fn('c'), opt: fn('opt'), opt2: fn('opt2'), main_end: fn('main_end'),
+      inner_join: { _type: 'JoinNode', id: 'inner_join', sources: ['a', 'b'] },
+      outer_join: { _type: 'JoinNode', id: 'outer_join', sources: ['main_end', 'opt2', 'c'] },
+      done: fn('done'),
+    },
+    edges: [
+      { source: 'outer', target: 'outer_join' }, { source: 'inner', target: 'inner_join' },
+      { source: 'a', target: 'inner_join' }, { source: 'b', target: 'inner_join' },
+      { source: 'inner_join', target: 'main_end' }, { source: 'main_end', target: 'outer_join' },
+      { source: 'opt', target: 'opt2' }, { source: 'opt2', target: 'outer_join' },
+      { source: 'c', target: 'outer_join' }, { source: 'outer_join', target: 'done' },
+    ],
+  }
+
+  it('makes a join due only once every branch, nested ones included, has drained', () => {
+    const spine = new Spine(graph)
+    spine.complete('outer')
+    spine.complete('inner')
+    spine.complete('c')
+    expect(ids(spine)).not.toContain('outer_join')
+    spine.complete('a')
+    expect(ids(spine)).not.toContain('inner_join')
+    spine.complete('b')
+    expect(ids(spine)).toEqual(['opt', 'inner_join'])
+    spine.complete('inner_join')
+    spine.complete('opt')
+    spine.complete('opt2')
+    expect(ids(spine)).toEqual(['main_end'])
+    spine.complete('main_end')
+    expect(ids(spine)).toEqual(['outer_join'])
+  })
+
+  it('records an optional node that failed as failed, and its branch goes on', () => {
+    const spine = new Spine(graph)
+    spine.complete('outer')
+    expect(() => spine.complete('c', { failed: true })).toThrow(/not optional/)
+    spine.complete('opt', { failed: true })
+    expect(ids(spine)).toContain('opt2')
+    expect(spine.state().log).toContain('failed opt')
+    expect(spine.state().log).not.toContain('completed opt')
+  })
+})

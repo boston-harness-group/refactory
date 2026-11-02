@@ -261,42 +261,27 @@ def test_gate_check_fast_handles_check_failure():
 def test_guardedness_reloops_in_full_mode_integration(tmp_path, monkeypatch):
     """Guardedness enforcement in full mode reloops through repair(kind='check').
 
-    Without the fix, check_artifact would return Verdict("reloop") without
-    calling repair(), so the run would hit max_iterations and raise
-    ExecutionError instead of a clean repair cycle.
+    The real compute_test_guardedness detects that test_foo.py (assert True)
+    passes on the base → not guarding → gate_check reloops. The second emit
+    adds ``import tool`` which fails on the base → guarding → proceeds.
+    Uses ``python -m pytest -q`` so compute_test_guardedness can run the tests.
     """
     monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
     from tests_support import (DESIGN_DOC_ANSWER,
                                PITFALLS_ANSWER, RESEARCH_ANSWER,
                                VERIFICATION_ANSWER,
                                REVIEW_ANSWERS, FakeModel, git_repo, render)
-    from refactory_dsh import base_check
     from refactory_dsh.design import DesignMode
 
     repo = git_repo(tmp_path / "repo")
-    call_count = [0]
-
-    def mock_guardedness(ctx, command, timeout):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return {
-                "summary": {"total_new_tests": 1, "guarding": 0, "not_guarding": 1},
-                "results": [{"file": "test_foo.py", "guarding": False, "file_level": "pass"}],
-            }
-        return {
-            "summary": {"total_new_tests": 1, "guarding": 1, "not_guarding": 0},
-            "results": [{"file": "test_foo.py", "guarding": True}],
-        }
-
-    monkeypatch.setattr(base_check, "compute_test_guardedness", mock_guardedness)
 
     answers = [
         RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
         DESIGN_DOC_ANSWER,
         render({"tool.py": "print('v1')\n",
-                "test_foo.py": "def test_foo():\n    assert True\n"}),  # first emit: test_foo.py in added_files
+                "test_foo.py": "def test_foo():\n    assert True\n"}),  # first emit: not guarding
         render({"tool.py": "print('v2')\n",
-                "test_foo.py": "def test_foo():\n    import tool\n    assert hasattr(tool, '__file__')\n"}),  # second emit: guarding test
+                "test_foo.py": "def test_foo():\n    import tool\n    assert hasattr(tool, '__file__')\n"}),  # second emit: guarding
         *REVIEW_ANSWERS[:3],
         VERIFICATION_ANSWER,
         REVIEW_ANSWERS[3],
@@ -304,59 +289,44 @@ def test_guardedness_reloops_in_full_mode_integration(tmp_path, monkeypatch):
     result = DesignMode().run(
         tmp_path / "run", model=FakeModel(answers),
         verdicts={"gate_strategy": "proceed"},
-        task={"name": "guard_full", "brief": "a tool", "check": "python tool.py",
+        task={"name": "guard_full", "brief": "a tool", "check": "python -m pytest -q",
               "target": str(repo)},
     )
     assert result.exit_ok, result.error
-    assert call_count[0] >= 2, "guardedness must be computed at least twice"
+    # Guardedness was computed and the pipeline relooped at least once.
+    tg = json.loads((tmp_path / "run" / "test-guardedness.json").read_text())
+    assert tg.get("summary", {}).get("guarding", 0) >= 1, "guardedness must have passed"
 
 
 def test_guardedness_reloops_in_fast_mode_integration(tmp_path, monkeypatch):
     """Guardedness enforcement in fast mode reloops through the real executor.
 
-    This exercises the full pipeline: focused_check detects non-guarding tests,
-    writes check.txt and sets guardedness_blocked in focused-check.json, then
-    gate_check reads the flag and reloops to emit.
-    On the second attempt guardedness passes and the run completes.
+    This exercises the full pipeline: focused_check detects non-guarding tests
+    through the real compute_test_guardedness (the check uses pytest so the
+    new tests can be run on the base), writes check.txt and sets
+    guardedness_blocked in focused-check.json, then gate_check reads the flag
+    and reloops to emit. On the second attempt guardedness passes and the run
+    completes.
     """
     monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
     from tests_support import FakeModel, git_repo, render, VERIFICATION_ANSWER
-    from refactory_dsh import base_check
     from refactory_dsh.fast import DesignFastMode
 
     repo = git_repo(tmp_path / "repo")
     FAST_QA = json.dumps({
         "status": "pass",
-        "checks": [{"name": "runs", "command": "python tool.py",
+        "checks": [{"name": "runs", "command": "python -m pytest -q",
                      "status": "pass", "evidence": "exit 0"}],
         "findings": [], "not_run": [],
     })
 
-    call_count = [0]
-
-    def mock_guardedness(ctx, command, timeout):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            # First call: test does not guard the change
-            return {
-                "summary": {"total_new_tests": 1, "guarding": 0, "not_guarding": 1},
-                "results": [{"file": "test_foo.py", "guarding": False, "file_level": "pass"}],
-            }
-        # Subsequent calls: test guards the change
-        return {
-            "summary": {"total_new_tests": 1, "guarding": 1, "not_guarding": 0},
-            "results": [{"file": "test_foo.py", "guarding": True}],
-        }
-
-    monkeypatch.setattr(base_check, "compute_test_guardedness", mock_guardedness)
-
     answers = [
         "Change only the requested file.",          # strategy
         render({"tool.py": "print('v1')\n",
-                "test_foo.py": "def test_foo():\n    assert True\n"}),  # first emit
+                "test_foo.py": "def test_foo():\n    assert True\n"}),  # first emit: not guarding
         # gate_check sees guardedness_blocked → reloops to emit
         render({"tool.py": "print('v2')\n",
-                "test_foo.py": "def test_foo():\n    import tool\n    assert hasattr(tool, '__file__')\n"}),  # second emit
+                "test_foo.py": "def test_foo():\n    import tool\n    assert hasattr(tool, '__file__')\n"}),  # second emit: guarding
         FAST_QA,                                     # focused QA (in fork_qa)
         VERIFICATION_ANSWER,                         # verifier (in fork_qa)
     ]
@@ -367,11 +337,12 @@ def test_guardedness_reloops_in_fast_mode_integration(tmp_path, monkeypatch):
     mode.load_state_dict(state)
     result = mode.run(
         tmp_path / "run", model=FakeModel(answers),
-        task={"name": "guard_fast", "brief": "a tool", "check": "python tool.py",
+        task={"name": "guard_fast", "brief": "a tool", "check": "python -m pytest -q",
               "target": str(repo)},
     )
     assert result.exit_ok, result.error
-    assert call_count[0] >= 2, "guardedness must be computed at least twice"
+    tg = json.loads((tmp_path / "run" / "test-guardedness.json").read_text())
+    assert tg.get("summary", {}).get("guarding", 0) >= 1, "guardedness must have passed"
     assert int(result.facts.get("repairs_used", 0)) >= 1, (
         "the pipeline must have relooped at least once for guardedness"
     )

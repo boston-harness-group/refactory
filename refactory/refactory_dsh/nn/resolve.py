@@ -32,6 +32,17 @@ def resolve(target: str) -> Callable[..., Any]:
         raise ResolutionError(
             f"{target!r} is not a 'module.path:function' target"
         )
+    # An op runs in a forkserver child, which does not carry the caller's
+    # __main__: the child would have to re-import the caller's script, and that
+    # re-runs its module-level code once per op visit -- including a module-level
+    # execute(), which nests runs on one run directory. So a one-file script
+    # cannot name its own op; put it in a module the child can import.
+    if module_name == "__main__":
+        raise ResolutionError(
+            f"{target!r} names the caller's __main__, which an op child cannot "
+            "import: move the function into an importable module (for example "
+            "my_ops.py beside the script) and name it 'my_ops:" + attribute + "'"
+        )
     try:
         module = importlib.import_module(module_name)
     except ImportError as exc:

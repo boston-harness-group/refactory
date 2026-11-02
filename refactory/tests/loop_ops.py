@@ -119,6 +119,12 @@ def always_proceed(ctx: Any) -> str:
     return "proceed"
 
 
+def always_reloop(ctx: Any) -> str:
+    """A gate that always says reloop, for testing iteration caps."""
+    from refactory_dsh.nn import Verdict
+    return Verdict("reloop", reason="needs more work")
+
+
 def fail_on_second_visit(ctx: Any) -> None:
     """Pass the first time, fail every time after: a run stopped right after a reloop."""
     visits = (ctx.read_json("visits.json", 0) or 0) + 1
@@ -127,11 +133,128 @@ def fail_on_second_visit(ctx: Any) -> None:
         raise RuntimeError("this op fails on its second visit")
 
 
+def reloop_with_stdout(ctx: Any) -> str:
+    """A gate that prints to stdout (extra context) then returns reloop once, then proceed.
+
+    SWEEP-4: Tests that stdout before the verdict line is used as feedback,
+    matching the spine's reasonOf(stdout) behavior.
+    """
+    from refactory_dsh.nn import Verdict
+
+    visits = int(ctx.facts.get("passes", 0)) + 1
+    ctx.set_fact("passes", visits)
+    if visits < 2:
+        print("extra context from stdout")
+        return Verdict("reloop", reason="needs more work")
+    return "proceed"
+
+
 def reloop_twice(ctx: Any) -> str:
     """`three_passes` on an explicit `reloop` edge, for a cycle with another gate in it."""
     visits = int(ctx.facts.get("passes", 0)) + 1
     ctx.set_fact("passes", visits)
     return "reloop" if visits < 3 else "proceed"
+
+
+def write_relative(ctx: Any) -> dict[str, Any]:
+    """SWEEP-3: Write a file using a relative path to prove ops run in the run directory."""
+    from pathlib import Path as _P
+    _P("relative_output.txt").write_text("written from op\n")
+    return {"relative_written": True}
+
+
+def check_model_is_none(ctx: Any) -> dict[str, Any]:
+    """SWEEP-5: Verify ctx.model is None for ops, matching the documented API."""
+    return {"model_is_none": ctx.model is None}
+
+
+def warn_on_stderr(ctx: Any) -> dict[str, Any]:
+    """Gap 20: Print a run warning to stderr for run_warning event test."""
+    import sys as _sys
+    print("run warning: something happened", file=_sys.stderr)
+    return {"warned": True}
+
+
+def always_halt(ctx: Any) -> str:
+    """A gate that always returns halt, for testing halt inside a fork branch."""
+    return "halt"
+
+
+def print_to_stdout(ctx: Any) -> dict[str, Any]:
+    """An op that prints to stdout, for testing that the parent forwards it."""
+    print("op stdout output: visible diagnostics")
+    return {}
+
+
+def stdout_then_raise(ctx: Any) -> None:
+    """An op that prints to stdout then raises: the run that most needs its output."""
+    print("op stdout before the raise")
+    raise ValueError("op failed after printing to stdout")
+
+
+def stderr_then_raise(ctx: Any) -> None:
+    """An op that prints to stderr then raises, for testing stderr preservation."""
+    import sys as _sys
+    print("op stderr output: important debug info", file=_sys.stderr)
+    raise ValueError("op failed after printing to stderr")
+
+
+def parity_write_relative(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: Write a relative path (SWEEP-3) and check ctx.model (SWEEP-5)."""
+    from pathlib import Path as _P
+    _P("parity_output.txt").write_text(f"knob_val={ctx.knobs.get('test_knob', '?')}\n")
+    return {"ctx_model_is_none": ctx.model is None, "knob_applied": ctx.knobs.get("test_knob", "")}
+
+
+def parity_fn_gate(ctx: Any) -> str:
+    """SWEEP-9: fn gate that prints to stdout and reloops once, then proceeds."""
+    from refactory_dsh.nn import Verdict
+    visits = int(ctx.facts.get("parity_visits", 0)) + 1
+    ctx.set_fact("parity_visits", visits)
+    if visits < 2:
+        print("parity stdout feedback")
+        return Verdict("reloop", reason="needs another round")
+    return "proceed"
+
+
+def parity_apply_correction(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: Apply corrections from the ledger."""
+    from refactory_dsh.design_ops import gate_corrections_due
+    _, corrections = gate_corrections_due(ctx.workdir)
+    correction_texts = [text for _, text in corrections]
+    ctx.set_fact("corrections_applied", correction_texts)
+    return {"corrections_applied": correction_texts}
+
+
+def parity_nested_fork_fail(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: An op that always fails, for the optional-branch-first-node-failure path."""
+    raise ValueError("optional branch first node failure (expected)")
+
+
+def parity_read_knob(ctx: Any) -> dict[str, Any]:
+    """SWEEP-9: An op that reads the test_knob knob value."""
+    return {"knob_read": ctx.knobs.get("test_knob", "")}
+
+
+def pid_reporting_gate(ctx: Any) -> str:
+    """A fn gate that records the current PID as a fact and proceeds.
+
+    Used by test_fn_gate_in_fork_branch_uses_forkserver: if the gate runs in
+    a forkserver child, its PID differs from the parent; if in-process, it matches.
+    """
+    import os
+    ctx.set_fact("gate_pid", os.getpid())
+    return "proceed"
+
+
+def test_apply_corrections(ctx: Any) -> dict[str, Any]:
+    """Test op that applies corrections from the ledger and records them as a fact."""
+    from pathlib import Path as _P
+    from refactory_dsh.design_ops import gate_corrections_due
+    _, corrections = gate_corrections_due(ctx.workdir)
+    correction_texts = [text for _, text in corrections]
+    _P(ctx.workdir, "design.md").write_text("# Corrected design\n")
+    return {"corrected": True, "correction_texts": correction_texts}
 
 
 def fail_on_a(ctx: Any) -> dict[str, Any]:
@@ -176,6 +299,49 @@ def fail_on_setup_fails(ctx: Any) -> dict[str, Any]:
     seen.setdefault("ids", []).append(str(item.get("id")))
     ctx.write_json("seen.json", seen)
     return {"seen": seen["ids"]}
+
+
+def fork_branch_write_a(ctx: Any) -> dict[str, Any]:
+    """Write a unique file via a relative path inside the run directory.
+
+    Used by test_concurrent_fork_branch_ops_write_to_run_dir: two branches
+    each write a file; both must land in the run directory.  Also records PID
+    so the test can verify the op ran in a child process (forkserver) rather
+    than in the parent (inline os.chdir).
+    """
+    import os
+    from pathlib import Path as _P
+    import time
+    # Small jitter so both branches are truly concurrent.
+    time.sleep(0.05)
+    _P("branch_a_output.txt").write_text("written by branch a\n")
+    ctx.set_fact("branch_a_pid", os.getpid())
+    return {"branch_a_written": True}
+
+
+def fork_branch_write_b(ctx: Any) -> dict[str, Any]:
+    """Write a unique file via a relative path inside the run directory."""
+    import os
+    from pathlib import Path as _P
+    import time
+    time.sleep(0.05)
+    _P("branch_b_output.txt").write_text("written by branch b\n")
+    ctx.set_fact("branch_b_pid", os.getpid())
+    return {"branch_b_written": True}
+
+
+def fn_gate_plain_str_with_stdout(ctx: Any) -> str:
+    """A fn gate that prints to stdout and returns a plain str (not Verdict).
+
+    Used by test_fn_gate_plain_str_stdout_is_feedback: the captured stdout
+    must appear as reloop feedback.
+    """
+    visits = int(ctx.facts.get("plain_gate_visits", 0)) + 1
+    ctx.set_fact("plain_gate_visits", visits)
+    if visits < 2:
+        print("stdout from plain str gate")
+        return "reloop"
+    return "proceed"
 
 
 def error_on_item(ctx: Any) -> dict[str, Any]:

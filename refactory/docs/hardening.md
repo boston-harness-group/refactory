@@ -2672,6 +2672,26 @@ verdict-use.  `apply_corrections` no longer declares
 `produces=("design_corrections_applied",)`, so the count fact set by
 `pick_gate_corrections` survives in `facts.json`.
 
+### Verdict-use: consumed field mechanism
+
+A verdict's `consumed` field now distinguishes two terminal states:
+
+- `consumed: used` — the walk applied this verdict (scope matched, label accepted).
+- `consumed: expired` — the verdict was consumed because the scope changed (design.md
+  was modified between the verdict and the resume) or the label was invalid.
+
+Legacy `consumed: yes` entries from older runs are treated as `used` for backward
+compatibility.
+
+`gate_corrections_due` counts only `consumed: used` (and legacy `yes`) verdicts as
+"went on", preventing double-application of corrections when a stray proceed expires.
+An expired verdict does not trigger re-application of corrections.
+
+A feedback note given with `proceed` at a gate is recorded as a correction on both
+runtimes (`--kind correction` in `refactory steer`).  `pick_gate_corrections` collects
+it and `apply_corrections` applies it to `design.md` before the build, on both
+runtimes.
+
 
 ## Base worktree integrity (dm-162)
 
