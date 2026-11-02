@@ -279,9 +279,15 @@ def test_response_reaches_extract_answer_unchanged(tmp_path):
         result = mode.run(workdir, model=model)
         assert result.exit_ok, f"run failed: {result.error}"
 
-        # Read answer.txt — the agent node's captured reply
-        answer_file = workdir / "answer.txt"
-        assert answer_file.exists(), "answer.txt not created"
+        # Read answer.txt — the agent node's captured reply, now in a pass directory
+        passes_dir = workdir / "passes" / "data"
+        assert passes_dir.exists(), "passes/data/ not created"
+        answer_file = None
+        for subdir in passes_dir.iterdir():
+            if subdir.is_dir() and (subdir / "answer.txt").exists():
+                answer_file = subdir / "answer.txt"
+                break
+        assert answer_file is not None and answer_file.exists(), "answer.txt not created in any pass dir"
         captured_reply = answer_file.read_text()
 
         # The raw response must reach extract_answer unchanged

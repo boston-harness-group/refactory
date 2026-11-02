@@ -583,6 +583,34 @@ class Graph:
                 stack.append(node.subgraph_entry)
         return seen
 
+    def data_body(self, data_id: str) -> set[str]:
+        """The nodes a data node runs once per item: its subgraph, entry to exit.
+
+        Followed the way the walk reaches them (edges, a fork's targets, a nested
+        data node's own subgraph), stopping at the exit: what comes after the exit
+        is not part of an item's pass. Both runtimes take a pass's read-through
+        inputs from this set, so it is computed in one place.
+        """
+        node = self.nodes.get(data_id)
+        if node is None or node.kind != "data" or not node.subgraph_entry:
+            return set()
+        seen: set[str] = set()
+        stack = [node.subgraph_entry]
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in self.nodes or current == data_id:
+                continue
+            seen.add(current)
+            if current == node.subgraph_exit:
+                continue
+            stack.extend(e.target for e in self.out_edges(current))
+            inner = self.nodes[current]
+            if inner.kind == "fork":
+                stack.extend(inner.targets)
+            if inner.kind == "data" and inner.subgraph_entry:
+                stack.append(inner.subgraph_entry)
+        return seen
+
     def knob_consumers(self) -> dict[str, list[str]]:
         """Which nodes consume each knob, for the dead-knob check."""
         consumers: dict[str, list[str]] = {}

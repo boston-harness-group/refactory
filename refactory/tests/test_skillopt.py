@@ -2470,15 +2470,24 @@ def record(ctx):
         write_subset(walker_dir, "train", 0.3, seed=77)
         walker_result = execute(walker_graph, walker_dir)
         assert walker_result.exit_ok, walker_result.error
-        walker_sidecar = walker_dir / "_seed_sidecar.json"
-        assert walker_sidecar.exists(), "walker did not produce sidecar"
-        walker_data = json.loads(walker_sidecar.read_text())
-        assert len(walker_data["setups"]) >= 1
-        assert len(walker_data["verifies"]) >= 1
-        assert walker_data["setups"][0]["part"] == "train"
-        assert walker_data["setups"][0]["seed"] == 77
-        assert walker_data["verifies"][0]["part"] == "train"
-        assert walker_data["verifies"][0]["seed"] == 77
+        # With pass isolation, each pass writes its sidecar in its pass directory.
+        walker_passes = walker_dir / "passes" / "data"
+        assert walker_passes.exists(), "walker did not create passes/data/"
+        walker_setups: list = []
+        walker_verifies: list = []
+        for subdir in sorted(walker_passes.iterdir()):
+            if subdir.is_dir():
+                sidecar = subdir / "_seed_sidecar.json"
+                if sidecar.exists():
+                    data = json.loads(sidecar.read_text())
+                    walker_setups.extend(data.get("setups", []))
+                    walker_verifies.extend(data.get("verifies", []))
+        assert len(walker_setups) >= 1
+        assert len(walker_verifies) >= 1
+        assert walker_setups[0]["part"] == "train"
+        assert walker_setups[0]["seed"] == 77
+        assert walker_verifies[0]["part"] == "train"
+        assert walker_verifies[0]["seed"] == 77
 
         # ── Spine run (real TS drain via data-drain.mts) ──
         spine_dir = tmp_path / "spine"
@@ -2527,22 +2536,31 @@ def record(ctx):
         )
 
         # ── Verify spine task received part/seed ──
-        spine_sidecar = spine_dir / "_seed_sidecar.json"
-        assert spine_sidecar.exists(), "spine did not produce sidecar"
-        spine_data = json.loads(spine_sidecar.read_text())
-        assert len(spine_data["setups"]) >= 1, "spine had no setup calls"
-        assert len(spine_data["verifies"]) >= 1, "spine had no verify calls"
-        assert spine_data["setups"][0]["part"] == "train", (
-            f"spine task.setup did not receive part='train', got {spine_data['setups'][0]['part']!r}"
+        # With pass isolation, each pass writes its sidecar in its pass directory.
+        spine_passes = spine_dir / "passes" / "data"
+        assert spine_passes.exists(), "spine did not create passes/data/"
+        spine_setups: list = []
+        spine_verifies: list = []
+        for subdir in sorted(spine_passes.iterdir()):
+            if subdir.is_dir():
+                sidecar = subdir / "_seed_sidecar.json"
+                if sidecar.exists():
+                    data = json.loads(sidecar.read_text())
+                    spine_setups.extend(data.get("setups", []))
+                    spine_verifies.extend(data.get("verifies", []))
+        assert len(spine_setups) >= 1, "spine had no setup calls"
+        assert len(spine_verifies) >= 1, "spine had no verify calls"
+        assert spine_setups[0]["part"] == "train", (
+            f"spine task.setup did not receive part='train', got {spine_setups[0]['part']!r}"
         )
-        assert spine_data["setups"][0]["seed"] == 77, (
-            f"spine task.setup did not receive seed=77, got {spine_data['setups'][0]['seed']!r}"
+        assert spine_setups[0]["seed"] == 77, (
+            f"spine task.setup did not receive seed=77, got {spine_setups[0]['seed']!r}"
         )
-        assert spine_data["verifies"][0]["part"] == "train", (
-            f"spine task.verify did not receive part='train', got {spine_data['verifies'][0]['part']!r}"
+        assert spine_verifies[0]["part"] == "train", (
+            f"spine task.verify did not receive part='train', got {spine_verifies[0]['part']!r}"
         )
-        assert spine_data["verifies"][0]["seed"] == 77, (
-            f"spine task.verify did not receive seed=77, got {spine_data['verifies'][0]['seed']!r}"
+        assert spine_verifies[0]["seed"] == 77, (
+            f"spine task.verify did not receive seed=77, got {spine_verifies[0]['seed']!r}"
         )
     finally:
         # Clean up sys.path

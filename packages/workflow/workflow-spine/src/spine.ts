@@ -76,6 +76,8 @@ export interface DataPass {
   exit: string
   /** True once the exit completed: the pass is finished and awaits its verdict. */
   finished: boolean
+  /** The isolated pass directory for this item, set by the drain after command_begin. */
+  passDir?: string
 }
 
 /** A gate stopped the run, rather than completing an item branch. */
@@ -808,6 +810,12 @@ export class Spine {
     if (this.pass === undefined) return undefined
     if (node !== undefined && this.pass.node !== node) return undefined
     return { ...this.pass }
+  }
+
+  /** Set the isolated pass directory on the current data pass. */
+  setPassDir(dir: string): void {
+    if (this.pass === undefined) throw new Error('no data pass is running')
+    this.pass = { ...this.pass, passDir: dir }
   }
 
   /**

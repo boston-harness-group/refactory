@@ -192,14 +192,16 @@ def _spine_records_with_exchanges(mode, state, workdir):
     }}
     (workdir / "declarations.json").write_text(json.dumps(decl))
 
+    from pathlib import Path
     items = load_items(data_node, workdir)
     records = []
     for i, item in enumerate(items):
-        command_begin(data_node, workdir, i)
-        # Simulate what agent_delivery.finish does in the spine path:
-        # write per-node exchanges to the sidecar file.
+        begin_result = command_begin(data_node, workdir, i)
+        # With pass isolation, exchanges are written to the pass directory
+        # (matching what the spine's pass-scoped runner does for subgraph commands).
+        pass_dir = Path(begin_result["pass_dir"])
         item_id = item.get("id", str(i))
-        record_exchange(workdir, "agent_node", f"prompt for {item_id}", f"response for {item_id}")
+        record_exchange(pass_dir, "agent_node", f"prompt for {item_id}", f"response for {item_id}")
         record = command_end(data_node, workdir, i)
         if record:
             records.append(record)
@@ -280,14 +282,16 @@ def test_exchange_sidecar_roundtrip(tmp_path):
     }}
     (workdir / "declarations.json").write_text(json.dumps(decl))
 
+    from pathlib import Path
     from refactory_dsh.nn.executor import load_items
     items = load_items(data_node, workdir)
     records = []
     for i, item in enumerate(items):
-        command_begin(data_node, workdir, i)
-        # Simulate what agent_delivery.finish does in the spine path:
-        # write per-node exchanges to the sidecar file.
-        record_exchange(workdir, "agent_node", f"prompt-{item.get('id', i)}", f"response-{item.get('id', i)}")
+        begin_result = command_begin(data_node, workdir, i)
+        # With pass isolation, exchanges must be written to the pass directory
+        # (where the subgraph runs, matching what the spine's pass-scoped runner does).
+        pass_dir = Path(begin_result["pass_dir"])
+        record_exchange(pass_dir, "agent_node", f"prompt-{item.get('id', i)}", f"response-{item.get('id', i)}")
         record = command_end(data_node, workdir, i)
         if record:
             records.append(record)

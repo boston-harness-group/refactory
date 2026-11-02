@@ -281,8 +281,12 @@ def test_failed_item_record_has_full_shape(tmp_path):
     (workdir / "declarations.json").write_text(json.dumps(decl))
 
     # Begin one item, write an exchange, then end with a failure.
-    command_begin(data_node, workdir, 0)
-    record_exchange(workdir, "agent_node", "hello", "world")
+    # With pass isolation, the exchange must be written to the pass directory
+    # (where the subgraph runs), not the run-level workdir.
+    from pathlib import Path
+    begin_result = command_begin(data_node, workdir, 0)
+    pass_dir = Path(begin_result["pass_dir"])
+    record_exchange(pass_dir, "agent_node", "hello", "world")
     record = command_end(data_node, workdir, 0,
                          failed_reason="subgraph failed",
                          failed_kind="RuntimeError")

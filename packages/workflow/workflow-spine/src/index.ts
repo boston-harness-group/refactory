@@ -492,6 +492,8 @@ interface Materialised {
   key: string
   /** The item `begin` printed for that pass. */
   item: unknown
+  /** The isolated pass directory returned by command_begin. */
+  passDir?: string
 }
 
 /** A graph opened at run time, and the session that owns it. */
@@ -1108,6 +1110,10 @@ export function apply(ctx: Context, config: Config): void {
       if (saved.materialised !== null) {
         const pass = spine.passOf()!
         if (saved.materialised?.key !== `${pass.node}:${pass.index}`) throw new Error('saved item setup belongs to another data pass')
+        // passDir needs no restoring here: state() serialises the whole
+        // DataPass (spine.ts:749) and restore() puts it back (spine.ts:1654),
+        // so spine.restore(saved) above has already recovered it. data.spec.ts
+        // asserts that for both state.pass.passDir and materialised.passDir.
         materialised.set(spine, saved.materialised)
       }
     }
@@ -1617,7 +1623,14 @@ export function apply(ctx: Context, config: Config): void {
         recordBoundary()
         return {}
       }
-      materialised.set(spine, { key, item: started.value })
+      const passDir = typeof (started.value as Record<string, unknown>)?.pass_dir === 'string'
+        ? (started.value as Record<string, unknown>).pass_dir as string
+        : undefined
+      const mat: Materialised = passDir !== undefined
+        ? { key, item: started.value, passDir }
+        : { key, item: started.value }
+      materialised.set(spine, mat)
+      if (passDir !== undefined) spine.setPassDir(passDir)
       item = started.value
       recordBoundary()
       return {}
@@ -1779,6 +1792,13 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
       }
+      // Pass isolation: when a data pass has a passDir, subgraph commands
+      // run in the pass directory so their files and facts are isolated.
+      const activePassForRunner = spine.passOf()
+      const effectiveRunner = activePassForRunner?.passDir
+        ? { ...runner, workdir: activePassForRunner.passDir, env: { ...runner.env, REFACTORY_WORKDIR: activePassForRunner.passDir } }
+        : runner
+
       const outcomes = await Promise.all(automatic.map(async node => {
         // A finishing command hands its slot straight to the first waiter rather
         // than returning it to the pool, so a fresh starter cannot slip in
@@ -1786,7 +1806,7 @@ export function apply(ctx: Context, config: Config): void {
         if (inFlight >= ceiling) await new Promise<void>(resolve => waiters.push(resolve))
         else inFlight += 1
         try {
-          return await runDeterministic(shell, node, runner, feedbackFiles[node.id])
+          return await runDeterministic(shell, node, effectiveRunner, feedbackFiles[node.id])
         } finally {
           const next = waiters.shift()
           if (next === undefined) inFlight -= 1
@@ -1964,12 +1984,19 @@ export function apply(ctx: Context, config: Config): void {
     drainSkipReceipts(spine, workdir, commandEnv, agentCommand)
     if (next.status === 'ready' && !spine.isPaused() && agentCommand !== '' && workdir !== undefined) {
       const runKey = workdir
+      // Pass isolation: agent delivery commands must run in the pass directory
+      // so snapshots and exchanges are found by command_end.
+      const agentPass = spine.passOf()
+      const agentDir = agentPass?.passDir ?? workdir
+      const agentEnv = agentPass?.passDir
+        ? { ...commandEnv, REFACTORY_WORKDIR: agentPass.passDir }
+        : commandEnv
       for (const node of next.nodes) {
         if (node._type !== 'AgentNode' && node._type !== 'LLMNode') continue
         // Dispatched AgentNodes are run by commandOf()/drain(); skip them here
         // to avoid recording a double delivery.
         if (isDeterministic(node)) continue
-        const receipt = runtimeBridge(agentCommand, workdir, commandEnv, {
+        const receipt = runtimeBridge(agentCommand, agentDir, agentEnv, {
           action: 'begin', node: node.id, prompt: node.prompt_template ?? '',
           reads: node.reads ?? [], writes: node.writes ?? [],
           ...(node.tool_policy === 'none' ? { tool_policy: 'none' } : {}),
@@ -2557,7 +2584,14 @@ export function apply(ctx: Context, config: Config): void {
         }
         const mapKey = `${runKey}:${args.node}`
         const nodeUnresolved = pendingUnresolvedKeys.get(mapKey)
-        runtimeBridge(agentCommand, workdir, commandEnv, {
+        // Pass isolation: agent delivery must write exchanges to the pass
+        // directory so command_end reads them from the right place.
+        const finishPass = spine.passOf()
+        const finishDir = finishPass?.passDir ?? workdir
+        const finishEnv = finishPass?.passDir
+          ? { ...commandEnv, REFACTORY_WORKDIR: finishPass.passDir }
+          : commandEnv
+        runtimeBridge(agentCommand, finishDir, finishEnv, {
           action: 'finish', node: args.node,
           ...(sentPromptHash !== undefined ? { sent_prompt_hash: sentPromptHash } : {}),
           ...(sentPromptText !== undefined ? { sent_prompt: sentPromptText } : {}),
