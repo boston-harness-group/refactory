@@ -112,15 +112,20 @@ def test_additive_composes_web_and_refactory_without_copying_web(additive_home):
         assert "<title>Refactory</title>" in page and "DeepSeek Harness</title>" not in page
         assert rpc(opener, base, "refactoryConsole/project", {}) == str(REPO_ROOT)
         from refactory_dsh.console import catalogue
+        from refactory_dsh import registry as _reg
         modes = rpc(opener, base, "refactoryConsole/modes", {})
         server_ids = {row["id"] for row in modes}
         shipped_ids = {row["id"] for row in catalogue(project=REPO_ROOT)}
         # The server and catalogue both scan .factory/packages/; in parallel CI
         # another worker may have installed a workspace package (e.g. created_pkg)
-        # between the two snapshots.  The shipped set must be present; extra
-        # workspace packages are not a failure.
-        assert shipped_ids <= server_ids, (
-            f"server is missing shipped modes: {shipped_ids - server_ids}"
+        # between the two snapshots.  Filter out workspace-only packages that
+        # appeared after the server started — they are not a test failure.
+        _ws_root = _reg.workspace_root(REPO_ROOT)
+        _ws_pkgs = {d.name for d in _ws_root.iterdir() if d.is_dir()} if _ws_root.is_dir() else set()
+        _ws_ids = {s for s in shipped_ids if s.split("/", 1)[0] in _ws_pkgs}
+        shipped_stable = shipped_ids - _ws_ids
+        assert shipped_stable <= server_ids, (
+            f"server is missing shipped modes: {shipped_stable - server_ids}"
         )
         created = rpc(opener, base, "session/create", {"request": {"cwd": str(user_home)}})
         assert created["agentPreset"] == "ceo"

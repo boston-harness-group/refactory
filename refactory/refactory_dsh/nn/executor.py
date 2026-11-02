@@ -66,6 +66,9 @@ def _emit_run_warnings(workdir: Path, node_id: str, stderr: str) -> None:
 # ── forkserver context (module-level, shared across all Executor instances) ──
 _forkserver_ctx = multiprocessing.get_context("forkserver")
 _forkserver_modules: set[str] = set()
+# Lock for thread-safe manipulation of __main__.__file__ during child.start().
+# Concurrent fork-branch threads must not race on the process-wide global.
+_main_file_lock = threading.Lock()
 
 
 def _ensure_forkserver_preload(graph: Graph) -> None:
@@ -1389,19 +1392,22 @@ class Executor:
             # which then fails with FileNotFoundError.  Our forkserver child
             # runs ``_op_child_target`` directly and never needs ``__main__``,
             # so we temporarily clear ``__file__`` for the start() call.
+            # The lock serialises concurrent fork-branch threads that modify
+            # the process-wide ``__main__.__file__`` global.
             import __main__ as _main_mod
-            _saved_main_file = getattr(_main_mod, "__file__", None)
-            _need_clear = (
-                _saved_main_file is not None
-                and not os.path.isfile(_saved_main_file)
-            )
-            if _need_clear:
-                _main_mod.__file__ = None  # type: ignore[attr-defined]
-            try:
-                child.start()
-            finally:
+            with _main_file_lock:
+                _saved_main_file = getattr(_main_mod, "__file__", None)
+                _need_clear = (
+                    _saved_main_file is not None
+                    and not os.path.isfile(_saved_main_file)
+                )
                 if _need_clear:
-                    _main_mod.__file__ = _saved_main_file  # type: ignore[attr-defined]
+                    _main_mod.__file__ = None  # type: ignore[attr-defined]
+                try:
+                    child.start()
+                finally:
+                    if _need_clear:
+                        _main_mod.__file__ = _saved_main_file  # type: ignore[attr-defined]
         except BaseException:
             parent_conn.close()
             child_conn.close()
