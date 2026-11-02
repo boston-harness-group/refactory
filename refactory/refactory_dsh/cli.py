@@ -736,6 +736,15 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     return 2
 
 
+def _read_facts(run_dir: Path) -> dict:
+    """The run's facts (its check command among them), or ``{}`` when none are readable."""
+    try:
+        found = json.loads((run_dir / "facts.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
 def _replay_probe_results(run_dir: Path, repo_root: Path, report: str, commit: str | None) -> str:
     """Rerun the probe files the replayed verifier wrote, in a scratch clone at the commit.
 
@@ -762,8 +771,19 @@ def _replay_probe_results(run_dir: Path, repo_root: Path, report: str, commit: s
         with tempfile.TemporaryDirectory(prefix="refactory-probe-rerun-") as scratch:
             checkout = Path(scratch) / "repo"
             clones.clone_shared(repo_root, checkout, rev)
+            # The check's interpreter: the clone has no environment of its own, so it is
+            # looked up in the verifier's checkout and then the repository's main checkout.
+            facts = _read_facts(run_dir)
+            roots = [repo_root]
+            try:
+                common = worktree.git(repo_root, "rev-parse", "--path-format=absolute",
+                                      "--git-common-dir").strip()
+                roots.append(Path(common).parent)
+            except (ValueError, OSError):
+                pass
             results = probe_rerun.run_probes(probes, checkout, report, base=base,
-                                             reset=clones._clean)
+                                             reset=clones._clean,
+                                             check=str(facts.get("check") or ""), roots=roots)
     except (ValueError, OSError) as exc:  # WorkspaceError is a ValueError
         return f"# Probe results\n\nThe probes could not be rerun: {exc}\n"
     return probe_rerun.write_results(run_dir, results)

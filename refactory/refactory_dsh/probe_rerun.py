@@ -16,7 +16,11 @@ on a known-buggy commit showed why the file matters: where the bugs were, it wro
 - a PROBED line naming no probe file, a missing one, or one that only invokes a test the
   repository had before the change is UNVERIFIED (`design_ops._check_unverified_coverage`
   gives it the coverage rule's one QA-director re-run, then lists it as advisory);
-- a probe that fails is a defect finding (kind defect, severity high, breaks its
+- each probe runs with the check's interpreter and the checkout's sources importable
+  (`probe_environment`); one that stops before reaching the change because of that
+  environment -- the project's own package not importable, a missing interpreter or Node
+  package -- is "could not run (environment)", advisory (`environment_failure`);
+- any other probe that fails is a defect finding (kind defect, severity high, breaks its
   requirement) that `design_ops.gate_qa` sends back.
 
 Design mode runs this as the ``rerun_probes`` op before ``synthesize_qa``, which both
@@ -156,20 +160,195 @@ def only_existing_tests(name: str, text: str, repo: Path, base: str,
     return [] if own else invoked
 
 
-def _command(probe: Path, text: str, env: dict[str, str]) -> list[str]:
+#: Where a project keeps its virtual environment's interpreter, from the project's root.
+_VENV_PYTHONS = (".venv/bin/python", "venv/bin/python", ".venv/Scripts/python.exe")
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+#: Directories a search for the checkout's Python projects does not enter.
+_SKIP_DIRS = {"node_modules", "__pycache__", "dist", "build", "vendor", "site-packages"}
+
+
+def _python_steps(check: str) -> list[list[str]]:
+    """The check command's steps that run Python (pytest or an interpreter), as words."""
+    import shlex
+
+    from refactory_dsh.base_check import _steps
+
+    found = []
+    for step in _steps(check or ""):
+        try:
+            words = shlex.split(step)
+        except ValueError:
+            continue
+        if any("python" in word or "pytest" in word for word in words):
+            found.append(words)
+    return found
+
+
+def _split_assignments(words: list[str]) -> tuple[dict[str, str], list[str]]:
+    """A step's leading ``NAME=value`` words (after an ``env``), and the command after them."""
+    assigned: dict[str, str] = {}
+    rest = list(words)
+    if rest[:1] == ["env"]:
+        rest = rest[1:]
+    while rest and _ASSIGNMENT.match(rest[0]):
+        name, value = _ASSIGNMENT.match(rest[0]).groups()  # type: ignore[union-attr]
+        assigned[name] = value
+        rest = rest[1:]
+    return assigned, rest
+
+
+def check_interpreter(check: str, roots: list[Path]) -> str | None:
+    """The interpreter the check runs Python with: the one its command names by path (such
+    as ``.venv/bin/python -m pytest``), else the project's virtual environment, looked up in
+    each of ``roots`` in turn (the scratch checkout first). ``None`` when there is none."""
+    named = []
+    for words in _python_steps(check):
+        _, command = _split_assignments(words)
+        if command and "python" in Path(command[0]).name and "/" in command[0]:
+            named.append(command[0])
+    for root in roots:
+        for relative in (*named, *_VENV_PYTHONS):
+            candidate = Path(relative) if Path(relative).is_absolute() else Path(root) / relative
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
+def _project_roots(checkout: Path, depth: int = 3) -> list[Path]:
+    """The checkout's Python projects' import roots: each directory with a ``pyproject.toml``,
+    ``setup.py`` or ``setup.cfg`` (its ``src/`` in a src layout), nearest the root first."""
+    found: list[Path] = []
+    level = [checkout]
+    for _ in range(depth):
+        following: list[Path] = []
+        for directory in level:
+            if any((directory / name).is_file() for name in ("pyproject.toml", "setup.py", "setup.cfg")):
+                found.append(directory / "src" if (directory / "src").is_dir() else directory)
+            try:
+                children = sorted(directory.iterdir())
+            except OSError:
+                continue
+            following += [child for child in children if child.is_dir() and not child.is_symlink()
+                          and not child.name.startswith(".") and child.name not in _SKIP_DIRS
+                          and not (child / "pyvenv.cfg").exists()]
+        level = following
+    return found
+
+
+def _test_roots(check: str, checkout: Path) -> list[Path]:
+    """The directories pytest puts on the import path for the check's test paths: each named
+    path's directory, up to the first that is not a package (pytest's ``prepend`` mode)."""
+    found: list[Path] = []
+    for words in _python_steps(check):
+        _, command = _split_assignments(words)
+        for word in command[1:]:
+            if word.startswith("-") or "::" in word:
+                continue
+            path = checkout / word
+            if not (path.is_dir() or (path.is_file() and path.suffix == ".py")):
+                continue
+            directory = path if path.is_dir() else path.parent
+            while (directory / "__init__.py").is_file() and directory != checkout:
+                directory = directory.parent
+            found.append(directory)
+    return found
+
+
+def probe_environment(checkout: Path, env: dict[str, str], check: str = "",
+                      roots: list[Path] | None = None) -> tuple[dict[str, str], str]:
+    """The environment and interpreter a probe runs with: the check's.
+
+    The interpreter is the check's (`check_interpreter`), its directory first on PATH so a
+    ``.sh`` probe's ``python`` is the same one. The scratch checkout's sources come first on
+    the import path, ahead of any installed copy: the ``PYTHONPATH`` the check's command
+    sets (relative to the checkout), each Python project's import root, and the check's
+    test directories. An inherited ``PYTHONPATH`` is dropped, as the check's environment
+    never has one (`worktree.check_environment`): it would import another checkout's code.
+    """
+    checkout = Path(checkout)
+    env = dict(env)
+    python = check_interpreter(check, [checkout, *(roots or [])])
+    if python is not None:
+        bin_dir = str(Path(python).parent)
+        env["PATH"] = os.pathsep.join([bin_dir, *(entry for entry in env.get("PATH", "").split(os.pathsep)
+                                                  if entry and entry != bin_dir)])
+        if (Path(python).parent.parent / "pyvenv.cfg").is_file():
+            env["VIRTUAL_ENV"] = str(Path(python).parent.parent)
+    else:
+        python = (shutil.which("python", path=env.get("PATH")) or shutil.which("python3", path=env.get("PATH"))
+                  or sys.executable)
+    paths: list[Path] = []
+    for words in _python_steps(check):
+        assigned, _ = _split_assignments(words)
+        for name, value in assigned.items():
+            if name == "PYTHONPATH":
+                paths += [entry if Path(entry).is_absolute() else checkout / entry
+                          for entry in value.split(os.pathsep) if entry and "$" not in entry]
+            elif "$" not in value:
+                env[name] = value
+    paths += [*_project_roots(checkout), *_test_roots(check, checkout), checkout]
+    ordered = list(dict.fromkeys(str(Path(path)) for path in paths))
+    env["PYTHONPATH"] = os.pathsep.join(ordered)
+    return env, python
+
+
+def _command(probe: Path, text: str, python: str) -> list[str]:
     if probe.suffix == ".sh":
         return ["bash", str(probe)]
-    python = (shutil.which("python", path=env.get("PATH")) or shutil.which("python3", path=env.get("PATH"))
-              or sys.executable)
     if re.search(r"^\s*(?:async\s+)?def\s+test_", text, re.M):
         return [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(probe)]
     return [python, str(probe)]
 
 
+_NO_MODULE = re.compile(r"ModuleNotFoundError: No module named '([\w.]+)'")
+_UNKNOWN_LOCATION = re.compile(r"ImportError: cannot import name '\w+' from '([\w.]+)' \(unknown location\)")
+_NOT_FOUND = re.compile(r"(?:^|\s)([\w.+-]+): (?:command )?not found\s*$", re.M)
+_NODE_MISSING = re.compile(r"Cannot find (?:module|package) '([^']+)'")
+#: Test runners a probe is run with: missing from the interpreter, the probe never started.
+_RUNNERS = {"pytest", "_pytest", "pluggy"}
+
+
+def _own_package(name: str, roots: list[Path]) -> bool:
+    return any((root / name / "__init__.py").is_file() or (root / f"{name}.py").is_file()
+               or (root / name).is_dir() and any((root / name).glob("*.py")) for root in roots)
+
+
+def environment_failure(code: int | None, output: str, checkout: Path, env: dict[str, str]) -> str:
+    """Why a failing probe could not run in this environment, or ``""`` when it ran and failed.
+
+    A probe could not run when it stops before reaching the change: the project's own
+    package (one the checkout has) or the test runner is not importable, its interpreter or
+    a command it calls is missing, or a Node package it imports is not installed. Anything
+    else -- an assertion, an error inside the code, a module the change was to add -- is
+    the probe's verdict on the change.
+    """
+    if code is None or code == 0:
+        return ""
+    roots = [Path(entry) for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry] or [checkout]
+    for match in _NO_MODULE.finditer(output):
+        name = match[1]
+        if name in _RUNNERS or ("." not in name and _own_package(name, roots)):
+            return f"the interpreter cannot import {name!r} (No module named {name!r})"
+    for match in _UNKNOWN_LOCATION.finditer(output):
+        if "." not in match[1] and _own_package(match[1], roots):
+            return f"the interpreter cannot import {match[1]!r} (unknown location)"
+    if code == 127:
+        missing = _NOT_FOUND.search(output)
+        return f"{missing[1] if missing else 'a command it runs'} is not installed (exit 127)"
+    for match in _NODE_MISSING.finditer(output):
+        name = match[1]
+        if not name.startswith((".", "/")) and not (checkout / "node_modules" / name).exists():
+            return f"the Node package {name!r} is not installed in the checkout"
+    return ""
+
+
 def _run_one(command: list[str], cwd: Path, env: dict[str, str], timeout: float) -> tuple[int | None, str]:
     """Run ``command`` in its own process group; ``(exit code or None on timeout, output)``."""
-    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:  # the interpreter or shell itself is missing
+        return 127, f"{command[0]}: not found ({exc})"
     try:
         out, _ = process.communicate(timeout=timeout)
         return process.returncode, out.decode(errors="replace")
@@ -188,15 +367,20 @@ def _tail(output: str) -> str:
 
 def run_probes(probes: Path, checkout: Path, report: str, *, base: str, env: dict[str, str] | None = None,
                reset: Callable[[Path], None] | None = None, per_probe_s: float = PROBE_TIMEOUT_S,
-               total_s: float = PROBES_TOTAL_S) -> dict[str, Any]:
+               total_s: float = PROBES_TOTAL_S, check: str = "",
+               roots: list[Path] | None = None) -> dict[str, Any]:
     """Run each probe file in ``probes`` in the scratch ``checkout``; check ``report``'s claims.
 
     ``checkout`` is a clone at the attempt's commit, made for this; ``reset`` puts it back
     to that commit before each probe. ``base`` is the commit the change started from, which
-    decides what a pre-existing test is. Returns the results `write_results` records.
+    decides what a pre-existing test is. Each probe runs with the check's interpreter and
+    the checkout's sources importable (`probe_environment`; ``check`` is the run's check
+    command, ``roots`` other directories to find its interpreter in). A probe that could
+    not run in that environment (`environment_failure`) is advisory, not a defect. Returns
+    the results `write_results` records.
     """
-    env = dict(os.environ if env is None else env)
-    env["PYTHONPATH"] = os.pathsep.join([str(checkout), *filter(None, [env.get("PYTHONPATH")])])
+    env, python = probe_environment(Path(checkout), dict(os.environ if env is None else env),
+                                    check, roots)
     files = _base_files(checkout, base)
     names = sorted(path.name for path in probes.iterdir()
                    if path.is_file() and PROBE_NAME.match(path.name)) if probes.is_dir() else []
@@ -219,10 +403,13 @@ def run_probes(probes: Path, checkout: Path, report: str, *, base: str, env: dic
         target = checkout / PROBES / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(probes / name, target)
-        code, output = _run_one(_command(target, text, env), checkout, env, min(per_probe_s, left))
+        code, output = _run_one(_command(target, text, python), checkout, env, min(per_probe_s, left))
         entry["exit_code"] = code
         entry["tail"] = _tail(output)
         entry["status"] = ("timed_out" if code is None else "pass" if code == 0 else "fail")
+        why = environment_failure(code, output, Path(checkout), env)
+        if why:
+            entry["status"], entry["environment"] = "environment", why
         results.append(entry)
     if reset is not None:
         reset(checkout)
@@ -272,7 +459,8 @@ def render(results: dict[str, Any]) -> str:
              "| --- | --- | --- | --- | --- |"]
     for entry in results.get("probes", []):
         result = {"pass": "pass", "fail": "FAIL", "timed_out": "FAIL (timed out)",
-                  "unrun": "not run (advisory)"}[entry["status"]]
+                  "unrun": "not run (advisory)",
+                  "environment": "could not run (environment)"}[entry["status"]]
         if entry.get("existing_tests"):
             result += " — only invokes existing tests: UNVERIFIED"
         tail = entry.get("tail", "").replace("|", "\\|").replace("\n", "<br>")
@@ -288,6 +476,12 @@ def render(results: dict[str, Any]) -> str:
     if found:
         lines += ["", "## Failing probes (defects, blocking)", ""]
         lines += [f"- {item['where']}: {item['what']} ({item['why']})" for item in found]
+    blocked = [entry for entry in results.get("probes", []) if entry["status"] == "environment"]
+    if blocked:
+        lines += ["", "## Could not run (environment, advisory)", "",
+                  "These probes stopped before reaching the change, so they say nothing about it; "
+                  "they are listed for the person, not sent back.", "",
+                  *(f"- {entry['file']}: {entry.get('environment', '')}" for entry in blocked)]
     unrun = [entry["file"] for entry in results.get("probes", []) if entry["status"] == "unrun"]
     if unrun:
         lines += ["", "## Not run (advisory)", "", *(f"- {name}" for name in unrun)]
@@ -351,6 +545,7 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
             else:
                 env[key] = str(value)
         results = run_probes(probes, Path(prepared["path"]), report, base=found.base, env=env,
-                             reset=clones._clean)
+                             reset=clones._clean, check=str(ctx.facts.get("check") or ""),
+                             roots=[Path(found.path)])
     text = write_results(workdir, results)
     return {"probe_results": text}

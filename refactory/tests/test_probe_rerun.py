@@ -33,6 +33,11 @@ def _repo(path: Path) -> tuple[str, str]:
     (path / "tests").mkdir()
     (path / "tests" / "test_calc.py").write_text(
         "from calc import double\n\n\ndef test_double():\n    assert double(2) == 4\n")
+    # A package of its own in a subdirectory project, as refactory's is: importable only
+    # with that project's root on the import path, never from the checkout's root.
+    (path / "proj" / "mypkg").mkdir(parents=True)
+    (path / "proj" / "pyproject.toml").write_text('[project]\nname = "mypkg"\nversion = "0"\n')
+    (path / "proj" / "mypkg" / "__init__.py").write_text("def triple(x):\n    return 3 * x\n")
     _git(path, "add", "-A")
     _git(path, "commit", "-qm", "base")
     base = _git(path, "rev-parse", "HEAD")
@@ -210,3 +215,84 @@ def test_replay_verifier_reruns_the_probes_and_prints_the_table(tmp_path, monkey
     assert "# Probe results" in out and "| R1-1.py | R1 | 0 | pass |" in out
     assert (run_dir / probe_rerun.RESULTS_MD).is_file()
     assert not (work / "reviews").exists() and (run_dir / probe_rerun.PROBES / "R1-1.py").is_file()
+
+
+PACKAGE_REPORT = "#### Requirement: R1\n- Failure points: PROBED reviews/probes/R1-1.py\n\nVERDICT: PASS\n"
+
+
+def test_a_probe_importing_the_projects_own_package_runs_and_passes(tmp_path, monkeypatch):
+    """The replay's 14 false defects: the package lives in a subdirectory project, so the
+    checkout's root alone on the import path gave ModuleNotFoundError."""
+    probe = "# R1: triple(2); expected 6\nfrom mypkg import triple\nassert triple(2) == 6\n"
+    ctx = _run(tmp_path, monkeypatch, PACKAGE_REPORT, {"R1-1.py": probe})
+    [entry] = probe_rerun.read_results(ctx)["probes"]
+    assert entry["status"] == "pass", entry["tail"]
+    assert design_ops.gate_qa(ctx) == "proceed"
+
+
+def test_a_probe_of_the_package_that_asserts_false_is_a_defect(tmp_path, monkeypatch):
+    probe = "# R1: triple(2); expected 7\nfrom mypkg import triple\nassert triple(2) == 7\n"
+    ctx = _run(tmp_path, monkeypatch, PACKAGE_REPORT, {"R1-1.py": probe})
+    [entry] = probe_rerun.read_results(ctx)["probes"]
+    assert entry["status"] == "fail" and "AssertionError" in entry["tail"]
+    assert len(probe_rerun.defects(probe_rerun.read_results(ctx))) == 1
+    assert design_ops.gate_qa(ctx) == "reloop"
+
+
+def test_the_projects_package_not_importable_is_could_not_run_not_a_defect(tmp_path, monkeypatch):
+    """ModuleNotFoundError for the project's own package: the probe never reached the change.
+    Listed for the person; not a defect, and the change is not sent back."""
+    probe = "# R1: triple\nraise ModuleNotFoundError(\"No module named 'mypkg'\")\n"
+    ctx = _run(tmp_path, monkeypatch, PACKAGE_REPORT, {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    [entry] = results["probes"]
+    assert entry["status"] == "environment" and "mypkg" in entry["environment"]
+    assert probe_rerun.defects(results) == [] and results["unverified"] == []
+    table = ctx.read_text(probe_rerun.RESULTS_MD)
+    assert "could not run (environment)" in table
+    assert "## Could not run (environment, advisory)" in table and "Failing probes" not in table
+    assert design_ops.gate_qa(ctx) == "proceed"
+
+
+def test_a_missing_module_the_change_was_to_add_stays_a_defect(tmp_path, monkeypatch):
+    """Only the project's own, existing package is the environment: a submodule or a module
+    the checkout does not have is the probe's verdict on the change."""
+    for missing in ("mypkg.added", "nothere"):
+        probe = f"# R1: x\nimport {missing}\n"
+        ctx = _run(tmp_path / missing, monkeypatch, PACKAGE_REPORT, {"R1-1.py": probe})
+        [entry] = probe_rerun.read_results(ctx)["probes"]
+        assert entry["status"] == "fail", missing
+        assert len(probe_rerun.defects(probe_rerun.read_results(ctx))) == 1
+
+
+def test_a_missing_interpreter_is_could_not_run(tmp_path):
+    out = tmp_path / "probes"
+    out.mkdir()
+    (out / "R1-1.sh").write_text("#!/bin/sh\n# R1: x\nno-such-tool-xyz --version\n")
+    target = tmp_path / "target"
+    base, _ = _repo(target)
+    results = probe_rerun.run_probes(out, target, PACKAGE_REPORT.replace(".py", ".sh"), base=base)
+    [entry] = results["probes"]
+    assert entry["status"] == "environment" and "no-such-tool-xyz" in entry["environment"]
+    assert probe_rerun.defects(results) == []
+
+
+def test_a_probe_importing_refactory_dsh_runs_from_the_scratch_checkout(tmp_path):
+    """This repository: a scratch clone has no environment of its own; the probe runs with
+    the check's interpreter (found in the source checkout) and imports refactory_dsh from
+    the clone's sources, not an installed copy."""
+    repo = Path(__file__).resolve().parents[2]
+    checkout = tmp_path / "repo"
+    clones.clone_shared(repo, checkout, "HEAD")
+    out = tmp_path / "probes"
+    out.mkdir()
+    (out / "R1-1.py").write_text(
+        "# R1: refactory_dsh imports from the checkout\nimport sys\nimport refactory_dsh.probe_rerun as m\n"
+        f"assert m.__file__.startswith({str(checkout)!r}), m.__file__\n")
+    check = "pnpm test && .venv/bin/python -m pytest -q refactory/tests"
+    env = {key: value for key, value in __import__("os").environ.items() if key != "PYTHONPATH"}
+    env["PATH"] = "/usr/bin:/bin"
+    results = probe_rerun.run_probes(out, checkout, PACKAGE_REPORT, base="HEAD", env=env,
+                                     check=check, roots=[repo])
+    [entry] = results["probes"]
+    assert entry["status"] == "pass", entry["tail"]
