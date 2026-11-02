@@ -61,9 +61,11 @@ _PROBED = re.compile(r"\bPROBED\b")
 #: A test file and optional test id a probe hands to pytest, or a test module it imports.
 _TEST_ID = re.compile(r"([\w./-]*test[\w./-]*\.py)(?:::(\w+))?")
 _FROM_IMPORT = re.compile(r"^[ \t]*from[ \t]+([\w.]+)[ \t]+import[ \t]+(?:\(([\w\s,]+)\)|([\w \t,]+))", re.M)
-#: A check of the probe's own: an assertion, an expected raise, or an explicit exit.
-_OWN_CHECK = {".py": re.compile(r"\bassert\b|pytest\.raises|\braise\b|sys\.exit\("),
-              ".sh": re.compile(r"\bexit\b|\[\s|\btest\s|python3?\s+(?:-c|-\s*<<)|<<")}
+#: A check of the probe's own: an assertion or an expected raise. Not an exit status:
+#: `sys.exit(subprocess.run([... "pytest", "<existing test>"]).returncode)` is the obvious
+#: way to write "just run the repository's test", which is the one thing a probe may not be.
+_OWN_CHECK = {".py": re.compile(r"\bassert\b|pytest\.raises|\braise\b"),
+              ".sh": re.compile(r"\[\s|\btest\s|python3?\s+(?:-c|-\s*<<)|<<")}
 
 
 def requirement_of(name: str) -> str:
@@ -147,6 +149,39 @@ def existing_tests_invoked(text: str, repo: Path, base: str,
         found += [f"{name}::{test}" for test in tests
                   if re.search(rf"^\s*(?:async\s+)?def\s+{test}\b", source, re.M)]
     return sorted(set(found))
+
+
+#: A run that checked nothing: nothing collected, or everything skipped or deselected.
+_NOTHING_RAN = re.compile(r"no tests ran|collected 0 items|no tests collected", re.I)
+_ALL_SKIPPED = re.compile(r"\b\d+ (?:skipped|deselected)\b", re.I)
+#: Any outcome that means a test actually executed and reported.
+_SOMETHING_RAN = re.compile(r"\b\d+ (?:passed|failed|error|errors|xpassed|xfailed)\b", re.I)
+
+
+def has_own_check(name: str, text: str) -> bool:
+    """Whether a probe file contains a check of its own at all.
+
+    A probe is model-authored, and `print("ok")` or `def test_nothing(): pass` exits 0.
+    Without a floor, "every probe passed" says nothing about the requirements, so a
+    probe with no assertion is reported unverified rather than passing.
+    """
+    pattern = _OWN_CHECK.get(Path(name).suffix)
+    if pattern is None:
+        return True
+    body = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+    return bool(pattern.search(body))
+
+
+def ran_nothing(output: str) -> bool:
+    """Whether a probe's own output says it checked nothing.
+
+    Either it collected nothing, or it reported only skips and deselections with no
+    test actually executing. A run with one skip beside one pass has still checked
+    something, so only the absence of any executed outcome counts.
+    """
+    if _SOMETHING_RAN.search(output):
+        return False
+    return bool(_NOTHING_RAN.search(output) or _ALL_SKIPPED.search(output))
 
 
 def only_existing_tests(name: str, text: str, repo: Path, base: str,
@@ -333,8 +368,14 @@ def environment_failure(code: int | None, output: str, checkout: Path, env: dict
         if "." not in match[1] and _own_package(match[1], roots):
             return f"the interpreter cannot import {match[1]!r} (unknown location)"
     if code == 127:
+        # Only when the output actually names what was not found. A bare 127 is not
+        # evidence of a missing command: a probe whose last line is `exit 127`, or
+        # whose own shell exits 127 for another reason, would otherwise mark itself
+        # "environment" and stop being a defect -- a blocking check that any probe
+        # can opt out of.
         missing = _NOT_FOUND.search(output)
-        return f"{missing[1] if missing else 'a command it runs'} is not installed (exit 127)"
+        if missing:
+            return f"{missing[1]} is not installed (exit 127)"
     for match in _NODE_MISSING.finditer(output):
         name = match[1]
         if not name.startswith((".", "/")) and not (checkout / "node_modules" / name).exists():
@@ -410,6 +451,12 @@ def run_probes(probes: Path, checkout: Path, report: str, *, base: str, env: dic
         why = environment_failure(code, output, Path(checkout), env)
         if why:
             entry["status"], entry["environment"] = "environment", why
+        elif entry["status"] == "pass":
+            # A pass only counts when the probe actually checked something.
+            if not has_own_check(name, text):
+                entry["status"], entry["no_check"] = "no_check", "the probe makes no check of its own"
+            elif ran_nothing(output):
+                entry["status"], entry["no_check"] = "no_check", "the probe's run checked nothing"
         results.append(entry)
     if reset is not None:
         reset(checkout)
@@ -424,6 +471,9 @@ def run_probes(probes: Path, checkout: Path, report: str, *, base: str, env: dic
         elif entry["existing_tests"]:
             why = (f"its probe file {claim['file']} only invokes tests the repository already had: "
                    + ", ".join(entry["existing_tests"]))
+        elif entry.get("status") == "no_check":
+            why = f"its probe file {claim['file']} passed without checking anything: " + str(
+                entry.get("no_check") or "")
         else:
             continue
         unverified.append({"id": claim["requirement"], "requirement": f"{claim['line']} ({why})",
@@ -459,7 +509,7 @@ def render(results: dict[str, Any]) -> str:
              "| --- | --- | --- | --- | --- |"]
     for entry in results.get("probes", []):
         result = {"pass": "pass", "fail": "FAIL", "timed_out": "FAIL (timed out)",
-                  "unrun": "not run (advisory)",
+                  "unrun": "not run (advisory)", "no_check": "no check of its own: UNVERIFIED",
                   "environment": "could not run (environment)"}[entry["status"]]
         if entry.get("existing_tests"):
             result += " — only invokes existing tests: UNVERIFIED"

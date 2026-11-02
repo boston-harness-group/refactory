@@ -97,6 +97,67 @@ def test_a_probed_claim_without_a_probe_file_is_unverified(tmp_path, monkeypatch
     assert "UNVERIFIED R1" in ctx.read_text(probe_rerun.RESULTS_MD)
 
 
+def test_a_probe_that_checks_nothing_is_unverified_not_a_pass(tmp_path, monkeypatch):
+    """`print("ok")` exits 0. Without a floor, "every probe passed" says nothing.
+
+    A probe is model-authored, so a pass only counts when the file contains a check of
+    its own.
+    """
+    probe = '# R1: nothing\nprint("ok")\n'
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"), {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    assert results["probes"][0]["status"] == "no_check", results["probes"][0]
+    assert [item["id"] for item in results["unverified"]] == ["R1"]
+    assert "without checking anything" in results["unverified"][0]["why"]
+
+
+def test_a_probe_whose_run_collected_nothing_is_unverified(tmp_path, monkeypatch):
+    """A pytest probe whose only test is skipped exits 0 and checks nothing."""
+    probe = ("# R1: skipped\nimport pytest\n\n\n"
+             "@pytest.mark.skip(reason='x')\ndef test_it():\n    assert False\n")
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"), {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    assert results["probes"][0]["status"] == "no_check", results["probes"][0]
+    assert [item["id"] for item in results["unverified"]] == ["R1"]
+
+
+def test_an_exit_status_is_not_a_check_of_the_probes_own(tmp_path, monkeypatch):
+    """`sys.exit(pytest(<existing test>))` is the obvious way to write the one thing a
+    probe may not be, and it used to satisfy the own-check rule."""
+    probe = ("# R1: reuse by exit status\nimport subprocess, sys\n"
+             "sys.exit(subprocess.run([sys.executable, '-m', 'pytest', '-q',\n"
+             "    'tests/test_calc.py::test_double']).returncode)\n")
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"), {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    assert results["probes"][0]["existing_tests"] == ["tests/test_calc.py::test_double"]
+    assert [item["id"] for item in results["unverified"]] == ["R1"]
+
+
+def test_a_bare_exit_127_does_not_excuse_a_failing_probe(tmp_path, monkeypatch):
+    """Exit 127 alone is not evidence of a missing command.
+
+    A probe whose last line is `exit 127` would otherwise mark itself "environment",
+    which `defects` skips — a blocking check any probe could opt out of.
+    """
+    probe = ("#!/bin/sh\n# R1: self-exempting\n"
+             "python3 -c 'import calc; assert calc.double(2) == 99' || exit 127\n")
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.sh"), {"R1-1.sh": probe})
+    results = probe_rerun.read_results(ctx)
+    entry = results["probes"][0]
+    assert entry["status"] == "fail", entry
+    assert "environment" not in entry, entry
+    assert [item["where"] for item in probe_rerun.defects(results)] == ["reviews/probes/R1-1.sh"]
+
+
+def test_a_named_missing_command_is_still_an_environment_failure(tmp_path, monkeypatch):
+    """The downgrade still applies when the output names what was not found."""
+    probe = "#!/bin/sh\n# R1: missing tool\nthis-command-does-not-exist --version\n"
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.sh"), {"R1-1.sh": probe})
+    entry = probe_rerun.read_results(ctx)["probes"][0]
+    assert entry["status"] == "environment", entry
+    assert "this-command-does-not-exist" in entry["environment"]
+
+
 def test_a_probe_that_only_runs_an_existing_test_is_unverified(tmp_path, monkeypatch):
     probe = "#!/bin/sh\n# R1: reuse\npytest -q tests/test_calc.py::test_double\n"
     ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.sh"), {"R1-1.sh": probe})
