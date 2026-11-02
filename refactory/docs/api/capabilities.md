@@ -11712,66 +11712,6 @@ draft, check, and let a person approve before publishing. Inspect declared ports
 }
 ```
 
-## skillopt/replay
-
-Offline replay test for SkillOpt arm-B divergence detection: feeds arm A's recorded model outputs through arm B and reports where B makes the same decisions and where it first diverges. Unscored; no model spend.
-
-```json
-{
-  "description": "offline replay test for SkillOpt arm-B divergence detection",
-  "edges": [],
-  "gates": [],
-  "guidance": "",
-  "id": "skillopt/replay",
-  "nodes": [
-    {
-      "call": "refactory_packages.skillopt.ops:replay_noop",
-      "id": "check",
-      "kind": "op",
-      "knobs": [
-        "recording_dir"
-      ],
-      "notes": "",
-      "role": "ceo"
-    }
-  ],
-  "parameters": {
-    "recording_dir": {
-      "default": "",
-      "description": "path to arm A's recording directory",
-      "frozen": false,
-      "kind": "str",
-      "range": [
-        null,
-        null
-      ],
-      "value": "",
-      "values": []
-    }
-  },
-  "ports": [],
-  "scored": false,
-  "usage": {
-    "doc": "refactory/docs/outer-loop.md",
-    "examples": [
-      {
-        "explanation": "Offline replay of a SkillOpt arm-A recording through arm B's strategy and solver graph. Provide the path to the recording directory containing calls.jsonl and out/. No model spend; divergences are detected by comparing B's behaviour against A's recorded outputs.",
-        "knobs": {
-          "recording_dir": "/home/lab/skillopt/runs/skillopt-train-20261023-e10-s42"
-        }
-      }
-    ],
-    "interfaces": {
-      "chat": "Offline replay mode; use python -m refactory_packages.skillopt.replay_runner --recording-dir <path> --output-dir <path> instead",
-      "cli": "python -m refactory_packages.skillopt.replay_runner --recording-dir <path> --output-dir <path>",
-      "panel": "Not available in the panel; offline replay is a developer testing tool run from the CLI"
-    },
-    "purpose": "Offline replay test for SkillOpt arm-B divergence detection: feeds arm A's recorded model outputs through arm B and reports where B makes the same decisions and where it first diverges. Unscored; no model spend.",
-    "reviewed_schema": "5b8a96e88027ccf9711d03cbe7b8f22bb7603134c61a3a8dda1a229535dc3099"
-  }
-}
-```
-
 ## sympy_pack/exact
 
 establish closed forms of sums with sympy and score what checked out. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.
