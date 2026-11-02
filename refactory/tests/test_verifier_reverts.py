@@ -200,12 +200,50 @@ def test_design_verifier_prompt_requires_the_edge_case_sweep():
     # Both runtimes: the same probe on walker and spine, compared.
     assert "Both runtimes" in prompt
     assert "shared runtime code" in prompt
-    assert "on the walker AND on the\n  spine and compare" in prompt
+    assert "on the walker AND on the\n  spine (through lowering" in prompt
     # Each probe gives its command and output; failures are findings; unprobed is listed.
     assert "exact command you ran and its output" in prompt
     assert "A failing probe is a\ndefect finding" in prompt
     assert "do not apply and why" in prompt
     assert "list every class you did not\nprobe as **UNCHECKED**" in prompt
+
+
+def test_sweep_injects_failures_at_every_point_and_last_element():
+    """Rule 1: each failure at every distinct point in the diff; LAST element at each."""
+    from refactory_dsh.verification import DESIGN_VERIFIER_PROMPT as prompt
+
+    assert "inject each failure at every distinct point in the diff" in prompt
+    assert "each step/op inside the changed path" in prompt
+    assert "not only the first point that works" in prompt
+    assert "make\n  the LAST element fail at each of the failure points" in prompt
+
+
+def test_sweep_probes_are_own_code_not_builder_tests():
+    """Rule 2: a probe is new code the verifier writes; builder tests do not count."""
+    from refactory_dsh.verification import DESIGN_VERIFIER_PROMPT as prompt
+
+    assert "A probe is new code you write and run." in prompt
+    assert "Running the builder's existing tests does\nnot count as a probe" in prompt
+
+
+def test_sweep_read_is_not_probed_and_each_runtime_is_run():
+    """Rule 3: PROBED means executed; reading is READ, not probed; unrun runtime UNCHECKED."""
+    from refactory_dsh.verification import DESIGN_VERIFIER_PROMPT as prompt
+
+    assert "PROBED means executed, with its\ncommand and output shown" in prompt
+    assert 'reported as "READ, not\nprobed"' in prompt
+    assert '"READ, not probed", NOT APPLICABLE' in prompt
+    assert "through lowering + the TS drain" in prompt
+    assert "A runtime you could not run the\n  probe on is UNCHECKED" in prompt
+
+
+def test_sweep_fixes_environment_and_reruns_the_same_probe():
+    """Rule 4: environment failures are fixed and the same probe rerun, never weakened."""
+    from refactory_dsh.verification import DESIGN_VERIFIER_PROMPT as prompt
+
+    assert "fails\nfor an environment reason" in prompt
+    assert "set PYTHONPATH to the repo's test helpers" in prompt
+    assert "rerun the same\nprobe; never substitute a weaker probe" in prompt
 
 
 def test_m15_requires_a_per_function_comparison_against_the_base():

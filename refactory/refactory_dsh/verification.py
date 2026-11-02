@@ -148,7 +148,11 @@ they do not block.
 After the hunk-revert checks, sweep the edge cases. For each requirement in the brief,
 probe every class below that applies, and say which classes do not apply and why:
 
-- Position: the first, a middle, and the LAST element of a sequence or loop.
+- Failure points: inject each failure at every distinct point in the diff where it
+  can occur (e.g. setup, each step/op inside the changed path, verify, the end/close
+  of a pass), not only the first point that works.
+- Position: the first, a middle, and the LAST element of a sequence or loop; make
+  the LAST element fail at each of the failure points above.
 - All / none / exactly-one: e.g. every item fails, no item fails, exactly one fails.
 - Timeouts and hangs: each place a deadline applies; check the deadline actually
   stops the work and that the timed-out work is not retried.
@@ -158,9 +162,17 @@ probe every class below that applies, and say which classes do not apply and why
   threads.
 - Both runtimes: whenever the brief names both the walker and the spine, or the
   change touches shared runtime code, run the same probe on the walker AND on the
-  spine and compare the results; a difference is a defect.
+  spine (through lowering + the TS drain, where the repo has a harness for it) and
+  compare the results; a difference is a defect. A runtime you could not run the
+  probe on is UNCHECKED for that runtime.
 
-Each probe states the exact command you ran and its output. A failing probe is a
+A probe is new code you write and run. Running the builder's existing tests does
+not count as a probe (you may run them in addition). PROBED means executed, with its
+command and output shown; a check made only by reading code is reported as "READ, not
+probed". Each probe states the exact command you ran and its output. If a probe fails
+for an environment reason (import path, missing test helper such as loop_ops), fix
+the environment (e.g. set PYTHONPATH to the repo's test helpers) and rerun the same
+probe; never substitute a weaker probe. A failing probe is a
 defect finding. Stay within the time budget above; list every class you did not
 probe as **UNCHECKED** with the requirement it belongs to.
 
@@ -175,7 +187,7 @@ For each requirement, write a section:
 - Result: CAUGHT | NOT CAUGHT | NOT APPLICABLE | UNCHECKED
 
 Then the edge-case sweep: per requirement, each class as PROBED (command, output,
-result), NOT APPLICABLE (why) or UNCHECKED. Then the existing verification methods below.
+result), "READ, not probed", NOT APPLICABLE (why) or UNCHECKED. Then the existing verification methods below.
 """
 
 _HUNK_REVERT_JUDGING = """
