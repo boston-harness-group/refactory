@@ -627,17 +627,24 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         except SystemExit:
             raise  # propagate SIGTERM
         except BaseException as exc:
-            # Include any stderr captured before the exception for error diagnosis.
+            # Include any stderr and stdout captured before the exception for
+            # error diagnosis: an op that prints and then raises is exactly the
+            # run whose diagnostics are wanted.
             try:
                 _err_stderr = _capture_stderr.getvalue()
             except Exception:
                 _err_stderr = ""
+            try:
+                _err_stdout = _capture_stdout.getvalue()
+            except Exception:
+                _err_stdout = ""
             conn.send(("error", {
                 "type": type(exc).__qualname__,
                 "module": type(exc).__module__,
                 "message": str(exc),
                 "traceback": "".join(traceback_mod.format_exception(exc)),
                 "_stderr": _err_stderr,
+                "_stdout": _err_stdout,
             }))
     finally:
         conn.close()
@@ -1507,10 +1514,11 @@ class Executor:
             import __main__ as _main_mod
             with _main_file_lock:
                 _saved_main_file = getattr(_main_mod, "__file__", None)
-                _need_clear = (
-                    _saved_main_file is not None
-                    and not os.path.isfile(_saved_main_file)
-                )
+                # Clear it whenever __main__ has one: a path that is not a
+                # real file makes _fixup_main_from_path raise, and a path that
+                # IS one makes the child re-import the caller's main module,
+                # re-running its module-level code once per op visit.
+                _need_clear = _saved_main_file is not None
                 if _need_clear:
                     _main_mod.__file__ = None  # type: ignore[attr-defined]
                 try:
@@ -1564,13 +1572,19 @@ class Executor:
             # visible for debugging and test assertions (e.g. capfd).
             if _child_stderr:
                 sys.stderr.write(_child_stderr)
+            # The same for stdout: ops print diagnostics (design_ops.py's
+            # self-check line, repo_change.py's copy notes), and on the spine
+            # those reach the command log. Capturing it for fn-gate feedback
+            # must not swallow it on the walker.
+            _child_stdout = payload.get("_stdout", "")
+            if _child_stdout:
+                sys.stdout.write(_child_stdout)
             result = payload.get("result")
             # SWEEP-4: attach child process stdout to the result so fn-gate
             # feedback extraction in _visit_gate can use it.  A plain str
             # does not accept attribute assignment, so wrap it in Verdict
             # first — this preserves stdout as feedback for fn gates that
             # return a bare string instead of Verdict.
-            _child_stdout = payload.get("_stdout", "")
             if _child_stdout and isinstance(result, str):
                 from refactory_dsh.nn import Verdict
                 if not isinstance(result, Verdict):
@@ -1579,11 +1593,21 @@ class Executor:
             return result
 
         # Exception from child: reconstruct and re-raise, preserving stderr.
-        return self._reraise_child_error(payload, payload.get("_stderr", ""))
+        return self._reraise_child_error(
+            payload, payload.get("_stderr", ""), payload.get("_stdout", ""),
+        )
 
     @staticmethod
-    def _reraise_child_error(payload: dict[str, Any], stderr: str = "") -> Any:
-        """Reconstruct and re-raise an exception sent by the child process."""
+    def _reraise_child_error(
+        payload: dict[str, Any], stderr: str = "", stdout: str = "",
+    ) -> Any:
+        """Reconstruct and re-raise an exception sent by the child process.
+
+        The child's stdout is forwarded too: an op that prints and then raises
+        is exactly the run whose diagnostics are wanted.
+        """
+        if stdout:
+            sys.stdout.write(stdout)
         exc_type_name = payload.get("type", "RuntimeError")
         exc_msg = payload.get("message", "")
         exc_tb = payload.get("traceback", "")

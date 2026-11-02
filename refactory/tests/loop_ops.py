@@ -180,6 +180,18 @@ def always_halt(ctx: Any) -> str:
     return "halt"
 
 
+def print_to_stdout(ctx: Any) -> dict[str, Any]:
+    """An op that prints to stdout, for testing that the parent forwards it."""
+    print("op stdout output: visible diagnostics")
+    return {}
+
+
+def stdout_then_raise(ctx: Any) -> None:
+    """An op that prints to stdout then raises: the run that most needs its output."""
+    print("op stdout before the raise")
+    raise ValueError("op failed after printing to stdout")
+
+
 def stderr_then_raise(ctx: Any) -> None:
     """An op that prints to stderr then raises, for testing stderr preservation."""
     import sys as _sys

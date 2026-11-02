@@ -536,6 +536,74 @@ def test_op_runs_in_run_directory_without_recovery(tmp_path):
         "ctx.model was not None inside op on default path"
 
 
+def test_a_script_main_module_is_not_re_imported_per_op(tmp_path):
+    """The caller's module-level code runs once, not once per op child.
+
+    The op child runs ``_op_child_target`` and never needs ``__main__``, but
+    multiprocessing's ``get_preparation_data`` passes ``__main__.__file__`` on
+    and the child's ``_fixup_main_from_path`` re-imports it. For a caller that
+    is a real script, that re-runs its module-level code — a heavy import or a
+    dataset open — once per op visit.
+    """
+    import os
+    import subprocess
+    import sys
+
+    script = tmp_path / "caller.py"
+    script.write_text(
+        "import sys\n"
+        "print('MAIN-MODULE-RAN', flush=True)\n"
+        "from refactory_dsh import nn\n"
+        "from refactory_dsh.nn.executor import execute\n"
+        "graph = nn.Graph()\n"
+        "graph.add(nn.Node('one', 'op', call='loop_ops:noop'))\n"
+        "graph.add(nn.Node('two', 'op', call='loop_ops:noop'))\n"
+        "graph.connect('one', 'two')\n"
+        f"result = execute(graph, {str(tmp_path / 'run')!r})\n"
+        "print('EXIT_OK', result.exit_ok, flush=True)\n"
+    )
+    here = Path(__file__).resolve().parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(here), str(here.parent)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    done = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=300,
+    )
+    assert "EXIT_OK True" in done.stdout, f"the run failed: {done.stdout}\n{done.stderr}"
+    assert done.stdout.count("MAIN-MODULE-RAN") == 1, (
+        "the caller's main module ran "
+        f"{done.stdout.count('MAIN-MODULE-RAN')} times, not once:\n{done.stdout}"
+    )
+
+
+def test_op_stdout_reaches_the_parent(tmp_path, capfd):
+    """An op's stdout is forwarded, as its stderr is.
+
+    The child captures stdout so a fn gate's feedback can be read from it; that
+    capture must not swallow the output of an ordinary op. The spine puts it in
+    the command log, so the walker has to show it too.
+    """
+    from refactory_dsh.nn.executor import execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node("say", "op", call="loop_ops:print_to_stdout"))
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    assert "op stdout output: visible diagnostics" in capfd.readouterr().out
+
+
+def test_op_stdout_reaches_the_parent_when_the_op_then_raises(tmp_path, capfd):
+    """An op that prints and then raises keeps its diagnostics."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node("boom", "op", call="loop_ops:stdout_then_raise"))
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is False
+    assert "op stdout before the raise" in capfd.readouterr().out
+
+
 def test_op_stderr_preserved_on_raise_without_recovery(tmp_path):
     """An op that prints to stderr then raises has its stderr preserved
     without enable_recovery (ops run in forkserver children)."""
