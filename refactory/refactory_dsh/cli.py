@@ -816,34 +816,34 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
 
         design_test_ids = design_contract.test_names(design_text)
 
-        # Build import map scoped to diff-selected test files
+        # Compute targeted selection from the commit's diff against its base.
+        # In a temp worktree HEAD == commit, so merge-base commit HEAD returns
+        # commit itself and the diff is empty.  Use commit~1 as the base.
         repo_files = _ts.repository_files(repo_root)
-
-        # Compute targeted selection from the commit's diff against its base
         if commit:
-            try:
-                base_commit = subprocess.run(
-                    ["git", "-C", str(repo_root), "merge-base", commit, "HEAD"],
-                    capture_output=True, text=True, timeout=10,
-                ).stdout.strip()
-                if not base_commit:
-                    base_commit = commit + "~1"
-            except Exception:
-                base_commit = commit + "~1"
+            base_commit = commit + "~1"
             try:
                 diff_output_raw = subprocess.run(
-                    ["git", "-C", str(repo_root), "diff", "--name-only", base_commit, commit],
+                    ["git", "-C", str(repo_root), "diff", "--name-only",
+                     base_commit, commit],
                     capture_output=True, text=True, timeout=10,
                 ).stdout
-                touched = [f.strip() for f in diff_output_raw.splitlines() if f.strip()]
+                touched = [f.strip() for f in diff_output_raw.splitlines()
+                           if f.strip()]
             except Exception:
                 touched = []
         else:
             touched = []
 
-        check_cmd = ""  # CLI replay: no check command
-        scope = _ts.pytest_scope(check_cmd, repo_root) if check_cmd else None
-        imports = _ts.import_map(repo_root, repo_files, scope=scope)
+        # Build the import map and compute the diff-based selection so broad
+        # package imports do not turn one site into hundreds of test runs.
+        imports = _ts.import_map(repo_root, repo_files)
+        if touched:
+            sel = _ts.select(touched, repo_root, files=repo_files,
+                             imports=imports)
+            selection: list[str] | None = list(sel.tests) if sel.tests else None
+        else:
+            selection = None
 
         pairs: list[tuple[str, str, str]] = []
         for site in changed_sites:
@@ -854,8 +854,9 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
             if site_key in exempted_paths or any(
                     site_key.startswith(e) for e in exempted_paths):
                 continue
-            # Use import-map-based test mapping (selection=None for CLI replay)
-            tests = _tests_for_source(file_path, imports, None, design_test_ids)
+            # Use import-map-based test mapping with diff-based selection
+            tests = _tests_for_source(
+                file_path, imports, selection, design_test_ids)
             if tests:
                 for t in tests:
                     pairs.append((site_key, t, "connected"))

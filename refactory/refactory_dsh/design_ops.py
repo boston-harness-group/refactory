@@ -2164,13 +2164,13 @@ def _tests_for_source(
 
     When *selection* is given (in-run mode) the result is intersected with it:
     only tests from the prepass selection whose file imports the source are
-    returned.  In the CLI replay *selection* is ``None`` and every importing
-    test file is used (scoped earlier by the diff-based selection).
+    returned.  In the CLI replay *selection* carries the diff-selected test IDs
+    computed from ``test_selection.select(touched, root)``, so broad package
+    imports do not expand one site into every test file.
 
     Design-named tests whose file imports the source are always included,
     regardless of *selection*.
     """
-    from refactory_dsh import test_selection as _ts
 
     # Reverse the import map: which test files import source_file?
     importing_tests: set[str] = set()
@@ -2189,7 +2189,7 @@ def _tests_for_source(
             if tf in sel_by_file:
                 result_ids.extend(sel_by_file[tf])
     else:
-        # CLI replay: use all importing test files
+        # No selection available: use all importing test files (fallback)
         result_ids.extend(sorted(importing_tests))
 
     # Design-named tests: include tests whose file imports the source

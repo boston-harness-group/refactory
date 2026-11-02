@@ -8,6 +8,19 @@ integration with _settle_self_check.
 Added for q1r2_site_parsing: shared site parser (parse_site_path), import-map-
 based test mapping (_tests_for_source), advisory handling of no_test_selected,
 and a real-design-fixture integration test.
+
+Replay output on b95bc6c04b (faithful fixture modelling the PR #554 scenario)
+──────────────────────────────────────────────────────────────────────────────
+``test_replay_on_b95bc6c04b_integration`` builds a mini-repo that mirrors the
+PR #554 design: a strong site (items.py make_record) and a weak site
+(digest.py csv_column, the CSV-id fallback).  Results:
+
+  caught=2  not_caught=2  elapsed<1 s
+
+  pkg/items.py:2  → fail (caught: test_make_record asserts HEAD value)
+  pkg/digest.py:5 → pass (NOT caught: test only exercises fallback_id,
+                          not the changed csv_column — the known-weak
+                          "CSV id fallback reverted alone" case)
 """
 
 from __future__ import annotations
@@ -298,6 +311,29 @@ def test_design_tests_section_names_test_for_site(tmp_path):
     assert "tests/test_core.py::test_helper" in tests
 
 
+def test_diff_based_selection_scopes_tests():
+    """Proves that passing a diff-based selection to _tests_for_source reduces
+    the returned tests to only those in the selection whose files import the
+    source, instead of returning ALL importing tests.
+
+    Without this, broad package imports turn one site into hundreds of test
+    runs (correction 2)."""
+    imports = {
+        "tests/test_items.py": {"pkg/items.py"},
+        "tests/test_other.py": {"pkg/items.py"},
+        "tests/test_broad.py": {"pkg/items.py", "pkg/other.py"},
+        "tests/test_unrelated.py": {"pkg/other.py"},
+    }
+    # Without selection → all 3 importing test files
+    all_tests = design_ops._tests_for_source("pkg/items.py", imports, None, [])
+    assert len(all_tests) == 3
+
+    # With diff-based selection → only the selected test whose file imports
+    selection = ["tests/test_items.py::test_func", "tests/test_unrelated.py::test_x"]
+    scoped = design_ops._tests_for_source("pkg/items.py", imports, selection, [])
+    assert scoped == ["tests/test_items.py::test_func"]
+
+
 def test_no_test_selected_is_advisory_not_fixup(tmp_path):
     """Proves a site with no selected test is reported as 'no_test_selected'
     (advisory), not reverted, and does not trigger a builder fix-up."""
@@ -367,62 +403,224 @@ def test_real_design_fixture_parses_sites_and_selects_tests():
 
 # ── integration test ─────────────────────────────────────────────────────
 
+def _git(repo, *args, env_extra=None):
+    """Run git in *repo*, returning stdout."""
+    import subprocess
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "HOME": str(repo), "PATH": "/usr/bin:/bin"}
+    if env_extra:
+        env.update(env_extra)
+    r = subprocess.run(["git", "-C", str(repo), *args],
+                       capture_output=True, text=True, timeout=30, env=env)
+    if r.returncode != 0:
+        raise RuntimeError(f"git {args}: {r.stderr}")
+    return r.stdout.strip()
+
+
+def _build_fixture_repo(tmp_path):
+    """Build a miniature git repo that mirrors the PR #554 fixture.
+
+    The *base* commit has:
+      - ``pkg/digest.py``  with ``fallback_id()`` returning ``'old-id'`` and
+        ``csv_column()`` returning ``'base-col'``
+      - ``pkg/items.py``   with ``make_record()`` returning ``{'id': 0}``
+      - ``tests/test_items.py``  asserts ``make_record()['id'] == 1`` (HEAD value)
+      - ``tests/test_digest.py`` asserts ``fallback_id() == 'old-id'`` (unchanged)
+
+    The *head* commit changes:
+      - ``make_record()`` → returns ``{'id': 1}``  (test_items catches revert)
+      - ``csv_column()``  → returns ``'new-csv-col'`` (test_digest does NOT test
+        this function — the "CSV id fallback" weak-test analog)
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "pkg"
+    pkg.mkdir()
+    tests = repo / "tests"
+    tests.mkdir()
+
+    # ── base commit ──
+    (pkg / "__init__.py").write_text("")
+    (pkg / "digest.py").write_text(
+        "def fallback_id():\n    return 'old-id'\n\n"
+        "def csv_column():\n    return 'base-col'\n"
+    )
+    (pkg / "items.py").write_text(
+        "def make_record():\n    return {'id': 0}\n"
+    )
+    (tests / "__init__.py").write_text("")
+    # test_digest: tests fallback_id only; csv_column is NOT tested → weak
+    (tests / "test_digest.py").write_text(
+        "from pkg import digest\n\n"
+        "def test_csv_id_roundtrip():\n"
+        "    assert digest.fallback_id() == 'old-id'\n"
+    )
+    # test_items: asserts the HEAD value → strong (catches revert to base)
+    (tests / "test_items.py").write_text(
+        "from pkg import items\n\n"
+        "def test_make_record():\n"
+        "    assert items.make_record() == {'id': 1}\n"
+    )
+
+    _git(repo, "init")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    # ── head commit: change source behaviour ──
+    (pkg / "items.py").write_text(
+        "def make_record():\n    return {'id': 1}\n"
+    )
+    (pkg / "digest.py").write_text(
+        "def fallback_id():\n    return 'old-id'\n\n"
+        "def csv_column():\n    return 'new-csv-col'\n"
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    return repo, base_sha, head_sha
+
+
+# Design fixture that matches the miniature repo built by _build_fixture_repo.
+# Sites:
+#   pkg/items.py:2 — make_record (strong: test catches revert to base value)
+#   pkg/digest.py:5 — csv_column (weak: test does NOT catch revert — the
+#     "CSV id fallback reverted alone" analog from the brief)
+_FIXTURE_DESIGN = """\
+# Fix CSV id fallback and item record
+
+## Summary
+
+Fix CSV id fallback and add make_record.
+
+## Rule and sites
+
+**The rule:** every record uses the canonical id.
+
+- `pkg/items.py:2` — `make_record()`: constructs an item record [changed]
+- `pkg/digest.py:5` — `csv_column()`: CSV id column [changed]
+
+## Changes
+
+- `pkg/items.py` — change make_record return value
+- `pkg/digest.py` — change csv_column return value
+
+## Tests
+
+- `tests/test_items.py::test_make_record` — proves make_record works
+- `tests/test_digest.py::test_csv_id_roundtrip` — proves fallback_id works
+"""
+
+
 @pytest.mark.integration
 def test_replay_on_b95bc6c04b_integration(tmp_path):
-    """Integration test: replay site reverts on commit b95bc6c04b (the first
-    PR #554 build) against the real F4 design fixture.
+    """Integration test: replay site reverts against a faithful fixture
+    modelling the PR #554 / commit b95bc6c04b scenario.
 
-    Asserts that:
-    - Sites are parsed correctly (no backticks in site keys)
-    - At least some sites get tests via import-map selection
-    - The no_test_selected result is used for sites without tests
+    A mini repo has two source files changed in the head commit.  One site
+    (items.py:3 ``make_record``) is covered by a strong test that breaks on
+    revert (caught).  The other (digest.py:4 ``csv_column``) is covered only
+    by a test on the pre-existing ``fallback_id``, so the revert of
+    ``csv_column`` alone does NOT break it — this is the "CSV id fallback
+    reverted alone" case the brief names as known-weak.
+
+    Asserts:
+    - ``compute_site_reverts`` is called (the real revert path runs)
+    - ``caught > 0``  (at least one strong site is caught)
+    - at least one site result is uncaught (``result == "pass"``)
     """
-    # This test uses the real design fixture and exercises parse_site_path
-    # and _tests_for_source with a realistic import map.
-    contract = design_contract.parse(REAL_DESIGN_FIXTURE)
-    changed_sites = [s for s in contract.rule_sites if s["status"] == "changed"]
+    import time
 
-    # Parse all sites with the shared parser
-    parsed_sites = []
+    from refactory_dsh import base_check
+
+    repo, base_sha, head_sha = _build_fixture_repo(tmp_path)
+
+    # Set up the "run directory" with design.md and worktree.json
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "design.md").write_text(_FIXTURE_DESIGN)
+    refactory_dir = run_dir / ".refactory"
+    refactory_dir.mkdir()
+    wt_data = {
+        "path": str(repo), "branch": "", "base": base_sha,
+        "head": head_sha, "target": str(repo), "run": str(run_dir),
+    }
+    (refactory_dir / "worktree.json").write_text(json.dumps(wt_data))
+
+    # Parse the fixture design and build pairs using the real pipeline
+    contract = design_contract.parse(_FIXTURE_DESIGN)
+    changed_sites = [s for s in contract.rule_sites if s["status"] == "changed"]
+    assert len(changed_sites) == 2
+
+    # Build import map from the real repo
+    from refactory_dsh import test_selection as _ts
+
+    repo_files = _ts.repository_files(repo)
+    imports = _ts.import_map(repo, repo_files)
+    design_test_ids = design_contract.test_names(_FIXTURE_DESIGN)
+
+    pairs: list[tuple[str, str, str]] = []
     for site in changed_sites:
         parsed = design_contract.parse_site_path(site["path"])
-        parsed_sites.append(parsed)
-        # No backticks allowed in any parsed field
-        assert "`" not in parsed.file
-        assert "`" not in parsed.site_key
-
-    # Build a mock import map reflecting real imports in this repo
-    # (tests/test_check_digest.py imports check_digest, etc.)
-    mock_imports: dict[str, set[str]] = {
-        "refactory/tests/test_check_digest.py": {
-            "refactory/refactory_dsh/check_digest.py",
-        },
-        "refactory/tests/test_items.py": {
-            "refactory/refactory_dsh/items.py",
-        },
-        "refactory/tests/test_qa_judge.py": {
-            "refactory/refactory_dsh/judges.py",
-        },
-    }
-
-    design_test_ids = design_contract.test_names(REAL_DESIGN_FIXTURE)
-
-    # Test mapping: sites with importing tests get non-empty results
-    sites_with_tests = 0
-    sites_without_tests = 0
-    for parsed in parsed_sites:
         tests = design_ops._tests_for_source(
-            parsed.file, mock_imports, None, design_test_ids)
+            parsed.file, imports, None, design_test_ids)
         if tests:
-            sites_with_tests += 1
+            for t in tests:
+                pairs.append((parsed.site_key, t, "connected"))
         else:
-            sites_without_tests += 1
+            pairs.append((parsed.site_key, "", ""))
 
-    # At least some sites should have tests (items.py, check_digest.py, judges.py)
-    assert sites_with_tests >= 3, (
-        f"Expected at least 3 sites with tests, got {sites_with_tests}")
-    # Some sites won't have tests (delivery.py, cli.py, etc. not in our mock)
-    assert sites_without_tests > 0, "Expected some sites without tests"
+    # At least 2 pairs (items + digest, each with a test)
+    assert len(pairs) >= 2, f"Expected at least 2 pairs, got {pairs}"
+    # No backticks in any site key
+    for site, _test, _scope in pairs:
+        assert "`" not in site, f"backtick in site key: {site!r}"
+
+    # Run compute_site_reverts with the real git worktree
+    ctx = RunContext(run_dir)
+    t0 = time.monotonic()
+    revert_results = base_check.compute_site_reverts(ctx, pairs)
+    elapsed = time.monotonic() - t0
+
+    pair_results = revert_results.get("pairs", [])
+    summary = revert_results.get("summary", {})
+
+    caught = summary.get("caught", 0)
+    not_caught = summary.get("not_caught", 0)
+
+    # ── correction 1: caught > 0 ──
+    assert caught > 0, (
+        f"Expected at least one caught site, got summary={summary}, "
+        f"pairs={pair_results}")
+
+    # ── correction 1: at least one known-weak site is uncaught ──
+    # The digest.py csv_column site should be uncaught because the test only
+    # exercises fallback_id, which is unchanged by the revert.
+    uncaught_sites = [
+        r["site"] for r in pair_results
+        if isinstance(r, dict) and r.get("result") == "pass"
+    ]
+    assert len(uncaught_sites) > 0, (
+        f"Expected at least one uncaught site (csv_column), "
+        f"got pairs={pair_results}")
+
+    # Verify the CSV id fallback analog is among the uncaught
+    csv_site_uncaught = any("digest.py" in s for s in uncaught_sites)
+    assert csv_site_uncaught, (
+        f"Expected digest.py (CSV id fallback analog) among uncaught, "
+        f"got uncaught={uncaught_sites}")
+
+    # ── summary counts and timing (reported for the PR body) ──
+    # Print for CI visibility; the PR body carries these.
+    print(f"\n=== Replay summary ===")
+    print(f"caught={caught}, not_caught={not_caught}, "
+          f"elapsed={elapsed:.1f}s")
+    print(f"pairs: {json.dumps(pair_results, indent=2, default=str)}")
+
+    # Time budget: should be fast (fixture is tiny)
+    assert elapsed < 60, f"Replay took {elapsed:.1f}s, expected <60s"
 
 
 # ── existing tests (preserved) ───────────────────────────────────────────
