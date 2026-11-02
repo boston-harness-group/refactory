@@ -179,3 +179,118 @@ def test_no_fixup_path():
         "prepare_check must not produce site_revert_fixup_count"
     assert "total_site_revert_fixups_used" not in pc.produces, \
         "prepare_check must not produce total_site_revert_fixups_used"
+
+
+# ── edge-case sweep, per-function weakened-test check, replay model flags ──
+
+
+def test_design_verifier_prompt_requires_the_edge_case_sweep():
+    """The design verifier sweeps every edge-case class per requirement, not 2-3 probes."""
+    from refactory_dsh.verification import DESIGN_VERIFIER_PROMPT
+
+    prompt = DESIGN_VERIFIER_PROMPT
+    assert "2–3 probes" not in prompt and "2-3 probes" not in prompt
+    assert "For each requirement in the brief" in prompt
+    for cls in ("Position:", "the LAST element", "All / none / exactly-one",
+                "every item fails, no item fails", "Timeouts and hangs",
+                "deadline actually\n  stops the work", "not retried",
+                "Interaction with control flow", "gate, pause, halt, stop or resume",
+                "Concurrency:", "forks or\n  threads"):
+        assert cls in prompt, cls
+    # Both runtimes: the same probe on walker and spine, compared.
+    assert "Both runtimes" in prompt
+    assert "shared runtime code" in prompt
+    assert "on the walker AND on the\n  spine and compare" in prompt
+    # Each probe gives its command and output; failures are findings; unprobed is listed.
+    assert "exact command you ran and its output" in prompt
+    assert "A failing probe is a\ndefect finding" in prompt
+    assert "do not apply and why" in prompt
+    assert "list every class you did not\nprobe as **UNCHECKED**" in prompt
+
+
+def test_m15_requires_a_per_function_comparison_against_the_base():
+    """M15 diffs the test files, lists every modified test function, and may not say
+    "no weakened tests" without that list."""
+    from refactory_dsh.verification import (
+        DESIGN_VERIFIER_PROMPT, FULL_VERIFICATION_METHODS, M15_METHOD, VERIFICATION_METHODS,
+    )
+
+    for text in ('git diff <base> -- <test files>', "list every existing test function",
+                 "file::name", "an assert removed or relaxed",
+                 "an expected value changed to match the new behaviour",
+                 "renamed or reworded to accept different behaviour", "skip/xfail added",
+                 'You may not conclude "no weakened tests" without listing the\n'
+                 '    modified test functions you compared'):
+        assert text in M15_METHOD, text
+    assert M15_METHOD in VERIFICATION_METHODS and M15_METHOD in FULL_VERIFICATION_METHODS
+    assert "{{verification_methods}}" in DESIGN_VERIFIER_PROMPT
+
+
+def _replay_run(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / ".refactory").mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    (run_dir / "brief.json").write_text('{"brief": "do a thing"}')
+    (run_dir / ".refactory" / "worktree.json").write_text(f'{{"path": "{work}"}}')
+    return run_dir
+
+
+def test_replay_verifier_parses_and_routes_the_model_flags(tmp_path, monkeypatch, capsys):
+    """--provider/--model/--effort reach the route the verifier's session runs on."""
+    import refactory_dsh.model as model_mod
+    from refactory_dsh import cli
+
+    args = cli.build_parser().parse_args([
+        "replay-verifier", "--run-dir", "r", "--provider", "p1", "--model", "m1",
+        "--effort", "high"])
+    assert (args.provider, args.model, args.effort) == ("p1", "m1", "high")
+
+    built: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            self.kwargs = kwargs
+
+        def context(self):
+            return {"worker_backend": "dsh", "provider": self.kwargs.get("provider", ""),
+                    "model": self.kwargs.get("model", ""), "effort": self.kwargs.get("effort", ""),
+                    "routes_resolved": True}
+
+        def complete(self, prompt, **kwargs):
+            return "VERDICT: PASS"
+
+    monkeypatch.setattr(model_mod, "DshModelClient", FakeClient)
+    run_dir = _replay_run(tmp_path)
+    code = cli.main(["replay-verifier", "--run-dir", str(run_dir), "--provider", "p1",
+                     "--model", "m1", "--effort", "high"])
+    assert code == 0
+    assert built[0]["provider"] == "p1" and built[0]["model"] == "m1"
+    assert built[0]["effort"] == "high"
+    # The session's client is built from the resolved route.
+    assert built[-1]["provider"] == "p1" and built[-1]["model"] == "m1"
+    assert built[-1]["effort"] == "high" and built[-1]["routes_resolved"] is True
+
+
+def test_replay_verifier_refuses_half_a_route(tmp_path, monkeypatch, capsys):
+    """A provider without a model is refused before any session, as a design run is."""
+    import refactory_dsh.model as model_mod
+    from refactory_dsh import cli
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def context(self):
+            return {"worker_backend": "dsh", "provider": self.kwargs.get("provider", ""),
+                    "model": ""}
+
+        def complete(self, prompt, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("no session without a complete route")
+
+    monkeypatch.setattr(model_mod, "DshModelClient", FakeClient)
+    code = cli.main(["replay-verifier", "--run-dir", str(_replay_run(tmp_path)),
+                     "--provider", "p1"])
+    assert code == 1
+    assert "refactory:" in capsys.readouterr().err

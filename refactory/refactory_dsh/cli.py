@@ -580,6 +580,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay.add_argument("--run-dir", required=True, help="path to the existing run directory")
     replay.add_argument("--commit", default="", help="commit hash to check out as a temporary worktree")
+    replay.add_argument("--provider", default="",
+                        help="the verifier's provider route (default: as `refactory ceo` resolves it)")
+    replay.add_argument("--model", default="", help="the verifier's model id")
+    replay.add_argument("--effort", default="", help="the verifier's reasoning effort")
 
     return parser
 
@@ -841,10 +845,21 @@ def _cmd_replay_verifier(args: argparse.Namespace) -> int:
         from refactory_dsh.model import DshModelClient
         from refactory_dsh.nn import RunContext
 
-        client = DshModelClient(
-            timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
-            project=repo_root,
-        )
+        # The route as a design run settles it: flags over the environment, the project
+        # file and the stored choice, then completed or refused (`require_route`).
+        from refactory_dsh.interactive import require_route
+        from refactory_dsh.model import ModelChoiceError
+
+        route = {key: value for key, value in (
+            ("provider", args.provider), ("model", args.model), ("effort", args.effort)) if value}
+        try:
+            context = require_route(DshModelClient(
+                timeout_s=DESIGN_VERIFIER_TIMEOUT_S, project=repo_root, **route,
+            ).context())
+        except ModelChoiceError as exc:
+            print(f"refactory: {exc}", file=sys.stderr)
+            return 1
+        client = DshModelClient(**context)
 
         # Create a RunContext with the run directory as the work directory
         ctx = RunContext(run_dir)

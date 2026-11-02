@@ -67,9 +67,16 @@ M12_METHOD = """M12 Shared state — identify every file, environment variable, 
 M13_METHOD = """M13 Boundary values — for every numeric or string parameter the diff parses,
     test zero, one, maximum, empty, and type-boundary values against the code."""
 
-M15_METHOD = """M15 Weakened tests — for every test the diff changes, determine whether the
-    assertion is now weaker than before; a test that would pass when the code
-    is wrong is blocking."""
+M15_METHOD = """M15 Weakened tests — run `git diff <base> -- <test files>` (the base is the
+    commit the diff starts from) and list every existing test function the diff
+    modifies, by file::name. Compare each one with its base version and list each
+    loosened assertion: an assert removed or relaxed (== to in, exact to approx,
+    a narrower raises), an expected value changed to match the new behaviour, a
+    test renamed or reworded to accept different behaviour, or a skip/xfail added.
+    A loosened assertion that would let the test pass when the code is wrong is
+    blocking. You may not conclude "no weakened tests" without listing the
+    modified test functions you compared (write "none modified" when the diff
+    changes no existing test function)."""
 
 #: For a change to an existing repository: the methods no reviewer applies.
 VERIFICATION_METHODS = (
@@ -137,9 +144,25 @@ retry at 2× (""" + str(DESIGN_VERIFIER_TIMEOUT_S * 2) + """ s) for a total of
 checking every requirement, report the unchecked ones as **UNCHECKED** (advisory) —
 they do not block.
 
-### Probes
-After the hunk-revert checks, write and run 2–3 probes for the brief's edge cases
-(on both runtimes when the brief names both).
+### Edge-case sweep
+After the hunk-revert checks, sweep the edge cases. For each requirement in the brief,
+probe every class below that applies, and say which classes do not apply and why:
+
+- Position: the first, a middle, and the LAST element of a sequence or loop.
+- All / none / exactly-one: e.g. every item fails, no item fails, exactly one fails.
+- Timeouts and hangs: each place a deadline applies; check the deadline actually
+  stops the work and that the timed-out work is not retried.
+- Interaction with control flow: a gate, pause, halt, stop or resume occurring
+  inside the changed path.
+- Concurrency: two branches or items at once, where the change runs in forks or
+  threads.
+- Both runtimes: whenever the brief names both the walker and the spine, or the
+  change touches shared runtime code, run the same probe on the walker AND on the
+  spine and compare the results; a difference is a defect.
+
+Each probe states the exact command you ran and its output. A failing probe is a
+defect finding. Stay within the time budget above; list every class you did not
+probe as **UNCHECKED** with the requirement it belongs to.
 
 ### Output format in reviews/verification.md
 
@@ -151,7 +174,8 @@ For each requirement, write a section:
 - Output: <relevant excerpt>
 - Result: CAUGHT | NOT CAUGHT | NOT APPLICABLE | UNCHECKED
 
-Then the probe results, then the existing verification methods below.
+Then the edge-case sweep: per requirement, each class as PROBED (command, output,
+result), NOT APPLICABLE (why) or UNCHECKED. Then the existing verification methods below.
 """
 
 _HUNK_REVERT_JUDGING = """

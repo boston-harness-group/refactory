@@ -6006,11 +6006,19 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "run_dir": "/path/to/existing-run"
       },
       "explanation": "Replay the verifier when the original worktree is gone; a temporary worktree of that commit is checked out and removed after the run."
+    },
+    {
+      "arguments": {
+        "model": "deepseek-v4-pro",
+        "provider": "deepseek-official",
+        "run_dir": "/path/to/existing-run"
+      },
+      "explanation": "Replay the verifier on a chosen model; the route resolves as for `refactory ceo`, so a home with no stored choice needs --provider and --model."
     }
   ],
   "interfaces": {
     "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
-    "cli": "refactory replay-verifier --run-dir DIR [--commit HASH]",
+    "cli": "refactory replay-verifier --run-dir DIR [--commit HASH] [--provider P --model M] [--effort E]",
     "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
   },
   "parameters": {
@@ -6019,6 +6027,39 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "description": "commit hash to check out as a temporary worktree",
       "flags": [
         "--commit"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "effort": {
+      "default": "",
+      "description": "the verifier's reasoning effort",
+      "flags": [
+        "--effort"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "model": {
+      "default": "",
+      "description": "the verifier's model id",
+      "flags": [
+        "--model"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "provider": {
+      "default": "",
+      "description": "the verifier's provider route (default: as `refactory ceo` resolves it)",
+      "flags": [
+        "--provider"
       ],
       "nargs": null,
       "positional": false,
@@ -6038,7 +6079,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.",
-  "reviewed_schema": "5ff1f9a1c0a702f1b167758b2960e10b86ea8ce59e880b9f3343f66a6bfaa82f"
+  "reviewed_schema": "8a960b0ec94e5a1f7583894729b991bba2858816ddfc8fb16217f850dc0be09c"
 }
 ```
 
