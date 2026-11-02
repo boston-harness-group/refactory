@@ -343,9 +343,8 @@ Respond ONLY with a valid JSON object:
 #
 # Every user message below reproduces SkillOpt's text byte for byte: section
 # headings, blank lines, group lines and where the optimizer meta skill goes.
-# Only the trajectory body differs, because SkillOpt reads ``conversation.json``
-# files and refactory hands the strategy F6 item records
-# (``refactory_dsh/items.py:make_item_record``) instead.
+# Trajectories are SkillOpt's own formatter over the rollout results the
+# mode's package renders from F6 item records (``env.py``).
 
 
 def format_meta_skill_context(meta_skill_text: str) -> str:
@@ -370,27 +369,6 @@ def _text(value: object) -> str:
     return str(value)
 
 
-def record_task(record: dict) -> str:
-    """The task text of an item record.
-
-    SkillOpt reads ``task_description``/``instruction`` (reflect.py:152) and
-    ``question`` (slow_update.py:247); an F6 record carries the item's own
-    fields under ``metadata`` (refactory_dsh/nn/executor.py, ``metadata=``).
-    """
-    meta = record.get("metadata") or {}
-    for key in ("question", "task_description", "instruction", "prompt", "task"):
-        value = meta.get(key)
-        if value:
-            return _text(value)
-    return ""
-
-
-def record_task_type(record: dict) -> str:
-    """reflect.py:153 — ``task_type`` falling back to ``instruction_type``."""
-    meta = record.get("metadata") or {}
-    return _text(meta.get("task_type", meta.get("instruction_type", "")))
-
-
 def record_fail_reason(record: dict) -> str:
     """The record's fail reason; an errored item's reason is its error."""
     reason = record.get("fail_reason")
@@ -402,57 +380,118 @@ def record_fail_reason(record: dict) -> str:
     return ""
 
 
-def format_trajectory(record: dict) -> str:
-    """Render one F6 record as SkillOpt renders a conversation (reflect.py:65-106).
+def fmt_trajectory(conversation: list) -> str:
+    """Port of SkillOpt's ``fmt_trajectory`` (skillopt/gradient/reflect.py:74-115).
 
-    Each agent exchange becomes a prompt line and a response line, and the
-    grading becomes the ``[verification]`` entry SkillOpt's rollout appends
-    (livemathematicianbench/rollout.py:194-204): prediction, label, label
-    text, score.
+    One line per conversation entry: tool calls, step records, ``system``
+    entries as ``[verification]`` and anything else as ``[<role>]`` with
+    ``role`` defaulting to ``agent``.
     """
     lines: list[str] = []
-    for exchange in record.get("exchanges") or []:
-        if not isinstance(exchange, dict):
-            lines.append(f"[agent] {_text(exchange)}")
+    for item in conversation:
+        if not isinstance(item, dict):
+            lines.append(f"[agent] {_text(item)}")
             continue
-        node = _text(exchange.get("node")) or "agent"
-        lines.append(f"[{node} prompt] {_text(exchange.get('prompt'))}")
-        lines.append(f"[{node}] {_text(exchange.get('response'))}")
-    verification = (
-        "[EVALUATION RESULT]\n"
-        f"Prediction: {record.get('prediction')!r}\n"
-        f"Label: {record.get('label')!r}\n"
-        f"Label text: {record.get('label_text')!r}\n"
-        f"Score: {record.get('score')!r}\n"
-        f"Passed: {record.get('passed')!r}"
-    )
-    if record.get("error_text"):
-        verification += f"\nError: {record.get('error_kind')}: {record['error_text']}"
-    lines.append(f"[verification] {verification}")
+        if item.get("type") == "tool_call":
+            cmd = _text(item.get("cmd"))
+            obs = _text(item.get("obs"))
+            lines.append(f"[action] {cmd}")
+            lines.append(f"[obs]    {obs}")
+        elif "action" in item and "env_feedback" in item:
+            step = item.get("step", "?")
+            reasoning = _text(item.get("reasoning"))
+            action = _text(item.get("action"))
+            feedback = _text(item.get("env_feedback"))
+            if reasoning:
+                lines.append(f"[step {step} think] {reasoning}")
+            lines.append(f"[step {step} action] {action}")
+            lines.append(f"[step {step} obs]    {feedback}")
+        elif item.get("role") == "system":
+            msg = _text(item.get("content"))
+            lines.append(f"[verification] {msg}")
+        else:
+            msg = _text(item.get("content"))
+            role = item.get("role", "agent")
+            lines.append(f"[{role}] {msg}")
     return "\n".join(lines)
 
 
-def format_trajectories(records: list[dict]) -> str:
-    """One minibatch of trajectories — reflect.py:112-239 ``fmt_minibatch_trajectories``."""
+def fmt_minibatch_trajectories(results: list[dict]) -> str:
+    """Port of SkillOpt's ``fmt_minibatch_trajectories`` (reflect.py:121-248).
+
+    ``results`` are SkillOpt rollout results as the mode's package renders
+    them (``env.SkillOptEnv.rollout_result``). SkillOpt reads each item's
+    ``conversation.json`` and ``target_*_prompt.txt`` from the prediction
+    directory; here they travel in the result as ``conversation``,
+    ``target_system_prompt`` and ``target_user_prompt``. A result without a
+    conversation is skipped but keeps its index, as reflect.py:148-156 skips a
+    missing or empty ``conversation.json`` inside ``enumerate``.
+
+    Not ported: the ``codex_trace_summary`` and ``claude_trace_steps`` blocks
+    (reflect.py:201-212, :226-232), which SkillOpt adds only from files the
+    codex/claude-code exec target backends write, behind environment switches.
+    """
     parts: list[str] = []
-    for idx, record in enumerate(records, 1):
-        tid = str(record.get("id", ""))
+    for idx, item in enumerate(results, 1):
+        tid = str(item["id"])
+        conversation = item.get("conversation")
+        if not conversation:
+            continue
+
+        traj_text = fmt_trajectory(conversation)
         header = (
             f"### Trajectory {idx} (id={tid})\n"
-            f"Task: {record_task(record)}\n"
-            f"Task type: {record_task_type(record)}\n"
+            f"Task: {item.get('task_description', item.get('instruction', ''))}\n"
+            f"Task type: {item.get('task_type', item.get('instruction_type', ''))}\n"
         )
-        fail_reason = record_fail_reason(record)
+        fail_reason = item.get("fail_reason", "")
         if fail_reason:
             header += f"Failure reason: {fail_reason}\n"
-        header += f"Steps: {len(record.get('exchanges') or [])}\n"
-        parts.append(header + "\n" + format_trajectory(record))
+        header += f"Steps: {item.get('n_turns', '?')}\n"
+
+        reference_text = str(item.get("reference_text") or "").strip()
+        if reference_text:
+            header += (
+                f"\n#### Hidden Reference\n"
+                f"{reference_text}\n"
+            )
+
+        target_prompt = item.get("target_system_prompt", "")
+        if target_prompt:
+            header += (
+                f"\n#### Target System Prompt\n"
+                f"{target_prompt}\n"
+            )
+
+        user_prompt = item.get("target_user_prompt", "")
+        if user_prompt:
+            header += (
+                f"\n#### Target User Prompt\n"
+                f"{user_prompt}\n"
+            )
+
+        codex_probe_trace_steps = str(item.get("codex_probe_trace_steps") or "").strip()
+        if codex_probe_trace_steps:
+            header += (
+                f"\n#### Codex Trace Steps\n"
+                f"{codex_probe_trace_steps}\n"
+            )
+
+        preview = item.get("spreadsheet_preview", "")
+        if preview:
+            header += (
+                f"\n#### Spreadsheet Preview\n"
+                f"{preview}\n"
+            )
+
+        parts.append(header + "\n" + traj_text)
+
     return "\n\n---\n\n".join(parts)
 
 
 def format_analyst_user(
     skill_text: str,
-    records: list[dict],
+    results: list[dict],
     edit_budget: int,
     meta_skill: str,
     *,
@@ -460,17 +499,22 @@ def format_analyst_user(
 ) -> str:
     """Analyst user message — reflect.py:321-344 (failure) and :421-441 (success).
 
+    ``results`` are the group's rollout results (``fmt_minibatch_trajectories``).
     The "Previous Steps in This Epoch" block (reflect.py:336-340) is empty here:
     this strategy takes one step per epoch, so the step buffer is always empty
-    when the analysts run (trainer.py:1188, :1277).
+    when the analysts run (trainer.py:1188, :1277). Returns ``""`` when no
+    result has a trajectory: SkillOpt then makes no call (reflect.py:324-325).
     """
+    trajectories_text = fmt_minibatch_trajectories(results)
+    if not trajectories_text.strip():
+        return ""
     user = f"## Current Skill\n{skill_text}\n\n"
     user += f"## Edits Budget\nProduce at most L={edit_budget} edits.\n\n"
     optimizer_ctx = format_meta_skill_context(meta_skill)
     if optimizer_ctx:
         user += optimizer_ctx + "\n\n"
     heading = "Failed Trajectories" if failure else "Successful Trajectories"
-    user += f"## {heading} ({len(records)} total)\n{format_trajectories(records)}"
+    user += f"## {heading} ({len(results)} total)\n{trajectories_text}"
     return user
 
 

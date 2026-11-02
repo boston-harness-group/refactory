@@ -157,6 +157,54 @@ def _comparable(value: Any) -> Any:
     return json.dumps(value, sort_keys=True, default=str)
 
 
+def _edit_list(value: Any) -> list[Any] | None:
+    """The edit list inside a ranked/merged payload, whichever shape it has.
+
+    A writes ``steps/step_NNNN/ranked_edits.json`` as the whole ranker payload
+    (``{"reasoning", "ranking_details", "edits"}``, trainer.py:1396); B's rank
+    step produces the selected edits themselves.  The edits are the thing both
+    sides decided, so the comparison is on them.
+    """
+    if isinstance(value, dict):
+        edits = value.get("edits")
+        return edits if isinstance(edits, list) else None
+    if isinstance(value, list):
+        return value
+    return None
+
+
+def _shared_key_match(a_value: dict[str, Any], b_value: dict[str, Any]) -> bool | None:
+    """Compare two dicts on the keys they share, or ``None`` when they share none.
+
+    A's slow-update and meta-skill results carry its own bookkeeping (``time_s``,
+    ``update_origin``), which B has no equivalent for; comparing the whole dict
+    would report a divergence that is not one.  Comparing the shared keys still
+    fails on a real disagreement (a different ``action``, say) and reports
+    ``None`` — "not comparable" — when there is no overlap at all.
+    """
+    shared = sorted(set(a_value) & set(b_value))
+    if not shared:
+        return None
+    return all(_comparable(a_value[key]) == _comparable(b_value[key]) for key in shared)
+
+
+def _has_data(value: Any) -> bool:
+    """Whether A actually reported something for a field.
+
+    A field's ``a`` side is sometimes a small dict of sub-facts (counts and
+    presence flags).  Such a dict means "A has data" only when one of those
+    sub-facts is itself present — an epoch where A skipped the step has the
+    dict but nothing in it.
+    """
+    if value is None or value is False:
+        return False
+    if isinstance(value, dict):
+        return any(_has_data(item) for item in value.values())
+    if isinstance(value, (list, tuple, str)):
+        return bool(value)
+    return True
+
+
 def compare_runs(
     a_out_dir: Path,
     b_history: list[dict[str, Any]],
@@ -267,19 +315,28 @@ def compare_runs(
             "n_failure": b_entry.get("n_failure_patches"),
             "n_success": b_entry.get("n_success_patches"),
             "rollout_ids": b_entry.get("rollout_ids"),
+            "patch_files": b_entry.get("patch_files"),
         }
-        # Compare on available data: IDs and order if present, else counts
+        # Compare every part that both sides reported, and require all of them.
+        # The rolled-out ids are compared as sets: A's rollout runs concurrently
+        # (config ``workers: 24``) and writes results.jsonl in completion order,
+        # so their order is a race, not a decision.
+        checks: list[bool] = []
         if a_refl.get("rollout_ids") and b_refl.get("rollout_ids"):
-            refl_match = a_refl["rollout_ids"] == b_refl["rollout_ids"]
-        elif (a_refl["n_patches"] is not None
-              and b_refl["n_patches"] is not None):
-            refl_match = (
+            checks.append(
+                sorted(a_refl["rollout_ids"]) == sorted(b_refl["rollout_ids"])
+            )
+        if a_refl["n_patches"] is not None and b_refl["n_patches"] is not None:
+            checks.append(
                 a_refl["n_patches"] == b_refl["n_patches"]
                 and a_refl["n_failure"] == b_refl["n_failure"]
                 and a_refl["n_success"] == b_refl["n_success"]
             )
-        else:
-            refl_match = None  # insufficient data
+        # Which analyst groups produced a patch: A names each file by its group
+        # index (reflect.py:583, :592), so this is group identity, not order.
+        if a_refl.get("patch_files") is not None and b_refl.get("patch_files") is not None:
+            checks.append(sorted(a_refl["patch_files"]) == sorted(b_refl["patch_files"]))
+        refl_match = all(checks) if checks else None  # None: insufficient data
         epoch_report["reflection_groups"] = {
             "a": a_refl, "b": b_refl, "match": refl_match,
         }
@@ -315,9 +372,9 @@ def compare_runs(
             }
 
         # ── ranked_edits ──
-        a_ranked = a_step.get("ranked_edits")
+        a_ranked = _edit_list(a_step.get("ranked_edits"))
         a_ranked_count = a_entry.get("n_edits_ranked")
-        b_ranked = b_entry.get("ranked_edits")
+        b_ranked = _edit_list(b_entry.get("ranked_edits"))
         b_ranked_count = b_entry.get("n_edits_ranked")
         if a_ranked is not None and b_ranked is not None:
             ranked_match = _comparable(a_ranked) == _comparable(b_ranked)
@@ -437,7 +494,7 @@ def compare_runs(
             # Both truthy → presence match; compare structurally only when
             # both sides have dict data.
             if isinstance(a_slow_ep, dict) and isinstance(b_slow_ep, dict):
-                slow_match = _comparable(a_slow_ep) == _comparable(b_slow_ep)
+                slow_match = _shared_key_match(a_slow_ep, b_slow_ep)
             elif isinstance(a_slow_ep, dict) and b_slow_ep is True:
                 # B ran slow_update but only recorded True; presence matches.
                 slow_match = True
@@ -463,7 +520,7 @@ def compare_runs(
             # Both truthy → presence match; compare structurally only when
             # both sides have dict data.
             if isinstance(a_meta_ep, dict) and isinstance(b_meta_ep, dict):
-                meta_match = _comparable(a_meta_ep) == _comparable(b_meta_ep)
+                meta_match = _shared_key_match(a_meta_ep, b_meta_ep)
             elif isinstance(a_meta_ep, dict) and b_meta_ep is True:
                 # B ran meta_skill but only recorded True; presence matches.
                 meta_match = True
@@ -549,11 +606,9 @@ def compare_runs(
                 return False
             # None is only OK when A also has no data for this field.
             # If A has data (a is not None/False/empty) but B doesn't, it's a miss.
-            if m is None:
-                a_val = info.get("a")
-                if a_val is not None and a_val is not False:
-                    # A has data but B doesn't → not a match
-                    return False
+            if m is None and _has_data(info.get("a")):
+                # A has data but B doesn't → not a match
+                return False
         return True
 
     matched = sum(1 for ep in per_epoch if _epoch_matched(ep))

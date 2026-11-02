@@ -5,8 +5,12 @@ The solver graph: data → [format_prompt → solve] → finish.
 System prompt ported from SkillOpt (MIT) —
 skillopt/envs/livemathematicianbench/prompts/rollout_system.md.
 SkillOpt solver defaults:
-  exec_timeout = 300 s (configs/livemathematicianbench/default.yaml:17) -- applied
-    as the solve node's ``timeout_s`` (``Solver.solve_timeout_s``).
+  exec_timeout = 1800 s -- applied as the solve node's ``timeout_s``
+    (``Solver.solve_timeout_s``). SkillOpt's LiveMath config says 300
+    (configs/livemathematicianbench/default.yaml:17), but arm A's runs override it
+    with ``--cfg-options env.exec_timeout=1800`` (SkillOpt's run-train.sh:14 and
+    run-train-seed.sh:20, recorded in each run's out/config.json ``exec_timeout``),
+    and the outer-loop protocol has arm B match arm A.
   max_completion_tokens = 16384 (livemathematicianbench/default.yaml:16) and
   reasoning_effort = medium (_base_/default.yaml:10) -- an agent node carries no
     per-node token cap or effort; both are run settings (``--effort medium``, or
@@ -40,8 +44,9 @@ SYSTEM_PROMPT = (
     "<answer>B</answer>\n"
 )
 
-# SkillOpt configs/livemathematicianbench/default.yaml:17 (exec_timeout)
-SOLVE_TIMEOUT_S = 300
+# Arm A's exec_timeout (run-train.sh:14, run-train-seed.sh:20); SkillOpt's own
+# configs/livemathematicianbench/default.yaml:17 default is 300.
+SOLVE_TIMEOUT_S = 1800
 
 
 class Solver(nn.Mode):

@@ -621,14 +621,16 @@ def test_load_items_skips_rows_like_skillopt(tmp_path):
 
 # ── SkillOpt solver defaults on the solve node ────────────────────────────
 
-def test_solve_node_carries_skillopt_exec_timeout():
-    """exec_timeout 300 (SkillOpt configs/livemathematicianbench/default.yaml:17)
-    is the solve node's timeout, in the graph and in the lowered node."""
+def test_solve_node_carries_arm_a_exec_timeout():
+    """exec_timeout 1800 -- arm A's ``--cfg-options env.exec_timeout=1800``
+    (SkillOpt's run-train.sh:14, run-train-seed.sh:20; SkillOpt's own LiveMath
+    config default is 300) -- is the solve node's timeout, in the graph and in
+    the lowered node."""
     from refactory_packages.livemath.mode import Solver
 
-    assert Solver().build().nodes["solve"].timeout_s == 300
+    assert Solver().build().nodes["solve"].timeout_s == 1800
     workflow = lowering.to_workflow(Solver().state_dict(), name="livemath-solver")
-    assert workflow.to_dict()["nodes"]["solve"]["timeout"] == 300
+    assert workflow.to_dict()["nodes"]["solve"]["timeout"] == 1800
 
 
 def test_solve_timeout_is_configurable():
@@ -684,3 +686,119 @@ def test_walker_run_items_follow_skillopt_shuffle_for_passed_seed(tmp_path):
         for r in result.item_records
     }
     assert got == expected
+
+
+# ── SkillOpt view: records as SkillOpt's rollout results ─────────────────
+
+_VIEW_RECORD = {
+    "id": "202601:41", "passed": False, "score": 0.0,
+    "error_text": None, "error_kind": None,
+    "exchanges": [{
+        "node": "solve",
+        "prompt": "## Question\nQ?\n\n## Choices\nA. x\nB. y",
+        "response": "think\n<answer>A</answer>",
+    }],
+    "prediction": "A", "label": "B", "label_text": "y", "fail_reason": None,
+    "metadata": {
+        "label": "B", "label_text": "y", "question": "Q?",
+        "choices": [{"label": "A", "text": "x"}, {"label": "B", "text": "y"}],
+        "correct_choice": {"label": "B", "text": "y"},
+        "theorem": "", "sketch": "", "theorem_type": ["Implication", "Other"],
+    },
+}
+
+
+def test_skillopt_view_renders_skillopt_analyst_trajectory():
+    """reflect.py:121-248 over livemathematicianbench/rollout.py's result,
+    conversation.json and target prompts (rollout.py:127-144, :246-281)."""
+    from refactory_packages.livemath.skillopt_view import rollout_result
+    from refactory_packages.skillopt.prompts import fmt_minibatch_trajectories
+
+    result = rollout_result(_VIEW_RECORD, {"skill": "S"})
+    system = _SKILLOPT_ROLLOUT_SYSTEM_MD.format(skill_section="## Skill\nS\n\n")
+    assert fmt_minibatch_trajectories([result]) == (
+        "### Trajectory 1 (id=202601:41)\n"
+        "Task: \n"
+        "Task type: Implication\n"
+        "Failure reason: MCQ=0: predicted 'A' but expected 'B'\n"
+        "Steps: 1\n"
+        f"\n#### Target System Prompt\n{system}\n"
+        "\n#### Target User Prompt\n## Question\nQ?\n\n## Choices\nA. x\nB. y\n"
+        "\n"
+        "[agent] think\n<answer>A</answer>\n"
+        "[verification] [EVALUATION RESULT]\n"
+        "Question: Q?\n"
+        "Predicted label: 'A'\n"
+        "Predicted text: 'x'\n"
+        "Correct label: 'B'\n"
+        "Correct text: 'y'\n"
+        "Exact Match: 0.0"
+    )
+    assert (result["soft"], result["predicted_answer"]) == (0.0, "A")
+
+
+def test_skillopt_view_success_and_error_records():
+    """A pass has no fail reason; no theorem type is ``math_mcq`` (rollout.py:132);
+    an errored item has no conversation, so SkillOpt skips it (reflect.py:151-156)."""
+    from refactory_packages.livemath.skillopt_view import rollout_result
+
+    passed = dict(_VIEW_RECORD, passed=True, score=1.0, exchanges=[
+        dict(_VIEW_RECORD["exchanges"][0], response="<answer>B</answer>"),
+    ], metadata=dict(_VIEW_RECORD["metadata"], theorem_type=[]))
+    result = rollout_result(passed, {"skill": ""})
+    assert (result["fail_reason"], result["task_type"], result["hard"], result["soft"]) == (
+        "", "math_mcq", 1, 1.0,
+    )
+    assert result["conversation"][-1]["content"].endswith("Exact Match: 1.0")
+    assert result["target_system_prompt"] == _SKILLOPT_ROLLOUT_SYSTEM_MD.format(skill_section="")
+
+    # The item deadline, and a model call that ran out of time inside the
+    # pass, are SkillOpt's task timeout: exec_timeout + 60 (rollout.py:313, :373).
+    for error_kind, error_text in (
+        ("timeout", "item '202601:41' of 'data' timed out after 2000.0s"),
+        ("RuntimeError", "solve: CompletionTimeout: model completion timed out after 1800s"),
+    ):
+        errored = dict(_VIEW_RECORD, exchanges=[], error_text=error_text, error_kind=error_kind)
+        result = rollout_result(errored, {"skill": "S"})
+        assert result["conversation"] is None and result["n_turns"] == 0
+        assert result["fail_reason"] == "task-timeout-1860s"
+    # Any other failure is process_one's ``error: {e}`` (rollout.py:286-287).
+    failed = dict(_VIEW_RECORD, exchanges=[], error_kind="RuntimeError", error_text=(
+        "solve: RuntimeError: Claude backend failed after 5 retries: "
+        "Claude CLI exited with code 1"
+    ))
+    assert rollout_result(failed, {})["fail_reason"] == (
+        "error: Claude backend failed after 5 retries: Claude CLI exited with code 1"
+    )
+
+
+def test_skillopt_view_slow_update_trajectory():
+    """slow_update.py:116-168 ``_read_trajectory`` over the same conversation."""
+    from refactory_packages.livemath.skillopt_view import rollout_result
+    from refactory_packages.skillopt.env import SkillOptEnv
+    from refactory_packages.skillopt.loop import SkillOptLoop
+
+    pairs = SkillOptLoop._build_comparison_pairs(
+        [_VIEW_RECORD], [_VIEW_RECORD], ["202601:41"],
+        env=SkillOptEnv("livemath"),
+        prev_knobs={"skill": "P"}, curr_knobs={"skill": "C"},
+    )
+    assert pairs[0]["task"] == "Q?"
+    assert pairs[0]["curr"] == {
+        "hard": 0, "soft": 0.0, "predicted_answer": "A",
+        "fail_reason": "MCQ=0: predicted 'A' but expected 'B'",
+    }
+    assert pairs[0]["curr_trajectory"] == (
+        "[agent] think\n<answer>A</answer>\n"
+        + "[verification] " + rollout_result(_VIEW_RECORD, {})["conversation"][-1]["content"]
+    )
+
+
+def test_format_prompt_and_view_share_the_prompt_builders():
+    """The solver's prompts and the view's target prompts are one code path."""
+    from refactory_packages.livemath.ops import build_user_prompt, format_prompt
+    from refactory_packages.livemath.skillopt_view import build_system
+
+    facts = format_prompt(_GatingCtx({"skill": " S "}))
+    assert facts["user_prompt"] == build_user_prompt(_GATING_ITEM)
+    assert build_system(" S ") == _render_system(" S ")

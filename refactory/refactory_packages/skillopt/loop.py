@@ -29,6 +29,7 @@ Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 import warnings
 from typing import Any
@@ -39,8 +40,9 @@ from refactory_dsh.optim import Candidate, Proposal
 from refactory_dsh.outerloop import OuterLoop, Run
 
 from refactory_packages.skillopt import analysts, merge, prompts, schedule, state
+from refactory_packages.skillopt.env import SkillOptEnv
 from refactory_packages.skillopt.json_utils import extract_json
-from refactory_packages.skillopt.trace import TraceRecorder
+from refactory_packages.skillopt.trace import TraceRecorder, ask
 
 
 class SkillOptLoop(OuterLoop):
@@ -96,6 +98,39 @@ class SkillOptLoop(OuterLoop):
             options.get("analyst_edit_budget", self.edit_budget_max),
         )
         self.base_seed = int(options.get("seed", 42))
+        # The order the analysts receive an epoch's train records in, before
+        # the seeded shuffle. ``None`` (every live run) keeps the Run's own
+        # deterministic item order. SkillOpt's order is the rollout's
+        # completion order (livemathematicianbench/rollout.py:383-436 appends
+        # results as futures finish; reflect.py:558-561 splits and shuffles
+        # that list), which no code can reproduce; an offline replay passes a
+        # callable ``(epoch, records) -> records`` that restores the recorded
+        # order. Only a callable is accepted, so a run configured from the
+        # command line or a file (strings, numbers) cannot set it, and
+        # ``_analyst_records`` refuses anything but a permutation.
+        rollout_order = options.get("rollout_order")
+        if rollout_order is not None and not callable(rollout_order):
+            raise TypeError(
+                "skillopt: rollout_order must be a callable (epoch, records) -> records "
+                f"or None, not {type(rollout_order).__name__}"
+            )
+        self.rollout_order = rollout_order
+        # The order of an epoch's analyst patches before the merge. ``None``
+        # (every live run) keeps the analysts' group order. SkillOpt's order is
+        # the analysts' completion order (reflect.py:643-650 appends each patch
+        # as its future completes; trainer.py:157-186 keeps it per source), which
+        # no code can reproduce; it shows in the merge prompts and in a merge's
+        # fallback concatenation (aggregate.py:70-76). An offline replay passes
+        # a callable ``(epoch, kind, patches) -> patches`` that restores the
+        # recorded order; like ``rollout_order`` only a callable is accepted and
+        # only a permutation is taken.
+        patch_order = options.get("patch_order")
+        if patch_order is not None and not callable(patch_order):
+            raise TypeError(
+                "skillopt: patch_order must be a callable (epoch, kind, patches) -> "
+                f"patches or None, not {type(patch_order).__name__}"
+            )
+        self.patch_order = patch_order
         # Initialise mutable state
         self._current_skill: str = ""
         self._current_score: float = 0.0
@@ -115,7 +150,11 @@ class SkillOptLoop(OuterLoop):
         self._comparison_pairs: list[dict] = []
         self._epoch: int = 0
         self._stale_epochs: int = 0
+        # The best score the early stop measures improvement against.
+        self._early_stop_best: float = 0.0
         self._trace: TraceRecorder | None = None
+        # The mode's package as SkillOpt's env adapter; set when the search starts.
+        self._env: SkillOptEnv = SkillOptEnv()
         # Per-phase marker for resume (ask 3)
         self._phase: str = ""
         # Cached intermediate outputs for resume (so we don't re-run model
@@ -151,6 +190,10 @@ class SkillOptLoop(OuterLoop):
         """Drive the full SkillOpt search."""
         # Initialise trace — uses Run.root (public seam)
         self._trace = TraceRecorder(run.root / "skillopt_trace.jsonl")
+        # SkillOpt's env is the adapter the run's env names (envs/base.py:288-296
+        # derives it from the adapter's module path); here it is the package that
+        # holds the run's mode -- its prompt overrides and rollout rendering.
+        self._env = SkillOptEnv.for_mode(str(run.state().get("mode", "")))
 
         # Train item ids for slow update sampling — uses Run.part_ids (public
         # seam). Checked before any evaluation so a run that cannot complete
@@ -189,6 +232,7 @@ class SkillOptLoop(OuterLoop):
             self._val_cache[skill_hash] = self._current_score
             self._best_skill = self._current_skill
             self._best_score = self._current_score
+            self._early_stop_best = self._best_score
             run.save_strategy_state()
 
             self._trace.record_decision(
@@ -206,6 +250,8 @@ class SkillOptLoop(OuterLoop):
             if epoch < resume_epoch:
                 continue
             if epoch == resume_epoch and resume_phase == "epoch_done":
+                if self._early_stop(run):
+                    return
                 continue
 
             # ③ Check control — mechanism 11
@@ -225,10 +271,20 @@ class SkillOptLoop(OuterLoop):
                 run.save_strategy_state()
             records = run.item_records(current)
 
+            # ``rollout_ids`` and ``rollout_hard`` are the Run's own per-item
+            # records reduced to the two figures SkillOpt writes per step
+            # (history.json ``rollout_hard``, steps/step_NNNN/rollout/results.jsonl
+            # ``id``): recorded so the trace alone identifies what this epoch
+            # rolled out. Observability only — nothing reads them back.
             self._trace.record_decision(
                 "train_rollout",
                 n_records=len(records),
                 epoch_seed=epoch_seed,
+                rollout_ids=[str(record.get("id", "")) for record in records],
+                rollout_hard=(
+                    sum(1 for record in records if record.get("passed", False)) / len(records)
+                    if records else None
+                ),
             )
 
             # ③ Analysts — mechanism 3
@@ -239,7 +295,7 @@ class SkillOptLoop(OuterLoop):
                 analyst_seed = epoch_seed
                 failure_patches, success_patches = analysts.reflect(
                     client=self.model,
-                    records=records,
+                    records=self._analyst_records(epoch, records),
                     skill_text=self._current_skill,
                     edit_budget=self.analyst_edit_budget,
                     meta_skill=self._meta_skill_text,
@@ -247,7 +303,11 @@ class SkillOptLoop(OuterLoop):
                     group_size=self.group_size,
                     epoch=epoch,
                     trace=self._trace,
+                    env=self._env,
+                    knobs=_knob_values(current),
                 )
+                failure_patches = self._merge_order(epoch, "failure", failure_patches)
+                success_patches = self._merge_order(epoch, "success", success_patches)
                 # Cache for resume
                 self._cached_failure_patches = failure_patches
                 self._cached_success_patches = success_patches
@@ -264,8 +324,11 @@ class SkillOptLoop(OuterLoop):
                 current = self._finish_epoch(
                     run, current, epoch, train_ids, resume_epoch, resume_phase,
                 )
+                self._count_stale_epoch()
                 self._phase = "epoch_done"
                 run.save_strategy_state()
+                if self._early_stop(run):
+                    return
                 continue
 
             # ④ Merge — mechanism 4
@@ -283,6 +346,15 @@ class SkillOptLoop(OuterLoop):
                 )
                 # Cache for resume
                 self._cached_merged = merged
+                # SkillOpt writes the merged patch to steps/step_NNNN/merged_patch.json
+                # (trainer.py:1376); recording the dict here
+                # is what lets the F20 replay compare it structurally rather than by
+                # count. Observability only — nothing reads it back.
+                self._trace.record_decision(
+                    "merged_patch",
+                    patch=merged,
+                    n_edits=len(merge.patch_edits(merged)),
+                )
                 run.save_strategy_state()
             else:
                 # Resume past merge: restore from cached state (no model calls)
@@ -308,11 +380,16 @@ class SkillOptLoop(OuterLoop):
                     trace=self._trace,
                 )
 
+                # ``edits`` mirrors SkillOpt's steps/step_NNNN/ranked_edits.json
+                # (trainer.py:1396, :1427) so
+                # the F20 replay compares the selected edits themselves, not their
+                # count. Observability only — nothing reads it back.
                 self._trace.record_decision(
                     "ranked_edits",
                     budget_step=self._edit_budget_step,
                     edit_budget=budget,
                     n_edits=len(ranked),
+                    edits=ranked,
                 )
                 # Cache for resume
                 self._cached_ranked = ranked
@@ -337,7 +414,21 @@ class SkillOptLoop(OuterLoop):
                     parent=current.id,
                 )
                 outcome = run.attempt(proposal, current)
-                if isinstance(outcome, list):
+                if isinstance(outcome, list) and _only_noop(outcome):
+                    # The edits changed nothing: SkillOpt still gates the
+                    # unchanged skill (trainer.py:1507, :1514), its selection
+                    # cache answers with the score it holds for that hash
+                    # (:1567-1572), and the gate does not accept an equal score.
+                    candidate = current
+                    # Its per-edit outcomes, as SkillOpt writes edit_apply_report.json
+                    # for it (trainer.py:1510-1512). Observability only.
+                    noop_reports: list[dict[str, Any]] = []
+                    nn_edits.apply(proposal.edit, current.state, edit_reports=noop_reports)
+                    self._trace.record_decision(
+                        "patch_noop", reasons=outcome, n_edits=len(ranked),
+                        edit_report=noop_reports[0] if noop_reports else None,
+                    )
+                elif isinstance(outcome, list):
                     self._trace.record_decision(
                         "patch_refused", reasons=outcome,
                     )
@@ -345,17 +436,20 @@ class SkillOptLoop(OuterLoop):
                     current = self._finish_epoch(
                         run, current, epoch, train_ids, resume_epoch, resume_phase,
                     )
+                    self._count_stale_epoch()
                     self._phase = "epoch_done"
                     run.save_strategy_state()
+                    if self._early_stop(run):
+                        return
                     continue
-
-                candidate = outcome
-                edit_report = candidate.edit_reports[-1] if candidate.edit_reports else None
-                self._trace.record_decision(
-                    "patch_applied",
-                    edit_report=edit_report,
-                    n_edits=len(ranked),
-                )
+                else:
+                    candidate = outcome
+                    edit_report = candidate.edit_reports[-1] if candidate.edit_reports else None
+                    self._trace.record_decision(
+                        "patch_applied",
+                        edit_report=edit_report,
+                        n_edits=len(ranked),
+                    )
 
                 cand_skill = self._get_skill(candidate)
                 cand_hash = self._skill_hash(cand_skill)
@@ -393,14 +487,12 @@ class SkillOptLoop(OuterLoop):
                     if cand_score > self._best_score:
                         self._best_skill = cand_skill
                         self._best_score = cand_score
-                    self._stale_epochs = 0
                     self._trace.record_decision(
                         "val_gate_accept",
                         cand_score=cand_score,
                         current_score=pre_accept_score,
                     )
                 else:
-                    self._stale_epochs = self._stale_epochs + 1
                     self._trace.record_decision(
                         "val_gate_reject",
                         cand_score=cand_score,
@@ -414,6 +506,7 @@ class SkillOptLoop(OuterLoop):
                 run, current, epoch, train_ids, resume_epoch, resume_phase,
             )
 
+            self._count_stale_epoch()
             self._phase = "epoch_done"
             run.save_strategy_state()
 
@@ -424,16 +517,85 @@ class SkillOptLoop(OuterLoop):
                 resume_phase = ""
 
             # ⑩ Early stop — mechanism 10
-            if self.early_stop_at_full_val and self._best_score >= 1.0 - 1e-9:
-                self._trace.record_decision("early_stop", reason="perfect_val")
-                run.stop("perfect_val")
-                return
-            if self.early_stop_patience > 0 and self._stale_epochs >= self.early_stop_patience:
-                self._trace.record_decision("early_stop", reason="patience")
-                run.stop("patience_exhausted")
+            if self._early_stop(run):
                 return
 
         run.stop("max_epochs")
+
+    def _analyst_records(self, epoch: int, records: list[dict]) -> list[dict]:
+        """The epoch's records in the order the analysts split and shuffle them.
+
+        The Run's order unless ``rollout_order`` is set (see ``configure``);
+        then its answer, which must be the same records in another order.
+        """
+        if self.rollout_order is None:
+            return records
+        ordered = list(self.rollout_order(epoch, list(records)))
+        by_id = {str(r.get("id", "")): r for r in records}
+        ids = [str(r.get("id", "")) for r in ordered]
+        if len(by_id) != len(records) or sorted(ids) != sorted(by_id):
+            raise ValueError(
+                "skillopt: rollout_order must return a permutation of the epoch's "
+                "records; it changed which records there are"
+            )
+        return [by_id[item_id] for item_id in ids]
+
+    # ── early stop: arm A's trainer patch (skillopt_local.diff, trainer.py) ──
+    #
+    # Arm A's SkillOpt carries a local early-stop patch (refactory-dsh#493): at
+    # the end of EVERY epoch -- one that skipped for want of edits included --
+    # an epoch whose best selection score did not beat the best seen so far
+    # counts as stale; the run ends once ``early_stop_at_full_val`` sees a full
+    # best score, or ``early_stop_patience`` stale epochs in a row. The best is
+    # the score at the start of training until an epoch improves it.
+
+    def _count_stale_epoch(self) -> None:
+        if not (self.early_stop_patience or self.early_stop_at_full_val):
+            return
+        if self._best_score > self._early_stop_best + 1e-9:
+            self._early_stop_best = self._best_score
+            self._stale_epochs = 0
+        else:
+            self._stale_epochs += 1
+
+    def _early_stop(self, run: Run) -> bool:
+        if self.early_stop_at_full_val and self._best_score >= 1.0 - 1e-9:
+            self._trace.record_decision("early_stop", reason="perfect_val")
+            run.stop("perfect_val")
+            return True
+        if self.early_stop_patience > 0 and self._stale_epochs >= self.early_stop_patience:
+            self._trace.record_decision("early_stop", reason="patience")
+            run.stop("patience_exhausted")
+            return True
+        return False
+
+    def _merge_order(self, epoch: int, kind: str, patches: list[dict]) -> list[dict]:
+        """The epoch's ``kind`` patches in the order the merge receives them.
+
+        The analysts' group order unless ``patch_order`` is set (see
+        ``configure``); then its answer, taken only as a permutation of these
+        same patch objects.
+        """
+        if self.patch_order is None or len(patches) < 2:
+            return patches
+        ordered = list(self.patch_order(epoch, kind, list(patches)))
+        remaining = list(range(len(patches)))
+        picked: list[dict] = []
+        for patch in ordered:
+            index = next((i for i in remaining if patches[i] is patch), None)
+            if index is None:
+                raise ValueError(
+                    "skillopt: patch_order must return a permutation of the epoch's "
+                    "patches; it changed which patches there are"
+                )
+            remaining.remove(index)
+            picked.append(patches[index])
+        if remaining:
+            raise ValueError(
+                "skillopt: patch_order must return a permutation of the epoch's "
+                "patches; it dropped some"
+            )
+        return picked
 
     # ── end of epoch: slow update then meta skill ─────────────────────────
 
@@ -530,12 +692,13 @@ class SkillOptLoop(OuterLoop):
             "slow_update_sample", sample_ids=sample_ids,
         )
 
-        # Evaluate prev skill on sample. SkillOpt rolls out both skills even
-        # when the epoch changed nothing (trainer.py:1866-1867); the same
-        # skill cannot be re-proposed here (E-noop), so roll out `current`.
-        if self._prev_epoch_skill == self._current_skill:
-            prev_candidate = current
-        else:
+        # Evaluate prev skill on sample. SkillOpt rolls out both skills on the
+        # sample whatever they are (trainer.py:1866-1867). A skill the search
+        # already holds cannot be proposed again (E-noop for the current one,
+        # E-duplicate for one evaluated earlier, e.g. the skill the previous
+        # epoch ended on), so roll out the candidate that already carries it.
+        prev_candidate = self._known_candidate(run, current, self._prev_epoch_skill)
+        if prev_candidate is None:
             prev_proposal = Proposal(
                 edit={
                     "op": "set_knob",
@@ -564,7 +727,12 @@ class SkillOptLoop(OuterLoop):
         curr_records = run.item_records(curr_candidate)
 
         # Build comparison pairs — slow_update.py:206-269
-        pairs = self._build_comparison_pairs(prev_records, curr_records, sample_ids)
+        pairs = self._build_comparison_pairs(
+            prev_records, curr_records, sample_ids,
+            env=self._env,
+            prev_knobs=_knob_values(prev_candidate),
+            curr_knobs=_knob_values(curr_candidate),
+        )
         self._comparison_pairs = pairs
         comparison_text = prompts.format_comparison_text(pairs)
 
@@ -575,11 +743,9 @@ class SkillOptLoop(OuterLoop):
         user = prompts.format_slow_update_user(
             self._prev_epoch_skill, self._current_skill, prev_guidance, comparison_text,
         )
-        output = self.model.complete(
-            user, system=prompts.SLOW_UPDATE_SYSTEM, call_key=call_key,
-        )
-        self._trace.record_model_call(
-            "slow_update", prompts.SLOW_UPDATE_SYSTEM, user, output, call_key=call_key,
+        output = ask(
+            self.model, self._trace, "slow_update", user,
+            system=prompts.SLOW_UPDATE_SYSTEM, call_key=call_key,
         )
 
         # Parse guidance — slow_update.py:434-439
@@ -634,6 +800,13 @@ class SkillOptLoop(OuterLoop):
         one (trainer.py:384-397, :2189-2194).
         """
         if epoch < 2 or self._prev_epoch_skill is None:
+            # SkillOpt still writes meta_skill/epoch_NN/meta_skill_result.json with
+            # ``action: skip_first_epoch`` for the first epoch (trainer.py:2103),
+            # so record the skip rather than leaving the epoch silent in the trace.
+            self._trace.record_decision(
+                "meta_skill",
+                action="skip_first_epoch" if epoch < 2 else "skip_no_prev_skill",
+            )
             return
 
         comparison_text = prompts.format_comparison_text(self._comparison_pairs)
@@ -644,11 +817,9 @@ class SkillOptLoop(OuterLoop):
             self._meta_skill_text,
             comparison_text,
         )
-        output = self.model.complete(
-            user, system=prompts.META_SKILL_SYSTEM, call_key=call_key,
-        )
-        self._trace.record_model_call(
-            "meta_skill", prompts.META_SKILL_SYSTEM, user, output, call_key=call_key,
+        output = ask(
+            self.model, self._trace, "meta_skill", user,
+            system=prompts.META_SKILL_SYSTEM, call_key=call_key,
         )
 
         # meta_skill.py:70-75
@@ -682,6 +853,7 @@ class SkillOptLoop(OuterLoop):
             "comparison_pairs": self._comparison_pairs,
             "epoch": self._epoch,
             "stale_epochs": self._stale_epochs,
+            "early_stop_best": self._early_stop_best,
             "phase": self._phase,
             # Cached intermediate outputs for mid-epoch resume.
             "cached_failure_patches": self._cached_failure_patches,
@@ -705,6 +877,7 @@ class SkillOptLoop(OuterLoop):
         self._comparison_pairs = restored.get("comparison_pairs", [])
         self._epoch = restored.get("epoch", 0)
         self._stale_epochs = restored.get("stale_epochs", 0)
+        self._early_stop_best = restored.get("early_stop_best", self._best_score)
         self._phase = restored.get("phase", "")
         # Cached intermediate outputs for mid-epoch resume.
         self._cached_failure_patches = restored.get("cached_failure_patches", [])
@@ -720,6 +893,27 @@ class SkillOptLoop(OuterLoop):
         knobs = candidate.state.get("knobs", {})
         skill_entry = knobs.get("skill", {})
         return str(skill_entry.get("value", ""))
+
+    @classmethod
+    def _known_candidate(cls, run: Run, current: Candidate, skill: str) -> Candidate | None:
+        """The candidate in the search that carries ``skill``, if there is one.
+
+        ``current`` first, then the seed, then the evaluated history: a SkillOpt
+        search edits only the ``skill`` knob, so the seed with that skill set
+        has the same state id as the candidate that holds it.
+        """
+        if cls._get_skill(current) == skill:
+            return current
+        seed = run.seed()
+        if cls._get_skill(seed) == skill:
+            return seed
+        built = Candidate.from_state(
+            nn_edits.configure(seed.state, "skill", skill), parent=seed.id,
+        )
+        for candidate in run.history():
+            if candidate.id == built.id:
+                return candidate
+        return None
 
     @classmethod
     def _candidate_for_skill(cls, run: Run, skill: str) -> Candidate:
@@ -758,20 +952,33 @@ class SkillOptLoop(OuterLoop):
         prev_records: list[dict],
         curr_records: list[dict],
         sample_ids: list[str],
+        *,
+        env: SkillOptEnv | None = None,
+        prev_knobs: dict[str, Any] | None = None,
+        curr_knobs: dict[str, Any] | None = None,
     ) -> list[dict]:
-        """Per-sample comparison entries — slow_update.py:206-269.
+        """Per-sample comparison entries — slow_update.py:206-269 ``build_comparison_pairs``.
 
-        Each entry carries the task, both outcomes (pass, score, answer, fail
-        reason) and both trajectories, rendered from the F6 records.
+        SkillOpt builds them from the two rollouts' result dicts and reads each
+        trajectory from the rollout's ``conversation.json``; here both come from
+        the env's rendering of the F6 records (``SkillOptEnv.rollout_result``),
+        each side with the knobs it was rolled out with.
         """
-        prev_by_id = {str(r.get("id", "")): r for r in prev_records}
-        curr_by_id = {str(r.get("id", "")): r for r in curr_records}
+        env = env if env is not None else SkillOptEnv()
+        prev_by_id = {
+            str(r.get("id", "")): env.rollout_result(r, dict(prev_knobs or {}))
+            for r in prev_records
+        }
+        curr_by_id = {
+            str(r.get("id", "")): env.rollout_result(r, dict(curr_knobs or {}))
+            for r in curr_records
+        }
         pairs: list[dict] = []
         for item_id in sample_ids:
             prev = prev_by_id.get(item_id, {})
             curr = curr_by_id.get(item_id, {})
-            prev_ok = bool(prev.get("passed", False))
-            curr_ok = bool(curr.get("passed", False))
+            prev_ok = _is_result_success(prev)
+            curr_ok = _is_result_success(curr)
             if not prev_ok and curr_ok:
                 category = "improved"
             elif prev_ok and not curr_ok:
@@ -780,14 +987,19 @@ class SkillOptLoop(OuterLoop):
                 category = "persistent_fail"
             else:
                 category = "stable_success"
+            # slow_update.py:242: SkillOpt reads the task from the sampled item;
+            # an env's result carries the item's question (e.g.
+            # livemathematicianbench/rollout.py:131).
+            item = curr or prev
             pairs.append({
                 "id": item_id,
-                "task": prompts.record_task(curr or prev) or item_id,
+                "task": item.get("question", item.get(
+                    "task_description", item.get("instruction", item_id))),
                 "category": category,
                 "prev": _outcome(prev, prev_ok),
                 "curr": _outcome(curr, curr_ok),
-                "prev_trajectory": _trajectory(prev),
-                "curr_trajectory": _trajectory(curr),
+                "prev_trajectory": _read_trajectory(prev),
+                "curr_trajectory": _read_trajectory(curr),
             })
         return pairs
 
@@ -804,28 +1016,64 @@ def batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
     return seed + epoch * 1000 + batch_idx + 1
 
 
-def _outcome(record: dict, passed: bool) -> dict[str, Any]:
-    """One side of a comparison pair — slow_update.py:249-260."""
-    score = record.get("score")
-    try:
-        soft = float(score) if score is not None else 0.0
-    except (TypeError, ValueError):
-        soft = 0.0
-    prediction = record.get("prediction")
+def _only_noop(reasons: list[str]) -> bool:
+    """Whether every refusal reason is ``E-noop`` (the edit changed nothing)."""
+    return bool(reasons) and all(str(reason).startswith("E-noop") for reason in reasons)
+
+
+def _knob_values(candidate: Candidate) -> dict[str, Any]:
+    """The candidate's knob values by name, as its rollout used them."""
+    knobs = candidate.state.get("knobs", {}) or {}
     return {
-        "hard": int(passed),
-        "soft": soft,
-        "predicted_answer": prediction if prediction is not None else "N/A",
-        "fail_reason": prompts.record_fail_reason(record) if record else "",
+        name: entry.get("value") if isinstance(entry, dict) else entry
+        for name, entry in knobs.items()
     }
 
 
-def _trajectory(record: dict) -> str:
-    """slow_update.py:116-168 ``_read_trajectory``, from an F6 record."""
-    if not record:
-        return "(trajectory not available)"
-    return prompts.format_trajectory(record)
+def _is_result_success(res: dict) -> bool:
+    """slow_update.py:182-195: ``hard`` must be a finite number in [0, 1], >= 0.5."""
+    if not res or not isinstance(res, dict):
+        return False
+    hard_val = res.get("hard")
+    if isinstance(hard_val, (bool, int, float)):
+        if math.isfinite(hard_val) and 0.0 <= hard_val <= 1.0:
+            return float(hard_val) >= 0.5
+    return False
 
+
+def _get_soft_score(res: dict) -> float:
+    """slow_update.py:198-211: ``soft`` when a finite number in [0, 1], else 0.0."""
+    if not res or not isinstance(res, dict):
+        return 0.0
+    soft_val = res.get("soft")
+    if isinstance(soft_val, (bool, int, float)):
+        if math.isfinite(soft_val) and 0.0 <= soft_val <= 1.0:
+            return float(soft_val)
+    return 0.0
+
+
+def _outcome(result: dict, passed: bool) -> dict[str, Any]:
+    """One side of a comparison pair — slow_update.py:246-257."""
+    return {
+        "hard": int(passed),
+        "soft": _get_soft_score(result),
+        "predicted_answer": result.get("predicted_answer", result.get("answer", "N/A")),
+        "fail_reason": result.get("fail_reason", ""),
+    }
+
+
+def _read_trajectory(result: dict) -> str:
+    """slow_update.py:116-168 ``_read_trajectory``, over a rendered result.
+
+    A result without a conversation is SkillOpt's missing ``conversation.json``.
+    Unlike ``fmt_trajectory``, entries that are not dicts are skipped.
+    """
+    conversation = result.get("conversation") if result else None
+    if conversation is None:
+        return "(trajectory not available)"
+    if not conversation:
+        return "(empty trajectory)"
+    return prompts.fmt_trajectory([e for e in conversation if isinstance(e, dict)])
 
 
 def _op_to_kind(edit: dict[str, Any]) -> dict[str, Any]:

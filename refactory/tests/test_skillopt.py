@@ -7,6 +7,7 @@ small toy Task, and each fails when the mechanism it tests is reverted.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -797,46 +798,123 @@ RECORD_FAIL = {
     "metadata": {"question": "What is 2+2?", "task_type": "arith"},
 }
 
-RECORD_FAIL_TEXT = (
+
+#: A SkillOpt rollout result as an env renders it: the result dict, its
+#: conversation and the target prompts (reflect.py:121-248 reads the latter
+#: from conversation.json and target_*_prompt.txt).
+RESULT_FAIL = {
+    "id": "q7", "question": "What is 2+2?", "task_type": "arith", "hard": 0,
+    "fail_reason": "MCQ=0: predicted 'A' but expected 'B'", "n_turns": 1,
+    "reference_text": "  2+2=4  ",
+    "target_system_prompt": "SYSTEM\n",
+    "target_user_prompt": "## Question\nWhat is 2+2?",
+    "conversation": [
+        {"type": "message", "turn": 1, "content": "<answer>A</answer>"},
+        {"role": "system", "content": "[EVALUATION RESULT]\nExact Match: 0.0"},
+    ],
+}
+
+#: SkillOpt's rendering of RESULT_FAIL, byte for byte (reflect.py:159-199, :246):
+#: an empty Task (LiveMath results carry no task_description/instruction), the
+#: hidden reference stripped, each target prompt followed by a newline, then
+#: one blank line and the conversation through fmt_trajectory (reflect.py:74-115).
+RESULT_FAIL_TEXT = (
     "### Trajectory 1 (id=q7)\n"
-    "Task: What is 2+2?\n"
+    "Task: \n"
     "Task type: arith\n"
-    "Failure reason: predicted 5, expected B\n"
+    "Failure reason: MCQ=0: predicted 'A' but expected 'B'\n"
     "Steps: 1\n"
+    "\n#### Hidden Reference\n2+2=4\n"
+    "\n#### Target System Prompt\nSYSTEM\n\n"
+    "\n#### Target User Prompt\n## Question\nWhat is 2+2?\n"
     "\n"
-    "[solve prompt] Solve: 2+2?\n"
-    "[solve] <answer>5</answer>\n"
-    "[verification] [EVALUATION RESULT]\n"
-    "Prediction: '5'\n"
-    "Label: 'B'\n"
-    "Label text: '4'\n"
-    "Score: 0.25\n"
-    "Passed: False"
+    "[agent] <answer>A</answer>\n"
+    "[verification] [EVALUATION RESULT]\nExact Match: 0.0"
 )
 
 
+def test_fmt_trajectory_matches_skillopt():
+    """reflect.py:74-115: tool calls, step records, system entries as
+    [verification], everything else as [<role>] defaulting to agent."""
+    assert prompts.fmt_trajectory([
+        "raw",
+        {"type": "tool_call", "cmd": "ls", "obs": "a"},
+        {"step": 2, "action": "go", "env_feedback": "ok", "reasoning": "why"},
+        {"step": 3, "action": "stop", "env_feedback": None},
+        {"role": "system", "content": "graded"},
+        {"role": "user", "content": "hi"},
+        {"type": "message", "content": None},
+    ]) == (
+        "[agent] raw\n"
+        "[action] ls\n[obs]    a\n"
+        "[step 2 think] why\n[step 2 action] go\n[step 2 obs]    ok\n"
+        "[step 3 action] stop\n[step 3 obs]    \n"
+        "[verification] graded\n"
+        "[user] hi\n"
+        "[agent] "
+    )
+
+
+def test_slow_update_trajectory_matches_skillopt():
+    """slow_update.py:116-168 ``_read_trajectory``: no conversation file,
+    an empty one, and non-dict entries skipped (unlike fmt_trajectory)."""
+    from refactory_packages.skillopt.loop import _read_trajectory
+
+    assert _read_trajectory({}) == "(trajectory not available)"
+    assert _read_trajectory({"conversation": None}) == "(trajectory not available)"
+    assert _read_trajectory({"conversation": []}) == "(empty trajectory)"
+    assert _read_trajectory({"conversation": [
+        "raw", {"type": "message", "content": "x"}, {"role": "system", "content": "v"},
+    ]}) == "[agent] x\n[verification] v"
+
+
 def test_analyst_message_renders_full_trajectory():
-    """reflect.py:321-344 / :421-441, trajectories as reflect.py:112-239."""
-    ok = dict(RECORD_FAIL, id="q8", passed=True, score=1.0, prediction="4",
-              fail_reason=None, exchanges=[])
-    user = prompts.format_analyst_user("SKILL", [RECORD_FAIL, ok], 4, "META", failure=True)
+    """reflect.py:321-344 / :421-441, trajectories as reflect.py:121-248."""
+    no_conversation = dict(RESULT_FAIL, id="q8", conversation=None)
+    ok = dict(RESULT_FAIL, id="q9", fail_reason="", reference_text="",
+              target_system_prompt="", target_user_prompt="", task_description="T")
+    user = prompts.format_analyst_user(
+        "SKILL", [RESULT_FAIL, no_conversation, ok], 4, "META", failure=True,
+    )
     assert user == (
         "## Current Skill\nSKILL\n\n"
         "## Edits Budget\nProduce at most L=4 edits.\n\n"
         + META_CTX + "\n\n"
-        "## Failed Trajectories (2 total)\n"
-        + RECORD_FAIL_TEXT
+        "## Failed Trajectories (3 total)\n"
+        + RESULT_FAIL_TEXT
         + "\n\n---\n\n"
-        "### Trajectory 2 (id=q8)\nTask: What is 2+2?\nTask type: arith\nSteps: 0\n\n"
-        "[verification] [EVALUATION RESULT]\nPrediction: '4'\nLabel: 'B'\n"
-        "Label text: '4'\nScore: 1.0\nPassed: True"
+        # q8 has no conversation: skipped, but the index still advances
+        # (reflect.py:148-156 ``continue`` inside ``enumerate``).
+        "### Trajectory 3 (id=q9)\nTask: T\nTask type: arith\nSteps: 1\n\n"
+        "[agent] <answer>A</answer>\n"
+        "[verification] [EVALUATION RESULT]\nExact Match: 0.0"
     )
-    success = prompts.format_analyst_user("SKILL", [RECORD_FAIL], 3, "", failure=False)
+    success = prompts.format_analyst_user("SKILL", [RESULT_FAIL], 3, "", failure=False)
     assert success == (
         "## Current Skill\nSKILL\n\n"
         "## Edits Budget\nProduce at most L=3 edits.\n\n"
-        "## Successful Trajectories (1 total)\n" + RECORD_FAIL_TEXT
+        "## Successful Trajectories (1 total)\n" + RESULT_FAIL_TEXT
     )
+    # No trajectory at all: no message, so no call (reflect.py:324-325).
+    assert prompts.format_analyst_user("SKILL", [no_conversation], 4, "", failure=True) == ""
+
+
+def test_analyst_group_without_trajectories_makes_no_call(tmp_path):
+    """reflect.py:324-325: a group whose results have no conversation is not sent."""
+    from refactory_packages.skillopt import analysts
+    from refactory_packages.skillopt.env import SkillOptEnv
+
+    class NoConversation(SkillOptEnv):
+        def rollout_result(self, record, knobs):  # type: ignore[no-untyped-def]
+            return {"id": record["id"], "conversation": None}
+
+    client = FakeClient()
+    records = [{"id": f"r{i}", "passed": False, "score": 0.0} for i in range(3)]
+    failures, _ = analysts.reflect(
+        client, records, "SKILL", 4, "", seed=1, group_size=8, epoch=1,
+        trace=_trace(tmp_path), env=NoConversation(),
+    )
+    assert client.calls == [] and failures == []
 
 
 def test_analyst_prompts_in_a_run_carry_records(tmp_path):
@@ -849,18 +927,148 @@ def test_analyst_prompts_in_a_run_carry_records(tmp_path):
     assert "Score: 0.5\nPassed: False" in prompt
 
 
+# ── env prompt overrides (skillopt/prompts/__init__.py:32-58) ──────────────
+
+
+def test_env_prompt_override_with_generic_fallback(tmp_path, monkeypatch):
+    """load_prompt(name, env): the package's skillopt_prompts/<name>.md wins,
+    the generic prompt is the fallback, and any name is looked up."""
+    from refactory_packages.skillopt import env as env_mod
+
+    pkg = tmp_path / "pkg"
+    (pkg / env_mod.PROMPT_DIR).mkdir(parents=True)
+    (pkg / env_mod.PROMPT_DIR / "analyst_error.md").write_text("ENV ERROR\n")
+    (pkg / env_mod.PROMPT_DIR / "custom.md").write_text("ENV CUSTOM")
+    monkeypatch.setattr(env_mod, "_package_dir", lambda name: pkg if name == "pkg" else None)
+
+    with_env = env_mod.SkillOptEnv("pkg")
+    assert with_env.prompt("analyst_error") == "ENV ERROR\n"  # as read, unstripped
+    assert with_env.prompt("custom") == "ENV CUSTOM"
+    assert with_env.prompt("analyst_success") == prompts.SUCCESS_ANALYST_SYSTEM
+    assert env_mod.SkillOptEnv("other").prompt("analyst_error") == prompts.FAILURE_ANALYST_SYSTEM
+    with pytest.raises(KeyError):
+        env_mod.SkillOptEnv("other").prompt("custom")
+
+
+def test_livemath_ships_skillopt_analyst_overrides():
+    """LiveMath's analyst prompts are SkillOpt's env files, and only those two:
+    SkillOpt's envs/livemathematicianbench/prompts/ overrides analyst_error
+    and analyst_success (plus its rollout_system, the solver's own prompt)."""
+    from refactory_packages.skillopt.env import PROMPT_DIR, SkillOptEnv
+
+    env = SkillOptEnv.for_mode("livemath/solver")
+    assert env.package == "livemath"
+    shipped = sorted(p.name for p in (env.override_path("x").parent).iterdir())
+    assert shipped == ["analyst_error.md", "analyst_success.md"], PROMPT_DIR
+    error = env.prompt("analyst_error")
+    assert error.startswith(
+        "You are an expert failure-analysis agent for theorem-grounded mathematical "
+        "multiple-choice questions.\n"
+    )
+    assert hashlib.sha256(error.encode()).hexdigest() == LIVEMATH_ANALYST_ERROR_SHA256
+    success = env.prompt("analyst_success")
+    assert hashlib.sha256(success.encode()).hexdigest() == LIVEMATH_ANALYST_SUCCESS_SHA256
+    assert env.prompt("merge_failure") == prompts.MERGE_FAILURE_SYSTEM
+
+
+#: sha256 of SkillOpt's envs/livemathematicianbench/prompts/analyst_{error,success}.md
+#: at the commit arm A ran (ec9d021b).
+LIVEMATH_ANALYST_ERROR_SHA256 = "9cd5e3449b9013fb67b6dec930486bd8c23c7128f2746f97a1ca29b07b178150"
+LIVEMATH_ANALYST_SUCCESS_SHA256 = "42619d41000d16b7e5194e5dd09ba67fcd65d1c5ae8b04b4097c38e45a02750d"
+
+
+def test_run_uses_the_mode_packages_analyst_prompts(tmp_path, monkeypatch):
+    """The analysts' system prompts come from the package that holds the run's
+    mode (envs/base.py:288-330), found from the run itself."""
+    from refactory_packages.skillopt import env as env_mod
+
+    pkg = tmp_path / "skillopt_probe"
+    (pkg / env_mod.PROMPT_DIR).mkdir(parents=True)
+    (pkg / env_mod.PROMPT_DIR / "analyst_error.md").write_text("PROBE ERROR")
+    (pkg / env_mod.PROMPT_DIR / "analyst_success.md").write_text("PROBE SUCCESS")
+    monkeypatch.setattr(
+        env_mod, "_package_dir", lambda name: pkg if name == MODE_ID.split("/")[0] else None,
+    )
+    monkeypatch.setenv(PASS_IDS_ENV, "t1,t3")
+    client = FakeClient()
+    _run_loop(tmp_path / "run", client=client, skillopt_options={"max_epochs": 1})
+    systems = {c["call_key"][0]: c["system"] for c in client.calls if c["call_key"]}
+    assert systems["analyst_failure"] == "PROBE ERROR"
+    assert systems["analyst_success"] == "PROBE SUCCESS"
+    assert {k for k, v in systems.items() if v.startswith("PROBE")} == {
+        "analyst_failure", "analyst_success",
+    }
+
+
+# ── rollout order seam (replay-only use) ──────────────────────────────────
+
+
+def _analyst_ids(trace: list[dict[str, Any]], epoch: int = 1) -> list[list[str]]:
+    return [d["record_ids"] for d in _decisions(trace, "analyst_failure") if d["epoch"] == epoch]
+
+
+def test_rollout_order_is_off_by_default(tmp_path):
+    """A run that does not pass ``rollout_order`` shuffles the Run's own order."""
+    import random
+
+    loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    assert loop.rollout_order is None
+    trace = _read_trace(tmp_path)
+    expected = list(_decisions(trace, "train_rollout")[0]["rollout_ids"])
+    random.Random(1043).shuffle(expected)
+    assert _analyst_ids(trace) == [expected]
+
+
+def test_rollout_order_feeds_the_seeded_shuffle(tmp_path):
+    """reflect.py:558-561 shuffle the list in the order the rollout returned it:
+    the order the option gives is the one the batch seed shuffles."""
+    import random
+
+    seen: list[int] = []
+
+    def reverse(epoch, records):  # type: ignore[no-untyped-def]
+        seen.append(epoch)
+        return list(reversed(records))
+
+    _run_loop(tmp_path, skillopt_options={"max_epochs": 1, "rollout_order": reverse})
+    trace = _read_trace(tmp_path)
+    expected = list(reversed(_decisions(trace, "train_rollout")[0]["rollout_ids"]))
+    random.Random(1043).shuffle(expected)
+    assert seen == [1]
+    assert _analyst_ids(trace) == [expected]
+
+
+def test_rollout_order_must_be_a_callable_permutation(tmp_path):
+    loop = SkillOptLoop()
+    with pytest.raises(TypeError):
+        loop.configure(rollout_order="completion")
+    loop.configure(rollout_order=lambda epoch, records: records[:-1])
+    records = [{"id": "a"}, {"id": "b"}]
+    with pytest.raises(ValueError):
+        loop._analyst_records(1, records)
+    loop.configure(rollout_order=lambda epoch, records: [{"id": "b", "x": 1}, {"id": "a"}])
+    # Only the order is taken: the records themselves stay the Run's.
+    assert loop._analyst_records(1, records) == [{"id": "b"}, {"id": "a"}]
+
+
 def test_comparison_and_slow_update_messages_match_skillopt():
     """slow_update.py:206-269 pairs, :287-349 text, :409-424 message;
     meta_skill.py:44-60 message."""
     prev_ok = dict(RECORD_FAIL, passed=True, score=1.0, prediction="4", fail_reason=None)
     pairs = SkillOptLoop._build_comparison_pairs([prev_ok], [RECORD_FAIL], ["q7", "q9"])
     text = prompts.format_comparison_text(pairs)
+    # Trajectories as slow_update.py:116-168 ``_read_trajectory`` renders the
+    # generic rollout result (env.default_rollout_result) of each record.
     traj_prev = (
-        "[solve prompt] Solve: 2+2?\n[solve] <answer>5</answer>\n"
+        "[agent] <answer>5</answer>\n"
         "[verification] [EVALUATION RESULT]\nPrediction: '4'\nLabel: 'B'\n"
         "Label text: '4'\nScore: 1.0\nPassed: True"
     )
-    traj_curr = RECORD_FAIL_TEXT.split("\n\n", 1)[1]
+    traj_curr = (
+        "[agent] <answer>5</answer>\n"
+        "[verification] [EVALUATION RESULT]\nPrediction: '5'\nLabel: 'B'\n"
+        "Label text: '4'\nScore: 0.25\nPassed: False"
+    )
     assert text == (
         "## Longitudinal Comparison Summary\n"
         "Total samples: 2\n"
@@ -915,6 +1123,196 @@ def test_slow_update_and_meta_prompts_in_a_run_carry_trajectories(tmp_path):
         prompt = next(c["prompt"] for c in client.calls if c["call_key"][0] == step)
         assert "## Longitudinal Comparison Summary\nTotal samples: 8\n" in prompt
         assert "**Current epoch trajectory:**\n```\n[verification] [EVALUATION RESULT]" in prompt
+
+
+def test_slow_update_rolls_out_a_previous_skill_the_search_already_holds(tmp_path, monkeypatch):
+    """trainer.py:1866-1867 roll out the previous epoch's last skill on the sample
+    whatever it is. When epoch 2 accepts a patch, that skill is the candidate the
+    epoch-2 train rollout already evaluated: re-proposing it is refused
+    (E-duplicate), so the strategy must roll out the candidate it already has."""
+    spy = _spy_evaluations(monkeypatch)
+    # Every patched skill scores higher on val, so both epochs accept.
+    monkeypatch.setattr(
+        SkillOptLoop, "_val_score",
+        staticmethod(lambda run, cand: 0.1 * SkillOptLoop._get_skill(cand).count("Always check.")),
+    )
+    client = FakeClient()
+    loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
+    trace = _read_trace(tmp_path)
+    assert len(_decisions(trace, "val_gate_accept")) == 2
+    assert not _decisions(trace, "slow_update_skipped")
+    assert [c["call_key"] for c in client.calls if c["call_key"][0] == "slow_update"] == [
+        ("slow_update", 2, 0, 0),
+    ]
+    sampled = [items for part, items in spy if part == "train" and items]
+    assert len(sampled) == 2  # the previous skill's and the current skill's rollouts
+    prompt = next(c["prompt"] for c in client.calls if c["call_key"][0] == "slow_update")
+    prev_section = prompt.split("## Previous Epoch's Skill\n", 1)[1].split("\n\n## Current Epoch's Skill", 1)[0]
+    assert prev_section.count("Always check.") == 1
+
+
+def test_failed_optimizer_calls_fall_back_like_skillopt(tmp_path):
+    """SkillOpt catches every optimizer-call failure (reflect.py:383, :467;
+    aggregate.py:60, :261; clip.py:101; slow_update.py:440; meta_skill.py:76):
+    the group's patch is dropped, the run goes on, and the trace says why."""
+    from refactory_packages.skillopt import analysts
+
+    class Failing(FakeClient):
+        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+            super().complete(prompt, system=system, call_key=call_key)
+            raise RuntimeError("Claude backend failed after 3 retries: Claude CLI exited with code 1")
+
+    records = [{"id": f"r{i}", "passed": False, "score": 0.0} for i in range(3)]
+    trace = _trace(tmp_path)
+    failures, _ = analysts.reflect(
+        Failing(), records, "SKILL", 4, "", seed=1, group_size=8, epoch=1, trace=trace,
+    )
+    assert failures == []
+    calls = [json.loads(line) for line in trace.path.read_text().splitlines()]
+    assert calls[0]["raw_output"] is None and "failed after 3 retries" in calls[0]["error"]
+
+    # A whole run whose every optimizer call fails still completes its epochs.
+    loop, _ = _run_loop(tmp_path / "run", client=Failing(), skillopt_options={"max_epochs": 2})
+    run_trace = _read_trace(tmp_path / "run")
+    assert _decisions(run_trace, "no_edits_skip")
+    assert loop.strategy_state_dict()["epoch"] == 2
+
+
+def test_patch_order_feeds_the_merge_and_its_fallback(tmp_path):
+    """aggregate.py:70-76 concatenates the patches' edits in the order the merge
+    got them; ``patch_order`` (replay-only) sets that order, off by default."""
+    from refactory_packages.skillopt import analysts as _analysts  # noqa: F401
+
+    class FailMerges(FakeClient):
+        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+            if call_key and call_key[0] == "merge_failure":
+                super().complete(prompt, system=system, call_key=call_key)
+                raise RuntimeError("failed after 3 retries")
+            if call_key and call_key[0] == "analyst_failure":
+                super().complete(prompt, system=system, call_key=call_key)
+                return json.dumps({"batch_size": 1, "patch": {"reasoning": f"g{call_key[2]}", "edits": [
+                    {"op": "append", "content": f"from group {call_key[2]}"},
+                ]}})
+            return super().complete(prompt, system=system, call_key=call_key)
+
+    seen: list[tuple[int, str, list[str]]] = []
+
+    def reverse(epoch, kind, patches):  # type: ignore[no-untyped-def]
+        seen.append((epoch, kind, [p["reasoning"] for p in patches]))
+        return list(reversed(patches))
+
+    options = {"max_epochs": 1, "group_size": 2}
+    loop, _ = _run_loop(tmp_path / "default", client=FailMerges(), skillopt_options=options)
+    assert loop.patch_order is None
+    merged = _decisions(_read_trace(tmp_path / "default"), "merged_patch")[0]["patch"]
+    default_order = [e["content"] for e in merged["edits"]]
+
+    client = FailMerges()
+    _run_loop(tmp_path / "ordered", client=client,
+              skillopt_options={**options, "patch_order": reverse})
+    assert seen and seen[0][1] == "failure"
+    merged = _decisions(_read_trace(tmp_path / "ordered"), "merged_patch")[0]["patch"]
+    assert [e["content"] for e in merged["edits"]] == list(reversed(default_order))
+    first_merge = next(c for c in client.calls if c["call_key"][0] == "merge_failure")
+    assert first_merge["prompt"].index('"g3"') < first_merge["prompt"].index('"g0"')
+
+
+def test_patch_order_must_be_a_permutation():
+    loop = SkillOptLoop()
+    loop.configure(patch_order=lambda epoch, kind, patches: [dict(patches[1]), patches[0]])
+    patches = [{"reasoning": "a"}, {"reasoning": "b"}]
+    with pytest.raises(ValueError, match="changed which patches"):
+        loop._merge_order(1, "failure", patches)
+    loop.configure(patch_order=lambda epoch, kind, patches: patches[:1])
+    with pytest.raises(ValueError, match="dropped some"):
+        loop._merge_order(1, "failure", patches)
+
+
+def test_early_stop_counts_every_epoch_without_a_better_best(tmp_path):
+    """Arm A's early-stop patch (skillopt_local.diff, trainer.py after the meta
+    skill): every epoch whose best score did not improve is stale -- a skipped
+    epoch too -- and ``early_stop_patience`` stale epochs end the run."""
+
+    class NoEdits(FakeClient):
+        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+            if call_key and call_key[0].startswith("analyst_"):
+                super().complete(prompt, system=system, call_key=call_key)
+                return json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": []}})
+            return super().complete(prompt, system=system, call_key=call_key)
+
+    loop, _ = _run_loop(
+        tmp_path, client=NoEdits(),
+        skillopt_options={"max_epochs": 5, "early_stop_patience": 2},
+    )
+    trace = _read_trace(tmp_path)
+    assert len(_decisions(trace, "no_edits_skip")) == 2
+    assert [d["reason"] for d in _decisions(trace, "early_stop")] == ["patience"]
+    assert loop.strategy_state_dict()["epoch"] == 2
+
+
+def test_early_stop_restarts_the_count_when_the_best_improves(tmp_path, monkeypatch):
+    """An epoch that raises the best score resets the stale count (arm A's
+    patch: ``es_stale = 0`` when ``best_score > es_best``)."""
+    monkeypatch.setattr(
+        SkillOptLoop, "_val_score",
+        staticmethod(lambda run, cand: 0.1 * SkillOptLoop._get_skill(cand).count("Always check.")),
+    )
+
+    class EditsInEpochOne(FakeClient):
+        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+            if call_key and call_key[0].startswith("analyst_") and call_key[1] > 1:
+                super().complete(prompt, system=system, call_key=call_key)
+                return json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": []}})
+            return super().complete(prompt, system=system, call_key=call_key)
+
+    loop, _ = _run_loop(
+        tmp_path, client=EditsInEpochOne(),
+        skillopt_options={"max_epochs": 5, "early_stop_patience": 2},
+    )
+    trace = _read_trace(tmp_path)
+    assert len(_decisions(trace, "val_gate_accept")) == 1
+    assert loop.strategy_state_dict()["epoch"] == 3  # epoch 1 improved; 2 and 3 stale
+
+
+def test_a_patch_that_changes_nothing_is_gated_from_the_cache(tmp_path):
+    """trainer.py:1507-1572: an unchanged skill still reaches the gate; its
+    cached score is the current one, so it is rejected (A's ``reject``), not
+    refused as a patch."""
+
+    class Noop(FakeClient):
+        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+            super().complete(prompt, system=system, call_key=call_key)
+            edits = [{"op": "replace", "target": "NOT IN THE SKILL", "content": "x"}]
+            if call_key and call_key[0].startswith("analyst_"):
+                return json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": edits}})
+            if call_key and call_key[0].startswith("merge_"):
+                return json.dumps({"reasoning": "m", "edits": edits})
+            return super()._default_response(call_key[0] if call_key else "", prompt)
+
+    _run_loop(tmp_path, client=Noop(), skillopt_options={"max_epochs": 1})
+    trace = _read_trace(tmp_path)
+    noop = _decisions(trace, "patch_noop")
+    assert noop and noop[0]["edit_report"]["outcomes"][0]["status"].startswith("skipped")
+    assert not _decisions(trace, "patch_refused")
+    assert _decisions(trace, "val_cache_hit") and _decisions(trace, "val_gate_reject")
+
+
+def test_analyst_decision_says_whether_a_patch_came_back(tmp_path):
+    """reflect.py:646-650 writes minibatch_*.json for every reply carrying a
+    patch, edits or none; the trace keeps that apart from the edit count."""
+    from refactory_packages.skillopt import analysts
+
+    replies = {
+        ("analyst_failure", 1, 0, 0): json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": []}}),
+        ("analyst_failure", 1, 1, 0): "no json here",
+    }
+    records = [{"id": f"r{i}", "passed": False, "score": 0.0} for i in range(2)]
+    trace = _trace(tmp_path)
+    analysts.reflect(FakeClient(replies), records, "SKILL", 4, "", seed=1, group_size=1,
+                     epoch=1, trace=trace)
+    decisions = [json.loads(line) for line in trace.path.read_text().splitlines()]
+    decisions = [d for d in decisions if d["type"] == "decision"]
+    assert [(d["n_edits"], d["returned_patch"]) for d in decisions] == [(0, True), (0, False)]
 
 
 # ── item 3: tolerant JSON ─────────────────────────────────────────────────
@@ -1527,6 +1925,11 @@ def test_skillopt_resolves_by_discovery_in_a_fresh_process():
 # ── Ask 3: Resume continues, never restarts ──────────────────────────────
 
 
+class ProcessKilled(BaseException):
+    """The process dying mid-call. A failed model *call* is not a crash: SkillOpt
+    carries on past it (trace.ask), so the kill is not an ``Exception``."""
+
+
 class CrashingClient(FakeClient):
     """A scripted client whose process dies at one call key."""
 
@@ -1536,7 +1939,7 @@ class CrashingClient(FakeClient):
 
     def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
         if call_key is not None and tuple(call_key) == self.crash_at:
-            raise RuntimeError(f"model died at {self.crash_at}")
+            raise ProcessKilled(f"model died at {self.crash_at}")
         return super().complete(prompt, system=system, call_key=call_key)
 
 
@@ -1554,7 +1957,7 @@ def _crash_then_resume(
     _run_loop(tmp_path / "ref", client=reference, skillopt_options=options)
 
     crashing = CrashingClient(crash_at)
-    with pytest.raises(RuntimeError, match="model died"):
+    with pytest.raises(ProcessKilled, match="model died"):
         _run_loop(tmp_path / "split", client=crashing, skillopt_options=options)
 
     resumed = FakeClient()
