@@ -1794,10 +1794,15 @@ def compute_site_reverts(
 
     for site, test_name, scope in pairs:
         cache_key_str = f"{head}|{site}|{test_name}"
-        if not isinstance(test_name, str) or not test_name.strip():
+        if not isinstance(test_name, str):
             # A citation that names no test: a wrong test id, measured without a run.
             record({"site": site, "test": test_name,
                     "result": "no_tests", "catches_site": False}, cache_key_str)
+            continue
+        if not test_name.strip():
+            # No test was selected for this site (advisory, not a fix-up).
+            record({"site": site, "test": test_name,
+                    "result": "no_test_selected", "catches_site": False}, cache_key_str)
             continue
         cached = cache.get(cache_key_str)
         # "unavailable" is what earlier versions cached for an unmeasured pair.
@@ -1988,6 +1993,119 @@ def compute_site_reverts(
         pass
 
     return {"pairs": results, "summary": summary}
+
+
+def compute_co_revert(
+    ctx: Any, group: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    """Revert all sites in *group* simultaneously and run the tests.
+
+    Unlike :func:`compute_site_reverts` which processes each pair independently,
+    this reverts *every* site's hunks at once before running any test.  This
+    catches co-dependent fallbacks that survive a solo revert.
+
+    Returns ``{"caught": bool, "detail": str}``.
+    """
+    found = worktree.recorded(ctx.workdir)
+    if found is None:
+        return {"caught": False, "detail": "no worktree"}
+
+    import subprocess as _sp
+    import time as _time
+
+    attempt_path = Path(found.path)
+    base = found.base
+
+    # Collect the unique sites and their reverse patches
+    reverted_files: list[str] = []  # for restore
+    patches_applied = False
+
+    try:
+        for site, _test_name, _scope in group:
+            parsed = _site_range(site)
+            if parsed is None:
+                continue
+            file_path, line_start, line_end = parsed
+            target = (attempt_path / file_path).resolve()
+            if not target.is_relative_to(attempt_path.resolve()) or not target.exists():
+                continue
+            if _is_test_file(file_path):
+                continue
+            try:
+                diff_output, overlapping_hunks = _overlapping_hunks(
+                    attempt_path, base, file_path, line_start, line_end)
+            except Exception:
+                continue
+            if not overlapping_hunks:
+                continue
+            # Build reverse patch
+            header_lines = []
+            for line in diff_output.splitlines():
+                if line.startswith("@@"):
+                    break
+                header_lines.append(line)
+            reverse_patch = "\n".join(header_lines + overlapping_hunks) + "\n"
+            try:
+                _sp.run(
+                    ["git", "-C", str(attempt_path), "apply", "--reverse", "--unidiff-zero"],
+                    input=reverse_patch, capture_output=True, text=True, timeout=10, check=True,
+                )
+                reverted_files.append(file_path)
+                patches_applied = True
+            except Exception:
+                continue
+
+        if not patches_applied:
+            return {"caught": False, "detail": "no patches applied"}
+
+        # Run all unique tests in the group
+        tests: set[str] = set()
+        for _site, test_name, _scope in group:
+            if isinstance(test_name, str) and test_name.strip():
+                tests.add(test_name)
+
+        caught = False
+        detail_parts: list[str] = []
+        home = Path(ctx.workdir).resolve() / worktree.CHECK_HOME
+        env = worktree.check_environment(attempt_path, home)
+
+        for test_name in sorted(tests):
+            test_path = test_name.split("::")[0] if "::" in test_name else test_name
+            fn_name = test_name.split("::")[-1] if "::" in test_name else ""
+            if test_path.endswith(".py"):
+                if fn_name:
+                    argv = ["python", "-B", "-m", "pytest", "-x", "-q", test_name]
+                else:
+                    argv = ["python", "-B", "-m", "pytest", "-x", "-q", test_path]
+            else:
+                argv = ["python", "-B", "-m", "pytest", "-x", "-q", test_name]
+            cmd = shlex.join(argv)
+            try:
+                test_result = sandbox.run_command(
+                    cmd, workdir=attempt_path,
+                    timeout_s=SITE_REVERT_PAIR_S, env=env, home=home, exact_env=True,
+                )
+                rc = test_result.returncode
+                if rc is not None and rc != 0 and rc > 0:
+                    caught = True
+                    detail_parts.append(f"{test_name}: fail (rc={rc})")
+                else:
+                    detail_parts.append(f"{test_name}: pass")
+            except Exception as exc:
+                detail_parts.append(f"{test_name}: error ({exc})")
+
+        return {"caught": caught, "detail": "; ".join(detail_parts)}
+    finally:
+        # Restore all reverted files
+        for file_path in reverted_files:
+            try:
+                _sp.run(
+                    ["git", "-C", str(attempt_path), "checkout", "HEAD", "--", file_path],
+                    capture_output=True, timeout=10,
+                    env={**os.environ, "GIT_LITERAL_PATHSPECS": "1"},
+                )
+            except Exception:
+                pass
 
 
 # ── integration function ────────────────────────────────────────────────

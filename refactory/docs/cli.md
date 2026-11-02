@@ -296,3 +296,9 @@ entry and survives a resume.
 |---|---|
 | `refactory pin list` | List all pins with commit (first 12 chars), creation time and driver checkout. |
 | `refactory pin prune` | Remove pins no run refers to. Also removes their `graph-pin-<commit12>` profiles from the person's DSH home. Never removes a pin that a live or resumable run refers to. |
+
+## Verifier replay
+
+| Command | Description |
+|---|---|
+| `refactory replay-verifier --run-dir <path> [--commit <hash>] [--provider <p> --model <m>] [--effort <e>]` | Replay the verifier on an existing run directory and a commit. Reads `brief.json` from the run directory and invokes the verifier's model session. When `--commit` is given, a temporary worktree of that commit is checked out, used, and removed. The model route resolves as for `refactory ceo`: the flags, then the environment, the project file and the stored choice; half a route is refused. |

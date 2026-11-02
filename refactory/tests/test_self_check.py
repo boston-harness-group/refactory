@@ -248,7 +248,8 @@ def test_a_stale_generated_file_and_a_pinned_test_are_fixed_inside_the_attempt(t
     fixes = render({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n"})
     model = FakeModel(_answers(breaks, fixes))
     run = tmp_path / "run"
-    result = _design(run, model, repo, generate="python gen.py")
+    result = _design(run, model, repo, mode=_mode(),
+                     generate="python gen.py")
     assert result.exit_ok, result.error
 
     first, second = _records(run)
@@ -1450,14 +1451,16 @@ def test_an_amendment_puts_the_worktree_back_first(tmp_path):
 def test_prepare_checks_limit_follows_the_knobs_to_their_bounds():
     from refactory_dsh.design import prepare_check_iterations
 
+    # fixups = 2*3 = 6, (8+6+1)*2 + 6+8+1 = 45
     assert prepare_check_iterations({}) == 45 == DesignMode().graph().nodes["prepare_check"].max_iterations
     widest = _mode(check_attempts=5, self_check_fixups=5)
-    # (8 + 25 + 1) x 2 + 25 + 8 reloops at most, so 102.
+    # fixups = 5*5 = 25, (8+25+1)*2 + 25+8+1 = 102
     assert widest.graph().nodes["prepare_check"].max_iterations == 102
     state = widest.state_dict()
     assert state["graph"]["nodes"]["prepare_check"]["max_iterations"] == 102
     assert lowering.to_workflow(state).nodes["prepare_check"].max_iterations == 102
     capped = _mode(check_attempts=5, self_check_fixups=5, check_attempt_cap=20)
+    # fixups = 5*5 = 25, (20+25+1)*2 + 25+20+1 = 138
     assert capped.graph().nodes["prepare_check"].max_iterations == (20 + 25 + 1) * 2 + 25 + 20 + 1
 
 

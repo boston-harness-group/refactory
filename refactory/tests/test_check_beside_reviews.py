@@ -45,7 +45,9 @@ def test_the_check_is_a_branch_of_the_review_fork():
     assert not [e for e in edges if e[0] == "check"]
     assert ("join_qa", "gate_check", None) in edges
     assert ("gate_check", "pick_corrections", "reloop") in edges
-    assert ("gate_check", "synthesize_qa", "proceed") in edges
+    # On to the synthesis, through the rerun of the verifier's probe files.
+    assert ("gate_check", "rerun_probes", "proceed") in edges
+    assert ("rerun_probes", "synthesize_qa", None) in edges
     assert graph.nodes["check"].kind == "op"
     assert graph.nodes["check"].call.endswith("design_ops:check_beside_reviews")
 

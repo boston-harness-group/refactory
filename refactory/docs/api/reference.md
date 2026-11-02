@@ -971,7 +971,7 @@ The per-item half of a data node, from the command line.
 - **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
-- **`pass_read_through`** — The run-level files a pass reads through: what its own nodes read and do not write.
+- **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.
 - **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
