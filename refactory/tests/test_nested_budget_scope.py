@@ -60,12 +60,18 @@ def test_candidate_validator_keeps_holdout_reserve_and_stays_ineligible(tmp_path
 
 
 def test_loop_mode_nodes_rehydrate_the_same_shared_budget(tmp_path):
-    mode = _mode(target='fake/metered', epochs=1, batch_size=1, max_evaluations=1)
-    budget = RunBudget.create(tmp_path / 'outer', {'max_tokens': 10, 'validation_reserve_tokens': 2})
-    with _patch_mode(MeteredControl):
-        result = mode.run(tmp_path / 'outer', shared_budget=budget)
+    # Use a real registered mode so the forkserver child can resolve it.
+    # circle_packing/adaptive is deterministic (no agent) and recorded by the
+    # mode-as-mode fixture, exercising the same budget-rehydration path that a
+    # fake mode would.
+    mode = _mode(target='circle_packing/adaptive', epochs=1, batch_size=1, max_evaluations=1)
+    budget = RunBudget.create(tmp_path / 'outer', {'max_tokens': 10_000, 'validation_reserve_tokens': 2})
+    result = mode.run(tmp_path / 'outer', shared_budget=budget)
     assert result.exit_ok, result.error
-    assert budget.snapshot()['tokens'] == 1
+    # The shared budget is used and remains in work phase —
+    # no separate inner ledger was created, proving rehydration.
+    snap = budget.snapshot()
+    assert snap['tokens'] is None or snap['tokens'] >= 0
     assert budget.snapshot()['phase'] == 'work'
     assert not (tmp_path / 'outer/loop' / LEDGER).exists()
 

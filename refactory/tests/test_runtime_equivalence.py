@@ -1187,43 +1187,41 @@ def test_complex_scenario_runtimes_agree(tmp_path, _real_gh_shim):
     spine_world = _complex_world(tmp_path / "spine", shim, [])
     _complex_spine_resumed(spine_world)
 
-    # ── Compare facts ────────────────────────────────────────────────
-    walker_facts = json.loads(
-        (walker_world.run / ".refactory/progress.json").read_text())["facts"]
-    spine_facts = json.loads((spine_world.run / "facts.json").read_text())
-
-    comparable_keys = ["ctx_model_is_none", "knob_applied", "parity_visits",
-                       "corrections_applied", "knob_read"]
-
-    diffs: list[Difference] = []
-    for key in sorted(set(comparable_keys)):
-        w_val = json.dumps(walker_facts.get(key), sort_keys=True) if key in walker_facts else None
-        s_val = json.dumps(spine_facts.get(key), sort_keys=True) if key in spine_facts else None
-        if w_val != s_val:
-            diffs.append(Difference("facts", key, w_val, s_val))
-
-    # Both runtimes should produce parity_output.txt
-    for fname in ("parity_output.txt",):
-        w_exists = (walker_world.run / fname).exists()
-        s_exists = (spine_world.run / fname).exists()
-        if w_exists != s_exists:
-            diffs.append(Difference("artifacts", fname,
-                                    "present" if w_exists else None,
-                                    "present" if s_exists else None))
-        elif w_exists and s_exists:
-            w_content = (walker_world.run / fname).read_text()
-            s_content = (spine_world.run / fname).read_text()
-            if w_content != s_content:
-                diffs.append(Difference("artifacts", fname, w_content, s_content))
-
+    # ── Compare via observe/differences/unexplained ────────────────
+    # The complex scenario uses a scripted in-process model on the walker side
+    # and the DSH model shim on the spine side, so model-generated content
+    # (agent writes, model-set facts) differs by design.  Compare the semantic
+    # aspects that must agree across runtimes: op-set facts, verdicts, and
+    # op-written artifacts.  This is the observe/differences/unexplained
+    # infrastructure the brief asks for, scoped to what both runtimes produce.
+    op_fact_keys = {"ctx_model_is_none", "knob_applied", "parity_visits",
+                    "corrections_applied", "knob_read"}
+    walker_facts_raw = _facts(walker_world.run, "walker")
+    spine_facts_raw = _facts(spine_world.run, "spine")
+    walker_aspects: dict[str, dict[str, str]] = {
+        "facts": {k: json.dumps(v, sort_keys=True)
+                  for k, v in walker_facts_raw.items() if k in op_fact_keys},
+        "artifacts": {k: v for k, v in _artifacts(walker_world.run).items()
+                      if k == "parity_output.txt"},
+        "verdicts": _verdicts(walker_world.run, "walker"),
+    }
+    spine_aspects: dict[str, dict[str, str]] = {
+        "facts": {k: json.dumps(v, sort_keys=True)
+                  for k, v in spine_facts_raw.items() if k in op_fact_keys},
+        "artifacts": {k: v for k, v in _artifacts(spine_world.run).items()
+                      if k == "parity_output.txt"},
+        "verdicts": _verdicts(spine_world.run, "spine"),
+    }
+    found = differences(walker_aspects, spine_aspects)
     gaps = [GAPS[name] for name in SCENARIO_GAPS["complex"] if name in GAPS]
-    remaining = unexplained(diffs, gaps)
+    remaining = unexplained(found, gaps)
     assert not remaining, (
         f"complex scenario: {len(remaining)} unexplained difference(s):\n"
         + "\n".join(str(d) for d in remaining)
     )
 
     # ── Walker-side verifications ────────────────────────────────────
+    walker_facts = walker_facts_raw
     assert walker_facts.get("ctx_model_is_none") is True
     assert walker_facts.get("knob_applied") == "hello"
     assert walker_facts.get("knob_read") == "hello"
