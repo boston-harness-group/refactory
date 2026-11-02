@@ -4,6 +4,11 @@ Run B on the LiveMath graph with A's seed, A's config, and A's recorded model
 outputs in place of model calls.  Produces a comparison report naming the first
 point where B diverges from A.
 
+Uses B's actual code paths:
+  - livemath/mode.py + livemath/ops.py for solver prompt construction
+  - skillopt/trainer.py for the 6-stage SkillOpt training loop
+  - skillopt/replay.py for the ReplayClient that feeds A's recorded outputs
+
 Usage::
 
     python -m refactory_packages.skillopt.replay_runner \\
@@ -15,7 +20,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 import traceback
@@ -29,6 +33,7 @@ from refactory_packages.skillopt.replay import (
     ReplayExhausted,
     ReplayMismatch,
 )
+from refactory_packages.skillopt.trainer import SkillOptTrainer
 
 
 # ── config mapping ─────────────────────────────────────────────────────────
@@ -64,7 +69,7 @@ def load_a_config(a_out_dir: Path) -> dict[str, Any]:
     }
 
 
-# ── rollout via the LiveMath graph ─────────────────────────────────────────
+# ── data loading ───────────────────────────────────────────────────────────
 
 
 def _load_initial_skill(recording_dir: Path) -> str:
@@ -105,110 +110,6 @@ def _load_val_items(data_dir: Path) -> list[dict[str, Any]]:
     return []
 
 
-def _build_system_prompt(skill_text: str) -> str:
-    """Build the solver system prompt, matching A's rollout.py:16-21.
-
-    A uses ``skill_content.strip()`` before embedding (rollout.py:18), and
-    the Claude Code backend's ``_build_prompt_from_messages`` applies
-    ``.strip()`` to the assembled system prompt (claude_backend.py:130),
-    removing any trailing newline.
-    """
-    if skill_text.strip():
-        skill_section = f"## Skill\n{skill_text.strip()}\n\n"
-    else:
-        skill_section = ""
-    raw = (
-        "You are an expert mathematical reasoning agent solving multiple-choice questions.\n"
-        "\n"
-        f"{skill_section}"
-        "## Task Format\n"
-        "You will receive one mathematics multiple-choice question and its answer choices.\n"
-        "Reason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n"
-        "\n"
-        "## Answer Format\n"
-        "Think step by step, then provide your final answer inside <answer>...</answer> tags.\n"
-        "Inside the tags, output only the single choice label, such as A or C.\n"
-        "\n"
-        "Example:\n"
-        "<answer>B</answer>\n"
-    )
-    return raw.strip()
-
-
-def _build_user_prompt(item: dict[str, Any]) -> str:
-    """Build the solver user prompt, matching livemath/ops.py."""
-    question = item.get("question", "")
-    choices = item.get("choices", [])
-    choices_text = "\n".join(
-        f"{c['label']}. {c['text']}" for c in choices
-    )
-    return f"## Question\n{question}\n\n## Choices\n{choices_text}"
-
-
-def _compute_batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
-    """Compute the per-batch choice-shuffle seed matching A's dataloader.
-
-    Ported from skillopt/envs/livemathematicianbench/dataloader.py:255 (MIT):
-    ``batch_seed = seed + epoch * 1000 + batch_idx + 1``
-    """
-    return seed + epoch * 1000 + batch_idx + 1
-
-
-def _shuffle_epoch_items(
-    items: list[dict[str, Any]], seed: int, epoch: int,
-) -> list[dict[str, Any]]:
-    """Shuffle items for an epoch, matching A's dataloader.
-
-    Ported from skillopt/envs/livemathematicianbench/dataloader.py:245-247 (MIT):
-    ``epoch_rng = random.Random(seed + epoch * 1000)``
-    ``items = list(self.train_items)``
-    ``epoch_rng.shuffle(items)``
-    """
-    import random as _random
-    epoch_rng = _random.Random(seed + epoch * 1000)
-    shuffled = list(items)
-    epoch_rng.shuffle(shuffled)
-    return shuffled
-
-
-def _run_rollout(
-    client: ReplayClient,
-    items: list[dict[str, Any]],
-    skill_text: str,
-    batch_seed: int,
-) -> list[dict[str, Any]]:
-    """Run the solver on items via the ReplayClient, matching A's rollout.
-
-    ``batch_seed`` is the per-batch choice-shuffle seed from
-    ``_compute_batch_seed()``, matching A's dataloader.py:255.
-    """
-    from refactory_packages.livemath.shuffling import shuffle_item_choices
-    from refactory_packages.livemath.grading import evaluate
-
-    system = _build_system_prompt(skill_text)
-    results: list[dict[str, Any]] = []
-    for item in items:
-        shuffled = shuffle_item_choices(item, batch_seed)
-        prompt = _build_user_prompt(shuffled)
-        try:
-            answer = client.complete(prompt, system=system)
-        except (ReplayMismatch, ReplayExhausted):
-            raise  # propagate to the runner
-        # Grade the answer
-        grade = evaluate(
-            answer,
-            shuffled["correct_choice"],
-            shuffled["choices"],
-        )
-        results.append({
-            "id": item["id"],
-            "answer": answer[:200],
-            "score": grade["em"],
-            "predicted_label": grade.get("predicted_label", ""),
-        })
-    return results
-
-
 # ── runner ─────────────────────────────────────────────────────────────────
 
 
@@ -217,15 +118,14 @@ def run_replay(
     output_dir: Path,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the offline replay: drive B's LiveMath graph with A's recordings.
+    """Run the offline replay: drive B's SkillOpt training loop with A's recordings.
 
-    For each epoch in A's training loop:
-    1. Run the solver graph on training items (rollout) via the ReplayClient
-    2. Compare rollout results against A's recorded history
-    3. Report the first divergence or mismatch
+    Creates a SkillOptTrainer with a ReplayClient and runs it through the full
+    6-stage pipeline (rollout, reflect, aggregate, select, update, evaluate)
+    plus epoch-end stages (slow update, meta skill).
 
     When a ReplayMismatch occurs (B requests a call not in A's recordings),
-    that mismatch itself is the report.
+    that mismatch itself is the report — it identifies where B's code diverges.
 
     ``data_dir`` points at the 35/17/125 parts from the official id split.
     """
@@ -258,7 +158,6 @@ def run_replay(
 
         # Load training items
         if data_dir is None:
-            # Try to find data dir from A's config
             with open(a_out_dir / "config.json") as f:
                 cfg = json.load(f)
             split_dir = cfg.get("split_dir", "")
@@ -274,62 +173,27 @@ def run_replay(
         train_items = _load_train_items(data_dir)
         val_items = _load_val_items(data_dir)
 
-        # Load A's history for comparison
-        a_history_path = a_out_dir / "history.json"
-        a_history: list[dict[str, Any]] = []
-        if a_history_path.exists():
-            with open(a_history_path) as f:
-                a_history = json.load(f)
+        # Add use_slow_update and use_meta_skill from A's config
+        with open(a_out_dir / "config.json") as f:
+            full_cfg = json.load(f)
+        a_config["use_slow_update"] = full_cfg.get("use_slow_update", True)
+        a_config["use_meta_skill"] = full_cfg.get("use_meta_skill", True)
 
-        seed = a_config["seed"]
-        max_epochs = a_config["max_epochs"]
-        b_history: list[dict[str, Any]] = []
-
-        # Run training loop: epoch by epoch, matching A's flow
-        for epoch in range(1, max_epochs + 1):
-            step = epoch  # A uses step = epoch (1-indexed)
-
-            # Shuffle items for this epoch (matches A's dataloader)
-            epoch_items = _shuffle_epoch_items(train_items, seed, epoch)
-            batch_seed = _compute_batch_seed(seed, epoch)
-
-            # === ROLLOUT: Run solver on training items ===
-            rollout_results = _run_rollout(
-                client, epoch_items, skill_text, batch_seed,
-            )
-            n_items = len(rollout_results)
-            hard_score = (
-                sum(r["score"] for r in rollout_results) / n_items
-                if n_items > 0 else 0.0
-            )
-
-            # Build B's history entry from the rollout
-            b_entry: dict[str, Any] = {
-                "epoch": epoch,
-                "step": step,
-                "rollout_hard": round(hard_score, 6),
-                "rollout_n": n_items,
-            }
-
-            # The non-rollout stages (analyst, merge, rank, update, evaluate,
-            # gate) require porting A's full prompt construction.  On a replay,
-            # the model calls for these stages are the next calls after the
-            # rollout in A's calls.jsonl.  Rather than reconstruct A's prompts
-            # (which is the full SkillOpt port), we let the ReplayClient
-            # match by content: if B's prompts match A's normalised prompts,
-            # the call succeeds; otherwise a ReplayMismatch is raised.
-
-            # For now, record what we can from the rollout and stop here —
-            # the analyst/merge/rank calls would need the exact same prompt
-            # construction as A, which is the porting bug surface the replay
-            # is designed to discover.
-
-            b_history.append(b_entry)
-
-            report["calls_matched"] = matcher.consumed_count()
+        # Build and run the trainer
+        trainer = SkillOptTrainer(
+            model=client,
+            config=a_config,
+            train_items=train_items,
+            val_items=val_items,
+            initial_skill=skill_text,
+            output_dir=output_dir,
+            a_out_dir=a_out_dir,
+        )
+        b_history = trainer.run()
 
         report["b_history"] = b_history
         report["replay_status"] = "completed"
+        report["calls_matched"] = matcher.consumed_count()
 
         # Report unused recordings
         unused = matcher.unused_recordings()

@@ -203,6 +203,7 @@ def compare_runs(
         epoch_report: dict[str, Any] = {
             "epoch": epoch,
             "step": step,
+            "rollout_hard": {"a": None, "b": None, "match": None},
             "reflection_groups": {"a": None, "b": None, "match": None},
             "merged_edits": {"a": None, "b": None, "match": None},
             "ranked_edits": {"a": None, "b": None, "match": None},
@@ -232,6 +233,26 @@ def compare_runs(
 
         # Load A's step details for structural comparison
         a_step = load_a_step_details(a_out_dir, step)
+
+        # ── rollout_hard: compare solver accuracy ──
+        a_rh = a_entry.get("rollout_hard")
+        b_rh = b_entry.get("rollout_hard")
+        if a_rh is not None and b_rh is not None:
+            # Allow small floating-point differences
+            rh_match = abs(a_rh - b_rh) < 1e-5
+        elif a_rh is not None and b_rh is None:
+            rh_match = False
+        else:
+            rh_match = None
+        epoch_report["rollout_hard"] = {
+            "a": a_rh, "b": b_rh, "match": rh_match,
+        }
+        if rh_match is False and first_div is None:
+            first_div = {
+                "epoch": epoch, "step": step, "phase": "rollout",
+                "field": "rollout_hard",
+                "a_value": a_rh, "b_value": b_rh, "call_key": None,
+            }
 
         # ── reflection_groups: compare IDs and order ──
         a_refl = {
@@ -468,6 +489,7 @@ def compare_runs(
                 "epoch": be.get("epoch"),
                 "step": be.get("step"),
                 "extra_b_epoch": True,
+                "rollout_hard": {"a": None, "b": None, "match": False},
                 "reflection_groups": {"a": None, "b": None, "match": False},
                 "merged_edits": {"a": None, "b": None, "match": False},
                 "ranked_edits": {"a": None, "b": None, "match": False},
@@ -491,21 +513,32 @@ def compare_runs(
                     "call_key": None,
                 }
 
-    # Summary
+    # Summary — an epoch is "matched" only when ALL comparable fields
+    # are True (not False AND not None when A has data).  This prevents
+    # vacuous matches where B simply lacks the field.
     total = len(per_epoch)
     fields_to_check = (
-        "reflection_groups", "merged_edits", "ranked_edits",
+        "rollout_hard", "reflection_groups", "merged_edits", "ranked_edits",
         "edit_apply_outcomes", "candidate_skill_hash", "val_scores",
         "accept_reject", "slow_update", "meta_skill", "early_stop",
     )
-    matched = sum(
-        1
-        for ep in per_epoch
-        if all(
-            ep[field].get("match") is not False
-            for field in fields_to_check
-        )
-    )
+
+    def _epoch_matched(ep: dict) -> bool:
+        for field in fields_to_check:
+            info = ep.get(field, {})
+            m = info.get("match")
+            if m is False:
+                return False
+            # None is only OK when A also has no data for this field.
+            # If A has data (a is not None/False/empty) but B doesn't, it's a miss.
+            if m is None:
+                a_val = info.get("a")
+                if a_val is not None and a_val is not False:
+                    # A has data but B doesn't → not a match
+                    return False
+        return True
+
+    matched = sum(1 for ep in per_epoch if _epoch_matched(ep))
 
     return {
         "per_epoch": per_epoch,
@@ -548,7 +581,7 @@ def format_report(report: dict[str, Any]) -> str:
 
     lines.append("## Per-Epoch Detail")
     fields = [
-        "reflection_groups", "merged_edits", "ranked_edits",
+        "rollout_hard", "reflection_groups", "merged_edits", "ranked_edits",
         "edit_apply_outcomes", "candidate_skill_hash", "val_scores",
         "accept_reject", "slow_update", "meta_skill", "early_stop",
     ]
