@@ -31,10 +31,11 @@ after the replayed verifier.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -384,26 +385,49 @@ def environment_failure(code: int | None, output: str, checkout: Path, env: dict
 
 
 def _run_one(command: list[str], cwd: Path, env: dict[str, str], timeout: float) -> tuple[int | None, str]:
-    """Run ``command`` in its own process group; ``(exit code or None on timeout, output)``."""
-    try:
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
-    except OSError as exc:  # the interpreter or shell itself is missing
-        return 127, f"{command[0]}: not found ({exc})"
-    try:
-        out, _ = process.communicate(timeout=timeout)
-        return process.returncode, out.decode(errors="replace")
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        out, _ = process.communicate()
-        return None, out.decode(errors="replace")
+    """Run one probe; ``(exit code or None on timeout, output)``.
+
+    A probe is a file the verifier agent wrote, so it runs the way every other command
+    we did not write runs (`sandbox.run_command`, as `base_check` runs reverted code):
+    CPU and file-size limits, the whole process group stopped at the deadline, no
+    stdin, and the probe's own environment and HOME. That is resource and lifetime
+    bounding, not filesystem confinement -- a probe can still write wherever the run
+    can, as the agent that wrote it can (no agent's file tools are confined). A probe
+    that leaves its checkout says so in its output.
+    """
+    from refactory_dsh import sandbox
+
+    result = sandbox.run_command(
+        shlex.join(command), workdir=cwd, timeout_s=max(1, math.ceil(timeout)), env=env,
+        exact_env=True, home=Path(env["HOME"]) if env.get("HOME") else None, worktree_root=cwd,
+    )
+    output = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
+    if result.cwd_outside:
+        output += f"\nthe probe left its checkout for {result.cwd_outside}"
+    return (None if result.timed_out else result.returncode), output
 
 
 def _tail(output: str) -> str:
     return "\n".join(output.rstrip().splitlines()[-TAIL_LINES:])
+
+
+def reset_checkout(repo: Path) -> None:
+    """Put a probe checkout back to its commit, ignored files included.
+
+    `clones._clean` keeps ignored files on purpose (build caches), but between probes
+    that lets one probe change the next one's result -- a file under a gitignored
+    directory such as ``reviews/`` survives, and probes run in an order the verifier
+    chooses by naming them. So ignored files go too; only the installed environments
+    and refactory's own directory (`workspace.EXCLUDED_DIRS`, `workspace.OWN`) stay,
+    because reinstalling them per probe would cost far more than a probe. A probe that
+    writes into one of those (a ``pip install`` into ``.venv``) still affects the next.
+    """
+    from refactory_dsh import worktree
+    from refactory_dsh.git_hooks import NO_HOOKS
+    from refactory_dsh.workspace import EXCLUDED_DIRS, OWN
+
+    worktree.git(repo, *NO_HOOKS, "reset", "-q", "--hard", "HEAD")
+    worktree.git(repo, "clean", "-fdqx", *(f"--exclude={name}" for name in (*EXCLUDED_DIRS, f"/{OWN}")))
 
 
 def run_probes(probes: Path, checkout: Path, report: str, *, base: str, env: dict[str, str] | None = None,
@@ -595,7 +619,7 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
             else:
                 env[key] = str(value)
         results = run_probes(probes, Path(prepared["path"]), report, base=found.base, env=env,
-                             reset=clones._clean, check=str(ctx.facts.get("check") or ""),
+                             reset=reset_checkout, check=str(ctx.facts.get("check") or ""),
                              roots=[Path(found.path)])
     text = write_results(workdir, results)
     return {"probe_results": text}

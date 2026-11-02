@@ -135,7 +135,7 @@ For each, identify the implementing hunk(s) from the diff and check them.
    - The test command you ran.
    - Its output (truncated to the relevant part).
    - **CAUGHT** when the test failed after the revert (good).
-   - **NOT CAUGHT** when the test still passed after the revert (bad — blocking).
+   - **NOT CAUGHT** when the test still passed after the revert (bad — report it as a finding).
 
 Requirements that are docs-only or test-only (no behaviour change) are reported as
 **NOT APPLICABLE** — they need no revert check.
@@ -212,7 +212,9 @@ _HUNK_REVERT_JUDGING = """
 - A hunk implementing a requirement or correction that no test catches when reverted:
   BLOCKING: <path:line>: <requirement> is not caught by any test when its hunk is
   reverted (tested with <test command>)
-  This is a finding of kind `check` with severity `high` that blocks.
+  Report it as a finding of kind `check` with severity `high`. The QA judge weighs it:
+  kept as a must-fix of kind `check`, it sends the build back; nothing sends it back
+  without the judge.
 - A probe that fails is a normal defect finding:
   BLOCKING: <path:line>: <description>
 """

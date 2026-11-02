@@ -97,6 +97,91 @@ def test_a_probed_claim_without_a_probe_file_is_unverified(tmp_path, monkeypatch
     assert "UNVERIFIED R1" in ctx.read_text(probe_rerun.RESULTS_MD)
 
 
+def test_a_probe_runs_in_the_sandbox_with_its_own_environment(tmp_path, monkeypatch):
+    """A probe is model-authored code, so it runs the way base_check runs reverted code.
+
+    `sandbox.run_command` bounds it (CPU and file-size limits, the process group stopped
+    at the deadline, no stdin) and watches for it leaving its checkout; the probe keeps
+    the environment and HOME the rerun built for it.
+    """
+    from refactory_dsh import sandbox
+
+    seen = {}
+    real = sandbox.run_command
+
+    def spy(command, **kwargs):
+        seen.update(kwargs, command=command)
+        return real(command, **kwargs)
+
+    monkeypatch.setattr(sandbox, "run_command", spy)
+    code, output = probe_rerun._run_one(
+        ["sh", "-c", "echo probed"], tmp_path, {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, 30)
+    assert (code, output.strip()) == (0, "probed")
+    assert seen["exact_env"] is True and seen["env"]["HOME"] == str(tmp_path)
+    assert seen["worktree_root"] == tmp_path and seen["workdir"] == tmp_path
+
+
+def test_a_probe_that_leaves_its_checkout_says_so(tmp_path):
+    """The sandbox's cwd watch reaches the probe's output, where the reviewers see it."""
+    from refactory_dsh import sandbox
+
+    result = sandbox.SandboxResult(ok=True, returncode=0, stdout="ran\n", cwd_outside="/elsewhere")
+    original = sandbox.run_command
+    try:
+        sandbox.run_command = lambda *a, **k: result
+        code, output = probe_rerun._run_one(["true"], tmp_path, {}, 5)
+    finally:
+        sandbox.run_command = original
+    assert code == 0 and "left its checkout for /elsewhere" in output
+
+
+def test_a_probe_timeout_is_reported_as_timed_out(tmp_path):
+    code, _ = probe_rerun._run_one(["sh", "-c", "sleep 30"], tmp_path,
+                                   {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, 1)
+    assert code is None
+
+
+def test_ignored_files_do_not_survive_from_one_probe_to_the_next(tmp_path):
+    """One probe must not change the next one's result through a gitignored path.
+
+    `clones._clean` keeps ignored files (build caches); between probes that let a file
+    under a gitignored directory such as reviews/ leak. Installed environments stay.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("/scratch/\n.venv/\n")
+    (repo / "a.py").write_text("x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    probes = tmp_path / "probes"
+    probes.mkdir()
+    (probes / "R1-1.sh").write_text("#!/bin/sh\n# R1: leaves state\nmkdir -p scratch .venv\n"
+                                    "echo leak > scratch/leak.txt\necho env > .venv/kept.txt\n"
+                                    "[ -f a.py ]\n")
+    (probes / "R2-1.sh").write_text("#!/bin/sh\n# R2: must start clean\n[ ! -f scratch/leak.txt ]\n")
+
+    results = probe_rerun.run_probes(probes, repo, "", base=base,
+                                     env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+                                     reset=probe_rerun.reset_checkout)
+    status = {entry["file"]: entry["status"] for entry in results["probes"]}
+    assert status == {"R1-1.sh": "pass", "R2-1.sh": "pass"}, results["probes"]
+    assert (repo / ".venv" / "kept.txt").exists(), "an installed environment must be kept"
+
+
+def test_the_graph_and_the_cli_reset_probe_checkouts_with_ignored_files(monkeypatch):
+    """Both callers of run_probes use the reset that drops ignored files."""
+    import inspect
+
+    from refactory_dsh import cli
+
+    assert "reset=reset_checkout" in inspect.getsource(probe_rerun.rerun_probes)
+    assert "reset=probe_rerun.reset_checkout" in inspect.getsource(cli)
+
+
 def test_a_probe_that_checks_nothing_is_unverified_not_a_pass(tmp_path, monkeypatch):
     """`print("ok")` exits 0. Without a floor, "every probe passed" says nothing.
 

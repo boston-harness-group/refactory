@@ -782,20 +782,65 @@ def _replay_probe_results(run_dir: Path, repo_root: Path, report: str, commit: s
             except (ValueError, OSError):
                 pass
             results = probe_rerun.run_probes(probes, checkout, report, base=base,
-                                             reset=clones._clean,
+                                             reset=probe_rerun.reset_checkout,
                                              check=str(facts.get("check") or ""), roots=roots)
     except (ValueError, OSError) as exc:  # WorkspaceError is a ValueError
         return f"# Probe results\n\nThe probes could not be rerun: {exc}\n"
     return probe_rerun.write_results(run_dir, results)
 
 
+def _replay_verifier_checkout(run_dir: Path, commit: str | None) -> tuple[Path, Path]:
+    """A throwaway worktree for a replayed verifier: ``(checkout, repository to remove it from)``.
+
+    Always a new temporary worktree, never the run's own: the verifier reverts hunks with
+    ``git apply --reverse`` and restores files with ``git checkout HEAD -- <file>``, which
+    in the run's worktree would discard a builder's uncommitted work and could leave hunks
+    reverted if it died midway -- as the graph's verifier gets a clone for. The commit is
+    ``--commit``, else the head the run recorded. Raises ``ValueError`` when there is no
+    repository or no commit to check out.
+    """
+    import subprocess
+    import tempfile
+
+    source: Path | None = None
+    head: str | None = None
+    record = run_dir / ".refactory" / "worktree.json"
+    if record.is_file():
+        try:
+            data = json.loads(record.read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{record} cannot be read: {exc}") from exc
+        if data.get("path") and Path(data["path"]).is_dir():
+            source = Path(data["path"])
+        head = data.get("head") or None
+    if source is None:
+        found = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
+                               text=True, timeout=10, cwd=str(Path.cwd()))
+        if found.returncode != 0:
+            raise ValueError("no git repository: run from the target, or replay a run "
+                             "that recorded its worktree")
+        source = Path(found.stdout.strip())
+    if not commit and not head:
+        # No head recorded: the commit the run's worktree is at now.
+        current = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
+                                 capture_output=True, text=True, timeout=10)
+        head = current.stdout.strip() if current.returncode == 0 else None
+    target = commit or head
+    if not target:
+        raise ValueError("no commit to check out: give --commit")
+    checkout = Path(tempfile.mkdtemp(prefix="refactory-replay-verifier-")) / "worktree"
+    subprocess.run(["git", "-C", str(source), "worktree", "add", "--detach", str(checkout), target],
+                   check=True, capture_output=True, timeout=60)
+    return checkout, source
+
+
 def _cmd_replay_verifier(args: argparse.Namespace) -> int:
     """Replay the verifier on an existing run directory and a commit.
 
-    When --commit is given, check out a temporary worktree of that commit,
-    invoke the verifier's model session against it with the same prompt and
-    workspace setup as the graph's verifier node, write the report to stdout,
-    and remove the temporary worktree.
+    The verifier runs in a temporary worktree of ``--commit`` (else the run's recorded
+    head), with the same prompt and workspace setup as the graph's verifier node; the
+    report goes to stdout and the worktree is removed. The run's own worktree is never
+    touched (`_replay_verifier_checkout`).
     """
     import subprocess
     import tempfile
@@ -812,40 +857,15 @@ def _cmd_replay_verifier(args: argparse.Namespace) -> int:
 
     commit = args.commit
     temp_worktree = None
+    git_source = None
 
     try:
-        # Find the repo root
-        repo_root = None
-        wt_json = run_dir / ".refactory" / "worktree.json"
-        if wt_json.is_file():
-            wt_data = json.loads(wt_json.read_text())
-            wt_path = wt_data.get("path", "")
-            if wt_path and Path(wt_path).is_dir():
-                repo_root = Path(wt_path)
-
-        if repo_root is None and commit:
-            cwd = Path.cwd()
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=10, cwd=str(cwd),
-            )
-            if result.returncode == 0:
-                git_root = Path(result.stdout.strip())
-                temp_dir = tempfile.mkdtemp(prefix="refactory-replay-verifier-")
-                temp_worktree = Path(temp_dir) / "worktree"
-                subprocess.run(
-                    ["git", "-C", str(git_root), "worktree", "add",
-                     str(temp_worktree), commit],
-                    check=True, capture_output=True, timeout=60,
-                )
-                repo_root = temp_worktree
-            else:
-                print("refactory: no git repository found and --commit given", file=sys.stderr)
-                return 1
-        elif repo_root is None:
-            print("refactory: no worktree found; use --commit to check out a temporary one",
-                  file=sys.stderr)
+        try:
+            temp_worktree, git_source = _replay_verifier_checkout(run_dir, commit)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            print(f"refactory: {exc}", file=sys.stderr)
             return 1
+        repo_root = temp_worktree
 
         # ── read brief and build context for the verifier prompt ──
         brief_data = json.loads(brief_path.read_text())
@@ -948,21 +968,17 @@ def _cmd_replay_verifier(args: argparse.Namespace) -> int:
         return 0
 
     finally:
-        if temp_worktree is not None:
+        if temp_worktree is not None and git_source is not None:
+            # Removed from the repository it was added to, which is not necessarily
+            # the one the command was started in.
             try:
-                result = subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0:
-                    git_root = Path(result.stdout.strip())
-                    subprocess.run(
-                        ["git", "-C", str(git_root), "worktree", "remove",
-                         "--force", str(temp_worktree)],
-                        capture_output=True, timeout=30,
-                    )
-            except Exception:
+                subprocess.run(["git", "-C", str(git_source), "worktree", "remove", "--force",
+                                str(temp_worktree)], capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
                 pass
+            import shutil as _shutil
+
+            _shutil.rmtree(temp_worktree.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":  # pragma: no cover - the entry point

@@ -5,6 +5,8 @@ Each test fails when its corresponding change is reverted.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from refactory_dsh import design_ops, judges
 from refactory_dsh.design import (
     DesignMode, TIMEOUT_RETRY, prepare_check_iterations,
@@ -60,9 +62,13 @@ def test_verifier_prompt_carries_method_and_repo_access():
     assert "probe" in prompt, "prompt must include probe instructions"
 
 
-def test_uncaught_hunk_produces_blocking_check_finding():
-    """A finding with kind 'check' and severity 'high' that breaks a requirement
-    blocks via judges.blocks().
+def test_a_check_finding_the_judge_keeps_blocks():
+    """The gate half of the uncaught-hunk path: a must-fix the QA judge keeps with kind
+    'check' blocks via judges.blocks().
+
+    Only this half is enforced in code. Whether a verifier's NOT CAUGHT line becomes
+    such an item is the QA judge's call -- there is no deterministic route from the
+    verifier's report to a blocking item yet (#563), and the prompt says so.
     """
     # This is the finding shape the verifier's judging instructions produce
     item = {
@@ -270,10 +276,18 @@ def test_m15_requires_a_per_function_comparison_against_the_base():
 
 
 def _replay_run(tmp_path):
+    """A run whose recorded worktree is a real repository with one commit."""
+    import subprocess
+
     run_dir = tmp_path / "run"
     (run_dir / ".refactory").mkdir(parents=True)
     work = tmp_path / "work"
     work.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(work), *args], check=True)
+    (work / "tool.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-qm", "attempt"], check=True)
     (run_dir / "brief.json").write_text('{"brief": "do a thing"}')
     (run_dir / ".refactory" / "worktree.json").write_text(f'{{"path": "{work}"}}')
     return run_dir
@@ -314,6 +328,66 @@ def test_replay_verifier_parses_and_routes_the_model_flags(tmp_path, monkeypatch
     # The session's client is built from the resolved route.
     assert built[-1]["provider"] == "p1" and built[-1]["model"] == "m1"
     assert built[-1]["effort"] == "high" and built[-1]["routes_resolved"] is True
+
+
+def test_replay_verifier_never_works_in_the_runs_own_worktree(tmp_path, monkeypatch, capsys):
+    """The replayed verifier gets a temporary worktree, as the graph's verifier gets a clone.
+
+    It reverts hunks and restores files with `git checkout HEAD -- <file>`, which in the
+    run's worktree would discard a builder's uncommitted work. --commit is honoured even
+    when the run recorded a worktree, and the temporary one is removed afterwards.
+    """
+    import subprocess
+
+    import refactory_dsh.model as model_mod
+    from refactory_dsh import cli
+
+    seen: dict = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def context(self):
+            return {"worker_backend": "dsh", "provider": "p", "model": "m", "effort": "",
+                    "routes_resolved": True}
+
+        def complete(self, prompt, *, cwd, **kwargs):
+            seen["cwd"] = Path(cwd)
+            seen["head"] = subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"],
+                                          capture_output=True, text=True).stdout.strip()
+            seen["files"] = sorted(p.name for p in Path(cwd).iterdir() if p.name != ".git")
+            return "VERDICT: PASS"
+
+    monkeypatch.setattr(model_mod, "DshModelClient", FakeClient)
+    run_dir = _replay_run(tmp_path)
+    work = tmp_path / "work"
+    first = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
+                           capture_output=True, text=True).stdout.strip()
+    # The builder's later commit plus uncommitted work, which must survive the replay.
+    (work / "tool.py").write_text("x = 2\n")
+    subprocess.run(["git", "-C", str(work), "commit", "-qam", "later"], check=True)
+    later = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
+                           capture_output=True, text=True).stdout.strip()
+    # The run recorded the later commit as its head; --commit must still win.
+    (run_dir / ".refactory" / "worktree.json").write_text(
+        f'{{"path": "{work}", "head": "{later}"}}')
+    (work / "tool.py").write_text("x = 3  # uncommitted\n")
+
+    code = cli.main(["replay-verifier", "--run-dir", str(run_dir), "--commit", first,
+                     "--provider", "p", "--model", "m"])
+    assert code == 0, capsys.readouterr().err
+    assert seen["cwd"] != work and work not in seen["cwd"].parents, seen["cwd"]
+    assert seen["head"] == first, "--commit must be honoured even with a recorded worktree"
+    assert "brief.json" in seen["files"], "the verifier's reads are copied into its checkout"
+    # The run's own worktree is exactly as the builder left it.
+    assert (work / "tool.py").read_text() == "x = 3  # uncommitted\n"
+    assert not (work / "brief.json").exists() and not (work / "changes.diff").exists()
+    # And the temporary worktree is gone.
+    assert not seen["cwd"].exists()
+    listed = subprocess.run(["git", "-C", str(work), "worktree", "list"],
+                            capture_output=True, text=True).stdout
+    assert str(seen["cwd"]) not in listed
 
 
 def test_replay_verifier_refuses_half_a_route(tmp_path, monkeypatch, capsys):
