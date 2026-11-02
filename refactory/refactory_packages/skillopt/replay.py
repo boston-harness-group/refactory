@@ -22,6 +22,8 @@ from typing import Any
 
 from refactory_dsh.model import CompletionTimeout
 
+from refactory_packages.skillopt.trace import current_call_key
+
 
 # ── normaliser ─────────────────────────────────────────────────────────────
 
@@ -620,7 +622,10 @@ class ReplayClient:
 
     Implements the executor's agent-node protocol:
     ``for_node()``, ``with_tool_policy()``, ``with_wall()``, ``route()``,
-    and ``complete()`` accepting ``call_key`` and ``workdir`` kwargs.
+    and ``complete()`` with the live client's signature
+    (``DshModelClient.complete``: ``system``, ``workdir``, ``cwd``, ``env``,
+    ``confine``, nothing else), so a call the live client would refuse fails
+    here too (#493 G30).
 
     Every prompt is matched exactly as B wrote it.
     """
@@ -636,17 +641,16 @@ class ReplayClient:
         prompt: str,
         *,
         system: str = "",
-        call_key: Any = None,
         workdir: Any = None,
         cwd: Any = None,
         env: Any = None,
         confine: bool = False,
-        **kwargs: Any,
     ) -> str:
         """Answer a request from A's recordings."""
         idx = self.matcher.consumed_for(system, prompt)
-        # A solver call (the walker passes no call_key) had the rollout's
-        # attempts; every strategy call is an optimizer call.
+        # Every strategy call is an optimizer call, made inside trace.ask (which
+        # exposes its key); a solver call (the walker's) had the rollout's attempts.
+        call_key = current_call_key()
         attempts = OPTIMIZER_ATTEMPTS if call_key else SOLVER_ATTEMPTS
         entry = {
             "key": (system[:80], prompt[:80]),

@@ -107,8 +107,14 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result[key], (list, tuple)) or any(not isinstance(v, str) for v in result[key]):
             raise ProfileError(f"{key} must be an array of names")
         result[key] = list(result[key])
-    if set(result["allowed_ops"]) - {op["op"] for op in catalogue(result["edit_preset"])}:
-        raise ProfileError("allowed_ops must belong to the selected edit preset")
+    outside = set(result["allowed_ops"]) - {op["op"] for op in catalogue(result["edit_preset"])}
+    if outside:
+        # The selected strategy's own required ops are permitted with any preset,
+        # as ``Loop.permitted_ops`` adds them (SkillOpt's text_patch; #493 G34).
+        outside -= set(getattr(strategies.resolve(result["strategy"]), "required_ops", ()))
+    if outside:
+        raise ProfileError("allowed_ops must belong to the selected edit preset "
+                           "or the selected strategy's required ops")
     return result
 
 

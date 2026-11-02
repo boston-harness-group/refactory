@@ -2,16 +2,50 @@
 
 Each line is a JSON object with ``type`` (``model_call`` or ``decision``),
 ``timestamp``, ``epoch``, ``step_type``, and an optional ``call_key`` (the
-stable 4-tuple ``[step_type, epoch, group_index, call_order]`` that the F20
-replay uses to match recorded outputs to call sites).
+stable 4-tuple ``[step_type, epoch, group_index, call_order]`` that names the
+call site).
+
+The call key is never sent to the model client: an optimizer call uses the
+client protocol the walker uses, ``complete(prompt, *, system=...)``, so any
+client works (refactory's live ``DshModelClient`` takes no other keyword;
+#493 G30). While a call is in flight its key is readable through
+:func:`current_call_key`, for clients that observe calls (the F20 replay picks
+an optimizer call's attempts by it; test doubles key canned replies by it).
 """
 
 from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
+
+#: The key of the optimizer call :func:`ask` has in flight, ``None`` outside one.
+_CALL_KEY: ContextVar[tuple[str, int, int, int] | None] = ContextVar(
+    "skillopt_call_key", default=None,
+)
+
+
+def current_call_key() -> tuple[str, int, int, int] | None:
+    """The call key of the optimizer call in flight (``None`` outside :func:`ask`).
+
+    Read-only context for clients that observe calls; it is not part of the
+    client protocol, and a solver call (the walker's) never sees one.
+    """
+    return _CALL_KEY.get()
+
+
+@contextmanager
+def optimizer_call(call_key: tuple[str, int, int, int] | list) -> Iterator[None]:
+    """Mark ``call_key`` as the optimizer call in flight (:func:`current_call_key`)."""
+    token = _CALL_KEY.set(tuple(call_key))
+    try:
+        yield
+    finally:
+        _CALL_KEY.reset(token)
 
 
 class TraceRecorder:
@@ -113,9 +147,13 @@ def ask(
     (:func:`_fatal`): they end the run rather than read as a bad reply. Every
     call, and every failure, goes to the trace and to ``trace.listener`` (the
     loop counts them into the run report's proposer health).
+
+    The client is called as the walker calls it, ``complete(user, system=...)``;
+    ``call_key`` goes to the trace and to :func:`current_call_key` only.
     """
     try:
-        output = client.complete(user, system=system, call_key=call_key)
+        with optimizer_call(call_key):
+            output = client.complete(user, system=system)
     except _fatal() as exc:
         error = f"{type(exc).__name__}: {exc}"
         trace.record_model_call(step_type, system, user, None, call_key=call_key, error=error)

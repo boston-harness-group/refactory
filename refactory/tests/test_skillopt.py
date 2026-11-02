@@ -25,6 +25,7 @@ from refactory_dsh.optim import Candidate
 from refactory_packages.skillopt.loop import SkillOptLoop
 from refactory_packages.skillopt import schedule as sched_mod
 from refactory_packages.skillopt import prompts
+from refactory_packages.skillopt.trace import current_call_key
 
 # ── toy task & mode ────────────────────────────────────────────────────────
 
@@ -129,22 +130,19 @@ class SkillProbe(nn.Mode):
 class FakeClient:
     """Scripted model client that returns canned responses keyed by call_key.
 
-    When a specific call_key is not in the responses dict, returns a default
-    response based on the step_type.
+    ``complete`` has the live client protocol (``prompt, *, system``) and
+    nothing more, so a call the live ``DshModelClient`` would refuse fails here
+    too (#493 G30). The call key is read from ``trace.current_call_key()``, the
+    optimizer call in flight. When a specific call_key is not in the responses
+    dict, returns a default response based on the step_type.
     """
 
     def __init__(self, responses: dict[tuple, str] | None = None) -> None:
         self.responses: dict[tuple, str] = dict(responses or {})
         self.calls: list[dict[str, Any]] = []
 
-    def complete(
-        self,
-        prompt: str,
-        *,
-        system: str = "",
-        call_key: tuple | list | None = None,
-    ) -> str:
-        key = tuple(call_key) if call_key else None
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        key = current_call_key()
         self.calls.append({
             "system": system,
             "prompt": prompt,
@@ -195,20 +193,14 @@ class FakeClient:
 
 
 class ReplayClient:
-    """Replay client: returns recorded outputs keyed by call_key."""
+    """Replay client: returns recorded outputs keyed by the call in flight."""
 
     def __init__(self, recordings: dict[tuple, str]) -> None:
         self.recordings = dict(recordings)
         self.calls: list[dict[str, Any]] = []
 
-    def complete(
-        self,
-        prompt: str,
-        *,
-        system: str = "",
-        call_key: tuple | list | None = None,
-    ) -> str:
-        key = tuple(call_key) if call_key else None
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        key = current_call_key()
         self.calls.append({"call_key": key, "prompt": prompt})
         if key and key in self.recordings:
             return self.recordings[key]
@@ -1158,8 +1150,8 @@ def test_failed_optimizer_calls_fall_back_like_skillopt(tmp_path):
     from refactory_packages.skillopt import analysts
 
     class Failing(FakeClient):
-        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
-            super().complete(prompt, system=system, call_key=call_key)
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            super().complete(prompt, system=system)
             raise RuntimeError("Claude backend failed after 3 retries: Claude CLI exited with code 1")
 
     records = [{"id": f"r{i}", "passed": False, "score": 0.0} for i in range(3)]
@@ -1196,12 +1188,47 @@ def test_optimizer_calls_that_answer_are_counted_and_not_flagged(tmp_path):
     assert report["proposer"]["failure_count"] == 0
 
 
+class _LiveSignatureClient(FakeClient):
+    """A client whose ``complete`` takes exactly what the live
+    ``DshModelClient.complete`` takes, so any extra keyword an optimizer call
+    sends fails here as it failed live (#493 G30)."""
+
+    def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):  # type: ignore[no-untyped-def]
+        return super().complete(prompt, system=system)
+
+
+def test_optimizer_calls_use_the_live_client_protocol(tmp_path):
+    """A live ``--strategy skillopt`` run failed every optimizer call with
+    ``DshModelClient.complete() got an unexpected keyword argument 'call_key'``
+    and silently optimized nothing. Through a client with the live signature,
+    the analysts' calls answer and an edit is proposed."""
+    import inspect
+
+    from refactory_dsh.model import DshModelClient
+
+    def params(fn):  # type: ignore[no-untyped-def]
+        return [(p.name, p.kind, p.default) for p in inspect.signature(fn).parameters.values()]
+
+    assert params(_LiveSignatureClient.complete) == params(DshModelClient.complete)
+
+    client = _LiveSignatureClient()
+    _, report = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 1})
+    trace = _read_trace(tmp_path)
+    analyst_calls = [e for e in trace if e["type"] == "model_call" and e["step_type"].startswith("analyst_")]
+    assert analyst_calls and all("error" not in e and e["raw_output"] for e in analyst_calls)
+    assert any(c["call_key"] and c["call_key"][0].startswith("analyst_") for c in client.calls)
+    assert report["proposer"]["failure_count"] == 0
+    assert sum(d["n_edits"] for d in _decisions(trace, "analyst_failure") + _decisions(trace, "analyst_success")) > 0
+    merged = _decisions(trace, "merged_patch")
+    assert merged and merged[0]["patch"]["edits"]
+
+
 class _Ending(FakeClient):
     def __init__(self, error: BaseException) -> None:
         super().__init__()
         self.error = error
 
-    def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+    def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
         raise self.error
 
 
@@ -1284,16 +1311,17 @@ def test_patch_order_feeds_the_merge_and_its_fallback(tmp_path):
     from refactory_packages.skillopt import analysts as _analysts  # noqa: F401
 
     class FailMerges(FakeClient):
-        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            call_key = current_call_key()
             if call_key and call_key[0] == "merge_failure":
-                super().complete(prompt, system=system, call_key=call_key)
+                super().complete(prompt, system=system)
                 raise RuntimeError("failed after 3 retries")
             if call_key and call_key[0] == "analyst_failure":
-                super().complete(prompt, system=system, call_key=call_key)
+                super().complete(prompt, system=system)
                 return json.dumps({"batch_size": 1, "patch": {"reasoning": f"g{call_key[2]}", "edits": [
                     {"op": "append", "content": f"from group {call_key[2]}"},
                 ]}})
-            return super().complete(prompt, system=system, call_key=call_key)
+            return super().complete(prompt, system=system)
 
     seen: list[tuple[int, str, list[str]]] = []
 
@@ -1334,11 +1362,12 @@ def test_early_stop_counts_every_epoch_without_a_better_best(tmp_path):
     epoch too -- and ``early_stop_patience`` stale epochs end the run."""
 
     class NoEdits(FakeClient):
-        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            call_key = current_call_key()
             if call_key and call_key[0].startswith("analyst_"):
-                super().complete(prompt, system=system, call_key=call_key)
+                super().complete(prompt, system=system)
                 return json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": []}})
-            return super().complete(prompt, system=system, call_key=call_key)
+            return super().complete(prompt, system=system)
 
     loop, _ = _run_loop(
         tmp_path, client=NoEdits(),
@@ -1359,11 +1388,12 @@ def test_early_stop_restarts_the_count_when_the_best_improves(tmp_path, monkeypa
     )
 
     class EditsInEpochOne(FakeClient):
-        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            call_key = current_call_key()
             if call_key and call_key[0].startswith("analyst_") and call_key[1] > 1:
-                super().complete(prompt, system=system, call_key=call_key)
+                super().complete(prompt, system=system)
                 return json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": []}})
-            return super().complete(prompt, system=system, call_key=call_key)
+            return super().complete(prompt, system=system)
 
     loop, _ = _run_loop(
         tmp_path, client=EditsInEpochOne(),
@@ -1380,8 +1410,9 @@ def test_a_patch_that_changes_nothing_is_gated_from_the_cache(tmp_path):
     refused as a patch."""
 
     class Noop(FakeClient):
-        def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
-            super().complete(prompt, system=system, call_key=call_key)
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            call_key = current_call_key()
+            super().complete(prompt, system=system)
             edits = [{"op": "replace", "target": "NOT IN THE SKILL", "content": "x"}]
             if call_key and call_key[0].startswith("analyst_"):
                 return json.dumps({"batch_size": 1, "patch": {"reasoning": "r", "edits": edits}})
@@ -2037,10 +2068,11 @@ class CrashingClient(FakeClient):
         super().__init__()
         self.crash_at = crash_at
 
-    def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+    def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+        call_key = current_call_key()
         if call_key is not None and tuple(call_key) == self.crash_at:
             raise ProcessKilled(f"model died at {self.crash_at}")
-        return super().complete(prompt, system=system, call_key=call_key)
+        return super().complete(prompt, system=system)
 
 
 def _crash_then_resume(

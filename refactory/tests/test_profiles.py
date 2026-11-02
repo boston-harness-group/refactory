@@ -170,6 +170,22 @@ def test_invalid_contract_refused(settings, tmp_path):
         profiles.save(tmp_path, "bad", {"settings": settings})
 
 
+def test_allowed_ops_may_name_the_selected_strategys_required_ops(tmp_path):
+    """``--strategy skillopt --allowed-ops set_knob --allowed-ops text_patch``:
+    text_patch is in no edit preset but is SkillOpt's required op, which the
+    loop permits with any preset (Loop.permitted_ops; #493 G34)."""
+    settings = {"strategy": "skillopt", "allowed_ops": ["set_knob", "text_patch"]}
+    assert profiles.normalize(settings)["allowed_ops"] == ["set_knob", "text_patch"]
+    saved = profiles.save(tmp_path, "skillopt", {"settings": settings})
+    assert saved["settings"]["allowed_ops"] == ["set_knob", "text_patch"]
+    # Only the selected strategy's: another strategy still gets the preset's.
+    with pytest.raises(profiles.ProfileError, match="selected edit preset"):
+        profiles.normalize({"strategy": "default", "allowed_ops": ["set_knob", "text_patch"]})
+    with pytest.raises(profiles.ProfileError, match="selected edit preset"):
+        profiles.normalize({"strategy": "skillopt", "allowed_ops": ["text_patch", "remove_node"],
+                            "edit_preset": "knob_only"})
+
+
 def test_repeats_measure_training_and_holdout_without_leaking_audit(tmp_path):
     loop, report = _run(tmp_path, repeats=3)
     assert report["evaluations"] == 1 and report["measurements"] == 6

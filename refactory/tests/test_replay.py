@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from refactory_packages.skillopt.trace import current_call_key, optimizer_call
 from refactory_packages.skillopt.replay import (
     CallMatcher,
     ReplayClient,
@@ -328,15 +329,20 @@ def test_client_complete_returns_text(tmp_path):
     assert result == "test_result"
 
 
-def test_client_accepts_call_key(tmp_path):
-    """complete() with call_key works without error."""
+def test_client_has_the_live_client_signature(tmp_path):
+    """complete() takes what DshModelClient.complete takes and nothing more: an
+    optimizer call carrying a call_key fails here as it does live (#493 G30)."""
+    import inspect
+
+    from refactory_dsh.model import DshModelClient
+
+    def params(fn):  # noqa: ANN001, ANN202
+        return [(p.name, p.kind) for p in inspect.signature(fn).parameters.values()]
+
+    assert params(ReplayClient.complete) == params(DshModelClient.complete)
     client = _make_client(tmp_path)
-    result = client.complete(
-        "test_prompt",
-        system="test_sys",
-        call_key=("analyst_failure", 1, 0, 0),
-    )
-    assert result == "test_result"
+    with pytest.raises(TypeError, match="call_key"):
+        client.complete("test_prompt", system="test_sys", call_key=("analyst_failure", 1, 0, 0))
 
 
 def test_client_accepts_workdir(tmp_path):
@@ -381,13 +387,14 @@ def test_client_match_log(tmp_path):
     path = _make_calls_jsonl(tmp_path, entries)
     client = ReplayClient(CallMatcher(path))
 
-    client.complete("p1", system="sys1", call_key="ck1")
-    client.complete("p2", system="sys2", call_key="ck2")
+    with optimizer_call(("rank", 1, 0, 0)):
+        client.complete("p1", system="sys1")
+    client.complete("p2", system="sys2")  # a solver call: none in flight
 
     assert len(client.match_log) == 2
-    assert client.match_log[0]["call_key"] == "ck1"
+    assert client.match_log[0]["call_key"] == ("rank", 1, 0, 0)
     assert client.match_log[0]["index"] == 0
-    assert client.match_log[1]["call_key"] == "ck2"
+    assert client.match_log[1]["call_key"] is None
 
 
 def test_client_match_log_counts_duplicate_keys(tmp_path):
@@ -1118,10 +1125,10 @@ def test_merge_prompt_formatting_is_matched_exactly(tmp_path):
         _json.dumps(patches, ensure_ascii=False, indent=4),
     ):
         fresh = replay_mod.ReplayClient(replay_mod.CallMatcher(calls))
-        with pytest.raises(_mismatch_error()):
-            fresh.complete(head + encoded, system=MERGE_SYSTEM, call_key=("merge_failure", 1, 0, 1))
-    assert client.complete(recorded, system=MERGE_SYSTEM,
-                           call_key=("merge_failure", 1, 0, 1)) == "MERGED"
+        with pytest.raises(_mismatch_error()), optimizer_call(("merge_failure", 1, 0, 1)):
+            fresh.complete(head + encoded, system=MERGE_SYSTEM)
+    with optimizer_call(("merge_failure", 1, 0, 1)):
+        assert client.complete(recorded, system=MERGE_SYSTEM) == "MERGED"
 
 
 def test_reordering_never_reaches_a_live_run():
@@ -1577,10 +1584,9 @@ class _RecordingClient:
     def __init__(self) -> None:
         self.recorded: list[tuple[str, str, str]] = []
 
-    def complete(self, prompt, *, system="", call_key=None, **kwargs):  # noqa: ANN001
-        step_type = ""
-        if call_key:
-            step_type = str(list(call_key)[0])
+    def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):  # noqa: ANN001
+        call_key = current_call_key()
+        step_type = str(call_key[0]) if call_key else ""
         result = self._reply(step_type)
         self.recorded.append((system, prompt, result))
         return result
@@ -1988,8 +1994,8 @@ def test_replay_client_gives_solver_calls_five_attempts_and_optimizer_calls_thre
     entries += [("s", "opt", "E", 1)] * 3 + [("s", "opt", "ok", 0)]
     client = ReplayClient(CallMatcher(_calls_with_rc(tmp_path, entries)))
     assert client.complete("solver", system="s") == "ok"
-    with pytest.raises(ReplayedCallFailure, match="after 3 retries"):
-        client.complete("opt", system="s", call_key=("rank", 1, 0, 0))
+    with pytest.raises(ReplayedCallFailure, match="after 3 retries"), optimizer_call(("rank", 1, 0, 0)):
+        client.complete("opt", system="s")
     assert client.match_log[-1]["a_event"].startswith("ReplayedCallFailure")
 
 
@@ -2063,8 +2069,8 @@ def test_a_fault_in_the_replay_is_kept_for_the_report(tmp_path):
         raise TypeError("bug in the replay")
 
     client.matcher.lookup = broken  # type: ignore[method-assign]
-    with pytest.raises(TypeError):
-        client.complete("p", system="s", call_key=("rank", 1, 0, 0))
+    with pytest.raises(TypeError), optimizer_call(("rank", 1, 0, 0)):
+        client.complete("p", system="s")
     assert client.harness_error == "TypeError: bug in the replay"
 
 
