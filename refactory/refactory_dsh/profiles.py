@@ -75,7 +75,11 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         ResourceLimits.from_dict(result)
     except ValueError as error:
         raise ProfileError(str(error)) from error
-    for key, choices in (("optimizer", optim.names()), ("strategy", strategies.names()),
+    # A package-contributed strategy (``Package.strategies``) is looked up only
+    # when the name is not one of the library's, so the common case imports nothing.
+    strategy_choices = (strategies.names() if result["strategy"] in strategies.STRATEGIES
+                        else strategies.available())
+    for key, choices in (("optimizer", optim.names()), ("strategy", strategy_choices),
                          ("evaluator", ("walker", "dsh")), ("edit_preset", PRESETS),
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
         if result[key] not in choices:
@@ -274,7 +278,7 @@ def add_arguments(parser: Any) -> None:
         flag = "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
         # provider_config travels in the project file and saved profile
         # snapshots, not as a command-line object.
-        if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config"):
+        if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
         kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts") else str
         parser.add_argument(flag, dest=key, type=kind, default=None)

@@ -76,7 +76,7 @@ class Run:
             reason = [refused]
             self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
             return reason
-        allowed = self._loop.config.allowed_ops or edits.enabled(self._loop.config.edit_preset)
+        allowed = self._loop.permitted_ops()
         if op_name not in allowed:
             reason = ["E-policy: operation is outside this run's permitted edits"]
             self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
@@ -204,6 +204,30 @@ class Run:
         self._loop.update(self, candidate)  # noqa: SLF001
         return candidate
 
+    # ── the run directory ───────────────────────────────────────────────────
+    @property
+    def root(self) -> Path:
+        """The run's root directory.
+
+        A strategy may write trace files or other artefacts beside the
+        journal.  Exposed so a strategy does not reach through ``_loop``.
+        """
+        return self._loop.root
+
+    def part_ids(self, part: str = "train") -> list[str]:
+        """Item ids declared for *part* in the parts manifest.
+
+        Returns an empty list when no manifest exists.  Only ``'train'``
+        ids are exposed to optimiser-facing code; ``'val'`` and ``'test'``
+        ids are withheld for the same reason ``item_records`` refuses them.
+        """
+        if part != "train":
+            raise OuterLoopError("only train ids are accessible to an optimizer")
+        manifest = getattr(self._loop, '_parts_manifest', None)  # noqa: SLF001
+        if manifest is None:
+            return []
+        return list(manifest.get(part, []))
+
     # ── the state of the search ────────────────────────────────────────────
     def seed(self) -> Candidate:
         return self._loop.population[0]
@@ -270,19 +294,63 @@ class Run:
 
 
 class OuterLoop:
-    """Base class for a search. Override the steps, or ``run`` entirely."""
+    """Base class for a custom strategy — the **custom strategy seam**.
+
+    A custom strategy subclasses ``OuterLoop`` and overrides the hooks in
+    :attr:`overridable`: ``configure``, ``strategy(run)``,
+    ``strategy_state_dict``, ``load_strategy_state``, and others.
+
+    The loop machinery (``Loop``) is the caller.  It constructs the strategy
+    object, calls ``configure(model=…, **strategy_options)`` after
+    construction, creates a ``Run`` and passes it to ``strategy(run)``, and
+    calls ``strategy_state_dict()`` / ``load_strategy_state()`` for
+    persistence.
+
+    The strategy keeps its own state as plain instance attributes.  It
+    interacts with the loop machinery **only** through ``Run``'s public API
+    (``run.evaluate()``, ``run.save_strategy_state()``, ``run.seed()``, etc.).
+    It never accesses ``Loop`` internals — no ``__getattr__`` proxy, no
+    monkey-patching, no ``_infra`` attribute.
+
+    A second strategy (e.g. a GEPA-like population strategy) must be able to
+    use this seam unchanged, proving it is generic.
+
+    The contract is validated at subclass creation time by
+    ``__init_subclass__``.
+    """
 
     #: The name this loop is selected by.
     name: str = "default"
     #: Whether it needs a model, so construction does not have to know.
     requires_model: bool = False
 
+    #: Edit operations the strategy's own proposals use. A run that names no
+    #: ``allowed_ops`` permits these on top of its edit preset, so the strategy
+    #: works without a profile setting; an explicit ``allowed_ops`` still wins.
+    required_ops: tuple[str, ...] = ()
+
     #: Steps a subclass may override. Each has a working default.
     overridable = (
+        "configure",
         "strategy", "select_parents", "propose", "batch_size", "install", "accepts",
         "update", "should_stop", "on_epoch_end", "report", "memory",
         "strategy_state_dict", "load_strategy_state",
     )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Validate that a custom strategy does not proxy Loop internals."""
+        super().__init_subclass__(**kwargs)
+        # A custom OuterLoop subclass must not define __getattr__ (proxy) or
+        # carry a _infra attribute.  Loop itself is exempt because it IS the
+        # infrastructure.
+        from_outerloop = getattr(cls, '_is_loop_infrastructure', False)
+        if from_outerloop:
+            return
+        if "__getattr__" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} defines __getattr__; a custom strategy must "
+                f"not proxy Loop internals — use Run's public API instead"
+            )
 
     def configure(
         self, *, model: Any = None, model_name: str = "", provider: str = "auto", **options: Any

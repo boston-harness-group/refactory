@@ -964,3 +964,78 @@ def test_stale_item_scores_cleared_on_rerun(tmp_path):
     assert sorted(ids) == ["x", "y"], (
         f"expected exactly the 2 new ids, got {ids}"
     )
+
+
+# ── part/seed reach a Task by its signature, never by catching TypeError ──
+
+
+def _typeerror_task():
+    """A Task whose verify raises TypeError from inside when it is handed a part.
+
+    Called again without part/seed it would pass, which is exactly what a
+    ``except TypeError: retry without them`` fallback did: the genuine error
+    vanished and the item scored as passed.
+    """
+
+    class Raising(task_module.Task):
+        name = "raising_inside_verify"
+        verify_calls: list[tuple[str | None, int | None]] = []
+
+        def instances(self, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+            return [task_module.TaskInstance(id="only")]
+
+        def verify(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+            Raising.verify_calls.append((part, seed))
+            if part is not None:
+                return len(5)  # type: ignore[arg-type]  # a genuine TypeError
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    Raising.verify_calls = []
+    task_module.register_task("raising_inside_verify", Raising)
+    return Raising
+
+
+def test_a_typeerror_inside_verify_is_the_items_failure_on_the_walker(tmp_path):
+    raising = _typeerror_task()
+    task_module.write_subset(tmp_path, "train", 0.0, seed=5)
+    result = execute(_data_graph(task_ref="raising_inside_verify"), tmp_path)
+    (record,) = result.facts["item_scores"]
+    assert record["passed"] is False
+    assert record["error_kind"] == "TypeError"
+    assert raising.verify_calls == [("train", 5)]
+
+
+def test_a_typeerror_inside_verify_is_the_items_failure_on_the_spine(tmp_path):
+    raising = _typeerror_task()
+    task_module.write_subset(tmp_path, "train", 0.0, seed=5)
+    node = _declared(_data_graph(task_ref="raising_inside_verify"), tmp_path)
+    record = items.command_end(node, tmp_path, 0)
+    assert record["passed"] is False
+    assert record["error_kind"] == "TypeError"
+    assert raising.verify_calls == [("train", 5)]
+
+
+def test_part_and_seed_reach_only_the_hooks_that_take_them(tmp_path):
+    """A pre-part/seed Task still runs; one taking only ``seed`` or ``**kwargs``
+    gets what it names."""
+    seen: dict[str, object] = {}
+
+    class SeedOnly(task_module.Task):
+        name = "seed_only"
+
+        def instances(self, seed=None):  # type: ignore[no-untyped-def,override]
+            seen["instances"] = seed
+            return [task_module.TaskInstance(id="x")]
+
+        def setup(self, instance, workspace, **extra):  # type: ignore[no-untyped-def,override]
+            seen["setup"] = extra
+
+        def verify(self, instance, workspace):  # type: ignore[no-untyped-def,override]
+            seen["verify"] = True
+            return task_module.VerifyResult(passed=True, score=1.0)
+
+    task_module.register_task("seed_only", SeedOnly)
+    task_module.write_subset(tmp_path, "train", 0.0, seed=9)
+    result = execute(_data_graph(task_ref="seed_only"), tmp_path)
+    assert result.exit_ok, result.error
+    assert seen == {"instances": 9, "setup": {"part": "train", "seed": 9}, "verify": True}
