@@ -160,6 +160,7 @@
     "lean_pack": "core",
     "loop_mode": "core",
     "review_pack": "core",
+    "livemath": "core",
     "skillopt": "core",
     "sympy_pack": "core"
   },
