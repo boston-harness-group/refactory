@@ -642,11 +642,13 @@ def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path, _forkserver_dispa
 
     Fails when _effective_timeout is reverted to exclude ops without
     enable_recovery (``use_forkserver = ... (is_op and self.enable_recovery)``),
-    because the in-process os.chdir race lets one branch write to the wrong
-    directory.
+    because the ops then run in-process (same PID as the parent, with
+    process-wide os.chdir) instead of in forkserver children (separate PIDs,
+    per-process CWD).
     """
     import os
 
+    parent_pid = os.getpid()
     parent_cwd = os.getcwd()
     for iteration in range(3):
         run_dir = tmp_path / f"run_{iteration}"
@@ -659,11 +661,11 @@ def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path, _forkserver_dispa
         graph.add(nn.Node("branch_a", "op",
                           call="loop_ops:fork_branch_write_a",
                           writes=("branch_a_output.txt",),
-                          produces=("branch_a_written",)))
+                          produces=("branch_a_written", "branch_a_pid")))
         graph.add(nn.Node("branch_b", "op",
                           call="loop_ops:fork_branch_write_b",
                           writes=("branch_b_output.txt",),
-                          produces=("branch_b_written",)))
+                          produces=("branch_b_written", "branch_b_pid")))
         graph.add(nn.Node("join1", "join",
                           sources=("branch_a", "branch_b")))
         graph.connect("fork1", "join1")
@@ -688,6 +690,15 @@ def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path, _forkserver_dispa
             f"iteration {iteration}: branch_a_output.txt escaped to parent CWD"
         assert not (Path(parent_cwd) / "branch_b_output.txt").exists(), \
             f"iteration {iteration}: branch_b_output.txt escaped to parent CWD"
+
+        # Both ops ran in forkserver children (different PIDs), not in-process.
+        # When reverted to inline dispatch, both PIDs equal the parent PID.
+        a_pid = result.facts.get("branch_a_pid")
+        b_pid = result.facts.get("branch_b_pid")
+        assert a_pid != parent_pid, \
+            f"iteration {iteration}: branch_a ran in parent process (inline os.chdir race)"
+        assert b_pid != parent_pid, \
+            f"iteration {iteration}: branch_b ran in parent process (inline os.chdir race)"
 
 
 def test_fn_gate_plain_str_stdout_is_feedback(tmp_path, _forkserver_dispatch):

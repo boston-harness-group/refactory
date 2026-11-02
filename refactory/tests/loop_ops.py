@@ -293,22 +293,28 @@ def fork_branch_write_a(ctx: Any) -> dict[str, Any]:
     """Write a unique file via a relative path inside the run directory.
 
     Used by test_concurrent_fork_branch_ops_write_to_run_dir: two branches
-    each write a file; both must land in the run directory.
+    each write a file; both must land in the run directory.  Also records PID
+    so the test can verify the op ran in a child process (forkserver) rather
+    than in the parent (inline os.chdir).
     """
+    import os
     from pathlib import Path as _P
     import time
     # Small jitter so both branches are truly concurrent.
     time.sleep(0.05)
     _P("branch_a_output.txt").write_text("written by branch a\n")
+    ctx.set_fact("branch_a_pid", os.getpid())
     return {"branch_a_written": True}
 
 
 def fork_branch_write_b(ctx: Any) -> dict[str, Any]:
     """Write a unique file via a relative path inside the run directory."""
+    import os
     from pathlib import Path as _P
     import time
     time.sleep(0.05)
     _P("branch_b_output.txt").write_text("written by branch b\n")
+    ctx.set_fact("branch_b_pid", os.getpid())
     return {"branch_b_written": True}
 
 

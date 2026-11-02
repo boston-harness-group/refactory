@@ -690,12 +690,12 @@ class Executor:
     _status: str = field(default="", init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
-    #: Test seam (explicit constructor parameter): when True, _effective_timeout
-    #: returns None so ops/fn gates run in-process and tests that monkeypatch
-    #: op functions in the parent process can see the patch.  Production code
-    #: never sets this.  The race fix lives in _effective_timeout returning a
-    #: float on every production path; _force_inline is the "explicit
-    #: constructor parameter on the component under test" the correction allows.
+    #: Test seam: when True, ``_effective_timeout`` returns None so ops/fn
+    #: gates run in-process and tests that monkeypatch op functions in the
+    #: parent process can see the patch.  Set after construction
+    #: (``init=False``); production code never sets this.  The race fix
+    #: lives in ``_effective_timeout`` returning a float on every production
+    #: path.
     _force_inline: bool = field(default=False, init=False, repr=False)
 
     def _record(
@@ -1382,7 +1382,26 @@ class Executor:
         try:
             child = _forkserver_ctx.Process(
                 target=_op_child_target, args=(child_conn, args_dict))
-            child.start()
+            # When the parent was launched from stdin (``python -`` or a
+            # heredoc), ``__main__.__file__`` is ``<stdin>`` — not a real
+            # path.  ``Process.start()`` calls ``get_preparation_data()``
+            # which feeds that path to the child's ``_fixup_main_from_path``,
+            # which then fails with FileNotFoundError.  Our forkserver child
+            # runs ``_op_child_target`` directly and never needs ``__main__``,
+            # so we temporarily clear ``__file__`` for the start() call.
+            import __main__ as _main_mod
+            _saved_main_file = getattr(_main_mod, "__file__", None)
+            _need_clear = (
+                _saved_main_file is not None
+                and not os.path.isfile(_saved_main_file)
+            )
+            if _need_clear:
+                _main_mod.__file__ = None  # type: ignore[attr-defined]
+            try:
+                child.start()
+            finally:
+                if _need_clear:
+                    _main_mod.__file__ = _saved_main_file  # type: ignore[attr-defined]
         except BaseException:
             parent_conn.close()
             child_conn.close()
