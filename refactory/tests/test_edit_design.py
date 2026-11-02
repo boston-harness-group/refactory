@@ -273,7 +273,8 @@ def test_the_design_graph_is_a_different_shape_from_a_package_one():
         "materialise", "overwatch", "pick_corrections", "pitfalls_researcher",
         "prepare", "prepare_check", "qa_director", "qa_director_rerun",
         "qa_judge", "record_findings",
-        "report", "research_director", "route_refine_design", "route_strategy",
+        "report", "rerun_probes", "research_director", "route_refine_design",
+        "route_strategy",
         "scope_reloop", "strategy_director", "synthesize_qa",
         "synthesize_strategy", "verifier",
     ], "the graph is design-v2's phases, not v1's"

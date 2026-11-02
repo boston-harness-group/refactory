@@ -116,7 +116,8 @@
     "refactory_dsh.changed_functions",
     "refactory_dsh.patch_scope",
     "refactory_dsh.targeted_tests",
-    "refactory_dsh.test_selection"
+    "refactory_dsh.test_selection",
+    "refactory_dsh.probe_rerun"
   ],
   "allowed_leaks": {
     "refactory_dsh.run": [
