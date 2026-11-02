@@ -64,6 +64,9 @@ class SkillOptLoop(OuterLoop):
 
     name = "skillopt"
     requires_model = True
+    #: The patch step is a ``text_patch``; the slow update and the previous
+    #: skill's rollout are ``set_knob``.
+    required_ops = ("text_patch", "set_knob")
 
     # ── configure (overrides OuterLoop.configure) ─────────────────────────
 
@@ -103,6 +106,9 @@ class SkillOptLoop(OuterLoop):
         # the state so a run resumed between the slow update and the meta
         # skill still compares the right skill (trainer.py:2176).
         self._epoch_last_step_skill: str = ""
+        # The skill the epoch's patch produced, saved with the "patch" phase so
+        # a run resumed before the val gate gates the patched candidate.
+        self._patched_skill: str = ""
         self._val_cache: dict[str, float] = {}
         self._edit_budget_step: int = 0
         self._meta_skill_text: str = ""
@@ -353,12 +359,14 @@ class SkillOptLoop(OuterLoop):
 
                 cand_skill = self._get_skill(candidate)
                 cand_hash = self._skill_hash(cand_skill)
+                self._patched_skill = cand_skill
                 run.save_strategy_state()
             else:
-                # Resume past patch: the candidate is the current (patch was
-                # already applied and accepted/rejected in the original run).
-                candidate = current
-                cand_skill = self._current_skill
+                # Resume past patch: the patched candidate is the one the saved
+                # "patch" phase recorded, rebuilt from its skill (a candidate's
+                # id is its state's, so it is the very candidate patched).
+                cand_skill = self._patched_skill or self._current_skill
+                candidate = self._candidate_for_skill(run, cand_skill)
                 cand_hash = self._skill_hash(cand_skill)
 
             # ⑦ Val gate — mechanism 7
@@ -667,6 +675,7 @@ class SkillOptLoop(OuterLoop):
             "best_score": self._best_score,
             "prev_epoch_skill": self._prev_epoch_skill,
             "epoch_last_step_skill": self._epoch_last_step_skill,
+            "patched_skill": self._patched_skill,
             "val_cache": dict(self._val_cache),
             "edit_budget_step": self._edit_budget_step,
             "meta_skill_text": self._meta_skill_text,
@@ -689,6 +698,7 @@ class SkillOptLoop(OuterLoop):
         self._best_score = restored.get("best_score", 0.0)
         self._prev_epoch_skill = restored.get("prev_epoch_skill")
         self._epoch_last_step_skill = restored.get("epoch_last_step_skill", "")
+        self._patched_skill = restored.get("patched_skill", "")
         self._val_cache = restored.get("val_cache", {})
         self._edit_budget_step = restored.get("edit_budget_step", 0)
         self._meta_skill_text = restored.get("meta_skill_text", "")

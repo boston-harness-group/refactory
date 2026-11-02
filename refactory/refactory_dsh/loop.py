@@ -453,6 +453,23 @@ class Loop(OuterLoop):
         #: ``load_strategy_state()`` delegate to this object.
         self._custom_strategy: OuterLoop | None = None
 
+    def permitted_ops(self) -> list[str]:
+        """The edit operations this run may apply.
+
+        An explicit ``allowed_ops`` is the whole answer. Otherwise the edit
+        preset's operations, plus the ``required_ops`` the running strategy
+        declares -- an attached custom strategy's, or this loop's own class's.
+        """
+        if self.config.allowed_ops:
+            return list(self.config.allowed_ops)
+        permitted = list(nn_edits.enabled(self.config.edit_preset))
+        attached = getattr(self, "_custom_strategy", None)
+        strategy = attached if attached is not None else self
+        for op in getattr(strategy, "required_ops", ()):
+            if op not in permitted:
+                permitted.append(op)
+        return permitted
+
     def set_custom_strategy(self, strategy: OuterLoop) -> None:
         """Attach a custom strategy (pure OuterLoop subclass) to this Loop.
 
@@ -662,7 +679,7 @@ class Loop(OuterLoop):
             edits.append(edit)
 
         for edit in edits:
-            if edit.get("op") not in (self.config.allowed_ops or nn_edits.enabled(self.config.edit_preset)):
+            if edit.get("op") not in self.permitted_ops():
                 continue
             proposal = Proposal(edit=edit, parent=seed.id, rationale="starting population")
             outcome = sampler.attempt(
@@ -1703,9 +1720,7 @@ class Loop(OuterLoop):
                 if refused is not None:
                     self.rejections.append(Rejection(rounds, proposal.edit, [refused]))
                     continue
-                allowed = self.config.allowed_ops or [
-                    entry["op"] for entry in nn_edits.catalogue(self.config.edit_preset)
-                ]
+                allowed = self.permitted_ops()
                 if op_name not in allowed:
                     self.rejections.append(Rejection(rounds, proposal.edit, ["E-policy: operation is outside this run's permitted edits"]))
                     continue

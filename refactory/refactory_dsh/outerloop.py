@@ -76,7 +76,7 @@ class Run:
             reason = [refused]
             self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
             return reason
-        allowed = self._loop.config.allowed_ops or edits.enabled(self._loop.config.edit_preset)
+        allowed = self._loop.permitted_ops()
         if op_name not in allowed:
             reason = ["E-policy: operation is outside this run's permitted edits"]
             self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
@@ -323,6 +323,11 @@ class OuterLoop:
     name: str = "default"
     #: Whether it needs a model, so construction does not have to know.
     requires_model: bool = False
+
+    #: Edit operations the strategy's own proposals use. A run that names no
+    #: ``allowed_ops`` permits these on top of its edit preset, so the strategy
+    #: works without a profile setting; an explicit ``allowed_ops`` still wins.
+    required_ops: tuple[str, ...] = ()
 
     #: Steps a subclass may override. Each has a working default.
     overridable = (

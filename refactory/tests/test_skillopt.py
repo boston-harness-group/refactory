@@ -1483,6 +1483,24 @@ def test_cli_runs_skillopt_end_to_end(tmp_path, monkeypatch):
     assert "initial_val" in step_types
     assert "train_rollout" in step_types
     assert any(c["call_key"][0] == "analyst_failure" for c in client.calls)
+    # No allowed_ops was set: the strategy's declared ``required_ops`` let its
+    # patch through instead of every patch being refused by the edit preset.
+    trace = _read_trace(tmp_path)
+    assert _decisions(trace, "patch_applied")
+    assert not _decisions(trace, "patch_refused")
+
+
+def test_explicit_allowed_ops_win_over_required_ops(tmp_path):
+    """A person's ``allowed_ops`` is the whole answer: without text_patch in
+    it, the patch is refused even though the strategy declares it."""
+    assert SkillOptLoop.required_ops == ("text_patch", "set_knob")
+    _run_loop(
+        tmp_path, config_overrides={"allowed_ops": ("set_knob",)},
+        skillopt_options={"max_epochs": 1},
+    )
+    trace = _read_trace(tmp_path)
+    assert _decisions(trace, "patch_refused")
+    assert not _decisions(trace, "patch_applied")
 
 
 def test_skillopt_resolves_by_discovery_in_a_fresh_process():
@@ -1592,6 +1610,64 @@ def test_resume_mid_epoch_continues_at_saved_phase(tmp_path, monkeypatch):
     assert _keys(after) == ref_keys[ref_keys.index(crash_at):]
     assert _keys(before) == ref_keys[:ref_keys.index(crash_at)]
     assert [c["prompt"] for c in after] == [c["prompt"] for c in ref[ref_keys.index(crash_at):]]
+
+
+def test_resume_before_the_val_gate_gates_the_patched_candidate(tmp_path, monkeypatch):
+    """Killed at the epoch-1 val-gate evaluation (after the patch), the resumed
+    run evaluates the patched skill -- not the pre-patch one -- and then makes
+    exactly the uninterrupted run's calls.
+
+    Fails when reverted because resume took ``current`` as the candidate, so
+    the val gate re-scored the unpatched skill from its cache.
+    """
+    from refactory_dsh.outerloop import Run
+
+    original = Run.evaluate
+    log: list[tuple[str, str, str]] = []   # (run label, part, skill)
+    label = {"run": ""}
+    crash = {"armed": False}
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        if part == "val":
+            vals = [entry for entry in log if entry[0] == label["run"] and entry[1] == "val"]
+            if crash["armed"] and len(vals) == 1:
+                raise RuntimeError("process died at the val gate")
+            log.append((label["run"], part, SkillOptLoop._get_skill(candidate)))
+        return original(self, candidate, part=part, items=items, seed=seed)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    options = {"max_epochs": 2}
+
+    label["run"] = "ref"
+    reference = FakeClient()
+    _run_loop(tmp_path / "ref", client=reference, skillopt_options=options)
+
+    label["run"] = "split"
+    crash["armed"] = True
+    before = FakeClient()
+    with pytest.raises(RuntimeError, match="val gate"):
+        _run_loop(tmp_path / "split", client=before, skillopt_options=options)
+    crash["armed"] = False
+
+    label["run"] = "resumed"
+    after = FakeClient()
+    with _patch_mode(SkillProbe):
+        loop = strategies.create(
+            "skillopt", MODE_ID, _config(tmp_path / "split", resume=True),
+            strategy_options=options, project=Path("."), model=after,
+        )
+        loop.run()
+
+    ref_vals = [skill for run, part, skill in log if run == "ref" and part == "val"]
+    resumed_vals = [skill for run, part, skill in log if run == "resumed" and part == "val"]
+    assert len(ref_vals) >= 2
+    assert ref_vals[1] != ref_vals[0], "the epoch-1 patch must change the skill"
+    assert resumed_vals[0] == ref_vals[1]
+    assert resumed_vals == ref_vals[1:]
+    assert _keys(before.calls) + _keys(after.calls) == _keys(reference.calls)
+    assert [c["prompt"] for c in before.calls + after.calls] == [
+        c["prompt"] for c in reference.calls
+    ]
 
 
 def test_resume_after_crash_at_meta_skill_makes_the_meta_skill(tmp_path):
