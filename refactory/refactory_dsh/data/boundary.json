@@ -160,7 +160,8 @@
     "lean_pack": "core",
     "loop_mode": "core",
     "review_pack": "core",
-    "sympy_pack": "core"
+    "sympy_pack": "core",
+    "livemath": "core"
   },
   "typescript_core_packages": [
     "@deepseek-ai/dsh-workflow-spine",
