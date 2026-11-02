@@ -278,6 +278,8 @@ def main() -> int:
                           f'optional {node_id}: {type(settle_error).__name__}: {settle_error}; '
                           f'a later resume asks for graph-control acknowledge', file=sys.stderr)
                 print(json.dumps({'node': node_id, 'status': 'missing'}))
+                # The spine records the node failed, not completed (`run.OPTIONAL_MISSING_MARKER`).
+                print('--- refactory optional node missing ---', file=sys.stderr)
                 return 0
             raise
     except Exception as error:

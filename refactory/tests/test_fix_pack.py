@@ -156,3 +156,21 @@ def test_with_its_worktree_off_it_writes_the_artifact_directory(tmp_path, monkey
     assert result.exit_ok, result.error
     assert result.facts["artifact"] == str((tmp_path / "project" / repo_change.ARTIFACTS / "answer").resolve())
     assert not worktree.root().exists()
+
+
+def test_with_its_worktree_off_the_check_writes_no_guardedness_placeholder(tmp_path, monkeypatch):
+    """`ops.check` passes on a worktree-off run without writing a test-guardedness.json
+    stand-in: only a worktree run has a base to run the new tests on."""
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path / "project"))
+    mode = registry.resolve(REPO_ROOT, "fix_pack/make_pass")[1]()
+    state = mode.state_dict()
+    state["knobs"]["worktree"]["value"] = False
+    state["knobs"]["name"]["value"] = "answer"
+    mode.load_state_dict(state)
+    model = FakeModel([render({"app.py": "def answer():\n    return 42\n"}), VERIFICATION_ANSWER])
+    result = mode.run(tmp_path / "run", model=model, task={"check": CHECK})
+    assert result.exit_ok, result.error
+    # The check ran and passed (the run succeeded); verify it left no guardedness placeholder.
+    assert result.gate_verdicts.get("check") == "proceed", "the check ran and passed"
+    assert not (tmp_path / "run" / "test-guardedness.json").exists(), \
+        "test-guardedness.json should not be written on no-worktree runs"

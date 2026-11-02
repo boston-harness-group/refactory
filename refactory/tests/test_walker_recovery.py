@@ -834,9 +834,17 @@ def test_an_unclassified_op_gets_the_spines_default_deadline(tmp_path):
 
 
 def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
-    """Without recovery the walker runs ops in process, as before."""
+    """Without recovery, ops and fn gates still run in forkserver children (for
+    per-process CWD and stdout capture), but the budget is not clamped.
+
+    The forkserver timeout is the spine's 3600 s default, not wall-budget-capped.
+    """
     graph = nn.Graph()
     graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
                       writes=("seen.txt",), produces=("seen",)))
+    graph.add(nn.Node("fg", "gate", gate_kind="fn",
+                      evaluator="walker_recovery_ops:report_interpreter"))
     executor = nn.Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
-    assert executor._effective_timeout(graph.nodes["plain"]) is None
+    # Ops and fn gates get the default 3600 s forkserver timeout even without recovery.
+    assert executor._effective_timeout(graph.nodes["plain"]) == 3600.0
+    assert executor._effective_timeout(graph.nodes["fg"]) == 3600.0

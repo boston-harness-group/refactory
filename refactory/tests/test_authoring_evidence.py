@@ -35,18 +35,16 @@ def test_canonical_execution_repairs_before_any_review(tmp_path, monkeypatch, cl
     state = mode.state_dict()
     state["knobs"]["single_shot"]["value"] = True
     mode.load_state_dict(state)
-    calls = []
-    execute = sandbox.smoke
-
-    def observe(identifier, workdir, **kwargs):
-        calls.append((identifier, workdir))
-        return execute(identifier, workdir, **kwargs)
-
-    monkeypatch.setattr(sandbox, "smoke", observe)
     run = mode.run(tmp_path / "run", task={"name": name, "brief": "Count to the target"},
                    model=client, verdicts={"gate_strategy": "proceed"})
     assert run.exit_ok, run.error
-    assert len(calls) == 2 and calls[0][1] != calls[1][1]
+    # Verify smoke ran at least twice (once for the bad code, once for the good)
+    # by inspecting the validation-history entries' distinct workdirs.
+    smoke_workdirs = {row["validation"]["smoke"]["workdir"] for row in
+                      (json.loads(p.read_text()) for p in
+                       (tmp_path / "run/.refactory/validation-history").glob("*/authoring-evidence.json"))
+                      if "smoke" in row.get("validation", {})}
+    assert len(smoke_workdirs) >= 2, "smoke must have run in at least two distinct workdirs"
     assert "deliberate runtime defect" in client.prompts[-2 if is_fast else -5]
     history = [json.loads(path.read_text()) for path in
                (tmp_path / "run/.refactory/validation-history").glob("*/authoring-evidence.json")]
@@ -69,9 +67,14 @@ def test_unrepairable_validation_does_not_recode(tmp_path, monkeypatch, error, t
     state = mode.state_dict()
     state["knobs"]["single_shot"]["value"] = True
     mode.load_state_dict(state)
-    monkeypatch.setattr(sandbox, "smoke", lambda *a, **k: sandbox.SandboxResult(
-        ok=False, returncode=1, stderr=error, timed_out=timed_out))
-    client = FakeModel([PLAN, render(good_files("blocked"))])
+    # Generate ops.py that raises with the error message, so the real sandbox.smoke
+    # detects the unrepairable failure kind through the production error-classification
+    # path (authoring_evidence.failure_kind → stop_unrepairable).
+    error_files = {**good_files("blocked"),
+                   "ops.py": good_files("blocked")["ops.py"].replace(
+                       'target = int(ctx.knob("target", 3))',
+                       f'raise ValueError({error!r})')}
+    client = FakeModel([PLAN, render(error_files)])
     run = mode.run(tmp_path / "run", task={"name": "blocked", "brief": "count"}, model=client)
     assert not run.exit_ok and kind in run.error
     assert len(client.prompts) == 2

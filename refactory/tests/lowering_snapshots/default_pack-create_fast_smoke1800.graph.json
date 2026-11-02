@@ -35,7 +35,8 @@
         "authoring-evidence.json",
         "check-record.json",
         "focused-check.json",
-        "focused-source.json"
+        "focused-source.json",
+        "test-guardedness.json"
       ],
       "blocking": true,
       "resource_role": "final_validation",

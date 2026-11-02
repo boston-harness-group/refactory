@@ -37,9 +37,38 @@ from .resolve import resolve
 if TYPE_CHECKING:
     from refactory_dsh.task import Task
 
+# Sentinel for SWEEP-6 refilled feedback cleanup.
+_SENTINEL = object()
+
+# Gap 20 / correction C: the spine's RUN_WARNING pattern (execute.ts:166).
+import re as _re_mod
+_RUN_WARNING_RE = _re_mod.compile(r"^(?:[\w.-]+:\s*)?run warning:\s*\S", _re_mod.IGNORECASE)
+
+
+def _emit_run_warnings(workdir: Path, node_id: str, stderr: str) -> None:
+    """Emit ``run_warning`` events for stderr lines that match the spine's pattern.
+
+    The spine (execute.ts:177-178, index.ts:1681-1683) scans an op's stderr for
+    lines matching ``/^(?:[\\w.-]+:\\s*)?run warning:\\s*\\S/i`` and journals each as
+    a ``run_warning`` event.  The walker captures stderr from child-process ops
+    and calls this helper after a successful dispatch.
+    """
+    if not stderr:
+        return
+    from refactory_dsh.live import emit as _emit_event
+    for line in stderr.split("\n"):
+        stripped = line.strip()
+        if _RUN_WARNING_RE.match(stripped):
+            _emit_event(workdir, "run_warning", node_id=node_id,
+                        state="warning", summary=stripped)
+
+
 # ── forkserver context (module-level, shared across all Executor instances) ──
 _forkserver_ctx = multiprocessing.get_context("forkserver")
 _forkserver_modules: set[str] = set()
+# Lock for thread-safe manipulation of __main__.__file__ during child.start().
+# Concurrent fork-branch threads must not race on the process-wide global.
+_main_file_lock = threading.Lock()
 
 
 def _ensure_forkserver_preload(graph: Graph) -> None:
@@ -520,13 +549,25 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
-        # Restore the parent's sys.path so resolve() finds the same modules, and pick up
-        # a workspace package installed since the forkserver preloaded.
-        sys.path[:] = args_dict["sys_path"]
+        # Apply the parent's environment snapshot: the forkserver child inherits
+        # the forkserver's env (created once), but the parent may have set vars
+        # (e.g. via monkeypatch.setenv in tests) that the child needs to see.
+        env_snapshot = args_dict.get("env_snapshot")
+        if env_snapshot:
+            os.environ.clear()
+            os.environ.update(env_snapshot)
+        # The child imports what an op names on its own: the forkserver started with the
+        # parent's sys.path. A workspace package installed since then is picked up here.
         for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
             pkg = importlib.import_module(pkg_name)
             pkg.__path__ = list(pkg_paths)
         importlib.invalidate_caches()
+        # SWEEP-3: Run ops in the run directory, matching the spine (execute.ts:204).
+        # Set REFACTORY_PROJECT so project_for_nodes() still resolves to the
+        # launcher rather than the run directory after the chdir.
+        if not os.environ.get("REFACTORY_PROJECT"):
+            os.environ["REFACTORY_PROJECT"] = os.getcwd()
+        os.chdir(args_dict["workdir"])
 
         try:
             from refactory_dsh.budgets import ENV_LEDGER, RunBudget
@@ -537,23 +578,8 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             else:
                 os.environ[ENV_LEDGER] = ledger
 
-            model: Any = None
-            model_info = args_dict.get("model_info")
-            if model_info:
-                kind = model_info.get("kind")
-                if kind == "dsh":
-                    from refactory_dsh.model import DshModelClient
-                    model = DshModelClient(**model_info["context"])
-                elif kind is not None:
-                    # Stand-in for non-DSH clients: not None so prepare/create_ops
-                    # skip readiness, and every method raises so nothing silently proceeds.
-                    class _StandIn:
-                        def __getattr__(self, name: str) -> Any:
-                            raise RuntimeError(f"model.{name}() called in child process")
-                        def complete(self, *a: Any, **kw: Any) -> str:
-                            raise RuntimeError("model.complete() called in child process")
-                    model = _StandIn()
-
+            # SWEEP-5: ctx.model for ops is None, matching the spine (run.py:314,
+            # 344-365) and the documented op API (create_ops.py:126).
             ctx = RunContext(
                 Path(args_dict["workdir"]), knobs=args_dict["knobs"],
                 facts=args_dict["facts"], task=args_dict["task"],
@@ -566,29 +592,59 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             ctx._declared_reads = tuple(args_dict.get("reads", ()))
             ctx._declared_facts = tuple(args_dict.get("produces", ()))
 
-            if model is not None:
-                ctx.model = model
             # Open the same shared ledger the parent holds, so an op that records usage
             # is charged once, in this run (dm-173).
             ctx.budget = RunBudget.from_path(ledger) if ledger else None
 
             fn = resolve(args_dict["callable_target"])
-            result = fn(ctx)
+            # Gap 20 / correction C: capture stderr so run_warning lines can
+            # be emitted by the parent, matching the spine (execute.ts:177-178).
+            # SWEEP-4: also capture stdout so the parent can extract fn-gate
+            # feedback the same way the spine does (execute.ts:148-157).
+            import io as _io
+            _old_stderr = sys.stderr
+            _old_stdout = sys.stdout
+            _capture_stderr = _io.StringIO()
+            _capture_stdout = _io.StringIO()
+            sys.stderr = _capture_stderr
+            sys.stdout = _capture_stdout
+            try:
+                result = fn(ctx)
+            finally:
+                sys.stderr = _old_stderr
+                sys.stdout = _old_stdout
+            _captured_stderr = _capture_stderr.getvalue()
+            _captured_stdout = _capture_stdout.getvalue()
 
             conn.send(("ok", {
                 "result": result,
                 "facts": dict(ctx.facts),
                 "writes_made": list(ctx.writes_made),
                 "_produced": list(ctx._produced),
+                "_stderr": _captured_stderr,
+                "_stdout": _captured_stdout,
             }))
         except SystemExit:
             raise  # propagate SIGTERM
         except BaseException as exc:
+            # Include any stderr and stdout captured before the exception for
+            # error diagnosis: an op that prints and then raises is exactly the
+            # run whose diagnostics are wanted.
+            try:
+                _err_stderr = _capture_stderr.getvalue()
+            except Exception:
+                _err_stderr = ""
+            try:
+                _err_stdout = _capture_stdout.getvalue()
+            except Exception:
+                _err_stdout = ""
             conn.send(("error", {
                 "type": type(exc).__qualname__,
                 "module": type(exc).__module__,
                 "message": str(exc),
                 "traceback": "".join(traceback_mod.format_exception(exc)),
+                "_stderr": _err_stderr,
+                "_stdout": _err_stdout,
             }))
     finally:
         conn.close()
@@ -656,6 +712,8 @@ class Executor:
 
     _gate_iterations: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _outcome: str = field(default="pending", init=False, repr=False)
+    #: Whether the visit being started is a failed op's one retry (`_try_visit`).
+    _retrying: bool = field(default=False, init=False, repr=False)
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
@@ -693,6 +751,7 @@ class Executor:
                 "outcome": outcome,
                 "graph": self.graph.to_state(),
                 "file_fingerprints": self._file_fingerprints(),
+                "gate_iterations": dict(self._gate_iterations),
                 **({"model_context": self.ctx.model.context()} if callable(getattr(self.ctx.model, "context", None)) else {}),
                 **({"branches": branches} if branches is not None else {}),
                 **({"schedule": schedule} if schedule is not None else {}),
@@ -728,13 +787,23 @@ class Executor:
                       failed: str | None = None) -> None:
         """Write the run's facts and its status where the spine writes them (`facts.json`,
         `.refactory/spine-status.json`), so a walked run reads as a driven one does.
-        Best effort, as the progress record is."""
+        Best effort, as the progress record is.
+
+        ASK-4b / gap 20: Also emit a ``graph_state`` event, matching the spine
+        (index.ts:1218). Only ``control`` events stay out (gap 19).
+        """
         from refactory_dsh.run import write_facts
 
         try:
             write_facts(self.ctx.workdir, self.ctx.facts)
             self.record.write_status(self.ctx.workdir, self.graph, status, nodes, error=error, failed=failed)
             self._status = status
+            # Emit graph_state event matching the spine (index.ts:1218).
+            from refactory_dsh.live import emit as _emit_event
+            _emit_event(self.ctx.workdir, "graph_state", status=status,
+                        running_nodes=nodes,
+                        **({"error": error} if error else {}),
+                        **({"failed_node": failed} if failed else {}))
         except OSError:  # pragma: no cover - an unwritable run directory
             pass
 
@@ -1158,6 +1227,10 @@ class Executor:
         A fork stops *before* its barrier, because the barrier is the node the walk
         continues at. A data node's pass includes its ``subgraph_exit``: that node is
         the last one of the subgraph, not the one after it.
+
+        Nested forks and joins within a branch are handled inline: when a fork is
+        encountered, ``run_fork`` is called recursively; when a join is encountered,
+        it is recorded and the walk continues to the next node.
         """
         current: str | None = start
         visits = self._gate_iterations if iterations is None else iterations
@@ -1173,6 +1246,31 @@ class Executor:
                 return f"node {current!r} does not exist"
             if len(self.steps) >= self.max_steps or (self._reserve_step and not self._reserve_step()):
                 return f"the run exceeded {self.max_steps} steps"
+            # Nested fork inside a branch: delegate to run_fork.
+            if node.kind == "fork":
+                from .fork import run_fork
+
+                self.steps.append(Step(node.id, node.kind, 0.0))
+                self.record.complete(node)
+                try:
+                    error = run_fork(self, node)
+                except GateStop as exc:
+                    return str(exc)
+                except HaltStop:
+                    raise
+                except Exception as exc:
+                    return f"{node.id}: {type(exc).__name__}: {exc}"
+                if error is not None:
+                    return error
+                current = self.graph.out_edges(node.id)[0].target
+                continue
+            # Nested join inside a branch: step over it.
+            if node.kind == "join":
+                self.steps.append(Step(node.id, node.kind, 0.0))
+                self.record.complete(node)
+                out = self.graph.out_edges(node.id)
+                current = out[0].target if out else None
+                continue
             self.ctx.iteration = len(self.steps)
             self.ctx.node_id = current
             self.ctx._declared = node.writes  # noqa: SLF001 - the run owns the context
@@ -1189,6 +1287,16 @@ class Executor:
             except (GateStop, HaltStop):
                 raise
             except Exception as exc:  # a failing branch ends the run, visibly
+                if self._missing_optional(node, exc):
+                    # Only the optional node is optional: it is recorded failed and
+                    # missing, and its branch goes on with its next node, as on the spine.
+                    error = f"{type(exc).__name__}: {exc}"
+                    self.steps.append(Step(node.id, node.kind, time.time() - started,
+                                           reason=f"missing: {error}"))
+                    self.record.complete(node)
+                    out = self.graph.out_edges(node.id)
+                    current = out[0].target if out else None
+                    continue
                 self.steps.append(
                     Step(node.id, node.kind, time.time() - started,
                          error=f"{type(exc).__name__}: {exc}")
@@ -1210,12 +1318,39 @@ class Executor:
         count = visits.get(node.id, 0) + 1
         visits[node.id] = count
         if count > node.max_iterations:
-            raise ExecutionError(
-                f"gate {node.id!r} exceeded max_iterations of {node.max_iterations}; "
-                f"retry {verdict!r} was refused before dispatching {target!r}"
+            # SWEEP-8: record as halted, not failed, matching the spine
+            # (spine.ts:972-980, 1003-1006).
+            raise HaltStop(
+                node.id,
+                reason=f"max_iterations of {node.max_iterations}; "
+                f"retry {verdict!r} was refused before dispatching {target!r}",
             )
 
     # ── retry wrapper ──────────────────────────────────────────────────────
+    def _missing_optional(self, node: Node, exc: BaseException) -> bool:
+        """Whether ``node``'s failure makes it missing rather than failing its branch.
+
+        A node a fork names in ``optional_targets`` is optional, and only that node:
+        an op or agent that failed is recorded missing (``reviews/<node>-missing.txt``,
+        its delivery marker settled), as the spine's runner and worker record it, and its
+        branch continues. A budget or build-loop stop, a timeout or an unknown outcome
+        still fails it, as they do on the spine.
+        """
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.run import BuildLoopStop
+
+        from .fork import _record_missing, _settle_missing
+
+        optional = any(node.id in (fork.optional_targets or ())
+                       for fork in self.graph.nodes.values() if fork.kind == "fork")
+        if not optional or node.kind not in ("op", "agent") or isinstance(
+                exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
+            return False
+        error = f"{type(exc).__name__}: {exc}"
+        _record_missing(self.ctx.workdir, node.id, error)
+        _settle_missing(self.ctx.workdir, [node], error)
+        return True
+
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:
         """Wrap ``_visit`` with FnNode-only one-retry under ``enable_recovery``."""
         if not self.enable_recovery or node.kind != "op":
@@ -1244,7 +1379,11 @@ class Executor:
             self._next_after_completion = None
 
             # Retry once.
-            result = self._visit(node)
+            self._retrying = True
+            try:
+                result = self._visit(node)
+            finally:
+                self._retrying = False
 
             # Record the successful retry.
             self.steps.append(
@@ -1257,42 +1396,42 @@ class Executor:
     def _effective_timeout(self, node: Node) -> float | None:
         """Derive per-op timeout from the shared formula and clamp to budget.
 
-        When ``enable_recovery`` is ``True``, every op and fn gate receives a
-        deadline.  Classified ops (smoke, check, deliver) use the shared timeout
-        formula from ``lowering.command_timeout_s()``.  Unclassified ops receive
-        a 3600-second default, as both shipped spine configurations set
+        Every op and fn gate runs in a reused forkserver child so the
+        run-dir CWD, ``ctx.model=None`` and stdout/stderr capture are
+        per-process.  No ``os.chdir`` or ``sys.std*`` swaps in the parent.
+
+        Classified ops (smoke, check, deliver) use the shared timeout formula
+        from ``lowering.command_timeout_s()``.  Unclassified ops and fn gates
+        receive a 3600-second default, as both shipped spine configurations set
         (``packages/bundle/refactory/presets/ceo.patch.yml`` and
         ``packages/bundle/graph/cordis.patch.yml`` each pin
         ``commandTimeoutMs: 3600000``; the ``600_000`` in the spine's schema is only
-        its fallback when nothing configures one).  All
-        deadlines are clamped to the remaining run wall budget
-        (``budget.remaining_s()``) with a 1-second floor.
+        its fallback when nothing configures one).  All deadlines are clamped to
+        the remaining run wall budget (``budget.remaining_s()``) with a 1-second
+        floor when ``enable_recovery`` is ``True``.
 
         An op that exceeds its deadline is killed (SIGTERM → 5 s grace → SIGKILL
         on its process group) and raises ``OpTimeoutError`` with the node id and
         deadline.  Timeouts are never silently retried.
-
-        Limitation: fcntl file locking has higher latency than in-memory access;
-        under extreme contention (many concurrent forkserver children writing to
-        the same budget ledger), lock wait time could approach the timeout.  In
-        practice, the walker runs ops sequentially (or in fork branches with
-        ``MAX_WORKERS`` threads), so contention is minimal.
         """
-        if not self.enable_recovery:
-            return None
-        if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
+        is_fn_gate = node.kind == "gate" and node.gate_kind == "fn"
+        is_op = node.kind == "op"
+        # Every op and fn gate runs in a reused forkserver child so the
+        # run-dir CWD, ctx.model=None, and stdout/stderr capture are
+        # per-process.  No os.chdir or sys.std* swaps in the parent.
+        use_forkserver = is_fn_gate or is_op
+        if use_forkserver:
             from refactory_dsh.lowering import command_timeout_s as _cmd_timeout_s
 
             state = {"knobs": {n: {"value": v} for n, v in self.ctx.knobs.items()}}
             raw = _cmd_timeout_s(node, state)
             if raw is None:
                 # Unclassified ops get the spine's 3600 s default (dm-173).
-                # Budget forwarding (PC-2/PC-3) ensures ctx.budget works in
-                # the child process.
                 raw = 3600.0
-            remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
-            if remaining is not None:
-                raw = min(raw, remaining)
+            if self.enable_recovery:
+                remaining = self.ctx.budget.remaining_s() if self.ctx.budget is not None else None
+                if remaining is not None:
+                    raw = min(raw, remaining)
             return max(1.0, float(raw))
         return None
 
@@ -1323,18 +1462,18 @@ class Executor:
         parent is interrupted — so nothing it left running blocks the run's exit.
         A crashed op is never replayed here.
         """
-        model_info: dict[str, Any] | None = None
-        if self.ctx.model is not None:
-            from refactory_dsh.model import DshModelClient
-
-            if isinstance(self.ctx.model, DshModelClient):
-                model_info = {"kind": "dsh", "context": self.ctx.model.context()}
-            else:
-                model_info = {"kind": "other"}
-
+        # SWEEP-5: ctx.model for ops is None, matching the spine (run.py:314,
+        # 344-365) and the documented op API (create_ops.py:126). The readiness
+        # checks (design_ops.py:302-306) handle None explicitly.
+        # Resolve workdir to absolute: the child does os.chdir(workdir) and
+        # relative paths would resolve against the new CWD otherwise.
+        _abs_workdir = str(self.ctx.workdir.resolve())
+        # Forward the current environment snapshot: forkserver children inherit
+        # the forkserver's env, not the parent's current one.  Tests that use
+        # monkeypatch.setenv need the child to see those changes.
         args_dict: dict[str, Any] = {
-            "sys_path": list(sys.path),
-            "workdir": str(self.ctx.workdir),
+            "workdir": _abs_workdir,
+            "env_snapshot": dict(os.environ),
             "facts": dict(self.ctx.facts),
             "knobs": dict(self.ctx.knobs),
             "task": dict(self.ctx.task),
@@ -1343,7 +1482,6 @@ class Executor:
             "writes": tuple(node.writes),
             "reads": tuple(node.reads),
             "produces": tuple(node.produces),
-            "model_info": model_info,
             "memory": self.ctx.memory,
             "iteration": self.ctx.iteration,
             "verdicts": dict(self.ctx.verdicts),
@@ -1364,7 +1502,40 @@ class Executor:
         try:
             child = _forkserver_ctx.Process(
                 target=_op_child_target, args=(child_conn, args_dict))
-            child.start()
+            # When the parent was launched from stdin (``python -`` or a
+            # heredoc), ``__main__.__file__`` is ``<stdin>`` — not a real
+            # path.  ``Process.start()`` calls ``get_preparation_data()``
+            # which feeds that path to the child's ``_fixup_main_from_path``,
+            # which then fails with FileNotFoundError.  Our forkserver child
+            # runs ``_op_child_target`` directly and never needs ``__main__``,
+            # so we temporarily clear ``__file__`` for the start() call.
+            # The lock serialises concurrent fork-branch threads that modify
+            # the process-wide ``__main__.__file__`` global.
+            import __main__ as _main_mod
+            with _main_file_lock:
+                _saved_main_file = getattr(_main_mod, "__file__", None)
+                _saved_main_spec = getattr(_main_mod, "__spec__", None)
+                # Clear both whenever __main__ has them. A __file__ that is not
+                # a real file makes _fixup_main_from_path raise; one that IS a
+                # real file makes the child re-import the caller's main module,
+                # re-running its module-level code once per op visit (a
+                # module-level execute() then nests runs on one run directory).
+                # __spec__ matters too: get_preparation_data prefers
+                # __spec__.name over __file__, so a `python -m` caller re-imports
+                # its main module unless this is cleared as well.
+                _need_clear = _saved_main_file is not None
+                _need_clear_spec = _saved_main_spec is not None
+                if _need_clear:
+                    _main_mod.__file__ = None  # type: ignore[attr-defined]
+                if _need_clear_spec:
+                    _main_mod.__spec__ = None  # type: ignore[attr-defined]
+                try:
+                    child.start()
+                finally:
+                    if _need_clear:
+                        _main_mod.__file__ = _saved_main_file  # type: ignore[attr-defined]
+                    if _need_clear_spec:
+                        _main_mod.__spec__ = _saved_main_spec  # type: ignore[attr-defined]
         except BaseException:
             parent_conn.close()
             child_conn.close()
@@ -1403,18 +1574,64 @@ class Executor:
                     self.ctx.facts[key] = value
             self.ctx._produced.update(payload.get("_produced", []))  # noqa: SLF001
             self.ctx.writes_made.extend(payload.get("writes_made", []))
-            return payload.get("result")
+            # Gap 20 / correction C: emit run_warning events for stderr lines
+            # matching the spine's RUN_WARNING pattern (execute.ts:166,177-178).
+            _child_stderr = payload.get("_stderr", "")
+            _emit_run_warnings(self.ctx.workdir, node.id, _child_stderr)
+            # Pass child stderr through to the parent's stderr so it remains
+            # visible for debugging and test assertions (e.g. capfd).
+            if _child_stderr:
+                sys.stderr.write(_child_stderr)
+            # An op's stdout goes to the parent's STDERR, not its stdout.
+            # Ops print diagnostics (design_ops.py's self-check line,
+            # repo_change.py's copy notes) and the spine puts those in its
+            # command log, so capturing stdout for fn-gate feedback must not
+            # swallow them. They cannot go to stdout, though: loop.run() runs
+            # the walker in-process and that command's stdout is the single
+            # JSON object its caller parses, so an op's print() would corrupt
+            # it. stderr keeps the diagnostics and the contract both.
+            _child_stdout = payload.get("_stdout", "")
+            if _child_stdout:
+                sys.stderr.write(_child_stdout)
+            result = payload.get("result")
+            # SWEEP-4: attach child process stdout to the result so fn-gate
+            # feedback extraction in _visit_gate can use it.  A plain str
+            # does not accept attribute assignment, so wrap it in Verdict
+            # first — this preserves stdout as feedback for fn gates that
+            # return a bare string instead of Verdict.
+            if _child_stdout and isinstance(result, str):
+                from refactory_dsh.nn import Verdict
+                if not isinstance(result, Verdict):
+                    result = Verdict(result)
+                result._fn_stdout = _child_stdout  # type: ignore[attr-defined]
+            return result
 
-        # Exception from child: reconstruct and re-raise.
-        return self._reraise_child_error(payload)
+        # Exception from child: reconstruct and re-raise, preserving stderr.
+        return self._reraise_child_error(
+            payload, payload.get("_stderr", ""), payload.get("_stdout", ""),
+        )
 
     @staticmethod
-    def _reraise_child_error(payload: dict[str, Any]) -> Any:
-        """Reconstruct and re-raise an exception sent by the child process."""
+    def _reraise_child_error(
+        payload: dict[str, Any], stderr: str = "", stdout: str = "",
+    ) -> Any:
+        """Reconstruct and re-raise an exception sent by the child process.
+
+        The child's stdout is forwarded too, onto the parent's stderr, because
+        an op that prints and then raises is exactly the run whose diagnostics
+        are wanted. stderr is appended to the exception message as well; stdout
+        is only written through.
+        """
+        if stdout:
+            sys.stderr.write(stdout)
         exc_type_name = payload.get("type", "RuntimeError")
         exc_msg = payload.get("message", "")
         exc_tb = payload.get("traceback", "")
         exc_module = payload.get("module", "builtins")
+
+        # Preserve stderr from the child so it is visible in the error.
+        if stderr and stderr.strip():
+            exc_msg = f"{exc_msg}\nop stderr: {stderr.strip()}"
 
         reconstructed: BaseException | None = None
         try:
@@ -1446,7 +1663,11 @@ class Executor:
         self._outcome = "running"
         if self._reserve_step is None:
             self._record(node.id, outcome="running")
-        emit(self.ctx.workdir, "node_started", node_id=node.id, state="running", summary=render(node.notes, self.ctx))
+        # The one retry of a failed op (`_try_visit`) is the same visit, as the spine's
+        # runner retries inside one command: its start says so.
+        retry = {"retry": True} if self._retrying else {}
+        emit(self.ctx.workdir, "node_started", node_id=node.id, state="running", summary=render(node.notes, self.ctx),
+             **retry)
         try:
             result = self._dispatch(node, answer)
         except BaseException as exc:
@@ -1466,11 +1687,7 @@ class Executor:
         is a user gate's, read before its visit started."""
         if node.kind == "op":
             timeout = self._effective_timeout(node)
-            if timeout is not None:
-                produced = self._run_op_timed(node.call, node, timeout)
-            else:
-                fn = resolve(node.call)
-                produced = fn(self.ctx)
+            produced = self._run_op_timed(node.call, node, timeout)
             if isinstance(produced, dict):
                 for key, value in produced.items():
                     self.ctx.set_fact(key, value)
@@ -1484,7 +1701,20 @@ class Executor:
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
-        from refactory_dsh.agent_delivery import fill_feedback, with_feedback
+        # Refuse an agent node with a tools field, matching the spine's
+        # lowering refusal (workers.py:306-307) — SWEEP-7 / gap 15.
+        if getattr(node, "tools", None):
+            raise ValueError(
+                f"agent node {node.id!r} declares a 'tools' field; "
+                "tools are not supported on agent nodes"
+            )
+        from refactory_dsh.agent_delivery import _path, fill_feedback, with_feedback
+
+        # ASK-4a / gap 15: Refuse a node whose declared reads are missing,
+        # matching the spine's worker_node.py:82-84.
+        for name in node.reads:
+            if not _path(self.ctx.workdir, name).exists():
+                raise ValueError(f'required worker input is missing: {name}')
 
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
@@ -1524,9 +1754,14 @@ class Executor:
             self.ctx.workdir, node.id, values,
             feedback_keys=node.feedback_keys if node.feedback_keys else None,
         )
+        # SWEEP-6: Refilled feedback keys are available for rendering but not
+        # persisted as run facts, matching the spine (worker_node.py:133-134).
+        # Temporarily inject them so render() sees them, then remove after.
+        _refilled_snap: dict[str, Any] = {}
         if refilled_keys:
             for k in refilled_keys:
-                self.ctx._internal_fact(k, values[k])
+                _refilled_snap[k] = self.ctx.facts.get(k, _SENTINEL)
+                self.ctx.facts[k] = values[k]
         model_context = client.context() if callable(getattr(client, "context", None)) else None
         route = client.route() if callable(getattr(client, "route", None)) else {}
         from refactory_dsh import workspace as workspaces
@@ -1541,6 +1776,26 @@ class Executor:
 
         prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
         system = render(node.system_prompt_template, self.ctx) if node.system_prompt_template else ""
+        # Gap 20 / correction C: detect unresolved template keys and emit
+        # run_warning events, matching the spine (index.ts:1800-1811).
+        # Strip the steering block before scanning (agent_delivery.py:838-845).
+        import re as _re_tmpl
+        from refactory_dsh.steering import STEERING_START, STEERING_END
+        _scan = node.prompt_template
+        _st_s = _scan.find(STEERING_START)
+        _st_e = _scan.find(STEERING_END, _st_s) if _st_s >= 0 else -1
+        if _st_s >= 0 and _st_e >= _st_s:
+            _scan = _scan[:_st_s] + _scan[_st_e + len(STEERING_END):]
+        _tmpl_keys = _re_tmpl.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', _scan)
+        _vals = {**self.ctx.knobs, **self.ctx.facts}
+        _unresolved = [k for k in _tmpl_keys if k.strip() not in _vals
+                       and k not in (refilled_keys or [])]
+        if _unresolved:
+            from refactory_dsh.live import emit as _emit_warn
+            for _uk in _unresolved:
+                _emit_warn(self.ctx.workdir, "run_warning", node_id=node.id,
+                           state="warning",
+                           summary=f"unresolved template key: {{{{{_uk}}}}}")
         # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.
         if system:
             from refactory_dsh.workers import capabilities as _caps
@@ -1576,12 +1831,20 @@ class Executor:
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
         if tool_policy == "none":
             _capture_final = True
-        output, _receipt = deliver(
-            self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
-            reads=list(node.reads), client=client, ask=ask,
-            capture_final=_capture_final, rule=node.retry,
-            timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
-            tool_policy=tool_policy)
+        try:
+            output, _receipt = deliver(
+                self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
+                reads=list(node.reads), client=client, ask=ask,
+                capture_final=_capture_final, rule=node.retry,
+                timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
+                tool_policy=tool_policy)
+        finally:
+            # SWEEP-6: clean up temporarily injected refilled keys, even on error.
+            for k, prev in _refilled_snap.items():
+                if prev is _SENTINEL:
+                    self.ctx.facts.pop(k, None)
+                else:
+                    self.ctx.facts[k] = prev
         if node.produces:
             # Text-producing nodes expose the delivered artifact, which can have
             # been written by tools while the final response only summarizes it.
@@ -1634,11 +1897,9 @@ class Executor:
             verdict = self._answered_verdict(node)
         else:
             timeout = self._effective_timeout(node)
-            if timeout is not None:
-                verdict = self._run_op_timed(node.evaluator, node, timeout)
-            else:
-                fn: Callable[[RunContext], Any] = resolve(node.evaluator)
-                verdict = fn(self.ctx)
+            # Forkserver child: per-process stdout capture, thread-safe,
+            # no global sys.stdout swap.
+            verdict = self._run_op_timed(node.evaluator, node, timeout)
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"
@@ -1652,7 +1913,33 @@ class Executor:
             # Terminal halt
             self.record.gate(self.graph, node.id, verdict, target=None, retry=False)
             raise HaltStop(node.id, reason=reason)
-        why = str(getattr(verdict, "reason", "") or "")
+        # SWEEP-4: Match the spine's feedback text (execute.ts:reasonOf).
+        # On the spine, run.py prints Verdict.reason to stdout first, then the
+        # verdict label; reasonOf() takes all lines before the last non-empty one.
+        # On the walker, stdout capture gets what the fn-gate printed (no label).
+        # Combine captured stdout with Verdict.reason, as the spine would see them.
+        _captured_stdout = getattr(verdict, '_fn_stdout', '').strip()
+        _verdict_reason = str(getattr(verdict, "reason", "") or "")
+        if _captured_stdout:
+            # Captured stdout is what the fn printed. The spine would also see the
+            # reason (from Verdict) and the label. Build the full text as the spine
+            # would, then apply reasonOf.
+            from refactory_dsh.run import _clipped as _clip_reason
+            _full_stdout_parts: list[str] = []
+            if _captured_stdout:
+                _full_stdout_parts.append(_captured_stdout)
+            if _verdict_reason:
+                _full_stdout_parts.append(_clip_reason(_verdict_reason))
+            _full_stdout_parts.append(str(verdict).strip())
+            _full_stdout = '\n'.join(_full_stdout_parts)
+            # reasonOf: all lines before the last non-empty one (the verdict label).
+            _lines = _full_stdout.split('\n')
+            _last = len(_lines) - 1
+            while _last >= 0 and _lines[_last].strip() == '':
+                _last -= 1
+            why = '\n'.join(_lines[:max(_last, 0)]).strip()
+        else:
+            why = _verdict_reason
         from refactory_dsh.run import _clipped
 
         retry = self._is_retry(node.id, selected.target, selected.condition or "")
@@ -1731,15 +2018,22 @@ def execute(
     ctx.budget = budget
     # A run that goes on from where it stopped goes on with its record: the nodes it
     # completed, its gates' verdicts and any feedback a reloop left.
+    # Read progress.json once, reuse for both RunRecord and gate_iterations (non-core).
     record = RunRecord()
+    gate_iterations: dict[str, int] = {}
     if start is not None:
         try:
-            record = RunRecord.from_progress(json.loads((workdir / PROGRESS).read_text()))
+            _progress = json.loads((workdir / PROGRESS).read_text())
+            record = RunRecord.from_progress(_progress)
+            gate_iterations = _progress.get("gate_iterations", {})
         except (OSError, ValueError, AttributeError):
             pass
     try:
-        result = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
-                          record=record).run(start=start)
+        executor = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
+                            record=record)
+        if gate_iterations:
+            executor._gate_iterations.update(gate_iterations)
+        result = executor.run(start=start)
         if budget is not None:
             result.facts["resources"] = budget.snapshot()
         return result

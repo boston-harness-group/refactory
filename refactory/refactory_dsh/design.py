@@ -1144,7 +1144,7 @@ class DesignMode(Mode):
             # leaves none this round (synthesize_qa sets the last round's aside). The prompt
             # reads them when they are there.
             reads=("brief.json", "design.md", "reviews/qa-synthesized.md",
-                   "changes.diff", "test-guardedness.json"),
+                   "changes.diff"),
             writes=(judges.OVERWATCH_VERDICT,),
             produces=("overwatch",),
             notes="verify acceptance, with the correction audit as evidence, and judge",
