@@ -98,6 +98,73 @@ def verification_methods(deliverable_kind: str) -> str:
     return VERIFICATION_METHODS if deliverable_kind == "repository_change" else FULL_VERIFICATION_METHODS
 
 
+_HUNK_REVERT_METHOD = """
+## Hunk-revert verification
+
+You have a workspace clone of the attempt.  Use it as a scratch copy for the revert
+checks below.  Never modify the builder's workspace or the committed tree — only
+this clone.
+
+### Requirements and corrections
+
+The requirements from brief.json and the person's gate corrections are listed below.
+For each, identify the implementing hunk(s) from the diff and check them.
+
+{{requirements_and_corrections}}
+
+### Method — for each behaviour-changing requirement or correction above
+
+1. From the diff (changes.diff), identify the hunk(s) that implement it.
+2. In the workspace clone, revert the hunk with `git apply --reverse` on a
+   patch containing only the overlapping hunks, or manually undo the lines.
+3. Run the specific test(s) you judge should catch the revert — not the whole
+   suite.  Record the command and its output.
+4. Restore the file: `git checkout HEAD -- <file>`.
+5. Report:
+   - The hunk (file:line range).
+   - The test command you ran.
+   - Its output (truncated to the relevant part).
+   - **CAUGHT** when the test failed after the revert (good).
+   - **NOT CAUGHT** when the test still passed after the revert (bad — blocking).
+
+Requirements that are docs-only or test-only (no behaviour change) are reported as
+**NOT APPLICABLE** — they need no revert check.
+
+### Time budget
+Your time budget is """ + str(DESIGN_VERIFIER_TIMEOUT_S) + """ s (~20 min), with one
+retry at 2× (""" + str(DESIGN_VERIFIER_TIMEOUT_S * 2) + """ s) for a total of
+""" + str(DESIGN_VERIFIER_TIMEOUT_S * 3) + """ s.  If you run out of time before
+checking every requirement, report the unchecked ones as **UNCHECKED** (advisory) —
+they do not block.
+
+### Probes
+After the hunk-revert checks, write and run 2–3 probes for the brief's edge cases
+(on both runtimes when the brief names both).
+
+### Output format in reviews/verification.md
+
+For each requirement, write a section:
+
+#### Requirement: <short id or summary>
+- Hunk: <file:line-range>
+- Test: <command>
+- Output: <relevant excerpt>
+- Result: CAUGHT | NOT CAUGHT | NOT APPLICABLE | UNCHECKED
+
+Then the probe results, then the existing verification methods below.
+"""
+
+_HUNK_REVERT_JUDGING = """
+### Judging
+- A hunk implementing a requirement or correction that no test catches when reverted:
+  BLOCKING: <path:line>: <requirement> is not caught by any test when its hunk is
+  reverted (tested with <test command>)
+  This is a finding of kind `check` with severity `high` that blocks.
+- A probe that fails is a normal defect finding:
+  BLOCKING: <path:line>: <description>
+"""
+
+
 def _verifier_prompt(methods: str) -> str:
     return (
         "Artifact directory (absolute): {{artifact}}\n"
@@ -117,9 +184,31 @@ def _verifier_prompt(methods: str) -> str:
     )
 
 
-#: The review fork's verifier: `prepare_design` sets `verification_methods` by what the
-#: run delivers.
-VERIFIER_PROMPT = _verifier_prompt("{{verification_methods}}")
+def _design_verifier_prompt(methods: str) -> str:
+    """The design-mode verifier prompt with the hunk-revert method."""
+    return (
+        "Artifact directory (absolute): {{artifact}}\n"
+        "Read and run the delivered files at this exact path; do not infer it "
+        "from your working directory. {{change}}\n\n"
+        "Brief: {{brief}}\n\n"
+        + _HUNK_REVERT_METHOD
+        + _HUNK_REVERT_JUDGING
+        + methods +
+        "\nFor each finding, report it as:\n"
+        "BLOCKING: <file:line>: <description with a runnable counterexample or "
+        "a cited file:line chain>\n"
+        + MARKER_RULE + "\n\n"
+        "design.md is in the run directory. Do NOT read it, or strategy.json, "
+        "or any review files. You verify the change against the brief and the "
+        "repository only.\n\n"
+        "End with a line that is exactly VERDICT: PASS when there are no "
+        "blocking findings, or VERDICT: FAIL when there are any."
+    )
+
+
+#: The review fork's verifier for design mode: includes hunk-revert method.
+#: `prepare_design` sets `verification_methods` by what the run delivers.
+VERIFIER_PROMPT = _design_verifier_prompt("{{verification_methods}}")
 #: fix_pack's inline verifier, with no reviewers beside it and no prepare fact.
 FULL_VERIFIER_PROMPT = _verifier_prompt(FULL_VERIFICATION_METHODS)
 

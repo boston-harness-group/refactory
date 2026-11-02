@@ -58,8 +58,14 @@ def test_the_spine_gives_the_session_the_bound_and_the_command_its_overhead(tmp_
     assert workflow.nodes["health_checker"].timeout is None
     lowered = workers.lower_workflow(workflow, tmp_path, DshModelClient().context())
     verifier = lowered.nodes["verifier"]
-    # Its bound, then its declared retry at twice the bound, then the dispatch overhead.
-    assert verifier.command_timeout_s == 3 * DESIGN_VERIFIER_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
+    # Its bound, then its declared retry at twice the bound, then the dispatch overhead,
+    # plus workspace preparation budget per attempt (the verifier now has a clone workspace).
+    from refactory_dsh.workspace import preparation_budget_s
+    ws = workflow.nodes["verifier"].workspace
+    retry = workflow.nodes["verifier"].retry
+    prep = (1 + int(retry["times"]) if retry else 1) * preparation_budget_s(
+        ws, workflow.knob_values.get("check_timeout_s"))
+    assert verifier.command_timeout_s == 3 * DESIGN_VERIFIER_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S + prep
     import json
     spec = json.loads(open(verifier.dispatch_command.rsplit(" ", 1)[1].strip("'")).read())
     assert spec["model_context"]["node_wall_s"] == DESIGN_VERIFIER_TIMEOUT_S

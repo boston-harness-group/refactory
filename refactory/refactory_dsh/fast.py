@@ -332,7 +332,7 @@ class DesignFastMode(DesignMode):
         knobs.pop("design_review_attempts")
         knobs.pop("judge_rereads")  # design's judges; design_fast has a focused QA instead
         knobs.pop("self_check_fixups")
-        knobs.pop("site_revert_fixups")
+
         knobs.pop("self_check_timeout_s")
         knobs.pop("refine_design")
         # design_fast's builder has no timeout retry: its verifier also has none,
@@ -368,6 +368,7 @@ class DesignFastMode(DesignMode):
                       "research_scope_reason", "qa_gate",
                       "overwatch_review", "design_review_feedback", "design_review_findings",
                       "deliverable_kind", "review_instructions", "verification_methods",
+                      "requirements_and_corrections",
                       "source_project", "source_files", "repair_feedback", "repairs_used",
                       "builder_tests", *repo_change.produces()),
             notes="read the artifact brief, and say where the run works",

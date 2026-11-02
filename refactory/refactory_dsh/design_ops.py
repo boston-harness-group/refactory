@@ -198,6 +198,22 @@ def late_correction_notice(run_root: Path) -> dict[str, Any] | None:
         "not pass the change while it is unapplied.")}
 
 
+def _update_requirements_and_corrections(ctx: Any, corrections: str) -> None:
+    """Update the ``requirements_and_corrections`` fact for the verifier's hunk-revert method.
+
+    Combines the brief with the person's gate corrections so the verifier receives
+    what was asked for without reading design.md.
+    """
+    brief = str(ctx.facts.get("brief") or "")
+    parts: list[str] = []
+    if brief:
+        parts.append(f"## Requirements from the brief\n{brief}")
+    if corrections:
+        parts.append(f"## Gate corrections\n{corrections}")
+    ctx.set_fact("requirements_and_corrections",
+                 "\n\n".join(parts) if parts else "(no requirements)")
+
+
 def pick_gate_corrections(ctx: Any) -> str:
     """Gate evaluator: extract gate_strategy corrections from the intent ledger.
 
@@ -220,6 +236,7 @@ def pick_gate_corrections(ctx: Any) -> str:
         ctx.set_fact("gate_corrections", "")
         ctx.set_fact("design_corrections_applied", "0 corrections (no ledger)")
         ctx.set_fact(CORRECTIONS_PICKED, json.dumps({"approval": approval, "keys": []}))
+        _update_requirements_and_corrections(ctx, "")
         return "skip"
     picked = _picked(ctx.facts, approval)
     ctx.set_fact(CORRECTIONS_PICKED, json.dumps({"approval": approval,
@@ -227,11 +244,13 @@ def pick_gate_corrections(ctx: Any) -> str:
     if not due:
         ctx.set_fact("gate_corrections", "")
         ctx.set_fact("design_corrections_applied", "0 corrections")
+        _update_requirements_and_corrections(ctx, "")
         return "skip"
 
     joined = "\n\n".join(f"- {text}" for _, text in due)
     ctx.set_fact("gate_corrections", joined)
     ctx.set_fact("design_corrections_applied", f"{len(due)} correction(s)")
+    _update_requirements_and_corrections(ctx, joined)
     if all(key in picked for key, _ in due):
         return "skip"  # design.md already carries every one of them
 
@@ -366,6 +385,10 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
         "gate_strategy_feedback": "",
         "gate_revision_instruction": "",
     } if deliver else {}
+    # The requirements_and_corrections fact: the brief's asks and the person's gate
+    # corrections, for the verifier's hunk-revert method. Initially just the brief;
+    # apply_corrections updates it with the gate corrections after approval.
+    requirements_and_corrections = brief if brief else "(no requirements yet)"
     return {"name": name, "brief": brief, "check": check, "validation": "(no check has run yet)",
             "research_review": "(no research review has run yet)",
             "research_scope": research_scope, "research_scope_reason": research_scope_reason,
@@ -375,6 +398,7 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
             "deliverable_kind": deliverable_kind,
             "review_instructions": review_instructions,
             "verification_methods": verification_methods(deliverable_kind),
+            "requirements_and_corrections": requirements_and_corrections,
             **pitfalls_facts,
             **claims_facts,
             **UNREFUSED, **located, **planned}
@@ -1947,9 +1971,6 @@ def _end_fixups(ctx: Any) -> None:
     """The attempt goes on to the fork or is spent: the next emission is a new attempt."""
     if _fixups_used(ctx):
         ctx.set_fact("self_check_fixup_count", 0)
-    sr_used = int(ctx.facts.get("site_revert_fixup_count") or 0)
-    if sr_used:
-        ctx.set_fact("site_revert_fixup_count", 0)
 
 
 
@@ -2144,325 +2165,8 @@ def _settle_self_check(ctx: Any, prepass: Any, entry: dict[str, Any], *, base: s
                "inconclusive")
     _record_self_check(ctx, {**entry, "outcome": outcome})
     _end_fixups(ctx)
-    # Site-revert pass: after the targeted self-check passes, revert each [changed] site
-    # and check that the tests catch the revert.
-    site_revert = _run_site_reverts(ctx, prepass, command)
-    if site_revert is not None:
-        return site_revert
     _record_prepared(ctx, attempt, prepass.targeted_command if prepass.ran else None)
     return "proceed"
-
-
-def _tests_for_source(
-    source_file: str, imports: dict[str, set[str]],
-    selection: list[str] | None, design_test_ids: list[str],
-) -> list[str]:
-    """Find tests for *source_file* via import-map and design's Tests section.
-
-    *imports* is ``test_selection.import_map(root, files, scope=scope)`` —
-    each test file → the set of source files it imports.
-
-    When *selection* is given (in-run mode) the result is intersected with it:
-    only tests from the prepass selection whose file imports the source are
-    returned.  In the CLI replay *selection* carries the diff-selected test IDs
-    computed from ``test_selection.select(touched, root)``, so broad package
-    imports do not expand one site into every test file.
-
-    Design-named tests whose file imports the source are always included,
-    regardless of *selection*.
-    """
-
-    # Reverse the import map: which test files import source_file?
-    importing_tests: set[str] = set()
-    for test_file, imported_sources in imports.items():
-        if source_file in imported_sources:
-            importing_tests.add(test_file)
-
-    result_ids: list[str] = []
-    if selection is not None:
-        # In-run: intersect with the prepass selection
-        sel_by_file: dict[str, list[str]] = {}
-        for tid in selection:
-            tf = tid.split("::")[0] if "::" in tid else tid
-            sel_by_file.setdefault(tf, []).append(tid)
-        for tf in importing_tests:
-            if tf in sel_by_file:
-                result_ids.extend(sel_by_file[tf])
-    else:
-        # No selection available: use all importing test files (fallback)
-        result_ids.extend(sorted(importing_tests))
-
-    # Design-named tests: include tests whose file imports the source
-    # (strong match), or whose file name contains the source's base name
-    # (fallback for the brief's "plus test ids the design's Tests section
-    # names for that file or function").
-    import os.path
-    source_base = os.path.splitext(os.path.basename(source_file))[0]
-    for tid in design_test_ids:
-        if tid in result_ids:
-            continue
-        tf = tid.split("::")[0] if "::" in tid else tid
-        if tf in importing_tests:
-            result_ids.append(tid)
-        elif source_base and source_base in os.path.basename(tf):
-            result_ids.append(tid)
-
-    return result_ids
-
-
-def _pairs_from_design(ctx: Any, prepass: Any) -> tuple[
-        list[tuple[str, str, str]], list[list[tuple[str, str, str]]], set[str]]:
-    """Extract ``(site, test, scope)`` pairs from the design's Rule and sites section.
-
-    Returns ``(all_pairs, groups, exempted_paths)``.  ``groups`` clusters
-    pairs that share the same bold-line rule block (``**Rule:**`` /
-    ``**The rule:**`` lines — each such line starts a new group) and also
-    co-reverts sites in the same function.  Designs write bold-line rule
-    blocks followed by site bullets, not ``###`` sub-headings.
-    """
-    from refactory_dsh import design_contract, test_selection as _ts
-
-    design_text = ctx.read_text("design.md") if ctx.exists("design.md") else ""
-    if not design_text:
-        return [], [], set()
-
-    contract = design_contract.parse(design_text)
-
-    # Extract exempted paths from "## Site revert exemptions"
-    lines = design_text.splitlines()
-    exempt_lines = design_contract._section_lines(lines, design_contract.SITE_REVERT_EXEMPTIONS)
-    exempted_paths: set[str] = set()
-    for line in exempt_lines:
-        if line.startswith("- ") or line.startswith("* "):
-            bullet = line[2:].strip()
-            parsed_exempt = design_contract.parse_site_path(bullet)
-            exempted_paths.add(parsed_exempt.site_key)
-
-    # Build pairs from [changed] sites, excluding exempted ones
-    changed_sites = [site for site in contract.rule_sites if site["status"] == "changed"]
-
-    # Parse the design's Tests section for test ids
-    design_test_ids = design_contract.test_names(design_text)
-
-    # Build the import map: which test files import which source files
-    found = worktree.recorded(ctx.workdir)
-    if found is not None:
-        attempt_path = Path(found.path)
-        repo_files = _ts.repository_files(attempt_path)
-        check_cmd = ctx.facts.get("check_command", "")
-        scope = _ts.pytest_scope(check_cmd, attempt_path) if check_cmd else None
-        imports = _ts.import_map(attempt_path, repo_files, scope=scope)
-    else:
-        imports = {}
-
-    # Build rule-block grouping from the raw text.
-    # Each "**Rule:**" or "**The rule:**" line starts a new group.
-    rule_lines_raw = design_contract._section_lines(lines, design_contract.RULE_AND_SITES)
-    rule_block_pattern = _re.compile(r'^\*\*(?:The\s+)?[Rr]ule(?:\s*:)?\*\*', _re.IGNORECASE)
-
-    # Map bullet ordinal (across ALL bullets: changed + left + unmarked) to
-    # the corresponding changed_sites index.
-    all_sites = contract.rule_sites
-    bullet_to_changed: dict[int, int] = {}
-    changed_idx = 0
-    for bullet_ord, site in enumerate(all_sites):
-        if site["status"] == "changed":
-            bullet_to_changed[bullet_ord] = changed_idx
-            changed_idx += 1
-
-    # Now parse raw text for rule-block groups, using bullet ordinals.
-    current_group: list[int] = []           # bullet ordinals
-    groups_by_bullet: list[list[int]] = []  # list of rule-block groups
-    bullet_count = 0
-    for rl in rule_lines_raw:
-        if rule_block_pattern.match(rl):
-            if current_group:
-                groups_by_bullet.append(current_group)
-            current_group = []
-        elif rl.startswith("- ") or rl.startswith("* "):
-            current_group.append(bullet_count)
-            bullet_count += 1
-    if current_group:
-        groups_by_bullet.append(current_group)
-
-    all_pairs: list[tuple[str, str, str]] = []
-    site_to_pairs: dict[int, list[tuple[str, str, str]]] = {}
-
-    for site_idx, site in enumerate(changed_sites):
-        parsed = design_contract.parse_site_path(site["path"])
-        site_key = parsed.site_key
-        file_path = parsed.file
-
-        # Skip exempted sites
-        if site_key in exempted_paths or any(site_key.startswith(e) for e in exempted_paths):
-            continue
-
-        # Find tests via import map + design Tests section
-        tests = _tests_for_source(
-            file_path, imports, list(prepass.selection), design_test_ids)
-
-        pairs_for_site: list[tuple[str, str, str]] = []
-        if tests:
-            for t in tests:
-                pair = (site_key, t, "connected")
-                pairs_for_site.append(pair)
-        else:
-            # No tests found for this site
-            pairs_for_site.append((site_key, "", ""))
-
-        site_to_pairs[site_idx] = pairs_for_site
-        all_pairs.extend(pairs_for_site)
-
-    # Build groups for co-revert: same rule block or same function
-    groups: list[list[tuple[str, str, str]]] = []
-    # Group by rule block: map bullet ordinals → changed_sites indices
-    for bullet_group in groups_by_bullet:
-        group_pairs: list[tuple[str, str, str]] = []
-        for bullet_ord in bullet_group:
-            changed_idx_val = bullet_to_changed.get(bullet_ord)
-            if changed_idx_val is not None and changed_idx_val in site_to_pairs:
-                group_pairs.extend(site_to_pairs[changed_idx_val])
-        if len(group_pairs) > 1:
-            groups.append(group_pairs)
-
-    # Group sites in the same function (same file)
-    func_groups: dict[str, list[tuple[str, str, str]]] = {}
-    for site_idx, pairs_for_site in site_to_pairs.items():
-        site = changed_sites[site_idx]
-        parsed = design_contract.parse_site_path(site["path"])
-        func_key = parsed.file
-        func_groups.setdefault(func_key, []).extend(pairs_for_site)
-    for key, fpairs in func_groups.items():
-        if len(fpairs) > 1 and fpairs not in groups:
-            groups.append(fpairs)
-
-    return all_pairs, groups, exempted_paths
-
-
-def _run_site_reverts(ctx: Any, prepass: Any, command: str) -> Verdict | None:
-    """Run the site-revert pass after the self-check passes.
-
-    Revert each [changed] site from the design's Rule and sites section, one at a time
-    (and same-rule-block sites together), and run the targeted tests. An uncaught site
-    goes back to the builder as a site-revert fix-up.
-
-    Budget: 240 s total (SITE_REVERT_TOTAL_S) / 60 s per pair (SITE_REVERT_PAIR_S).
-    If the time cap stops the pass early, unmeasured sites are listed in the check record
-    as unmeasured (advisory), not as uncaught and never as a fix-up.
-
-    Returns a Verdict('reloop') when uncaught sites need fixing, or None to proceed.
-    """
-    from refactory_dsh import base_check
-
-    if not ctx.exists("design.md"):
-        return None
-
-    all_pairs, groups, exempted = _pairs_from_design(ctx, prepass)
-    if not all_pairs:
-        return None
-
-    found = worktree.recorded(ctx.workdir)
-    if found is None:
-        return None
-
-    # Early exit when the site-revert budget is zero: skip the revert check entirely.
-    sr_allowed = int(ctx.knob("site_revert_fixups", 1))
-    if sr_allowed <= 0:
-        return None
-
-    # Run site reverts using the existing machinery
-    revert_results = base_check.compute_site_reverts(ctx, all_pairs)
-    pair_results = revert_results.get("pairs", [])
-
-    # Also run co-revert groups: revert all sites in the group simultaneously
-    co_revert_caught: set[str] = set()
-    for group in groups:
-        if len(group) > 1:
-            co_result = base_check.compute_co_revert(ctx, group)
-            if co_result.get("caught"):
-                for site, _test, _scope in group:
-                    co_revert_caught.add(site)
-
-    # Identify uncaught sites (result == "pass" means the test still passes after revert)
-    uncaught: list[str] = []
-    unmeasured: list[str] = []
-    no_test_selected: list[str] = []
-    for entry in pair_results:
-        if not isinstance(entry, dict):
-            continue
-        site = entry.get("site", "")
-        result = entry.get("result", "")
-        if result == "no_test_selected":
-            no_test_selected.append(site)
-        elif result == "pass":
-            # Check if co-revert group caught it
-            if site not in co_revert_caught:
-                uncaught.append(site)
-        elif result == "not_run":
-            unmeasured.append(site)
-
-    # Record advisories in check record
-    if no_test_selected:
-        _record_site_revert_advisory(ctx, no_test_selected, label="no_test_selected")
-    if unmeasured:
-        _record_site_revert_advisory(ctx, unmeasured)
-
-    if not uncaught:
-        return None
-
-    # Check site-revert fix-up budget
-    sr_used = _site_revert_fixups_used(ctx)
-    sr_allowed = int(ctx.knob("site_revert_fixups", 1))
-    sr_run_used = int(ctx.facts.get("total_site_revert_fixups_used") or 0)
-    sr_run_cap = sr_allowed * int(ctx.knob("check_attempts", 3))
-
-    if sr_used < sr_allowed and sr_run_used < sr_run_cap:
-        return _site_revert_fixup(ctx, uncaught, sr_used + 1, sr_allowed, sr_run_used + 1)
-
-    # Past the budget: list as advisory warnings, do not send back
-    _record_site_revert_advisory(ctx, uncaught, label="uncaught_past_budget")
-    return None
-
-
-def _site_revert_fixups_used(ctx: Any) -> int:
-    """The site-revert fix-ups this attempt has had."""
-    return int(ctx.facts.get("site_revert_fixup_count") or 0)
-
-
-def _site_revert_fixup(ctx: Any, uncaught: list[str], number: int, allowed: int,
-                       run_used: int) -> Verdict:
-    """Send uncaught site-revert results back to emit as a fix-up.
-
-    Mirrors ``_self_check_fixup``: formats uncaught sites into the fix-up message,
-    sets ``site_revert_fixup_count`` and ``total_site_revert_fixups_used`` facts,
-    returns ``Verdict('reloop')``.
-    """
-    lead = (f"site-revert fix-up {number} of {allowed}: {len(uncaught)} site(s) whose revert "
-            "no test catches. Fix the tests so they fail when these sites are reverted:")
-    parts = [lead]
-    for site in uncaught:
-        parts.append(f"- {site}")
-    parts.append("")
-    parts.append("The site-revert pass reverted each [changed] site from the design and ran "
-                 "the targeted tests. These sites' reverts were not caught by any test. "
-                 "Add or fix tests so each site's revert causes a test failure.")
-    block = _brief_and_corrections_block(ctx)
-    if block:
-        parts.append("")
-        parts.append(block)
-    detail = "\n".join(parts)
-    ctx.write_text("check.txt", detail + "\n")
-    ctx.set_fact("validation", detail)
-    ctx.set_fact("site_revert_fixup_count", number)
-    ctx.set_fact("total_site_revert_fixups_used", run_used)
-    return Verdict("reloop", detail)
-
-
-def _record_site_revert_advisory(ctx: Any, sites: list[str],
-                                 label: str = "unmeasured") -> None:
-    """Record unmeasured or uncaught-past-budget sites in the check record as advisory."""
-    entry = {"site_revert_advisory": label, "sites": sites}
-    ctx.append_text(SELF_CHECK_RECORD, json.dumps(entry, default=str) + "\n")
 
 
 def _on_the_base(root: Path, base: str, test_id: str) -> bool:

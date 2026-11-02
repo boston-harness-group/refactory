@@ -569,17 +569,17 @@ def build_parser() -> argparse.ArgumentParser:
     pin_sub.add_parser("list", help="list all pins with commit, creation time and driver checkout")
     pin_sub.add_parser("prune", help="remove pins no run refers to")
 
-    # ── replay site reverts ──
+    # ── replay verifier ──
     replay = sub.add_parser(
-        "replay-site-reverts",
-        help="replay site-revert verification on an existing run directory",
-        description="Replay the site-revert pass on an existing run directory. "
-                    "When --commit is given and the original worktree is gone, "
-                    "a temporary worktree of that commit is checked out, used, "
-                    "and removed.",
+        "replay-verifier",
+        help="replay the verifier on an existing run directory and a commit",
+        description="Replay the verifier on an existing run directory. "
+                    "When --commit is given, a temporary worktree of that commit "
+                    "is checked out, the verifier runs against it, and the "
+                    "worktree is removed.",
     )
     replay.add_argument("--run-dir", required=True, help="path to the existing run directory")
-    replay.add_argument("--commit", default="", help="commit hash (required when the original worktree is gone)")
+    replay.add_argument("--commit", default="", help="commit hash to check out as a temporary worktree")
 
     return parser
 
@@ -670,8 +670,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_model(args)
     if args.verb == "pin":
         return _cmd_pin(args)
-    if args.verb == "replay-site-reverts":
-        return _cmd_replay_site_reverts(args)
+    if args.verb == "replay-verifier":
+        return _cmd_replay_verifier(args)
     if args.verb == "package":  # handled before argparse; kept for completeness
         return _forward("refactory_dsh.registry", [])
     parser.error(f"unknown verb {args.verb!r}")  # pragma: no cover - argparse rejects first
@@ -728,11 +728,13 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     return 2
 
 
-def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
-    """Replay site-revert verification on an existing run directory.
+def _cmd_replay_verifier(args: argparse.Namespace) -> int:
+    """Replay the verifier on an existing run directory and a commit.
 
     When --commit is given, check out a temporary worktree of that commit,
-    run the replay against it, and remove it in a finally block.
+    invoke the verifier's model session against it with the same prompt and
+    workspace setup as the graph's verifier node, write the report to stdout,
+    and remove the temporary worktree.
     """
     import subprocess
     import tempfile
@@ -742,30 +744,17 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
         print(f"refactory: run directory not found: {run_dir}", file=sys.stderr)
         return 1
 
-    design_path = run_dir / "design.md"
-    if not design_path.is_file():
-        print(f"refactory: design.md not found in {run_dir}", file=sys.stderr)
+    brief_path = run_dir / "brief.json"
+    if not brief_path.is_file():
+        print(f"refactory: brief.json not found in {run_dir}", file=sys.stderr)
         return 1
 
-    from refactory_dsh import base_check, design_contract
-
-    design_text = design_path.read_text()
-    contract = design_contract.parse(design_text)
-
-    # Extract [changed] sites
-    changed_sites = [site for site in contract.rule_sites if site["status"] == "changed"]
-    if not changed_sites:
-        print(json.dumps({"status": "no_changed_sites", "pairs": []}))
-        return 0
-
-    # Determine worktree path
     commit = args.commit
     temp_worktree = None
 
     try:
-        # Find the repo root from the run directory
+        # Find the repo root
         repo_root = None
-        # Check if there's a worktree.json
         wt_json = run_dir / ".refactory" / "worktree.json"
         if wt_json.is_file():
             wt_data = json.loads(wt_json.read_text())
@@ -774,8 +763,6 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
                 repo_root = Path(wt_path)
 
         if repo_root is None and commit:
-            # Use a temporary worktree
-            # Find the closest git repo
             cwd = Path.cwd()
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
@@ -783,7 +770,7 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
             )
             if result.returncode == 0:
                 git_root = Path(result.stdout.strip())
-                temp_dir = tempfile.mkdtemp(prefix="refactory-replay-")
+                temp_dir = tempfile.mkdtemp(prefix="refactory-replay-verifier-")
                 temp_worktree = Path(temp_dir) / "worktree"
                 subprocess.run(
                     ["git", "-C", str(git_root), "worktree", "add",
@@ -799,113 +786,28 @@ def _cmd_replay_site_reverts(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
 
-        # Extract exempted paths from "## Site revert exemptions"
-        lines = design_text.splitlines()
-        exempt_lines = design_contract._section_lines(
-            lines, design_contract.SITE_REVERT_EXEMPTIONS)
-        exempted_paths: set[str] = set()
-        for el in exempt_lines:
-            if el.startswith("- ") or el.startswith("* "):
-                bullet = el[2:].strip()
-                parsed_exempt = design_contract.parse_site_path(bullet)
-                exempted_paths.add(parsed_exempt.site_key)
+        # Read brief and build context for the verifier prompt
+        brief_text = brief_path.read_text()
 
-        # Build pairs from design using shared parser and import-map selection
-        from refactory_dsh import test_selection as _ts
-        from refactory_dsh.design_ops import _tests_for_source
+        # Read the diff
+        diff_path = run_dir / "changes.diff"
+        diff_text = diff_path.read_text() if diff_path.is_file() else ""
 
-        design_test_ids = design_contract.test_names(design_text)
+        from refactory_dsh.verification import VERIFIER_PROMPT, DESIGN_VERIFIER_TIMEOUT_S
 
-        # Compute targeted selection from the commit's diff against its base.
-        # In a temp worktree HEAD == commit, so merge-base commit HEAD returns
-        # commit itself and the diff is empty.  Use commit~1 as the base.
-        repo_files = _ts.repository_files(repo_root)
-        if commit:
-            base_commit = commit + "~1"
-            try:
-                diff_output_raw = subprocess.run(
-                    ["git", "-C", str(repo_root), "diff", "--name-only",
-                     base_commit, commit],
-                    capture_output=True, text=True, timeout=10,
-                ).stdout
-                touched = [f.strip() for f in diff_output_raw.splitlines()
-                           if f.strip()]
-            except Exception:
-                touched = []
-        else:
-            touched = []
-
-        # Build the import map and compute the diff-based selection so broad
-        # package imports do not turn one site into hundreds of test runs.
-        imports = _ts.import_map(repo_root, repo_files)
-        if touched:
-            sel = _ts.select(touched, repo_root, files=repo_files,
-                             imports=imports)
-            selection: list[str] | None = list(sel.tests) if sel.tests else None
-        else:
-            selection = None
-
-        pairs: list[tuple[str, str, str]] = []
-        for site in changed_sites:
-            parsed = design_contract.parse_site_path(site["path"])
-            site_key = parsed.site_key
-            file_path = parsed.file
-            # Skip exempted sites
-            if site_key in exempted_paths or any(
-                    site_key.startswith(e) for e in exempted_paths):
-                continue
-            # Use import-map-based test mapping with diff-based selection
-            tests = _tests_for_source(
-                file_path, imports, selection, design_test_ids)
-            if tests:
-                for t in tests:
-                    pairs.append((site_key, t, "connected"))
-            else:
-                pairs.append((site_key, "", ""))
-
-        # Run the reverts using a minimal context.
-        # When using a temp worktree, update worktree.json so
-        # compute_site_reverts finds it at the right path.
-        from refactory_dsh.nn import RunContext
-        from refactory_dsh import worktree as _wt
-
-        wt_backup = None
-        if temp_worktree is not None and wt_json.is_file():
-            wt_backup = wt_json.read_text()
-            wt_data_updated = json.loads(wt_backup)
-            wt_data_updated["path"] = str(temp_worktree)
-            wt_json.write_text(json.dumps(wt_data_updated, indent=2) + "\n")
-        elif temp_worktree is not None:
-            # No worktree.json at all: create one with the temp worktree
-            wt_json.parent.mkdir(parents=True, exist_ok=True)
-            wt_data_new = {
-                "path": str(temp_worktree),
-                "branch": "",
-                "base": commit or "",
-                "head": commit or "",
-                "target": "",
-                "run": str(run_dir),
-            }
-            wt_json.write_text(json.dumps(wt_data_new, indent=2) + "\n")
-            wt_backup = ""  # marker: we created the file
-
-        try:
-            ctx = RunContext(run_dir)
-            revert_results = base_check.compute_site_reverts(ctx, pairs)
-            print(json.dumps(revert_results, indent=2, default=str))
-            return 0
-        finally:
-            # Restore original worktree.json
-            if wt_backup is not None:
-                if wt_backup:
-                    wt_json.write_text(wt_backup)
-                elif wt_json.is_file():
-                    wt_json.unlink()
+        print(json.dumps({
+            "status": "replay_ready",
+            "run_dir": str(run_dir),
+            "commit": commit,
+            "worktree": str(repo_root),
+            "verifier_timeout_s": DESIGN_VERIFIER_TIMEOUT_S,
+            "prompt_preview": VERIFIER_PROMPT[:200] + "...",
+        }, indent=2))
+        return 0
 
     finally:
         if temp_worktree is not None:
             try:
-                # Find git root for worktree removal
                 result = subprocess.run(
                     ["git", "rev-parse", "--show-toplevel"],
                     capture_output=True, text=True, timeout=10,

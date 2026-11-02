@@ -5983,7 +5983,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 }
 ```
 
-## cli:replay-site-reverts
+## cli:replay-verifier
 
 Replay the site-revert pass on an existing run directory to verify that every changed site is caught by a test; when the original worktree is gone, check out a temporary worktree of the given commit.
 
@@ -5991,32 +5991,32 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ```json
 {
-  "description": "replay site-revert verification on an existing run directory",
+  "description": "replay the verifier on an existing run directory and a commit",
   "doc": "refactory/docs/cli.md",
   "examples": [
     {
       "arguments": {
         "run_dir": "/path/to/existing-run"
       },
-      "explanation": "Replay site-revert verification on a completed run whose worktree is still present."
+      "explanation": "Replay the verifier on a completed run whose worktree is still present."
     },
     {
       "arguments": {
         "commit": "abc123",
         "run_dir": "/path/to/existing-run"
       },
-      "explanation": "Replay site-revert verification when the original worktree is gone; a temporary worktree of that commit is checked out and removed after the run."
+      "explanation": "Replay the verifier when the original worktree is gone; a temporary worktree of that commit is checked out and removed after the run."
     }
   ],
   "interfaces": {
     "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
-    "cli": "refactory replay-site-reverts --run-dir DIR [--commit HASH]",
+    "cli": "refactory replay-verifier --run-dir DIR [--commit HASH]",
     "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
   },
   "parameters": {
     "commit": {
       "default": "",
-      "description": "commit hash (required when the original worktree is gone)",
+      "description": "commit hash to check out as a temporary worktree",
       "flags": [
         "--commit"
       ],
@@ -6038,7 +6038,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Replay the site-revert pass on an existing run directory to verify that every changed site is caught by a test; when the original worktree is gone, check out a temporary worktree of the given commit.",
-  "reviewed_schema": "8a9700061998fe706aa9f005cfab854e01ac0b161c7e75f843fc191a6ef932cc"
+  "reviewed_schema": "5ff1f9a1c0a702f1b167758b2960e10b86ea8ce59e880b9f3343f66a6bfaa82f"
 }
 ```
 
@@ -8531,7 +8531,6 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "check_timeout_s",
         "check_attempt_cap",
         "self_check_fixups",
-        "site_revert_fixups",
         "self_check_timeout_s"
       ],
       "notes": "settle the commit the check and the reviews see; every attempt's self-check runs the tests the change touches here (first or fix-up): a failure goes back to emit as a fix-up, spending no attempt and running no review; the full check runs beside the reviews in fork_qa; a limit stop with an applied commit and current check evidence goes to the report as a draft",
@@ -8643,7 +8642,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "verifier",
       "kind": "agent",
       "knobs": [],
-      "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo",
+      "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo; for each behaviour-changing requirement, revert the implementing hunk in the workspace clone, run the specific test, and report caught/not caught",
       "role": "code_reviewer"
     }
   ],
@@ -8931,18 +8930,6 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": "",
       "values": []
     },
-    "site_revert_fixups": {
-      "default": 1,
-      "description": "how many times the site-revert pass may send an attempt back to emit when an uncaught site is found; a run gets this many times check_attempts",
-      "frozen": false,
-      "kind": "int",
-      "range": [
-        0,
-        3
-      ],
-      "value": 1,
-      "values": []
-    },
     "target": {
       "default": "",
       "description": "the git repository to change; empty starts a new project in the projects folder",
@@ -9006,7 +8993,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "51720207219f1468f1c13697a3192a854690be6052711882ea9860714c301cbf"
+    "reviewed_schema": "62f7f1ea44b64255aeecac7bc4bbd5fd91d30bb1c376dc3ff4e0053b045a3d1b"
   }
 }
 ```

@@ -298,4 +298,4 @@ entry and survives a resume.
 
 | Command | Description |
 |---|---|
-| `refactory replay-site-reverts --run-dir <path> [--commit <hash>]` | Replay site-revert verification on an existing run directory. Reads `design.md` from the run directory, extracts `[changed]` sites, and runs the revert pass. When `--commit` is given and the original worktree is gone, a temporary worktree of that commit is checked out, used, and removed. Prints the results as JSON to stdout. |
+| `refactory replay-verifier --run-dir <path> [--commit <hash>]` | Replay the verifier on an existing run directory and a commit. Reads `brief.json` from the run directory and invokes the verifier's model session. When `--commit` is given, a temporary worktree of that commit is checked out, used, and removed. |

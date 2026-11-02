@@ -303,16 +303,15 @@ def prepare_check_iterations(knobs: dict[str, Any]) -> int:
 
     It reloops for a fix-up, an early stop or a refused emission. Attempts reach at most
     ``check_attempt_cap`` (when it is above ``check_attempts``), the run's fix-ups are at
-    most ``(self_check_fixups + site_revert_fixups) x check_attempts``, and each applied
+    most ``self_check_fixups x check_attempts``, and each applied
     emission comes after at most ``refusal_attempts - 1`` refusals, so the reloops are at
     most ``(attempts + fixups + 1) x refusals + fixups + attempts``:
-    (8 + 9 + 1) x 2 + 9 + 8 + 1 = 54 with the defaults.  Past that, b39b's stop has already
+    (8 + 6 + 1) x 2 + 6 + 8 + 1 = 45 with the defaults.  Past that, b39b's stop has already
     ended the run.
     """
     attempts = int(knobs.get("check_attempts", 3))
     reach = max(attempts, int(knobs.get("check_attempt_cap", 8)))
-    fixups = (int(knobs.get("self_check_fixups", 2))
-              + int(knobs.get("site_revert_fixups", 1))) * attempts
+    fixups = int(knobs.get("self_check_fixups", 2)) * attempts
     refusals = max(int(knobs.get("refusal_attempts", 3)) - 1, 0)
     return (reach + fixups + 1) * refusals + fixups + reach + 1
 
@@ -386,12 +385,7 @@ class DesignMode(Mode):
                             "spending nothing, before the early stop spends it; a run gets "
                             "this many times check_attempts",
             ),
-            "site_revert_fixups": Knob(
-                1, "int", lo=0, hi=3,
-                description="how many times the site-revert pass may send an attempt back "
-                            "to emit when an uncaught site is found; a run gets this many "
-                            "times check_attempts",
-            ),
+
             "self_check_timeout_s": Knob(
                 300, "int", lo=10, hi=600,
                 description="how long the self-check's tests may run before the reviews; "
@@ -451,6 +445,7 @@ class DesignMode(Mode):
                       "research_scope_reason", "qa_gate",
                       "overwatch_review", "design_review_feedback", "design_review_findings",
                       "deliverable_kind", "review_instructions", "verification_methods",
+                      "requirements_and_corrections",
                       *repo_change.produces(), "delivery", "delivery_plan",
                       "has_pitfalls_step", "pitfalls", "pitfalls_review", "builder_tests",
                       "claims_check_feedback", "design_review_status", "refine_context",
@@ -859,7 +854,6 @@ class DesignMode(Mode):
         self_check_produces = (*check_produces, *repo_change.CHECK_PRODUCES,
                                "review_feedback", "review_baseline",
                                "self_check_fixup_count", "total_self_check_fixups_used",
-                               "site_revert_fixup_count", "total_site_revert_fixups_used",
                                "builder_tests", "draft_delivery", "early_asks_rereads",
                                "early_asks_reread")
         graph.add(Node(
@@ -868,7 +862,7 @@ class DesignMode(Mode):
             reads=("brief.json",),
             writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD),
             produces=self_check_produces,
-            knobs=(*check_knobs, "self_check_fixups", "site_revert_fixups",
+            knobs=(*check_knobs, "self_check_fixups",
                    "self_check_timeout_s"),
             # From the knobs, so the build loop's stop always comes first: 54 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
@@ -923,6 +917,7 @@ class DesignMode(Mode):
         graph.add(Node(
             "verifier", "agent",
             retry=TIMEOUT_RETRY, outputs_only=True,
+            workspace={"kind": "clone", "of": "attempt", "collect": "files"},
             prompt_template=VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
             timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
@@ -932,7 +927,9 @@ class DesignMode(Mode):
             role="code_reviewer",
             resource_role="final_validation",
             notes="design-blind verification: apply the evidence log's methods "
-                  "to the brief, diff and repo",
+                  "to the brief, diff and repo; for each behaviour-changing requirement, "
+                  "revert the implementing hunk in the workspace clone, run the specific "
+                  "test, and report caught/not caught",
         ))
         graph.add(Node("fork_qa", "fork",
                        targets=("health_checker", "code_reviewer", "qa_director", "verifier",
@@ -1162,7 +1159,8 @@ class DesignMode(Mode):
         # commit and current check evidence (`design_ops._draft_for_stop`).
         graph.add(Node(
             "pick_corrections", "gate", evaluator=f"{OPS}:pick_gate_corrections",
-            produces=("gate_corrections", "design_corrections_applied", CORRECTIONS_PICKED),
+            produces=("gate_corrections", "design_corrections_applied",
+                      "requirements_and_corrections", CORRECTIONS_PICKED),
             max_iterations=2,
             notes="deterministically extract the person's corrections to the approved design "
                   "from the ledger, after the approval and on every send-back to the builder; "
