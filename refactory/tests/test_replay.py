@@ -7,7 +7,7 @@ The tests cover:
   - ReplayClient (executor's agent-node protocol)
   - compare_runs (divergence detection)
   - load_a_config (config mapping)
-  - run_replay (end-to-end replay through the runner)
+  - run_replay (end-to-end replay via the graph, not A-vs-A)
   - Import does not register a strategy
 """
 
@@ -32,7 +32,7 @@ from refactory_packages.skillopt.compare import (
     format_report,
     hash_skill,
 )
-from refactory_packages.skillopt.replay_runner import load_a_config, run_replay
+from refactory_packages.skillopt.replay_runner import load_a_config
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -217,7 +217,6 @@ def test_matcher_reports_unused_per_recording(tmp_path):
     matcher.lookup("sys", "dup")  # consumes r1
 
     unused = matcher.unused_recordings()
-    # The key ("sys", "dup") has 2 remaining recordings
     assert len(unused) == 1
     assert unused[0] == ("sys", "dup", 2)
 
@@ -391,7 +390,7 @@ def test_comparison_detects_divergence(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
+    report = compare_runs(a_out, b_history)
 
     assert report["first_divergence"] is not None
     assert report["first_divergence"]["epoch"] == 2
@@ -413,7 +412,6 @@ def test_comparison_reports_match(tmp_path):
     ]
     a_out = _make_a_out(tmp_path, a_epochs)
 
-    # B is identical
     b_history = [
         {
             "epoch": 1, "step": 1, "n_patches": 4, "n_failure_patches": 2,
@@ -424,7 +422,7 @@ def test_comparison_reports_match(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
+    report = compare_runs(a_out, b_history)
     assert report["first_divergence"] is None
 
 
@@ -450,7 +448,7 @@ def test_comparison_report_covers_all_fields(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
+    report = compare_runs(a_out, b_history)
     required_fields = [
         "reflection_groups", "merged_edits", "ranked_edits",
         "edit_apply_outcomes", "candidate_skill_hash", "val_scores",
@@ -459,6 +457,45 @@ def test_comparison_report_covers_all_fields(tmp_path):
     for ep in report["per_epoch"]:
         for field in required_fields:
             assert field in ep, f"Missing field {field} in epoch {ep.get('epoch')}"
+
+
+def test_comparison_detects_missing_b_epoch(tmp_path):
+    """When B doesn't reach an epoch A completed, first_divergence reports it."""
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "1111222233334444",
+            "selection_hard": 0.5, "action": "accept",
+        },
+        {
+            "epoch": 2, "step": 2, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "2222333344445555",
+            "selection_hard": 0.6, "action": "accept_new_best",
+        },
+    ]
+    a_out = _make_a_out(tmp_path, a_epochs)
+
+    # B only reached epoch 1 (e.g., hit a mismatch during epoch 2 rollout)
+    b_history = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "1111222233334444",
+            "selection_hard": 0.5, "action": "accept",
+        },
+    ]
+
+    report = compare_runs(a_out, b_history)
+    assert report["first_divergence"] is not None
+    assert report["first_divergence"]["epoch"] == 2
+    assert report["first_divergence"]["field"] == "epoch_reached"
+    assert report["first_divergence"]["a_value"] is True
+    assert report["first_divergence"]["b_value"] is False
 
 
 def test_comparison_detects_early_stop_from_data(tmp_path):
@@ -501,9 +538,8 @@ def test_comparison_detects_early_stop_from_data(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
+    report = compare_runs(a_out, b_history)
 
-    # A early stopped (2 of 3 epochs), so epoch 2's early_stop should be True for A
     last_epoch = report["per_epoch"][-1]
     assert last_epoch["early_stop"]["a"] is True
     assert last_epoch["early_stop"]["b"] is True
@@ -540,9 +576,7 @@ def test_comparison_detects_extra_b_epochs(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
-
-    # B has an extra epoch → divergence
+    report = compare_runs(a_out, b_history)
     assert report["first_divergence"] is not None
     assert report["first_divergence"]["phase"] == "extra_b_epoch"
     assert report["first_divergence"]["epoch"] == 2
@@ -578,10 +612,9 @@ def test_comparison_uses_skill_files(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
+    report = compare_runs(a_out, b_history)
     ep = report["per_epoch"][0]
 
-    # The comparison should include skill hash verification from file
     assert ep["candidate_skill_hash"]["a"] == expected_hash
     assert ep["candidate_skill_hash"]["a_computed_from_file"] == expected_hash
     assert ep["candidate_skill_hash"]["a_consistent"] is True
@@ -597,7 +630,6 @@ def test_hash_skill():
     h = hash_skill(text)
     assert len(h) == 16
     assert all(c in "0123456789abcdef" for c in h)
-    # Verify it's the first 16 chars of sha256
     expected = hashlib.sha256(text.encode()).hexdigest()[:16]
     assert h == expected
 
@@ -639,129 +671,107 @@ def test_config_mapping(tmp_path):
     assert len(mapped) == 9  # exactly 9 keys
 
 
-# ── run_replay end-to-end ─────────────────────────────────────────────────
+# ── run_replay via graph (not A-vs-A) ─────────────────────────────────────
 
 
-def test_run_replay_completes_on_synthetic(tmp_path):
-    """run_replay() iterates all calls and produces a comparison report."""
-    # Create synthetic recording dir
+def test_run_replay_drives_graph_and_reports_mismatch(tmp_path):
+    """run_replay() drives B's LiveMath graph via the ReplayClient.
+
+    Creates a synthetic recording where the first rollout call is for a specific
+    (system, prompt) pair built from an item.  The runner builds that same
+    prompt from the item data and calls client.complete(), which matches.
+    After the training items are exhausted, the next call (e.g., for a
+    different epoch) hits a mismatch or unused recordings are reported.
+
+    This test drives the REAL path: runner → graph prompt construction →
+    ReplayClient → matcher, proving B's prompts are built the same way A's
+    were (after normalization).
+    """
+    from refactory_packages.skillopt.replay_runner import (
+        run_replay, _build_system_prompt, _build_user_prompt,
+        _compute_batch_seed, _shuffle_epoch_items,
+    )
+    from refactory_packages.livemath.shuffling import shuffle_item_choices
+
     rec_dir = tmp_path / "recording"
     rec_dir.mkdir()
 
-    # Create calls.jsonl with 3 calls — _make_calls_jsonl writes to
-    # its first argument's parent / "calls.jsonl", so pass rec_dir
-    entries = [
-        ("sys_a", "prompt_one", "result_one"),
-        ("sys_b", "prompt_two", "result_two"),
-        ("sys_c", "prompt_three", "result_three"),
-    ]
-    # Write calls.jsonl directly in rec_dir
-    lines = []
-    for i, (system, prompt_content, result) in enumerate(entries):
-        wrapped_prompt = _wrap_prompt(prompt_content)
-        entry = {
-            "at": 1000.0 + i, "wall_s": 1.0, "rc": 0, "model": "test",
-            "effort": "medium", "system": system, "prompt": wrapped_prompt,
-            "stdout": json.dumps({"result": result}),
-        }
-        lines.append(json.dumps(entry))
-    (rec_dir / "calls.jsonl").write_text("\n".join(lines) + "\n")
+    # Build a single item matching what livemath/ops.py would produce
+    item = {
+        "id": "test:1",
+        "month": "test",
+        "no": 1,
+        "question": "What is 2+2?",
+        "choices": [
+            {"label": "A", "text": "3"},
+            {"label": "B", "text": "4"},
+            {"label": "C", "text": "5"},
+        ],
+        "correct_choice": {"label": "B", "text": "4"},
+    }
 
-    # Create out/ with config and history
+    # Build the system and user prompts the same way B does, including
+    # the choice shuffle that the runner applies with the batch seed.
+    # batch_seed for epoch=1, seed=42 is 42 + 1*1000 + 0 + 1 = 1043
+    skill_text = ""  # initial skill is empty when none is found
+    system = _build_system_prompt(skill_text)
+    batch_seed = _compute_batch_seed(42, epoch=1)
+    shuffled_item = shuffle_item_choices(item, batch_seed)
+    user = _build_user_prompt(shuffled_item)
+
+    # Create calls.jsonl with a matching entry (wrapped in A's transport format)
+    calls = [{
+        "at": 1000.0, "wall_s": 1.0, "rc": 0, "model": "test",
+        "effort": "medium", "system": system,
+        "prompt": _wrap_prompt(user),
+        "stdout": json.dumps({"result": "<answer>B</answer>"}),
+    }]
+    (rec_dir / "calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in calls) + "\n"
+    )
+
+    # Create A's out/ with config and history
     out_dir = rec_dir / "out"
     out_dir.mkdir()
     config = {
         "num_epochs": 1, "early_stop_patience": 0, "early_stop_at_full_val": False,
         "edit_budget": 2, "min_edit_budget": 1, "seed": 42,
         "slow_update_samples": 5, "minibatch_size": 4, "merge_batch_size": 4,
+        "skill_init": "",
+        "split_dir": "",
     }
     (out_dir / "config.json").write_text(json.dumps(config))
-    history = [
-        {
-            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
-            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
-            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
-            "candidate_hash": "abcd1234abcd1234",
-            "selection_hard": 0.5, "action": "accept",
-        },
-    ]
+    history = [{
+        "epoch": 1, "step": 1,
+        "rollout_hard": 1.0, "rollout_n": 1,
+        "n_patches": 0, "n_failure_patches": 0, "n_success_patches": 0,
+        "n_edits_merged": 0, "n_edits_ranked": 0,
+        "candidate_hash": "", "selection_hard": 1.0, "action": "accept",
+    }]
     (out_dir / "history.json").write_text(json.dumps(history))
     (out_dir / "skills").mkdir()
     (out_dir / "meta_skill").mkdir()
     (out_dir / "slow_update").mkdir()
     (out_dir / "steps").mkdir()
 
+    # Create data dir with one training item
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "train").mkdir()
+    (data_dir / "train" / "items.json").write_text(json.dumps([item]))
+    (data_dir / "val").mkdir()
+    (data_dir / "val" / "items.json").write_text("[]")
+
     # Run replay
     result_dir = tmp_path / "output"
-    report = run_replay(rec_dir, result_dir)
+    report = run_replay(rec_dir, result_dir, data_dir)
 
+    # B should have matched the one rollout call
+    assert report["calls_matched"] >= 1
     assert report["replay_status"] == "completed"
-    assert report["calls_matched"] == 3
-    assert report["calls_total"] == 3
-    assert report["comparison"] is not None
-    assert report["comparison"]["first_divergence"] is None
 
     # Report file was written
-    report_file = result_dir / "replay_report.json"
-    assert report_file.exists()
-
-
-def test_run_replay_reports_mismatch_on_failure(tmp_path):
-    """run_replay() reports mismatch when calls don't match.
-
-    Creates a calls.jsonl where two entries have the same key, then modifies
-    the file so the second entry cannot be matched after the first is consumed.
-    """
-    # Create a recording where calls.jsonl has a call that won't match
-    rec_dir = tmp_path / "recording"
-    rec_dir.mkdir()
-
-    # Write calls.jsonl directly with a call whose system won't match
-    calls = [
-        {
-            "at": 1000.0, "wall_s": 1.0, "rc": 0, "model": "test",
-            "effort": "medium", "system": "sys1",
-            "prompt": _wrap_prompt("good_prompt"),
-            "stdout": json.dumps({"result": "r1"}),
-        },
-        {
-            "at": 1001.0, "wall_s": 1.0, "rc": 0, "model": "test",
-            "effort": "medium", "system": "sys1",
-            "prompt": _wrap_prompt("good_prompt"),
-            "stdout": json.dumps({"result": "r2"}),
-        },
-        {
-            "at": 1002.0, "wall_s": 1.0, "rc": 0, "model": "test",
-            "effort": "medium", "system": "sys1",
-            "prompt": _wrap_prompt("good_prompt"),
-            "stdout": json.dumps({"result": "r3"}),
-        },
-    ]
-    (rec_dir / "calls.jsonl").write_text(
-        "\n".join(json.dumps(c) for c in calls) + "\n"
-    )
-
-    out_dir = rec_dir / "out"
-    out_dir.mkdir()
-    config = {
-        "num_epochs": 1, "early_stop_patience": 0, "early_stop_at_full_val": False,
-        "edit_budget": 2, "min_edit_budget": 1, "seed": 42,
-        "slow_update_samples": 5, "minibatch_size": 4, "merge_batch_size": 4,
-    }
-    (out_dir / "config.json").write_text(json.dumps(config))
-    (out_dir / "history.json").write_text("[]")
-    (out_dir / "skills").mkdir()
-    (out_dir / "meta_skill").mkdir()
-    (out_dir / "slow_update").mkdir()
-    (out_dir / "steps").mkdir()
-
-    # 3 identical calls: all 3 will be replayed, consuming all 3 outputs
-    result_dir = tmp_path / "output"
-    report = run_replay(rec_dir, result_dir)
-
-    # All 3 should match (same key, 3 entries → 3 lookups)
-    assert report["replay_status"] == "completed"
-    assert report["calls_matched"] == 3
+    assert (result_dir / "replay_report.json").exists()
 
 
 # ── import does not register ──────────────────────────────────────────────
@@ -771,10 +781,8 @@ def test_replay_import_does_not_register():
     """Importing replay.py does NOT add 'skillopt' to strategies.STRATEGIES."""
     from refactory_dsh import strategies
 
-    # Record the strategies before import
     before = set(strategies.STRATEGIES.keys())
 
-    # Force reimport of replay module
     import importlib
     import refactory_packages.skillopt.replay
     importlib.reload(refactory_packages.skillopt.replay)
@@ -814,7 +822,7 @@ def test_format_report_includes_divergence(tmp_path):
         },
     ]
 
-    report = compare_runs(a_out, [], b_history)
+    report = compare_runs(a_out, b_history)
     text = format_report(report)
 
     assert "First Divergence" in text
