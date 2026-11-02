@@ -77,13 +77,17 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
             if current == fork.id or current not in graph.nodes:
                 raise ExecutionError(f"fork {fork.id!r} has an invalid branch at {current!r}")
             node = graph.nodes[current]
-            if node.kind not in ("op", "agent", "gate"):
+            if node.kind not in ("op", "agent", "gate", "fork", "join"):
                 raise ExecutionError(
                     f"fork {fork.id!r}: nested {node.kind!r} node {current!r} is not "
                     "supported inside a Python fork branch"
                 )
             seen.add(current)
             pending.extend(edge.target for edge in graph.out_edges(current))
+            # Include nested fork targets so their nodes and produced facts are
+            # accounted for in the branch (matching the spine's lowering).
+            if node.kind == "fork" and node.targets:
+                pending.extend(node.targets)
         if not seen or seen & owned:
             raise ExecutionError(f"fork {fork.id!r} has empty or overlapping branches at {target!r}")
         owned.update(seen)
@@ -205,6 +209,8 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         child._reserve_step = reserve
         children.append(child)
 
+    _halt_exc: list[Any] = []  # HaltStop raised inside a branch, propagated after cleanup
+
     def walk(index: int) -> str | None:
         from .executor import GateStop, HaltStop
 
@@ -225,9 +231,11 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         except GateStop:
             branch_state = "refused"
             error = f"{target}: gate stop"
-        except HaltStop:
+        except HaltStop as exc:
             branch_state = "halted"
             error = f"{target}: halted"
+            _halt_exc.append(exc)
+            cancelled.set()
         except Exception as exc:
             error = f"{target}: {type(exc).__name__}: {exc}"
         if branch_state is None:
@@ -236,14 +244,11 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         return error
 
     errors: list[str | None] = [None] * len(children)
-    optional = set(node.optional_targets or ())
     try:
         if serial:
             for index in range(len(children)):
                 errors[index] = walk(index)
-                # A failed optional branch is missing, as it is when branches run at
-                # once: the branches after it still run.
-                if errors[index] and node.targets[index] not in optional:
+                if errors[index]:
                     for target in node.targets[index + 1:]:
                         record(target, "not-started")
                     break
@@ -285,30 +290,19 @@ def run_fork(executor: Executor, node: Node) -> str | None:
     # after the join begins. Order does not depend on completion timing.
     executor.record.merge_branches([child.record for child in children],
                                    [{member.id for member in branch} for branch in branches])
-    for index, child in enumerate(children):
-        if errors[index] and node.targets[index] in optional:
-            # A failed optional branch is missing, not failed: keep its steps in
-            # the record, but move the error to the reason so the run's final
-            # step scan (Executor.run) does not fail the run on it.
-            for step in child.steps:
-                if step.error:
-                    _record_missing(ctx.workdir, step.node, step.error)
-                    step.reason, step.error = f"missing: {step.error}", None
-            _settle_missing(ctx.workdir, branches[index], errors[index])
+    # An optional node that failed is missing, and its branch went on past it
+    # (`Executor._missing_optional`), so a branch's error is a real failure.
+    for child in children:
         executor.steps.extend(child.steps)
         executor.model_calls += child.model_calls
         ctx.writes_made.extend(child.ctx.writes_made)
-    error = next((e for i, e in enumerate(errors) if e and node.targets[i] not in optional), None)
+    error = next((e for e in errors if e), None)
     visited = {step.node for child in children for step in child.steps}
     missing = set(join.sources) - visited
     if error is None and missing:
         error = f"fork {node.id!r} did not complete join sources: {sorted(missing)}"
     if error is None:
         for index, child in enumerate(children):
-            target = node.targets[index]
-            # A failed optional branch is silently skipped in the fact merge.
-            if errors[index] and target in optional:
-                continue
             produced = {key for member in branches[index] for key in member.produces}
             for key in sorted(produced):
                 if key in child.ctx.facts:
@@ -317,6 +311,12 @@ def run_fork(executor: Executor, node: Node) -> str | None:
                     ctx.facts.pop(key, None)
     # On failure, facts remain the pre-fork snapshot and resume replays the fork.
     # File side effects and completed delivery receipts remain available for audit.
+    # A HaltStop inside a branch is recorded as halted, not as a failed fork with an
+    # error string.  Re-raise it so the executor's main loop records halted=True.
+    if _halt_exc:
+        executor._record(node.id, error=str(_halt_exc[0]), branches=status, schedule=schedule,
+                         outcome="halted")
+        raise _halt_exc[0]
     executor._record(node.id if error else barrier, error=error, branches=status, schedule=schedule,
                      outcome="failed" if error else "pending")
     return error

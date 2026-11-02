@@ -1,6 +1,7 @@
 """A nested search and its validators consume the enclosing allocation."""
 from pathlib import Path
 
+import child_patches
 from refactory_dsh import nn
 from refactory_dsh.budgets import LEDGER, RunBudget
 from refactory_dsh.loop import Loop, LoopConfig
@@ -59,11 +60,27 @@ def test_candidate_validator_keeps_holdout_reserve_and_stays_ineligible(tmp_path
     assert loop.budget.snapshot()['tokens'] == 1
 
 
-def test_loop_mode_nodes_rehydrate_the_same_shared_budget(tmp_path):
+class _MeteredPackage:
+    name = 'fake'
+    description = ''
+
+    def mode(self, name):
+        return MeteredControl
+
+
+def resolve_metered(project, identifier):
+    """`registry.resolve`, for `fake/metered`: the loop's ops resolve their target with it."""
+    return _MeteredPackage(), MeteredControl
+
+
+def test_loop_mode_nodes_rehydrate_the_same_shared_budget(tmp_path, monkeypatch):
+    import refactory_dsh.registry as registry
+
     mode = _mode(target='fake/metered', epochs=1, batch_size=1, max_evaluations=1)
     budget = RunBudget.create(tmp_path / 'outer', {'max_tokens': 10, 'validation_reserve_tokens': 2})
-    with _patch_mode(MeteredControl):
-        result = mode.run(tmp_path / 'outer', shared_budget=budget)
+    # The loop's steps run in the walker's op children: the fake target reaches them there.
+    child_patches.for_test(monkeypatch).setattr(registry, 'resolve', resolve_metered)
+    result = mode.run(tmp_path / 'outer', shared_budget=budget)
     assert result.exit_ok, result.error
     assert budget.snapshot()['tokens'] == 1
     assert budget.snapshot()['phase'] == 'work'

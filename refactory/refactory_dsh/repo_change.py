@@ -1076,9 +1076,12 @@ def _materialise_directory(ctx: Any, source: Path | None, files: tuple[str, ...]
     finally:
         if not preserve_backup and not (previous.exists() and not root.exists()):
             shutil.rmtree(temporary)
-    # Write changed-functions.json as [] for directory-mode (no worktree, no diff).
-    import json as _json
-    (ctx.workdir / "changed-functions.json").write_text(_json.dumps([]) + "\n")
+    # changed-functions.json and changes.diff are valid empty results on no-worktree
+    # runs (no changed functions, no diff), not placeholders: focused_qa, overwatch and
+    # the verifier declare them as reads, and both runtimes refuse a missing read.
+    ctx.write_json("changed-functions.json", [])
+    if not (Path(ctx.workdir) / "changes.diff").exists():
+        ctx.write_text("changes.diff", "")
     return {"artifact": str(root), "files": sorted(set(files) | {str(path) for path in checked}),
             "changed_functions": "(none)"}
 

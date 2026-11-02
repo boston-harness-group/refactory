@@ -288,6 +288,71 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 **({"tool_policy": node.tool_policy} if node.tool_policy is not None else {}),
             )
 
+    # SWEEP-1: Validate fork-shape rules at lowering so the spine refuses the same
+    # shapes the walker does (nn/fork.py:112-122). Branches that produce the same
+    # facts, overlap in reads/writes, or read a sibling's facts are refused.
+    import re as _re
+    for fork_id, fork_node in graph.nodes.items():
+        if fork_node.kind != "fork":
+            continue
+        # Collect each branch's members.
+        fork_edges = graph.out_edges(fork_id)
+        barrier = fork_edges[0].target if fork_edges else None
+        _branch_lists: list[list[Any]] = []
+        for target in fork_node.targets:
+            seen: set[str] = set()
+            pending = [target]
+            while pending:
+                current = pending.pop()
+                if current == barrier or current in seen:
+                    continue
+                if current not in graph.nodes:
+                    continue
+                seen.add(current)
+                pending.extend(e.target for e in graph.out_edges(current))
+                # A nested fork's branches belong to this branch too (nn/fork.py).
+                if graph.nodes[current].kind == "fork":
+                    pending.extend(graph.nodes[current].targets)
+            _branch_lists.append([graph.nodes[n] for n in sorted(seen)])
+        _branch_facts = [{name for n in branch for name in n.produces} for branch in _branch_lists]
+        _branch_consumed = [{match for n in branch for match in _re.findall(
+            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", n.prompt_template)}
+            for branch in _branch_lists]
+        # Per-branch write and read sets for the file-overlap check (fork.py:120-122).
+        # Use directory-containment overlap matching the walker (fork.py:24-27).
+        from pathlib import PurePosixPath as _PP
+
+        def _overlap(left: _PP, right: _PP) -> bool:
+            return left == right or left in right.parents or right in left.parents
+
+        _branch_write_paths = [[_PP(p) for n in branch for p in n.writes] for branch in _branch_lists]
+        _branch_read_paths = [[_PP(p) for n in branch for p in n.reads] for branch in _branch_lists]
+        _refactory_root = _PP(".refactory")
+        for idx, bf in enumerate(_branch_facts):
+            # Refuse a branch whose writes overlap with .refactory (fork.py:113-114).
+            if any(_overlap(p, _refactory_root) for p in _branch_write_paths[idx]):
+                raise LoweringError(
+                    f"fork {fork_id!r}: a branch declares executor metadata as output"
+                )
+            for other in range(idx):
+                if bf & _branch_facts[other]:
+                    raise LoweringError(
+                        f"fork {fork_id!r}: branches declare the same produced facts"
+                    )
+                if bf & _branch_consumed[other] or _branch_facts[other] & _branch_consumed[idx]:
+                    raise LoweringError(
+                        f"fork {fork_id!r}: a branch prompt depends on a sibling's facts"
+                    )
+                # Reads/writes overlap using directory containment: a branch writing
+                # "out" conflicts with a sibling reading "out/x.txt" (fork.py:120-122).
+                if (any(_overlap(a, b) for a in _branch_write_paths[idx]
+                        for b in _branch_write_paths[other] + _branch_read_paths[other])
+                        or any(_overlap(a, b) for a in _branch_write_paths[other]
+                               for b in _branch_read_paths[idx])):
+                    raise LoweringError(
+                        f"fork {fork_id!r}: branches have conflicting declared file access"
+                    )
+
     edges = [
         Edge(source=edge.source, target=edge.target, condition=edge.condition)
         for edge in sorted(graph.edges, key=lambda e: e.key())

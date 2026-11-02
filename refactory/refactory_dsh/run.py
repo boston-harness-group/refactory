@@ -72,6 +72,10 @@ def _clipped(reason: str) -> str:
 #: The marker ``refactory_dsh.run`` prints before the failure detail so the spine
 #: can locate the structured block even when earlier stderr lines push it down.
 FAILURE_MARKER = "--- refactory failure ---"
+#: The stderr line an optional node that failed prints as it exits 0: the spine records
+#: the node failed (not completed) and goes on with its branch, as the walker does.
+#: `worker_node` prints the same line for an optional agent.
+OPTIONAL_MISSING_MARKER = "--- refactory optional node missing ---"
 
 
 def format_failure_detail(exc: Exception, limit: int = 2000) -> str:
@@ -412,6 +416,7 @@ def run_node(
                     print(f"refactory: run warning: could not settle the delivery marker of "
                           f"optional {node_id}: {type(settle_error).__name__}: {settle_error}; "
                           f"a later resume asks for graph-control acknowledge", file=sys.stderr)
+                print(OPTIONAL_MISSING_MARKER, file=sys.stderr)
                 return {}
             raise
     if isinstance(produced, dict):

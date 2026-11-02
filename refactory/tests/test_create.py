@@ -57,11 +57,23 @@ def _config(**overrides) -> CreateConfig:
 
 @pytest.fixture(autouse=True)
 def _clean_package():
-    """A created package is real: leave the workspace as it was found."""
+    """A created package is real: leave the workspace as it was found.
+
+    Uses a file lock so xdist workers do not step on each other's packages.
+    """
+    import fcntl
     root = registry.workspace_root(Path(".")) / NAME
+    lock_path = root.parent / f".{NAME}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_path, "w")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
     shutil.rmtree(root, ignore_errors=True)
-    yield
-    shutil.rmtree(root, ignore_errors=True)
+    try:
+        yield
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 # ── T2: @-path accepted by parse_files ─────────────────────────────────────
