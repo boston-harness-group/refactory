@@ -123,6 +123,21 @@ export interface WorkflowEdge {
   condition?: string | null
 }
 
+/** One evaluated item's record, same shape on both runtimes (F6). */
+export interface ItemRecord {
+  id: string
+  passed: boolean
+  score: number
+  exchanges: Array<{ node: string; prompt: string; response: string }>
+  prediction: string | null
+  label: string | null
+  label_text: string | null
+  fail_reason: string | null
+  error_kind: string | null
+  error_text: string | null
+  metadata: Record<string, unknown>
+}
+
 /** A workflow graph — the exact shape of refactory's `Workflow.to_dict()`. */
 export interface WorkflowGraph {
   /** The run's name, used in status and in the spine's own reporting. */

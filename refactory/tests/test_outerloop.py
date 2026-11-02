@@ -92,7 +92,7 @@ def test_the_loop_refuses_an_unknown_optimizer(tmp_path):
 def test_the_handle_offers_the_primitives_a_strategy_is_built_from(tmp_path):
     loop = Loop(MODE, _config(tmp_path / "run"), project=Path("."))
     loop.init()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     assert run.seed() is loop.population[0]
     assert run.history() == [], "nothing has been scored"
     assert run.budget_left() == loop.config.max_evaluations
@@ -105,7 +105,7 @@ def test_the_handle_offers_the_primitives_a_strategy_is_built_from(tmp_path):
 def test_evaluating_past_the_budget_is_refused(tmp_path):
     loop = Loop(MODE, _config(tmp_path / "run", max_evaluations=1), project=Path("."))
     loop.init()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     candidate = Candidate.from_state(loop.mode.state_dict())
     run.evaluate(candidate)
     assert run.budget_left() == 0
@@ -117,7 +117,7 @@ def test_the_two_primitives_are_distinct(tmp_path):
     """`attempt` is cheap and spends nothing; `evaluate` is expensive."""
     loop = Loop(MODE, _config(tmp_path / "run"), project=Path("."))
     loop.init()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     before = loop.evaluations
     run.attempt(Proposal(edit={"op": "remove_node", "id": "exit"},
                          parent=run.seed().id), run.seed())
@@ -128,7 +128,7 @@ def test_the_two_primitives_are_distinct(tmp_path):
 def test_logging_reaches_a_file(tmp_path):
     loop = Loop(MODE, _config(tmp_path / "run"), project=Path("."))
     loop.init()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     run.log("hello")
     assert "hello" in (loop.root / "strategy.log").read_text()
 

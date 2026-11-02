@@ -15,12 +15,18 @@ from refactory_dsh import nn, registry
 
 
 def test_every_installed_package_mode_validates():
-    """A package that cannot be validated must not be discoverable at all."""
+    """A mode package that cannot be validated must not be discoverable at all.
+
+    Strategy-only packages (those with ``modes=()``) are valid: they contribute
+    an outer-loop strategy rather than a mode, so there is nothing to validate
+    here.  Any future strategy package (GEPA, etc.) falls into this category.
+    """
     names = registry.discover_names()
     assert names, "no packages are installed"
     for name in names:
         package = registry.load(name)
-        assert package.modes, f"{name} declares no modes"
+        if not package.modes:
+            continue  # strategy-only package — no modes to validate
         for mode_class in package.modes:
             identifier = f"{name}/{mode_class.name}"
             mode = mode_class()

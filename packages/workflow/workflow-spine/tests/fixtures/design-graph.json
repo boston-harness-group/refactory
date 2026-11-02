@@ -202,6 +202,10 @@
       "id": "report",
       "_type": "FnNode"
     },
+    "rerun_probes": {
+      "id": "rerun_probes",
+      "_type": "FnNode"
+    },
     "research_director": {
       "id": "research_director",
       "role": "ceo",
@@ -317,7 +321,7 @@
     },
     {
       "source": "gate_check",
-      "target": "synthesize_qa",
+      "target": "rerun_probes",
       "condition": "proceed"
     },
     {
@@ -463,6 +467,11 @@
     {
       "source": "report",
       "target": "deliver",
+      "condition": null
+    },
+    {
+      "source": "rerun_probes",
+      "target": "synthesize_qa",
       "condition": null
     },
     {

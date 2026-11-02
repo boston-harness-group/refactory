@@ -2080,6 +2080,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
@@ -2087,6 +2088,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
+    "parts_manifest": null,
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
@@ -2095,6 +2097,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "role_routes": {},
     "seed": 0,
     "strategy": "default",
+    "strategy_options": {},
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
     "worker_backend": "dsh"
@@ -2299,6 +2302,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "max_rollouts": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-rollouts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_steps": {
       "default": null,
       "description": "",
@@ -2385,6 +2399,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "number"
+    },
+    "parts_manifest": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--parts-manifest"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
     },
     "permission_mode": {
       "default": null,
@@ -2564,7 +2589,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "f5b6d4c9f9b4853b747650bb49a0aed78137b526db795f341857958f1292dd9b"
+  "reviewed_schema": "a92a06a129a98b6d2dfb7f263e47875dfc657c1cdf82890ec8476ddf9b6b8dcd"
 }
 ```
 
@@ -3403,6 +3428,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
@@ -3410,6 +3436,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
+    "parts_manifest": null,
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
@@ -3418,6 +3445,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "role_routes": {},
     "seed": 0,
     "strategy": "default",
+    "strategy_options": {},
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
     "worker_backend": "dsh"
@@ -3625,6 +3653,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "max_rollouts": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-rollouts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_steps": {
       "default": null,
       "description": "",
@@ -3711,6 +3750,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "number"
+    },
+    "parts_manifest": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--parts-manifest"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
     },
     "permission_mode": {
       "default": null,
@@ -3901,7 +3951,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "73ecff28ddecca400ab767af6aa18b969c9601ad385170626d73eabc4c86817b"
+  "reviewed_schema": "ce755b1e47cbaf02093f0ad850e94c14a4845ebd3c213e74ccccb1ccae035a17"
 }
 ```
 
@@ -5352,6 +5402,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
@@ -5359,6 +5410,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
+    "parts_manifest": null,
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
@@ -5367,6 +5419,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "role_routes": {},
     "seed": 0,
     "strategy": "default",
+    "strategy_options": {},
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
     "worker_backend": "dsh"
@@ -5573,6 +5626,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "max_rollouts": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-rollouts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_steps": {
       "default": null,
       "description": "",
@@ -5659,6 +5723,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "number"
+    },
+    "parts_manifest": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--parts-manifest"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
     },
     "permission_mode": {
       "default": null,
@@ -5781,6 +5856,20 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "strategy_option": {
+      "default": [],
+      "description": "strategy-specific option as KEY=VALUE; may be repeated",
+      "flags": [
+        "--strategy-option"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "array"
+    },
     "validation_reserve_s": {
       "default": null,
       "description": "",
@@ -5827,7 +5916,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "09d1e3ff59a3740637db363f7ce91c1da86768099e7903ff48eb1c2fa1455e08"
+  "reviewed_schema": "96d2d260b5f5ea618b3865fcdc01e8bed9d59e881f5e637861f9dc42b791ea7a"
 }
 ```
 
@@ -8035,7 +8124,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     {
       "condition": "proceed",
       "source": "gate_check",
-      "target": "synthesize_qa"
+      "target": "rerun_probes"
     },
     {
       "condition": "reloop",
@@ -8181,6 +8270,11 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "condition": null,
       "source": "report",
       "target": "deliver"
+    },
+    {
+      "condition": null,
+      "source": "rerun_probes",
+      "target": "synthesize_qa"
     },
     {
       "condition": null,
@@ -8618,6 +8712,14 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "role": "ceo"
     },
     {
+      "call": "refactory_dsh.probe_rerun:rerun_probes",
+      "id": "rerun_probes",
+      "kind": "op",
+      "knobs": [],
+      "notes": "rerun each probe file the verifier wrote on the attempt in a scratch clone (120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED claim without a probe file of its own is unverified",
+      "role": "ceo"
+    },
+    {
       "call": "",
       "id": "research_director",
       "kind": "agent",
@@ -9034,7 +9136,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "62f7f1ea44b64255aeecac7bc4bbd5fd91d30bb1c376dc3ff4e0053b045a3d1b"
+    "reviewed_schema": "a89a70fe616e8dbaa4db03cb3f90e4b1f9da4bf398727714afd386e08255e796"
   }
 }
 ```
@@ -11135,6 +11237,129 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
     },
     "purpose": "prove a theorem in Lean and score what the Lean checker accepted. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.",
     "reviewed_schema": "f6d0144cf23fcce624f495f873690711972933fbcf05aa374221ff3fbf542a2c"
+  }
+}
+```
+
+## livemath/solver
+
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a LiveMathematicianBench item with a single agent call",
+  "edges": [
+    {
+      "condition": null,
+      "source": "data",
+      "target": "finish"
+    },
+    {
+      "condition": null,
+      "source": "format_prompt",
+      "target": "solve"
+    }
+  ],
+  "gates": [],
+  "guidance": "",
+  "id": "livemath/solver",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:finish",
+      "id": "finish",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:format_prompt",
+      "id": "format_prompt",
+      "kind": "op",
+      "knobs": [
+        "skill",
+        "use_theorem",
+        "use_sketch"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "skill": {
+      "default": "",
+      "description": "skill prompt injected into the system message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "use_sketch": {
+      "default": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "use_theorem": {
+      "default": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/outer-loop.md",
+    "examples": [
+      {
+        "explanation": "Solve LiveMathematicianBench items with an empty skill prompt and SkillOpt's defaults (no theorem or proof sketch in the prompt); set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "knobs": {
+          "skill": "",
+          "use_sketch": false,
+          "use_theorem": false
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=livemath/solver; use refactory help topic=livemath/solver first",
+      "cli": "refactory ceo livemath/solver",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "7ae45ec28ac9b7a75fae8932203e473e306327039c5516aa5e7e96e1dbe87cd9"
   }
 }
 ```

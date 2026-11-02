@@ -324,10 +324,17 @@ def test_a_data_node_bound_to_a_task_uses_its_items_and_verifies_each(tmp_path):
     assert (workdir / "setup-a").exists() and (workdir / "setup-b").exists(), (
         "the Task's setup did not run per item"
     )
-    assert result.facts["item_scores"] == [
-        {"id": "a", "passed": True, "score": 1.0},
-        {"id": "b", "passed": True, "score": 0.5},
-    ]
+    # F6: item_scores carry all record fields now.
+    for entry in result.facts["item_scores"]:
+        assert "exchanges" in entry
+        assert "prediction" in entry
+        assert "metadata" in entry
+    assert result.facts["item_scores"][0]["id"] == "a"
+    assert result.facts["item_scores"][0]["passed"] is True
+    assert result.facts["item_scores"][0]["score"] == 1.0
+    assert result.facts["item_scores"][1]["id"] == "b"
+    assert result.facts["item_scores"][1]["passed"] is True
+    assert result.facts["item_scores"][1]["score"] == 0.5
 
 
 def test_an_agent_node_tells_the_model_client_where_the_node_lives(tmp_path):

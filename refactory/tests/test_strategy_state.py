@@ -170,7 +170,7 @@ def test_custom_strategy_honours_stop_via_check_control(tmp_path):
     Control(tmp_path).request("stop")
     loop = Loop(MODE, _config(tmp_path), project=Path("."))
     loop.init()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     result = run.check_control()
     assert result == "stop"
 
@@ -186,7 +186,7 @@ def test_custom_strategy_honours_pause_via_check_control(tmp_path):
 
     loop = Loop(MODE, _config(tmp_path), project=Path("."))
     loop.init()
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
 
     check_returned = threading.Event()
 
@@ -224,7 +224,7 @@ def test_check_control_one_shot_not_repeated(tmp_path):
     )
     assert control.read() == "reject"
 
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     result = run.check_control()
     assert result is None  # reject is a population act, not stop
     assert victim in loop.rejected

@@ -772,6 +772,28 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
             raise ValueError(f"agent {node!r} changed shared git state: {wt_msg}")
         else:
             target_guard.warn(wt_msg)
+    # Record the exchange for spine-path per-item records (F6).
+    # The walker captures exchanges in-memory (executor._item_exchanges);
+    # for the spine, agent_delivery is the only place that sees both the
+    # prompt and the response, so it writes the sidecar that command_end
+    # reads.  Only inside a data-node pass (CURRENT_ITEM exists).
+    from refactory_dsh.nn.executor import CURRENT_ITEM
+    if (workdir / CURRENT_ITEM).exists():
+        prompt_text = record.get('prompt', '')
+        response_text = final_response
+        if response_text is None:
+            # Read the first delivered artifact as the response.
+            for name in writes:
+                if name in fresh:
+                    artifact = _path(workdir, name)
+                    if artifact.is_file():
+                        try:
+                            response_text = artifact.read_text()
+                        except (OSError, UnicodeDecodeError):
+                            pass
+                    break
+        from refactory_dsh.items import record_exchange
+        record_exchange(workdir, node, prompt_text, response_text or '')
     return receipt
 
 

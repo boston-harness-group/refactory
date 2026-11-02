@@ -54,13 +54,60 @@ DATA_KEY = "data"
 #: The key an override uses to mean "every data node of this run".
 ANY_NODE = "*"
 
+#: Sidecar file for per-item exchanges within a data-node pass.
+#: Written by agent execution (walker or spine commands), read by ``command_end``.
+EXCHANGES_SIDECAR = ".refactory/item_exchanges.json"
+
+
+def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> None:
+    """Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+
+    Called from agent execution in both runtimes so that ``command_end`` can
+    include per-node exchanges in the item record.
+    """
+    path = workdir / EXCHANGES_SIDECAR
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+    existing.append({"node": node, "prompt": prompt, "response": response})
+    path.write_text(json.dumps(existing, default=str))
+
+
+def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
+    """Read per-item exchanges from the sidecar, then remove the file."""
+    path = workdir / EXCHANGES_SIDECAR
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        path.unlink(missing_ok=True)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
 
 def make_item_record(
     item_id: str,
     verdict: VerifyResult | None,
     error: Exception | None = None,
+    *,
+    exchanges: list[dict[str, Any]] | None = None,
+    prediction: str | None = None,
+    label: str | None = None,
+    label_text: str | None = None,
+    fail_reason: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Build the per-item score dict for both success and failure.
+    """Build a per-item record for one evaluated item.
+
+    One record per item, same shape on both runtimes.  Extends F4's existing
+    error_kind convention (exception class name or ``"timeout"``).  The
+    ``exchanges`` list carries one ``{node, prompt, response}`` dict per agent
+    call in the item's pass, so a multi-node pass records every model call.
 
     **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``.
     **Failure path** (error is not None): ``{"id", "passed": False, "score": 0.0,
@@ -68,6 +115,14 @@ def make_item_record(
     **No-verdict path** (error is None, verdict is None): ``None`` — the Task chose
     not to grade this item.
     """
+    base: dict[str, Any] = {
+        "exchanges": list(exchanges or []),
+        "prediction": prediction,
+        "label": label,
+        "label_text": label_text,
+        "fail_reason": fail_reason,
+        "metadata": dict(metadata or {}),
+    }
     if error is not None:
         return {
             "id": item_id,
@@ -75,6 +130,7 @@ def make_item_record(
             "score": 0.0,
             "error_text": str(error)[:4096],
             "error_kind": type(error).__name__,
+            **base,
         }
     if verdict is None:
         return None
@@ -82,6 +138,9 @@ def make_item_record(
         "id": item_id,
         "passed": verdict.passed,
         "score": verdict.score,
+        "error_text": None,
+        "error_kind": None,
+        **base,
     }
 
 
@@ -274,10 +333,19 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     _write_pass_state(workdir, node.id, ps)
 
     (workdir / CURRENT_ITEM).write_text(json.dumps(item, indent=2, default=str))
+    # Clear the exchange sidecar for this item's pass.
+    sidecar = workdir / EXCHANGES_SIDECAR
+    if sidecar.exists():
+        sidecar.unlink(missing_ok=True)
     task = _task_of(node, workdir)
     if task is not None:
+        from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+        subset_part, subset_seed = subset_part_seed(workdir)
         try:
-            task.setup(instance_of(item), workdir)
+            task.setup(
+                instance_of(item), workdir,
+                **part_seed_kwargs(task.setup, part=subset_part, seed=subset_seed),
+            )
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
@@ -341,7 +409,17 @@ def command_end(
     # and write a failure record directly, as the walker does.
     if failed_reason is not None:
         exc = RuntimeError(failed_reason)
-        record = make_item_record(item_id, None, error=exc)
+        instance = instance_of(item)
+        exchanges = _read_and_clear_exchanges(workdir)
+        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+        record = make_item_record(
+            item_id, None, error=exc,
+            exchanges=exchanges,
+            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+            fail_reason=failed_reason,
+            metadata=metadata,
+        )
         if record is not None:
             if failed_kind is not None:
                 record["error_kind"] = failed_kind
@@ -369,12 +447,28 @@ def command_end(
     if task is None:
         _check_all_items_failed(node, workdir, items, index)
         return {}
+    instance = instance_of(item)
+    # Read per-node exchanges from the sidecar (written by agent execution).
+    exchanges = _read_and_clear_exchanges(workdir)
+    metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+    # Pass part and seed from subset.json to task.verify (ask 5)
+    from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+    _verify_part, _verify_seed = subset_part_seed(workdir)
     try:
-        verdict = task.verify(instance_of(item), workdir)
+        verdict = task.verify(
+            instance, workdir,
+            **part_seed_kwargs(task.verify, part=_verify_part, seed=_verify_seed),
+        )
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:
-        record = make_item_record(item_id, None, error=exc)
+        record = make_item_record(
+            item_id, None, error=exc,
+            exchanges=exchanges,
+            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+            metadata=metadata,
+        )
         if record is not None and SCORES_FACT in node.produces:
             _write_facts(workdir, SCORES_FACT, [record])
         # Track failed count in pass state.
@@ -387,7 +481,25 @@ def command_end(
     if verdict is None:
         _check_all_items_failed(node, workdir, items, index)
         return {}
-    record = make_item_record(item_id, verdict)
+    # Prediction comes from VerifyResult.prediction whenever the Task sets it
+    # (both pass and fail).  Fall back to verdict.details on pass and "" on
+    # fail only when the Task gives none.
+    prediction: str | None
+    if verdict.prediction:
+        prediction = verdict.prediction
+    elif verdict.passed:
+        prediction = verdict.details
+    else:
+        prediction = ""
+    record = make_item_record(
+        item_id, verdict,
+        exchanges=exchanges,
+        prediction=prediction,
+        label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+        label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+        fail_reason=verdict.details if not verdict.passed and verdict.details else None,
+        metadata=metadata,
+    )
     if record is not None and SCORES_FACT in node.produces:
         _write_facts(workdir, SCORES_FACT, [record])
     _check_all_items_failed(node, workdir, items, index)

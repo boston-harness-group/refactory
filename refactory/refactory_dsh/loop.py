@@ -28,12 +28,14 @@ import dataclasses
 import json
 import math
 import random
+import shutil
 import statistics
 import sys
 import time
 from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Sequence
 
 from refactory_dsh import history as run_history
@@ -193,7 +195,16 @@ class LoopConfig:
     max_tokens: int | None = None
     validation_reserve_s: float = 0
     validation_reserve_tokens: int = 0
+    max_rollouts: int | None = None
+    #: Path to a parts manifest (parts.json) with train/val/test id lists.
+    #: When set, the loop copies it to the run root and every evaluation draws
+    #: items from it.  The optimizer cannot choose val/test items.
+    parts_manifest: str | None = None
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: Strategy-specific options passed to the strategy's ``configure()``
+    #: method as keyword arguments.  Set from ``--strategy-option`` on the
+    #: CLI or directly from Python.
+    strategy_options: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -258,9 +269,15 @@ class Loop(OuterLoop):
 
     Every step a different strategy would change is a method here, so a strategy
     subclasses this and overrides one of them rather than copying the loop.
+
+    When ``_custom_strategy`` is set (a pure ``OuterLoop`` subclass), the
+    Loop delegates ``strategy``, ``strategy_state_dict``, and
+    ``load_strategy_state`` to that object — the **custom strategy seam**.
+    The strategy sees only ``Run``'s public API and never the Loop's internals.
     """
 
     name = "default"
+    _is_loop_infrastructure = True
 
     def bind_budget(self, budget: Any) -> None:
         """Share accounting even when a deterministic target has no model client."""
@@ -338,6 +355,7 @@ class Loop(OuterLoop):
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
             raise LoopError("repeats must be an integer from 1 to 10")
         self.measurements = 0
+        self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
         self.budget: Any = None
         self._owns_resource_budget = False
@@ -414,6 +432,52 @@ class Loop(OuterLoop):
         #: The strategy's own state, backing store for the default
         #: strategy_state_dict / load_strategy_state implementations.
         self._strategy_state: dict[str, Any] = {}
+        #: Loop-private storage for per-part evaluation data (records, workdirs,
+        #: scores).  Keyed by (candidate_id, part_name).  This data never reaches
+        #: optimizer-facing APIs.
+        self._part_results: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        #: Loop-private per-candidate, per-part occasion counters.
+        self._occasion_counters: dict[str, dict[str, int]] = {}
+        #: Loop-private per-candidate train item records.
+        self._train_item_records: dict[str, list[dict[str, Any]]] = {}
+        #: The loop-level parts manifest (train/val/test id lists), loaded from
+        #: config.parts_manifest or the run root.
+        self._parts_manifest: dict[str, list[str]] | None = None
+        #: The candidate the current optimizer step edits, recomputed on every
+        #: ``optimizer_step`` (from ``select_parents(1)``, unless a strategy set
+        #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
+        #: records the proposal context carries, and is not a strategy decision.
+        self._editing_parent: str | None = None
+        #: A pure OuterLoop subclass whose hooks this Loop drives.  When set,
+        #: ``strategy()``, ``strategy_state_dict()``, and
+        #: ``load_strategy_state()`` delegate to this object.
+        self._custom_strategy: OuterLoop | None = None
+
+    def permitted_ops(self) -> list[str]:
+        """The edit operations this run may apply.
+
+        An explicit ``allowed_ops`` is the whole answer. Otherwise the edit
+        preset's operations, plus the ``required_ops`` the running strategy
+        declares -- an attached custom strategy's, or this loop's own class's.
+        """
+        if self.config.allowed_ops:
+            return list(self.config.allowed_ops)
+        permitted = list(nn_edits.enabled(self.config.edit_preset))
+        attached = getattr(self, "_custom_strategy", None)
+        strategy = attached if attached is not None else self
+        for op in getattr(strategy, "required_ops", ()):
+            if op not in permitted:
+                permitted.append(op)
+        return permitted
+
+    def set_custom_strategy(self, strategy: OuterLoop) -> None:
+        """Attach a custom strategy (pure OuterLoop subclass) to this Loop.
+
+        The Loop will delegate ``strategy``, ``strategy_state_dict`` and
+        ``load_strategy_state`` calls to the strategy object.  The strategy
+        sees only ``Run``'s public API.
+        """
+        self._custom_strategy = strategy
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -510,6 +574,9 @@ class Loop(OuterLoop):
                 indent=2,
             )
         )
+        # Load the loop-level parts manifest if configured or already on disk.
+        self._load_parts_manifest()
+
         if resumed:
             if getattr(self, "_executing_strategy", False) and self.bound:
                 # A previous stop reason is history, not the new strategy's
@@ -540,6 +607,49 @@ class Loop(OuterLoop):
             optimizer=self.optimizer.name,
         )
 
+    def _load_parts_manifest(self) -> None:
+        """Load and install the loop-level parts manifest.
+
+        If ``config.parts_manifest`` names a file, copy it to the run root as
+        ``parts.json`` and load it.  If the run root already has a ``parts.json``
+        (e.g. from a previous run being resumed), load that.
+        """
+        dest = self.root / task_module.MANIFEST
+        if self.config.parts_manifest:
+            source = Path(self.config.parts_manifest)
+            if not source.exists():
+                raise LoopError(
+                    f"parts_manifest {self.config.parts_manifest!r} does not exist"
+                )
+            self.root.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, dest)
+        if not dest.exists():
+            return
+        # A manifest that cannot be read is refused rather than ignored: falling back
+        # to the fraction split would grade the run on items nobody chose, and
+        # overlapping parts would let val/test items into the optimizer's train set.
+        try:
+            data = json.loads(dest.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LoopError(f"parts manifest {dest} is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise LoopError(f"parts manifest {dest} must be a JSON object of id lists")
+        parts = {
+            k: [str(x) for x in v]
+            for k, v in data.items()
+            if isinstance(v, list)
+        }
+        names = [name for name in (task_module.TRAIN, task_module.VAL, task_module.TEST) if name in parts]
+        for index, first in enumerate(names):
+            for second in names[index + 1:]:
+                shared = set(parts[first]) & set(parts[second])
+                if shared:
+                    raise LoopError(
+                        f"parts manifest {dest}: {first} and {second} share items "
+                        f"{sorted(shared)}; train, val and test must be disjoint"
+                    )
+        self._parts_manifest = parts
+
     def _seed_population(self, seed: Candidate) -> None:
         """Fill the starting batch with neighbours of the seed.
 
@@ -569,7 +679,7 @@ class Loop(OuterLoop):
             edits.append(edit)
 
         for edit in edits:
-            if edit.get("op") not in (self.config.allowed_ops or nn_edits.enabled(self.config.edit_preset)):
+            if edit.get("op") not in self.permitted_ops():
                 continue
             proposal = Proposal(edit=edit, parent=seed.id, rationale="starting population")
             outcome = sampler.attempt(
@@ -616,6 +726,8 @@ class Loop(OuterLoop):
         for index, candidate in enumerate(batch):
             if self.evaluations >= self.config.max_evaluations:
                 break
+            if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+                break
             self._evaluate(candidate)
             self._progress(
                 "forward",
@@ -646,8 +758,6 @@ class Loop(OuterLoop):
         note added while a candidate is running reaches the next candidate, exactly as
         it reaches the next node of an interactive run.
         """
-        import shutil
-
         from refactory_dsh.steering import LEDGER
 
         source = self.root / LEDGER
@@ -656,7 +766,7 @@ class Loop(OuterLoop):
         workdir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, workdir / LEDGER)
 
-    def _write_subset(self, workdir: Path, part: str) -> None:
+    def _write_subset(self, workdir: Path, part: str, *, seed: int | None = None) -> None:
         """Name the part of the items this candidate is evaluated on.
 
         Written into the candidate's own run directory before the evaluator starts,
@@ -664,9 +774,11 @@ class Loop(OuterLoop):
         that could set it would choose its own exam, and there would be no item left
         for the audit to hold out.
         """
-        task_module.write_subset(workdir, part, self.config.holdout)
+        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
 
-    def _evaluate(self, candidate: Candidate) -> None:
+    def _evaluate(
+        self, candidate: Candidate, *, seed: int | None = None, items: list[str] | None = None,
+    ) -> None:
         """Run one candidate through the evaluator, and record what it scored.
 
         This is the loop's forward pass and the evaluator is its loss: what the
@@ -680,7 +792,17 @@ class Loop(OuterLoop):
         """
         workdir = self.root / "runs" / candidate.id
         mode = self.mode_class(state=candidate.state)
-        result, measurements = self._measure(candidate, workdir, task_module.TRAIN)
+        # Copy the loop-level manifest so select_subset finds it.
+        if self._parts_manifest is not None:
+            workdir.mkdir(parents=True, exist_ok=True)
+            manifest_src = self.root / task_module.MANIFEST
+            if manifest_src.exists():
+                shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
+        # When explicit items are given, write a per-candidate manifest.
+        if items is not None:
+            workdir.mkdir(parents=True, exist_ok=True)
+            task_module.make_manifest(workdir, train_ids=items)
+        result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed, items=items)
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
         candidate.score = result.score - self.config.parsimony * nodes if result.exit_ok else None
@@ -692,7 +814,12 @@ class Loop(OuterLoop):
         candidate.duration_s = result.duration_s
         candidate.model_calls = result.model_calls
         candidate.evaluated = True
+        self._train_item_records[candidate.id] = list(result.item_records)
         self.evaluations += 1
+        self.rollouts += len(result.item_records) or 1
+        self._journal("train_records", id=candidate.id,
+                      records=list(result.item_records))
+        self._journal("rollouts", rollouts=self.rollouts)
         self._journal(
             "score",
             id=candidate.id,
@@ -709,7 +836,53 @@ class Loop(OuterLoop):
         )
         self._write_candidate(candidate, workdir, mode=mode)
 
-    def _measure(self, candidate: Candidate, workdir: Path, part: str) -> tuple[Any, dict[str, Any]]:
+    def _evaluate_part(
+        self, candidate: Candidate, part: str,
+        items: list[str] | None, seed: int | None,
+    ) -> None:
+        """Evaluate on val or test in a fresh occasion directory (F18)."""
+        counters = self._occasion_counters.setdefault(candidate.id, {})
+        counter = counters.get(part, 0)
+        counters[part] = counter + 1
+        self._journal("occasion_counter", id=candidate.id, part=part,
+                      counter=counters[part])
+        workdir = self.root / "runs" / candidate.id / "occasions" / f"{part}_{counter}"
+        workdir.mkdir(parents=True, exist_ok=True)
+        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
+        # Copy or build the manifest so select_subset finds it.
+        if items is not None:
+            task_module.make_manifest(workdir, train_ids=items if part == "train" else [],
+                                     val_ids=items if part == "val" else None,
+                                     test_ids=items if part == "test" else None)
+        elif self._parts_manifest is not None:
+            manifest_src = self.root / task_module.MANIFEST
+            if manifest_src.exists():
+                shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
+        self._carry_ledger(workdir)
+        result, measurements = self._measure(candidate, workdir, part, seed=seed, items=items)
+        # Score-only occasion record for optimizer-facing storage (no records,
+        # no workdir).
+        occasion_public = {
+            "part": part, "occasion": counter,
+            "score": result.score if result.exit_ok else None,
+            "exit_ok": result.exit_ok, "error": result.error,
+            "duration_s": result.duration_s,
+        }
+        self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
+            occasion_public
+        )
+        self._journal("part_result", id=candidate.id, part=part,
+                      result=occasion_public)
+        self.rollouts += len(result.item_records) or 1
+        self._journal("rollouts", rollouts=self.rollouts)
+        if result.item_records:
+            (workdir / "item_records.json").write_text(
+                json.dumps(result.item_records, indent=2, default=str))
+
+    def _measure(
+        self, candidate: Candidate, workdir: Path, part: str, *,
+        seed: int | None = None, items: list[str] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
         from refactory_dsh.budgets import BudgetExhausted
@@ -718,14 +891,26 @@ class Loop(OuterLoop):
         # and the loop root, not from the candidate's trial directory.
         seed_state = self.population[0].state if self.population else candidate.state
         expected_ids, seed_declares_item_scores = self._expected_item_ids(seed_state, part)
+        # When an explicit items subset was requested, narrow expected_ids to
+        # just those items so _verify_item_set does not fail on the "missing"
+        # items that were intentionally excluded.
+        if items is not None:
+            expected_ids = set(str(i) for i in items)
 
         trials = []
+        all_item_records: list[dict[str, Any]] = []  # accumulate across repeats
         last = RunResult(exit_ok=False, error="no measurement completed")
         required = (self.config.resolved_profile.get("contract") or {}).get("required_artifacts", [])
         for index in range(self.config.repeats):
             trial_dir = workdir if index == 0 else workdir / "trials" / str(index + 1)
             self._carry_ledger(trial_dir)
-            self._write_subset(trial_dir, part)
+            self._write_subset(trial_dir, part, seed=seed)
+            # Copy the manifest to trial sub-directories so select_subset
+            # finds it there too (repeats > 1 creates separate directories).
+            manifest = workdir / task_module.MANIFEST
+            if trial_dir != workdir and manifest.exists():
+                trial_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(manifest, trial_dir / task_module.MANIFEST)
             before = self.budget.snapshot() if self.budget else {}
             try:
                 if self.budget:
@@ -738,13 +923,13 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 break
             after = self.budget.snapshot() if self.budget else {}
+            budget_exhausted_after_trial = False
             if self.budget:
                 try:
                     self.budget.checkpoint()
                 except BudgetExhausted as exc:
-                    result.exit_ok = False
-                    result.error = str(exc)
                     self.bound = str(exc)
+                    budget_exhausted_after_trial = True
             # Post-trial item-ownership verification (works with both evaluators).
             self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
             missing = [path for path in required if not (trial_dir / path).exists()]
@@ -767,8 +952,14 @@ class Loop(OuterLoop):
                     continue
             trials.append(trial)
             self.measurements += 1
+            # Each record says which repeat graded it: joined across repeats, the
+            # same item id appears once per repeat, and without the index two
+            # gradings of one item read as a duplicate.
+            all_item_records.extend({**record, "repeat": index + 1} for record in result.item_records)
             last = result
             if not result.exit_ok:
+                break
+            if budget_exhausted_after_trial:
                 break
         scores = [t["score"] for t in trials if t["score"] is not None]
         complete = len(trials) == self.config.repeats and all(t["exit_ok"] for t in trials)
@@ -784,6 +975,10 @@ class Loop(OuterLoop):
         last.exit_ok = complete
         last.duration_s = sum(t["duration_s"] for t in trials)
         last.model_calls = sum(t["model_calls"] for t in trials)
+        # Every trial's item records count toward rollouts and are kept
+        # per occasion (brief ask 1: "every trial's items count toward
+        # rollouts and the records of every repeat are kept per occasion").
+        last.item_records = all_item_records
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
         return last, summary
@@ -1095,7 +1290,7 @@ class Loop(OuterLoop):
         Going through ``propose`` and ``install`` rather than straight to the
         optimizer is what lets a strategy change one of them and keep the other.
         """
-        run = run or Run(loop=self)
+        run = run or Run(_loop=self)
         # The pair a proposer is handed, and why it is the whole population rather
         # than the elite: `describe()` carries a score and the edits that produced
         # it, not the state, so a candidate the loop does not hand over cannot be
@@ -1108,6 +1303,19 @@ class Loop(OuterLoop):
             parents = self.select_parents(self.config.elite)
         if not parents:
             return [], []
+        # The parent this step edits, so ProposalContext.item_records carries its
+        # records, not board[0]'s (brief ask 5). Recomputed every step: the leader
+        # moves between steps, and a parent fixed at the first step would hand every
+        # later proposal a stale candidate's records. A strategy may name the parent
+        # in strategy_decision; otherwise select_parents(1) -- which respects kept
+        # candidates and is overridable -- decides. Kept out of strategy_decision,
+        # which reaches the proposal as the strategy's own choice.
+        explicit = self.strategy_decision.get("parent")
+        if explicit:
+            self._editing_parent = str(explicit)
+        else:
+            selected = self.select_parents(1)
+            self._editing_parent = selected[0].id if selected else None
         before = len(self.rejections)
         proposals = self.propose(run, parents, self.batch_size(run))
         candidates = self.install(run, proposals, parents)
@@ -1210,7 +1418,26 @@ class Loop(OuterLoop):
         Computed from the loop root and the seed's state — the loop-owned channel
         the candidate cannot write. Falls back silently when the mode cannot build
         or has no data nodes with items.
+
+        When a loop-level manifest exists, val/test ids are read from it instead
+        of calling ``partition().get(part)`` (which is always empty for val/test).
         """
+        # When a manifest exists, read val/test ids directly from it.
+        if self._parts_manifest is not None and part in self._parts_manifest:
+            manifest_ids = set(self._parts_manifest[part])
+            # Still need to determine seed_declares_item_scores
+            declares = False
+            if state:
+                try:
+                    graph = self.mode_class(state=state).build()
+                    for node in graph.nodes.values():
+                        if node.kind == "data" and "item_scores" in node.produces:
+                            declares = True
+                            break
+                except Exception:
+                    pass
+            return manifest_ids, declares
+
         if not state:
             return set(), False
         try:
@@ -1390,6 +1617,8 @@ class Loop(OuterLoop):
             self.bound = "epochs"
         elif self.evaluations >= self.config.max_evaluations:
             self.bound = "evaluations"
+        elif self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+            self.bound = "rollouts"
         if self.bound:
             # Journaled, not derived: the report states what bound the run, and a
             # run whose steps are separate processes reads that from the log.
@@ -1491,9 +1720,7 @@ class Loop(OuterLoop):
                 if refused is not None:
                     self.rejections.append(Rejection(rounds, proposal.edit, [refused]))
                     continue
-                allowed = self.config.allowed_ops or [
-                    entry["op"] for entry in nn_edits.catalogue(self.config.edit_preset)
-                ]
+                allowed = self.permitted_ops()
                 if op_name not in allowed:
                     self.rejections.append(Rejection(rounds, proposal.edit, ["E-policy: operation is outside this run's permitted edits"]))
                     continue
@@ -1537,7 +1764,12 @@ class Loop(OuterLoop):
 
         `should_stop` is consulted first so a strategy can end for a reason of its
         own -- a plateau, a convergence -- without replacing the loop.
+
+        When a custom strategy is attached (``_custom_strategy``), delegates
+        to it — the **custom strategy seam**.
         """
+        if self._custom_strategy is not None:
+            return self._custom_strategy.strategy(run)
         while True:
             if self._apply_control() == "stop":
                 run.stop("a person asked the run to stop")
@@ -1754,6 +1986,16 @@ class Loop(OuterLoop):
         self._epoch_open = False
         self._journal("epoch_end", epoch=self.epoch)
 
+    def strategy_state_dict(self) -> dict[str, Any]:
+        if self._custom_strategy is not None:
+            return self._custom_strategy.strategy_state_dict()
+        return super().strategy_state_dict()
+
+    def load_strategy_state(self, state: dict[str, Any]) -> None:
+        if self._custom_strategy is not None:
+            return self._custom_strategy.load_strategy_state(state)
+        return super().load_strategy_state(state)
+
     def _save_strategy_state(self) -> None:
         """Journal the strategy's current state unconditionally.
 
@@ -1853,9 +2095,16 @@ class Loop(OuterLoop):
         audit = self.audit_holdout()
         board = self.leaderboard()
         best = board[0] if board else None
+        # When the winner has explicit val/test parts, use audit_parts for a
+        # like-with-like overfit comparison (both unseen by the optimizer).
+        if best is not None:
+            parts_audit = self.audit_parts(best)
+            if parts_audit is not None:
+                audit = parts_audit
         exit_ok = (
             best is not None and audit.get("winner") == best.id
             and audit.get("status") in ("measured", "not_applicable")
+            and not audit.get("overfit")
         )
         payload = {
             "exit_ok": exit_ok,
@@ -2009,6 +2258,45 @@ class Loop(OuterLoop):
             overfit=audit["overfit"],
         )
         return audit
+
+    def audit_parts(self, winner: Candidate) -> dict[str, Any] | None:
+        """Overfit check comparing val vs test scores (like with like).
+
+        When the winner has been evaluated on both 'val' and 'test' parts,
+        the overfit check compares the latest val score vs the latest test
+        score.  Both are unseen by the optimizer, so the comparison is
+        *like with like*.
+
+        Returns ``None`` when the winner does not have both val and test.
+        """
+        candidate_results = self._part_results.get(winner.id, {})
+        val_parts = candidate_results.get("val", [])
+        test_parts = candidate_results.get("test", [])
+        if not val_parts or not test_parts:
+            return None
+
+        val_score = val_parts[-1].get("score")
+        test_score = test_parts[-1].get("score")
+
+        if val_score is None or test_score is None:
+            return {
+                "status": "failed",
+                "val": val_score,
+                "test": test_score,
+                "winner": winner.id,
+                "note": "val or test score is missing",
+            }
+
+        gap = val_score - test_score
+        return {
+            "status": "measured",
+            "val": val_score,
+            "test": test_score,
+            "gap": gap,
+            "overfit": gap > OVERFIT_THRESHOLD,
+            "threshold": OVERFIT_THRESHOLD,
+            "winner": winner.id,
+        }
 
     def _holdout_score(self, winner: Candidate) -> tuple[float | None, str]:
         """Run the winner on the held-out part, in a directory of its own.
@@ -2293,7 +2581,34 @@ class Loop(OuterLoop):
             # Read now, not at construction: the point of steering a search is that a
             # note added while it runs reaches the next proposal.
             steering=self._steering_block(),
+            item_records=self._parent_train_records(board),
+            parent_item_records=self._parent_train_records(board),
         )
+
+    def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """Train records for the parent the strategy selected for editing.
+
+        Priority:
+        1. ``strategy_decision["parent"]`` when a strategy named one, else the
+           parent ``optimizer_step`` chose this step from ``select_parents(1)``.
+        2. The most recently installed candidate's parent — what the optimizer
+           actually bred from in the previous round.  This is a better signal
+           than ``board[0]`` when the optimizer picks a non-best parent.
+        3. ``board[0]`` — leaderboard best as a last resort.
+        """
+        # Prefer the parent the strategy explicitly selected.
+        parent_id = self.strategy_decision.get("parent") or self._editing_parent
+        if parent_id and parent_id in self._train_item_records:
+            return list(self._train_item_records[parent_id])
+        # Fall back to the most recently installed candidate's parent:
+        # what the optimizer actually bred from.
+        for c in reversed(self.population):
+            if c.parent and c.parent in self._train_item_records:
+                return list(self._train_item_records[c.parent])
+        # Last resort: leaderboard best.
+        if not board:
+            return []
+        return list(self._train_item_records.get(board[0].id, []))
 
     def _steering_block(self) -> str:
         """The run's intent ledger as the proposer reads it, empty when there is none."""
@@ -2515,6 +2830,24 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
+            elif event == "train_records":
+                cid = record.get("id")
+                if cid is not None:
+                    self._train_item_records[cid] = list(record.get("records") or [])
+            elif event == "part_result":
+                cid = record.get("id")
+                part_name = record.get("part")
+                result_data = record.get("result")
+                if cid is not None and part_name is not None and result_data is not None:
+                    self._part_results.setdefault(cid, {}).setdefault(part_name, []).append(result_data)
+            elif event == "occasion_counter":
+                cid = record.get("id")
+                part_name = record.get("part")
+                counter_val = record.get("counter")
+                if cid is not None and part_name is not None and counter_val is not None:
+                    self._occasion_counters.setdefault(cid, {})[part_name] = int(counter_val)
+            elif event == "rollouts":
+                self.rollouts = int(record.get("rollouts") or 0)
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")
@@ -2724,6 +3057,23 @@ def run(
     return loop.run()
 
 
+def _coerce_strategy_value(raw: str) -> Any:
+    """Coerce a CLI strategy-option value to int, float, bool, or string."""
+    if raw.lower() in ("true", "yes"):
+        return True
+    if raw.lower() in ("false", "no"):
+        return False
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m refactory_dsh.loop <package>/<mode> [options]``."""
     import argparse
@@ -2740,7 +3090,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default=str(project_root()))
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--parts", default=None, dest="parts_manifest",
+                        help="path to a parts.json manifest with train/val/test id lists")
     parser.add_argument("--resolved-config", default="", help="exact resolved snapshot prepared by the console")
+    parser.add_argument(
+        "--strategy-option", action="append", default=[], metavar="KEY=VALUE",
+        help="strategy-specific option as KEY=VALUE; may be repeated",
+    )
     args = parser.parse_args(argv)
     project = Path(args.project)
     from refactory_dsh.model import DshModelClient, ModelChoiceError, require_model_choice
@@ -2785,9 +3141,18 @@ def main(argv: list[str] | None = None) -> int:
                 gated = client(snapshot)
             model = gated
         settings = snapshot["settings"]
+        # Parse --strategy-option KEY=VALUE flags
+        strategy_opts: dict[str, Any] = {}
+        for pair in getattr(args, "strategy_option", []):
+            if "=" not in pair:
+                raise ValueError(f"--strategy-option requires KEY=VALUE, got {pair!r}")
+            key, _, raw = pair.partition("=")
+            strategy_opts[key.strip()] = _coerce_strategy_value(raw.strip())
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
-                                      "resume": args.resume, "resolved_profile": snapshot})
+                                      "resume": args.resume, "resolved_profile": snapshot,
+                                      "parts_manifest": getattr(args, "parts_manifest", None),
+                                      "strategy_options": strategy_opts})
     except ModelChoiceError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1
@@ -2796,7 +3161,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         loop = strategies.create(
-            config.strategy, args.mode, config, project=project, model=model
+            config.strategy, args.mode, config,
+            strategy_options=config.strategy_options,
+            project=project, model=model,
         )
         report = loop.run()
     except LoopError as exc:

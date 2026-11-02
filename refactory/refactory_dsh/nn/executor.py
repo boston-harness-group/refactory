@@ -370,12 +370,17 @@ def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     A node bound to a Task and naming no source takes its items from the Task, which
     is what makes ``task_ref`` a binding rather than a line in a prompt. Public
     because the outer loop sizes the partition it writes from the whole selection.
+
+    When ``subset.json`` exists in ``workdir``, its ``part`` and ``seed`` are
+    forwarded to ``Task.instances()`` so a Task whose items depend on the seed
+    sees the evaluation's part and seed.
     """
     items = declared_items(node, workdir)
     if not items and node.task_ref:
-        from refactory_dsh.task import load_task
+        from refactory_dsh.task import load_task, subset_part_seed
 
-        items = task_items(load_task(node.task_ref, workdir))
+        part, seed = subset_part_seed(workdir)
+        items = task_items(load_task(node.task_ref, workdir), part=part, seed=seed)
     return items
 
 
@@ -449,11 +454,24 @@ def declared_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     return items
 
 
-def task_items(task: "Task") -> list[dict[str, Any]]:
-    """A Task's instances as the items a data node iterates."""
+def task_items(
+    task: "Task",
+    *,
+    part: str | None = None,
+    seed: int | None = None,
+) -> list[dict[str, Any]]:
+    """A Task's instances as the items a data node iterates.
+
+    ``part`` and ``seed`` reach ``task.instances()`` only when its signature
+    accepts them (``task.part_seed_kwargs``), so a Task written without them
+    still loads and a TypeError raised inside it is never swallowed.
+    """
+    from refactory_dsh.task import part_seed_kwargs
+
+    instances = task.instances(**part_seed_kwargs(task.instances, part=part, seed=seed))
     return [
         {"id": instance.id, "path": instance.path, **instance.metadata}
-        for instance in task.instances()
+        for instance in instances
     ]
 
 
@@ -641,6 +659,10 @@ class Executor:
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
+    #: Per-item exchanges captured during a data-node pass.
+    _item_exchanges: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    #: Per-item records built during the data-node loop.
+    _item_records: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
 
@@ -831,6 +853,17 @@ class Executor:
                 _original_max_steps = self.max_steps
                 self.max_steps += (len(items) - 1) * _subgraph_node_count
 
+                # Read part/seed from subset.json once for all items (ask 5).
+                from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+                _walker_part, _walker_seed = subset_part_seed(self.ctx.workdir)
+                _setup_kwargs: dict[str, Any] = {}
+                _verify_kwargs: dict[str, Any] = {}
+                if task is not None:
+                    _setup_kwargs = part_seed_kwargs(
+                        task.setup, part=_walker_part, seed=_walker_seed)
+                    _verify_kwargs = part_seed_kwargs(
+                        task.verify, part=_walker_part, seed=_walker_seed)
+
                 scores: list[dict[str, Any]] = []
                 _data_halted = False
                 for index, item in enumerate(items):
@@ -851,7 +884,7 @@ class Executor:
                             _alarm_armed = True
 
                         if task is not None:
-                            task.setup(instance, self.ctx.workdir)
+                            task.setup(instance, self.ctx.workdir, **_setup_kwargs)
                         # The item is written as the data node, so the declaration that
                         # governs it is the data node's — not the last node of the pass
                         # before it.
@@ -861,6 +894,8 @@ class Executor:
                         self.ctx._declared_facts = node.produces  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
                         self.ctx.write_json(CURRENT_ITEM, item)
+                        # Clear per-item exchanges before each pass.
+                        self._item_exchanges = []
 
                         # Disarm deadline before walking the branch.
                         if _alarm_armed:
@@ -881,7 +916,7 @@ class Executor:
                             _alarm_armed = True
 
                         if task is not None:
-                            verdict = task.verify(instance, self.ctx.workdir)
+                            verdict = task.verify(instance, self.ctx.workdir, **_verify_kwargs)
                         else:
                             verdict = None
                     except _PASSTHROUGH:
@@ -901,10 +936,18 @@ class Executor:
                         break
                     except _ItemDeadlineError as exc:
                         # Deadline exceeded: record as timeout, not retryable.
-                        record = make_item_record(item_id, None, error=exc)
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        record = make_item_record(
+                            item_id, None, error=exc,
+                            exchanges=list(self._item_exchanges),
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
+                        )
                         if record is not None:
                             record["error_kind"] = "timeout"
                             scores.append(record)
+                            self._item_records.append(record)
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
@@ -912,27 +955,64 @@ class Executor:
                     except _BranchFailed as exc:
                         # Wrap in RuntimeError so error_kind matches the
                         # spine's "RuntimeError" for subgraph failures.
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
                         record = make_item_record(
-                            item_id, None, error=RuntimeError(str(exc))
+                            item_id, None, error=RuntimeError(str(exc)),
+                            exchanges=list(self._item_exchanges),
+                            fail_reason=str(exc),
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
                         )
                         if record is not None:
                             scores.append(record)
+                            self._item_records.append(record)
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
                         continue
                     except Exception as exc:
-                        record = make_item_record(item_id, None, error=exc)
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        record = make_item_record(
+                            item_id, None, error=exc,
+                            exchanges=list(self._item_exchanges),
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
+                        )
                         if record is not None:
                             scores.append(record)
+                            self._item_records.append(record)
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
                         continue
                     else:
-                        record = make_item_record(item_id, verdict)
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        # Prediction comes from VerifyResult.prediction whenever
+                        # the Task sets it (both pass and fail).  Fall back to
+                        # verdict.details on pass and "" on fail only when the
+                        # Task gives none.
+                        _prediction: str | None = None
+                        if verdict is not None:
+                            if verdict.prediction:
+                                _prediction = verdict.prediction
+                            elif verdict.passed:
+                                _prediction = verdict.details
+                            else:
+                                _prediction = ""
+                        record = make_item_record(
+                            item_id, verdict,
+                            exchanges=list(self._item_exchanges),
+                            prediction=_prediction,
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
+                            metadata=metadata,
+                        )
                         if record is not None:
                             scores.append(record)
+                            self._item_records.append(record)
                     finally:
                         # Disarm the per-item deadline and restore the
                         # previous handler/alarm.  The guard is on
@@ -1065,6 +1145,7 @@ class Executor:
             gate_stop=gate_stop_id,
             halted=halted,
             gate_verdicts=dict(self.record.gate_verdicts),
+            item_records=list(self._item_records),
         )
 
     # ── one branch of a fork, or one pass of a data node ───────────────────
@@ -1475,8 +1556,22 @@ class Executor:
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                return _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
-            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
+                response = _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+            else:
+                response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
+            # Exchange-counting rule: one exchange per completed agent call.
+            # Retries within a single ask() are transparent to the walker
+            # (the model client handles them); the spine path records one
+            # exchange per agent_delivery.finish call via record_exchange.
+            # Both runtimes therefore count one exchange per completed call.
+            # The walker keeps exchanges in memory; the sidecar file is only
+            # for the spine path (where separate processes share state via disk).
+            self._item_exchanges.append({
+                "node": node.id,
+                "prompt": sent,
+                "response": response,
+            })
+            return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
         if tool_policy == "none":

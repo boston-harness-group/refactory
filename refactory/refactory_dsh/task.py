@@ -33,6 +33,7 @@ that could set it would take its own exam.
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +60,7 @@ class VerifyResult:
     passed: bool
     score: float
     details: str = ""
+    prediction: str = ""
 
 
 class Task:
@@ -66,14 +68,27 @@ class Task:
 
     name = ""
 
-    def instances(self) -> list[TaskInstance]:
-        """The items to process. One unnamed instance unless the Task says otherwise."""
+    def instances(
+        self, *, part: str | None = None, seed: int | None = None,
+    ) -> list[TaskInstance]:
+        """The items to process. One unnamed instance unless the Task says otherwise.
+
+        ``part`` and ``seed`` are optional: a Task that depends on neither
+        ignores them (backward compatible).  A Task whose items vary by seed
+        overrides this and uses them.
+        """
         return [TaskInstance(id="default")]
 
-    def setup(self, instance: TaskInstance, workspace: Path) -> None:
+    def setup(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> None:
         """Prepare the workspace for one item. Nothing to do by default."""
 
-    def verify(self, instance: TaskInstance, workspace: Path) -> VerifyResult | None:
+    def verify(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> VerifyResult | None:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 
@@ -132,12 +147,17 @@ def instance_of(item: dict[str, Any]) -> TaskInstance:
 #: The file in a run directory that names the part of the items it evaluates.
 SUBSET = "subset.json"
 
-#: The two parts an item selection can name.
+#: The parts an item selection can name.
 TRAIN = "train"
 HOLDOUT = "holdout"
+VAL = "val"
+TEST = "test"
 
 #: The holdout fraction used when a run directory names a part but no fraction.
 DEFAULT_HOLDOUT = 0.3
+
+#: An explicit id-list manifest for three-way partitioning.
+MANIFEST = "parts.json"
 
 
 def _item_key(item: dict[str, Any], index: int) -> str:
@@ -181,7 +201,47 @@ def _subset_file(workdir: Path) -> Path:
     return Path(workdir) / SUBSET
 
 
-def write_subset(workdir: Path, part: str, holdout: float) -> Path:
+def make_manifest(
+    workdir: Path,
+    *,
+    train_ids: list[str],
+    val_ids: list[str] | None = None,
+    test_ids: list[str] | None = None,
+) -> Path:
+    """Write an explicit id-list manifest for three-way partitioning."""
+    manifest: dict[str, list[str]] = {"train": list(train_ids)}
+    if val_ids is not None:
+        manifest["val"] = list(val_ids)
+    if test_ids is not None:
+        manifest["test"] = list(test_ids)
+    path = Path(workdir) / MANIFEST
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2))
+    return path
+
+
+def split_to_manifest(
+    workdir: Path,
+    items: Sequence[dict[str, Any]],
+    *,
+    holdout: float = DEFAULT_HOLDOUT,
+    val_fraction: float = 0.0,
+) -> Path:
+    """Partition items by fractions and write the resulting id lists as a manifest."""
+    parts = partition(items, holdout)
+    train_items = parts[TRAIN]
+    test_items = parts[HOLDOUT]
+    train_ids = [str(item.get("id") or i) for i, item in enumerate(items) if item in train_items]
+    test_ids = [str(item.get("id") or i) for i, item in enumerate(items) if item in test_items]
+    val_ids: list[str] | None = None
+    if val_fraction > 0 and len(train_ids) > 1:
+        split_point = max(1, int(round(len(train_ids) * (1 - val_fraction))))
+        val_ids = train_ids[split_point:]
+        train_ids = train_ids[:split_point]
+    return make_manifest(workdir, train_ids=train_ids, val_ids=val_ids, test_ids=test_ids or None)
+
+
+def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None) -> Path:
     """Record which part of a Task's items a run directory evaluates.
 
     The outer loop writes this before it evaluates a candidate and the item loader
@@ -189,7 +249,10 @@ def write_subset(workdir: Path, part: str, holdout: float) -> Path:
     """
     path = _subset_file(workdir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"part": str(part), "holdout": float(holdout)}, indent=2))
+    data: dict[str, Any] = {"part": str(part), "holdout": float(holdout)}
+    if seed is not None:
+        data["seed"] = seed
+    path.write_text(json.dumps(data, indent=2))
     return path
 
 
@@ -205,21 +268,87 @@ def read_subset(workdir: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def subset_part_seed(workdir: Path) -> tuple[str | None, int | None]:
+    """The part and seed ``subset.json`` names, each ``None`` when it names none."""
+    record = read_subset(workdir)
+    part = record.get("part") or None
+    seed = record.get("seed")
+    return (str(part) if part else None), (int(seed) if seed is not None else None)
+
+
+def part_seed_kwargs(
+    method: Any, *, part: str | None, seed: int | None,
+) -> dict[str, Any]:
+    """The ``part``/``seed`` keywords a Task hook accepts, decided by its signature.
+
+    A Task written before ``part`` and ``seed`` existed takes neither, so they are
+    passed only to a hook that names them or takes ``**kwargs``. Deciding from the
+    signature rather than by calling and catching ``TypeError`` means a TypeError
+    raised inside the hook is that item's failure, never a silent second call.
+    """
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return {"part": part, "seed": seed}
+    accepted = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    return {
+        name: value
+        for name, value in (("part", part), ("seed", seed))
+        if name in params and params[name].kind in accepted
+    }
+
+
 def select_subset(
     items: Sequence[dict[str, Any]], workdir: Path
 ) -> list[dict[str, Any]]:
     """The part of ``items`` a run directory names, or all of them when it names none.
 
     Called by the one item loader both runtimes use, so the walker and DSH iterate
-    the same items of the same Task. A mode run outside the outer loop has no run
-    directory naming a part and evaluates everything it has.
+    the same items of the same Task. When a ``parts.json`` manifest exists, item
+    ids are looked up there. When ``seed`` is present in subset.json, the returned
+    items are shuffled within the part using ``random.Random(seed)``.
     """
+    import random as _random
+
     record = read_subset(workdir)
     part = str(record.get("part") or "")
-    if part not in (TRAIN, HOLDOUT):
+
+    # Try manifest first
+    manifest_path = Path(workdir) / MANIFEST
+    if manifest_path.exists() and part:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            if isinstance(manifest, dict) and part in manifest:
+                allowed_ids = set(str(x) for x in manifest[part])
+                selected = [
+                    item for i, item in enumerate(items)
+                    if str(item.get("id") or i) in allowed_ids
+                ]
+                seed = record.get("seed")
+                if seed is not None:
+                    selected = list(selected)
+                    _random.Random(seed).shuffle(selected)
+                return selected
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if part not in (TRAIN, HOLDOUT, VAL, TEST):
         return list(items)
+    if part in (VAL, TEST):
+        raise TaskError(
+            f"part {part!r} requires a parts manifest (parts.json); "
+            f"no manifest was found in {workdir}"
+        )
+    effective = part
     try:
         fraction = float(record.get("holdout", DEFAULT_HOLDOUT))
     except (TypeError, ValueError):
         fraction = DEFAULT_HOLDOUT
-    return partition(items, fraction)[part]
+    selected = partition(items, fraction)[effective]
+    seed = record.get("seed")
+    if seed is not None:
+        selected = list(selected)
+        _random.Random(seed).shuffle(selected)
+    return selected

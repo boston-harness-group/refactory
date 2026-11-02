@@ -1,0 +1,56 @@
+[
+  {
+    "month": "202503",
+    "no": 1,
+    "paper_link": "http://arxiv.org/abs/2503.00001v1",
+    "theorem": "By Cauchy's theorem, $\\oint_C f(z)\\,dz = 0$.",
+    "sketch": "",
+    "theorem_type": ["complex_analysis"],
+    "mcq": {
+      "question": "What is the value of $\\oint_{|z|=1} \\frac{1}{z}\\,dz$?",
+      "choices": [
+        {"label": "A", "text": "$0$"},
+        {"label": "B", "text": "$2\\pi i$"},
+        {"label": "C", "text": "$\\pi i$"},
+        {"label": "D", "text": "$-2\\pi i$"}
+      ],
+      "correct_choice": {"label": "B", "text": "$2\\pi i$"}
+    }
+  },
+  {
+    "month": "202503",
+    "no": 2,
+    "paper_link": "http://arxiv.org/abs/2503.00002v1",
+    "theorem": "",
+    "sketch": "",
+    "theorem_type": ["number_theory"],
+    "mcq": {
+      "question": "How many primes are there less than 10?",
+      "choices": [
+        {"label": "A", "text": "3"},
+        {"label": "B", "text": "4"},
+        {"label": "C", "text": "5"},
+        {"label": "D", "text": "6"}
+      ],
+      "correct_choice": {"label": "B", "text": "4"}
+    }
+  },
+  {
+    "month": "202503",
+    "no": 3,
+    "paper_link": "http://arxiv.org/abs/2503.00003v1",
+    "theorem": "",
+    "sketch": "",
+    "theorem_type": ["topology"],
+    "mcq": {
+      "question": "Is every compact subset of $\\mathbb{R}^n$ closed and bounded?",
+      "choices": [
+        {"label": "A", "text": "Yes, by Heine-Borel"},
+        {"label": "B", "text": "No, only closed"},
+        {"label": "C", "text": "No, only bounded"},
+        {"label": "D", "text": "It depends on $n$"}
+      ],
+      "correct_choice": {"label": "A", "text": "Yes, by Heine-Borel"}
+    }
+  }
+]

@@ -523,6 +523,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="print every event, and each candidate's own run output, not only the "
              "meaningful ones",
     )
+    optimize.add_argument(
+        "--strategy-option", action="append", default=[], metavar="KEY=VALUE",
+        help="strategy-specific option as KEY=VALUE; may be repeated",
+    )
 
     listing = sub.add_parser("list", help="what this checkout can do")
     listing.add_argument("what", nargs="?", default="modes", choices=["modes", "packages"])
