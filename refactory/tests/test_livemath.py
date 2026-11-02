@@ -638,3 +638,49 @@ def test_solve_timeout_is_configurable():
         solve_timeout_s = 900
 
     assert Slow().build().nodes["solve"].timeout_s == 900
+
+
+def test_walker_run_items_follow_skillopt_shuffle_for_passed_seed(tmp_path):
+    """In a real walker run, the seed subset.json names reaches
+    ``LiveMathTask.instances`` and every item's choices are SkillOpt's shuffle
+    for that seed. Expected orders were computed by SkillOpt's own
+    ``LiveMathematicianBenchDataLoader._shuffle_item_choices`` (dataloader.py:200-226)
+    for seed 1043 -- the epoch-1 batch seed for seed 42 (dataloader.py:278)."""
+    from refactory_dsh.evaluators import WalkerEvaluator
+    from refactory_dsh.task import write_subset
+    from refactory_packages.livemath.mode import Solver
+    import refactory_packages.livemath.tasks as tasks_mod
+    from tests_support import FakeModel
+
+    expected = {
+        "202501:1": (["Diverges", "Converges conditionally", "Converges absolutely",
+                      "Oscillates"], "B"),
+        "202501:2": (["2", "0", "1", "3"], "D"),
+        "202503:1": (["$2\\pi i$", "$\\pi i$", "$-2\\pi i$", "$0$"], "A"),
+        "202503:2": (["6", "5", "3", "4"], "D"),
+        "202503:3": (["No, only closed", "No, only bounded", "Yes, by Heine-Borel",
+                      "It depends on $n$"], "C"),
+    }
+    original_init = tasks_mod.LiveMathTask.__init__
+
+    def patched_init(self, data_path=None, shuffle_choices=True):  # type: ignore[no-untyped-def]
+        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=shuffle_choices)
+
+    tasks_mod.LiveMathTask.__init__ = patched_init  # type: ignore[method-assign]
+    try:
+        workdir = tmp_path / "walk"
+        write_subset(workdir, "train", 0.0, seed=1043)
+        mode = Solver()
+        evaluator = WalkerEvaluator(
+            model=FakeModel(["<answer>B</answer>"] * 10), project=Path("."), max_steps=2000,
+        )
+        result = evaluator.evaluate(mode, mode.state_dict(), workdir)
+    finally:
+        tasks_mod.LiveMathTask.__init__ = original_init  # type: ignore[method-assign]
+
+    assert result.exit_ok, result.error
+    got = {
+        r["id"]: ([c["text"] for c in r["metadata"]["choices"]], r["label"])
+        for r in result.item_records
+    }
+    assert got == expected

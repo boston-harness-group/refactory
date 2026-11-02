@@ -33,6 +33,7 @@ that could set it would take its own exam.
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,14 +68,27 @@ class Task:
 
     name = ""
 
-    def instances(self) -> list[TaskInstance]:
-        """The items to process. One unnamed instance unless the Task says otherwise."""
+    def instances(
+        self, *, part: str | None = None, seed: int | None = None,
+    ) -> list[TaskInstance]:
+        """The items to process. One unnamed instance unless the Task says otherwise.
+
+        ``part`` and ``seed`` are optional: a Task that depends on neither
+        ignores them (backward compatible).  A Task whose items vary by seed
+        overrides this and uses them.
+        """
         return [TaskInstance(id="default")]
 
-    def setup(self, instance: TaskInstance, workspace: Path) -> None:
+    def setup(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> None:
         """Prepare the workspace for one item. Nothing to do by default."""
 
-    def verify(self, instance: TaskInstance, workspace: Path) -> VerifyResult | None:
+    def verify(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> VerifyResult | None:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 
@@ -252,6 +266,38 @@ def read_subset(workdir: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def subset_part_seed(workdir: Path) -> tuple[str | None, int | None]:
+    """The part and seed ``subset.json`` names, each ``None`` when it names none."""
+    record = read_subset(workdir)
+    part = record.get("part") or None
+    seed = record.get("seed")
+    return (str(part) if part else None), (int(seed) if seed is not None else None)
+
+
+def part_seed_kwargs(
+    method: Any, *, part: str | None, seed: int | None,
+) -> dict[str, Any]:
+    """The ``part``/``seed`` keywords a Task hook accepts, decided by its signature.
+
+    A Task written before ``part`` and ``seed`` existed takes neither, so they are
+    passed only to a hook that names them or takes ``**kwargs``. Deciding from the
+    signature rather than by calling and catching ``TypeError`` means a TypeError
+    raised inside the hook is that item's failure, never a silent second call.
+    """
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return {"part": part, "seed": seed}
+    accepted = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    return {
+        name: value
+        for name, value in (("part", part), ("seed", seed))
+        if name in params and params[name].kind in accepted
+    }
 
 
 def select_subset(

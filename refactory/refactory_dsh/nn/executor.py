@@ -399,12 +399,17 @@ def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     A node bound to a Task and naming no source takes its items from the Task, which
     is what makes ``task_ref`` a binding rather than a line in a prompt. Public
     because the outer loop sizes the partition it writes from the whole selection.
+
+    When ``subset.json`` exists in ``workdir``, its ``part`` and ``seed`` are
+    forwarded to ``Task.instances()`` so a Task whose items depend on the seed
+    sees the evaluation's part and seed.
     """
     items = declared_items(node, workdir)
     if not items and node.task_ref:
-        from refactory_dsh.task import load_task
+        from refactory_dsh.task import load_task, subset_part_seed
 
-        items = task_items(load_task(node.task_ref, workdir))
+        part, seed = subset_part_seed(workdir)
+        items = task_items(load_task(node.task_ref, workdir), part=part, seed=seed)
     return items
 
 
@@ -478,11 +483,24 @@ def declared_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     return items
 
 
-def task_items(task: "Task") -> list[dict[str, Any]]:
-    """A Task's instances as the items a data node iterates."""
+def task_items(
+    task: "Task",
+    *,
+    part: str | None = None,
+    seed: int | None = None,
+) -> list[dict[str, Any]]:
+    """A Task's instances as the items a data node iterates.
+
+    ``part`` and ``seed`` reach ``task.instances()`` only when its signature
+    accepts them (``task.part_seed_kwargs``), so a Task written without them
+    still loads and a TypeError raised inside it is never swallowed.
+    """
+    from refactory_dsh.task import part_seed_kwargs
+
+    instances = task.instances(**part_seed_kwargs(task.instances, part=part, seed=seed))
     return [
         {"id": instance.id, "path": instance.path, **instance.metadata}
-        for instance in task.instances()
+        for instance in instances
     ]
 
 
@@ -897,6 +915,17 @@ class Executor:
                 _original_max_steps = self.max_steps
                 self.max_steps += (len(items) - 1) * _subgraph_node_count
 
+                # Read part/seed from subset.json once for all items (ask 5).
+                from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+                _walker_part, _walker_seed = subset_part_seed(self.ctx.workdir)
+                _setup_kwargs: dict[str, Any] = {}
+                _verify_kwargs: dict[str, Any] = {}
+                if task is not None:
+                    _setup_kwargs = part_seed_kwargs(
+                        task.setup, part=_walker_part, seed=_walker_seed)
+                    _verify_kwargs = part_seed_kwargs(
+                        task.verify, part=_walker_part, seed=_walker_seed)
+
                 scores: list[dict[str, Any]] = []
                 _data_halted = False
                 for index, item in enumerate(items):
@@ -917,7 +946,7 @@ class Executor:
                             _alarm_armed = True
 
                         if task is not None:
-                            task.setup(instance, self.ctx.workdir)
+                            task.setup(instance, self.ctx.workdir, **_setup_kwargs)
                         # The item is written as the data node, so the declaration that
                         # governs it is the data node's — not the last node of the pass
                         # before it.
@@ -949,7 +978,7 @@ class Executor:
                             _alarm_armed = True
 
                         if task is not None:
-                            verdict = task.verify(instance, self.ctx.workdir)
+                            verdict = task.verify(instance, self.ctx.workdir, **_verify_kwargs)
                         else:
                             verdict = None
                     except _PASSTHROUGH:

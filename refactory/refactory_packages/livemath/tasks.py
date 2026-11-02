@@ -178,12 +178,15 @@ class LiveMathTask(Task):
             self._items = load_items(self.data_path)
         return self._items
 
-    def instances(self, seed: int | None = None) -> list[TaskInstance]:  # type: ignore[override]
+    def instances(
+        self, *, part: str | None = None, seed: int | None = None,
+    ) -> list[TaskInstance]:
         """Load items and return TaskInstance list.
 
         When shuffle_choices is True and seed is not None, each item's choices
         are shuffled per SkillOpt's dataloader.py:200-226, using the seed the
-        outer loop passes (F18).
+        outer loop passes (F18). ``part`` does not change the items: the loader
+        selects the part from the parts manifest.
         """
         raw_items = self._load()
         result: list[TaskInstance] = []
