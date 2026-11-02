@@ -701,8 +701,9 @@ TAUTOLOGY = {"source": "verifier", "where": "tests/test_pitfalls.py:394",
 
 
 @pytest.mark.parametrize("item, back", [
-    # A weakened test with breaks set blocks; a merely missing test is a follow-up.
-    (TAUTOLOGY, True),
+    # A weakened test is a follow-up whatever it breaks: no detector separates a
+    # loosened assertion from an expected value updated to match a required behaviour.
+    (TAUTOLOGY, False),
     ({**TAUTOLOGY, "breaks": "none"}, False),
     ({**TAUTOLOGY, "severity": "high", "breaks": "none"}, False),
     ({**TAUTOLOGY, "kind": "docs", "severity": "high"}, False),
@@ -744,9 +745,11 @@ def test_the_judge_prompts_state_the_bar_and_ask_for_each_items_kind():
         assert "merely missing test" in prompt
 
 
-def test_a_weakened_test_costs_a_build_round(tmp_path):
-    """A weakened test with breaks='correction' now blocks: the QA judge's must-fix
-    causes a second build round, because the gate blocks kind='test' when breaks is set."""
+def test_a_weakened_test_does_not_cost_a_build_round(tmp_path):
+    """A weakened test with breaks='correction' is reported, not sent back.
+
+    It reaches the pull request as a follow-up, so the build does not pay a round for
+    a finding that may well be the edit the brief required."""
     repo = git_repo(tmp_path / "repo")
     model = FakeModel(_answers(
         _round(_tool("bilt"), judge=qa_judgment("redo", must_fix=[TAUTOLOGY])),
@@ -755,18 +758,27 @@ def test_a_weakened_test_costs_a_build_round(tmp_path):
     result = _design(run, model, repo)
 
     assert result.exit_ok, result.error
-    assert len(_prompts(model, EMIT_MARK)) == 2, "a weakened test causes a second build round"
-    assert result.facts.get("review_attempts_used") == 1
+    assert len(_prompts(model, EMIT_MARK)) == 1, (
+        "a weakened test must not cause a second build round")
+    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text(), (
+        "the weakened test must still be reported as a follow-up")
 
 
-def test_weakened_test_blocks_while_missing_test_follows_up():
-    """Directly call judges.blocks: a weakened test (breaks set) blocks, a merely
-    missing test (breaks='none') does not."""
-    assert judges.blocks({"kind": "test", "breaks": "correction"}) is True
-    assert judges.blocks({"kind": "test", "breaks": "ask"}) is True
+def test_a_weakened_test_is_a_follow_up_whatever_it_breaks():
+    """Directly call judges.blocks: no `test` item blocks, whatever its `breaks`.
+
+    The detector behind it cannot tell a loosened assertion from an expected value
+    updated to match a behaviour the brief asked for, and the second is the required
+    edit for a behaviour-change brief, so blocking on it sent legitimate builds back.
+    It is reported and a person judges it."""
+    assert judges.blocks({"kind": "test", "breaks": "correction"}) is False
+    assert judges.blocks({"kind": "test", "breaks": "ask"}) is False
     assert judges.blocks({"kind": "test", "breaks": "none"}) is False
     assert judges.blocks({"kind": "test", "breaks": ""}) is False
     assert judges.blocks({"kind": "test"}) is False
+    # An ask or a check still blocks, so the bar has not been removed wholesale.
+    assert judges.blocks({"kind": "ask", "breaks": "ask"}) is True
+    assert judges.blocks({"kind": "check", "breaks": "none"}) is True
 
 
 def test_an_unbuilt_ask_still_sends_the_change_back(tmp_path):
@@ -796,17 +808,17 @@ def test_a_high_severity_product_defect_still_sends_the_change_back(tmp_path):
     assert len(emits) == 2 and "crashes on empty input" in model.prompts[emits[1]]
 
 
-def test_the_tautology_blocks_on_the_spine_too(tmp_path, monkeypatch):
-    """gate_qa runs as its own process on the spine: a weakened test (TAUTOLOGY with
-    breaks='correction') now blocks on the spine just as on the walker."""
+def test_the_tautology_does_not_block_on_the_spine_either(tmp_path, monkeypatch):
+    """gate_qa runs as its own process on the spine, and agrees with the walker.
+
+    A weakened test proceeds whatever it breaks, on both runtimes; a check item below
+    still sends the build back, so the bar itself is intact."""
     run = _spine_run(tmp_path, qa_judgment("redo", must_fix=[TAUTOLOGY]))
     code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
     assert code == 0, err
-    assert out.split()[-1] == "reloop"
-    assert TAUTOLOGY["what"] in out
-    assert json.loads((run / "facts.json").read_text()).get("review_attempts_used") == 1
+    assert out.split()[-1] == "proceed"
 
-    # A merely missing test (breaks='none') still proceeds on the spine
+    # And with breaks='none', as before.
     (run / judges.QA_JUDGE).write_text(qa_judgment("redo", must_fix=[
         {**TAUTOLOGY, "breaks": "none"}]))
     code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})

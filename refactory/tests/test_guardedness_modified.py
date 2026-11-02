@@ -79,9 +79,15 @@ def test_bar():
     assert "test_bar" not in relaxed
 
 
-def test_modified_test_function_with_relaxed_assertion_reported(tmp_path):
-    """A changed test function whose change relaxed an assertion is reported
-    by enforce_guardedness."""
+def test_modified_test_function_with_relaxed_assertion_is_advisory_not_blocking(tmp_path):
+    """A relaxed assertion in a MODIFIED test is recorded, and does not block.
+
+    enforce_guardedness returns only the blocking set (non-guarding ADDED tests), so
+    the modified file must not appear there. The finding is written to the
+    weakened_tests_advisory fact and to relaxed_advisory in test-guardedness.json,
+    for the reviewers and the person to judge: the detector cannot tell a loosened
+    assertion from an expected value updated to match a behaviour the brief asked
+    for, and the second is the required edit."""
     repo = _git_repo(tmp_path / "repo")
 
     base_test = '''\
@@ -120,7 +126,10 @@ def test_check():
     }))
 
     result = design_ops.enforce_guardedness(ctx)
-    assert "tests/test_mod.py" in result
+    assert result == [], f"a modified test must not block, got {result}"
+    assert ctx.facts.get("weakened_tests_advisory") == ["tests/test_mod.py::test_check"]
+    record = ctx.read_json("test-guardedness.json", {})
+    assert record.get("relaxed_advisory") == ["tests/test_mod.py::test_check"]
 
 
 def test_modified_test_function_with_rename_only_excused(tmp_path):

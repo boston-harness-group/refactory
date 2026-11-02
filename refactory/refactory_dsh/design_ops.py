@@ -2759,15 +2759,20 @@ def _assertion_relaxed(base_body: str, head_body: str) -> bool:
 
 
 def enforce_guardedness(ctx: Any) -> list[str]:
-    """Return the names of non-guarding **added** tests and modified tests with
-    relaxed assertions that are not exempted.
+    """Return the names of non-guarding **added** tests that are not exempted.
 
-    Added test files (not modified ones) are enforced for the whole file.
-    Modified test files are checked at function granularity: only functions
-    whose change relaxed an assertion (removed or weakened ``assert``, changed
-    expected value, added ``skip``/``xfail``) are reported. A test function
-    edited only for renames or refactors is excused via
-    "## Test guardedness exemptions".
+    Added test files are enforced for the whole file: a new test that passes
+    without the change pins nothing, and that blocks.
+
+    Modified test files are checked at function granularity for relaxed
+    assertions, but the result is **advisory only** -- written to the
+    ``weakened_tests_advisory`` fact and to ``relaxed_advisory`` in
+    ``test-guardedness.json``, never returned here. The detector cannot
+    distinguish a loosened assertion from an expected value updated to match a
+    behaviour the brief asked for, which is the required edit for a
+    behaviour-change brief, so blocking on it sent legitimate builds back. It
+    also misses every decorator-level weakening. See the detector-redesign
+    follow-up.
 
     Exemptions come from two sources:
 
@@ -2856,6 +2861,8 @@ def enforce_guardedness(ctx: Any) -> list[str]:
         pass
 
     result_files = [t for t in non_guarding if t not in exempted]
+    #: Modified tests whose assertions look relaxed. Reported, never blocking.
+    advisory: list[str] = []
 
     # Modified test files: check at function granularity for relaxed assertions.
     # Only check files whose guardedness result says "not guarding" (the file's tests
@@ -2883,7 +2890,18 @@ def enforce_guardedness(ctx: Any) -> list[str]:
                 non_exempt = [fn for fn in relaxed_fns
                               if fn not in exempted and f"{tf}::{fn}" not in exempted]
                 if non_exempt:
-                    result_files.append(tf)
+                    # Advisory, never blocking: the detector cannot tell a loosened
+                    # assertion from an expected value updated to match a behaviour
+                    # the brief asked for, and the second is the required edit. It is
+                    # recorded for the reviewers and the person; it does not send the
+                    # build back. See the detector-redesign follow-up.
+                    advisory.extend(f"{tf}::{fn}" for fn in non_exempt)
+
+    if advisory:
+        ctx.set_fact("weakened_tests_advisory", sorted(advisory))
+        record = ctx.read_json("test-guardedness.json", {}) or {}
+        record["relaxed_advisory"] = sorted(advisory)
+        ctx.write_json("test-guardedness.json", record)
 
     return result_files
 

@@ -253,13 +253,18 @@ def test_m15_requires_a_per_function_comparison_against_the_base():
         DESIGN_VERIFIER_PROMPT, FULL_VERIFICATION_METHODS, M15_METHOD, VERIFICATION_METHODS,
     )
 
+    # Compare on collapsed whitespace: the wording is the contract, not its wrapping.
+    flat = " ".join(M15_METHOD.split())
     for text in ('git diff <base> -- <test files>', "list every existing test function",
                  "file::name", "an assert removed or relaxed",
                  "an expected value changed to match the new behaviour",
                  "renamed or reworded to accept different behaviour", "skip/xfail added",
-                 'You may not conclude "no weakened tests" without listing the\n'
-                 '    modified test functions you compared'):
-        assert text in M15_METHOD, text
+                 'You may not conclude "no weakened tests" without listing the '
+                 'modified test functions you compared'):
+        assert " ".join(text.split()) in flat, text
+    # And M15 reports rather than blocks: the detector cannot tell a loosened
+    # assertion from an expected value updated to match a required behaviour.
+    assert "it does not block" in flat, M15_METHOD
     assert M15_METHOD in VERIFICATION_METHODS and M15_METHOD in FULL_VERIFICATION_METHODS
     assert "{{verification_methods}}" in DESIGN_VERIFIER_PROMPT
 

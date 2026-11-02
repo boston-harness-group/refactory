@@ -74,10 +74,12 @@ M15_METHOD = """M15 Weakened tests — run `git diff <base> -- <test files>` (th
     loosened assertion: an assert removed or relaxed (== to in, exact to approx,
     a narrower raises), an expected value changed to match the new behaviour, a
     test renamed or reworded to accept different behaviour, or a skip/xfail added.
-    A loosened assertion that would let the test pass when the code is wrong is
-    blocking. You may not conclude "no weakened tests" without listing the
-    modified test functions you compared (write "none modified" when the diff
-    changes no existing test function)."""
+    Report a loosened assertion that would let the test pass when the code is
+    wrong; it does not block, because an expected value updated to match a
+    behaviour the brief asked for looks the same and is the required edit. You
+    may not conclude "no weakened tests" without listing the modified test
+    functions you compared (write "none modified" when the diff changes no
+    existing test function)."""
 
 #: For a change to an existing repository: the methods no reviewer applies.
 VERIFICATION_METHODS = (
