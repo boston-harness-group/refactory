@@ -281,3 +281,84 @@ def halt_on_b(ctx: Any) -> dict[str, Any]:
             flag.write_text("halted")
             raise HaltStop("data", reason="test halt on item b")
     return {"seen": seen["ids"]}
+
+
+# ── pass isolation review fixes (PR #561) ─────────────────────────────
+
+def _current_id(ctx: Any) -> str:
+    item = ctx.read_json("current_item.json", {}) or {}
+    return str(item.get("id"))
+
+
+def write_prompt(ctx: Any) -> dict[str, Any]:
+    """Upstream of the data node: leave a run-level ``prompt.txt`` for the passes."""
+    ctx.write_text("prompt.txt", "from prep")
+    return {}
+
+
+def read_prompt(ctx: Any) -> dict[str, Any]:
+    """In a pass: read the upstream ``prompt.txt``; FileNotFoundError when it is not read through."""
+    assert ctx.read_text("prompt.txt") == "from prep"
+    return {}
+
+
+def log_and_stop_on_b(ctx: Any) -> dict[str, Any]:
+    """Log each run of an item to ``$PASS_TEST_LOG``; stop the run on item ``b`` once.
+
+    The walker stops on a halt; the spine's op runs as a command, so it stops the
+    way a killed run does -- the drain dies mid-command (``PASS_TEST_RUNTIME=spine``).
+    The flag file beside the log makes the stop happen once, so the resume runs b.
+    """
+    import os
+    import signal
+    from pathlib import Path
+
+    item_id = _current_id(ctx)
+    log = Path(os.environ["PASS_TEST_LOG"])
+    with log.open("a") as handle:
+        handle.write(item_id + "\n")
+    flag = log.with_suffix(".stopped")
+    if item_id == "b" and not flag.exists():
+        flag.write_text("stopped")
+        if os.environ.get("PASS_TEST_RUNTIME") == "spine":
+            os.kill(os.getppid(), signal.SIGKILL)
+            raise SystemExit(1)
+        from refactory_dsh.nn.executor import HaltStop
+
+        raise HaltStop("data", reason="test stop on item b")
+    return {}
+
+
+def seed_shared(ctx: Any) -> dict[str, Any]:
+    """Upstream of the data node: a run-level list fact."""
+    ctx.set_fact("shared", ["seed"])
+    return {}
+
+
+def append_shared_in_place(ctx: Any) -> dict[str, Any]:
+    """In a pass: record what ``shared`` looks like, then append to it in place."""
+    import json
+    from pathlib import Path
+
+    shared = ctx.facts.get("shared")
+    Path(ctx.workdir, "shared_seen.json").write_text(json.dumps(shared))
+    shared.append("x")
+    return {}
+
+
+def tamper_run_input(ctx: Any) -> dict[str, Any]:
+    """In a pass: read the run-level ``run_input.txt``, then write over it.
+
+    The node declares no writes, so write enforcement does not stop it; only the
+    pass's read-through protection does.
+    """
+    item_id = _current_id(ctx)
+    ctx.write_text("input_seen.txt", ctx.read_text("run_input.txt"))
+    ctx.write_text("run_input.txt", f"tampered by {item_id}")
+    return {}
+
+
+def note_item(ctx: Any) -> dict[str, Any]:
+    """In a pass: set the declared, non-score fact ``note`` for this item."""
+    ctx.set_fact("note", f"from {_current_id(ctx)}")
+    return {}

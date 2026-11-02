@@ -114,6 +114,10 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "inline_items": [dict(item) for item in node.inline_items],
                 "limit": node.limit,
             }
+            # The nodes of the per-item pass, so the loader can tell a pass's own
+            # writes from the run-level files it reads through (the walker takes the
+            # same set from the graph: Graph.data_body).
+            entry["subgraph_nodes"] = sorted(graph.data_body(node_id))
         if node.feedback_keys:
             entry["feedback_keys"] = list(node.feedback_keys)
         if node.retry is not None:

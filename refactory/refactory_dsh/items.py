@@ -63,19 +63,74 @@ EXCHANGES_SIDECAR = ".refactory/item_exchanges.json"
 
 # ── pass isolation utilities ─────────────────────────────────────────────
 
+#: The longest item-id stem a pass directory name keeps, in UTF-8 bytes. A file
+#: name may hold 255 bytes; the stem leaves room for the hash and the index.
+_MAX_ID_BYTES = 200
+
+#: Written into every pass directory by :func:`prepare_pass_dir`: it marks the
+#: directory as a pass, so a write through one of its read-through links is
+#: detached first (:func:`detach_read_through`), on either runtime.
+PASS_MARKER = ".refactory/pass.json"
+
+#: The record of a finished item, beside its ``.done`` marker. A resumed walker
+#: reads the scores of the items it skips from here.
+PASS_RECORD = ".item_record.json"
+
+#: Run-level files every pass reads through, whatever the subgraph declares:
+#: the node declarations, the part/seed and item overrides, the person's
+#: steering, the run configuration (steering opt-out, pins, driver profile) and
+#: the run's worktree record. Links, so a note steered mid-pass is seen live;
+#: read-only from a pass, as every read-through is.
+PASS_INFRA = (
+    ".refactory/declarations.json", "subset.json", "items.json",
+    "intent-ledger.md", ".refactory/run-config.json", ".refactory/worktree.json",
+)
+
 
 def sanitize_item_id(item_id: str) -> str:
     """Make an item id safe for use as a directory name.
 
-    Replaces ``/``, ``:``, ``\\``, and ``\\0`` with ``_``.  When the
-    sanitization changed the id, a 6-character hex digest suffix is appended
-    for uniqueness.
+    Replaces ``/``, ``:``, ``\\``, and ``\\0`` with ``_`` and bounds the stem to
+    ``_MAX_ID_BYTES`` bytes.  When either changed the id, a 6-character hex
+    digest of the original id is appended for uniqueness.
     """
     sanitized = item_id.replace("/", "_").replace(":", "_").replace("\\", "_").replace("\0", "_")
+    encoded = sanitized.encode()
+    if len(encoded) > _MAX_ID_BYTES:
+        sanitized = encoded[:_MAX_ID_BYTES].decode("utf-8", "ignore")
     if sanitized != item_id:
         suffix = hashlib.sha256(item_id.encode()).hexdigest()[:6]
         sanitized = f"{sanitized}_{suffix}"
     return sanitized
+
+
+def pass_dir_of(run_dir: Path, node_id: str, item_id: str, index: int) -> Path:
+    """Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``."""
+    return Path(run_dir) / "passes" / node_id / f"{sanitize_item_id(item_id)}_{index}"
+
+
+def pass_read_through(
+    declared: dict[str, tuple[tuple[str, ...] | list[str], tuple[str, ...] | list[str]]],
+    body: set[str] | list[str] | tuple[str, ...],
+    data_writes: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    """The run-level files a pass reads through: what its own nodes read and do not write.
+
+    *declared* maps node ids to ``(reads, writes)``; *body* names the pass's nodes
+    (``Graph.data_body``); *data_writes* are the data node's own writes (the
+    current item). Only the body's writes are subtracted: a file a node upstream
+    of the data node wrote is a run-level input the pass must see. One function
+    for both runtimes, so their pass directories cannot drift.
+    """
+    reads: set[str] = set()
+    writes: set[str] = set(data_writes)
+    for node_id in body:
+        entry = declared.get(node_id)
+        if entry is None:
+            continue
+        reads.update(entry[0])
+        writes.update(entry[1])
+    return tuple(sorted(r for r in reads if r not in writes))
 
 
 def prepare_pass_dir(
@@ -91,12 +146,13 @@ def prepare_pass_dir(
 
     * Copies ``facts.json`` from *run_dir* into the pass directory (seeding the
       fact scope for the spine path).
-    * For each path in *declared_reads*, if the file exists at *run_dir* and not
-      yet at *pass_dir*, creates a symlink so subgraph nodes can read them
-      transparently inside the pass directory.
+    * Links :data:`PASS_INFRA` and each path in *declared_reads* that exists at
+      *run_dir* and not yet in the pass, so subgraph nodes read them in place.
+      A write to one of them is detached from the run first
+      (:func:`detach_read_through`), so a pass cannot change a run-level input.
     """
-    sanitized = sanitize_item_id(item_id)
-    pass_dir = run_dir / "passes" / node_id / f"{sanitized}_{index}"
+    run_dir = Path(run_dir)
+    pass_dir = pass_dir_of(run_dir, node_id, item_id, index)
     pass_dir.mkdir(parents=True, exist_ok=True)
 
     # Seed the pass's fact scope from the run-level facts.
@@ -105,32 +161,72 @@ def prepare_pass_dir(
     if facts_src.exists() and not facts_dst.exists():
         shutil.copy2(str(facts_src), str(facts_dst))
 
-    # Infrastructure files that commands running inside the pass need.
-    # .refactory/declarations.json: node configurations (reads, writes, produces).
-    # subset.json: part/seed for tasks.
-    # items.json: data-node item overrides.
-    _infra = (".refactory/declarations.json", "subset.json", "items.json")
-    for name in _infra:
+    for name in (*PASS_INFRA, *declared_reads):
         src = run_dir / name
         dst = pass_dir / name
-        if src.exists() and not dst.exists():
+        if src.exists() and not dst.exists() and not dst.is_symlink():
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.symlink_to(src.resolve())
 
-    # Materialise declared run-level reads as symlinks.
-    for name in declared_reads:
-        src = run_dir / name
-        dst = pass_dir / name
-        if src.exists() and not dst.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.symlink_to(src.resolve())
-
+    marker = pass_dir / PASS_MARKER
+    if not marker.exists():
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"node": node_id, "item": item_id, "index": index}) + "\n")
     return pass_dir
 
 
-def mark_pass_complete(pass_dir: Path) -> None:
-    """Write a ``.done`` marker in the pass directory."""
+def detach_read_through(workdir: Path, name: str) -> None:
+    """Before a write to *name* in a pass directory, cut it loose from the run.
+
+    A pass reads run-level inputs through links (:func:`prepare_pass_dir`).
+    Writing through one would change the run's file for every later item and the
+    rest of the run, so each linked component of *name* is replaced first: a
+    linked file by a copy of itself (an append keeps the content), a linked
+    directory by a real directory linking its entries. Outside a pass directory
+    (no :data:`PASS_MARKER`) this does nothing: a run's own links are the run's
+    business.
+    """
+    workdir = Path(workdir)
+    if not (workdir / PASS_MARKER).exists():
+        return
+    current = workdir
+    for part in Path(name).parts:
+        current = current / part
+        if current.is_symlink():
+            source = current.resolve()
+            current.unlink()
+            if source.is_dir():
+                current.mkdir()
+                for child in source.iterdir():
+                    (current / child.name).symlink_to(child)
+            elif source.exists():
+                shutil.copy2(str(source), str(current))
+        if not current.exists():
+            return
+
+
+def mark_pass_complete(pass_dir: Path, record: dict[str, Any] | None = None) -> None:
+    """Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
+
+    The record is written first, so a ``.done`` pass always has the score a
+    resume needs (an interrupted write leaves an unfinished pass, rerun).
+    """
+    if record is not None:
+        pending = pass_dir / f"{PASS_RECORD}.tmp"
+        pending.write_text(json.dumps(record, indent=2, default=str))
+        os.replace(pending, pass_dir / PASS_RECORD)
     (pass_dir / ".done").write_text("")
+
+
+def finished_pass_record(pass_dir: Path) -> dict[str, Any] | None:
+    """The record a finished pass kept, or None when it is unfinished or kept none."""
+    if not (pass_dir / ".done").exists():
+        return None
+    try:
+        record = json.loads((pass_dir / PASS_RECORD).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def merge_pass_results(
@@ -170,24 +266,28 @@ def merge_pass_results(
 
 
 def _subgraph_declared_reads(workdir: Path, node: Node) -> tuple[str, ...]:
-    """Compute the external reads of a data node's subgraph.
+    """The run-level files *node*'s passes read through, from the run's declarations.
 
-    Returns the declared reads of all non-data nodes in the run's declarations
-    that are not produced by any node's writes.  These files live at run level
-    and need to be symlinked into the pass directory.
+    The lowering writes the pass's own nodes beside the data node
+    (``subgraph_nodes``, from ``Graph.data_body``); :func:`pass_read_through` keeps
+    what they read and do not write. Declarations lowered before that key existed
+    name no body: every other node's reads are taken then, with only the data
+    node's own writes left out (an upstream file is still read through; nothing
+    is wrongly withheld).
     """
     try:
         declarations = _declarations(workdir)
     except Exception:
         return ()
-    subgraph_reads: set[str] = set()
-    subgraph_writes: set[str] = set(node.writes)
+    entry = declarations.get(node.id)
+    body = entry.get("subgraph_nodes") if isinstance(entry, dict) else None
+    declared: dict[str, tuple[list[str], list[str]]] = {}
     for nid, decl in declarations.items():
         if nid == node.id or not isinstance(decl, dict):
             continue
-        subgraph_reads.update(decl.get("reads", []))
-        subgraph_writes.update(decl.get("writes", []))
-    return tuple(r for r in subgraph_reads if r not in subgraph_writes)
+        writes = list(decl.get("writes") or []) if isinstance(body, list) else []
+        declared[nid] = (list(decl.get("reads") or []), writes)
+    return pass_read_through(declared, body if isinstance(body, list) else set(declared), node.writes)
 
 
 def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> None:
@@ -590,7 +690,7 @@ def command_end(
         _write_pass_state(workdir, node.id, ps)
         # Merge declared produces from the pass directory to the run directory.
         merge_pass_results(workdir, pass_dir, node.produces)
-        mark_pass_complete(pass_dir)
+        mark_pass_complete(pass_dir, record)
         result: dict[str, Any] = {"error": failed_reason, **(record or {})}
         _check_all_items_failed(node, workdir, items, index)
         return result
@@ -632,7 +732,7 @@ def command_end(
         _write_pass_state(workdir, node.id, ps)
         # Merge declared produces from the pass directory to the run directory.
         merge_pass_results(workdir, pass_dir, node.produces)
-        mark_pass_complete(pass_dir)
+        mark_pass_complete(pass_dir, record)
         result = {"error": str(exc), **(record or {})}
         _check_all_items_failed(node, workdir, items, index)
         return result
@@ -665,7 +765,7 @@ def command_end(
         _write_facts(workdir, SCORES_FACT, [record])
     # Merge declared produces from the pass directory to the run directory.
     merge_pass_results(workdir, pass_dir, node.produces)
-    mark_pass_complete(pass_dir)
+    mark_pass_complete(pass_dir, record)
     _check_all_items_failed(node, workdir, items, index)
     return record or {}
 

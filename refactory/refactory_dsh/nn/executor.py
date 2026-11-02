@@ -238,16 +238,26 @@ class RunContext:
             f"declared writes: {list(self._declared)}"
         )
 
+    def _writable(self, name: str) -> Path:
+        """The path a write to *name* goes to, cut loose from any run-level input
+        a data pass reads through (items.detach_read_through): a pass must not
+        change the run's files, whatever the node declares."""
+        from refactory_dsh.items import detach_read_through
+
+        target = self.path(name)
+        detach_read_through(self.workdir, name)
+        return target
+
     def write_text(self, name: str, text: str) -> Path:
         self._note_write(name)
-        target = self.path(name)
+        target = self._writable(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
         return target
 
     def append_text(self, name: str, text: str) -> Path:
         self._note_write(name)
-        target = self.path(name)
+        target = self._writable(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a") as handle:
             handle.write(text)
@@ -305,13 +315,15 @@ class RunContext:
         """Context manager that isolates one data-node item pass.
 
         On enter: saves *workdir* and *facts*, sets ``workdir`` to *pass_dir*
-        and ``facts`` to a shallow copy (write-isolated, read-through).
+        and ``facts`` to a deep copy: a pass that edits a fact in place (appends
+        to a list) changes its own copy, as the spine's pass does with its own
+        ``facts.json``.
 
-        On exit: computes which fact keys changed (new or replaced by
-        reference), merges only keys in *produces* plus ``"item_scores"`` from
-        the changed set into the saved (run-level) facts, then restores both
-        ``workdir`` and ``facts``.
+        On exit: merges only keys in *produces* plus ``"item_scores"`` that the
+        pass added or changed into the saved (run-level) facts, then restores
+        both ``workdir`` and ``facts``.
         """
+        import copy
         from contextlib import contextmanager
 
         @contextmanager
@@ -319,15 +331,16 @@ class RunContext:
             saved_workdir = self.workdir
             saved_facts = self.facts
             self.workdir = pass_dir
-            self.facts = dict(saved_facts)  # shallow copy for write-isolation
+            self.facts = copy.deepcopy(saved_facts)
             try:
                 yield
             finally:
-                # Merge only declared produces + item_scores.
+                # Merge only declared produces + item_scores. The pass's copy is
+                # discarded on exit, so its values can be handed over as they are.
                 allowed = set(produces) | {"item_scores"}
                 for key in allowed:
                     if key in self.facts:
-                        if key not in saved_facts or saved_facts[key] is not self.facts[key]:
+                        if key not in saved_facts or saved_facts[key] != self.facts[key]:
                             saved_facts[key] = self.facts[key]
                 self.workdir = saved_workdir
                 self.facts = saved_facts
@@ -695,6 +708,9 @@ class Executor:
     _status: str = field(default="", init=False, repr=False)
     #: The run-level work directory, captured before any pass isolation swap.
     _run_workdir: Path | None = field(default=None, init=False, repr=False)
+    #: The node a resume starts at, until the walk has entered it: only that data
+    #: node keeps the passes it finished before the stop.
+    _resume_at: str | None = field(default=None, init=False, repr=False)
     #: Per-item exchanges captured during a data-node pass.
     _item_exchanges: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     #: Per-item records built during the data-node loop.
@@ -785,6 +801,7 @@ class Executor:
     def run(self, *, start: str | None = None) -> RunResult:
         started = time.time()
         self._run_workdir = self.ctx.workdir
+        self._resume_at = start
         visits = self._gate_iterations
         current: str | None = start or self.graph.start or None
         error: str | None = None
@@ -909,54 +926,40 @@ class Executor:
 
                 # ── pass isolation: compute declared reads and prepare ──
                 from refactory_dsh.items import (
-                    prepare_pass_dir, mark_pass_complete, sanitize_item_id,
+                    finished_pass_record, mark_pass_complete, pass_dir_of,
+                    pass_read_through, prepare_pass_dir,
                 )
                 import shutil as _shutil
                 _run_workdir = self._run_workdir or self.ctx.workdir
-                # Compute external reads of the subgraph.
-                _subgraph_reads: set[str] = set()
-                _subgraph_writes: set[str] = set(node.writes)
-                for _n in self.graph.nodes.values():
-                    if _n.id != node.id:
-                        _subgraph_reads.update(_n.reads)
-                        _subgraph_writes.update(_n.writes)
-                _declared_reads = tuple(
-                    r for r in _subgraph_reads if r not in _subgraph_writes
+                # The run-level files the pass reads through: what the pass's own
+                # nodes read and do not write -- the same function, over the same
+                # node set, as the spine's loader (items._subgraph_declared_reads).
+                _declared_reads = pass_read_through(
+                    {n.id: (n.reads, n.writes) for n in self.graph.nodes.values()},
+                    self.graph.data_body(node.id), node.writes,
                 )
-                # Resume / rerun logic for pass directories.
+                # Only a resume of this very node goes on from its finished
+                # passes; any other entry starts the node clean, as the spine's
+                # first `begin` does (items.command_begin, index 0).
                 _passes_root = _run_workdir / "passes" / node.id
-                _done_items: set[int] = set()
-                if _passes_root.exists():
-                    # Check which items already completed (.done marker).
-                    for _idx, _it in enumerate(items):
-                        _iid = str(_it.get("id") or _idx)
-                        _sid = sanitize_item_id(_iid)
-                        _pd = _passes_root / f"{_sid}_{_idx}"
-                        if _pd.exists() and (_pd / ".done").exists():
-                            _done_items.add(_idx)
-                    if len(_done_items) >= len(items):
-                        # All items done — this is a rerun; start fresh.
-                        _shutil.rmtree(_passes_root)
-                        _done_items.clear()
+                _resuming = self._resume_at == node.id
+                self._resume_at = None
+                if not _resuming and _passes_root.exists():
+                    _shutil.rmtree(_passes_root)
 
                 for index, item in enumerate(items):
-                    # Resume: skip items that already completed.
-                    if index in _done_items:
-                        # Pre-load scores from the completed pass into the
-                        # accumulator so the run's final item_scores include them.
-                        _item_id_done = str(item.get("id") or index)
-                        _sid_done = sanitize_item_id(_item_id_done)
-                        _pass_dir_done = _passes_root / f"{_sid_done}_{index}"
-                        _facts_done = _pass_dir_done / "facts.json"
-                        if _facts_done.exists():
-                            try:
-                                _done_facts = json.loads(_facts_done.read_text())
-                                _done_scores = _done_facts.get("item_scores", [])
-                                if isinstance(_done_scores, list):
-                                    scores.extend(_done_scores)
-                            except (json.JSONDecodeError, OSError):
-                                pass
-                        continue
+                    # Resume: an item whose pass finished is not run again; its
+                    # record -- kept with the pass when it finished -- is.
+                    if _resuming:
+                        _done_dir = pass_dir_of(
+                            _run_workdir, node.id, str(item.get("id") or index), index,
+                        )
+                        if (_done_dir / ".done").exists():
+                            _kept = finished_pass_record(_done_dir)
+                            if _kept is not None:
+                                scores.append(_kept)
+                                self._item_records.append(_kept)
+                            continue
                     _item_steps_start = len(self.steps)
 
                     instance = instance_of(item)
@@ -968,6 +971,7 @@ class Executor:
                         declared_reads=_declared_reads,
                     )
                     _pass_completed = False
+                    record = None
 
                     _alarm_armed = False
                     _prev_handler = None
@@ -1133,7 +1137,7 @@ class Executor:
                         if _prev_alarm > 0:
                             signal.alarm(_prev_alarm)
                         if _pass_completed:
-                            mark_pass_complete(_pass_dir)
+                            mark_pass_complete(_pass_dir, record)
 
                 # Restore max_steps, offset by the steps the data loop added
                 # so the main walk loop's cap accounts for the kept history.
