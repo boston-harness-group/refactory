@@ -454,7 +454,6 @@
         "changed-functions.json",
         "changes.diff",
         "check.txt",
-        "test-guardedness.json",
         "updated-tests.json"
       ],
       "blocking": true,

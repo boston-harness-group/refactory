@@ -160,7 +160,7 @@ def materialise_node(**fields: Any) -> Node:
     """The op that applies ``emit.txt`` as the run's next attempt (`materialise`)."""
     return Node(**{
         "id": "materialise", "kind": "op", "call": f"{OPS}:materialise",
-        "reads": (EMIT_FILE,), "writes": ("changes.diff", "changed-functions.json", "test-guardedness.json"),
+        "reads": (EMIT_FILE,), "writes": ("changes.diff", "changed-functions.json"),
         "produces": ("artifact", "files", "commit", "change", "emission_refused",
                      "changed_functions", "consecutive_refusals",
                      "empty_emission_fingerprint"),
@@ -1076,12 +1076,11 @@ def _materialise_directory(ctx: Any, source: Path | None, files: tuple[str, ...]
     finally:
         if not preserve_backup and not (previous.exists() and not root.exists()):
             shutil.rmtree(temporary)
-    # changed-functions.json and changes.diff are valid empty results on
-    # no-worktree runs (no changed functions, no diff); downstream nodes
-    # (focused_qa, verifier) declare them as reads.
+    # changed-functions.json and changes.diff are valid empty results on no-worktree
+    # runs (no changed functions, no diff), not placeholders: focused_qa, overwatch and
+    # the verifier declare them as reads, and both runtimes refuse a missing read.
     ctx.write_json("changed-functions.json", [])
-    _workdir = Path(ctx.workdir)
-    if not (_workdir / "changes.diff").exists():
+    if not (Path(ctx.workdir) / "changes.diff").exists():
         ctx.write_text("changes.diff", "")
     return {"artifact": str(root), "files": sorted(set(files) | {str(path) for path in checked}),
             "changed_functions": "(none)"}

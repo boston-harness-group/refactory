@@ -404,7 +404,7 @@ class DesignFastMode(DesignMode):
         graph.add(repo_change.materialise_node(
             call=f"{OPS}:materialise_artifact", resource_role="work",
             reads=("emit.txt", "source-manifest.json"),
-            writes=("changes.diff", "changed-functions.json", "test-guardedness.json"),
+            writes=("changes.diff", "changed-functions.json"),
             produces=("artifact", "files", "commit", "change", "emission_refused",
                       "changed_functions", "consecutive_refusals",
                       "empty_emission_fingerprint"),

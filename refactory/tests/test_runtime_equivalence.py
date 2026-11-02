@@ -1171,8 +1171,6 @@ def test_complex_scenario_runtimes_agree(tmp_path):
     assert "opt_result" not in result2.facts, \
         "optional branch produced facts despite first node failure"
 
-    # Nested fork completed (inner branches ran).
-    assert result2.facts.get("inner_a_done") is not None or "inner_a_done" not in result2.facts
     assert result2.facts.get("knob_read") == "hello"
 
     # graph_state events were emitted.
@@ -1182,6 +1180,19 @@ def test_complex_scenario_runtimes_agree(tmp_path):
               if line.strip()]
     graph_state_events = [e for e in events if e.get("kind") == "graph_state"]
     assert len(graph_state_events) > 0, "no graph_state events emitted"
+
+    def states(node_id: str) -> list[str]:
+        return [e["state"] for e in events
+                if e.get("node_id") == node_id and e.get("kind", "").startswith("node_")]
+
+    # Nested fork completed: inner_a (a noop, so it produces no fact) ran to completion.
+    assert states("inner_a") == ["running", "completed"], states("inner_a")
+    # The optional branch stops at its failing first node: opt_fail is recorded as
+    # failed and missing, and opt_step2 never starts.
+    assert states("opt_fail") == ["running", "failed"], states("opt_fail")
+    assert states("opt_step2") == [], "the optional branch went on past its failed first node"
+    assert (walker_dir / "reviews" / "opt_fail-missing.txt").exists(), \
+        "the failed optional branch was not recorded as missing"
 
 
 def test_halt_inside_fork_branch_both_runtimes(tmp_path):
