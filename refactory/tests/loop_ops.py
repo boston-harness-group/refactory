@@ -187,3 +187,51 @@ def error_on_item(ctx: Any) -> dict[str, Any]:
     seen.setdefault("ids", []).append(str(item.get("id")))
     ctx.write_json("seen.json", seen)
     return {"seen": seen["ids"]}
+
+
+# ── pass isolation ops ────────────────────────────────────────────────
+
+
+def assert_isolated(ctx: Any) -> dict[str, Any]:
+    """Assert that a previous item's artifacts are invisible.
+
+    Reads ``current_item.json`` to get the item id.  If the id is not ``"a"``
+    (the first item), asserts that ``marker.txt`` does NOT exist in
+    ``ctx.workdir`` and that ``ctx.facts.get("leak_test")`` is ``None``.
+    Then writes ``marker.txt`` and sets fact ``leak_test``.
+
+    Fails when reverted (without isolation, the second item sees the first
+    item's ``marker.txt`` and ``leak_test`` fact).
+    """
+    item = ctx.read_json("current_item.json", {}) or {}
+    item_id = str(item.get("id"))
+    if item_id != "a":
+        from pathlib import Path
+
+        marker = Path(ctx.workdir) / "marker.txt"
+        assert not marker.exists(), (
+            f"item {item_id!r} can see marker.txt from a previous pass"
+        )
+        assert ctx.facts.get("leak_test") is None, (
+            f"item {item_id!r} can see leak_test={ctx.facts.get('leak_test')!r}"
+        )
+    ctx.write_text("marker.txt", f"from_{item_id}")
+    ctx.set_fact("leak_test", f"from_{item_id}")
+    return {}
+
+
+def write_undeclared_fact(ctx: Any) -> dict[str, Any]:
+    """Set a fact not in the node's ``produces`` — tests leak filtering."""
+    ctx.set_fact("undeclared_secret", "leaked")
+    return {}
+
+
+def read_run_level_input(ctx: Any) -> dict[str, Any]:
+    """Read ``run_input.txt`` from ``ctx.workdir`` and assert its content.
+
+    With pass isolation the file lives at run level and is symlinked into the
+    pass directory by ``prepare_pass_dir``.  Fails without the symlink.
+    """
+    content = ctx.read_text("run_input.txt")
+    assert content == "run-level-data", f"expected 'run-level-data', got {content!r}"
+    return {}

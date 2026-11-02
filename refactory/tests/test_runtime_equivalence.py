@@ -1161,5 +1161,272 @@ def test_data_failure_scenario_matches(tmp_path):
         # The spine should also fail (non-zero exit)
         assert af_rc != 0, "spine should fail when all items fail"
 
+        # ── F5: compare pass directory structures ──
+        walker_passes = walker_dir / "passes" / "data"
+        spine_passes = spine_dir / "passes" / "data"
+        assert walker_passes.exists(), "walker should create passes/data/"
+        assert spine_passes.exists(), "spine should create passes/data/"
+        walker_pass_names = sorted(d.name for d in walker_passes.iterdir() if d.is_dir())
+        spine_pass_names = sorted(d.name for d in spine_passes.iterdir() if d.is_dir())
+        assert walker_pass_names == spine_pass_names, (
+            f"pass directory names differ:\nwalker: {walker_pass_names}\nspine: {spine_pass_names}"
+        )
+        # Each completed pass should have a .done marker.
+        for name in walker_pass_names:
+            assert (walker_passes / name / ".done").exists(), (
+                f"walker pass {name} missing .done"
+            )
+        for name in spine_pass_names:
+            assert (spine_passes / name / ".done").exists(), (
+                f"spine pass {name} missing .done"
+            )
+
     finally:
         sys.path.remove(str(project / ".factory" / "packages"))
+
+
+# ── F5: pass isolation equivalence tests ─────────────────────────────────────
+
+
+def test_pass_isolation_equivalence(tmp_path):
+    """Both runtimes run a data graph with assert_isolated; both succeed.
+
+    Compares run-level facts, pass directory structures, and absence of
+    undeclared facts between walker and spine.
+    """
+    from unittest.mock import patch
+    from refactory_dsh import lowering, nn
+    from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, execute
+    from refactory_dsh.task import register_task
+
+    # Build a Task that passes everything.
+    project = tmp_path / "project"
+    _write_pass_all_package(project)
+    sys.path.insert(0, str(project / ".factory" / "packages"))
+    try:
+        from pass_all_scenario.task import PassAllTask  # type: ignore[import-not-found]
+        register_task("pass_all_scenario", PassAllTask)
+        task_ref = "refactory_packages.pass_all_scenario.task:PassAllTask"
+
+        graph = nn.Graph()
+        graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="pass_all_scenario",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        graph.add(nn.Node(
+            "work", "op", call="loop_ops:assert_isolated",
+            reads=(CURRENT_ITEM,), writes=("marker.txt",), produces=("leak_test",),
+        ))
+        graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        graph.connect("data", "report")
+
+        # ── Walker run ──
+        walker_dir = tmp_path / "walker"
+        walker_result = execute(graph, walker_dir)
+        assert walker_result.exit_ok, walker_result.error
+
+        # ── Spine run ──
+        spine_dir = tmp_path / "spine"
+        spine_dir.mkdir(parents=True, exist_ok=True)
+
+        spine_graph = nn.Graph()
+        spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=task_ref,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:assert_isolated",
+            reads=(CURRENT_ITEM,), writes=("marker.txt",), produces=("leak_test",),
+        ))
+        spine_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        spine_graph.connect("data", "report")
+
+        state = {"graph": spine_graph.to_state()}
+        lowering.write_declarations(state, spine_dir)
+        graph_path, _ = lowering.write_mode_graph(
+            state, tmp_path / "graphs", name="pass_isolation",
+        )
+
+        python_bin = str(REPO_ROOT / ".venv/bin")
+        extra_path = os.pathsep.join([
+            str(project / ".factory" / "packages"),
+            str(HERE),
+        ])
+        env_patch = {
+            "REFACTORY_PROJECT": str(project),
+            "PYTHONPATH": extra_path,
+        }
+        old_env = {}
+        for key, value in env_patch.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            rc = _run_spine(graph_path, spine_dir, python_bin, 5_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert rc == 0, "spine drain failed"
+        spine_facts = json.loads((spine_dir / "facts.json").read_text())
+
+        # ── Compare ──
+        # Undeclared facts should not leak on either runtime.
+        assert "leak_test" not in walker_result.facts, (
+            "leak_test leaked on walker"
+        )
+        assert "leak_test" not in spine_facts, (
+            "leak_test leaked on spine"
+        )
+
+        # Pass directory structures should match.
+        walker_passes = walker_dir / "passes" / "data"
+        spine_passes = spine_dir / "passes" / "data"
+        assert walker_passes.exists() and spine_passes.exists()
+        walker_pass_names = sorted(d.name for d in walker_passes.iterdir() if d.is_dir())
+        spine_pass_names = sorted(d.name for d in spine_passes.iterdir() if d.is_dir())
+        assert walker_pass_names == spine_pass_names, (
+            f"pass dirs differ:\nwalker: {walker_pass_names}\nspine: {spine_pass_names}"
+        )
+
+    finally:
+        sys.path.remove(str(project / ".factory" / "packages"))
+
+
+def test_pass_file_read_through_equivalence(tmp_path):
+    """A subgraph node that reads a run-level declared input file works on both runtimes.
+
+    Fails without the symlink materialisation in prepare_pass_dir.
+    """
+    from refactory_dsh import lowering, nn
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+    from refactory_dsh.task import register_task
+
+    project = tmp_path / "project"
+    _write_pass_all_package(project)
+    sys.path.insert(0, str(project / ".factory" / "packages"))
+    try:
+        from pass_all_scenario.task import PassAllTask  # type: ignore[import-not-found]
+        register_task("pass_all_read", PassAllTask)
+        task_ref = "refactory_packages.pass_all_scenario.task:PassAllTask"
+
+        graph = nn.Graph()
+        graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref="pass_all_read",
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        graph.add(nn.Node(
+            "work", "op", call="loop_ops:read_run_level_input",
+            reads=(CURRENT_ITEM, "run_input.txt"), writes=(), produces=(),
+        ))
+        graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        graph.connect("data", "report")
+
+        # ── Walker ──
+        walker_dir = tmp_path / "walker"
+        walker_dir.mkdir(parents=True)
+        (walker_dir / "run_input.txt").write_text("run-level-data")
+        walker_result = execute(graph, walker_dir)
+        assert walker_result.exit_ok, walker_result.error
+
+        # ── Spine ──
+        spine_dir = tmp_path / "spine"
+        spine_dir.mkdir(parents=True)
+        (spine_dir / "run_input.txt").write_text("run-level-data")
+
+        spine_graph = nn.Graph()
+        spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="work",
+            task_ref=task_ref,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:read_run_level_input",
+            reads=(CURRENT_ITEM, "run_input.txt"), writes=(), produces=(),
+        ))
+        spine_graph.add(nn.Node(
+            "report", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        spine_graph.connect("data", "report")
+
+        state = {"graph": spine_graph.to_state()}
+        lowering.write_declarations(state, spine_dir)
+        graph_path, _ = lowering.write_mode_graph(
+            state, tmp_path / "graphs_read", name="read_through",
+        )
+
+        python_bin = str(REPO_ROOT / ".venv/bin")
+        extra_path = os.pathsep.join([
+            str(project / ".factory" / "packages"),
+            str(HERE),
+        ])
+        env_patch = {
+            "REFACTORY_PROJECT": str(project),
+            "PYTHONPATH": extra_path,
+        }
+        old_env = {}
+        for key, value in env_patch.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            rc = _run_spine(graph_path, spine_dir, python_bin, 5_000)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert rc == 0, "spine drain failed for file read-through"
+
+    finally:
+        sys.path.remove(str(project / ".factory" / "packages"))
+
+
+def _write_pass_all_package(project: Path) -> None:
+    """Write a simple pass-all Task as a proper package."""
+    pkg = project / ".factory" / "packages" / "pass_all_scenario"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(
+        'from refactory_dsh.nn import Package\n'
+        'from .task import PassAllTask\n'
+        'PACKAGE = Package(\n'
+        '    name="pass_all_scenario",\n'
+        '    description="pass all items",\n'
+        '    modes=(),\n'
+        '    ops=(),\n'
+        ')\n'
+    )
+    (pkg / "task.py").write_text(
+        'from refactory_dsh.task import Task, TaskInstance, VerifyResult\n'
+        '\n'
+        'class PassAllTask(Task):\n'
+        '    name = "pass_all_scenario"\n'
+        '\n'
+        '    def instances(self):\n'
+        '        return [\n'
+        '            TaskInstance(id="a", metadata={}),\n'
+        '            TaskInstance(id="b", metadata={}),\n'
+        '        ]\n'
+        '\n'
+        '    def setup(self, instance, workspace):\n'
+        '        pass\n'
+        '\n'
+        '    def verify(self, instance, workspace):\n'
+        '        return VerifyResult(passed=True, score=1.0)\n'
+    )

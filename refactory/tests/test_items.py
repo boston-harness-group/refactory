@@ -134,11 +134,15 @@ def test_begin_materialises_the_item_and_runs_the_task_setup(tmp_path):
     node = _declared(_data_graph(task_ref="counting"), tmp_path)
 
     assert items.command_list(node, tmp_path) == {"count": 2, "ids": ["alpha", "beta"]}
-    assert items.command_begin(node, tmp_path, 1) == {
-        "id": "beta", "path": None, "split": "test",
-    }
+    result = items.command_begin(node, tmp_path, 1)
+    assert result["id"] == "beta"
+    assert result["split"] == "test"
+    assert "pass_dir" in result
     assert json.loads((tmp_path / CURRENT_ITEM).read_text())["id"] == "beta"
-    assert (tmp_path / "setup-beta").exists()
+    # Task.setup now runs in the pass directory.
+    from pathlib import Path
+    pass_dir = Path(result["pass_dir"])
+    assert (pass_dir / "setup-beta").exists()
 
 
 def test_end_folds_the_task_verdict_into_the_run_facts(tmp_path):
@@ -1013,6 +1017,110 @@ def test_a_typeerror_inside_verify_is_the_items_failure_on_the_spine(tmp_path):
     assert record["passed"] is False
     assert record["error_kind"] == "TypeError"
     assert raising.verify_calls == [("train", 5)]
+
+
+# ── F5: pass isolation tests ────────────────────────────────────────────────
+
+
+def test_command_begin_returns_pass_dir(tmp_path):
+    """command_begin response includes pass_dir; the directory exists and contains current_item."""
+    _probe_task()
+    node = _declared(_data_graph(task_ref="counting"), tmp_path)
+
+    result = items.command_begin(node, tmp_path, 0)
+    assert "pass_dir" in result, "command_begin should return pass_dir"
+    from pathlib import Path
+    pass_dir = Path(result["pass_dir"])
+    assert pass_dir.exists(), "pass directory should exist"
+    assert (pass_dir / "current_item.json").exists(), "pass dir should have current_item.json"
+
+
+def test_command_begin_materialises_declared_reads(tmp_path):
+    """A run-level file listed in declared_reads is symlinked into the pass directory."""
+    from refactory_dsh import lowering
+
+    # Write a run-level file.
+    (tmp_path / "run_input.txt").write_text("run-level-data")
+
+    # Build a graph whose subgraph reads run_input.txt.
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        writes=("current_item.json",), inline_items=({"id": "a"},),
+        produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:read_run_level_input",
+        reads=("current_item.json", "run_input.txt"), writes=(), produces=(),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+    lowering.write_declarations({"graph": graph.to_state()}, tmp_path)
+    node = items.data_node(tmp_path, "data")
+
+    result = items.command_begin(node, tmp_path, 0)
+    from pathlib import Path
+    pass_dir = Path(result["pass_dir"])
+
+    symlink = pass_dir / "run_input.txt"
+    assert symlink.exists(), "run_input.txt should be symlinked into pass dir"
+    assert symlink.is_symlink(), "run_input.txt should be a symlink"
+    assert symlink.read_text() == "run-level-data"
+
+
+def test_command_end_merges_only_declared_produces(tmp_path):
+    """An undeclared fact in pass_dir/facts.json does not appear in run_dir/facts.json."""
+    _probe_task()
+    node = _declared(_data_graph(task_ref="counting"), tmp_path)
+
+    # Begin item 0 to create the pass directory.
+    result = items.command_begin(node, tmp_path, 0)
+    from pathlib import Path
+    pass_dir = Path(result["pass_dir"])
+
+    # Write an undeclared fact into the pass directory's facts.json.
+    facts_path = pass_dir / "facts.json"
+    pass_facts = json.loads(facts_path.read_text()) if facts_path.exists() else {}
+    pass_facts["undeclared_secret"] = "leaked"
+    facts_path.write_text(json.dumps(pass_facts))
+
+    # End the item.
+    items.command_end(node, tmp_path, 0)
+
+    # The undeclared fact should NOT be in run-level facts.
+    run_facts = json.loads((tmp_path / "facts.json").read_text())
+    assert "undeclared_secret" not in run_facts, (
+        f"undeclared fact leaked to run facts: {run_facts.get('undeclared_secret')}"
+    )
+
+
+def test_rerun_clears_pass_directories(tmp_path):
+    """command_begin at index 0 deletes old passes/<node_id>/."""
+    _probe_task()
+    node = _declared(_data_graph(task_ref="counting"), tmp_path)
+
+    # First run: create pass dirs.
+    for i in range(2):
+        items.command_begin(node, tmp_path, i)
+        items.command_end(node, tmp_path, i)
+
+    passes_dir = tmp_path / "passes" / "data"
+    assert passes_dir.exists(), "passes/data/ should exist after first run"
+
+    # Write a sentinel.
+    first_pass = next(passes_dir.iterdir())
+    (first_pass / "sentinel.txt").write_text("old")
+
+    # Rerun: begin item 0 again.
+    items.command_begin(node, tmp_path, 0)
+
+    # The sentinel should be gone (passes cleaned up).
+    for subdir in passes_dir.iterdir():
+        if subdir.is_dir():
+            assert not (subdir / "sentinel.txt").exists(), "stale file survived rerun"
 
 
 def test_part_and_seed_reach_only_the_hooks_that_take_them(tmp_path):

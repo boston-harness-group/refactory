@@ -945,7 +945,11 @@ The per-item half of a data node, from the command line.
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any] \| None'` |
+| function | `mark_pass_complete` | `(pass_dir: 'Path') -> 'None'` |
+| function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
+| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
+| function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
 
@@ -958,6 +962,10 @@ The per-item half of a data node, from the command line.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
 - **`make_item_record`** — Build a per-item record for one evaluated item.
+- **`mark_pass_complete`** — Write a ``.done`` marker in the pass directory.
+- **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
+- **`prepare_pass_dir`** — Create and return the pass directory for one item.
 - **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+- **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.
