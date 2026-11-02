@@ -74,7 +74,12 @@ def blocks(item: dict[str, str]) -> bool:
     missing edge-case test is a follow-up, even when it touches a correction). Always when
     it is an unbuilt ``ask`` or a failing ``check``. Otherwise it is a product defect and
     blocks when it is critical or high, or breaks an ask, a correction the person gave, or
-    the health check. A missing ``kind`` is a defect."""
+    the health check. A missing ``kind`` is a defect.
+
+    A weakened existing test is deliberately NOT blocking. The detector that finds one
+    cannot tell a loosened assertion from an expected value updated to match a
+    behaviour the brief asked for, so blocking on it sent back legitimate builds.
+    It reports; a person judges. See the follow-up for the detector's redesign."""
     kind = item.get("kind") or "defect"
     if kind in FOLLOW_UP_KINDS:
         return False

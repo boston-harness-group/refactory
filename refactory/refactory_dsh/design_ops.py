@@ -48,6 +48,9 @@ REFINE_SCOPE_REASON = "refinement of an open pull request"
 
 STAGING = "staging"
 
+#: Sentinel for _assertion_relaxed's literal extraction.
+_SENTINEL = object()
+
 #: Planning steps that must not change the target or the worktree (#347).
 #: They write only into the run directory; a change they make to the target
 #: or the worktree fails the step and names what changed.
@@ -208,6 +211,22 @@ def late_correction_notice(run_root: Path) -> dict[str, Any] | None:
         "not pass the change while it is unapplied.")}
 
 
+def _update_requirements_and_corrections(ctx: Any, corrections: str) -> None:
+    """Update the ``requirements_and_corrections`` fact for the verifier's hunk-revert method.
+
+    Combines the brief with the person's gate corrections so the verifier receives
+    what was asked for without reading design.md.
+    """
+    brief = str(ctx.facts.get("brief") or "")
+    parts: list[str] = []
+    if brief:
+        parts.append(f"## Requirements from the brief\n{brief}")
+    if corrections:
+        parts.append(f"## Gate corrections\n{corrections}")
+    ctx.set_fact("requirements_and_corrections",
+                 "\n\n".join(parts) if parts else "(no requirements)")
+
+
 def pick_gate_corrections(ctx: Any) -> str:
     """Gate evaluator: extract gate_strategy corrections from the intent ledger.
 
@@ -230,6 +249,7 @@ def pick_gate_corrections(ctx: Any) -> str:
         ctx.set_fact("gate_corrections", "")
         ctx.set_fact("design_corrections_applied", "0 corrections (no ledger)")
         ctx.set_fact(CORRECTIONS_PICKED, json.dumps({"approval": approval, "keys": []}))
+        _update_requirements_and_corrections(ctx, "")
         return "skip"
     picked = _picked(ctx.facts, approval)
     ctx.set_fact(CORRECTIONS_PICKED, json.dumps({"approval": approval,
@@ -237,11 +257,13 @@ def pick_gate_corrections(ctx: Any) -> str:
     if not due:
         ctx.set_fact("gate_corrections", "")
         ctx.set_fact("design_corrections_applied", "0 corrections")
+        _update_requirements_and_corrections(ctx, "")
         return "skip"
 
     joined = "\n\n".join(f"- {text}" for _, text in due)
     ctx.set_fact("gate_corrections", joined)
     ctx.set_fact("design_corrections_applied", f"{len(due)} correction(s)")
+    _update_requirements_and_corrections(ctx, joined)
     if all(key in picked for key, _ in due):
         return "skip"  # design.md already carries every one of them
 
@@ -376,6 +398,10 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
         "gate_strategy_feedback": "",
         "gate_revision_instruction": "",
     } if deliver else {}
+    # The requirements_and_corrections fact: the brief's asks and the person's gate
+    # corrections, for the verifier's hunk-revert method. Initially just the brief;
+    # apply_corrections updates it with the gate corrections after approval.
+    requirements_and_corrections = brief if brief else "(no requirements yet)"
     return {"name": name, "brief": brief, "check": check, "validation": "(no check has run yet)",
             "research_review": "(no research review has run yet)",
             "research_scope": research_scope, "research_scope_reason": research_scope_reason,
@@ -385,6 +411,7 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
             "deliverable_kind": deliverable_kind,
             "review_instructions": review_instructions,
             "verification_methods": verification_methods(deliverable_kind),
+            "requirements_and_corrections": requirements_and_corrections,
             **pitfalls_facts,
             **claims_facts,
             **UNREFUSED, **located, **planned}
@@ -2380,6 +2407,10 @@ def gate_check(ctx: Any) -> Any:
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh.run import BuildLoopStop
 
+    # Reset the coverage re-run bound: a new QA round (the builder committed
+    # new code and the reviews ran again) allows one more coverage re-run.
+    ctx.set_fact("qa_coverage_rerun_done", False)
+
     attempt = _prepared_attempt(ctx)
     if not attempt:
         raise ValueError("the check was not prepared for the attempt the run is at; "
@@ -2581,11 +2612,181 @@ def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
     return Verdict("reloop", detail)
 
 
+def _changed_test_fns(root: Path, base: str, test_file: str) -> list[str]:
+    """Return names of test functions in *test_file* whose change relaxed an assertion.
+
+    Compares HEAD and base versions of the file. A function whose body changed
+    is classified as assertion-relaxing (removed or weakened ``assert``, changed
+    expected value, added ``skip``/``xfail``) vs rename/refactor. Only the
+    assertion-relaxing names are returned.
+    """
+    import ast
+    import textwrap
+
+    attempt_path = root / test_file
+    if not attempt_path.is_file():
+        return []
+
+    try:
+        head_text = attempt_path.read_text(errors="replace")
+    except OSError:
+        return []
+
+    try:
+        base_text = worktree.git(root, "show", f"{base}:{test_file}")
+    except (ValueError, OSError):
+        return []  # New file or not on base — not a modified test
+
+    def _test_functions(source: str) -> dict[str, str]:
+        """Map test function name → body source."""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return {}
+        funcs: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_"):
+                    lines = source.splitlines()
+                    start = node.lineno - 1
+                    end = node.end_lineno if node.end_lineno else start + 1
+                    body = "\n".join(lines[start:end])
+                    funcs[node.name] = body
+        return funcs
+
+    head_fns = _test_functions(head_text)
+    base_fns = _test_functions(base_text)
+
+    relaxed: list[str] = []
+    for name, head_body in head_fns.items():
+        if name not in base_fns:
+            continue  # New function — not a weakened test
+        base_body = base_fns[name]
+        if head_body == base_body:
+            continue  # Unchanged
+
+        # Check if the change relaxed an assertion
+        if _assertion_relaxed(base_body, head_body):
+            relaxed.append(name)
+
+    return relaxed
+
+
+def _assertion_relaxed(base_body: str, head_body: str) -> bool:
+    """Whether the change from *base_body* to *head_body* relaxed an assertion.
+
+    Checks for: removed assert statements, weakened assert (fewer asserts),
+    added skip/xfail markers, changed comparison operators to weaker ones,
+    and changed expected values (``assert x == 42`` → ``assert x == 0``).
+    A rename (variable name change with same assertion structure) is NOT relaxing.
+    """
+    import ast
+
+    def _assert_nodes(source: str) -> list[ast.Assert]:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return []
+        return [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+
+    def _has_skip_xfail(source: str) -> bool:
+        return bool(_re.search(r'(?:pytest\.mark\.skip|pytest\.mark\.xfail|@skip|@xfail|'
+                               r'unittest\.skip)', source))
+
+    def _assert_structure(node: ast.Assert) -> str:
+        """A structural fingerprint of an assert: its AST shape without names/values."""
+        return type(node.test).__name__ + (
+            ("." + type(node.test.ops[0]).__name__) if isinstance(node.test, ast.Compare) else ""
+        )
+
+    def _literal_value(node: Any) -> Any:
+        """Extract a literal value from an AST node, or _SENTINEL if not a literal."""
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.List):
+            elts = [_literal_value(e) for e in node.elts]
+            if _SENTINEL not in elts:
+                return elts
+        if isinstance(node, ast.Tuple):
+            elts = [_literal_value(e) for e in node.elts]
+            if _SENTINEL not in elts:
+                return tuple(elts)
+        if isinstance(node, ast.Set):
+            elts = [_literal_value(e) for e in node.elts]
+            if _SENTINEL not in elts:
+                return frozenset(elts)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            v = _literal_value(node.operand)
+            if v is not _SENTINEL:
+                return -v
+        return _SENTINEL
+
+    def _assert_literals(node: ast.Assert) -> list[Any]:
+        """Extract literal comparator values from a Compare assert."""
+        if not isinstance(node.test, ast.Compare):
+            return []
+        lits: list[Any] = []
+        v = _literal_value(node.test.left)
+        if v is not _SENTINEL:
+            lits.append(v)
+        for comp in node.test.comparators:
+            v = _literal_value(comp)
+            if v is not _SENTINEL:
+                lits.append(v)
+        return lits
+
+    base_asserts = _assert_nodes(base_body)
+    head_asserts = _assert_nodes(head_body)
+
+    # Fewer asserts = relaxed
+    if len(head_asserts) < len(base_asserts):
+        return True
+
+    # Added skip/xfail
+    if _has_skip_xfail(head_body) and not _has_skip_xfail(base_body):
+        return True
+
+    # Check if any assert was structurally weakened (e.g. Compare → bare Name)
+    base_structures = sorted(_assert_structure(a) for a in base_asserts)
+    head_structures = sorted(_assert_structure(a) for a in head_asserts)
+    if base_structures != head_structures:
+        # Structure changed — check if it was weakened
+        # A Compare (assert x == 42) becoming a Name (assert x) is weakening
+        for bs in base_structures:
+            if "Compare" in bs and bs not in head_structures:
+                return True
+
+    # Check for changed expected values: same structure but different literal values.
+    # Match asserts by position when counts are equal.
+    if len(base_asserts) == len(head_asserts):
+        for ba, ha in zip(base_asserts, head_asserts):
+            bs = _assert_structure(ba)
+            hs = _assert_structure(ha)
+            if bs == hs and "Compare" in bs:
+                base_lits = _assert_literals(ba)
+                head_lits = _assert_literals(ha)
+                if base_lits and head_lits and base_lits != head_lits:
+                    return True
+
+    return False
+
+
 def enforce_guardedness(ctx: Any) -> list[str]:
     """Return the names of non-guarding **added** tests that are not exempted.
 
-    Only added test files (not modified ones) are enforced, as the brief
-    says "a new test".  Exemptions come from two sources:
+    Added test files are enforced for the whole file: a new test that passes
+    without the change pins nothing, and that blocks.
+
+    Modified test files are checked at function granularity for relaxed
+    assertions, but the result is **advisory only** -- written to
+    ``relaxed_advisory`` in ``test-guardedness.json``, never returned here. The detector cannot
+    distinguish a loosened assertion from an expected value updated to match a
+    behaviour the brief asked for, which is the required edit for a
+    behaviour-change brief, so blocking on it sent legitimate builds back. It
+    also misses every decorator-level weakening. See the detector-redesign
+    follow-up.
+
+    Exemptions come from two sources:
 
     1. design.md's ``## Test guardedness exemptions`` section (full mode).
     2. A ``# guardedness-exempt: <reason>`` comment in the test file itself
@@ -2604,11 +2805,10 @@ def enforce_guardedness(ctx: Any) -> list[str]:
     if "unavailable" in guardedness:
         return []
     summary = guardedness.get("summary", {})
-    if summary.get("not_guarding", 0) == 0:
-        return []
 
-    # Determine which test files were ADDED (not modified).
+    # Determine which test files were ADDED vs MODIFIED.
     added_files: set[str] | None = None
+    modified_files: set[str] | None = None
     try:
         from refactory_dsh import worktree
         found = worktree.recorded(ctx.workdir)
@@ -2618,20 +2818,22 @@ def enforce_guardedness(ctx: Any) -> list[str]:
                 found.base, "HEAD",
             )
             added_files = set(f.strip() for f in added_raw.splitlines() if f.strip())
+            modified_raw = worktree.git(
+                Path(found.path), "diff", "--name-only", "--diff-filter=M",
+                found.base, "HEAD",
+            )
+            modified_files = set(f.strip() for f in modified_raw.splitlines() if f.strip())
     except (ValueError, OSError, AttributeError):
         pass  # If we can't determine, enforce on all (conservative)
 
-    # Collect non-guarding test file paths — only ADDED files.
+    # Collect non-guarding test file paths — only ADDED files (existing rule unchanged).
     non_guarding = []
     for result in guardedness.get("results", []):
         if result.get("guarding") is False and result.get("file_level") != "cannot_run_on_base":
             tf = result.get("file", "unknown")
             if added_files is not None and tf not in added_files:
-                continue  # Modified file, not a new test — skip
+                continue  # Modified file, not a new test — skip for whole-file reporting
             non_guarding.append(tf)
-
-    if not non_guarding:
-        return []
 
     # Read exemptions from design.md (full mode).
     design_text = ctx.read_text("design.md") if ctx.exists("design.md") else ""
@@ -2658,7 +2860,7 @@ def enforce_guardedness(ctx: Any) -> list[str]:
         from refactory_dsh import worktree as _wt
         found = _wt.recorded(ctx.workdir)
         if found is not None:
-            for tf in non_guarding:
+            for tf in list(non_guarding):
                 tf_path = Path(found.path) / tf
                 if tf_path.is_file():
                     try:
@@ -2670,7 +2872,53 @@ def enforce_guardedness(ctx: Any) -> list[str]:
     except (ValueError, AttributeError):
         pass
 
-    return [t for t in non_guarding if t not in exempted]
+    result_files = [t for t in non_guarding if t not in exempted]
+    #: Modified tests whose assertions look relaxed. Reported, never blocking.
+    advisory: list[str] = []
+
+    # Modified test files: check at function granularity for relaxed assertions.
+    # Only check files whose guardedness result says "not guarding" (the file's tests
+    # pass on the base), so files the check didn't analyse are not false-positived,
+    # and files that ARE guarding (fail on base revert) keep their exemption.
+    not_guarding_files = {r.get("file", "") for r in guardedness.get("results", [])
+                          if r.get("guarding") is False
+                          and r.get("file_level") != "cannot_run_on_base"}
+    if modified_files is not None and found is not None:
+        root = Path(found.path)
+        for tf in modified_files:
+            if tf not in not_guarding_files:
+                continue  # Not flagged by the guardedness check
+            if tf in exempted:
+                continue
+            if not tf.endswith(".py"):
+                continue
+            # Check if this is a test file
+            tf_basename = Path(tf).name
+            if not (tf_basename.startswith("test_") or tf_basename.endswith("_test.py")):
+                continue
+            relaxed_fns = _changed_test_fns(root, found.base, tf)
+            if relaxed_fns:
+                # Check exemptions at function level
+                non_exempt = [fn for fn in relaxed_fns
+                              if fn not in exempted and f"{tf}::{fn}" not in exempted]
+                if non_exempt:
+                    # Advisory, never blocking: the detector cannot tell a loosened
+                    # assertion from an expected value updated to match a behaviour
+                    # the brief asked for, and the second is the required edit. It is
+                    # recorded for the reviewers and the person; it does not send the
+                    # build back. See the detector-redesign follow-up.
+                    advisory.extend(f"{tf}::{fn}" for fn in non_exempt)
+
+    if advisory:
+        # Into the guardedness record, not a fact: every node that calls this
+        # (design's check and gate_check, design_fast's focused_check) would have to
+        # declare a new fact, and an undeclared one ends the run on both runtimes --
+        # the opposite of advisory.
+        record = ctx.read_json("test-guardedness.json", {}) or {}
+        record["relaxed_advisory"] = sorted(advisory)
+        ctx.write_json("test-guardedness.json", record)
+
+    return result_files
 
 
 def report_artifact(ctx: Any) -> dict[str, Any]:
@@ -2875,6 +3123,9 @@ def _set_aside_judging(ctx: Any) -> None:
         ctx.path(name).rename(folder / name)
 
 
+QA_RERUN_REVIEW = "reviews/qa-rerun.md"
+
+
 def synthesize_qa(ctx: Any) -> dict[str, Any]:
     """Op: put this attempt's reviews, its check and its scope in one document for the QA judge.
 
@@ -2885,8 +3136,25 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
 
     It also starts the round's judging: the last round's verdicts, evidence map and audit
     are set aside (`_set_aside_judging`), and the judges' reread counts start again.
+    When a new QA round starts, `reviews/qa-rerun.md` (from a coverage re-run in the
+    previous round) is archived alongside the other judging files, so a later round
+    never merges stale probes from an earlier one.
     """
     _set_aside_judging(ctx)
+    # Archive reviews/qa-rerun.md from a previous round so stale probes are
+    # never merged into the new round's synthesis.  When qa_coverage_rerun_done
+    # is True, the file is from a valid coverage re-run in the current round and
+    # should be included; when False (reset by gate_check at the start of each
+    # new round), it is stale and must be removed.
+    rerun_path = ctx.path(QA_RERUN_REVIEW)
+    if rerun_path.is_file() and not ctx.facts.get("qa_coverage_rerun_done"):
+        import uuid
+        from datetime import datetime, timezone
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        folder = ctx.workdir / JUDGING_HISTORY / stamp
+        folder.mkdir(parents=True, exist_ok=True)
+        rerun_path.rename(folder / "qa-rerun.md")
     sections: list[str] = []
     missing: list[str] = []
     for name, who in DESIGN_QA_REVIEWS:
@@ -2931,6 +3199,24 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
         + "## The diff stat\n\n```\n" + _diff_stat(ctx) + "\n```\n\n"
         + "## The design's Changes\n\n" + (changes or "(design.md has no Changes section)") + "\n"
     )
+    # Include the coverage re-run review when the qa_director_rerun node wrote one.
+    # The graph edge qa_director_rerun → synthesize_qa guarantees it exists when
+    # the coverage_rerun path fires; on a normal path it was archived above.
+    rerun_text = ctx.read_text(QA_RERUN_REVIEW).strip() if ctx.exists(QA_RERUN_REVIEW) else ""
+    if rerun_text:
+        body += (f"\n\n## {QA_RERUN_REVIEW} (the QA director coverage re-run)"
+                 f"\n\n{rerun_text}\n")
+    # The verifier's probe files, rerun by `probe_rerun.rerun_probes` before this step.
+    # Only when there is something to show: a verifier that gave nothing has no probes.
+    from refactory_dsh.probe_rerun import RESULTS_MD, read_results
+    found = read_results(ctx)
+    probe_text = (ctx.read_text(RESULTS_MD).strip()
+                  if (found.get("probes") or found.get("unverified")) and ctx.exists(RESULTS_MD)
+                  else "")
+    if probe_text:
+        body += (f"\n\n## {RESULTS_MD} (the verifier's probe files, rerun by the runtime)\n\n"
+                 "A failing probe is a defect the QA gate sends back; a PROBED claim with no "
+                 "probe file of its own is UNVERIFIED.\n\n" + probe_text + "\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)
@@ -3258,6 +3544,74 @@ def _quoting(ctx: Any, note: str, name: str) -> str:
     return note + (f". It wrote: {said}" if said else "")
 
 
+def _check_unverified_coverage(ctx: Any) -> tuple[list[str], Verdict | None]:
+    """Check probe coverage for requirements marked unverified in intent-audit.json.
+
+    When unverified requirements are found for the first time in a QA round,
+    trigger a coverage re-run (``Verdict("coverage_rerun")``) so the QA director
+    re-runs via the ``qa_director_rerun`` node with those requirement ids in its
+    prompt — a probe that runs and fails becomes a normal finding.  The re-run is
+    bounded to once per QA round: ``qa_coverage_rerun_done`` is set on the first
+    re-run and checked before triggering another; the bound resets when the builder
+    produces a new commit (a new QA round begins, and ``synthesize_qa`` sets it
+    aside).  A requirement still unverified after that one re-run is listed as
+    advisory (not verified), never a builder reloop.
+
+    Returns ``(advisories, verdict)``.  *verdict* is non-None only when a coverage
+    re-run is needed; the caller must return it instead of proceeding.
+    """
+    from refactory_dsh import probe_rerun
+
+    audit: Any = {}
+    if ctx.exists("intent-audit.json"):
+        try:
+            audit = ctx.read_json("intent-audit.json", {})
+        except (ValueError, OSError):
+            audit = {}
+
+    requirements = audit.get("requirements", []) if isinstance(audit, dict) else []
+    unverified = [req for req in requirements
+                  if isinstance(req, dict) and req.get("status") == "unverified"]
+    # A verifier PROBED claim with no probe file of its own (`probe_rerun`) is unverified too.
+    unverified += [item for item in probe_rerun.read_results(ctx).get("unverified", [])
+                   if isinstance(item, dict)]
+
+    if not unverified:
+        return [], None
+
+    rerun_done = ctx.facts.get("qa_coverage_rerun_done")
+    advisories: list[str] = []
+
+    if not rerun_done:
+        # First time in this QA round: trigger a coverage re-run.
+        ctx.set_fact("qa_coverage_rerun_done", True)
+        # Set the requirement ids as a fact so the qa_director_rerun prompt
+        # template can reference {{qa_coverage_rerun_ids}}.
+        lines = []
+        for req in unverified:
+            req_id = req.get("id", "?")
+            req_text = req.get("requirement", req.get("text", "?"))
+            lines.append(f"- {req_id}: {req_text}")
+        ids_text = "\n".join(lines)
+        ctx.set_fact("qa_coverage_rerun_ids", ids_text)
+        req_ids = ", ".join(req.get("id", "?") for req in unverified)
+        return [], Verdict(
+            "coverage_rerun",
+            f"coverage re-run: {len(unverified)} unverified requirement(s) ({req_ids}); "
+            "re-running the QA director so it can probe them",
+        )
+
+    # After re-run, still unverified: list as advisory, never a builder reloop.
+    for req in unverified:
+        req_id = req.get("id", "?")
+        req_text = req.get("requirement", req.get("text", "?"))
+        advisories.append(
+            f"not verified (advisory): {req_id} — {req_text} — "
+            "still unverified after QA re-run"
+        )
+    return advisories, None
+
+
 def gate_qa(ctx: Any) -> Any:
     """Gate after the QA judge: route on ``qa-judge.json``, never on the reviews' prose.
 
@@ -3304,6 +3658,16 @@ def gate_qa(ctx: Any) -> Any:
         ctx.write_text("reviews/qa-gate.txt", f"reread: {reread.reason}\n")
         return reread
     advisory = _review_questions_advisory(ctx)
+    # A verifier probe that fails when the runtime reruns it is a blocking defect, whatever
+    # the judge said (`probe_rerun.defects`).
+    from dataclasses import replace
+
+    from refactory_dsh import probe_rerun
+
+    failing = probe_rerun.defects(probe_rerun.read_results(ctx))
+    if failing:
+        judgment = (judges.Judgment("redo", must_fix=tuple(failing)) if judgment is None else
+                    replace(judgment, verdict="redo", must_fix=(*judgment.must_fix, *failing)))
     if judgment is not None:
         stop = judges.unavailable(judgment)
         if stop:
@@ -3336,6 +3700,15 @@ def gate_qa(ctx: Any) -> Any:
     _note_unresolved(ctx, QA_UNRESOLVED, "QA judge", [])
     _note_unresolved(ctx, QA_UNRESOLVED, "QA gate", [])
     ctx.set_fact(QA_DRAFT, "")
+    # Check unverified probe coverage before proceeding
+    unverified_advisory, coverage_verdict = _check_unverified_coverage(ctx)
+    if coverage_verdict is not None:
+        # Route back to the QA reviews for a coverage re-run.
+        record_follow_ups(ctx, "qa", follow)
+        ctx.write_text("reviews/qa-gate.txt", f"coverage_rerun: {coverage_verdict.reason}\n")
+        return coverage_verdict
+    if unverified_advisory:
+        follow = [*follow, *unverified_advisory]
     record_follow_ups(ctx, "qa", follow)
     # The advisory goes last: delivery reads the repository-question advisory to the end.
     notes = "".join(f"{line}\n" for line in (

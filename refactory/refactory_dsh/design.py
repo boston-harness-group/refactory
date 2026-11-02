@@ -139,12 +139,18 @@ _JUDGE_RULE = (
     "(`kind` `check`); or a critical or high defect in product code (`kind` `defect`: "
     "wrong behaviour, data loss, a crash or a security problem, or a regression, with the "
     "test or path:line that shows it).\n"
-    "These are always follow-ups, never must_fix: weak or tautological test assertions and "
-    "missing edge-case tests, docs wording, style, dead code, minor refactors, and any low or "
-    "medium finding. Put them in `follow_ups`. If you list one in must_fix anyway, label it "
-    "with its `kind` (`test`, `docs` or `style`, or a `defect` of `medium` or `low` "
-    "severity): the gate moves it to the follow-ups and the pull request lists it. A weak "
-    "test is a `test` item even when it covers a correction: the correction is built.\n"
+    "A weakened existing test — an assertion removed, relaxed, or made trivially true, an "
+    "expected value changed to match new behaviour, or a test marked skip/xfail — is "
+    "reported with `kind` `test` and `breaks` set to what it breaks (e.g. `correction`). "
+    "The gate does NOT block on it: an expected value updated to match a behaviour the "
+    "brief asked for is the required edit, and no detector tells the two apart, so a "
+    "person judges it. A merely missing test, a missing edge-case test, or a tautological "
+    "new test is a follow-up with `kind` `test` and `breaks` `none`.\n"
+    "These are always follow-ups, never must_fix: docs wording, style, dead code, minor "
+    "refactors, and any low or medium finding. Put them in `follow_ups`. If you list one in "
+    "must_fix anyway, label it with its `kind` (`test`, `docs` or `style`, or a `defect` of "
+    "`medium` or `low` severity): the gate moves it to the follow-ups and the pull request "
+    "lists it.\n"
     "Give each must_fix item its `kind` (`ask`, `check`, `defect`, `test`, `docs` or "
     "`style`), its `severity` (`critical`, `high`, `medium` or `low`) and what it `breaks` "
     "(`ask`, `correction`, `health` or `none`). Answer `redo` only when at least one item "
@@ -264,7 +270,8 @@ OVERWATCH_PROMPT = (
     + "You are the overwatch. Verify acceptance rather than repeating the reviews: take "
     "each ask in the brief and each correction above and say what proves it (a test "
     "that fails without the change, or a command and its output) or that nothing does. "
-    "Run your own spot checks on what the reviews and the map claim. Do not promote a "
+    "Run the 2\u20133 most critical requirements yourself, with the exact command and its "
+    "output. Run your own spot checks on what the reviews and the map claim. Do not promote a "
     "syntax check, file-presence check, self-report or label-string check into semantic "
     "evidence. If required validation is unavailable, keep that requirement unverified "
     "and say what would unblock it.\n\n"
@@ -298,10 +305,11 @@ def prepare_check_iterations(knobs: dict[str, Any]) -> int:
 
     It reloops for a fix-up, an early stop or a refused emission. Attempts reach at most
     ``check_attempt_cap`` (when it is above ``check_attempts``), the run's fix-ups are at
-    most ``self_check_fixups x check_attempts``, and each applied emission comes after at
-    most ``refusal_attempts - 1`` refusals, so the reloops are at most
-    ``(attempts + fix-ups + 1) x refusals + fix-ups + attempts``: (8 + 6 + 1) x 2 + 6 + 8
-    = 44 with the defaults. Past that, b39b's stop has already ended the run.
+    most ``self_check_fixups x check_attempts``, and each applied
+    emission comes after at most ``refusal_attempts - 1`` refusals, so the reloops are at
+    most ``(attempts + fixups + 1) x refusals + fixups + attempts``:
+    (8 + 6 + 1) x 2 + 6 + 8 + 1 = 45 with the defaults.  Past that, b39b's stop has already
+    ended the run.
     """
     attempts = int(knobs.get("check_attempts", 3))
     reach = max(attempts, int(knobs.get("check_attempt_cap", 8)))
@@ -379,6 +387,7 @@ class DesignMode(Mode):
                             "spending nothing, before the early stop spends it; a run gets "
                             "this many times check_attempts",
             ),
+
             "self_check_timeout_s": Knob(
                 300, "int", lo=10, hi=600,
                 description="how long the self-check's tests may run before the reviews; "
@@ -438,6 +447,7 @@ class DesignMode(Mode):
                       "research_scope_reason", "qa_gate",
                       "overwatch_review", "design_review_feedback", "design_review_findings",
                       "deliverable_kind", "review_instructions", "verification_methods",
+                      "requirements_and_corrections",
                       *repo_change.produces(), "delivery", "delivery_plan",
                       "has_pitfalls_step", "pitfalls", "pitfalls_review", "builder_tests",
                       "claims_check_feedback", "design_review_status", "refine_context",
@@ -854,7 +864,8 @@ class DesignMode(Mode):
             reads=("brief.json",),
             writes=(*check_writes, *repo_change.CHECK_WRITES, CHECK_PREP, SELF_CHECK_RECORD),
             produces=self_check_produces,
-            knobs=(*check_knobs, "self_check_fixups", "self_check_timeout_s"),
+            knobs=(*check_knobs, "self_check_fixups",
+                   "self_check_timeout_s"),
             # From the knobs, so the build loop's stop always comes first: 45 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
             max_iterations=prepare_check_iterations(defaults),
@@ -891,7 +902,8 @@ class DesignMode(Mode):
             # It runs the whole check itself when no decision stands for this attempt.
             writes=(*check_writes, *repo_change.CHECK_WRITES),
             produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
-                      "combined_sendback_count", "early_asks_sendback_count"),
+                      "combined_sendback_count", "early_asks_sendback_count",
+                      "qa_coverage_rerun_done"),
             knobs=check_knobs, max_iterations=8,
             notes="compose one send-back from check failures and review findings without "
                   "spending an attempt; the combined send-back names every failing test "
@@ -903,11 +915,12 @@ class DesignMode(Mode):
         ))
 
         # ── design-v2's three reviews, in parallel, and the overwatch pass ──
-        from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, VERIFIER_PROMPT
+        from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, DESIGN_VERIFIER_PROMPT
         graph.add(Node(
             "verifier", "agent",
             retry=TIMEOUT_RETRY, outputs_only=True,
-            prompt_template=VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
+            workspace={"kind": "clone", "of": "attempt", "collect": "files"},
+            prompt_template=DESIGN_VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
             timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
             reads=("brief.json", "changes.diff"),
@@ -916,7 +929,9 @@ class DesignMode(Mode):
             role="code_reviewer",
             resource_role="final_validation",
             notes="design-blind verification: apply the evidence log's methods "
-                  "to the brief, diff and repo",
+                  "to the brief, diff and repo; for each behaviour-changing requirement, "
+                  "revert the implementing hunk in the workspace clone, run the specific "
+                  "test, and report caught/not caught",
         ))
         graph.add(Node("fork_qa", "fork",
                        targets=("health_checker", "code_reviewer", "qa_director", "verifier",
@@ -1004,7 +1019,12 @@ class DesignMode(Mode):
                 "the exit code. Include conflicting nearby numbers, unsupported counts, "
                 "and alternative sign/unit encodings when the interface parses them. "
                 "Accepted output must match the request; unsupported input must fail "
-                "clearly without silently substituting a valid case. Write "
+                "clearly without silently substituting a valid case.\n\n"
+                "Coverage rule: every requirement in the brief, and every runtime when the "
+                "brief names both, must be covered by at least one probe you actually run, "
+                "reported with the exact command and its output. A requirement with no run "
+                "probe is NOT_VERIFIED.\n\n"
+                "Write "
                 "`reviews/qa.md` with each check and its exact result. Anything that "
                 "breaks an ask in the brief is written as BLOCKING: <path>: <description> where <path> is the file the builder must change to fix the problem. A defect in the code is reported against the code file, even when the requirement it misses comes from design.md or the brief. A problem in a run document (design.md, strategy.json, or another file an earlier step wrote) is reported with that document's path.\n"
                 + SEVERITY_RULE + " " + MARKER_RULE + "\n"
@@ -1017,11 +1037,56 @@ class DesignMode(Mode):
             produces=("qa_review",),
             notes="attack the artifact against the brief",
         ))
+        graph.add(Node(
+            "qa_director_rerun", "agent",
+            prompt_template=(
+                "Artifact directory (absolute): {{artifact}}\n"
+                "Read and run the delivered files at this exact path; do not infer it "
+                "from your working directory. {{change}}\n\n"
+                "Brief: {{brief}}\nThe check it must pass: {{check}}\n\n"
+                "## The approved design\nRead the approved design from `design.md` in the run directory.\n\n"
+                + _ACCEPTANCE_BASELINE
+                + "You are the QA director, running a coverage re-run. The previous QA "
+                "round left some requirements with no run probe. Probe ONLY the "
+                "unverified requirements listed below — do not repeat probes for "
+                "requirements that already passed.\n\n"
+                "Unverified requirements to probe:\n{{qa_coverage_rerun_ids}}\n\n"
+                "Coverage rule: every requirement listed above must be covered by at "
+                "least one probe you actually run, reported with the exact command and "
+                "its output. A probe that runs and fails is a normal finding.\n\n"
+                "Read the original QA review at `reviews/qa.md` to see what was already "
+                "covered. Write `reviews/qa-rerun.md` with each check and its exact "
+                "result. Anything that breaks an ask in the brief is written as "
+                "BLOCKING: <path>: <description> where <path> is the file the builder "
+                "must change to fix the problem.\n"
+                + SEVERITY_RULE + " " + MARKER_RULE + "\n"
+                "{{review_instructions}}\n"
+                "Changed functions:\n{{changed_functions}}\n\n"
+            ),
+            reads=("brief.json", "design.md", "reviews/qa.md",
+                   "changed-functions.json"),
+            writes=("reviews/qa-rerun.md",),
+            resource_role="final_validation",
+            outputs_only=True,
+            notes="coverage re-run: probe only the unverified requirements",
+        ))
         graph.add(Node("join_qa", "join",
                        sources=("check", "health_checker", "code_reviewer", "qa_director",
                                 "early_asks_check", "verifier"),
                        notes="wait for the check, all three reviews, the verifier "
                              "and the early asks judge"))
+        # ── the verifier's probe files, rerun by deterministic code (refactory_dsh.probe_rerun) ──
+        graph.add(Node(
+            "rerun_probes", "op", call="refactory_dsh.probe_rerun:rerun_probes",
+            # Not reviews/verification.md: the verifier is optional, and a declared input
+            # must exist on the spine. Its probe files are read from its workspace clone.
+            writes=("reviews/probe-results.md", "reviews/probe-results.json"),
+            produces=("probe_results",),
+            resource_role="final_validation",
+            notes="rerun each probe file the verifier wrote on the attempt in a scratch clone "
+                  "(120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED "
+                  "claim without a probe file of its own is unverified",
+        ))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(
             "synthesize_qa", "op", call=f"{OPS}:synthesize_qa",
@@ -1051,12 +1116,14 @@ class DesignMode(Mode):
                    "reviews/qa.md", "changed-functions.json"),
             writes=("reviews/qa-gate.txt", "reviews/follow-ups.json", "reviews/follow-ups.md"),
             produces=("qa_gate", "qa_judge_rereads", "qa_judge_reread", "qa_draft",
-                      "qa_unresolved"),
+                      "qa_unresolved", "qa_coverage_rerun_done",
+                      "qa_coverage_rerun_ids"),
             knobs=("judge_rereads",),
-            max_iterations=5,
+            max_iterations=6,
             notes="route on the QA judge's verdict: a redo for what holds the change back goes "
                   "to the builder, or, at the review limit, on as a draft; an unreadable "
-                  "verdict is read again once; follow-ups go to the pull request",
+                  "verdict is read again once; a coverage re-run adds one pass; "
+                  "follow-ups go to the pull request",
         ))
         # The correction audit measures the QA judge's evidence map before the overwatch
         # reads it; it routes nothing.
@@ -1106,7 +1173,8 @@ class DesignMode(Mode):
         # commit and current check evidence (`design_ops._draft_for_stop`).
         graph.add(Node(
             "pick_corrections", "gate", evaluator=f"{OPS}:pick_gate_corrections",
-            produces=("gate_corrections", "design_corrections_applied", CORRECTIONS_PICKED),
+            produces=("gate_corrections", "design_corrections_applied",
+                      "requirements_and_corrections", CORRECTIONS_PICKED),
             max_iterations=2,
             notes="deterministically extract the person's corrections to the approved design "
                   "from the ledger, after the approval and on every send-back to the builder; "
@@ -1208,7 +1276,8 @@ class DesignMode(Mode):
         # when one branch completes, before the other branches finish.
         graph.connect("join_qa", "gate_check")
         graph.connect("gate_check", "pick_corrections", condition="reloop")
-        graph.connect("gate_check", "synthesize_qa", condition="proceed")
+        graph.connect("gate_check", "rerun_probes", condition="proceed")
+        graph.connect("rerun_probes", "synthesize_qa")
         graph.connect("gate_check", "report", condition="draft")
         graph.connect("synthesize_qa", "qa_judge")
         graph.connect("qa_judge", "gate_qa")
@@ -1216,6 +1285,11 @@ class DesignMode(Mode):
         # A judge-only reread: the QA judge's verdict could not be read, so it is asked
         # again, with no builder round (`design_ops._read_judge`; `judge_rereads` caps it).
         graph.connect("gate_qa", "qa_judge", condition="reread")
+        # Coverage re-run: unverified requirements trigger a re-run of the QA
+        # director for those requirements, then re-synthesis and re-judge;
+        # still unverified after that is advisory.
+        graph.connect("gate_qa", "qa_director_rerun", condition="coverage_rerun")
+        graph.connect("qa_director_rerun", "synthesize_qa")
         graph.connect("gate_qa", "audit_corrections", condition="proceed")
         graph.connect("audit_corrections", "overwatch")
         graph.connect("overwatch", "gate_overwatch")

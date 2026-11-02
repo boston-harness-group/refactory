@@ -469,7 +469,8 @@ def test_design_mode_retries_its_builder_and_verifier():
 
     graph = DesignMode().build()
     assert [node.id for node in graph.nodes.values() if node.retry is not None] == ["emit", "verifier"]
-    assert [node.id for node in graph.nodes.values() if node.outputs_only] == ["verifier"]
+    assert sorted(node.id for node in graph.nodes.values() if node.outputs_only) == [
+        "qa_director_rerun", "verifier"]
     assert graph.nodes["verifier"].retry == TIMEOUT_RETRY == RULE
     # The builder's limit is a hard maximum (inactivity stops a stuck one sooner), and its
     # retry has the same maximum rather than twice it.

@@ -175,7 +175,7 @@
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
       "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-      "reviewed_schema": "ed27fe9124c2ca6f2fb19b4429643965808150370c9df6d206133a3c67a7493f"
+      "reviewed_schema": "a89a70fe616e8dbaa4db03cb3f90e4b1f9da4bf398727714afd386e08255e796"
     },
     "default_pack/design_fast": {
       "doc": "refactory/docs/budgets-fast-modes.md",
@@ -659,7 +659,7 @@
           "arguments": {
             "model_action": "set"
           },
-          "explanation": "Store the model every run uses, where Settings → Models keeps it: `refactory model set --provider deepseek-official --model deepseek-v4-pro`. Only that entry of the profile patch changes. --provider/--model on a command override it for that run."
+          "explanation": "Store the model every run uses, where Settings \u2192 Models keeps it: `refactory model set --provider deepseek-official --model deepseek-v4-pro`. Only that entry of the profile patch changes. --provider/--model on a command override it for that run."
         },
         {
           "arguments": {
@@ -671,9 +671,9 @@
       "interfaces": {
         "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
         "cli": "refactory model {set --provider <p> --model <m>, show}",
-        "panel": "Unavailable as a dedicated panel control; use Settings → Models."
+        "panel": "Unavailable as a dedicated panel control; use Settings \u2192 Models."
       },
-      "purpose": "The one model choice every run uses (the refactory profile's agent-default-model, shared with Settings → Models). A run with no choice and no flag is refused, or on a first run uses the only provider with a key. set stores it; show reads it.",
+      "purpose": "The one model choice every run uses (the refactory profile's agent-default-model, shared with Settings \u2192 Models). A run with no choice and no flag is refused, or on a first run uses the only provider with a key. set stores it; show reads it.",
       "reviewed_schema": "f10bd7347dd90563346c2b4b9790d80ae0d3988d70a9426d093f2e3ef8d27fd9"
     },
     "cli:pin": {
@@ -1189,7 +1189,7 @@
             "mode": "counting_pack/fixed_step",
             "omit_steering": true
           },
-          "explanation": "Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. Set omit_steering to exclude steering from candidate model prompts without disabling correction gates or audits."
+          "explanation": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. Set omit_steering to exclude steering from candidate model prompts without disabling correction gates or audits."
         }
       ],
       "interfaces": {
@@ -1485,7 +1485,7 @@
             "note": "Keep the output text unchanged",
             "run": "/tmp/example-run"
           },
-          "explanation": "Read or append to the run’s intent ledger. CLI/panel also expose gate answers and boundary controls; chat only exposes notes, constraints and seed. Use --source ceo for the CEO’s own observations (context only, not auditable); the CLI default is user-relayed (the person’s words, auditable)."
+          "explanation": "Read or append to the run\u2019s intent ledger. CLI/panel also expose gate answers and boundary controls; chat only exposes notes, constraints and seed. Use --source ceo for the CEO\u2019s own observations (context only, not auditable); the CLI default is user-relayed (the person\u2019s words, auditable)."
         }
       ],
       "interfaces": {
@@ -1493,7 +1493,7 @@
         "cli": "python -m refactory_dsh.console steer",
         "panel": "Steering and user gate controls."
       },
-      "purpose": "Read or append to the run’s intent ledger. CLI/panel also expose gate answers and boundary controls; chat only exposes notes, constraints and seed.",
+      "purpose": "Read or append to the run\u2019s intent ledger. CLI/panel also expose gate answers and boundary controls; chat only exposes notes, constraints and seed.",
       "reviewed_schema": "1cd553bcc1982fe5717a19d9a0dfd396ab3e3037efef6f634d15f165afa921df"
     },
     "stop": {
@@ -1589,6 +1589,39 @@
       },
       "purpose": "List registered target projects for the GUI's target picker; the same registry as refactory projects.",
       "reviewed_schema": "661036eb7e202899aecc567e2ab9c8364d37d51b4592f36895805e60d1398fe5"
+    },
+    "cli:replay-verifier": {
+      "doc": "refactory/docs/cli.md",
+      "examples": [
+        {
+          "arguments": {
+            "run_dir": "/path/to/existing-run"
+          },
+          "explanation": "Replay the verifier on a completed run whose worktree is still present."
+        },
+        {
+          "arguments": {
+            "commit": "abc123",
+            "run_dir": "/path/to/existing-run"
+          },
+          "explanation": "Replay the verifier when the original worktree is gone; a temporary worktree of that commit is checked out and removed after the run."
+        },
+        {
+          "arguments": {
+            "model": "deepseek-v4-pro",
+            "provider": "deepseek-official",
+            "run_dir": "/path/to/existing-run"
+          },
+          "explanation": "Replay the verifier on a chosen model; the route resolves as for `refactory ceo`, so a home with no stored choice needs --provider and --model."
+        }
+      ],
+      "interfaces": {
+        "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
+        "cli": "refactory replay-verifier --run-dir DIR [--commit HASH] [--provider P --model M] [--effort E]",
+        "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
+      },
+      "purpose": "Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.",
+      "reviewed_schema": "8a960b0ec94e5a1f7583894729b991bba2858816ddfc8fb16217f850dc0be09c"
     }
   }
 }
