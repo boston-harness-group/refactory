@@ -470,8 +470,7 @@
         "brief.json",
         "changes.diff",
         "design.md",
-        "reviews/qa-synthesized.md",
-        "test-guardedness.json"
+        "reviews/qa-synthesized.md"
       ],
       "writes": [
         "overwatch-verdict.json"

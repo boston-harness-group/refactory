@@ -1076,15 +1076,14 @@ def _materialise_directory(ctx: Any, source: Path | None, files: tuple[str, ...]
     finally:
         if not preserve_backup and not (previous.exists() and not root.exists()):
             shutil.rmtree(temporary)
-    # Write placeholder files for directory-mode (no worktree, no diff).
-    # These files are now declared in the node's writes.
-    import json as _json
+    # changed-functions.json and changes.diff are legitimate empty results on
+    # no-worktree runs; downstream nodes (verifier, focused_qa) read them.
+    # test-guardedness.json is NOT written — it is only meaningful on worktree
+    # runs and is no longer a required read of the verifier.
     ctx.write_json("changed-functions.json", [])
     _workdir = Path(ctx.workdir)
     if not (_workdir / "changes.diff").exists():
-        ctx.write_text("changes.diff", "(this run has no worktree; no diff available)\n")
-    if not (_workdir / "test-guardedness.json").exists():
-        ctx.write_json("test-guardedness.json", {"unavailable": "no worktree"})
+        ctx.write_text("changes.diff", "")
     return {"artifact": str(root), "files": sorted(set(files) | {str(path) for path in checked}),
             "changed_functions": "(none)"}
 

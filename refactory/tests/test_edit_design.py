@@ -149,51 +149,82 @@ def test_the_revision_records_what_it_came_from(tmp_path):
 
 
 def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
-    # Use a unique package name so parallel workers cleaning ``edited_pkg``
-    # cannot break the registration step (pre-existing parallel-execution race).
+    """The smoke gate refuses a revision whose score is lower than the original.
+
+    Exercises ``create_ops.smoke()`` directly in the test's own process with a
+    monkeypatched ``sandbox.smoke`` (the test's own fake).  All ops run in
+    forkserver children where parent-process monkeypatching is invisible, so
+    the test calls the function directly instead of going through the executor.
+    The business logic under test is identical: ``_revision()`` receives the
+    controlled scores and raises ``ValueError``.
+    """
+    import refactory_dsh.create_ops as create_ops
+
     pkg = "edited_regression"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    # With enable_recovery=True the edit CLI runs ops in forkserver children,
-    # so monkeypatching sandbox.smoke is invisible.  Use an environment
-    # variable override that the child process reads.
-    smoke_override = json.dumps({
-        "circle_packing/adaptive": {"exit_ok": True, "score": 5.0},
-        "*": {"exit_ok": True, "score": 1.0},
-    })
-    monkeypatch.setenv("_REFACTORY_TEST_SMOKE_OVERRIDE", smoke_override)
     try:
-        with pytest.raises(CreateError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
-            edit_module.edit(
-                _edit_config(
-                    name=pkg, brief="count", mode="circle_packing/adaptive", attempts=1,
-                    workdir=tmp_path / "edit-run",
-                ),
-                client=FakeModel(create_answers(pkg, good_files(pkg))),
-            )
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        workdir = tmp_path / "smoke-run"
+        workdir.mkdir(parents=True, exist_ok=True)
+        ctx = nn.RunContext(workdir)
+        ctx.task = {"name": pkg, "brief": "count", "mode": "circle_packing/adaptive",
+                    "revision_of_state": None}
+        ctx._declared = ("smoke.json", "revision.json")
+        ctx.knobs = {"smoke_timeout_s": 60, "allow_regression": 0,
+                     "sample_knobs": "[]", "attempts": 1}
+        ctx.facts = {"name": pkg, "revision_of": "circle_packing/adaptive",
+                     "package_path": str(pkg_dir)}
+
+        def _fake_smoke(identifier, wdir, **kw):
+            if identifier == "circle_packing/adaptive":
+                return sandbox.SandboxResult(ok=True, payload={"exit_ok": True, "score": 5.0})
+            return sandbox.SandboxResult(ok=True, payload={"exit_ok": True, "score": 1.0})
+
+        def _fake_describe(name, **kw):
+            return sandbox.SandboxResult(ok=True, payload={"ids": [f"{name}/counter"], "describe": {}})
+
+        monkeypatch.setattr(sandbox, "smoke", _fake_smoke)
+        monkeypatch.setattr(sandbox, "describe_package", _fake_describe)
+        with pytest.raises(ValueError, match="scores 1.0 where circle_packing/adaptive scores 5.0"):
+            create_ops.smoke(ctx)
     finally:
         shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 def test_a_regression_can_be_intended(monkeypatch, tmp_path):
-    # Use a unique package name so parallel workers cleaning ``edited_pkg``
-    # cannot break the registration step (pre-existing parallel-execution race).
+    """With ``allow_regression=True`` the smoke gate skips the source comparison.
+
+    ``_revision()`` returns ``regressed=None`` and ``before_score=None``
+    because the original mode was never scored.
+    """
+    import refactory_dsh.create_ops as create_ops
+
     pkg = "edited_intended"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    smoke_override = json.dumps({
-        "circle_packing/adaptive": {"exit_ok": True, "score": 5.0},
-        "*": {"exit_ok": True, "score": 1.0},
-    })
-    monkeypatch.setenv("_REFACTORY_TEST_SMOKE_OVERRIDE", smoke_override)
     try:
-        result = edit_module.edit(
-            _edit_config(
-                name=pkg, brief="count", mode="circle_packing/adaptive",
-                allow_regression=True, workdir=tmp_path / "edit-run",
-            ),
-            client=FakeModel(create_answers(pkg, good_files(pkg))),
-        )
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        workdir = tmp_path / "smoke-run"
+        workdir.mkdir(parents=True, exist_ok=True)
+        ctx = nn.RunContext(workdir)
+        ctx.task = {"name": pkg, "brief": "count", "mode": "circle_packing/adaptive",
+                    "revision_of_state": None}
+        ctx._declared = ("smoke.json", "revision.json")
+        ctx.knobs = {"smoke_timeout_s": 60, "allow_regression": 1,
+                     "sample_knobs": "[]", "attempts": 1}
+        ctx.facts = {"name": pkg, "revision_of": "circle_packing/adaptive",
+                     "package_path": str(pkg_dir)}
+
+        def _fake_smoke(identifier, wdir, **kw):
+            return sandbox.SandboxResult(ok=True, payload={"exit_ok": True, "score": 1.0})
+
+        def _fake_describe(name, **kw):
+            return sandbox.SandboxResult(ok=True, payload={"ids": [f"{name}/counter"], "describe": {}})
+
+        monkeypatch.setattr(sandbox, "smoke", _fake_smoke)
+        monkeypatch.setattr(sandbox, "describe_package", _fake_describe)
+        result = create_ops.smoke(ctx)
         assert result["regressed"] is None
         assert result["before_score"] is None
         assert "intentionally skipped" in result["revision_note"]
@@ -202,22 +233,36 @@ def test_a_regression_can_be_intended(monkeypatch, tmp_path):
 
 
 def test_a_revision_of_a_mode_that_does_not_run_is_refused(monkeypatch, tmp_path):
-    # Use a unique package name so parallel workers cleaning ``edited_pkg``
-    # cannot break the registration step (pre-existing parallel-execution race).
+    """A mode that fails to run (exit_ok=False) is refused by the smoke step."""
+    import refactory_dsh.create_ops as create_ops
+
     pkg = "edited_norun"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
-    smoke_override = json.dumps({"*": {"exit_ok": False, "error": "it never ran", "score": None}})
-    monkeypatch.setenv("_REFACTORY_TEST_SMOKE_OVERRIDE", smoke_override)
     try:
-        with pytest.raises(CreateError, match="it never ran"):
-            edit_module.edit(
-                _edit_config(
-                    name=pkg, brief="count", mode="circle_packing/adaptive", attempts=1,
-                    workdir=tmp_path / "edit-run",
-                ),
-                client=FakeModel(create_answers(pkg, good_files(pkg))),
-            )
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        workdir = tmp_path / "smoke-run"
+        workdir.mkdir(parents=True, exist_ok=True)
+        ctx = nn.RunContext(workdir)
+        ctx.task = {"name": pkg, "brief": "count", "mode": "circle_packing/adaptive",
+                    "revision_of_state": None}
+        ctx._declared = ("smoke.json", "revision.json")
+        ctx.knobs = {"smoke_timeout_s": 60, "allow_regression": 0,
+                     "sample_knobs": "[]", "attempts": 1}
+        ctx.facts = {"name": pkg, "revision_of": "circle_packing/adaptive",
+                     "package_path": str(pkg_dir)}
+
+        def _fake_smoke(identifier, wdir, **kw):
+            return sandbox.SandboxResult(ok=True, payload={
+                "exit_ok": False, "error": "it never ran", "score": None})
+
+        def _fake_describe(name, **kw):
+            return sandbox.SandboxResult(ok=True, payload={"ids": [f"{name}/counter"], "describe": {}})
+
+        monkeypatch.setattr(sandbox, "smoke", _fake_smoke)
+        monkeypatch.setattr(sandbox, "describe_package", _fake_describe)
+        with pytest.raises(ValueError, match="it never ran"):
+            create_ops.smoke(ctx)
     finally:
         shutil.rmtree(pkg_dir, ignore_errors=True)
 

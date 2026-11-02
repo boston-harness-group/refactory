@@ -6,6 +6,7 @@ Phase 3 gate of ``docs/plans/pythonic-modes.md``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -501,10 +502,7 @@ def test_op_runs_in_run_directory_with_recovery(tmp_path):
 
 def test_op_runs_in_run_directory_without_recovery(tmp_path):
     """Without enable_recovery, ops run in-process with CWD set to the run
-    directory and ctx.model=None, matching the spine.
-
-    This verifies brief item 5: 'Op behavior must match the spine on the default
-    walker path too, not only with enable_recovery.'"""
+    directory and ctx.model=None, matching the spine."""
     graph = nn.Graph()
     graph.add(nn.Node("write", "op", call="loop_ops:write_relative",
                       writes=("relative_output.txt",), produces=("relative_written",)))
@@ -560,14 +558,8 @@ def test_op_stderr_preserved_on_raise(tmp_path):
 
 
 def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
-    """Brief item 5: fn gates in fork branches run in forkserver children
-    so the global sys.stdout is never swapped while concurrent branch
-    threads are running.
-
-    The child executor created for a fork branch has _in_fork_branch=True,
-    and _effective_timeout returns a timeout for fn gates (routing them
-    through _run_op_timed), while it returns None for fn gates on the main
-    thread (routing them through _run_fn_gate_inline).
+    """Fn gates in fork branches run in forkserver children so the global
+    sys.stdout is never swapped while concurrent branch threads are running.
 
     This test fails if _in_fork_branch is not set on fork branch executors
     or if _effective_timeout ignores it for fn gates.
@@ -576,7 +568,6 @@ def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
 
     from refactory_dsh.nn.executor import Executor
 
-    # Directly test the _in_fork_branch flag's effect on _effective_timeout.
     graph = nn.Graph()
     graph.add(nn.Node("fg", "gate", gate_kind="fn",
                       evaluator="loop_ops:pid_reporting_gate"))
@@ -592,10 +583,9 @@ def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
     fork_exec._in_fork_branch = True
     assert fork_exec._effective_timeout(graph.nodes["fg"]) == 3600.0, \
         "fn gate in fork branch should get a forkserver timeout"
-
-    # Ops always run inline on default path, even in fork branches.
+    # Ops in fork branches without recovery still run in-process.
     assert fork_exec._effective_timeout(graph.nodes["op"]) is None, \
-        "op in fork branch should not have a forkserver timeout"
+        "op in fork branch without recovery should not have a forkserver timeout"
 
     # Verify the full fork path: the fn gate in a fork branch runs in a
     # separate process (PID differs from the parent).
@@ -620,9 +610,95 @@ def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
     gate_pid = result.facts.get("gate_pid")
     assert gate_pid is not None, "fn gate did not run inside the fork branch"
     assert gate_pid != parent_pid, (
-        f"fn gate in fork branch ran in-process (PID {gate_pid} == parent {parent_pid}); "
-        "it should run in a forkserver child for thread-safe stdout capture"
+        f"fn gate ran in-process (PID {gate_pid} == parent {parent_pid}); "
+        "it should run in a forkserver child"
     )
+
+
+def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path):
+    """Two concurrent fork-branch ops writing relative files each land in the
+    run directory, nothing outside it, on repeated runs.
+
+    Fails when _effective_timeout is reverted to return None for ops with
+    enable_recovery, because the in-process os.chdir race lets one branch
+    write to the wrong directory.
+    """
+    import os
+
+    parent_cwd = os.getcwd()
+    for iteration in range(3):
+        run_dir = tmp_path / f"run_{iteration}"
+        run_dir.mkdir()
+        graph = nn.Graph()
+        graph.add(nn.Node("start", "op", call="loop_ops:noop"))
+        graph.add(nn.Node("fork1", "fork",
+                          targets=("branch_a", "branch_b")))
+        graph.connect("start", "fork1")
+        graph.add(nn.Node("branch_a", "op",
+                          call="loop_ops:fork_branch_write_a",
+                          writes=("branch_a_output.txt",),
+                          produces=("branch_a_written",)))
+        graph.add(nn.Node("branch_b", "op",
+                          call="loop_ops:fork_branch_write_b",
+                          writes=("branch_b_output.txt",),
+                          produces=("branch_b_written",)))
+        graph.add(nn.Node("join1", "join",
+                          sources=("branch_a", "branch_b")))
+        graph.connect("fork1", "join1")
+        graph.connect("branch_a", "join1")
+        graph.connect("branch_b", "join1")
+        graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+        graph.connect("join1", "done")
+
+        # enable_recovery ensures ops in fork branches run in forkserver
+        # children, making os.chdir per-process and race-free.
+        result = nn.execute(graph, run_dir, enable_recovery=True)
+        assert result.exit_ok, f"iteration {iteration}: {result.error}"
+
+        # Both files must land in the run directory.
+        assert (run_dir / "branch_a_output.txt").exists(), \
+            f"iteration {iteration}: branch_a_output.txt not in run dir"
+        assert (run_dir / "branch_b_output.txt").exists(), \
+            f"iteration {iteration}: branch_b_output.txt not in run dir"
+
+        # Nothing was written outside the run directory (into the parent CWD).
+        assert not (Path(parent_cwd) / "branch_a_output.txt").exists(), \
+            f"iteration {iteration}: branch_a_output.txt escaped to parent CWD"
+        assert not (Path(parent_cwd) / "branch_b_output.txt").exists(), \
+            f"iteration {iteration}: branch_b_output.txt escaped to parent CWD"
+
+
+def test_fn_gate_plain_str_stdout_is_feedback(tmp_path):
+    """An fn gate that prints to stdout and returns a plain str (not Verdict)
+    keeps its stdout as reloop feedback.
+
+    Fails when the Verdict wrapping at _run_op_timed's return path is
+    reverted, because result._fn_stdout = _child_stdout raises
+    AttributeError on a plain str and is silently swallowed.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("start", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("gate", "gate", gate_kind="fn",
+                      evaluator="loop_ops:fn_gate_plain_str_with_stdout",
+                      produces=("plain_gate_visits",),
+                      max_iterations=5))
+    graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph.connect("start", "gate")
+    graph.connect("gate", "start", condition="reloop")
+    graph.connect("gate", "done", condition="proceed")
+
+    result = nn.execute(graph, tmp_path, enable_recovery=False)
+    assert result.exit_ok, result.error
+    # The gate relooped once (visits=2 to reach proceed).
+    assert result.facts.get("plain_gate_visits") == 2
+    # The stdout from the reloop iteration must appear in the feedback.
+    # Feedback is stored in progress.json by the executor's record.
+    progress = json.loads((tmp_path / ".refactory" / "progress.json").read_text())
+    feedback = progress.get("feedback", {})
+    # The reloop sends feedback to the gate's reloop target (which is "start").
+    start_feedback = feedback.get("start", "")
+    assert "stdout from plain str gate" in start_feedback, \
+        f"fn gate stdout not preserved as feedback: {start_feedback!r}"
 
 
 # ── F4 failure rule: failed items score 0, other items continue ────────

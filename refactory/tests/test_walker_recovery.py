@@ -835,8 +835,8 @@ def test_an_unclassified_op_gets_the_spines_default_deadline(tmp_path):
 
 def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
     """Without recovery ops and main-thread fn gates run in-process (no forkserver
-    timeout).  Fn gates in fork branches get a forkserver timeout for per-process
-    stdout capture (brief item 5: no global sys.stdout swap in concurrent threads)."""
+    timeout).  Fn gates and ops in fork branches get a forkserver timeout for
+    per-process stdout capture and thread-safe CWD."""
     graph = nn.Graph()
     graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
                       writes=("seen.txt",), produces=("seen",)))
@@ -849,5 +849,5 @@ def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
     # In a fork branch: fn gate gets a timeout (forkserver)
     executor._in_fork_branch = True
     assert executor._effective_timeout(graph.nodes["fg"]) == 3600.0
-    # Op still has no timeout in fork branch (same as main thread)
+    # Op still has no timeout in fork branch without recovery
     assert executor._effective_timeout(graph.nodes["plain"]) is None

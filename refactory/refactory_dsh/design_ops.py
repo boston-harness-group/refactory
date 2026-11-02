@@ -124,14 +124,15 @@ def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
                 went_on = (_field(entry, "source") == "upfront"
                            or consumed in ("yes", "used")
                            or (bool(named) and named in used))
+                # An expired verdict must never set collecting or approval,
+                # even when it is the very first verdict (no prior approval).
+                if consumed == "expired" and not went_on:
+                    collecting = False
+                    continue
                 if approved and not went_on:
-                    # An expired verdict (consumed: expired) closes the correction
-                    # window: its corrections must not be re-applied.  A pending
-                    # verdict (consumed: no) is simply skipped without touching
-                    # the collecting state (it decides nothing yet).
-                    if consumed == "expired":
-                        collecting = False
-                    continue  # a pending answer after the run went on decides nothing
+                    # A pending verdict (consumed: no) after the run already
+                    # went on is simply skipped (it decides nothing yet).
+                    continue
                 collecting = (gate == "gate_strategy" and verdict == "proceed")
                 if gate == "gate_strategy":
                     approval = named or str(entry.get("at"))
@@ -1587,11 +1588,6 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             guardedness = {"unavailable": f"the new tests could not be run on the base: {exc}"}
         if guardedness is not None:
             ctx.write_json("test-guardedness.json", guardedness)
-    # test-guardedness.json is now declared in the node's writes, so we can use
-    # ctx.write_json safely.
-    _tg_path = Path(ctx.workdir) / "test-guardedness.json"
-    if not _tg_path.exists():
-        ctx.write_json("test-guardedness.json", {"unavailable": "no worktree"})
     evidence.record(ctx, outcome)
 
     # Clear base_unavailable at the start of each check attempt (R2).

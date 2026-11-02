@@ -35,11 +35,6 @@ def check(ctx: Any) -> str:
     if refused:
         return _again(ctx, f"materialise could not apply emit.txt, so nothing was checked: {refused}")
     result = repo_change.run_check(ctx, str(ctx.facts["check"]), int(ctx.knob("check_timeout_s", 300)))
-    # test-guardedness.json is now declared in the node's writes.
-    from pathlib import Path as _P
-    _tg = _P(ctx.workdir) / "test-guardedness.json"
-    if not _tg.exists():
-        ctx.write_json("test-guardedness.json", {"unavailable": "fix-pack check"})
     if result.ok:
         return "proceed"
     return _again(ctx, "\n".join((result.problem(), result.stdout or "", result.stderr or "")).strip())

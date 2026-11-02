@@ -171,7 +171,7 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
             "verifier", "agent",
             prompt_template=VERIFIER_PROMPT,
             timeout_s=VERIFIER_TIMEOUT_S,
-            reads=("brief.json", "test-guardedness.json", "changes.diff"),
+            reads=("brief.json", "changes.diff"),
             writes=("reviews/verification.md",),
             produces=("verification",),
             role="code_reviewer",

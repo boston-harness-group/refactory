@@ -78,12 +78,12 @@ def test_a_worktree_off_design_fast_run_reaches_focused_qa_on_the_spine(tmp_path
     step('refactory_dsh.fast_ops:materialise_artifact', 'materialise', 'op')
     step('refactory_dsh.fast_ops:gate_emit', 'gate_emit', 'gate')
     step('refactory_dsh.fast_ops:focused_check', 'focused_check', 'op')
-    # test-guardedness.json is declared in the node's writes and written through
-    # ctx.write_json with a placeholder when there is no worktree.
-    assert (run / 'test-guardedness.json').exists(), 'test-guardedness.json should be written'
-    content = json.loads((run / 'test-guardedness.json').read_text())
-    assert 'unavailable' in content, 'non-worktree guardedness should be a placeholder'
+    # A no-worktree run must not write placeholder files.
+    assert not (run / 'test-guardedness.json').exists(), \
+        'test-guardedness.json should not be written on no-worktree runs'
 
+    # changed-functions.json is written as an empty list on no-worktree runs
+    # (a valid empty result). The focused_qa node reads it, so it must exist.
     workers.lower_workflow(lowering.to_workflow(mode.state_dict()), run, DshModelClient().context())
     spec = next(json.loads(path.read_text()) for path in (run / '.refactory/worker-specs').glob('*.json')
                 if json.loads(path.read_text())['node_id'] == 'focused_qa')

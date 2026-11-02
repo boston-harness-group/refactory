@@ -287,3 +287,40 @@ def fail_on_setup_fails(ctx: Any) -> dict[str, Any]:
     seen.setdefault("ids", []).append(str(item.get("id")))
     ctx.write_json("seen.json", seen)
     return {"seen": seen["ids"]}
+
+
+def fork_branch_write_a(ctx: Any) -> dict[str, Any]:
+    """Write a unique file via a relative path inside the run directory.
+
+    Used by test_concurrent_fork_branch_ops_write_to_run_dir: two branches
+    each write a file; both must land in the run directory.
+    """
+    from pathlib import Path as _P
+    import time
+    # Small jitter so both branches are truly concurrent.
+    time.sleep(0.05)
+    _P("branch_a_output.txt").write_text("written by branch a\n")
+    return {"branch_a_written": True}
+
+
+def fork_branch_write_b(ctx: Any) -> dict[str, Any]:
+    """Write a unique file via a relative path inside the run directory."""
+    from pathlib import Path as _P
+    import time
+    time.sleep(0.05)
+    _P("branch_b_output.txt").write_text("written by branch b\n")
+    return {"branch_b_written": True}
+
+
+def fn_gate_plain_str_with_stdout(ctx: Any) -> str:
+    """A fn gate that prints to stdout and returns a plain str (not Verdict).
+
+    Used by test_fn_gate_plain_str_stdout_is_feedback: the captured stdout
+    must appear as reloop feedback.
+    """
+    visits = int(ctx.facts.get("plain_gate_visits", 0)) + 1
+    ctx.set_fact("plain_gate_visits", visits)
+    if visits < 2:
+        print("stdout from plain str gate")
+        return "reloop"
+    return "proceed"

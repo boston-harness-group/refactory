@@ -460,10 +460,6 @@ def focused_check(ctx: Any) -> dict[str, Any]:
             guardedness = {"unavailable": f"the new tests could not be run on the base: {exc}"}
         if guardedness is not None:
             ctx.write_json("test-guardedness.json", guardedness)
-    # test-guardedness.json is now declared in the node's writes.
-    _tg_path = Path(ctx.workdir) / "test-guardedness.json"
-    if not _tg_path.exists():
-        ctx.write_json("test-guardedness.json", {"unavailable": "no worktree"})
     # ── enforce test guardedness in fast mode (R3, #384 item 1) ──
     from refactory_dsh.design_ops import enforce_guardedness
     if payload.get("status") != "fail" and ctx.facts.get("artifact") and worktree.recorded(ctx.workdir) is not None:

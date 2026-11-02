@@ -247,8 +247,7 @@
       "id": "verifier",
       "reads": [
         "brief.json",
-        "changes.diff",
-        "test-guardedness.json"
+        "changes.diff"
       ],
       "writes": [
         "reviews/verification.md"

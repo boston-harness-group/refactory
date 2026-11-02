@@ -690,10 +690,9 @@ class Executor:
     _status: str = field(default="", init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
-    #: True for child executors running inside a fork branch thread.  Fn gates
-    #: in fork branches always run in forkserver children so their stdout
-    #: capture does not swap the global ``sys.stdout`` while concurrent branch
-    #: threads are running (brief item 5).
+    #: True for child executors running inside a fork branch thread.  Ops
+    #: in fork branches run in forkserver children so os.chdir does not race
+    #: across concurrent branch threads.
     _in_fork_branch: bool = field(default=False, init=False, repr=False)
 
     def _record(
@@ -1432,13 +1431,16 @@ class Executor:
                 sys.stderr.write(_child_stderr)
             result = payload.get("result")
             # SWEEP-4: attach child process stdout to the result so fn-gate
-            # feedback extraction in _visit_gate can use it.
+            # feedback extraction in _visit_gate can use it.  A plain str
+            # does not accept attribute assignment, so wrap it in Verdict
+            # first — this preserves stdout as feedback for fn gates that
+            # return a bare string instead of Verdict.
             _child_stdout = payload.get("_stdout", "")
             if _child_stdout and isinstance(result, str):
-                try:
-                    result._fn_stdout = _child_stdout  # type: ignore[attr-defined]
-                except (AttributeError, TypeError):
-                    pass
+                from refactory_dsh.nn import Verdict
+                if not isinstance(result, Verdict):
+                    result = Verdict(result)
+                result._fn_stdout = _child_stdout  # type: ignore[attr-defined]
             return result
 
         # Exception from child: reconstruct and re-raise, preserving stderr.
@@ -1505,14 +1507,9 @@ class Executor:
         """Run an op in-process matching the spine's op contract: run directory
         is the CWD and ctx.model is None.
 
-        Used on the default walker path (``enable_recovery=False``).  Fn gates
-        never reach this method — they always run in a forkserver child via
-        ``_run_op_timed`` (in fork branches) or ``_run_fn_gate_inline`` (main
-        thread) for per-call stdout capture.
-
-        ``sys.stdout`` is never replaced.  Stderr is captured via
-        ``contextlib.redirect_stderr`` so it can be preserved in the error
-        message when the op raises, matching what ``_run_op_timed`` does.
+        Used on the default walker path (``enable_recovery=False``, not in a
+        fork branch).  Fork-branch ops always use ``_run_op_timed`` (forkserver
+        child) so os.chdir does not race across concurrent branch threads.
         """
         import contextlib
         import io
@@ -1589,12 +1586,15 @@ class Executor:
             with contextlib.redirect_stdout(_capture_stdout):
                 verdict = resolve(callable_target)(self.ctx)
             # Attach captured stdout for fn-gate feedback extraction.
+            # A plain str does not accept attribute assignment, so wrap it
+            # in Verdict first — this preserves stdout as feedback for fn
+            # gates that return a bare string instead of Verdict.
             _child_stdout = _capture_stdout.getvalue()
             if _child_stdout and isinstance(verdict, str):
-                try:
-                    verdict._fn_stdout = _child_stdout  # type: ignore[attr-defined]
-                except (AttributeError, TypeError):
-                    pass
+                from refactory_dsh.nn import Verdict
+                if not isinstance(verdict, Verdict):
+                    verdict = Verdict(verdict)
+                verdict._fn_stdout = _child_stdout  # type: ignore[attr-defined]
             return verdict
         finally:
             self.ctx.model = saved_model
