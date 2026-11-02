@@ -21,6 +21,7 @@ class AgentRole(str, Enum):
     RESEARCHER = "researcher"
     STRATEGIST = "strategist"
     BUILDER = "builder"
+    SOLVER = "solver"
     HEALTH_CHECKER = "health_checker"
     CODE_REVIEWER = "code_reviewer"
     ADVERSARIAL_TESTER = "adversarial_tester"

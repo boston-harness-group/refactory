@@ -1,0 +1,38 @@
+[
+  {
+    "month": "202501",
+    "no": 1,
+    "paper_link": "http://arxiv.org/abs/2501.00001v1",
+    "theorem": "Let $f$ be continuous on $[0,1]$.",
+    "sketch": "Apply the intermediate value theorem.",
+    "theorem_type": ["analysis"],
+    "mcq": {
+      "question": "Which of the following series converges conditionally?",
+      "choices": [
+        {"label": "A", "text": "Diverges"},
+        {"label": "B", "text": "Converges conditionally"},
+        {"label": "C", "text": "Converges absolutely"},
+        {"label": "D", "text": "Oscillates"}
+      ],
+      "correct_choice": {"label": "B", "text": "Converges conditionally"}
+    }
+  },
+  {
+    "month": "202501",
+    "no": 2,
+    "paper_link": "http://arxiv.org/abs/2501.00002v1",
+    "theorem": "",
+    "sketch": "",
+    "theorem_type": ["algebra"],
+    "mcq": {
+      "question": "What is the rank of the matrix $A = \\begin{pmatrix} 1 & 2 \\\\ 3 & 6 \\end{pmatrix}$?",
+      "choices": [
+        {"label": "A", "text": "0"},
+        {"label": "B", "text": "1"},
+        {"label": "C", "text": "2"},
+        {"label": "D.", "text": "3"}
+      ],
+      "correct_choice": {"label": "D.", "text": "3"}
+    }
+  }
+]
