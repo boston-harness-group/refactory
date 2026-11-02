@@ -94,6 +94,34 @@ If a baseline model scores vastly above published benchmarks for the same task,
 assume cheating until proven otherwise. Investigate before investing compute in
 optimization runs that start from an inflated baseline.
 
+## 7. Restrict the solver's tools
+
+The sections above keep gold answers out of reach. A solver with a shell does not
+need them: it can install or import a solver library (python-chess for puzzles,
+SymPy for algebra) or write a brute-force search, and the score then measures the
+tool instead of the model. Nothing in the transcript shows it, because native
+workers do not record their tool calls.
+
+- **Do not run benchmark solvers with `permission_mode: skip`.** For
+  `claude_code`, `skip` is `bypassPermissions`: every tool, including Bash, runs
+  without approval. Use `acceptEdits` when the node delivers by writing a file in
+  its workspace. Reads and edits inside the workspace are approved; shell
+  commands, and other requests that would need approval, reach the unattended
+  approval callback, which denies them.
+- **Run outside any project whose Claude settings pre-approve commands.** The
+  Claude Agent SDK loads user, project and local settings when the caller does
+  not pass `settingSources`, so a worker whose cwd is inside a repo inherits that
+  repo's `.claude/settings*.json` allow rules (`Bash(python3 *)`, say). Put
+  `--runs-root` outside the repo.
+- **Keep grader-only libraries out of the solver's environment.** The worker
+  prompt names the project interpreter. If `verify()` needs a library the solver
+  could use, run the grader in an isolated environment (for example
+  `uv run --no-project --with <pkg>`) instead of installing it in the project.
+- **Audit what the run leaves behind.** Check that each worker record's
+  `requested_route.permission_mode` is the restricted mode and its `cwd` is
+  outside the repo, that workspaces hold only the files the mode writes, and that
+  no permission denial was recorded. A denial means a tool was attempted.
+
 ## Checklist for new benchmark modes
 
 - [ ] `TaskInstance.metadata` contains NO solution fields
@@ -102,3 +130,6 @@ optimization runs that start from an inflated baseline.
 - [ ] `verify()` loads solutions from source data, not from metadata or workspace
 - [ ] Spot-check confirms the model gets some items genuinely wrong
 - [ ] Baseline accuracy is plausible for the model and task difficulty
+- [ ] Solver workers run with a restricted permission mode (`acceptEdits`), not `skip`
+- [ ] `--runs-root` is outside any project with Claude allow rules
+- [ ] Grader-only libraries are not importable from the solver's environment
