@@ -6072,6 +6072,106 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 }
 ```
 
+## cli:replay-verifier
+
+Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.
+
+Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
+
+```json
+{
+  "description": "replay the verifier on an existing run directory and a commit",
+  "doc": "refactory/docs/cli.md",
+  "examples": [
+    {
+      "arguments": {
+        "run_dir": "/path/to/existing-run"
+      },
+      "explanation": "Replay the verifier on a completed run whose worktree is still present."
+    },
+    {
+      "arguments": {
+        "commit": "abc123",
+        "run_dir": "/path/to/existing-run"
+      },
+      "explanation": "Replay the verifier when the original worktree is gone; a temporary worktree of that commit is checked out and removed after the run."
+    },
+    {
+      "arguments": {
+        "model": "deepseek-v4-pro",
+        "provider": "deepseek-official",
+        "run_dir": "/path/to/existing-run"
+      },
+      "explanation": "Replay the verifier on a chosen model; the route resolves as for `refactory ceo`, so a home with no stored choice needs --provider and --model."
+    }
+  ],
+  "interfaces": {
+    "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
+    "cli": "refactory replay-verifier --run-dir DIR [--commit HASH] [--provider P --model M] [--effort E]",
+    "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
+  },
+  "parameters": {
+    "commit": {
+      "default": "",
+      "description": "commit hash to check out as a temporary worktree",
+      "flags": [
+        "--commit"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "effort": {
+      "default": "",
+      "description": "the verifier's reasoning effort",
+      "flags": [
+        "--effort"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "model": {
+      "default": "",
+      "description": "the verifier's model id",
+      "flags": [
+        "--model"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "provider": {
+      "default": "",
+      "description": "the verifier's provider route (default: as `refactory ceo` resolves it)",
+      "flags": [
+        "--provider"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "run_dir": {
+      "default": null,
+      "description": "path to the existing run directory",
+      "flags": [
+        "--run-dir"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": true,
+      "type": "string"
+    }
+  },
+  "purpose": "Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.",
+  "reviewed_schema": "8a960b0ec94e5a1f7583894729b991bba2858816ddfc8fb16217f850dc0be09c"
+}
+```
+
 ## cli:ui
 
 Launch the native Refactory web interface for conversations and the run/optimization panel.
@@ -8024,7 +8124,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     {
       "condition": "proceed",
       "source": "gate_check",
-      "target": "synthesize_qa"
+      "target": "rerun_probes"
     },
     {
       "condition": "reloop",
@@ -8070,6 +8170,11 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "condition": "reloop",
       "source": "gate_qa",
       "target": "pick_corrections"
+    },
+    {
+      "condition": "coverage_rerun",
+      "source": "gate_qa",
+      "target": "qa_director_rerun"
     },
     {
       "condition": "reread",
@@ -8148,6 +8253,11 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     },
     {
       "condition": null,
+      "source": "qa_director_rerun",
+      "target": "synthesize_qa"
+    },
+    {
+      "condition": null,
       "source": "qa_judge",
       "target": "gate_qa"
     },
@@ -8160,6 +8270,11 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "condition": null,
       "source": "report",
       "target": "deliver"
+    },
+    {
+      "condition": null,
+      "source": "rerun_probes",
+      "target": "synthesize_qa"
     },
     {
       "condition": null,
@@ -8446,7 +8561,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "judge_rereads",
         "review_attempts"
       ],
-      "notes": "route on the QA judge's verdict: a redo for what holds the change back goes to the builder, or, at the review limit, on as a draft; an unreadable verdict is read again once; follow-ups go to the pull request",
+      "notes": "route on the QA judge's verdict: a redo for what holds the change back goes to the builder, or, at the review limit, on as a draft; an unreadable verdict is read again once; a coverage re-run adds one pass; follow-ups go to the pull request",
       "role": "ceo"
     },
     {
@@ -8566,6 +8681,14 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     },
     {
       "call": "",
+      "id": "qa_director_rerun",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "coverage re-run: probe only the unverified requirements",
+      "role": "ceo"
+    },
+    {
+      "call": "",
       "id": "qa_judge",
       "kind": "agent",
       "knobs": [],
@@ -8586,6 +8709,14 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "kind": "op",
       "knobs": [],
       "notes": "summarise what was designed",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.probe_rerun:rerun_probes",
+      "id": "rerun_probes",
+      "kind": "op",
+      "knobs": [],
+      "notes": "rerun each probe file the verifier wrote on the attempt in a scratch clone (120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED claim without a probe file of its own is unverified",
       "role": "ceo"
     },
     {
@@ -8654,7 +8785,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "verifier",
       "kind": "agent",
       "knobs": [],
-      "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo",
+      "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo; for each behaviour-changing requirement, revert the implementing hunk in the workspace clone, run the specific test, and report caught/not caught",
       "role": "code_reviewer"
     }
   ],
@@ -9005,7 +9136,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "ed27fe9124c2ca6f2fb19b4429643965808150370c9df6d206133a3c67a7493f"
+    "reviewed_schema": "a89a70fe616e8dbaa4db03cb3f90e4b1f9da4bf398727714afd386e08255e796"
   }
 }
 ```

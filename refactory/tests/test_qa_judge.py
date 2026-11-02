@@ -480,7 +480,14 @@ def test_the_design_graph_has_judges_and_no_free_audit_round():
     # A reread goes back to the judge alone; only a reloop reaches the builder, through
     # pick_corrections (dm-226).
     assert {(e.target, e.condition) for e in graph.out_edges("gate_qa")} == {
-        ("pick_corrections", "reloop"), ("qa_judge", "reread"), ("audit_corrections", "proceed")}
+        ("pick_corrections", "reloop"), ("qa_judge", "reread"),
+        ("qa_director_rerun", "coverage_rerun"), ("audit_corrections", "proceed")}
+    # The coverage re-run node is an agent that writes reviews/qa-rerun.md and
+    # connects to synthesize_qa.
+    rerun_node = graph.nodes["qa_director_rerun"]
+    assert rerun_node.kind == "agent"
+    assert "reviews/qa-rerun.md" in rerun_node.writes
+    assert [e.target for e in graph.out_edges("qa_director_rerun")] == ["synthesize_qa"]
     assert [e.target for e in graph.out_edges("audit_corrections")] == ["overwatch"]
     assert {(e.target, e.condition) for e in graph.out_edges("gate_overwatch")} == {
         ("pick_corrections", "reloop"), ("overwatch", "reread"), ("report", "proceed")}
@@ -694,9 +701,10 @@ TAUTOLOGY = {"source": "verifier", "where": "tests/test_pitfalls.py:394",
 
 
 @pytest.mark.parametrize("item, back", [
-    # Test-strength, docs and style findings are follow-ups, whatever they say they break
-    # or how severe they are.
+    # A weakened test is a follow-up whatever it breaks: no detector separates a
+    # loosened assertion from an expected value updated to match a required behaviour.
     (TAUTOLOGY, False),
+    ({**TAUTOLOGY, "breaks": "none"}, False),
     ({**TAUTOLOGY, "severity": "high", "breaks": "none"}, False),
     ({**TAUTOLOGY, "kind": "docs", "severity": "high"}, False),
     ({**TAUTOLOGY, "kind": "style", "severity": "critical"}, False),
@@ -728,30 +736,49 @@ def test_a_must_fix_the_judge_labels_a_test_docs_or_style_nit_is_a_follow_up(
 
 def test_the_judge_prompts_state_the_bar_and_ask_for_each_items_kind():
     """Both judges are told what sends a change back, what is always a follow-up, and to
-    label every must-fix item with its kind."""
+    label every must-fix item with its kind. The prompt distinguishes weakened tests
+    (block) from missing tests (follow-up)."""
     from refactory_dsh import design
     for prompt in (design.QA_JUDGE_PROMPT, design.OVERWATCH_PROMPT):
         assert '"kind": "ask" | "check" | "defect" | "test" | "docs" | "style"' in prompt
-        assert "weak or tautological test assertions" in prompt
-        assert "always follow-ups, never must_fix" in prompt
+        assert "weakened existing test" in prompt
+        assert "merely missing test" in prompt
 
 
-def test_a_tautological_test_assertion_does_not_cost_a_build_round(tmp_path):
-    """b2_pitfalls_research: the QA judge's only must-fix was a tautological assertion in a
-    test, and it sent the change back for a second round. Now the run proceeds on the
-    first attempt and the pull request lists the finding as a follow-up."""
+def test_a_weakened_test_does_not_cost_a_build_round(tmp_path):
+    """A weakened test with breaks='correction' is reported, not sent back.
+
+    It reaches the pull request as a follow-up, so the build does not pay a round for
+    a finding that may well be the edit the brief required."""
     repo = git_repo(tmp_path / "repo")
     model = FakeModel(_answers(
-        _round(_tool("built"), judge=qa_judgment("redo", must_fix=[TAUTOLOGY]),
-               overwatch=overwatch_judgment("pass"))))
+        _round(_tool("bilt"), judge=qa_judgment("redo", must_fix=[TAUTOLOGY])),
+        _round(_tool("built"), overwatch=overwatch_judgment("pass"))))
     run = tmp_path / "run"
     result = _design(run, model, repo)
 
     assert result.exit_ok, result.error
-    assert len(_prompts(model, EMIT_MARK)) == 1, "no second build round"
-    assert not result.facts.get("review_attempts_used")
-    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text()
-    assert (run / "reviews/qa-gate.txt").read_text().startswith("proceed:")
+    assert len(_prompts(model, EMIT_MARK)) == 1, (
+        "a weakened test must not cause a second build round")
+    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text(), (
+        "the weakened test must still be reported as a follow-up")
+
+
+def test_a_weakened_test_is_a_follow_up_whatever_it_breaks():
+    """Directly call judges.blocks: no `test` item blocks, whatever its `breaks`.
+
+    The detector behind it cannot tell a loosened assertion from an expected value
+    updated to match a behaviour the brief asked for, and the second is the required
+    edit for a behaviour-change brief, so blocking on it sent legitimate builds back.
+    It is reported and a person judges it."""
+    assert judges.blocks({"kind": "test", "breaks": "correction"}) is False
+    assert judges.blocks({"kind": "test", "breaks": "ask"}) is False
+    assert judges.blocks({"kind": "test", "breaks": "none"}) is False
+    assert judges.blocks({"kind": "test", "breaks": ""}) is False
+    assert judges.blocks({"kind": "test"}) is False
+    # An ask or a check still blocks, so the bar has not been removed wholesale.
+    assert judges.blocks({"kind": "ask", "breaks": "ask"}) is True
+    assert judges.blocks({"kind": "check", "breaks": "none"}) is True
 
 
 def test_an_unbuilt_ask_still_sends_the_change_back(tmp_path):
@@ -781,15 +808,22 @@ def test_a_high_severity_product_defect_still_sends_the_change_back(tmp_path):
     assert len(emits) == 2 and "crashes on empty input" in model.prompts[emits[1]]
 
 
-def test_the_tautology_proceeds_on_the_spine_too(tmp_path, monkeypatch):
-    """gate_qa runs as its own process on the spine: it reads the same kind and takes the
-    same decision as the walker."""
+def test_the_tautology_does_not_block_on_the_spine_either(tmp_path, monkeypatch):
+    """gate_qa runs as its own process on the spine, and agrees with the walker.
+
+    A weakened test proceeds whatever it breaks, on both runtimes; a check item below
+    still sends the build back, so the bar itself is intact."""
     run = _spine_run(tmp_path, qa_judgment("redo", must_fix=[TAUTOLOGY]))
     code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
     assert code == 0, err
     assert out.split()[-1] == "proceed"
-    assert TAUTOLOGY["what"] in (run / "reviews/follow-ups.md").read_text()
-    assert not json.loads((run / "facts.json").read_text()).get("review_attempts_used")
+
+    # And with breaks='none', as before.
+    (run / judges.QA_JUDGE).write_text(qa_judgment("redo", must_fix=[
+        {**TAUTOLOGY, "breaks": "none"}]))
+    code, out, err = _gate_qa_on_the_spine(run, monkeypatch, {"review_attempts": 3})
+    assert code == 0, err
+    assert out.split()[-1] == "proceed"
 
     (run / judges.QA_JUDGE).write_text(qa_judgment("redo", must_fix=[
         {**TAUTOLOGY, "kind": "check", "what": "the check fails"}]))

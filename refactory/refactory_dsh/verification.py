@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from refactory_dsh.create_ops import MARKER_RULE
+from refactory_dsh.probe_rerun import PROBE_TIMEOUT_S, PROBES_TOTAL_S
 
 #: The most wall time the review fork's verifier session may take, on either runtime.
 #: It runs beside the three reviews, which take about eight minutes, so a verifier
@@ -67,9 +68,18 @@ M12_METHOD = """M12 Shared state — identify every file, environment variable, 
 M13_METHOD = """M13 Boundary values — for every numeric or string parameter the diff parses,
     test zero, one, maximum, empty, and type-boundary values against the code."""
 
-M15_METHOD = """M15 Weakened tests — for every test the diff changes, determine whether the
-    assertion is now weaker than before; a test that would pass when the code
-    is wrong is blocking."""
+M15_METHOD = """M15 Weakened tests — run `git diff <base> -- <test files>` (the base is the
+    commit the diff starts from) and list every existing test function the diff
+    modifies, by file::name. Compare each one with its base version and list each
+    loosened assertion: an assert removed or relaxed (== to in, exact to approx,
+    a narrower raises), an expected value changed to match the new behaviour, a
+    test renamed or reworded to accept different behaviour, or a skip/xfail added.
+    Report a loosened assertion that would let the test pass when the code is
+    wrong; it does not block, because an expected value updated to match a
+    behaviour the brief asked for looks the same and is the required edit. You
+    may not conclude "no weakened tests" without listing the modified test
+    functions you compared (write "none modified" when the diff changes no
+    existing test function)."""
 
 #: For a change to an existing repository: the methods no reviewer applies.
 VERIFICATION_METHODS = (
@@ -98,6 +108,118 @@ def verification_methods(deliverable_kind: str) -> str:
     return VERIFICATION_METHODS if deliverable_kind == "repository_change" else FULL_VERIFICATION_METHODS
 
 
+_HUNK_REVERT_METHOD = """
+## Hunk-revert verification
+
+You have a workspace clone of the attempt.  Use it as a scratch copy for the revert
+checks below.  Never modify the builder's workspace or the committed tree — only
+this clone.
+
+### Requirements and corrections
+
+The requirements from brief.json and the person's gate corrections are listed below.
+For each, identify the implementing hunk(s) from the diff and check them.
+
+{{requirements_and_corrections}}
+
+### Method — for each behaviour-changing requirement or correction above
+
+1. From the diff (changes.diff), identify the hunk(s) that implement it.
+2. In the workspace clone, revert the hunk with `git apply --reverse` on a
+   patch containing only the overlapping hunks, or manually undo the lines.
+3. Run the specific test(s) you judge should catch the revert — not the whole
+   suite.  Record the command and its output.
+4. Restore the file: `git checkout HEAD -- <file>`.
+5. Report:
+   - The hunk (file:line range).
+   - The test command you ran.
+   - Its output (truncated to the relevant part).
+   - **CAUGHT** when the test failed after the revert (good).
+   - **NOT CAUGHT** when the test still passed after the revert (bad — report it as a finding).
+
+Requirements that are docs-only or test-only (no behaviour change) are reported as
+**NOT APPLICABLE** — they need no revert check.
+
+### Time budget
+Your time budget is """ + str(DESIGN_VERIFIER_TIMEOUT_S) + """ s (~20 min), with one
+retry at 2× (""" + str(DESIGN_VERIFIER_TIMEOUT_S * 2) + """ s) for a total of
+""" + str(DESIGN_VERIFIER_TIMEOUT_S * 3) + """ s.  If you run out of time before
+checking every requirement, report the unchecked ones as **UNCHECKED** (advisory) —
+they do not block.
+
+### Edge-case sweep
+After the hunk-revert checks, sweep the edge cases. For each requirement in the brief,
+probe every class below that applies, and say which classes do not apply and why:
+
+- Failure points: inject each failure at every distinct point in the diff where it
+  can occur (e.g. setup, each step/op inside the changed path, verify, the end/close
+  of a pass), not only the first point that works.
+- Position: the first, a middle, and the LAST element of a sequence or loop; make
+  the LAST element fail at each of the failure points above.
+- All / none / exactly-one: e.g. every item fails, no item fails, exactly one fails.
+- Timeouts and hangs: each place a deadline applies; check the deadline actually
+  stops the work and that the timed-out work is not retried.
+- Interaction with control flow: a gate, pause, halt, stop or resume occurring
+  inside the changed path.
+- Concurrency: two branches or items at once, where the change runs in forks or
+  threads.
+- Both runtimes: whenever the brief names both the walker and the spine, or the
+  change touches shared runtime code, run the same probe on the walker AND on the
+  spine (through lowering + the TS drain, where the repo has a harness for it) and
+  compare the results; a difference is a defect. A runtime you could not run the
+  probe on is UNCHECKED for that runtime.
+
+A probe is new code you write and run. Running the builder's existing tests does
+not count as a probe (you may run them in addition). PROBED means executed, with its
+command and output shown; a check made only by reading code is reported as "READ, not
+probed".
+
+Save every probe as its own file under `reviews/probes/` in your workspace, named
+`<requirement-id>-<n>.py` (a Python script, or a test file with `test_` functions, run
+with pytest) or `<requirement-id>-<n>.sh`, run from the repository root. Its first line
+is a comment stating the requirement, the failure point and the expected outcome. First
+delete any `reviews/probes/` an earlier attempt left. A probe file must not just call an
+existing repository test (pytest on an existing test id, or importing and calling a test
+function): it makes its own check. Each PROBED line in reviews/verification.md names its
+probe file (`reviews/probes/<file>`). After you finish, the runtime reruns every probe
+file on this attempt in a fresh checkout (""" + str(PROBE_TIMEOUT_S) + """ s each,
+""" + str(PROBES_TOTAL_S) + """ s in all): a probe that fails is a blocking defect, and a
+PROBED line whose file is missing or only calls an existing test is UNVERIFIED.
+
+Each probe states the exact command you ran and its output. If a probe fails
+for an environment reason (import path, missing test helper such as loop_ops), fix
+the environment (e.g. set PYTHONPATH to the repo's test helpers) and rerun the same
+probe; never substitute a weaker probe. A failing probe is a
+defect finding. Stay within the time budget above; list every class you did not
+probe as **UNCHECKED** with the requirement it belongs to.
+
+### Output format in reviews/verification.md
+
+For each requirement, write a section:
+
+#### Requirement: <short id or summary>
+- Hunk: <file:line-range>
+- Test: <command>
+- Output: <relevant excerpt>
+- Result: CAUGHT | NOT CAUGHT | NOT APPLICABLE | UNCHECKED
+
+Then the edge-case sweep: per requirement, each class as PROBED (probe file
+`reviews/probes/<file>`, command, output, result), "READ, not probed", NOT APPLICABLE (why) or UNCHECKED. Then the existing verification methods below.
+"""
+
+_HUNK_REVERT_JUDGING = """
+### Judging
+- A hunk implementing a requirement or correction that no test catches when reverted:
+  BLOCKING: <path:line>: <requirement> is not caught by any test when its hunk is
+  reverted (tested with <test command>)
+  Report it as a finding of kind `check` with severity `high`. The QA judge weighs it:
+  kept as a must-fix of kind `check`, it sends the build back; nothing sends it back
+  without the judge.
+- A probe that fails is a normal defect finding:
+  BLOCKING: <path:line>: <description>
+"""
+
+
 def _verifier_prompt(methods: str) -> str:
     return (
         "Artifact directory (absolute): {{artifact}}\n"
@@ -117,9 +239,34 @@ def _verifier_prompt(methods: str) -> str:
     )
 
 
-#: The review fork's verifier: `prepare_design` sets `verification_methods` by what the
-#: run delivers.
+def _design_verifier_prompt(methods: str) -> str:
+    """The design-mode verifier prompt with the hunk-revert method."""
+    return (
+        "Artifact directory (absolute): {{artifact}}\n"
+        "Read and run the delivered files at this exact path; do not infer it "
+        "from your working directory. {{change}}\n\n"
+        "Brief: {{brief}}\n\n"
+        + _HUNK_REVERT_METHOD
+        + _HUNK_REVERT_JUDGING
+        + methods +
+        "\nFor each finding, report it as:\n"
+        "BLOCKING: <file:line>: <description with a runnable counterexample or "
+        "a cited file:line chain>\n"
+        + MARKER_RULE + "\n\n"
+        "design.md is in the run directory. Do NOT read it, or strategy.json, "
+        "or any review files. You verify the change against the brief and the "
+        "repository only.\n\n"
+        "End with a line that is exactly VERDICT: PASS when there are no "
+        "blocking findings, or VERDICT: FAIL when there are any."
+    )
+
+
+#: The review fork's verifier without hunk-revert (for design_fast, which has no
+#: workspace clone, no retry, and a shorter timeout).
 VERIFIER_PROMPT = _verifier_prompt("{{verification_methods}}")
+#: Design mode's verifier with the hunk-revert method.  Requires a workspace clone,
+#: ``DESIGN_VERIFIER_TIMEOUT_S`` and a retry; ``design.py`` uses this one.
+DESIGN_VERIFIER_PROMPT = _design_verifier_prompt("{{verification_methods}}")
 #: fix_pack's inline verifier, with no reviewers beside it and no prepare fact.
 FULL_VERIFIER_PROMPT = _verifier_prompt(FULL_VERIFICATION_METHODS)
 

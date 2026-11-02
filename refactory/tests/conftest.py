@@ -286,6 +286,14 @@ def pytest_configure(config: pytest.Config) -> None:
             raise pytest.UsageError(
                 "--toolchain-gate runs in one process: it reads each test's report in the "
                 "controller, and xdist reports in its workers. Re-run it with -n 0.")
+    # Tests that share a global package registry (test_create, test_edit_design) collide
+    # when pytest-xdist distributes individual test IDs from the same module across
+    # workers.  ``loadscope`` keeps every test in the same module on one worker.
+    workers = config.getoption("numprocesses", default=None)
+    if workers not in (None, 0):
+        dist = config.getoption("dist", default=None)
+        if dist in (None, "no", "load"):
+            config.option.dist = "loadscope"
     config.addinivalue_line(
         "markers", "integration: slow tests that spawn a real DSH CEO run"
     )

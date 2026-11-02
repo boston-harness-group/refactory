@@ -573,6 +573,22 @@ def build_parser() -> argparse.ArgumentParser:
     pin_sub.add_parser("list", help="list all pins with commit, creation time and driver checkout")
     pin_sub.add_parser("prune", help="remove pins no run refers to")
 
+    # ── replay verifier ──
+    replay = sub.add_parser(
+        "replay-verifier",
+        help="replay the verifier on an existing run directory and a commit",
+        description="Replay the verifier on an existing run directory. "
+                    "When --commit is given, a temporary worktree of that commit "
+                    "is checked out, the verifier runs against it, and the "
+                    "worktree is removed.",
+    )
+    replay.add_argument("--run-dir", required=True, help="path to the existing run directory")
+    replay.add_argument("--commit", default="", help="commit hash to check out as a temporary worktree")
+    replay.add_argument("--provider", default="",
+                        help="the verifier's provider route (default: as `refactory ceo` resolves it)")
+    replay.add_argument("--model", default="", help="the verifier's model id")
+    replay.add_argument("--effort", default="", help="the verifier's reasoning effort")
+
     return parser
 
 
@@ -662,6 +678,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_model(args)
     if args.verb == "pin":
         return _cmd_pin(args)
+    if args.verb == "replay-verifier":
+        return _cmd_replay_verifier(args)
     if args.verb == "package":  # handled before argparse; kept for completeness
         return _forward("refactory_dsh.registry", [])
     parser.error(f"unknown verb {args.verb!r}")  # pragma: no cover - argparse rejects first
@@ -716,6 +734,251 @@ def _cmd_pin(args: argparse.Namespace) -> int:
         return 0
     print("usage: refactory pin {list,prune}", file=sys.stderr)
     return 2
+
+
+def _read_facts(run_dir: Path) -> dict:
+    """The run's facts (its check command among them), or ``{}`` when none are readable."""
+    try:
+        found = json.loads((run_dir / "facts.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _replay_probe_results(run_dir: Path, repo_root: Path, report: str, commit: str | None) -> str:
+    """Rerun the probe files the replayed verifier wrote, in a scratch clone at the commit.
+
+    The probes move from the verifier's checkout to ``run_dir/reviews/probes``; the table
+    goes to ``run_dir/reviews/probe-results.md`` and is returned.
+    """
+    import shutil
+    import tempfile
+
+    from refactory_dsh import clones, probe_rerun, worktree
+
+    written = repo_root / probe_rerun.PROBES
+    probes = run_dir / probe_rerun.PROBES
+    shutil.rmtree(probes, ignore_errors=True)
+    if written.is_dir():
+        shutil.copytree(written, probes)
+        shutil.rmtree(written, ignore_errors=True)
+        if not any(written.parent.iterdir()):
+            written.parent.rmdir()
+    try:
+        rev = commit or worktree.git(repo_root, "rev-parse", "HEAD").strip()
+        found = worktree.recorded(run_dir)
+        base = found.base if found is not None else f"{rev}~1"
+        with tempfile.TemporaryDirectory(prefix="refactory-probe-rerun-") as scratch:
+            checkout = Path(scratch) / "repo"
+            clones.clone_shared(repo_root, checkout, rev)
+            # The check's interpreter: the clone has no environment of its own, so it is
+            # looked up in the verifier's checkout and then the repository's main checkout.
+            facts = _read_facts(run_dir)
+            roots = [repo_root]
+            try:
+                common = worktree.git(repo_root, "rev-parse", "--path-format=absolute",
+                                      "--git-common-dir").strip()
+                roots.append(Path(common).parent)
+            except (ValueError, OSError):
+                pass
+            results = probe_rerun.run_probes(probes, checkout, report, base=base,
+                                             reset=probe_rerun.reset_checkout,
+                                             check=str(facts.get("check") or ""), roots=roots)
+    except (ValueError, OSError) as exc:  # WorkspaceError is a ValueError
+        return f"# Probe results\n\nThe probes could not be rerun: {exc}\n"
+    return probe_rerun.write_results(run_dir, results)
+
+
+def _replay_verifier_checkout(run_dir: Path, commit: str | None) -> tuple[Path, Path]:
+    """A throwaway worktree for a replayed verifier: ``(checkout, repository to remove it from)``.
+
+    Always a new temporary worktree, never the run's own: the verifier reverts hunks with
+    ``git apply --reverse`` and restores files with ``git checkout HEAD -- <file>``, which
+    in the run's worktree would discard a builder's uncommitted work and could leave hunks
+    reverted if it died midway -- as the graph's verifier gets a clone for. The commit is
+    ``--commit``, else the head the run recorded. Raises ``ValueError`` when there is no
+    repository or no commit to check out.
+    """
+    import subprocess
+    import tempfile
+
+    source: Path | None = None
+    head: str | None = None
+    record = run_dir / ".refactory" / "worktree.json"
+    if record.is_file():
+        try:
+            data = json.loads(record.read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{record} cannot be read: {exc}") from exc
+        if data.get("path") and Path(data["path"]).is_dir():
+            source = Path(data["path"])
+        head = data.get("head") or None
+    if source is None:
+        found = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
+                               text=True, timeout=10, cwd=str(Path.cwd()))
+        if found.returncode != 0:
+            raise ValueError("no git repository: run from the target, or replay a run "
+                             "that recorded its worktree")
+        source = Path(found.stdout.strip())
+    if not commit and not head:
+        # No head recorded: the commit the run's worktree is at now.
+        current = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
+                                 capture_output=True, text=True, timeout=10)
+        head = current.stdout.strip() if current.returncode == 0 else None
+    target = commit or head
+    if not target:
+        raise ValueError("no commit to check out: give --commit")
+    checkout = Path(tempfile.mkdtemp(prefix="refactory-replay-verifier-")) / "worktree"
+    subprocess.run(["git", "-C", str(source), "worktree", "add", "--detach", str(checkout), target],
+                   check=True, capture_output=True, timeout=60)
+    return checkout, source
+
+
+def _cmd_replay_verifier(args: argparse.Namespace) -> int:
+    """Replay the verifier on an existing run directory and a commit.
+
+    The verifier runs in a temporary worktree of ``--commit`` (else the run's recorded
+    head), with the same prompt and workspace setup as the graph's verifier node; the
+    report goes to stdout and the worktree is removed. The run's own worktree is never
+    touched (`_replay_verifier_checkout`).
+    """
+    import subprocess
+    import tempfile
+
+    run_dir = Path(args.run_dir).resolve()
+    if not run_dir.is_dir():
+        print(f"refactory: run directory not found: {run_dir}", file=sys.stderr)
+        return 1
+
+    brief_path = run_dir / "brief.json"
+    if not brief_path.is_file():
+        print(f"refactory: brief.json not found in {run_dir}", file=sys.stderr)
+        return 1
+
+    commit = args.commit
+    temp_worktree = None
+    git_source = None
+
+    try:
+        try:
+            temp_worktree, git_source = _replay_verifier_checkout(run_dir, commit)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            print(f"refactory: {exc}", file=sys.stderr)
+            return 1
+        repo_root = temp_worktree
+
+        # ── read brief and build context for the verifier prompt ──
+        brief_data = json.loads(brief_path.read_text())
+        brief_text = brief_data.get("brief", "")
+
+        # Read the diff
+        diff_path = run_dir / "changes.diff"
+        diff_text = diff_path.read_text() if diff_path.is_file() else ""
+
+        # Read corrections from the intent ledger
+        corrections = ""
+        ledger_path = run_dir / "intent-ledger.md"
+        if ledger_path.is_file():
+            from refactory_dsh.design_ops import gate_corrections_due
+            _approval, due = gate_corrections_due(run_dir)
+            if due:
+                corrections = "\n\n".join(f"- {text}" for _, text in due)
+
+        # Build the requirements_and_corrections fact
+        parts: list[str] = []
+        if brief_text:
+            parts.append(f"## Requirements from the brief\n{brief_text}")
+        if corrections:
+            parts.append(f"## Gate corrections\n{corrections}")
+        req_and_corr = "\n\n".join(parts) if parts else "(no requirements)"
+
+        # Build the verification methods fact
+        from refactory_dsh.verification import (
+            DESIGN_VERIFIER_PROMPT, DESIGN_VERIFIER_TIMEOUT_S,
+            verification_methods,
+        )
+        methods = verification_methods("repository_change")
+
+        # Fill the template variables in the prompt
+        import re as _re
+
+        values = {
+            "artifact": str(repo_root),
+            "change": f"The diff is in changes.diff ({len(diff_text)} bytes).",
+            "brief": brief_text,
+            "requirements_and_corrections": req_and_corr,
+            "verification_methods": methods,
+        }
+
+        def _fill(match: _re.Match[str]) -> str:
+            key = match.group(1).strip()
+            return str(values[key]) if key in values else match.group(0)
+
+        prompt = _re.sub(
+            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", _fill, DESIGN_VERIFIER_PROMPT,
+        )
+
+        # ── invoke the verifier's model session ──
+        from refactory_dsh.model import DshModelClient
+        from refactory_dsh.nn import RunContext
+
+        # The route as a design run settles it: flags over the environment, the project
+        # file and the stored choice, then completed or refused (`require_route`).
+        from refactory_dsh.interactive import require_route
+        from refactory_dsh.model import ModelChoiceError
+
+        route = {key: value for key, value in (
+            ("provider", args.provider), ("model", args.model), ("effort", args.effort)) if value}
+        try:
+            context = require_route(DshModelClient(
+                timeout_s=DESIGN_VERIFIER_TIMEOUT_S, project=repo_root, **route,
+            ).context())
+        except ModelChoiceError as exc:
+            print(f"refactory: {exc}", file=sys.stderr)
+            return 1
+        client = DshModelClient(**context)
+
+        # Create a RunContext with the run directory as the work directory
+        ctx = RunContext(run_dir)
+
+        # Copy the reads the verifier expects into the cwd if not present
+        for read_file in ("brief.json", "changes.diff"):
+            src = run_dir / read_file
+            dst = repo_root / read_file
+            if src.is_file() and not dst.exists():
+                import shutil as _shutil
+                _shutil.copy2(str(src), str(dst))
+
+        print(f"Replaying verifier on {run_dir} (worktree: {repo_root})...",
+              file=sys.stderr)
+        print(f"Timeout: {DESIGN_VERIFIER_TIMEOUT_S}s", file=sys.stderr)
+
+        output = client.complete(prompt, workdir=run_dir, cwd=repo_root)
+
+        # Write reviews/verification.md into the run directory
+        report_path = run_dir / "reviews" / "verification.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(output)
+
+        # Print the report to stdout
+        print(output)
+
+        # ── rerun the verifier's probe files, as design mode's rerun_probes op does ──
+        print(_replay_probe_results(run_dir, repo_root, output, commit))
+        return 0
+
+    finally:
+        if temp_worktree is not None and git_source is not None:
+            # Removed from the repository it was added to, which is not necessarily
+            # the one the command was started in.
+            try:
+                subprocess.run(["git", "-C", str(git_source), "worktree", "remove", "--force",
+                                str(temp_worktree)], capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            import shutil as _shutil
+
+            _shutil.rmtree(temp_worktree.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":  # pragma: no cover - the entry point
