@@ -235,3 +235,49 @@ def read_run_level_input(ctx: Any) -> dict[str, Any]:
     content = ctx.read_text("run_input.txt")
     assert content == "run-level-data", f"expected 'run-level-data', got {content!r}"
     return {}
+
+
+def write_scripted_answer(ctx: Any) -> dict[str, Any]:
+    """Write a scripted ``<answer>B</answer>`` response to ``answer.txt``.
+
+    Simulates what the agent ``solve`` node + model would do in the LiveMath
+    solver graph.  Used by the spine drain tests so the deterministic drain
+    can run the graph without an actual model.
+    """
+    ctx.write_text("answer.txt", "<answer>B</answer>")
+    return {}
+
+
+def halt_on_b(ctx: Any) -> dict[str, Any]:
+    """Record the item, then halt the run when item id is ``"b"`` — once only.
+
+    Used to test resume mid-pass: item ``"a"`` completes, the run halts on
+    ``"b"``, and resume should skip ``"a"`` and re-enter ``"b"``'s pass
+    directory.  On the second visit (resume) the halt does not fire because
+    ``.refactory/halted_b`` was written at the run level on the first halt.
+    """
+    from pathlib import Path
+    from refactory_dsh.nn.executor import HaltStop
+
+    item = ctx.read_json("current_item.json", {}) or {}
+    item_id = str(item.get("id"))
+    seen = ctx.read_json("seen.json", {"ids": []}) or {"ids": []}
+    seen.setdefault("ids", []).append(item_id)
+    ctx.write_json("seen.json", seen)
+    if item_id == "b":
+        # Only halt on the first visit. The flag file is at the run-level
+        # workdir's parent (two levels up from a pass dir, or just the workdir
+        # if no isolation), using a deterministic name.
+        # We look for the flag by searching up from workdir for a passes/ dir.
+        wd = Path(ctx.workdir)
+        # Check if we're inside a pass directory (passes/<node>/<item>_<index>/)
+        if wd.parent.parent.name == "passes":
+            run_dir = wd.parent.parent.parent
+        else:
+            run_dir = wd
+        flag = run_dir / ".refactory" / "halted_b"
+        if not flag.exists():
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.write_text("halted")
+            raise HaltStop("data", reason="test halt on item b")
+    return {"seen": seen["ids"]}

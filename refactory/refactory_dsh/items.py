@@ -588,6 +588,8 @@ def command_end(
         ps = _read_pass_state(workdir, node.id)
         ps["failed"] = ps.get("failed", 0) + 1
         _write_pass_state(workdir, node.id, ps)
+        # Merge declared produces from the pass directory to the run directory.
+        merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir)
         result: dict[str, Any] = {"error": failed_reason, **(record or {})}
         _check_all_items_failed(node, workdir, items, index)
@@ -595,6 +597,8 @@ def command_end(
 
     task = _task_of(node, workdir)
     if task is None:
+        # Merge declared produces even when there is no task.
+        merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir)
         _check_all_items_failed(node, workdir, items, index)
         return {}
@@ -626,11 +630,15 @@ def command_end(
         ps = _read_pass_state(workdir, node.id)
         ps["failed"] = ps.get("failed", 0) + 1
         _write_pass_state(workdir, node.id, ps)
+        # Merge declared produces from the pass directory to the run directory.
+        merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir)
         result = {"error": str(exc), **(record or {})}
         _check_all_items_failed(node, workdir, items, index)
         return result
     if verdict is None:
+        # Merge declared produces even with no verdict.
+        merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir)
         _check_all_items_failed(node, workdir, items, index)
         return {}
@@ -655,6 +663,8 @@ def command_end(
     )
     if record is not None and SCORES_FACT in node.produces:
         _write_facts(workdir, SCORES_FACT, [record])
+    # Merge declared produces from the pass directory to the run directory.
+    merge_pass_results(workdir, pass_dir, node.produces)
     mark_pass_complete(pass_dir)
     _check_all_items_failed(node, workdir, items, index)
     return record or {}

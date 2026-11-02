@@ -1459,3 +1459,67 @@ def test_pass_file_read_through(tmp_path):
 
     result = execute(graph, workdir)
     assert result.exit_ok, result.error
+
+
+def test_resume_mid_pass_continues_in_same_pass_directory(tmp_path):
+    """Resume mid-pass: item 'a' is done, item 'b' was interrupted; resume
+    re-enters 'b''s pass directory and does NOT re-run 'a'.
+
+    The op ``halt_on_b`` completes item 'a' normally, then raises HaltStop
+    on item 'b'. Resume from the data node should skip 'a' (its .done
+    marker is present) and run 'b' and 'c' in their pass directories.
+
+    Fails without the .done-based skip logic in the walker's data loop.
+    """
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        writes=(CURRENT_ITEM,), inline_items=({"id": "a"}, {"id": "b"}, {"id": "c"}),
+        produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:halt_on_b",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    workdir = tmp_path / "run"
+    result1 = execute(graph, workdir)
+    # Run halts on item 'b'.
+    assert result1.exit_ok is False
+    assert result1.halted is True
+
+    # Item 'a' should have a completed pass directory.
+    passes_dir = workdir / "passes" / "data"
+    assert passes_dir.exists(), "passes/data/ not created"
+    a_pass = passes_dir / "a_0"
+    assert a_pass.exists(), "pass dir for item 'a' not created"
+    assert (a_pass / ".done").exists(), "item 'a' should have .done marker"
+    # Write a sentinel in item 'a''s pass dir to prove it's not re-created.
+    (a_pass / "sentinel.txt").write_text("from first run")
+
+    # Item 'b' should NOT have a .done marker (it was halted mid-pass).
+    b_pass = passes_dir / "b_1"
+    assert b_pass.exists(), "pass dir for item 'b' not created"
+    assert not (b_pass / ".done").exists(), "item 'b' should NOT have .done"
+
+    # Resume from the data node — use the facts from the first run.
+    result2 = execute(graph, workdir, start="data", facts=dict(result1.facts))
+    assert result2.exit_ok, result2.error
+
+    # Item 'a''s sentinel should still exist (it was skipped, not re-run).
+    assert (a_pass / "sentinel.txt").exists(), (
+        "item 'a' was re-run instead of skipped on resume"
+    )
+    assert (a_pass / "sentinel.txt").read_text() == "from first run"
+
+    # Item 'b' and 'c' should both be done now.
+    assert (b_pass / ".done").exists(), "item 'b' should have .done after resume"
+    c_pass = passes_dir / "c_2"
+    assert (c_pass / ".done").exists(), "item 'c' should have .done after resume"

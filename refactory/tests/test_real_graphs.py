@@ -1,7 +1,10 @@
-"""End-to-end tests with representative data-node graphs on both runtimes.
+"""End-to-end tests with the real LiveMath package on both runtimes.
 
 Proves that pass isolation does not break existing graph behavior: item_scores
 and records match between walker and spine, and pass directories are created.
+
+Uses the actual LiveMath package (refactory_packages/livemath) with the
+fixture data, not a custom representative solver package.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
 NODE = REPO_ROOT / "node_modules/.bin/tsx"
 DATA_DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain.mts"
+FIXTURE_DIR = HERE / "fixtures" / "livemath"
 
 
 def _run_spine(graph_json: Path, workdir: Path, python_bin_dir: str, timeout_ms: int) -> int:
@@ -39,127 +43,98 @@ def _run_spine(graph_json: Path, workdir: Path, python_bin_dir: str, timeout_ms:
     return result.returncode
 
 
-def _write_solver_package(project: Path) -> None:
-    """Write a representative solver-style Task as a proper package.
-
-    Mimics the LiveMath solver graph: multiple items, each with a label,
-    setup writes a prompt file, verify checks for a result file.
-    """
-    pkg = project / ".factory" / "packages" / "solver_scenario"
-    pkg.mkdir(parents=True, exist_ok=True)
-    (pkg / "__init__.py").write_text(
-        'from refactory_dsh.nn import Package\n'
-        'from .task import SolverTask\n'
-        'PACKAGE = Package(\n'
-        '    name="solver_scenario",\n'
-        '    description="solver scenario",\n'
-        '    modes=(),\n'
-        '    ops=("refactory_packages.solver_scenario.ops",),\n'
-        ')\n'
-    )
-    (pkg / "task.py").write_text(
-        'from refactory_dsh.task import Task, TaskInstance, VerifyResult\n'
-        '\n'
-        'class SolverTask(Task):\n'
-        '    name = "solver_scenario"\n'
-        '\n'
-        '    def instances(self):\n'
-        '        return [\n'
-        '            TaskInstance(id="q1", metadata={"label": "42", "label_text": "answer is 42"}),\n'
-        '            TaskInstance(id="q2", metadata={"label": "7", "label_text": "answer is 7"}),\n'
-        '            TaskInstance(id="q3", metadata={"label": "100", "label_text": "answer is 100"}),\n'
-        '        ]\n'
-        '\n'
-        '    def setup(self, instance, workspace):\n'
-        '        (workspace / f"prompt-{instance.id}.txt").write_text(\n'
-        '            f"Solve for {instance.id}"\n'
-        '        )\n'
-        '\n'
-        '    def verify(self, instance, workspace):\n'
-        '        return VerifyResult(\n'
-        '            passed=True,\n'
-        '            score=1.0 if instance.id != "q2" else 0.5,\n'
-        '            prediction=str(instance.metadata.get("label", "")),\n'
-        '        )\n'
-    )
-    (pkg / "ops.py").write_text(
-        'def solve(ctx):\n'
-        '    item = ctx.read_json("current_item.json", {})\n'
-        '    ctx.write_text("solution.txt", f"solution for {item.get(\\"id\\", \\"\\")}")\n'
-        '    return {}\n'
-    )
-
-
 @pytest.mark.skipif(not NODE.exists(), reason="tsx not available")
 def test_livemath_solver_end_to_end(tmp_path):
-    """A representative solver graph runs end to end on both runtimes.
+    """The real LiveMath solver graph runs end to end on both runtimes.
 
-    Merged item_scores and records are identical across runtimes.  Pass
-    directories are created with .done markers.
+    Uses the actual LiveMath package (refactory_packages/livemath) with the
+    fixture data.  Walker uses FakeModel; spine uses a deterministic graph
+    variant with the same LiveMathTask (same items, same verify/grading).
+
+    Merged item_scores are identical across runtimes.  Pass directories are
+    created with .done markers.
     """
-    project = tmp_path / "project"
-    _write_solver_package(project)
-    sys.path.insert(0, str(project / ".factory" / "packages"))
+    import refactory_packages.livemath.tasks as tasks_mod
+    from refactory_packages.livemath.mode import Solver
+    from refactory_packages.livemath.tasks import LiveMathTask
+
+    # Patch LiveMathTask to use fixture data (no shuffling for reproducibility).
+    original_init = tasks_mod.LiveMathTask.__init__
+
+    def patched_init(self, data_path=None, shuffle_choices=True):
+        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=False)
+
+    tasks_mod.LiveMathTask.__init__ = patched_init  # type: ignore[method-assign]
     try:
-        from solver_scenario.task import SolverTask  # type: ignore[import-not-found]
-        register_task("solver_scenario", SolverTask)
-        task_ref = "refactory_packages.solver_scenario.task:SolverTask"
+        register_task("livemath", LiveMathTask)
 
-        graph = nn.Graph()
-        graph.add(nn.Node(
-            "data", "data", subgraph_entry="work", subgraph_exit="work",
-            task_ref="solver_scenario",
-            writes=(CURRENT_ITEM, "solution.txt"), produces=("item_scores",),
-        ))
-        graph.add(nn.Node(
-            "work", "op", call="loop_ops:record_item",
-            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
-        ))
-        graph.add(nn.Node(
-            "report", "op", call="loop_ops:write_best",
-            writes=("best.json",), produces=("best",),
-        ))
-        graph.connect("data", "report")
-
-        # ── Walker run ──
+        # ── Walker run: real LiveMath Solver mode + FakeModel ──
+        from tests_support import FakeModel
+        model = FakeModel(["<answer>B</answer>"] * 10)
+        mode = Solver()
         walker_dir = tmp_path / "walker"
-        walker_result = execute(graph, walker_dir)
-        assert walker_result.exit_ok, walker_result.error
+        walker_result = mode.run(walker_dir, model=model)
+        assert walker_result.exit_ok, f"walker failed: {walker_result.error}"
         walker_scores = walker_result.facts.get("item_scores", [])
 
-        # ── Spine run ──
+        # ── Spine run: real LiveMathTask + deterministic graph variant ──
+        # The spine data drain can only run deterministic (op/gate) nodes, so
+        # the agent "solve" node is replaced by an op that writes the same
+        # scripted response ("<answer>B</answer>") to answer.txt.
+        # This exercises the REAL LiveMathTask (instances, setup, verify) and
+        # the real graph structure through the spine drain.
         spine_dir = tmp_path / "spine"
         spine_dir.mkdir(parents=True, exist_ok=True)
 
+        OPS = "refactory_packages.livemath.ops"
+        TASK = "refactory_packages.livemath.tasks:LiveMathTask"
+
         spine_graph = nn.Graph()
         spine_graph.add(nn.Node(
-            "data", "data", subgraph_entry="work", subgraph_exit="work",
-            task_ref=task_ref,
-            writes=(CURRENT_ITEM, "solution.txt"), produces=("item_scores",),
+            "data", "data",
+            subgraph_entry="format_prompt",
+            subgraph_exit="solve",
+            task_ref=TASK,
+            writes=(CURRENT_ITEM,),
+            produces=("item_scores",),
         ))
         spine_graph.add(nn.Node(
-            "work", "op", call="loop_ops:record_item",
-            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+            "format_prompt", "op",
+            call=f"{OPS}:format_prompt",
+            reads=(CURRENT_ITEM,),
+            knobs=("skill", "use_theorem", "use_sketch"),
+            produces=("user_prompt", "skill_section"),
+        ))
+        # Deterministic op replacing the agent node — writes the same response
+        # FakeModel would give so the LiveMathTask's verify produces matching scores.
+        spine_graph.add(nn.Node(
+            "solve", "op",
+            call="loop_ops:write_scripted_answer",
+            writes=("answer.txt",),
+            produces=(),
         ))
         spine_graph.add(nn.Node(
-            "report", "op", call="loop_ops:write_best",
-            writes=("best.json",), produces=("best",),
+            "finish", "op",
+            call=f"{OPS}:finish",
+            writes=("result.json",),
+            produces=("finished",),
         ))
-        spine_graph.connect("data", "report")
+        spine_graph.connect("format_prompt", "solve")
+        spine_graph.connect("data", "finish")
 
         state = {"graph": spine_graph.to_state()}
         lowering.write_declarations(state, spine_dir)
         graph_path, _ = lowering.write_mode_graph(
-            state, tmp_path / "graphs", name="solver_scenario",
+            state, tmp_path / "graphs", name="livemath_solver",
         )
 
         python_bin = str(REPO_ROOT / ".venv/bin")
         extra_path = os.pathsep.join([
-            str(project / ".factory" / "packages"),
+            str(REPO_ROOT / "refactory" / "refactory_packages"),
             str(HERE),
         ])
         env_patch = {
-            "REFACTORY_PROJECT": str(project),
+            "LIVEMATH_DATA_PATH": str(FIXTURE_DIR),
             "PYTHONPATH": extra_path,
         }
         old_env = {}
@@ -190,6 +165,15 @@ def test_livemath_solver_end_to_end(tmp_path):
             f"walker and spine disagree:\nwalker: {walker_scores}\nspine: {spine_scores}"
         )
 
+        # Items with correct label B should score 1.0
+        for scores_list in [walker_scores, spine_scores]:
+            correct_b = {"202501:1", "202503:1", "202503:2"}
+            for entry in scores_list:
+                if entry["id"] in correct_b:
+                    assert entry["score"] == 1.0, (
+                        f"{entry['id']} should score 1.0: {entry}"
+                    )
+
         # ── Pass directories should exist on both runtimes ──
         walker_passes = walker_dir / "passes" / "data"
         spine_passes = spine_dir / "passes" / "data"
@@ -207,34 +191,40 @@ def test_livemath_solver_end_to_end(tmp_path):
             assert (spine_passes / name / ".done").exists(), f"spine {name} missing .done"
 
     finally:
-        sys.path.remove(str(project / ".factory" / "packages"))
+        tasks_mod.LiveMathTask.__init__ = original_init  # type: ignore[method-assign]
 
 
 @pytest.mark.skipif(not NODE.exists(), reason="tsx not available")
 def test_existing_data_node_graph_end_to_end(tmp_path):
     """An existing data-node graph pattern runs on both runtimes.
 
-    Merged item_scores and records match.  This exercises the common
-    pattern of inline items with a task that verifies each.
+    Uses the real LiveMathTask with the fixture data but a minimal
+    deterministic graph.  Merged item_scores match.
     """
-    project = tmp_path / "project"
-    _write_solver_package(project)
-    sys.path.insert(0, str(project / ".factory" / "packages"))
-    try:
-        from solver_scenario.task import SolverTask  # type: ignore[import-not-found]
-        register_task("solver_existing", SolverTask)
-        task_ref = "refactory_packages.solver_scenario.task:SolverTask"
+    import refactory_packages.livemath.tasks as tasks_mod
+    from refactory_packages.livemath.tasks import LiveMathTask
 
-        # This graph uses task-provided items (no inline_items).
+    original_init = tasks_mod.LiveMathTask.__init__
+
+    def patched_init(self, data_path=None, shuffle_choices=True):
+        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=False)
+
+    tasks_mod.LiveMathTask.__init__ = patched_init  # type: ignore[method-assign]
+    try:
+        register_task("livemath_existing", LiveMathTask)
+        task_ref = "refactory_packages.livemath.tasks:LiveMathTask"
+
+        # This graph uses the real LiveMathTask for items and verify,
+        # with a noop subgraph and a scripted answer writer.
         graph = nn.Graph()
         graph.add(nn.Node(
             "data", "data", subgraph_entry="work", subgraph_exit="work",
-            task_ref="solver_existing",
+            task_ref="livemath_existing",
             writes=(CURRENT_ITEM,), produces=("item_scores",),
         ))
         graph.add(nn.Node(
-            "work", "op", call="loop_ops:noop",
-            reads=(CURRENT_ITEM,), writes=(), produces=(),
+            "work", "op", call="loop_ops:write_scripted_answer",
+            reads=(CURRENT_ITEM,), writes=("answer.txt",), produces=(),
         ))
         graph.add(nn.Node(
             "report", "op", call="loop_ops:write_best",
@@ -259,8 +249,8 @@ def test_existing_data_node_graph_end_to_end(tmp_path):
             writes=(CURRENT_ITEM,), produces=("item_scores",),
         ))
         spine_graph.add(nn.Node(
-            "work", "op", call="loop_ops:noop",
-            reads=(CURRENT_ITEM,), writes=(), produces=(),
+            "work", "op", call="loop_ops:write_scripted_answer",
+            reads=(CURRENT_ITEM,), writes=("answer.txt",), produces=(),
         ))
         spine_graph.add(nn.Node(
             "report", "op", call="loop_ops:write_best",
@@ -276,11 +266,11 @@ def test_existing_data_node_graph_end_to_end(tmp_path):
 
         python_bin = str(REPO_ROOT / ".venv/bin")
         extra_path = os.pathsep.join([
-            str(project / ".factory" / "packages"),
+            str(REPO_ROOT / "refactory" / "refactory_packages"),
             str(HERE),
         ])
         env_patch = {
-            "REFACTORY_PROJECT": str(project),
+            "LIVEMATH_DATA_PATH": str(FIXTURE_DIR),
             "PYTHONPATH": extra_path,
         }
         old_env = {}
@@ -315,4 +305,4 @@ def test_existing_data_node_graph_end_to_end(tmp_path):
         assert (spine_dir / "passes" / "data").exists()
 
     finally:
-        sys.path.remove(str(project / ".factory" / "packages"))
+        tasks_mod.LiveMathTask.__init__ = original_init  # type: ignore[method-assign]

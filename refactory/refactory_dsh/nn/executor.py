@@ -909,7 +909,7 @@ class Executor:
 
                 # ── pass isolation: compute declared reads and prepare ──
                 from refactory_dsh.items import (
-                    prepare_pass_dir, mark_pass_complete,
+                    prepare_pass_dir, mark_pass_complete, sanitize_item_id,
                 )
                 import shutil as _shutil
                 _run_workdir = self._run_workdir or self.ctx.workdir
@@ -923,12 +923,40 @@ class Executor:
                 _declared_reads = tuple(
                     r for r in _subgraph_reads if r not in _subgraph_writes
                 )
-                # Clean up pass directories from a previous run of this data node.
+                # Resume / rerun logic for pass directories.
                 _passes_root = _run_workdir / "passes" / node.id
+                _done_items: set[int] = set()
                 if _passes_root.exists():
-                    _shutil.rmtree(_passes_root)
+                    # Check which items already completed (.done marker).
+                    for _idx, _it in enumerate(items):
+                        _iid = str(_it.get("id") or _idx)
+                        _sid = sanitize_item_id(_iid)
+                        _pd = _passes_root / f"{_sid}_{_idx}"
+                        if _pd.exists() and (_pd / ".done").exists():
+                            _done_items.add(_idx)
+                    if len(_done_items) >= len(items):
+                        # All items done — this is a rerun; start fresh.
+                        _shutil.rmtree(_passes_root)
+                        _done_items.clear()
 
                 for index, item in enumerate(items):
+                    # Resume: skip items that already completed.
+                    if index in _done_items:
+                        # Pre-load scores from the completed pass into the
+                        # accumulator so the run's final item_scores include them.
+                        _item_id_done = str(item.get("id") or index)
+                        _sid_done = sanitize_item_id(_item_id_done)
+                        _pass_dir_done = _passes_root / f"{_sid_done}_{index}"
+                        _facts_done = _pass_dir_done / "facts.json"
+                        if _facts_done.exists():
+                            try:
+                                _done_facts = json.loads(_facts_done.read_text())
+                                _done_scores = _done_facts.get("item_scores", [])
+                                if isinstance(_done_scores, list):
+                                    scores.extend(_done_scores)
+                            except (json.JSONDecodeError, OSError):
+                                pass
+                        continue
                     _item_steps_start = len(self.steps)
 
                     instance = instance_of(item)

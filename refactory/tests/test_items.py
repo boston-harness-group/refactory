@@ -1097,6 +1097,56 @@ def test_command_end_merges_only_declared_produces(tmp_path):
     )
 
 
+def test_command_end_merges_declared_produces_on_spine(tmp_path):
+    """A declared produce written to pass_dir/facts.json is merged to run facts.
+
+    The spine path writes facts to pass_dir/facts.json (via REFACTORY_WORKDIR).
+    ``command_end`` must call ``merge_pass_results`` to merge declared produces
+    back to the run-level facts.json.  Without the merge call, only
+    ``item_scores`` would be merged (via the direct ``_write_facts`` call),
+    and other declared produces would stay in the pass directory.
+
+    Fails without the ``merge_pass_results`` call in ``command_end``.
+    """
+    _probe_task()
+
+    # Build a data node that declares "custom_result" as a produce.
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="counting",
+        writes=(CURRENT_ITEM,), produces=("item_scores", "custom_result"),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:noop",
+        reads=(CURRENT_ITEM,), writes=(), produces=(),
+    ))
+    graph.connect("data", "work")
+    node = _declared(graph, tmp_path)
+
+    # Begin item 0 to create the pass directory.
+    result = items.command_begin(node, tmp_path, 0)
+    from pathlib import Path
+    pass_dir = Path(result["pass_dir"])
+
+    # Write a declared produce fact into pass_dir/facts.json (simulating
+    # what a subgraph op would do on the spine path).
+    facts_path = pass_dir / "facts.json"
+    pass_facts = json.loads(facts_path.read_text()) if facts_path.exists() else {}
+    pass_facts["custom_result"] = {"merged": True}
+    facts_path.write_text(json.dumps(pass_facts))
+
+    # End the item.
+    items.command_end(node, tmp_path, 0)
+
+    # The declared produce should be in run-level facts.
+    run_facts = json.loads((tmp_path / "facts.json").read_text())
+    assert "custom_result" in run_facts, (
+        f"declared produce 'custom_result' not merged to run facts: {list(run_facts.keys())}"
+    )
+    assert run_facts["custom_result"] == {"merged": True}
+
+
 def test_rerun_clears_pass_directories(tmp_path):
     """command_begin at index 0 deletes old passes/<node_id>/."""
     _probe_task()
