@@ -258,6 +258,43 @@ def test_a_probe_that_imports_and_calls_an_existing_test_is_unverified(tmp_path,
     assert [item["id"] for item in probe_rerun.read_results(ctx)["unverified"]] == ["R1"]
 
 
+def test_a_script_pytest_cannot_run_as_a_test_is_unverified_not_a_defect(tmp_path, monkeypatch):
+    """A .py probe with a test_* name in it is run under pytest; when pytest finds
+    nothing it can run (a method, a helper with arguments) it exits 5 or 1 with a missing
+    fixture. That says the probe checked nothing, not that the change is wrong."""
+    method = ("# R1: a checker class\nfrom calc import double\n\n\nclass Checker:\n"
+              "    def __init__(self):\n        self.n = 2\n\n"
+              "    def test_case(self):\n        assert double(self.n) == 4\n\n\n"
+              "Checker().test_case()\n")
+    helper = ("# R2: a helper\nfrom calc import double\n\n\n"
+              "def test_value(v):\n    assert double(v) == 2 * v\n\n\ntest_value(3)\n")
+    report = REPORT.format("reviews/probes/R1-1.py") + "\n" + REPORT.format(
+        "reviews/probes/R2-1.py").replace("R1", "R2")
+    ctx = _run(tmp_path, monkeypatch, report, {"R1-1.py": method, "R2-1.py": helper})
+    results = probe_rerun.read_results(ctx)
+    statuses = {entry["file"]: entry["status"] for entry in results["probes"]}
+    assert statuses == {"R1-1.py": "no_check", "R2-1.py": "no_check"}, results["probes"]
+    assert probe_rerun.defects(results) == []
+
+
+def test_a_pytest_probe_whose_assertion_fails_is_still_a_defect(tmp_path, monkeypatch):
+    """The pytest exceptions above must not excuse a real failure."""
+    probe = ("# R1: double under pytest\nfrom calc import double\n\n\n"
+             "def test_double():\n    assert double(3) == 7\n")
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"), {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    assert results["probes"][0]["status"] == "fail", results["probes"][0]
+    assert [item["where"] for item in probe_rerun.defects(results)] == ["reviews/probes/R1-1.py"]
+
+
+def test_a_timed_out_probe_is_a_blocking_defect():
+    results = {"per_probe_s": 120, "probes": [
+        {"file": "R1-1.sh", "requirement": "R1", "status": "timed_out", "exit_code": None,
+         "tail": "still going", "existing_tests": [], "header": "R1: hangs"}]}
+    [item] = probe_rerun.defects(results)
+    assert "timed out after 120 s" in item["what"] and judges.blocks(item)
+
+
 def test_a_failing_probe_file_is_a_blocking_defect(tmp_path, monkeypatch):
     """The judge proceeded; the probe fails on the attempt; the gate sends it back."""
     probe = "# R1: double(3) at the end; expected 7\nfrom calc import double\nassert double(3) == 7\n"

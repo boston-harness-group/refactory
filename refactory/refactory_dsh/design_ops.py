@@ -2765,9 +2765,8 @@ def enforce_guardedness(ctx: Any) -> list[str]:
     without the change pins nothing, and that blocks.
 
     Modified test files are checked at function granularity for relaxed
-    assertions, but the result is **advisory only** -- written to the
-    ``weakened_tests_advisory`` fact and to ``relaxed_advisory`` in
-    ``test-guardedness.json``, never returned here. The detector cannot
+    assertions, but the result is **advisory only** -- written to
+    ``relaxed_advisory`` in ``test-guardedness.json``, never returned here. The detector cannot
     distinguish a loosened assertion from an expected value updated to match a
     behaviour the brief asked for, which is the required edit for a
     behaviour-change brief, so blocking on it sent legitimate builds back. It
@@ -2898,7 +2897,10 @@ def enforce_guardedness(ctx: Any) -> list[str]:
                     advisory.extend(f"{tf}::{fn}" for fn in non_exempt)
 
     if advisory:
-        ctx.set_fact("weakened_tests_advisory", sorted(advisory))
+        # Into the guardedness record, not a fact: every node that calls this
+        # (design's check and gate_check, design_fast's focused_check) would have to
+        # declare a new fact, and an undeclared one ends the run on both runtimes --
+        # the opposite of advisory.
         record = ctx.read_json("test-guardedness.json", {}) or {}
         record["relaxed_advisory"] = sorted(advisory)
         ctx.write_json("test-guardedness.json", record)

@@ -340,6 +340,23 @@ _NO_MODULE = re.compile(r"ModuleNotFoundError: No module named '([\w.]+)'")
 _UNKNOWN_LOCATION = re.compile(r"ImportError: cannot import name '\w+' from '([\w.]+)' \(unknown location\)")
 _NOT_FOUND = re.compile(r"(?:^|\s)([\w.+-]+): (?:command )?not found\s*$", re.M)
 _NODE_MISSING = re.compile(r"Cannot find (?:module|package) '([^']+)'")
+#: pytest's own exit codes for a run that never got to test anything: interrupted (2),
+#: internal error (3), usage error (4), nothing collected (5).
+_PYTEST_NOT_RUN = {2, 3, 4, 5}
+#: A test function pytest could not call, because a parameter is not a fixture.
+_MISSING_FIXTURE = re.compile(r"^E\s+fixture '[^']+' not found", re.M)
+
+
+def _not_a_test_run(command: list[str], code: int | None, output: str) -> bool:
+    """Whether a failing pytest-run probe failed only because pytest could not run it."""
+    if "pytest" not in command or code is None:
+        return False
+    if code in _PYTEST_NOT_RUN:
+        return True
+    return code == 1 and bool(_MISSING_FIXTURE.search(output)) and not re.search(
+        r"\b\d+ passed\b|^FAILED ", output, re.M)
+
+
 #: Test runners a probe is run with: missing from the interpreter, the probe never started.
 _RUNNERS = {"pytest", "_pytest", "pluggy"}
 
@@ -475,6 +492,11 @@ def run_probes(probes: Path, checkout: Path, report: str, *, base: str, env: dic
         why = environment_failure(code, output, Path(checkout), env)
         if why:
             entry["status"], entry["environment"] = "environment", why
+        elif entry["status"] == "fail" and _not_a_test_run(_command(target, text, python), code, output):
+            # pytest ran the file but found nothing it could run as a test (a script
+            # with a helper or a method called test_*): the probe checked nothing, which
+            # is unverified, not a defect in the change.
+            entry["status"], entry["no_check"] = "no_check", "pytest could not run it as a test"
         elif entry["status"] == "pass":
             # A pass only counts when the probe actually checked something.
             if not has_own_check(name, text):

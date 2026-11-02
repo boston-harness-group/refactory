@@ -84,7 +84,7 @@ def test_modified_test_function_with_relaxed_assertion_is_advisory_not_blocking(
 
     enforce_guardedness returns only the blocking set (non-guarding ADDED tests), so
     the modified file must not appear there. The finding is written to the
-    weakened_tests_advisory fact and to relaxed_advisory in test-guardedness.json,
+    relaxed_advisory list in test-guardedness.json,
     for the reviewers and the person to judge: the detector cannot tell a loosened
     assertion from an expected value updated to match a behaviour the brief asked
     for, and the second is the required edit."""
@@ -125,11 +125,25 @@ def test_check():
         "head": head_commit, "target": str(repo), "run": str(run_dir),
     }))
 
-    result = design_ops.enforce_guardedness(ctx)
-    assert result == [], f"a modified test must not block, got {result}"
-    assert ctx.facts.get("weakened_tests_advisory") == ["tests/test_mod.py::test_check"]
-    record = ctx.read_json("test-guardedness.json", {})
-    assert record.get("relaxed_advisory") == ["tests/test_mod.py::test_check"]
+    # Under each calling node's own declarations, as both runtimes check them after
+    # the node runs: an advisory finding must not produce a fact the node does not
+    # declare, or the run ends -- the opposite of advisory.
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.fast import DesignFastMode
+
+    callers = [DesignMode().graph().nodes["check"], DesignMode().graph().nodes["gate_check"],
+               DesignFastMode().graph().nodes["focused_check"]]
+    record_text = (run_dir / "test-guardedness.json").read_text()
+    for node in callers:
+        (run_dir / "test-guardedness.json").write_text(record_text)
+        ctx = RunContext(run_dir)
+        ctx._declared_facts = node.produces  # noqa: SLF001 - as the executor sets them
+        ctx._produced = set()  # noqa: SLF001
+        result = design_ops.enforce_guardedness(ctx)
+        assert result == [], f"a modified test must not block, got {result}"
+        ctx._check_produces()  # noqa: SLF001 - raises on an undeclared fact
+        record = ctx.read_json("test-guardedness.json", {})
+        assert record.get("relaxed_advisory") == ["tests/test_mod.py::test_check"], node.id
 
 
 def test_modified_test_function_with_rename_only_excused(tmp_path):
