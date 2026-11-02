@@ -1592,7 +1592,7 @@
         "cli": "refactory replay-verifier --run-dir DIR [--commit HASH]",
         "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
       },
-      "purpose": "Replay the site-revert pass on an existing run directory to verify that every changed site is caught by a test; when the original worktree is gone, check out a temporary worktree of the given commit.",
+      "purpose": "Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.",
       "reviewed_schema": "5ff1f9a1c0a702f1b167758b2960e10b86ea8ce59e880b9f3343f66a6bfaa82f"
     }
   }

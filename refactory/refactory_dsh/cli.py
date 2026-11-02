@@ -786,23 +786,90 @@ def _cmd_replay_verifier(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
 
-        # Read brief and build context for the verifier prompt
-        brief_text = brief_path.read_text()
+        # ── read brief and build context for the verifier prompt ──
+        brief_data = json.loads(brief_path.read_text())
+        brief_text = brief_data.get("brief", "")
 
         # Read the diff
         diff_path = run_dir / "changes.diff"
         diff_text = diff_path.read_text() if diff_path.is_file() else ""
 
-        from refactory_dsh.verification import VERIFIER_PROMPT, DESIGN_VERIFIER_TIMEOUT_S
+        # Read corrections from the intent ledger
+        corrections = ""
+        ledger_path = run_dir / "intent-ledger.md"
+        if ledger_path.is_file():
+            from refactory_dsh.design_ops import gate_corrections_due
+            _approval, due = gate_corrections_due(run_dir)
+            if due:
+                corrections = "\n\n".join(f"- {text}" for _, text in due)
 
-        print(json.dumps({
-            "status": "replay_ready",
-            "run_dir": str(run_dir),
-            "commit": commit,
-            "worktree": str(repo_root),
-            "verifier_timeout_s": DESIGN_VERIFIER_TIMEOUT_S,
-            "prompt_preview": VERIFIER_PROMPT[:200] + "...",
-        }, indent=2))
+        # Build the requirements_and_corrections fact
+        parts: list[str] = []
+        if brief_text:
+            parts.append(f"## Requirements from the brief\n{brief_text}")
+        if corrections:
+            parts.append(f"## Gate corrections\n{corrections}")
+        req_and_corr = "\n\n".join(parts) if parts else "(no requirements)"
+
+        # Build the verification methods fact
+        from refactory_dsh.verification import (
+            DESIGN_VERIFIER_PROMPT, DESIGN_VERIFIER_TIMEOUT_S,
+            verification_methods,
+        )
+        methods = verification_methods("repository_change")
+
+        # Fill the template variables in the prompt
+        import re as _re
+
+        values = {
+            "artifact": str(repo_root),
+            "change": f"The diff is in changes.diff ({len(diff_text)} bytes).",
+            "brief": brief_text,
+            "requirements_and_corrections": req_and_corr,
+            "verification_methods": methods,
+        }
+
+        def _fill(match: _re.Match[str]) -> str:
+            key = match.group(1).strip()
+            return str(values[key]) if key in values else match.group(0)
+
+        prompt = _re.sub(
+            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", _fill, DESIGN_VERIFIER_PROMPT,
+        )
+
+        # ── invoke the verifier's model session ──
+        from refactory_dsh.model import DshModelClient
+        from refactory_dsh.nn import RunContext
+
+        client = DshModelClient(
+            timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
+            project=repo_root,
+        )
+
+        # Create a RunContext with the run directory as the work directory
+        ctx = RunContext(run_dir)
+
+        # Copy the reads the verifier expects into the cwd if not present
+        for read_file in ("brief.json", "changes.diff"):
+            src = run_dir / read_file
+            dst = repo_root / read_file
+            if src.is_file() and not dst.exists():
+                import shutil as _shutil
+                _shutil.copy2(str(src), str(dst))
+
+        print(f"Replaying verifier on {run_dir} (worktree: {repo_root})...",
+              file=sys.stderr)
+        print(f"Timeout: {DESIGN_VERIFIER_TIMEOUT_S}s", file=sys.stderr)
+
+        output = client.complete(prompt, workdir=run_dir, cwd=repo_root)
+
+        # Write reviews/verification.md into the run directory
+        report_path = run_dir / "reviews" / "verification.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(output)
+
+        # Print the report to stdout
+        print(output)
         return 0
 
     finally:

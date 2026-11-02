@@ -864,7 +864,7 @@ class DesignMode(Mode):
             produces=self_check_produces,
             knobs=(*check_knobs, "self_check_fixups",
                    "self_check_timeout_s"),
-            # From the knobs, so the build loop's stop always comes first: 54 with the
+            # From the knobs, so the build loop's stop always comes first: 45 with the
             # defaults (`prepare_check_iterations`; `DesignMode.graph` follows the knobs).
             max_iterations=prepare_check_iterations(defaults),
             notes="settle the commit the check and the reviews see; every attempt's "
@@ -913,12 +913,12 @@ class DesignMode(Mode):
         ))
 
         # ── design-v2's three reviews, in parallel, and the overwatch pass ──
-        from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, VERIFIER_PROMPT
+        from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S, DESIGN_VERIFIER_PROMPT
         graph.add(Node(
             "verifier", "agent",
             retry=TIMEOUT_RETRY, outputs_only=True,
             workspace={"kind": "clone", "of": "attempt", "collect": "files"},
-            prompt_template=VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
+            prompt_template=DESIGN_VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
             timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
             reads=("brief.json", "changes.diff"),

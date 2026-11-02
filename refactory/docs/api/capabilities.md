@@ -5985,7 +5985,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## cli:replay-verifier
 
-Replay the site-revert pass on an existing run directory to verify that every changed site is caught by a test; when the original worktree is gone, check out a temporary worktree of the given commit.
+Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.
 
 Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
@@ -6037,7 +6037,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "type": "string"
     }
   },
-  "purpose": "Replay the site-revert pass on an existing run directory to verify that every changed site is caught by a test; when the original worktree is gone, check out a temporary worktree of the given commit.",
+  "purpose": "Replay the verifier on an existing run directory and a commit; when the original worktree is gone, check out a temporary worktree of the given commit and remove it after the run.",
   "reviewed_schema": "5ff1f9a1c0a702f1b167758b2960e10b86ea8ce59e880b9f3343f66a6bfaa82f"
 }
 ```

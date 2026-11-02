@@ -105,6 +105,32 @@ def test_revert_uses_scratch_copy():
         "verifier must use the standard timeout retry"
 
 
+def test_design_fast_verifier_has_no_hunk_revert():
+    """design_fast's verifier uses the standard prompt without hunk-revert instructions.
+
+    It has no workspace clone, no retry, and uses VERIFIER_TIMEOUT_S (600 s) — the
+    hunk-revert method requires capabilities design_fast does not have.
+    """
+    from refactory_dsh.verification import VERIFIER_TIMEOUT_S
+
+    graph = DesignFastMode().graph()
+    v = graph.nodes["verifier"]
+    prompt_lower = v.prompt_template.lower()
+
+    # design_fast must NOT have hunk-revert instructions
+    assert "hunk-revert" not in prompt_lower, \
+        "design_fast verifier must not contain hunk-revert instructions"
+    assert "requirements_and_corrections" not in v.prompt_template, \
+        "design_fast verifier must not reference requirements_and_corrections"
+    # design_fast uses the shorter timeout and no workspace clone
+    assert v.timeout_s == VERIFIER_TIMEOUT_S, \
+        f"design_fast verifier must use VERIFIER_TIMEOUT_S (600), got {v.timeout_s}"
+    assert v.workspace is None, \
+        "design_fast verifier must not have a workspace clone"
+    assert v.retry is None, \
+        "design_fast verifier must not have a retry"
+
+
 def test_site_revert_fixups_knob_removed():
     """DesignMode.declare() has no site_revert_fixups key;
     DesignFastMode.declare() does not pop it.

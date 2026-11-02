@@ -206,9 +206,12 @@ def _design_verifier_prompt(methods: str) -> str:
     )
 
 
-#: The review fork's verifier for design mode: includes hunk-revert method.
-#: `prepare_design` sets `verification_methods` by what the run delivers.
-VERIFIER_PROMPT = _design_verifier_prompt("{{verification_methods}}")
+#: The review fork's verifier without hunk-revert (for design_fast, which has no
+#: workspace clone, no retry, and a shorter timeout).
+VERIFIER_PROMPT = _verifier_prompt("{{verification_methods}}")
+#: Design mode's verifier with the hunk-revert method.  Requires a workspace clone,
+#: ``DESIGN_VERIFIER_TIMEOUT_S`` and a retry; ``design.py`` uses this one.
+DESIGN_VERIFIER_PROMPT = _design_verifier_prompt("{{verification_methods}}")
 #: fix_pack's inline verifier, with no reviewers beside it and no prepare fact.
 FULL_VERIFIER_PROMPT = _verifier_prompt(FULL_VERIFICATION_METHODS)
 
