@@ -27,7 +27,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
 | class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None) -> None` |
-| class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '') -> None` |
+| class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
 - **`Edge`** — One connection between two nodes, and the verdict that selects it.
@@ -232,7 +232,7 @@ The two extension points: what proposes, and what runs the search.
 | class | `Run` | `(_loop: 'Any', log_lines: 'list[str]' = <factory>, stopped: 'str \| None' = None) -> None` |
 | function | `run_strategy` | `(loop: 'Any') -> 'dict[str, Any]'` |
 
-- **`OuterLoop`** — Base class for a search. Override the steps, or ``run`` entirely.
+- **`OuterLoop`** — Base class for a custom strategy — the **custom strategy seam**.
 - **`OuterLoopError`** — A search cannot proceed. Always names what is wrong.
 - **`Run`** — Everything a search strategy is built from.
 - **`run_strategy`** — Run an outer loop and return its report, with the bound it stopped for.
@@ -330,10 +330,12 @@ The SRF strategies, as outer loops.
 | class | `StagedV1` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
 | class | `TreeArchive` | `(members: 'list[Candidate]' = <factory>, parents: 'dict[str, str]' = <factory>, children: 'dict[str, list[str]]' = <factory>) -> None` |
 | class | `TreeSearch` | `(*args: 'Any', **kwargs: 'Any') -> 'None'` |
-| function | `create` | `(name: 'str', mode_id: 'str', config: 'Any' = None, **kwargs: 'Any') -> 'Loop'` |
+| function | `available` | `(project: 'Path \| None' = None) -> 'list[str]'` |
+| function | `create` | `(name: 'str', mode_id: 'str', config: 'Any' = None, *, strategy_options: 'dict[str, Any] \| None' = None, **kwargs: 'Any') -> 'Loop'` |
 | function | `names` | `() -> 'list[str]'` |
-| function | `register` | `(name: 'str', cls: 'type[Loop]') -> 'None'` |
-| function | `resolve` | `(name: 'str') -> 'type[Loop]'` |
+| function | `package_strategies` | `(project: 'Path \| None' = None) -> 'dict[str, type[OuterLoop]]'` |
+| function | `register` | `(name: 'str', cls: 'type[OuterLoop]') -> 'None'` |
+| function | `resolve` | `(name: 'str', project: 'Path \| None' = None) -> 'type[OuterLoop]'` |
 
 - **`AdaptiveMeta`** — SRF `adaevolve`: an adaptive meta-level.
 - **`Archive`** — A set of candidates a strategy keeps, and how it picks from them.
@@ -347,7 +349,9 @@ The SRF strategies, as outer loops.
 - **`StagedV1`** — SRF `ai_sci_v1`: the earlier staged variant.
 - **`TreeArchive`** — A tree. A node's parent is the node it was expanded from.
 - **`TreeSearch`** — SRF `aide`: `policy → action_gate(draft|improve|debug) → tree_update`.
+- **`available`** — Every selectable strategy: the library's own and the packages'.
 - **`create`** — Build a strategy by name, failing loud on an unknown one.
+- **`package_strategies`** — Strategies the discoverable packages contribute, by name.
 - **`register`** — Add a strategy without editing the library.
 
 
@@ -361,7 +365,7 @@ The optimizer loop, named like one.
 |---|---|---|
 | class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, parts_manifest: 'str \| None' = None, resolved_profile: 'dict[str, Any]' = <factory>) -> None` |
+| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, parts_manifest: 'str \| None' = None, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>) -> None` |
 | class | `LoopError` | `` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |

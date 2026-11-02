@@ -339,8 +339,13 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         sidecar.unlink(missing_ok=True)
     task = _task_of(node, workdir)
     if task is not None:
+        from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+        subset_part, subset_seed = subset_part_seed(workdir)
         try:
-            task.setup(instance_of(item), workdir)
+            task.setup(
+                instance_of(item), workdir,
+                **part_seed_kwargs(task.setup, part=subset_part, seed=subset_seed),
+            )
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
@@ -446,8 +451,14 @@ def command_end(
     # Read per-node exchanges from the sidecar (written by agent execution).
     exchanges = _read_and_clear_exchanges(workdir)
     metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+    # Pass part and seed from subset.json to task.verify (ask 5)
+    from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+    _verify_part, _verify_seed = subset_part_seed(workdir)
     try:
-        verdict = task.verify(instance, workdir)
+        verdict = task.verify(
+            instance, workdir,
+            **part_seed_kwargs(task.verify, part=_verify_part, seed=_verify_seed),
+        )
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:

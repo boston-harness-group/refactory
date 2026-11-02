@@ -632,7 +632,7 @@
         "panel": "Unavailable as a dedicated panel control; use the documented CLI or chat route."
       },
       "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-      "reviewed_schema": "84678a4a6faeb47cca0f52dba7795d168f7ed2f81d45a22364a375e3a0675430"
+      "reviewed_schema": "96d2d260b5f5ea618b3865fcdc01e8bed9d59e881f5e637861f9dc42b791ea7a"
     },
     "cli:package": {
       "doc": "refactory/docs/cli.md",
@@ -1198,7 +1198,7 @@
         "panel": "Preview resolved configuration button."
       },
       "purpose": "Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-      "reviewed_schema": "9f3b3c21399de33ebebbb07ded1c88e2555eb23f6f74679b9ff9dadd75735dc8"
+      "reviewed_schema": "a92a06a129a98b6d2dfb7f263e47875dfc657c1cdf82890ec8476ddf9b6b8dcd"
     },
     "profile-save": {
       "doc": "refactory/docs/optimization-profiles.md",
@@ -1407,7 +1407,7 @@
         "panel": "Optimize button."
       },
       "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-      "reviewed_schema": "3e5af2caf4a03d69b6fb47c5fda208f38de0cce29d7e7ceeafa8b6b8a06510ae"
+      "reviewed_schema": "ce755b1e47cbaf02093f0ad850e94c14a4845ebd3c213e74ccccb1ccae035a17"
     },
     "status": {
       "chat": {

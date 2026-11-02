@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Sequence
 
 from refactory_dsh.loop import Loop
@@ -464,7 +465,9 @@ class Autoscientists(Loop):
 # ── selection ──────────────────────────────────────────────────────────────
 
 #: The strategies, by name. `default` is the harness's own loop.
-STRATEGIES: dict[str, type[Loop]] = {
+#: Values may be ``Loop`` subclasses (built-in strategies) or pure
+#: ``OuterLoop`` subclasses (custom strategies using the custom strategy seam).
+STRATEGIES: dict[str, type[OuterLoop]] = {
     "default": Loop,
     BestOfN.name: BestOfN,
     Reflective.name: Reflective,
@@ -506,18 +509,80 @@ def names() -> list[str]:
     return sorted(STRATEGIES)
 
 
-def resolve(name: str) -> type[Loop]:
-    if name not in STRATEGIES:
-        raise ValueError(f"unknown strategy {name!r}; known: {names()}")
-    return STRATEGIES[name]
+def package_strategies(project: Path | None = None) -> dict[str, type[OuterLoop]]:
+    """Strategies the discoverable packages contribute, by name.
+
+    A package lists them in ``Package.strategies``, so a strategy shipped as a
+    package is selectable by name (``--strategy``) the way a mode is, without a
+    registration call and without joining the library's own ports in
+    ``STRATEGIES``.
+    """
+    from refactory_dsh import registry
+
+    found: dict[str, type[OuterLoop]] = {}
+    for package in registry.discover(project).values():
+        for cls in package.strategies:
+            if not (isinstance(cls, type) and issubclass(cls, OuterLoop)):
+                raise TypeError(
+                    f"package {package.name!r} lists {cls!r}, which is not an OuterLoop"
+                )
+            found[cls.name] = cls
+    return found
 
 
-def create(name: str, mode_id: str, config: Any = None, **kwargs: Any) -> Loop:
-    """Build a strategy by name, failing loud on an unknown one."""
-    return resolve(name)(mode_id, config, **kwargs)
+def available(project: Path | None = None) -> list[str]:
+    """Every selectable strategy: the library's own and the packages'."""
+    return sorted(set(STRATEGIES) | set(package_strategies(project)))
 
 
-def register(name: str, cls: type[Loop]) -> None:
+def resolve(name: str, project: Path | None = None) -> type[OuterLoop]:
+    if name in STRATEGIES:
+        return STRATEGIES[name]
+    contributed = package_strategies(project)
+    if name in contributed:
+        return contributed[name]
+    known = sorted(set(STRATEGIES) | set(contributed))
+    raise ValueError(f"unknown strategy {name!r}; known: {known}")
+
+
+def create(
+    name: str,
+    mode_id: str,
+    config: Any = None,
+    *,
+    strategy_options: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Loop:
+    """Build a strategy by name, failing loud on an unknown one.
+
+    For strategies that subclass ``Loop`` directly, constructs and returns
+    them.  For pure ``OuterLoop`` subclasses (the custom strategy seam),
+    constructs a ``Loop`` for the infrastructure and attaches the strategy
+    via ``set_custom_strategy()``.
+
+    ``strategy_options`` are forwarded to the strategy's ``configure()``
+    method.  The ``model`` kwarg is extracted and passed to ``configure()``
+    as well.
+    """
+    project = kwargs.get("project")
+    cls = resolve(name, Path(project) if project is not None else None)
+    model = kwargs.pop("model", None)
+    if issubclass(cls, Loop):
+        # A Loop subclass: construct directly, configure with options
+        loop = cls(mode_id, config, model=model, **kwargs)
+        if strategy_options:
+            loop.configure(model=model, **strategy_options)
+        return loop
+    # A pure OuterLoop subclass: create a Loop for infrastructure, attach
+    # the strategy object.
+    loop = Loop(mode_id, config, model=model, **kwargs)
+    strategy = cls()
+    strategy.configure(model=model, **(strategy_options or {}))
+    loop.set_custom_strategy(strategy)
+    return loop
+
+
+def register(name: str, cls: type[OuterLoop]) -> None:
     """Add a strategy without editing the library."""
     if not issubclass(cls, OuterLoop):
         raise TypeError(f"{cls.__name__} is not an OuterLoop")
