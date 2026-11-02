@@ -267,16 +267,26 @@ class RunContext:
             f"declared writes: {list(self._declared)}"
         )
 
+    def _writable(self, name: str) -> Path:
+        """The path a write to *name* goes to, cut loose from any run-level input
+        a data pass reads through (items.detach_read_through): a pass must not
+        change the run's files, whatever the node declares."""
+        from refactory_dsh.items import detach_read_through
+
+        target = self.path(name)
+        detach_read_through(self.workdir, name)
+        return target
+
     def write_text(self, name: str, text: str) -> Path:
         self._note_write(name)
-        target = self.path(name)
+        target = self._writable(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
         return target
 
     def append_text(self, name: str, text: str) -> Path:
         self._note_write(name)
-        target = self.path(name)
+        target = self._writable(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a") as handle:
             handle.write(text)
@@ -328,6 +338,43 @@ class RunContext:
                 f"node {self.node_id!r} produced the fact(s) {extra}, which it does "
                 f"not declare; declared facts: {list(self._declared_facts)}"
             )
+
+    # ── pass isolation ─────────────────────────────────────────────────────
+    def pass_scope(self, pass_dir: Path, produces: tuple[str, ...]):
+        """Context manager that isolates one data-node item pass.
+
+        On enter: saves *workdir* and *facts*, sets ``workdir`` to *pass_dir*
+        and ``facts`` to a deep copy: a pass that edits a fact in place (appends
+        to a list) changes its own copy, as the spine's pass does with its own
+        ``facts.json``.
+
+        On exit: merges only keys in *produces* plus ``"item_scores"`` that the
+        pass added or changed into the saved (run-level) facts, then restores
+        both ``workdir`` and ``facts``.
+        """
+        import copy
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _scope():
+            saved_workdir = self.workdir
+            saved_facts = self.facts
+            self.workdir = pass_dir
+            self.facts = copy.deepcopy(saved_facts)
+            try:
+                yield
+            finally:
+                # Merge only declared produces + item_scores. The pass's copy is
+                # discarded on exit, so its values can be handed over as they are.
+                allowed = set(produces) | {"item_scores"}
+                for key in allowed:
+                    if key in self.facts:
+                        if key not in saved_facts or saved_facts[key] != self.facts[key]:
+                            saved_facts[key] = self.facts[key]
+                self.workdir = saved_workdir
+                self.facts = saved_facts
+
+        return _scope()
 
 
 class Verdict(str):
@@ -717,6 +764,11 @@ class Executor:
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
+    #: The run-level work directory, captured before any pass isolation swap.
+    _run_workdir: Path | None = field(default=None, init=False, repr=False)
+    #: The node a resume starts at, until the walk has entered it: only that data
+    #: node keeps the passes it finished before the stop.
+    _resume_at: str | None = field(default=None, init=False, repr=False)
     #: Per-item exchanges captured during a data-node pass.
     _item_exchanges: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     #: Per-item records built during the data-node loop.
@@ -737,7 +789,8 @@ class Executor:
         """
         import json
 
-        path = self.ctx.workdir / PROGRESS
+        workdir = self._run_workdir or self.ctx.workdir
+        path = workdir / PROGRESS
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             pending = path.with_suffix(".tmp")
@@ -778,10 +831,11 @@ class Executor:
         configuration: a resume refuses a run whose files changed since (dm-160)."""
         from refactory_dsh.recovery import fingerprint
 
+        workdir = self._run_workdir or self.ctx.workdir
         names = {name for node in self.graph.nodes.values() for name in (*node.reads, *node.writes)}
-        if (self.ctx.workdir / ".refactory/run-config.json").exists():
+        if (workdir / ".refactory/run-config.json").exists():
             names.add(".refactory/run-config.json")
-        return {name: fingerprint(self.ctx.workdir / name) for name in sorted(names)}
+        return {name: fingerprint(workdir / name) for name in sorted(names)}
 
     def _write_status(self, status: str, nodes: list[str], *, error: str | None = None,
                       failed: str | None = None) -> None:
@@ -794,9 +848,10 @@ class Executor:
         """
         from refactory_dsh.run import write_facts
 
+        workdir = self._run_workdir or self.ctx.workdir
         try:
-            write_facts(self.ctx.workdir, self.ctx.facts)
-            self.record.write_status(self.ctx.workdir, self.graph, status, nodes, error=error, failed=failed)
+            write_facts(workdir, self.ctx.facts)
+            self.record.write_status(workdir, self.graph, status, nodes, error=error, failed=failed)
             self._status = status
             # Emit graph_state event matching the spine (index.ts:1218).
             from refactory_dsh.live import emit as _emit_event
@@ -814,6 +869,8 @@ class Executor:
 
     def run(self, *, start: str | None = None) -> RunResult:
         started = time.time()
+        self._run_workdir = self.ctx.workdir
+        self._resume_at = start
         visits = self._gate_iterations
         current: str | None = start or self.graph.start or None
         error: str | None = None
@@ -935,15 +992,61 @@ class Executor:
 
                 scores: list[dict[str, Any]] = []
                 _data_halted = False
+
+                # ── pass isolation: compute declared reads and prepare ──
+                from refactory_dsh.items import (
+                    finished_pass_record, mark_pass_complete, pass_dir_of,
+                    pass_read_through, prepare_pass_dir,
+                )
+                import shutil as _shutil
+                _run_workdir = self._run_workdir or self.ctx.workdir
+                # The run-level files the pass reads through: what the pass's own
+                # nodes read and do not write -- the same function, over the same
+                # node set, as the spine's loader (items._subgraph_declared_reads).
+                _declared_reads = pass_read_through(
+                    {n.id: (n.reads, n.writes) for n in self.graph.nodes.values()},
+                    self.graph.data_body(node.id), node.writes,
+                )
+                # Only a resume of this very node goes on from its finished
+                # passes; any other entry starts the node clean, as the spine's
+                # first `begin` does (items.command_begin, index 0).
+                _passes_root = _run_workdir / "passes" / node.id
+                _resuming = self._resume_at == node.id
+                self._resume_at = None
+                if not _resuming and _passes_root.exists():
+                    _shutil.rmtree(_passes_root)
+
                 for index, item in enumerate(items):
+                    # Resume: an item whose pass finished is not run again; its
+                    # record -- kept with the pass when it finished -- is.
+                    if _resuming:
+                        _done_dir = pass_dir_of(
+                            _run_workdir, node.id, str(item.get("id") or index), index,
+                        )
+                        if (_done_dir / ".done").exists():
+                            _kept = finished_pass_record(_done_dir)
+                            if _kept is not None:
+                                scores.append(_kept)
+                                self._item_records.append(_kept)
+                            continue
                     _item_steps_start = len(self.steps)
 
                     instance = instance_of(item)
                     item_id = str(item.get("id") or index)
+
+                    # Create the isolated pass directory.
+                    _pass_dir = prepare_pass_dir(
+                        _run_workdir, node.id, item_id, index,
+                        declared_reads=_declared_reads,
+                    )
+                    _pass_completed = False
+                    record = None
+
                     _alarm_armed = False
                     _prev_handler = None
                     _prev_alarm = 0
-                    try:
+                    with self.ctx.pass_scope(_pass_dir, node.produces):
+                      try:
                         # Phase 1: arm deadline around setup + item loading only.
                         if _item_deadline_s is not None:
                             def _deadline_handler(signum: int, frame: Any) -> None:
@@ -963,6 +1066,10 @@ class Executor:
                         self.ctx._declared_facts = node.produces  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
                         self.ctx.write_json(CURRENT_ITEM, item)
+                        # Dual-write current_item to run-level workdir for progress (PIT-005).
+                        (_run_workdir / CURRENT_ITEM).write_text(
+                            json.dumps(item, indent=2, default=str)
+                        )
                         # Clear per-item exchanges before each pass.
                         self._item_exchanges = []
 
@@ -988,22 +1095,22 @@ class Executor:
                             verdict = task.verify(instance, self.ctx.workdir, **_verify_kwargs)
                         else:
                             verdict = None
-                    except _PASSTHROUGH:
+                      except _PASSTHROUGH:
                         raise
-                    except HaltStop as exc:
+                      except HaltStop as exc:
                         # Terminal halt ends the data node.
                         error = str(exc)
                         self._record(node.id, error=error, outcome="halted")
                         _data_halted = True
                         break
-                    except GateStop as exc:
+                      except GateStop as exc:
                         # A user gate in a data pass must pause the run
                         # (re-raise like a halt), not become a failed item.
                         self._record(node.id, error=str(exc), outcome="refused")
                         error = str(exc)
                         _data_halted = True  # break out of both loops
                         break
-                    except _ItemDeadlineError as exc:
+                      except _ItemDeadlineError as exc:
                         # Deadline exceeded: record as timeout, not retryable.
                         metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
                         record = make_item_record(
@@ -1020,8 +1127,9 @@ class Executor:
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
+                        _pass_completed = True
                         continue
-                    except _BranchFailed as exc:
+                      except _BranchFailed as exc:
                         # Wrap in RuntimeError so error_kind matches the
                         # spine's "RuntimeError" for subgraph failures.
                         metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
@@ -1039,8 +1147,9 @@ class Executor:
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
+                        _pass_completed = True
                         continue
-                    except Exception as exc:
+                      except Exception as exc:
                         metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
                         record = make_item_record(
                             item_id, None, error=exc,
@@ -1055,8 +1164,9 @@ class Executor:
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
+                        _pass_completed = True
                         continue
-                    else:
+                      else:
                         metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
                         # Prediction comes from VerifyResult.prediction whenever
                         # the Task sets it (both pass and fail).  Fall back to
@@ -1082,7 +1192,8 @@ class Executor:
                         if record is not None:
                             scores.append(record)
                             self._item_records.append(record)
-                    finally:
+                        _pass_completed = True
+                      finally:
                         # Disarm the per-item deadline and restore the
                         # previous handler/alarm.  The guard is on
                         # _prev_handler (captured when arming), NOT on
@@ -1094,6 +1205,8 @@ class Executor:
                             signal.signal(signal.SIGALRM, _prev_handler)
                         if _prev_alarm > 0:
                             signal.alarm(_prev_alarm)
+                        if _pass_completed:
+                            mark_pass_complete(_pass_dir, record)
 
                 # Restore max_steps, offset by the steps the data loop added
                 # so the main walk loop's cap accounts for the kept history.

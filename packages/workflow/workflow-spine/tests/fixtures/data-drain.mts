@@ -6,9 +6,16 @@
  * Mounts the spine plugin with a spawn-based shell, drives wf_next until the
  * run finishes, and exits.  The workdir must already contain declarations.json
  * (written by `lowering.write_declarations`).
+ *
+ * With DRAIN_RESUME=1 it first asks the spine to go on from the run's saved
+ * checkpoint (as `graph-control resume` does), acknowledging a node whose
+ * process was killed mid-command: how the pass-isolation tests resume a run
+ * stopped in the middle of an item.
  */
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -45,6 +52,18 @@ function runCommand(spec: { command: string; workdir?: string; env?: Record<stri
       })
     })
   })
+}
+
+if (process.env.DRAIN_RESUME === '1') {
+  const checkpoint = join(workdir!, '.refactory', 'spine-checkpoint.json')
+  if (!existsSync(checkpoint)) {
+    process.stderr.write('DRAIN_RESUME: the run has no checkpoint\n')
+    process.exit(2)
+  }
+  writeFileSync(join(workdir!, '.refactory', 'resume-request.json'), JSON.stringify({
+    checkpoint_sha256: createHash('sha256').update(readFileSync(checkpoint)).digest('hex'),
+    acknowledge_executing: true,
+  }))
 }
 
 const ctx = new Context()

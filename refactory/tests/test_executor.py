@@ -234,7 +234,8 @@ def test_a_data_node_runs_its_subgraph_once_per_item(tmp_path):
 
     The walker used to refuse a data node by name, because the runtime that loads a
     source is DSH. Iterating here is what makes a dataset mode mean the same thing
-    on both runtimes.
+    on both runtimes.  With pass isolation, each pass writes its own ``seen.json``
+    in its pass directory.
     """
     from refactory_dsh.nn.executor import CURRENT_ITEM, execute
 
@@ -256,8 +257,16 @@ def test_a_data_node_runs_its_subgraph_once_per_item(tmp_path):
     workdir = tmp_path / "run"
     result = execute(graph, workdir)
     assert result.exit_ok, result.error
-    assert json.loads((workdir / "seen.json").read_text())["ids"] == ["a", "b"], (
-        "the subgraph did not run once per item"
+    # With pass isolation, each pass has its own seen.json in its pass directory.
+    passes_dir = workdir / "passes" / "data"
+    assert passes_dir.exists(), "passes/data/ should exist"
+    all_seen: list[str] = []
+    for subdir in sorted(passes_dir.iterdir()):
+        if subdir.is_dir() and (subdir / "seen.json").exists():
+            data = json.loads((subdir / "seen.json").read_text())
+            all_seen.extend(data.get("ids", []))
+    assert sorted(all_seen) == ["a", "b"], (
+        f"the subgraph did not run once per item: {all_seen}"
     )
 
 
@@ -323,8 +332,14 @@ def test_a_data_node_bound_to_a_task_uses_its_items_and_verifies_each(tmp_path):
     workdir = tmp_path / "run"
     result = execute(graph, workdir)
     assert result.exit_ok, result.error
-    assert (workdir / "setup-a").exists() and (workdir / "setup-b").exists(), (
-        "the Task's setup did not run per item"
+    # With pass isolation, setup artifacts are in the pass directories.
+    passes_dir = workdir / "passes" / "data"
+    setup_files = []
+    for subdir in sorted(passes_dir.iterdir()):
+        if subdir.is_dir():
+            setup_files.extend(f.name for f in subdir.iterdir() if f.name.startswith("setup-"))
+    assert sorted(setup_files) == ["setup-a", "setup-b"], (
+        f"the Task's setup did not run per item: {setup_files}"
     )
     # F6: item_scores carry all record fields now.
     for entry in result.facts["item_scores"]:
@@ -1644,3 +1659,245 @@ def test_sigalrm_handler_restored_after_branch_failure(tmp_path):
         )
     finally:
         signal.signal(signal.SIGALRM, prev_handler)
+
+
+# ── F5: pass isolation tests ────────────────────────────────────────────────
+
+
+def _isolation_graph(op: str = "loop_ops:assert_isolated", **node_kw) -> nn.Graph:
+    """A data graph whose subgraph runs one op per item."""
+    from refactory_dsh.nn.executor import CURRENT_ITEM
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        writes=(CURRENT_ITEM,), inline_items=({"id": "a"}, {"id": "b"}),
+        produces=("item_scores",), **node_kw,
+    ))
+    graph.add(nn.Node(
+        "work", "op", call=op,
+        reads=(CURRENT_ITEM,), writes=("marker.txt",), produces=("leak_test",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+    return graph
+
+
+def test_item_pass_fact_isolation(tmp_path):
+    """An op asserts the previous pass's fact is invisible.
+
+    Fails without the dict-copy fact scope in pass_scope.
+    """
+    from refactory_dsh.nn.executor import execute
+
+    workdir = tmp_path / "run"
+    result = execute(_isolation_graph(), workdir)
+    assert result.exit_ok, result.error
+    # Every item must have passed (no error records).
+    for record in result.item_records:
+        assert record.get("error_text") is None, (
+            f"item {record['id']} failed: {record.get('error_text')}"
+        )
+
+
+def test_item_pass_file_isolation(tmp_path):
+    """An op asserts the previous pass's file is absent from the current workdir.
+
+    Fails without the workdir swap in pass_scope.
+    """
+    from refactory_dsh.nn.executor import execute
+
+    workdir = tmp_path / "run"
+    result = execute(_isolation_graph(), workdir)
+    assert result.exit_ok, result.error
+    # marker.txt should NOT exist at run level (only in pass dirs)
+    assert not (workdir / "marker.txt").exists(), (
+        "marker.txt leaked to run-level workdir"
+    )
+
+
+def test_undeclared_fact_does_not_leak(tmp_path):
+    """An op writes a fact not in the data node's produces; the fact stays in the pass.
+
+    The subgraph op declares ``undeclared_secret`` in its own ``produces``
+    (so it is allowed to set it). But the data node's ``produces`` is only
+    ``("item_scores",)``, so pass_scope's merge filter must exclude it.
+    Without the merge filter (reverting pass_scope), the fact would remain
+    on the run's facts dict.
+
+    Fails without the merge filter in pass_scope.__exit__.
+    """
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        writes=(CURRENT_ITEM,), inline_items=({"id": "a"},),
+        produces=("item_scores",),
+    ))
+    # The work node declares undeclared_secret so the op can set it,
+    # but the data node does NOT declare it — so it must not leak.
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:write_undeclared_fact",
+        reads=(CURRENT_ITEM,), writes=(), produces=("undeclared_secret",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    assert result.exit_ok, result.error
+    assert "undeclared_secret" not in result.facts, (
+        f"undeclared_secret leaked to run facts: {result.facts.get('undeclared_secret')}"
+    )
+
+
+def test_pass_directories_created(tmp_path):
+    """After a data node run, passes/<node_id>/ has one subdir per item with .done."""
+    from refactory_dsh.nn.executor import execute
+
+    workdir = tmp_path / "run"
+    result = execute(_isolation_graph(), workdir)
+    assert result.exit_ok, result.error
+
+    passes_dir = workdir / "passes" / "data"
+    assert passes_dir.exists(), "passes/data/ does not exist"
+    subdirs = sorted(d.name for d in passes_dir.iterdir() if d.is_dir())
+    assert len(subdirs) == 2, f"expected 2 pass dirs, got {subdirs}"
+    for subdir in passes_dir.iterdir():
+        if subdir.is_dir():
+            assert (subdir / ".done").exists(), f"{subdir.name} missing .done marker"
+
+
+def test_walker_rerun_creates_fresh_passes(tmp_path):
+    """Running the data node twice: second run's pass dirs are fresh."""
+    from refactory_dsh.nn.executor import execute
+
+    workdir = tmp_path / "run"
+    result1 = execute(_isolation_graph(), workdir)
+    assert result1.exit_ok, result1.error
+
+    # Write a sentinel file in one of the first run's pass dirs.
+    passes_dir = workdir / "passes" / "data"
+    first_pass = next(passes_dir.iterdir())
+    (first_pass / "stale.txt").write_text("from first run")
+
+    result2 = execute(_isolation_graph(), workdir)
+    assert result2.exit_ok, result2.error
+
+    # The sentinel should be gone (fresh pass dirs).
+    for subdir in passes_dir.iterdir():
+        if subdir.is_dir():
+            assert not (subdir / "stale.txt").exists(), (
+                f"stale file survived rerun in {subdir.name}"
+            )
+
+
+def test_pass_file_read_through(tmp_path):
+    """A run-level file declared as a subgraph input is readable inside a pass.
+
+    Fails without the symlink materialisation in prepare_pass_dir.
+    """
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        writes=(CURRENT_ITEM,), inline_items=({"id": "a"},),
+        produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:read_run_level_input",
+        reads=(CURRENT_ITEM, "run_input.txt"), writes=(), produces=(),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    workdir = tmp_path / "run"
+    workdir.mkdir(parents=True)
+    (workdir / "run_input.txt").write_text("run-level-data")
+
+    result = execute(graph, workdir)
+    assert result.exit_ok, result.error
+
+
+def test_resume_mid_pass_continues_in_same_pass_directory(tmp_path):
+    """Resume mid-pass: item 'a' is done, item 'b' was interrupted; resume
+    re-enters 'b''s pass directory and does NOT re-run 'a'.
+
+    The op ``halt_on_b`` completes item 'a' normally, then raises HaltStop
+    on item 'b'. Resume from the data node should skip 'a' (its .done
+    marker is present) and run 'b' and 'c' in their pass directories.
+
+    Fails without the .done-based skip logic in the walker's data loop.
+    """
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        writes=(CURRENT_ITEM,), inline_items=({"id": "a"}, {"id": "b"}, {"id": "c"}),
+        produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:halt_on_b",
+        reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    workdir = tmp_path / "run"
+    result1 = execute(graph, workdir)
+    # Run halts on item 'b'.
+    assert result1.exit_ok is False
+    assert result1.halted is True
+
+    # Item 'a' should have a completed pass directory.
+    passes_dir = workdir / "passes" / "data"
+    assert passes_dir.exists(), "passes/data/ not created"
+    a_pass = passes_dir / "a_0"
+    assert a_pass.exists(), "pass dir for item 'a' not created"
+    assert (a_pass / ".done").exists(), "item 'a' should have .done marker"
+    # Write a sentinel in item 'a''s pass dir to prove it's not re-created.
+    (a_pass / "sentinel.txt").write_text("from first run")
+
+    # Item 'b' should NOT have a .done marker (it was halted mid-pass).
+    b_pass = passes_dir / "b_1"
+    assert b_pass.exists(), "pass dir for item 'b' not created"
+    assert not (b_pass / ".done").exists(), "item 'b' should NOT have .done"
+
+    # Resume from the data node — use the facts from the first run.
+    result2 = execute(graph, workdir, start="data", facts=dict(result1.facts))
+    assert result2.exit_ok, result2.error
+
+    # Item 'a''s sentinel should still exist (it was skipped, not re-run).
+    assert (a_pass / "sentinel.txt").exists(), (
+        "item 'a' was re-run instead of skipped on resume"
+    )
+    assert (a_pass / "sentinel.txt").read_text() == "from first run"
+
+    # The sentinel alone cannot prove the skip: prepare_pass_dir is idempotent
+    # and does not wipe an existing pass directory, so a re-run of 'a' leaves
+    # the sentinel in place. Its own record is what shows re-execution -- the
+    # op appends the item id on every visit, so a re-run reads ["a"] and
+    # writes ["a", "a"].
+    assert json.loads((a_pass / "seen.json").read_text()) == {"ids": ["a"]}, (
+        "item 'a' ran a second time on resume instead of being skipped"
+    )
+
+    # Item 'b' and 'c' should both be done now.
+    assert (b_pass / ".done").exists(), "item 'b' should have .done after resume"
+    c_pass = passes_dir / "c_2"
+    assert (c_pass / ".done").exists(), "item 'c' should have .done after resume"

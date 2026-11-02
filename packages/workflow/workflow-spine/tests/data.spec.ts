@@ -270,6 +270,73 @@ describe('driving the loader commands around each pass', () => {
     expect(commands).toEqual([])
   })
 
+  it('restores the pass directory on resume mid-pass', async () => {
+    const workdir = scratch()
+    const passDir = join(workdir, 'passes', 'data', 'a_0')
+    mkdirSync(passDir, { recursive: true })
+    // A shell whose begin returns pass_dir so the spine records it.
+    const passDirShell = {
+      ...loaderShell([{ id: 'a' }], []),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          const verb = spec.command.split(' ')[3] ?? ''
+          const answers: Record<string, unknown> = {
+            list: { count: 1, ids: ['a'] },
+            begin: { id: 'a', pass_dir: passDir },
+            end: { id: 'a', passed: true, score: 1 },
+          }
+          const text = verb in answers ? JSON.stringify(answers[verb]) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const root = await mount(passDirShell, { workdir })
+    // wf_next dispatches the list command, starts the pass, and dispatches beginItem.
+    await call(root, 'wf_next')
+    // Now the spine should have the passDir on the active pass.
+    const path = join(workdir, '.refactory/spine-checkpoint.json')
+    const saved = readFileSync(path)
+    const checkpoint = JSON.parse(saved.toString())
+    // The materialised entry should include passDir.
+    expect(checkpoint.materialised).toMatchObject({ key: 'data:0', item: { id: 'a' }, passDir })
+    // The spine's pass should have passDir.
+    expect(checkpoint.state?.pass?.passDir).toBe(passDir)
+    // Restore and verify the passDir survives.
+    writeFileSync(join(workdir, '.refactory/resume-request.json'), JSON.stringify({
+      checkpoint_sha256: createHash('sha256').update(saved).digest('hex'),
+    }))
+    const commands: string[] = []
+    const restoredShell = {
+      ...loaderShell([{ id: 'a' }], commands),
+      execute: async (spec: { command: string }) => ({
+        result: async () => {
+          commands.push(spec.command)
+          const verb = spec.command.split(' ')[3] ?? ''
+          const text = verb === 'end' ? JSON.stringify({ id: 'a', passed: true, score: 1 }) : ''
+          return {
+            exitCode: 0, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text, truncated: false },
+            stderr: { text: '', truncated: false },
+          }
+        },
+      }),
+    }
+    const restored = await mount(restoredShell, { workdir })
+    // After restore, wf_next should show the subgraph node without re-running begin.
+    const state = await call(restored, 'wf_next') as { nodes?: Array<{ id: string }> }
+    expect(state.nodes?.[0]).toMatchObject({ id: 'end' })
+    // begin should NOT have been called again (commands list should be empty before wf_done).
+    expect(commands.filter(c => c.includes(' begin '))).toEqual([])
+    // The checkpoint after restore should still have passDir.
+    const restoredCheckpoint = JSON.parse(readFileSync(path, 'utf8'))
+    expect(restoredCheckpoint.materialised?.passDir).toBe(passDir)
+    expect(restoredCheckpoint.state?.pass?.passDir).toBe(passDir)
+  })
+
   it('pauses a finished item before its grading command and resumes without repeating setup', async () => {
     const workdir = scratch()
     const graph = dataGraph()

@@ -942,10 +942,18 @@ The per-item half of a data node, from the command line.
 | function | `command_list` | `(node: 'Node', workdir: 'Path') -> 'dict[str, Any]'` |
 | function | `command_reset` | `(workdir: 'Path', request: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |
+| function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
+| function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any] \| None'` |
+| function | `mark_pass_complete` | `(pass_dir: 'Path', record: 'dict[str, Any] \| None' = None) -> 'None'` |
+| function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
+| function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
+| function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
+| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
+| function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
 
@@ -956,8 +964,16 @@ The per-item half of a data node, from the command line.
 - **`command_list`** — How many items the node iterates, and what they are called.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
+- **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
+- **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
 - **`make_item_record`** — Build a per-item record for one evaluated item.
+- **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
+- **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
+- **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
+- **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
+- **`prepare_pass_dir`** — Create and return the pass directory for one item.
 - **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+- **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.
