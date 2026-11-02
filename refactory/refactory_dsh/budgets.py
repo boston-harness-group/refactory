@@ -330,34 +330,58 @@ class RunBudget:
             live.emit(workdir, "run_warning", node_id=node_id, state="warning",
                       summary=f"step {node_id} reached {node_tokens:,} tokens (threshold: {warn_tokens:,})")
 
+    def record_stop(self, kind: str) -> None:
+        """Record when and how the run stopped.
+
+        Called from ``pause()`` with ``kind="clean"`` on a graceful stop.
+        A crash or kill leaves no record, which ``resume()`` detects.
+        """
+        with self._locked() as state:
+            state["stop_kind"] = kind
+            state["stop_at"] = time.time()
+
     def pause(self) -> None:
         """Stop charging idle time after the owning run ends or pauses."""
         with self._locked() as state:
             state["elapsed_before_s"] = self._summary(state)["elapsed_s"]
             state["started_at"] = None
+        self.record_stop("clean")
 
     def resume(self, limits: ResourceLimits | None = None) -> None:
         """Retain consumption; only an explicit caller may change the allocation.
 
-        Downtime after a kill is not charged: when the run was killed rather
-        than gracefully paused (``started_at`` is still set), and
-        ``_last_active`` shows a gap exceeding 300 seconds, that gap is
-        subtracted from ``elapsed_before_s`` (F18).
+        Downtime handling uses recorded facts instead of a heuristic threshold:
+
+        - **Clean stop** (``stop_kind == "clean"``): ``pause()`` already froze
+          elapsed time, so no adjustment is needed.
+        - **Kill/crash** (``stop_kind`` absent, ``started_at`` still set): charge
+          time up to the last heartbeat (``_last_active``) and not the gap after
+          it.  ``elapsed_before_s`` is set to elapsed-as-of-heartbeat and
+          ``started_at`` is reset to now.
         """
         with self._locked() as state:
             if limits is not None:
                 state["limits"] = asdict(limits)
-            # Subtract downtime gap only when the budget was NOT gracefully
-            # paused (started_at is still set, meaning pause() was not called).
-            if state.get("started_at") is not None:
+            # Handle downtime based on recorded stop facts.
+            stop_kind = state.get("stop_kind")
+            if stop_kind == "clean":
+                # pause() already froze elapsed_before_s and cleared started_at.
+                # Nothing to adjust.
+                pass
+            elif state.get("started_at") is not None:
+                # Kill/crash: started_at still set (pause was not called).
+                # Charge time only up to the last heartbeat.
                 last_active = state.get("_last_active")
                 if last_active is not None:
-                    gap = time.time() - last_active
-                    if gap > 300:
-                        current_elapsed = self._summary(state)["elapsed_s"]
-                        adjusted = max(0.0, current_elapsed - gap)
-                        state["elapsed_before_s"] = adjusted
-                        state["started_at"] = time.time()
+                    started = state["started_at"]
+                    # Elapsed before this session + time from start to last heartbeat.
+                    elapsed_before = float(state.get("elapsed_before_s") or 0.0)
+                    elapsed_before += max(0.0, last_active - started)
+                    state["elapsed_before_s"] = elapsed_before
+                    state["started_at"] = time.time()
+            # Clear stop record for this session.
+            state.pop("stop_kind", None)
+            state.pop("stop_at", None)
             if state.get("started_at") is None:
                 state["started_at"] = time.time()
             state["exhausted"] = False

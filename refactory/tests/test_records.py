@@ -245,3 +245,175 @@ def test_val_test_records_never_reach_optimizer(tmp_path):
     assert ctx.item_records == train_records, (
         "context item_records must be exactly the train records, not val/test"
     )
+
+
+# ── test_failed_item_record_has_full_shape ─────────────────────────────────
+
+def test_failed_item_record_has_full_shape(tmp_path):
+    """The spine's failed-item path produces a record with full shape.
+
+    The failed_reason branch in command_end must produce exchanges, label,
+    label_text, metadata, and fail_reason.  Reverting the parity fix makes
+    the record bare (missing those fields).
+    """
+    from refactory_dsh.items import command_begin, command_end, record_exchange
+    from refactory_dsh.nn.executor import CURRENT_ITEM, load_items
+
+    # Build a graph with a data node bound to RecordsCounting.
+    graph = _probe_graph_for_records(TASK_REF)
+    data_node = None
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            data_node = node
+            break
+    assert data_node is not None
+
+    workdir = tmp_path / "failed"
+    workdir.mkdir(parents=True, exist_ok=True)
+    task_module.write_subset(workdir, "train", 0.0)
+    task_module.make_manifest(workdir, train_ids=list(NAMES))
+    decl = {data_node.id: {
+        "task_ref": data_node.task_ref,
+        "produces": list(data_node.produces),
+    }}
+    (workdir / "declarations.json").write_text(json.dumps(decl))
+
+    # Begin one item, write an exchange, then end with a failure.
+    command_begin(data_node, workdir, 0)
+    record_exchange(workdir, "agent_node", "hello", "world")
+    record = command_end(data_node, workdir, 0,
+                         failed_reason="subgraph failed",
+                         failed_kind="RuntimeError")
+
+    # The record must have the full shape.
+    assert record is not None
+    for key in ("exchanges", "label", "label_text", "metadata", "fail_reason"):
+        assert key in record, f"missing key: {key}"
+    assert record["fail_reason"] == "subgraph failed"
+    assert record["exchanges"] == [{"node": "agent_node", "prompt": "hello", "response": "world"}]
+    assert record["label"] == "ALPHA"  # First item is "alpha" with label "ALPHA"
+    assert isinstance(record["metadata"], dict)
+
+
+# ── test_prediction_on_pass_and_fail ───────────────────────────────────────
+
+def test_prediction_on_pass_and_fail(tmp_path):
+    """Prediction uses VerifyResult.prediction when set; falls back to
+    verdict.details on pass and '' on fail when the Task gives none.
+
+    Reverting the prediction fix makes passing items use verdict.details
+    regardless and failing items always get None/empty.
+    """
+    from refactory_dsh.items import command_begin, command_end
+    from refactory_dsh.nn.executor import load_items
+
+    graph = _probe_graph_for_records(TASK_REF)
+    data_node = None
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            data_node = node
+            break
+    assert data_node is not None
+
+    workdir = tmp_path / "pred"
+    workdir.mkdir(parents=True, exist_ok=True)
+    task_module.write_subset(workdir, "train", 0.0)
+    task_module.make_manifest(workdir, train_ids=list(NAMES))
+    decl = {data_node.id: {
+        "task_ref": data_node.task_ref,
+        "produces": list(data_node.produces),
+    }}
+    (workdir / "declarations.json").write_text(json.dumps(decl))
+
+    # Alpha passes: prediction should be verdict.details ("predicted alpha")
+    # since the Task sets no VerifyResult.prediction.
+    command_begin(data_node, workdir, 0)
+    alpha_record = command_end(data_node, workdir, 0)
+    assert alpha_record["prediction"] == "predicted alpha", (
+        f"passing item without Task prediction should use verdict.details, got {alpha_record['prediction']!r}"
+    )
+
+    # Gamma fails: prediction should be "" when Task gives none.
+    command_begin(data_node, workdir, 2)
+    gamma_record = command_end(data_node, workdir, 2)
+    assert gamma_record["prediction"] == "", (
+        f"failing item without Task prediction should get '', got {gamma_record['prediction']!r}"
+    )
+
+
+# ── test_prediction_from_task_on_fail ──────────────────────────────────────
+
+class PredictionOnFailTask(task_module.Task):
+    """A Task that sets VerifyResult.prediction on failure."""
+
+    name = "pred_fail_task"
+
+    def instances(self):
+        return [
+            task_module.TaskInstance(id="alpha", metadata={"label": "A"}),
+            task_module.TaskInstance(id="beta", metadata={"label": "B"}),
+        ]
+
+    def verify(self, instance, workspace):
+        if instance.id == "beta":
+            return task_module.VerifyResult(
+                passed=False, score=0.0,
+                details="beta fails",
+                prediction="beta_prediction",
+            )
+        return task_module.VerifyResult(
+            passed=True, score=1.0,
+            details="ok-alpha",
+            prediction="alpha_prediction",
+        )
+
+
+task_module.register_task("pred_fail_task", PredictionOnFailTask)
+
+
+def test_prediction_from_task_on_fail(tmp_path):
+    """A failing item whose Task sets verdict.prediction has that prediction
+    in the record, not ''.
+
+    Reverting the VerifyResult.prediction read makes failing items always
+    get prediction=''.
+    """
+    from refactory_dsh.items import command_begin, command_end
+    from refactory_dsh import nn
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="work", subgraph_exit="work",
+        task_ref="pred_fail_task", writes=("current_item.json",), produces=("item_scores",),
+    ))
+    graph.add(nn.Node(
+        "work", "op", call="loop_ops:record_item",
+        reads=("current_item.json",), writes=("seen.json",), produces=("seen",),
+    ))
+    graph.connect("data", "data")  # not used, just need the nodes
+
+    data_node = graph.nodes["data"]
+
+    workdir = tmp_path / "pred_fail"
+    workdir.mkdir(parents=True, exist_ok=True)
+    task_module.write_subset(workdir, "train", 0.0)
+    task_module.make_manifest(workdir, train_ids=["alpha", "beta"])
+    decl = {data_node.id: {
+        "task_ref": data_node.task_ref,
+        "produces": list(data_node.produces),
+    }}
+    (workdir / "declarations.json").write_text(json.dumps(decl))
+
+    # Alpha passes with Task-set prediction.
+    command_begin(data_node, workdir, 0)
+    alpha_record = command_end(data_node, workdir, 0)
+    assert alpha_record["prediction"] == "alpha_prediction", (
+        f"passing item should use Task prediction, got {alpha_record['prediction']!r}"
+    )
+
+    # Beta fails with Task-set prediction.
+    command_begin(data_node, workdir, 1)
+    beta_record = command_end(data_node, workdir, 1)
+    assert beta_record["prediction"] == "beta_prediction", (
+        f"failing item with Task prediction should use it, got {beta_record['prediction']!r}"
+    )

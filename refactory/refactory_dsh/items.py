@@ -404,7 +404,17 @@ def command_end(
     # and write a failure record directly, as the walker does.
     if failed_reason is not None:
         exc = RuntimeError(failed_reason)
-        record = make_item_record(item_id, None, error=exc)
+        instance = instance_of(item)
+        exchanges = _read_and_clear_exchanges(workdir)
+        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+        record = make_item_record(
+            item_id, None, error=exc,
+            exchanges=exchanges,
+            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+            fail_reason=failed_reason,
+            metadata=metadata,
+        )
         if record is not None:
             if failed_kind is not None:
                 record["error_kind"] = failed_kind
@@ -460,10 +470,20 @@ def command_end(
     if verdict is None:
         _check_all_items_failed(node, workdir, items, index)
         return {}
+    # Prediction comes from VerifyResult.prediction whenever the Task sets it
+    # (both pass and fail).  Fall back to verdict.details on pass and "" on
+    # fail only when the Task gives none.
+    prediction: str | None
+    if verdict.prediction:
+        prediction = verdict.prediction
+    elif verdict.passed:
+        prediction = verdict.details
+    else:
+        prediction = ""
     record = make_item_record(
         item_id, verdict,
         exchanges=exchanges,
-        prediction=verdict.details if verdict.passed else None,
+        prediction=prediction,
         label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
         label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
         fail_reason=verdict.details if not verdict.passed and verdict.details else None,

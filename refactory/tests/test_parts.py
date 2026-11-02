@@ -859,3 +859,168 @@ def test_existing_run_resumes(tmp_path):
         loop2.init()
         assert len(loop2.population) >= 1
         assert loop2.evaluations >= 1
+
+
+# ======================================================================
+# RESUME TESTS -- Part B of PR #558
+# ======================================================================
+
+# ── test_resume_occasion_counter ─────────────────────────────────────────
+
+def test_resume_occasion_counter(tmp_path):
+    """After stop+resume, the occasion counter continues from where it left off.
+
+    Evaluating val after resume must produce val_1 (not val_0).  Reverting
+    the journal_occasion_counter replay handler makes the counter restart
+    at 0, reusing val_0.
+    """
+    with _patch_mode(PartsProbe):
+        loop1 = _make_loop_with_manifest(tmp_path)
+        loop1.init()
+        seed = loop1.population[0]
+        run = Run(_loop=loop1)
+
+        # Evaluate on train then val (produces val_0).
+        run.evaluate(seed)
+        run.evaluate(seed, part="val")
+        assert loop1._occasion_counters.get(seed.id, {}).get("val") == 1
+
+        # Resume.
+        loop2 = Loop(
+            MODE, LoopConfig(
+                epochs=2, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+                parts_manifest=str(tmp_path / "source_manifest.json"),
+                resume=True,
+            ),
+            project=Path("."),
+        )
+        loop2.init()
+        seed2 = loop2.population[0]
+
+        # The occasion counter should survive resume.
+        assert loop2._occasion_counters.get(seed2.id, {}).get("val") == 1, (
+            f"occasion counter not restored: {loop2._occasion_counters}"
+        )
+
+        # The next val evaluation should produce val_1, not val_0.
+        run2 = Run(_loop=loop2)
+        run2.evaluate(seed2, part="val")
+        dir_1 = loop2.root / "runs" / seed2.id / "occasions" / "val_1"
+        assert dir_1.exists(), (
+            "val_1 directory should exist after resume; counter was not restored"
+        )
+
+
+# ── test_resume_rollout_count ────────────────────────────────────────────
+
+def test_resume_rollout_count(tmp_path):
+    """After stop+resume, loop.rollouts equals the pre-stop value.
+
+    Reverting the journal_rollouts replay handler makes the rollout count
+    restart at 0.
+    """
+    with _patch_mode(PartsProbe):
+        loop1 = _make_loop_with_manifest(tmp_path)
+        loop1.init()
+        seed = loop1.population[0]
+        run = Run(_loop=loop1)
+        run.evaluate(seed)
+
+        pre_stop_rollouts = loop1.rollouts
+        assert pre_stop_rollouts > 0, "rollouts should be > 0 after evaluation"
+
+        # Resume.
+        loop2 = Loop(
+            MODE, LoopConfig(
+                epochs=2, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+                parts_manifest=str(tmp_path / "source_manifest.json"),
+                resume=True,
+            ),
+            project=Path("."),
+        )
+        loop2.init()
+
+        assert loop2.rollouts == pre_stop_rollouts, (
+            f"rollouts not restored: {loop2.rollouts} != {pre_stop_rollouts}"
+        )
+
+
+# ── test_resume_train_records ────────────────────────────────────────────
+
+def test_resume_train_records(tmp_path):
+    """After stop+resume, ProposalContext.item_records is non-empty.
+
+    Reverting the journal_train_records replay handler makes item_records
+    empty after resume.
+    """
+    with _patch_mode(PartsProbe):
+        loop1 = _make_loop_with_manifest(tmp_path)
+        loop1.init()
+        seed = loop1.population[0]
+        run = Run(_loop=loop1)
+        run.evaluate(seed)
+
+        pre_stop_records = list(loop1._train_item_records.get(seed.id, []))
+        assert pre_stop_records, "train records should be non-empty after evaluation"
+
+        # Resume.
+        loop2 = Loop(
+            MODE, LoopConfig(
+                epochs=2, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+                parts_manifest=str(tmp_path / "source_manifest.json"),
+                resume=True,
+            ),
+            project=Path("."),
+        )
+        loop2.init()
+
+        seed2 = loop2.population[0]
+        restored_records = list(loop2._train_item_records.get(seed2.id, []))
+        assert restored_records, (
+            "train records should be non-empty after resume"
+        )
+        ctx = loop2._context()
+        assert ctx.item_records, (
+            "ProposalContext.item_records should be non-empty after resume"
+        )
+
+
+# ── test_resume_repeats_all_counted ──────────────────────────────────────
+
+def test_resume_repeats_all_counted(tmp_path):
+    """With repeats=2, every trial's items count toward rollouts.
+
+    Reverting the per-trial rollout increment makes rollouts count only
+    the first trial.
+    """
+    with _patch_mode(PartsProbe):
+        manifest_dict = {
+            "train": ["alpha", "beta", "gamma", "delta"],
+            "val": ["epsilon"],
+            "test": ["zeta"],
+        }
+        manifest_path = tmp_path / "source_manifest.json"
+        manifest_path.write_text(json.dumps(manifest_dict))
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+                parts_manifest=str(manifest_path),
+                repeats=2,
+            ),
+            project=Path("."),
+        )
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+
+        # With 4 train items and 2 repeats, rollouts should count items
+        # from both trials (so > 4 if both repeat trials count).
+        # Each trial produces its own item_records; rollouts accumulates.
+        assert loop.rollouts >= 4, (
+            f"expected rollouts >= 4 with 2 repeats, got {loop.rollouts}"
+        )

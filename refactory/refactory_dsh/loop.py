@@ -757,6 +757,9 @@ class Loop(OuterLoop):
         self._train_item_records[candidate.id] = list(result.item_records)
         self.evaluations += 1
         self.rollouts += len(result.item_records) or 1
+        self._journal("train_records", id=candidate.id,
+                      records=list(result.item_records))
+        self._journal("rollouts", rollouts=self.rollouts)
         self._journal(
             "score",
             id=candidate.id,
@@ -781,6 +784,8 @@ class Loop(OuterLoop):
         counters = self._occasion_counters.setdefault(candidate.id, {})
         counter = counters.get(part, 0)
         counters[part] = counter + 1
+        self._journal("occasion_counter", id=candidate.id, part=part,
+                      counter=counters[part])
         workdir = self.root / "runs" / candidate.id / "occasions" / f"{part}_{counter}"
         workdir.mkdir(parents=True, exist_ok=True)
         task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
@@ -806,7 +811,10 @@ class Loop(OuterLoop):
         self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
             occasion_public
         )
+        self._journal("part_result", id=candidate.id, part=part,
+                      result=occasion_public)
         self.rollouts += len(result.item_records) or 1
+        self._journal("rollouts", rollouts=self.rollouts)
         if result.item_records:
             (workdir / "item_records.json").write_text(
                 json.dumps(result.item_records, indent=2, default=str))
@@ -2483,7 +2491,22 @@ class Loop(OuterLoop):
         )
 
     def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
-        """Train records for the parent/current candidate the optimizer is editing."""
+        """Train records for the parent the strategy selected for editing.
+
+        Uses the strategy_decision's parent when available, then falls back to
+        select_parents(1), and only then to board[0].  This ensures the
+        optimizer sees the records of the candidate it is actually editing,
+        not necessarily the overall best.
+        """
+        # Prefer the parent the strategy explicitly selected.
+        parent_id = self.strategy_decision.get("parent")
+        if parent_id and parent_id in self._train_item_records:
+            return list(self._train_item_records[parent_id])
+        # Fall back to the first parent select_parents would choose.
+        parents = self.select_parents(1)
+        if parents:
+            return list(self._train_item_records.get(parents[0].id, []))
+        # Last resort: leaderboard best.
         if not board:
             return []
         return list(self._train_item_records.get(board[0].id, []))
@@ -2708,6 +2731,24 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
+            elif event == "train_records":
+                cid = record.get("id")
+                if cid is not None:
+                    self._train_item_records[cid] = list(record.get("records") or [])
+            elif event == "part_result":
+                cid = record.get("id")
+                part_name = record.get("part")
+                result_data = record.get("result")
+                if cid is not None and part_name is not None and result_data is not None:
+                    self._part_results.setdefault(cid, {}).setdefault(part_name, []).append(result_data)
+            elif event == "occasion_counter":
+                cid = record.get("id")
+                part_name = record.get("part")
+                counter_val = record.get("counter")
+                if cid is not None and part_name is not None and counter_val is not None:
+                    self._occasion_counters.setdefault(cid, {})[part_name] = int(counter_val)
+            elif event == "rollouts":
+                self.rollouts = int(record.get("rollouts") or 0)
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")

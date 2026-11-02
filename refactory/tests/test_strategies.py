@@ -411,3 +411,63 @@ def test_a_curriculum_stage_reaches_the_proposal(tmp_path):
         f"every iteration reported the same stage ({set(seen)}), so the curriculum "
         "did not advance"
     )
+
+
+# ── test_proposal_context_parent_records ─────────────────────────────────
+
+def test_proposal_context_parent_records(tmp_path):
+    """ProposalContext.item_records carries the parent's records, not board[0]'s.
+
+    Set up a loop with two evaluated candidates where board[0] (the best)
+    and the strategy_decision parent differ.  _context().item_records must
+    match the parent's records.
+
+    Reverting the _parent_train_records fix makes item_records always come
+    from board[0].
+    """
+    loop = _loop("default", tmp_path / "run", epochs=3, batch_size=1)
+    loop.init()
+
+    # Create two candidates with different states (hence different ids).
+    seed = loop.population[0]
+    seed.evaluated = True
+    seed.exit_ok = True
+    seed.score = 1.0
+    seed.raw_score = 1.0
+    seed.mean_score = 1.0
+    loop.evaluations = 1
+    loop._train_item_records[seed.id] = [
+        {"id": "seed_item", "passed": True, "score": 1.0}
+    ]
+    workdir1 = loop.root / "runs" / seed.id
+    workdir1.mkdir(parents=True, exist_ok=True)
+
+    # Create a second candidate with a DIFFERENT state so it gets a different id.
+    child_state = copy.deepcopy(seed.state)
+    child_state.setdefault("knobs", {})["_test_knob"] = {"spec": {"kind": "int"}, "value": 42}
+    child = Candidate.from_state(child_state, parent=seed.id)
+    assert child.id != seed.id, "child must have a different id than seed"
+    child.evaluated = True
+    child.exit_ok = True
+    child.score = 0.5
+    child.raw_score = 0.5
+    child.mean_score = 0.5
+    loop.population.append(child)
+    loop.evaluations = 2
+    loop._train_item_records[child.id] = [
+        {"id": "child_item", "passed": True, "score": 0.5}
+    ]
+    workdir2 = loop.root / "runs" / child.id
+    workdir2.mkdir(parents=True, exist_ok=True)
+
+    # board[0] is the seed (score 1.0), but set strategy_decision.parent to
+    # the child (score 0.5).
+    loop.strategy_decision = {"parent": child.id}
+
+    ctx = loop._context()
+
+    # item_records should come from the child (the parent in strategy_decision),
+    # NOT from board[0] (the seed).
+    assert ctx.item_records == [{"id": "child_item", "passed": True, "score": 0.5}], (
+        f"expected child's records, got {ctx.item_records}"
+    )

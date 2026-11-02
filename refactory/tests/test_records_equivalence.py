@@ -341,3 +341,299 @@ def test_spine_item_records_in_status():
     assert restored["fail_reason"] is None
     assert restored["error_kind"] is None
     assert restored["metadata"]["difficulty"] == "easy"
+
+
+# ── test_both_runtimes_full_records (Brief item 3, correction 1a) ────────
+
+import os
+import shutil
+import subprocess
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_DRAIN_AGENT = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain-agent.mts"
+NODE = shutil.which("node")
+HERE = Path(__file__).resolve().parent
+
+BOTH_TASK_REF = "both_runtimes_task"
+BOTH_NAMES = ("pass_item", "fail_item", "error_item")
+
+_BOTH_TASK_SOURCE = '''\
+"""Task for the both-runtimes record equivalence test."""
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class BothRuntimesTask(Task):
+    name = "both_runtimes_task"
+
+    def instances(self):
+        return [
+            TaskInstance(id="pass_item", metadata={"label": "PASS", "label_text": "This item passes"}),
+            TaskInstance(id="fail_item", metadata={"label": "FAIL", "label_text": "This item fails"}),
+            TaskInstance(id="error_item", metadata={"label": "ERR", "label_text": "This item errors"}),
+        ]
+
+    def verify(self, instance, workspace):
+        if instance.id == "pass_item":
+            return VerifyResult(passed=True, score=1.0, details="correct prediction", prediction="pass_prediction")
+        if instance.id == "fail_item":
+            return VerifyResult(passed=False, score=0.0, details="wrong answer", prediction="fail_prediction")
+        # error_item: verify is never called (subgraph error skips it).
+        return VerifyResult(passed=True, score=1.0)
+'''
+
+
+def _write_both_runtimes_package(project: Path) -> None:
+    """Write the both-runtimes Task as a proper importable package."""
+    pkg = project / ".factory" / "packages" / "both_runtimes_pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(
+        'from refactory_dsh.nn import Package\n'
+        'from .task import BothRuntimesTask\n'
+        'PACKAGE = Package(\n'
+        '    name="both_runtimes_pkg",\n'
+        '    description="both-runtimes equivalence test",\n'
+        '    modes=(),\n'
+        '    ops=(),\n'
+        ')\n'
+    )
+    (pkg / "task.py").write_text(_BOTH_TASK_SOURCE)
+
+
+class _ScriptedModel:
+    """A model that returns scripted responses."""
+
+    def __init__(self):
+        self._call_count = 0
+
+    def complete(self, prompt: str, **kwargs) -> str:
+        self._call_count += 1
+        return f"scripted response #{self._call_count}"
+
+    def route(self):
+        return {"worker_backend": "dsh"}
+
+    def context(self):
+        return {}
+
+
+def _run_spine_agent(
+    graph_json: Path, workdir: Path, python_bin_dir: str,
+    timeout_ms: int, responses: dict[str, str],
+) -> int:
+    """Drive the TS spine drain with agent support via data-drain-agent.mts."""
+    responses_file = workdir / "responses.json"
+    responses_file.write_text(json.dumps(responses))
+    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir)}
+    env["PATH"] = f"{python_bin_dir}:{env.get('PATH', '')}"
+    result = subprocess.run(
+        [str(NODE), "--import", "tsx/esm", str(DATA_DRAIN_AGENT),
+         str(graph_json), str(workdir), f"{python_bin_dir}/python",
+         str(timeout_ms), str(responses_file)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=120,
+        env=env,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"spine drain failed:\nstdout: {result.stdout[-2000:]}\n"
+            f"stderr: {result.stderr[-2000:]}\n"
+        )
+    return result.returncode
+
+
+@pytest.mark.skipif(
+    NODE is None
+    or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists(),
+    reason="the spine drain needs Node and the installed workspace (pnpm install)",
+)
+def test_both_runtimes_full_records(tmp_path):
+    """Both runtimes produce matching full records for a graph with an agent node.
+
+    A graph with a data node, an op node, and an agent node is run through
+    the walker (in-process with a scripted model) and through the real
+    spine (lowering + TS drain via data-drain-agent.mts).  Three items:
+    - pass_item: passes, Task sets prediction="pass_prediction"
+    - fail_item: fails, Task sets prediction="fail_prediction"
+    - error_item: op raises during subgraph execution
+
+    Full item records are compared: exchanges (node, prompt, response),
+    prediction, label, fail_reason.  The agent node produces one exchange
+    per completed call on both runtimes.
+
+    Reverting the command_end parity fix (exchanges, prediction, fail_reason)
+    breaks this test.
+    """
+    from refactory_dsh import lowering
+    from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+
+    # Write the Task as an importable package.
+    project = tmp_path / "project"
+    _write_both_runtimes_package(project)
+    sys.path.insert(0, str(project / ".factory" / "packages"))
+
+    try:
+        from both_runtimes_pkg.task import BothRuntimesTask  # type: ignore[import-not-found]
+        task_module.register_task(BOTH_TASK_REF, BothRuntimesTask)
+
+        task_ref_qualified = "refactory_packages.both_runtimes_pkg.task:BothRuntimesTask"
+
+        graph = nn.Graph()
+        graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="agent",
+            task_ref=BOTH_TASK_REF,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        graph.add(nn.Node(
+            "work", "op", call="loop_ops:error_on_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        graph.add(nn.Node(
+            "agent", "agent", role="builder",
+            prompt_template="Process item",
+            reads=(CURRENT_ITEM,), writes=(),
+        ))
+        graph.add(nn.Node(
+            "finish", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        graph.connect("work", "agent")
+        graph.connect("data", "finish")
+
+        # ── Walker run ──
+        walker_dir = tmp_path / "walker"
+        model = _ScriptedModel()
+        walker_result = execute(graph, walker_dir, model=model)
+        assert len(walker_result.item_records) == 3, (
+            f"walker: expected 3 records, got {len(walker_result.item_records)}: "
+            f"{[r.get('id') for r in walker_result.item_records]}"
+        )
+
+        walker_by_id = {r["id"]: r for r in walker_result.item_records}
+
+        # ── Spine run (real TS drain via data-drain-agent.mts) ──
+        # For the spine, use the module-qualified task_ref.
+        spine_graph = nn.Graph()
+        spine_graph.add(nn.Node(
+            "data", "data", subgraph_entry="work", subgraph_exit="agent",
+            task_ref=task_ref_qualified,
+            writes=(CURRENT_ITEM,), produces=("item_scores",),
+        ))
+        spine_graph.add(nn.Node(
+            "work", "op", call="loop_ops:error_on_item",
+            reads=(CURRENT_ITEM,), writes=("seen.json",), produces=("seen",),
+        ))
+        spine_graph.add(nn.Node(
+            "agent", "agent", role="builder",
+            prompt_template="Process item",
+            reads=(CURRENT_ITEM,), writes=(),
+        ))
+        spine_graph.add(nn.Node(
+            "finish", "op", call="loop_ops:write_best",
+            writes=("best.json",), produces=("best",),
+        ))
+        spine_graph.connect("work", "agent")
+        spine_graph.connect("data", "finish")
+
+        spine_dir = tmp_path / "spine"
+        spine_dir.mkdir(parents=True, exist_ok=True)
+        state = {"graph": spine_graph.to_state()}
+        lowering.write_declarations(state, spine_dir)
+        graph_path, workflow = lowering.write_mode_graph(
+            state, tmp_path / "graphs", name="both_runtimes",
+        )
+
+        python_bin = str(REPO_ROOT / ".venv/bin")
+        extra_path = os.pathsep.join([
+            str(project / ".factory" / "packages"),
+            str(HERE),
+        ])
+        env_patch = {
+            "REFACTORY_PROJECT": str(project),
+            "PYTHONPATH": extra_path,
+        }
+        old_env = {}
+        for key, value in env_patch.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+
+        try:
+            rc = _run_spine_agent(
+                graph_path, spine_dir, python_bin, 10_000,
+                responses={"agent": "scripted response for agent"},
+            )
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert rc == 0, f"spine drain failed with rc={rc}"
+
+        # Read spine records from item_records.json or facts.json.
+        spine_records_file = spine_dir / "item_records.json"
+        if spine_records_file.exists():
+            spine_records = json.loads(spine_records_file.read_text())
+        else:
+            spine_facts = json.loads((spine_dir / "facts.json").read_text())
+            spine_records = spine_facts.get("item_scores", [])
+
+        assert len(spine_records) >= 2, (
+            f"spine: expected >= 2 records, got {len(spine_records)}"
+        )
+
+        spine_by_id = {r["id"]: r for r in spine_records}
+
+        # ── Compare records ──
+        expected_keys = {"id", "passed", "score", "exchanges", "prediction", "label",
+                         "label_text", "fail_reason", "error_kind", "error_text", "metadata"}
+
+        for record in walker_result.item_records:
+            assert set(record.keys()) == expected_keys, (
+                f"walker {record['id']} unexpected keys: {set(record.keys())}"
+            )
+
+        # Compare items that both runtimes processed.
+        common_ids = set(walker_by_id.keys()) & set(spine_by_id.keys())
+        for item_id in common_ids:
+            w = walker_by_id[item_id]
+            s = spine_by_id[item_id]
+            assert w["passed"] == s["passed"], f"{item_id}: passed differs"
+            assert w["score"] == s["score"], f"{item_id}: score differs"
+            assert w["label"] == s["label"], f"{item_id}: label differs"
+            assert w["fail_reason"] == s["fail_reason"], f"{item_id}: fail_reason differs"
+            assert w["prediction"] == s["prediction"], (
+                f"{item_id}: prediction differs: walker={w['prediction']!r}, spine={s['prediction']!r}"
+            )
+            assert w["error_kind"] == s["error_kind"], f"{item_id}: error_kind differs"
+            assert isinstance(w["exchanges"], list), f"{item_id}: walker exchanges not a list"
+            assert isinstance(s["exchanges"], list), f"{item_id}: spine exchanges not a list"
+            # Exchange counts should match (one per completed agent call).
+            assert len(w["exchanges"]) == len(s["exchanges"]), (
+                f"{item_id}: exchange count differs: walker={len(w['exchanges'])}, spine={len(s['exchanges'])}"
+            )
+
+        # ── Validate walker records in detail ──
+        pw = walker_by_id["pass_item"]
+        assert pw["passed"] is True
+        assert pw["prediction"] == "pass_prediction"
+        assert pw["label"] == "PASS"
+        assert pw["fail_reason"] is None
+        assert len(pw["exchanges"]) >= 1, (
+            f"pass_item: expected >= 1 exchange, got {len(pw['exchanges'])}"
+        )
+        assert pw["exchanges"][0]["node"] == "agent"
+
+        fw = walker_by_id["fail_item"]
+        assert fw["passed"] is False
+        assert fw["prediction"] == "fail_prediction"
+        assert fw["label"] == "FAIL"
+        assert fw["fail_reason"] == "wrong answer"
+        assert len(fw["exchanges"]) >= 1
+
+        ew = walker_by_id["error_item"]
+        assert ew["passed"] is False
+        assert ew["error_text"] is not None
+        assert ew["label"] == "ERR"
+
+    finally:
+        sys.path.remove(str(project / ".factory" / "packages"))

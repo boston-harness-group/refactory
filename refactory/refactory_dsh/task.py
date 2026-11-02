@@ -59,6 +59,7 @@ class VerifyResult:
     passed: bool
     score: float
     details: str = ""
+    prediction: str = ""
 
 
 class Task:

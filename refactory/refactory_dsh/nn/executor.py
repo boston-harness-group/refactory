@@ -960,10 +960,22 @@ class Executor:
                         continue
                     else:
                         metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        # Prediction comes from VerifyResult.prediction whenever
+                        # the Task sets it (both pass and fail).  Fall back to
+                        # verdict.details on pass and "" on fail only when the
+                        # Task gives none.
+                        _prediction: str | None = None
+                        if verdict is not None:
+                            if verdict.prediction:
+                                _prediction = verdict.prediction
+                            elif verdict.passed:
+                                _prediction = verdict.details
+                            else:
+                                _prediction = ""
                         record = make_item_record(
                             item_id, verdict,
                             exchanges=list(self._item_exchanges),
-                            prediction=verdict.details if verdict is not None and verdict.passed else None,
+                            prediction=_prediction,
                             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
@@ -1518,7 +1530,11 @@ class Executor:
                 response = _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
             else:
                 response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
-            # Capture the exchange for per-item records (F6).
+            # Exchange-counting rule: one exchange per completed agent call.
+            # Retries within a single ask() are transparent to the walker
+            # (the model client handles them); the spine path records one
+            # exchange per agent_delivery.finish call via record_exchange.
+            # Both runtimes therefore count one exchange per completed call.
             # The walker keeps exchanges in memory; the sidecar file is only
             # for the spine path (where separate processes share state via disk).
             self._item_exchanges.append({
