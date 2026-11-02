@@ -1,100 +1,148 @@
-"""Three-phase failure-first hierarchical merge and LLM rank.
+"""Failure-first hierarchical merge and LLM rank.
 
-Reproduces ``aggregate.py:195-275`` (hierarchical merge) and ``clip.py:25-109``
-(rank and select).
+Reproduces ``aggregate.py:28-275`` (hierarchical merge of analyst patches)
+and ``clip.py:25-109`` (rank and select), patch update mode.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from refactory_packages.skillopt import prompts
+from refactory_packages.skillopt.json_utils import extract_json
 from refactory_packages.skillopt.trace import TraceRecorder
-
 
 # ── hierarchical merge ────────────────────────────────────────────────────
 
 def hierarchical_merge(
     client: Any,
     skill_text: str,
-    failure_edits: list[dict[str, Any]],
-    success_edits: list[dict[str, Any]],
+    failure_patches: list[dict[str, Any]],
+    success_patches: list[dict[str, Any]],
     meta_skill: str,
     epoch: int,
     trace: TraceRecorder,
     merge_batch_size: int = 8,
-) -> list[dict[str, Any]]:
-    """Failure-first hierarchical merge of analyst edits.
+) -> dict[str, Any]:
+    """Failure-first hierarchical merge of analyst patches — aggregate.py:156-275.
 
-    Phase 1: merge failure patches hierarchically (aggregate.py:195-199).
-    Phase 2: merge success patches hierarchically (aggregate.py:201-205).
-    Phase 3: final merge with failure priority (aggregate.py:217-275).
-    Fallback: concatenation failure-first then truncation (aggregate.py:272-275).
+    Phase 1: merge the failure patches hierarchically (aggregate.py:195-199).
+    Phase 2: merge the success patches hierarchically (aggregate.py:201-205).
+    Phase 3: final merge with failure priority (aggregate.py:217-270), falling
+    back to failure edits then success edits (aggregate.py:272-275).
+
+    Returns the merged patch dict (``reasoning`` + ``edits``).
     """
-    call_order = [0]
-
-    def _merge_group(edits_list: list[dict], system: str, step_type: str) -> list[dict]:
-        """Hierarchically merge until one patch remains."""
-        if len(edits_list) <= 1:
-            return edits_list
-        batches = _chunk(edits_list, merge_batch_size)
-        if len(batches) <= 1:
-            # Single batch — merge directly
-            key = (step_type, epoch, 0, call_order[0])
-            call_order[0] += 1
-            user = prompts.format_merge_user(skill_text, edits_list, meta_skill)
-            output = client.complete(user, system=system, call_key=key)
-            trace.record_model_call(step_type, system, user, output, call_key=key)
-            return _parse_merge(output)
-        # Multiple batches — merge each, then recurse
-        merged_parts: list[dict] = []
-        for batch in batches:
-            if len(batch) == 1:
-                merged_parts.append(batch[0])
-                continue
-            key = (step_type, epoch, 0, call_order[0])
-            call_order[0] += 1
-            user = prompts.format_merge_user(skill_text, batch, meta_skill)
-            output = client.complete(user, system=system, call_key=key)
-            trace.record_model_call(step_type, system, user, output, call_key=key)
-            merged_parts.extend(_parse_merge(output))
-        if len(merged_parts) > 1:
-            return _merge_group(merged_parts, system, step_type)
-        return merged_parts
-
-    # Phase 1: failure edits
-    merged_failures = _merge_group(
-        failure_edits, prompts.MERGE_FAILURE_SYSTEM, "merge_failure",
-    ) if failure_edits else []
-
-    # Phase 2: success edits
-    merged_successes = _merge_group(
-        success_edits, prompts.MERGE_SUCCESS_SYSTEM, "merge_success",
-    ) if success_edits else []
-
-    # Single-group shortcut — aggregate.py:210-215
-    if not merged_failures:
-        return merged_successes
-    if not merged_successes:
-        return merged_failures
-
-    # Phase 3: final merge — aggregate.py:217-275
-    all_edits = merged_failures + merged_successes
-    key = ("merge_final", epoch, 0, call_order[0])
-    call_order[0] += 1
-    user = prompts.format_merge_user(skill_text, all_edits, meta_skill)
-    output = client.complete(
-        user, system=prompts.MERGE_FINAL_SYSTEM, call_key=key,
+    failure_merged = _merge_group(
+        client, skill_text, failure_patches, prompts.MERGE_FAILURE_SYSTEM,
+        "merge_failure", meta_skill, epoch, trace, merge_batch_size,
     )
+    success_merged = _merge_group(
+        client, skill_text, success_patches, prompts.MERGE_SUCCESS_SYSTEM,
+        "merge_success", meta_skill, epoch, trace, merge_batch_size,
+    )
+
+    f_edits = patch_edits(failure_merged)
+    s_edits = patch_edits(success_merged)
+
+    # Single-group shortcuts — aggregate.py:210-215
+    if not f_edits and not s_edits:
+        return {"reasoning": "no updates from either group", "edits": []}
+    if not s_edits:
+        return failure_merged
+    if not f_edits:
+        return success_merged
+
+    key = ("merge_final", epoch, 0, 0)
+    user = prompts.format_merge_final_user(
+        skill_text, failure_merged, success_merged, len(f_edits), len(s_edits), meta_skill,
+    )
+    output = client.complete(user, system=prompts.MERGE_FINAL_SYSTEM, call_key=key)
     trace.record_model_call(
         "merge_final", prompts.MERGE_FINAL_SYSTEM, user, output, call_key=key,
     )
-    result = _parse_merge(output)
-    if not result:
-        # Concatenation fallback — aggregate.py:272-275
-        result = merged_failures + merged_successes
-    return result
+    final = _parse_merge(output)
+    if final is not None:
+        trace.record_decision("merge_final", fallback=False, n_edits=len(final["edits"]))
+        return final
+    # Fallback — aggregate.py:272-275
+    trace.record_decision("merge_final", fallback=True, n_edits=len(f_edits) + len(s_edits))
+    return {"reasoning": "fallback: failure first, then success", "edits": f_edits + s_edits}
+
+
+def _merge_group(
+    client: Any,
+    skill_text: str,
+    patches: list[dict[str, Any]],
+    system: str,
+    step_type: str,
+    meta_skill: str,
+    epoch: int,
+    trace: TraceRecorder,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Merge N patches level by level until one remains — aggregate.py:79-151."""
+    if not patches:
+        return {"reasoning": "no patches", "edits": []}  # aggregate.py:97-98
+    if len(patches) == 1:
+        return patches[0]  # aggregate.py:99-100 — no model call
+
+    batch_size = max(2, batch_size)  # aggregate.py:102
+    current = list(patches)
+    level = 0
+    while len(current) > 1:
+        level += 1
+        next_level: list[dict[str, Any]] = []
+        for bi, start in enumerate(range(0, len(current), batch_size)):
+            batch = current[start:start + batch_size]
+            if len(batch) == 1:
+                next_level.append(batch[0])  # aggregate.py:123-124
+                continue
+            next_level.append(_merge_batch(
+                client, skill_text, batch, system, step_type, meta_skill,
+                epoch, trace, level, bi,
+            ))
+        current = next_level
+    return current[0]
+
+
+def _merge_batch(
+    client: Any,
+    skill_text: str,
+    patches: list[dict[str, Any]],
+    system: str,
+    step_type: str,
+    meta_skill: str,
+    epoch: int,
+    trace: TraceRecorder,
+    level: int,
+    batch_index: int,
+) -> dict[str, Any]:
+    """Merge one batch of patches into one — aggregate.py:28-76."""
+    key = (step_type, epoch, batch_index, level)
+    user = prompts.format_merge_user(skill_text, patches, meta_skill, level)
+    output = client.complete(user, system=system, call_key=key)
+    trace.record_model_call(step_type, system, user, output, call_key=key)
+    merged = _parse_merge(output)
+    if merged is not None:
+        for edit in merged["edits"]:
+            edit["merge_level"] = level  # aggregate.py:57-58
+        trace.record_decision(
+            step_type, level=level, batch_index=batch_index,
+            n_patches=len(patches), fallback=False, n_edits=len(merged["edits"]),
+        )
+        return merged
+    # Fallback: concatenate every edit, never drop one — aggregate.py:70-76
+    all_edits: list[dict[str, Any]] = []
+    for patch in patches:
+        for edit in patch_edits(patch):
+            edit.setdefault("merge_level", level)
+            all_edits.append(edit)
+    trace.record_decision(
+        step_type, level=level, batch_index=batch_index,
+        n_patches=len(patches), fallback=True, n_edits=len(all_edits),
+    )
+    return {"reasoning": "fallback concatenation", "edits": all_edits}
 
 
 # ── rank ──────────────────────────────────────────────────────────────────
@@ -108,7 +156,7 @@ def rank(
     epoch: int,
     trace: TraceRecorder,
 ) -> list[dict[str, Any]]:
-    """Rank and select top edits up to the budget.
+    """Rank and select top edits up to the budget — clip.py:25-109.
 
     Short-circuits if ``len(edits) <= budget`` (clip.py:54-55).
     Fallback: truncation ``edits[:budget]`` (clip.py:104-109).
@@ -118,12 +166,8 @@ def rank(
 
     call_key = ("rank", epoch, 0, 0)
     user = prompts.format_rank_user(skill_text, merged_edits, budget, meta_skill)
-    output = client.complete(
-        user, system=prompts.RANK_SYSTEM, call_key=call_key,
-    )
-    trace.record_model_call(
-        "rank", prompts.RANK_SYSTEM, user, output, call_key=call_key,
-    )
+    output = client.complete(user, system=prompts.RANK_SYSTEM, call_key=call_key)
+    trace.record_model_call("rank", prompts.RANK_SYSTEM, user, output, call_key=call_key)
 
     selected = _parse_ranking(output, merged_edits, budget)
     trace.record_decision("rank", edit_budget=budget, selected_count=len(selected))
@@ -132,47 +176,48 @@ def rank(
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-def _chunk(items: list, size: int) -> list[list]:
-    size = max(2, size)  # aggregate.py:96
-    return [items[i:i + size] for i in range(0, len(items), size)]
-
-
-def _parse_merge(output: str) -> list[dict[str, Any]]:
-    try:
-        data = json.loads(output)
-    except (json.JSONDecodeError, TypeError):
+def patch_edits(patch: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """update_modes.py:52-56 ``get_payload_items`` (patch mode)."""
+    if not isinstance(patch, dict):
         return []
-    edits = data.get("edits", [])
+    edits = patch.get("edits", [])
     return edits if isinstance(edits, list) else []
 
 
+def _parse_merge(output: Any) -> dict[str, Any] | None:
+    """A usable merge response or ``None`` — aggregate.py:53-59 and :251-260.
+
+    Usable means ``edits`` is a list of dicts (an empty list is usable).
+    """
+    merged = extract_json(output) if isinstance(output, str) else None
+    items = merged.get("edits") if isinstance(merged, dict) else None
+    if isinstance(items, list) and all(isinstance(e, dict) for e in items):
+        return merged
+    return None
+
+
 def _parse_ranking(
-    output: str,
+    output: Any,
     edits: list[dict[str, Any]],
     budget: int,
 ) -> list[dict[str, Any]]:
-    """Extract selected edits by 0-based index — clip.py:80-100.
+    """Extract selected edits by 0-based index — clip.py:79-100.
 
     Fallback: truncation — clip.py:104-109.
     """
-    try:
-        data = json.loads(output)
-        indices = data.get("selected_indices", [])
-    except (json.JSONDecodeError, TypeError):
+    result = extract_json(output) if isinstance(output, str) else None
+    if not result or not isinstance(result, dict) or "selected_indices" not in result:
         return edits[:budget]
-
+    indices = result["selected_indices"]
     if not isinstance(indices, list):
         return edits[:budget]
 
     seen: set[int] = set()
     selected: list[dict[str, Any]] = []
     for idx in indices:
-        if not isinstance(idx, int) or idx < 0 or idx >= len(edits):
-            continue
-        if idx in seen:
-            continue
-        seen.add(idx)
-        selected.append(edits[idx])
+        if isinstance(idx, int) and 0 <= idx < len(edits) and idx not in seen:
+            selected.append(edits[idx])
+            seen.add(idx)
         if len(selected) >= budget:
             break
 

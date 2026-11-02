@@ -37,6 +37,9 @@ VAL_IDS = [f"v{i}" for i in range(1, 5)]     # 4 val
 # A magic marker the toy task looks for to decide pass/fail
 MAGIC_MARKER = "SKILL_MAGIC_PASS"
 
+# Comma-separated item ids the toy task passes (the rest fail)
+PASS_IDS_ENV = "_SKILLOPT_PASS_IDS"
+
 # Initial skill text (enough content for analysts to work with)
 INITIAL_SKILL = """\
 # Skill Document
@@ -67,7 +70,8 @@ class SkillTask(task_module.Task):
         # Read the skill from the state if it's available via item data
         # For simplicity: pass based on whether MAGIC_MARKER env is set
         # In tests, the FakeClient controls the scoring via the val cache
-        passed = bool(os.environ.get("_SKILLOPT_PASS_ALL", ""))
+        pass_ids = os.environ.get(PASS_IDS_ENV, "").split(",")
+        passed = bool(os.environ.get("_SKILLOPT_PASS_ALL", "")) or instance.id in pass_ids
         score = 1.0 if passed else 0.5
         return task_module.VerifyResult(passed=passed, score=score)
 
@@ -279,6 +283,25 @@ def _run_loop(
     return loop, report
 
 
+def _spy_evaluations(monkeypatch) -> list[tuple[str, tuple | None]]:  # type: ignore[no-untyped-def]
+    """Record (part, items) for every Run.evaluate call."""
+    from refactory_dsh.outerloop import Run
+
+    calls: list[tuple[str, tuple | None]] = []
+    original = Run.evaluate
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        calls.append((part, tuple(items) if items else None))
+        return original(self, candidate, part=part, items=items, seed=seed)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    return calls
+
+
+def _decisions(trace: list[dict[str, Any]], step_type: str) -> list[dict[str, Any]]:
+    return [e for e in trace if e["type"] == "decision" and e["step_type"] == step_type]
+
+
 def _read_trace(root: Path) -> list[dict[str, Any]]:
     """Read the JSONL trace file."""
     trace_path = root / "run" / "skillopt_trace.jsonl"
@@ -355,8 +378,13 @@ def test_full_epoch_end_to_end(tmp_path):
         assert "edit_budget" in ranked_decisions[0]
 
 
-def test_no_edit_step_skipped(tmp_path):
-    """FakeClient returns empty edits. No val_evaluate entry, edit_budget_step=0."""
+def test_no_edit_step_skipped(tmp_path, monkeypatch):
+    """FakeClient returns empty edits. No val rollout, edit_budget_step=0.
+
+    trainer.py:1336-1360 skips the step before the scheduler and the
+    selection rollout.
+    """
+    parts = _spy_evaluations(monkeypatch)
     empty_responses = {}
     # Override all analyst calls to return empty edits
     for gi in range(10):
@@ -379,6 +407,8 @@ def test_no_edit_step_skipped(tmp_path):
     # No val_evaluate when edits are empty — mechanism 6
     val_evals = [e for e in trace if e["step_type"] == "val_evaluate"]
     assert len(val_evals) == 0, "val should not be evaluated when no edits are proposed"
+    # Only the initial val score was rolled out — no val rollout for the step
+    assert [p for p, _ in parts].count("val") == 1
 
     # edit_budget_step should remain at 0
     state_dict = loop.strategy_state_dict()
@@ -558,9 +588,6 @@ def test_meta_skill_reaches_next_epoch_prompts(tmp_path):
 
 def test_stop_resume_same_decision(tmp_path):
     """Stop after epoch 1 val, resume → RNG and state continue consistently."""
-    import random
-    from refactory_packages.skillopt import state as state_mod
-
     client1 = FakeClient()
     loop1, report1 = _run_loop(
         tmp_path / "run1", client=client1,
@@ -588,16 +615,10 @@ def test_stop_resume_same_decision(tmp_path):
     assert state2["edit_budget_step"] == state1["edit_budget_step"]
     assert state2["epoch"] == state1["epoch"]
 
-    # RNG state must be faithfully serialized: the deserialized RNG
-    # must produce the same sequence as the original.
-    rng_original = loop1._rng
-    rng_restored = loop2._rng
-    # Draw a sequence of numbers from both RNGs
-    seq_original = [rng_original.random() for _ in range(10)]
-    seq_restored = [rng_restored.random() for _ in range(10)]
-    assert seq_original == seq_restored, (
-        "RNG state was not faithfully restored; resume would diverge"
-    )
+    assert state2 == state1
+    # No generator is carried between steps: every shuffle and sample is
+    # reseeded from the seed and epoch (reflect.py:481, trainer.py:1844).
+    assert "rng_state" not in state1
 
 
 def test_pause_stop_honoured(tmp_path):
@@ -666,36 +687,528 @@ def test_trace_records_calls_and_decisions(tmp_path):
             json.loads(line)  # Should not raise
 
 
-def test_replay_client_reproduces_decisions(tmp_path):
-    """A ReplayClient returning recorded outputs reproduces the same decisions."""
-    # Run 1: collect all model call outputs
+
+
+def test_replay_client_reproduces_decisions(tmp_path, monkeypatch):
+    """A ReplayClient fed the recorded outputs reproduces the run exactly.
+
+    Compares the full sequence of call keys and prompts, and every decision
+    with the inputs that drive it (group order, sampled ids, budget per step,
+    per-edit outcomes) — not just the decision types.
+    """
+    monkeypatch.setenv(PASS_IDS_ENV, "t1,t3,t5,t7")
     client1 = FakeClient()
-    loop1, report1 = _run_loop(
-        tmp_path / "run1", client=client1,
-        skillopt_options={"max_epochs": 1},
-    )
+    _run_loop(tmp_path / "run1", client=client1, skillopt_options={"max_epochs": 2})
     trace1 = _read_trace(tmp_path / "run1")
     model_calls_1 = [e for e in trace1 if e["type"] == "model_call"]
 
-    # Build replay dict
-    recordings: dict[tuple, str] = {}
-    for mc in model_calls_1:
-        key = tuple(mc["call_key"])
-        recordings[key] = mc["raw_output"]
+    keys1 = [c["call_key"] for c in client1.calls]
+    assert len(set(keys1)) == len(keys1), "call keys must be unique to be replayable"
+    recordings = {tuple(mc["call_key"]): mc["raw_output"] for mc in model_calls_1}
+    assert set(recordings) == set(keys1)
 
-    # Run 2: same setup with ReplayClient
     replay = ReplayClient(recordings)
-    loop2, report2 = _run_loop(
-        tmp_path / "run2", client=replay,
-        skillopt_options={"max_epochs": 1},
-    )
+    _run_loop(tmp_path / "run2", client=replay, skillopt_options={"max_epochs": 2})
     trace2 = _read_trace(tmp_path / "run2")
 
-    # Compare decisions
-    decisions1 = [e for e in trace1 if e["type"] == "decision"]
-    decisions2 = [e for e in trace2 if e["type"] == "decision"]
+    assert [c["call_key"] for c in replay.calls] == keys1
+    assert [c["prompt"] for c in replay.calls] == [c["prompt"] for c in client1.calls]
 
-    # Same number of decisions
-    types1 = [d["step_type"] for d in decisions1]
-    types2 = [d["step_type"] for d in decisions2]
-    assert types1 == types2, f"decision sequences differ: {types1} vs {types2}"
+    def strip(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {k: v for k, v in e.items() if k != "timestamp"}
+            for e in entries if e["type"] == "decision"
+        ]
+
+    decisions1, decisions2 = strip(trace1), strip(trace2)
+    assert decisions1 == decisions2
+    # The compared decisions carry the inputs that drive the run
+    assert _decisions(trace1, "analyst_failure")[0]["record_ids"]
+    assert _decisions(trace1, "analyst_success")[0]["record_ids"]
+    assert _decisions(trace1, "slow_update_sample")[0]["sample_ids"]
+    assert [d["edit_budget"] for d in _decisions(trace1, "ranked_edits")] == [3, 2]
+    assert _decisions(trace1, "patch_applied")[0]["edit_report"]["outcomes"]
+
+
+# ── item 1: edit budget per ranked step ───────────────────────────────────
+
+
+def test_budget_advances_every_ranked_step_whatever_the_gate(tmp_path):
+    """The scheduler steps whenever a step reaches ranking, before the gate.
+
+    trainer.py:1415 (``scheduler.step()``) runs before the gate at :1583, so a
+    rejected candidate still advances the budget. Every step here is rejected
+    (equal val scores), and the budget still walks the cosine schedule.
+    """
+    loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 4})
+    trace = _read_trace(tmp_path)
+    ranked = _decisions(trace, "ranked_edits")
+    assert [d["edit_budget"] for d in ranked] == sched_mod.full_sequence(4) == [4, 3, 2, 2]
+    assert [d["budget_step"] for d in ranked] == [1, 2, 3, 4]
+    assert not _decisions(trace, "val_gate_accept")
+    assert loop.strategy_state_dict()["edit_budget_step"] == 4
+
+
+def test_budget_advances_when_patch_refused(tmp_path):
+    """A refused patch reached ranking too, so it advances the budget."""
+    loop, _ = _run_loop(
+        tmp_path,
+        config_overrides={"allowed_ops": ("set_knob",)},
+        skillopt_options={"max_epochs": 4},
+    )
+    trace = _read_trace(tmp_path)
+    assert len(_decisions(trace, "patch_refused")) == 4
+    assert [d["edit_budget"] for d in _decisions(trace, "ranked_edits")] == [4, 3, 2, 2]
+    assert loop.strategy_state_dict()["edit_budget_step"] == 4
+
+
+# ── item 2: full trajectories ─────────────────────────────────────────────
+
+META_CTX = (
+    "## Optimizer Meta Skill\n"
+    "This is optimizer-side memory distilled from prior epoch transitions in "
+    "this environment. Use it to improve how you propose, merge, and rank "
+    "skill edits. Prefer it when the current evidence is ambiguous, but do "
+    "not force it if the current trajectories clearly contradict it.\n\n"
+    "META"
+)
+
+RECORD_FAIL = {
+    "id": "q7", "passed": False, "score": 0.25, "error_text": None, "error_kind": None,
+    "exchanges": [{"node": "solve", "prompt": "Solve: 2+2?", "response": "<answer>5</answer>"}],
+    "prediction": "5", "label": "B", "label_text": "4",
+    "fail_reason": "predicted 5, expected B",
+    "metadata": {"question": "What is 2+2?", "task_type": "arith"},
+}
+
+RECORD_FAIL_TEXT = (
+    "### Trajectory 1 (id=q7)\n"
+    "Task: What is 2+2?\n"
+    "Task type: arith\n"
+    "Failure reason: predicted 5, expected B\n"
+    "Steps: 1\n"
+    "\n"
+    "[solve prompt] Solve: 2+2?\n"
+    "[solve] <answer>5</answer>\n"
+    "[verification] [EVALUATION RESULT]\n"
+    "Prediction: '5'\n"
+    "Label: 'B'\n"
+    "Label text: '4'\n"
+    "Score: 0.25\n"
+    "Passed: False"
+)
+
+
+def test_analyst_message_renders_full_trajectory():
+    """reflect.py:321-344 / :421-441, trajectories as reflect.py:112-239."""
+    ok = dict(RECORD_FAIL, id="q8", passed=True, score=1.0, prediction="4",
+              fail_reason=None, exchanges=[])
+    user = prompts.format_analyst_user("SKILL", [RECORD_FAIL, ok], 4, "META", failure=True)
+    assert user == (
+        "## Current Skill\nSKILL\n\n"
+        "## Edits Budget\nProduce at most L=4 edits.\n\n"
+        + META_CTX + "\n\n"
+        "## Failed Trajectories (2 total)\n"
+        + RECORD_FAIL_TEXT
+        + "\n\n---\n\n"
+        "### Trajectory 2 (id=q8)\nTask: What is 2+2?\nTask type: arith\nSteps: 0\n\n"
+        "[verification] [EVALUATION RESULT]\nPrediction: '4'\nLabel: 'B'\n"
+        "Label text: '4'\nScore: 1.0\nPassed: True"
+    )
+    success = prompts.format_analyst_user("SKILL", [RECORD_FAIL], 3, "", failure=False)
+    assert success == (
+        "## Current Skill\nSKILL\n\n"
+        "## Edits Budget\nProduce at most L=3 edits.\n\n"
+        "## Successful Trajectories (1 total)\n" + RECORD_FAIL_TEXT
+    )
+
+
+def test_analyst_prompts_in_a_run_carry_records(tmp_path):
+    """The run's analysts see each record's fields, not just pass/fail."""
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 1})
+    prompt = next(c["prompt"] for c in client.calls if c["call_key"][0] == "analyst_failure")
+    assert "## Failed Trajectories (8 total)\n### Trajectory 1 (id=t" in prompt
+    assert "[verification] [EVALUATION RESULT]\nPrediction: ''" in prompt
+    assert "Score: 0.5\nPassed: False" in prompt
+
+
+def test_comparison_and_slow_update_messages_match_skillopt():
+    """slow_update.py:206-269 pairs, :287-349 text, :409-424 message;
+    meta_skill.py:44-60 message."""
+    prev_ok = dict(RECORD_FAIL, passed=True, score=1.0, prediction="4", fail_reason=None)
+    pairs = SkillOptLoop._build_comparison_pairs([prev_ok], [RECORD_FAIL], ["q7", "q9"])
+    text = prompts.format_comparison_text(pairs)
+    traj_prev = (
+        "[solve prompt] Solve: 2+2?\n[solve] <answer>5</answer>\n"
+        "[verification] [EVALUATION RESULT]\nPrediction: '4'\nLabel: 'B'\n"
+        "Label text: '4'\nScore: 1.0\nPassed: True"
+    )
+    traj_curr = RECORD_FAIL_TEXT.split("\n\n", 1)[1]
+    assert text == (
+        "## Longitudinal Comparison Summary\n"
+        "Total samples: 2\n"
+        "- Improved (wrong→right): 0\n"
+        "- Regressed (right→wrong): 1\n"
+        "- Persistent failures (wrong→wrong): 1\n"
+        "- Stable successes (right→right): 0\n"
+        "\n\n"
+        "### Regressions (right→wrong) — HIGHEST PRIORITY\n"
+        "\n#### Task q7: What is 2+2?\n"
+        "- Prev epoch: PASS (soft=1.00) — answer: 4\n"
+        "- Curr epoch: FAIL (soft=0.25) — answer: 5\n"
+        "- Curr fail reason: predicted 5, expected B\n"
+        f"\n**Previous epoch trajectory:**\n```\n{traj_prev}\n```\n"
+        f"\n**Current epoch trajectory:**\n```\n{traj_curr}\n```"
+        "\n\n"
+        "### Persistent Failures (wrong→wrong)\n"
+        "\n#### Task q9: q9\n"
+        "- Prev epoch: FAIL (soft=0.00) — answer: N/A\n"
+        "- Curr epoch: FAIL (soft=0.00) — answer: N/A\n"
+        "\n**Previous epoch trajectory:**\n```\n(trajectory not available)\n```\n"
+        "\n**Current epoch trajectory:**\n```\n(trajectory not available)\n```"
+        "\n\n"
+        "### Improvements (wrong→right)\n(none)\n"
+        "\n\n"
+        "### Stable Successes (right→right)\n(none)\n"
+    )
+    assert prompts.format_slow_update_user("PREV", "CURR", "", "CMP") == (
+        "## Previous Epoch's Skill\nPREV\n\n"
+        "## Current Epoch's Skill\nCURR\n\n"
+        "## Previous Slow Update Guidance\n"
+        "The following guidance was active during the current epoch. "
+        "Reflect on its effectiveness before writing the new version.\n\n"
+        "(No previous guidance — this is the first slow update.)\n\n"
+        "## Longitudinal Comparison (same 20 tasks, two skill versions)\nCMP"
+    )
+    assert prompts.format_meta_skill_user("PREV", "CURR", " M ", "CMP") == (
+        "## Previous Epoch Last-Step Skill\nPREV\n\n"
+        "## Current Epoch Last-Step Skill\nCURR\n\n"
+        "## Previous Optimizer Meta Skill\n"
+        "The following optimizer memory was available during the current epoch. "
+        "Reflect on whether it improved or harmed the quality of edits.\n\n"
+        "M\n\n"
+        "## Longitudinal Comparison (same tasks, two last-step skills)\nCMP"
+    )
+
+
+def test_slow_update_and_meta_prompts_in_a_run_carry_trajectories(tmp_path):
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
+    for step in ("slow_update", "meta_skill"):
+        prompt = next(c["prompt"] for c in client.calls if c["call_key"][0] == step)
+        assert "## Longitudinal Comparison Summary\nTotal samples: 8\n" in prompt
+        assert "**Current epoch trajectory:**\n```\n[verification] [EVALUATION RESULT]" in prompt
+
+
+# ── item 3: tolerant JSON ─────────────────────────────────────────────────
+
+
+def _wrapped(obj: object) -> str:
+    return "Sure, here it is:\n```json\n" + json.dumps(obj) + "\n```\nHope that helps."
+
+
+def test_tolerant_json_in_every_parser(tmp_path):
+    """Every parser uses SkillOpt's extract_json (utils/json_utils.py:183)."""
+    from refactory_packages.skillopt import analysts, merge
+    from refactory_packages.skillopt.json_utils import extract_json
+
+    assert extract_json("prose {x} only") is None
+    assert extract_json('noise {"a": 1} tail') == {"a": 1}
+
+    patch = analysts._parse_patch(
+        _wrapped({"batch_size": 2, "patch": {"edits": [{"op": "append", "content": "x"}]}}),
+        "failure", 4,
+    )
+    assert patch is not None
+    assert patch["edits"] == [
+        {"op": "append", "content": "x", "source_type": "failure", "support_count": 2},
+    ]
+    assert merge._parse_merge(_wrapped({"edits": [{"op": "append", "content": "y"}]})) == {
+        "edits": [{"op": "append", "content": "y"}],
+    }
+    edits = [{"op": "append", "content": "a"}, {"op": "append", "content": "b"}]
+    assert merge._parse_ranking(_wrapped({"selected_indices": [1]}), edits, 1) == [edits[1]]
+
+    client = FakeClient({
+        ("slow_update", 2, 0, 0): _wrapped({"reasoning": "r", "slow_update_content": "GUIDE"}),
+        ("meta_skill", 2, 0, 0): _wrapped({"reasoning": "r", "meta_skill_content": "META2"}),
+    })
+    loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
+    state_dict = loop.strategy_state_dict()
+    assert prompts.extract_slow_update_field(state_dict["current_skill"]) == "GUIDE"
+    assert state_dict["meta_skill_text"] == "META2"
+
+
+# ── item 4: merge as SkillOpt ─────────────────────────────────────────────
+
+
+def _trace(tmp_path: Path):  # type: ignore[no-untyped-def]
+    from refactory_packages.skillopt.trace import TraceRecorder
+    return TraceRecorder(tmp_path / "unit_trace.jsonl")
+
+
+def _patch(i: int, source: str = "failure") -> dict[str, Any]:
+    return {"reasoning": f"r{i}", "edits": [
+        {"op": "append", "content": f"rule {i}", "source_type": source, "support_count": 1},
+    ]}
+
+
+def test_one_patch_per_analyst_group(tmp_path):
+    """reflect.py:557-558 groups; one patch per group, edits truncated to L
+    (reflect.py:360, update_modes.py:64-70)."""
+    from refactory_packages.skillopt import analysts
+
+    six = json.dumps({"batch_size": 8, "patch": {"reasoning": "r", "edits": [
+        {"op": "append", "content": f"e{i}"} for i in range(6)
+    ]}})
+    client = FakeClient({("analyst_failure", 1, 0, 0): six, ("analyst_failure", 1, 1, 0): six})
+    records = [{"id": f"r{i}", "passed": False, "score": 0.0} for i in range(16)]
+    failures, successes = analysts.reflect(
+        client, records, "SKILL", 4, "", seed=43, group_size=8, epoch=1, trace=_trace(tmp_path),
+    )
+    assert [c["call_key"] for c in client.calls] == [
+        ("analyst_failure", 1, 0, 0), ("analyst_failure", 1, 1, 0),
+    ]
+    assert successes == []
+    assert len(failures) == 2
+    assert all(len(p["edits"]) == 4 for p in failures)
+    assert failures[0]["edits"][0]["support_count"] == 8
+
+
+def test_merge_in_batches_of_eight(tmp_path):
+    """aggregate.py:79-151: 9 patches → a batch of 8 merged + 1 passed through,
+    then the 2 remaining merged at level 2."""
+    from refactory_packages.skillopt import merge
+
+    client = FakeClient()
+    patches = [_patch(i) for i in range(9)]
+    merged = merge.hierarchical_merge(client, "SKILL", patches, [], "", 1, _trace(tmp_path))
+    assert [c["call_key"] for c in client.calls] == [
+        ("merge_failure", 1, 0, 1), ("merge_failure", 1, 0, 2),
+    ]
+    assert "## Patches to merge (8 total, merge level 1)\n" in client.calls[0]["prompt"]
+    level2 = client.calls[1]["prompt"]
+    assert "## Patches to merge (2 total, merge level 2)\n" in level2
+    assert '"rule 8"' in level2  # the lone 9th patch passed through unmerged
+    assert merged["edits"][0]["merge_level"] == 2
+
+
+def test_single_patch_passes_through_without_a_call(tmp_path):
+    """aggregate.py:99-100 and :212-213."""
+    from refactory_packages.skillopt import merge
+
+    client = FakeClient()
+    only = _patch(0)
+    assert merge.hierarchical_merge(client, "S", [only], [], "", 1, _trace(tmp_path)) is only
+    assert client.calls == []
+
+
+def test_failed_batch_merge_concatenates(tmp_path):
+    """aggregate.py:70-76: an unusable batch merge keeps every edit."""
+    from refactory_packages.skillopt import merge
+
+    client = FakeClient({("merge_failure", 1, 0, 1): "I cannot merge these."})
+    patches = [_patch(i) for i in range(3)]
+    merged = merge.hierarchical_merge(client, "S", patches, [], "", 1, _trace(tmp_path))
+    assert [e["content"] for e in merged["edits"]] == ["rule 0", "rule 1", "rule 2"]
+    assert all(e["merge_level"] == 1 for e in merged["edits"])
+
+
+def test_failed_final_merge_concatenates_failure_first(tmp_path):
+    """aggregate.py:272-275."""
+    from refactory_packages.skillopt import merge
+
+    client = FakeClient({("merge_final", 1, 0, 0): "nope"})
+    merged = merge.hierarchical_merge(
+        client, "S", [_patch(0)], [_patch(1, "success")], "", 1, _trace(tmp_path),
+    )
+    assert [e["content"] for e in merged["edits"]] == ["rule 0", "rule 1"]
+
+
+def test_merge_and_rank_messages_match_skillopt(tmp_path):
+    """aggregate.py:37-44 and :217-242, clip.py:58-71 — byte for byte,
+    with the meta skill prepended."""
+    from refactory_packages.skillopt import merge
+
+    client = FakeClient()
+    batch = [_patch(0), _patch(1)]
+    succ = [_patch(2, "success"), _patch(3, "success")]
+    merge.hierarchical_merge(client, "SKILL", batch, succ, "META", 1, _trace(tmp_path))
+    prompts_by_key = {c["call_key"]: c["prompt"] for c in client.calls}
+    assert prompts_by_key[("merge_failure", 1, 0, 1)] == (
+        META_CTX + "\n\n## Current Skill\nSKILL\n\n"
+        "## Patches to merge (2 total, merge level 1)\n"
+        + json.dumps(batch, ensure_ascii=False, indent=2)
+    )
+    failure_merged = json.loads(FakeClient()._default_response("merge_failure", ""))
+    failure_merged["edits"][0]["merge_level"] = 1
+    success_merged = json.loads(FakeClient()._default_response("merge_success", ""))
+    success_merged["edits"][0]["merge_level"] = 1
+    assert prompts_by_key[("merge_final", 1, 0, 0)] == (
+        META_CTX + "\n\n## Current Skill\nSKILL\n\n"
+        "## Two pre-merged patch groups to combine\n"
+        "Group 1 (failure-driven, HIGH priority): 1 edits\n"
+        "Group 2 (success-driven, lower priority): 1 edits\n\n"
+        + json.dumps([failure_merged, success_merged], ensure_ascii=False, indent=2)
+    )
+
+    edits = [
+        {"op": "append", "content": "a", "support_count": 2},
+        {"op": "replace", "target": "x", "content": "y"},
+        {"op": "delete", "target": "z"},
+    ]
+    merge.rank(client, "SKILL", edits, 2, "META", 1, _trace(tmp_path))
+    assert client.calls[-1]["prompt"] == (
+        META_CTX + "\n\n## Current Skill\nSKILL\n\n"
+        "## Edits Pool (3 edits, budget=2)\n"
+        "[0] op=append  content='a'  support=2\n"
+        "[1] op=replace  target='x'  content='y'\n"
+        "[2] op=delete  target='z'\n\n"
+        "Select the 2 most important edits. Return their 0-based indices in priority order."
+    )
+
+
+def test_meta_skill_reaches_merge_and_analysts(tmp_path, monkeypatch):
+    """The meta skill is prepended to merge prompts (aggregate.py:240-242)
+    and sits after the budget in analyst prompts (reflect.py:341-343)."""
+    monkeypatch.setenv(PASS_IDS_ENV, "t1,t3,t5,t7")
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 3})
+    ctx = prompts.format_meta_skill_context("USE CONCISE EDITS")
+    final3 = [c["prompt"] for c in client.calls if c["call_key"] == ("merge_final", 3, 0, 0)]
+    assert final3 and final3[0].startswith(ctx + "\n\n## Current Skill\n")
+    analyst3 = next(c["prompt"] for c in client.calls if c["call_key"] == ("analyst_failure", 3, 0, 0))
+    assert "Produce at most L=4 edits.\n\n" + ctx + "\n\n## Failed Trajectories" in analyst3
+
+
+# ── item 5: smaller fidelity fixes ────────────────────────────────────────
+
+
+def test_unparseable_slow_update_changes_nothing(tmp_path):
+    """slow_update.py:434-443 returns None; trainer.py:2040-2047 then leaves
+    the skill as it was (no raw output injected)."""
+    client = FakeClient({("slow_update", 2, 0, 0): "I have no guidance this time."})
+    loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
+    skill = loop.strategy_state_dict()["current_skill"]
+    assert prompts.extract_slow_update_field(skill) == ""
+    assert "no guidance this time" not in skill
+    assert _decisions(_read_trace(tmp_path), "slow_update")[0]["action"] == "no_content"
+
+
+def test_unparseable_meta_skill_leaves_none(tmp_path):
+    """meta_skill.py:70-79 returns None; the next epoch then loads no meta
+    skill (trainer.py:384-397)."""
+    client = FakeClient({("meta_skill", 2, 0, 0): "no json here"})
+    loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
+    assert loop.strategy_state_dict()["meta_skill_text"] == ""
+
+
+def test_meta_skill_compares_skill_before_slow_update(tmp_path):
+    """trainer.py:1763 / :2176: the meta skill sees this epoch's last-step
+    skill, not the skill the slow update just rewrote."""
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
+    slow = next(c["prompt"] for c in client.calls if c["call_key"][0] == "slow_update")
+    meta = next(c["prompt"] for c in client.calls if c["call_key"][0] == "meta_skill")
+    pre_update = slow.split("## Current Epoch's Skill\n", 1)[1].split(
+        "\n\n## Previous Slow Update Guidance", 1)[0]
+    meta_curr = meta.split("## Current Epoch Last-Step Skill\n", 1)[1].split(
+        "\n\n## Previous Optimizer Meta Skill", 1)[0]
+    assert meta_curr == pre_update
+    assert "Updated guidance text." not in meta_curr
+
+
+def test_analysts_get_constant_L(tmp_path):
+    """envs/base.py:265: analysts get the adapter's constant edit budget (4),
+    while the rank budget follows the schedule."""
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 4})
+    analyst_prompts = [c["prompt"] for c in client.calls if c["call_key"][0].startswith("analyst_")]
+    assert len(analyst_prompts) == 4
+    assert all("## Edits Budget\nProduce at most L=4 edits.\n" in p for p in analyst_prompts)
+    budgets = [d["edit_budget"] for d in _decisions(_read_trace(tmp_path), "ranked_edits")]
+    assert 2 in budgets
+
+
+def test_analyst_shuffle_uses_batch_seed(tmp_path, monkeypatch):
+    """reflect.py:553-554 shuffles failures with the batch seed and successes
+    with batch seed + 1; the batch seed is datasets/base.py:98-109's (43 for
+    seed 42 and one batch per epoch), the same every epoch."""
+    import random
+
+    from refactory_packages.skillopt import analysts
+    from refactory_packages.skillopt.loop import batch_seed
+
+    monkeypatch.setenv(PASS_IDS_ENV, "t1,t3,t5,t7")
+    seen: list[tuple[list[str], list[str], int]] = []
+    original = analysts.reflect
+
+    def spy(**kwargs):  # type: ignore[no-untyped-def]
+        records = kwargs["records"]
+        seen.append((
+            [r["id"] for r in records if not r["passed"]],
+            [r["id"] for r in records if r["passed"]],
+            kwargs["seed"],
+        ))
+        return original(**kwargs)
+
+    monkeypatch.setattr(analysts, "reflect", spy)
+    _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
+    trace = _read_trace(tmp_path)
+    assert batch_seed(42, 1) == batch_seed(42, 2) == 43
+    assert [s for _, _, s in seen] == [43, 43]
+    for epoch, (fails, succs, seed) in enumerate(seen, 1):
+        random.Random(seed).shuffle(fails)
+        random.Random(seed + 1).shuffle(succs)
+        fail_dec = [d for d in _decisions(trace, "analyst_failure") if d["epoch"] == epoch]
+        succ_dec = [d for d in _decisions(trace, "analyst_success") if d["epoch"] == epoch]
+        assert fail_dec[0]["record_ids"] == fails
+        assert succ_dec[0]["record_ids"] == succs
+
+
+def test_default_analyst_group_is_eight(tmp_path):
+    """_base_/default.yaml:87 ``minibatch_size: 8``: 8 failures, one call."""
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 1})
+    calls = [c for c in client.calls if c["call_key"][0] == "analyst_failure"]
+    assert len(calls) == 1
+    assert len(_decisions(_read_trace(tmp_path), "analyst_failure")[0]["record_ids"]) == 8
+
+
+def test_val_cache_placeholder_and_slow_update_rules(tmp_path):
+    """The epoch-1 placeholder is not cached (trainer.py:1809-1824); the slow
+    update caches the pre-update score for its skill (trainer.py:2052-2053)."""
+    import hashlib
+
+    def h(text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    loop1, _ = _run_loop(tmp_path / "one", skillopt_options={"max_epochs": 1})
+    state1 = loop1.strategy_state_dict()
+    assert prompts.SLOW_UPDATE_START in state1["current_skill"]
+    assert h(state1["current_skill"]) not in state1["val_cache"]
+
+    loop2, _ = _run_loop(tmp_path / "two", skillopt_options={"max_epochs": 2})
+    state2 = loop2.strategy_state_dict()
+    assert "Updated guidance text." in state2["current_skill"]
+    assert state2["val_cache"][h(state2["current_skill"])] == 0.5
+
+
+def test_slow_update_sample_seed(tmp_path):
+    """trainer.py:1844: the sample is seeded with ``seed + epoch * 2000``."""
+    import random
+
+    _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
+    sample = _decisions(_read_trace(tmp_path), "slow_update_sample")[0]["sample_ids"]
+    assert sample == random.Random(42 + 2 * 2000).sample(TRAIN_IDS, 8)
+
+
+def test_slow_update_without_train_ids_raises(tmp_path):
+    """The slow update cannot run without train ids; say so before spending."""
+    with pytest.raises(ValueError, match="parts manifest"):
+        _run_loop(
+            tmp_path,
+            config_overrides={"parts_manifest": None},
+            skillopt_options={"max_epochs": 2},
+        )

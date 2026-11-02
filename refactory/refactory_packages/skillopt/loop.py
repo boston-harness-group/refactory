@@ -22,14 +22,17 @@ Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
   - edit_budget_max = 4     (_base_/default.yaml:93, ``learning_rate: 4``)
   - edit_budget_min = 2     (_base_/default.yaml:94, ``min_learning_rate: 2``)
   - group_size = 8          (_base_/default.yaml:87, ``minibatch_size: 8``)
+  - merge_batch_size = 8    (_base_/default.yaml:88, ``merge_batch_size: 8``)
+  - analyst_edit_budget = 4 (envs/base.py:265 — the analysts' L is the adapter's
+                             constant ``edit_budget``, not the schedule)
   - seed = 42               (_base_/default.yaml:84, ``seed: 42``)
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import random
+import warnings
 from typing import Any
 
 from refactory_dsh.nn.edits import SKILLOPT_PATCH_CONFIG
@@ -37,6 +40,7 @@ from refactory_dsh.optim import Candidate, Proposal
 from refactory_dsh.outerloop import OuterLoop, Run
 
 from refactory_packages.skillopt import analysts, merge, prompts, schedule, state
+from refactory_packages.skillopt.json_utils import extract_json
 from refactory_packages.skillopt.trace import TraceRecorder
 
 
@@ -122,6 +126,11 @@ class SkillOptLoop(OuterLoop):
         object.__setattr__(self, "edit_budget_max", options.get("edit_budget_max", 4))
         object.__setattr__(self, "edit_budget_min", options.get("edit_budget_min", 2))
         object.__setattr__(self, "group_size", options.get("group_size", 8))
+        object.__setattr__(self, "merge_batch_size", options.get("merge_batch_size", 8))
+        object.__setattr__(
+            self, "analyst_edit_budget",
+            options.get("analyst_edit_budget", self.edit_budget_max),
+        )
         object.__setattr__(self, "base_seed", options.get("seed", 42))
         # Initialise mutable state
         object.__setattr__(self, "_current_skill", "")
@@ -135,7 +144,6 @@ class SkillOptLoop(OuterLoop):
         object.__setattr__(self, "_comparison_pairs", [])
         object.__setattr__(self, "_epoch", 0)
         object.__setattr__(self, "_stale_epochs", 0)
-        object.__setattr__(self, "_rng", random.Random(self.base_seed))
         object.__setattr__(self, "_trace", None)
 
     # ── run: delegate to infrastructure Loop ──────────────────────────────
@@ -154,6 +162,20 @@ class SkillOptLoop(OuterLoop):
         """Drive the full SkillOpt search."""
         # Initialise trace — uses Run.root (public seam)
         object.__setattr__(self, "_trace", TraceRecorder(run.root / "skillopt_trace.jsonl"))
+
+        # Train item ids for slow update sampling — uses Run.part_ids (public
+        # seam). Checked before any evaluation so a run that cannot complete
+        # the algorithm spends nothing.
+        train_ids = run.part_ids("train")
+        if self.max_epochs >= 2 and not train_ids:
+            # The slow update samples the train set from epoch 2
+            # (trainer.py:1843-1860); without train ids it cannot run, and
+            # skipping it silently would make this a different algorithm.
+            raise ValueError(
+                "skillopt: the slow update needs the parts manifest's train ids "
+                "(run.part_ids('train') returned none); give the run a parts "
+                "manifest with a 'train' part or set max_epochs=1"
+            )
 
         seed_candidate = run.seed()
         object.__setattr__(self, "_current_skill", self._get_skill(seed_candidate))
@@ -175,8 +197,6 @@ class SkillOptLoop(OuterLoop):
 
         current = seed_candidate
 
-        # Get train item ids for slow update sampling — uses Run.part_ids (public seam)
-        train_ids = run.part_ids("train")
 
         for epoch in range(1, self.max_epochs + 1):
             object.__setattr__(self, "_epoch", epoch)
@@ -200,18 +220,15 @@ class SkillOptLoop(OuterLoop):
                 epoch_seed=epoch_seed,
             )
 
-            # ③ Analysts — mechanism 3
-            analyst_seed = self.base_seed + epoch * 100
-            failure_edits, success_edits = analysts.reflect(
+            # ③ Analysts — mechanism 3. The shuffle seed is the step's batch
+            # seed (trainer.py:1244, :1283) and L is the adapter's constant
+            # edit budget (envs/base.py:265), not the scheduled one.
+            analyst_seed = batch_seed(self.base_seed, epoch)
+            failure_patches, success_patches = analysts.reflect(
                 client=self.model,
                 records=records,
                 skill_text=self._current_skill,
-                edit_budget=schedule.edit_budget(
-                    self._edit_budget_step + 1,
-                    self.max_epochs,
-                    self.edit_budget_max,
-                    self.edit_budget_min,
-                ),
+                edit_budget=self.analyst_edit_budget,
                 meta_skill=self._meta_skill_text,
                 seed=analyst_seed,
                 group_size=self.group_size,
@@ -219,38 +236,40 @@ class SkillOptLoop(OuterLoop):
                 trace=self._trace,
             )
 
-            # ⑥ No-edit skip — mechanism 6
-            if not failure_edits and not success_edits:
+            # ⑥ No-edit skip — mechanism 6 (trainer.py:1336-1360: before the
+            # scheduler steps, so the budget does not advance)
+            if not failure_patches and not success_patches:
                 self._trace.record_decision("no_edits_skip")
                 run.save_strategy_state()
-                # Do slow update and meta skill even on skip
-                current = self._do_slow_update(run, current, epoch, train_ids)
-                self._do_meta_skill(run, epoch)
-                object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
+                current = self._end_epoch(run, current, epoch, train_ids)
                 continue
 
             # ④ Merge — mechanism 4
             merged = merge.hierarchical_merge(
                 client=self.model,
                 skill_text=self._current_skill,
-                failure_edits=failure_edits,
-                success_edits=success_edits,
+                failure_patches=failure_patches,
+                success_patches=success_patches,
                 meta_skill=self._meta_skill_text,
                 epoch=epoch,
                 trace=self._trace,
+                merge_batch_size=self.merge_batch_size,
             )
 
-            # Rank
+            # Rank. The scheduler steps every time a step reaches ranking,
+            # whatever the gate later decides — trainer.py:1415, before the
+            # gate at :1583.
             budget = schedule.edit_budget(
                 self._edit_budget_step + 1,
                 self.max_epochs,
                 self.edit_budget_max,
                 self.edit_budget_min,
             )
+            object.__setattr__(self, "_edit_budget_step", self._edit_budget_step + 1)
             ranked = merge.rank(
                 client=self.model,
                 skill_text=self._current_skill,
-                merged_edits=merged,
+                merged_edits=merge.patch_edits(merged),
                 budget=budget,
                 meta_skill=self._meta_skill_text,
                 epoch=epoch,
@@ -259,18 +278,19 @@ class SkillOptLoop(OuterLoop):
 
             self._trace.record_decision(
                 "ranked_edits",
+                budget_step=self._edit_budget_step,
                 edit_budget=budget,
                 n_edits=len(ranked),
             )
 
             # ⑤ Patch — mechanism 5
             # Convert SkillOpt's "op" key to text_patch's "kind" key
-            patch_edits = [_op_to_kind(e) for e in ranked]
+            text_edits = [_op_to_kind(e) for e in ranked]
             proposal = Proposal(
                 edit={
                     "op": "text_patch",
                     "name": "skill",
-                    "edits": patch_edits,
+                    "edits": text_edits,
                     "config": dict(SKILLOPT_PATCH_CONFIG),
                 },
                 rationale="skillopt epoch {} patch".format(epoch),
@@ -283,9 +303,7 @@ class SkillOptLoop(OuterLoop):
                     "patch_refused", reasons=outcome,
                 )
                 run.save_strategy_state()
-                current = self._do_slow_update(run, current, epoch, train_ids)
-                self._do_meta_skill(run, epoch)
-                object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
+                current = self._end_epoch(run, current, epoch, train_ids)
                 continue
 
             candidate = outcome
@@ -321,7 +339,6 @@ class SkillOptLoop(OuterLoop):
                 current = run.keep(candidate)
                 object.__setattr__(self, "_current_skill", cand_skill)
                 object.__setattr__(self, "_current_score", cand_score)
-                object.__setattr__(self, "_edit_budget_step", self._edit_budget_step + 1)
                 if cand_score > self._best_score:
                     object.__setattr__(self, "_best_skill", cand_skill)
                     object.__setattr__(self, "_best_score", cand_score)
@@ -342,11 +359,7 @@ class SkillOptLoop(OuterLoop):
             run.save_strategy_state()
 
             # ⑧⑨ Slow update & meta skill — mechanisms 8, 9
-            current = self._do_slow_update(run, current, epoch, train_ids)
-            self._do_meta_skill(run, epoch)
-
-            # Record the skill at end of epoch for the next epoch's slow update
-            object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
+            current = self._end_epoch(run, current, epoch, train_ids)
 
             run.save_strategy_state()
 
@@ -362,7 +375,28 @@ class SkillOptLoop(OuterLoop):
 
         run.stop("max_epochs")
 
-    # ── slow update ────────────────────────────────────────────────────────
+    # ── end of epoch: slow update then meta skill ─────────────────────────
+
+    def _end_epoch(
+        self,
+        run: Run,
+        current: Candidate,
+        epoch: int,
+        train_ids: list[str],
+    ) -> Candidate:
+        """Slow update, then meta skill, then remember this epoch's skill.
+
+        The meta skill compares against the epoch's last-step skill, taken
+        before this epoch's slow update rewrites it (trainer.py:1763, :2176).
+        """
+        epoch_last_step_skill = self._current_skill
+        current = self._do_slow_update(run, current, epoch, train_ids)
+        self._do_meta_skill(run, epoch, epoch_last_step_skill)
+        # The previous epoch's skill for the next epoch is the saved skill of
+        # this epoch's last step, which already carries the slow update
+        # (trainer.py:1838-1839 load it; :2059 saved it after the update).
+        object.__setattr__(self, "_prev_epoch_skill", self._current_skill)
+        return current
 
     def _do_slow_update(
         self,
@@ -373,22 +407,20 @@ class SkillOptLoop(OuterLoop):
     ) -> Candidate:
         """Slow update: placeholder in epoch 1, comparison from epoch 2.
 
-        Epoch 1 (mechanism 8): inject empty SLOW_UPDATE markers.
-        Epoch 2+ (mechanism 8): compare prev and current skills on a seeded
-        20-item sample, force-accept, cache pre-update score.
+        Epoch 1 (trainer.py:1809-1824): inject empty SLOW_UPDATE markers; the
+        selection cache is not touched.
+        Epoch 2+ (trainer.py:1825-2066): compare prev and current skills on a
+        seeded sample, force-accept the guidance, cache the pre-update score.
+        A response without guidance changes nothing (trainer.py:2040-2047).
 
         Returns the (possibly updated) current candidate.
         """
         if epoch == 1:
-            # Inject placeholder markers
-            placeholder = (
-                f"\n{prompts.SLOW_UPDATE_START}\n{prompts.SLOW_UPDATE_END}\n"
-            )
             proposal = Proposal(
                 edit={
                     "op": "set_knob",
                     "name": "skill",
-                    "value": self._current_skill + placeholder,
+                    "value": prompts.inject_empty_slow_update_field(self._current_skill),
                 },
                 rationale="slow update placeholder",
                 parent=current.id,
@@ -397,20 +429,26 @@ class SkillOptLoop(OuterLoop):
             if not isinstance(outcome, list):
                 current = run.keep(outcome)
                 object.__setattr__(self, "_current_skill", self._get_skill(current))
-                # Update val cache with pre-update score for the new hash
-                new_hash = self._skill_hash(self._current_skill)
-                self._val_cache[new_hash] = self._current_score
                 self._trace.record_decision("slow_update_placeholder")
             run.save_strategy_state()
             return current
 
         if self._prev_epoch_skill is None:
             return current
+        object.__setattr__(self, "_comparison_pairs", [])
 
-        # Epoch 2+: compare on seeded sample
+        # Epoch 2+: compare on a seeded sample — trainer.py:1843-1844
         sample_rng = random.Random(self.base_seed + epoch * 2000)
         n_samples = min(self.slow_update_samples, len(train_ids))
         if n_samples <= 0:
+            warnings.warn(
+                f"skillopt: slow update skipped in epoch {epoch} — no train items to sample "
+                f"(slow_update_samples={self.slow_update_samples}, "
+                f"train ids={len(train_ids)})",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._trace.record_decision("slow_update_skipped", reason="no_samples")
             return current
         sample_ids = sample_rng.sample(train_ids, n_samples)
 
@@ -418,20 +456,28 @@ class SkillOptLoop(OuterLoop):
             "slow_update_sample", sample_ids=sample_ids,
         )
 
-        # Evaluate prev skill on sample
-        prev_proposal = Proposal(
-            edit={
-                "op": "set_knob",
-                "name": "skill",
-                "value": self._prev_epoch_skill,
-            },
-            rationale="slow update prev skill",
-            parent=current.id,
-        )
-        prev_outcome = run.attempt(prev_proposal, current)
-        if isinstance(prev_outcome, list):
-            return current
-        prev_candidate = prev_outcome
+        # Evaluate prev skill on sample. SkillOpt rolls out both skills even
+        # when the epoch changed nothing (trainer.py:1866-1867); the same
+        # skill cannot be re-proposed here (E-noop), so roll out `current`.
+        if self._prev_epoch_skill == self._current_skill:
+            prev_candidate = current
+        else:
+            prev_proposal = Proposal(
+                edit={
+                    "op": "set_knob",
+                    "name": "skill",
+                    "value": self._prev_epoch_skill,
+                },
+                rationale="slow update prev skill",
+                parent=current.id,
+            )
+            prev_outcome = run.attempt(prev_proposal, current)
+            if isinstance(prev_outcome, list):
+                self._trace.record_decision(
+                    "slow_update_skipped", reason="prev_skill_refused", reasons=prev_outcome,
+                )
+                return current
+            prev_candidate = prev_outcome
         epoch_seed = self.base_seed + epoch * 3000
         prev_candidate = run.evaluate(
             prev_candidate, part="train", items=sample_ids, seed=epoch_seed,
@@ -444,15 +490,14 @@ class SkillOptLoop(OuterLoop):
         )
         curr_records = run.item_records(curr_candidate)
 
-        # Build comparison pairs — slow_update.py:236-243
+        # Build comparison pairs — slow_update.py:206-269
         pairs = self._build_comparison_pairs(prev_records, curr_records, sample_ids)
         object.__setattr__(self, "_comparison_pairs", pairs)
-        comparison_text = self._format_comparison(pairs)
+        comparison_text = prompts.format_comparison_text(pairs)
 
-        # Extract previous guidance from current skill
-        prev_guidance = self._extract_slow_update_content(self._current_skill)
+        # Previous guidance from the current skill — trainer.py:1916
+        prev_guidance = prompts.extract_slow_update_field(self._current_skill)
 
-        # LLM call for slow update
         call_key = ("slow_update", epoch, 0, 0)
         user = prompts.format_slow_update_user(
             self._prev_epoch_skill, self._current_skill, prev_guidance, comparison_text,
@@ -464,18 +509,21 @@ class SkillOptLoop(OuterLoop):
             "slow_update", prompts.SLOW_UPDATE_SYSTEM, user, output, call_key=call_key,
         )
 
-        # Parse guidance
+        # Parse guidance — slow_update.py:434-439
+        result = extract_json(output) if isinstance(output, str) else None
         guidance = ""
-        try:
-            data = json.loads(output)
-            guidance = data.get("slow_update_content", "")
-        except (json.JSONDecodeError, TypeError):
-            guidance = output
+        if isinstance(result, dict) and result.get("slow_update_content"):
+            guidance = str(result["slow_update_content"]).strip()
+        if not guidance:
+            # No guidance: the skill is unchanged — trainer.py:2040-2047
+            self._trace.record_decision("slow_update", action="no_content", n_pairs=len(pairs))
+            run.save_strategy_state()
+            return current
 
-        # Replace slow update content — NOT via text_patch (SKILLOPT_PATCH_CONFIG
-        # has honour_protected: True which blocks writes to the region)
+        # Force-accept (trainer.py:2042-2055). Not via text_patch:
+        # SKILLOPT_PATCH_CONFIG honours the protected region, which blocks it.
         pre_update_score = self._current_score
-        new_skill = self._replace_slow_update(self._current_skill, guidance)
+        new_skill = prompts.replace_slow_update_field(self._current_skill, guidance)
         proposal = Proposal(
             edit={
                 "op": "set_knob",
@@ -489,12 +537,13 @@ class SkillOptLoop(OuterLoop):
         if not isinstance(outcome, list):
             current = run.keep(outcome)
             object.__setattr__(self, "_current_skill", self._get_skill(current))
-            # Record pre-update score in val cache for new skill hash
+            # Cache the pre-update score for the new hash — trainer.py:2052-2053
             new_hash = self._skill_hash(self._current_skill)
             self._val_cache[new_hash] = pre_update_score
 
         self._trace.record_decision(
             "slow_update",
+            action="force_accept" if not isinstance(outcome, list) else "refused",
             guidance_length=len(guidance),
             n_pairs=len(pairs),
         )
@@ -503,16 +552,22 @@ class SkillOptLoop(OuterLoop):
 
     # ── meta skill ─────────────────────────────────────────────────────────
 
-    def _do_meta_skill(self, run: Run, epoch: int) -> None:
-        """Meta skill — mechanism 9. Only from epoch 2."""
+    def _do_meta_skill(self, run: Run, epoch: int, epoch_last_step_skill: str) -> None:
+        """Meta skill — mechanism 9, from epoch 2 (trainer.py:2083-2198).
+
+        Compares the previous epoch's skill with this epoch's last-step skill
+        (before the slow update; trainer.py:2176). A response without content
+        leaves no meta skill for the next epoch: SkillOpt then loads an empty
+        one (trainer.py:384-397, :2189-2194).
+        """
         if epoch < 2 or self._prev_epoch_skill is None:
             return
 
-        comparison_text = self._format_comparison(self._comparison_pairs)
+        comparison_text = prompts.format_comparison_text(self._comparison_pairs)
         call_key = ("meta_skill", epoch, 0, 0)
         user = prompts.format_meta_skill_user(
             self._prev_epoch_skill,
-            self._current_skill,
+            epoch_last_step_skill,
             self._meta_skill_text,
             comparison_text,
         )
@@ -523,15 +578,17 @@ class SkillOptLoop(OuterLoop):
             "meta_skill", prompts.META_SKILL_SYSTEM, user, output, call_key=call_key,
         )
 
-        try:
-            data = json.loads(output)
-            object.__setattr__(self, "_meta_skill_text", data.get("meta_skill_content", ""))
-        except (json.JSONDecodeError, TypeError):
-            object.__setattr__(self, "_meta_skill_text", output)
+        # meta_skill.py:70-75
+        result = extract_json(output) if isinstance(output, str) else None
+        content = ""
+        if isinstance(result, dict) and result.get("meta_skill_content"):
+            content = str(result["meta_skill_content"]).strip()
+        object.__setattr__(self, "_meta_skill_text", content)
 
         self._trace.record_decision(
             "meta_skill",
-            meta_skill_length=len(self._meta_skill_text),
+            action="write_meta_skill" if content else "no_content",
+            meta_skill_length=len(content),
         )
         run.save_strategy_state()
 
@@ -550,7 +607,6 @@ class SkillOptLoop(OuterLoop):
             "comparison_pairs": self._comparison_pairs,
             "epoch": self._epoch,
             "stale_epochs": self._stale_epochs,
-            "rng_state": self._rng,
         })
 
     def load_strategy_state(self, data: dict[str, Any]) -> None:
@@ -566,9 +622,6 @@ class SkillOptLoop(OuterLoop):
         object.__setattr__(self, "_comparison_pairs", restored.get("comparison_pairs", []))
         object.__setattr__(self, "_epoch", restored.get("epoch", 0))
         object.__setattr__(self, "_stale_epochs", restored.get("stale_epochs", 0))
-        rng = restored.get("rng_state")
-        if isinstance(rng, random.Random):
-            object.__setattr__(self, "_rng", rng)
 
     # ── helpers ────────────────────────────────────────────────────────────
 
@@ -596,63 +649,74 @@ class SkillOptLoop(OuterLoop):
         prev_records: list[dict],
         curr_records: list[dict],
         sample_ids: list[str],
-    ) -> list[list]:
-        """Build comparison pairs — slow_update.py:236-243."""
+    ) -> list[dict]:
+        """Per-sample comparison entries — slow_update.py:206-269.
+
+        Each entry carries the task, both outcomes (pass, score, answer, fail
+        reason) and both trajectories, rendered from the F6 records.
+        """
         prev_by_id = {str(r.get("id", "")): r for r in prev_records}
         curr_by_id = {str(r.get("id", "")): r for r in curr_records}
-        pairs = []
+        pairs: list[dict] = []
         for item_id in sample_ids:
             prev = prev_by_id.get(item_id, {})
             curr = curr_by_id.get(item_id, {})
-            prev_pass = prev.get("passed", False)
-            curr_pass = curr.get("passed", False)
-            if not prev_pass and curr_pass:
+            prev_ok = bool(prev.get("passed", False))
+            curr_ok = bool(curr.get("passed", False))
+            if not prev_ok and curr_ok:
                 category = "improved"
-            elif prev_pass and not curr_pass:
+            elif prev_ok and not curr_ok:
                 category = "regressed"
-            elif not prev_pass and not curr_pass:
+            elif not prev_ok and not curr_ok:
                 category = "persistent_fail"
             else:
                 category = "stable_success"
-            pairs.append([item_id, category])
+            pairs.append({
+                "id": item_id,
+                "task": prompts.record_task(curr or prev) or item_id,
+                "category": category,
+                "prev": _outcome(prev, prev_ok),
+                "curr": _outcome(curr, curr_ok),
+                "prev_trajectory": _trajectory(prev),
+                "curr_trajectory": _trajectory(curr),
+            })
         return pairs
 
-    @staticmethod
-    def _format_comparison(pairs: list[list]) -> str:
-        """Format comparison pairs into readable text."""
-        if not pairs:
-            return "(no comparison data)"
-        lines = []
-        for category in ["regressed", "persistent_fail", "improved", "stable_success"]:
-            items = [p for p in pairs if p[1] == category]
-            if items:
-                lines.append(f"### {category.replace('_', ' ').title()} ({len(items)})")
-                for item_id, _ in items:
-                    lines.append(f"- {item_id}")
-        return "\n".join(lines)
 
-    @staticmethod
-    def _extract_slow_update_content(skill: str) -> str:
-        """Extract content between SLOW_UPDATE markers."""
-        start = skill.find(prompts.SLOW_UPDATE_START)
-        end = skill.find(prompts.SLOW_UPDATE_END)
-        if start < 0 or end < 0 or end <= start:
-            return ""
-        inner_start = start + len(prompts.SLOW_UPDATE_START)
-        return skill[inner_start:end].strip()
+def batch_seed(seed: int, epoch: int, batches_per_epoch: int = 1) -> int:
+    """The seed of an epoch's first batch — SkillOpt's train-batch seed.
 
-    @staticmethod
-    def _replace_slow_update(skill: str, content: str) -> str:
-        """Replace content between SLOW_UPDATE markers."""
-        start = skill.find(prompts.SLOW_UPDATE_START)
-        end = skill.find(prompts.SLOW_UPDATE_END)
-        if start < 0 or end < 0:
-            return skill
-        end_of_marker = end + len(prompts.SLOW_UPDATE_END)
-        new_section = (
-            f"{prompts.SLOW_UPDATE_START}\n{content}\n{prompts.SLOW_UPDATE_END}"
-        )
-        return skill[:start] + new_section + skill[end_of_marker:]
+    datasets/base.py:98-109 (and trainer.py:966, :1181-1183): the base seeds
+    are ``seed + i + 1`` for each batch of an epoch, shuffled by
+    ``Random(seed + epoch * 1000)``. This strategy takes one step of one batch
+    per epoch, so the step's batch seed is the first shuffled seed.
+    """
+    base_seeds = [seed + i + 1 for i in range(batches_per_epoch)]
+    random.Random(seed + epoch * 1000).shuffle(base_seeds)
+    return base_seeds[0]
+
+
+def _outcome(record: dict, passed: bool) -> dict[str, Any]:
+    """One side of a comparison pair — slow_update.py:249-260."""
+    score = record.get("score")
+    try:
+        soft = float(score) if score is not None else 0.0
+    except (TypeError, ValueError):
+        soft = 0.0
+    prediction = record.get("prediction")
+    return {
+        "hard": int(passed),
+        "soft": soft,
+        "predicted_answer": prediction if prediction is not None else "N/A",
+        "fail_reason": prompts.record_fail_reason(record) if record else "",
+    }
+
+
+def _trajectory(record: dict) -> str:
+    """slow_update.py:116-168 ``_read_trajectory``, from an F6 record."""
+    if not record:
+        return "(trajectory not available)"
+    return prompts.format_trajectory(record)
 
 
 # Attributes that belong on the SkillOptLoop instance, not on _infra.
@@ -660,11 +724,11 @@ _SELF_ATTRS = frozenset({
     "model", "model_name", "provider", "options",
     "max_epochs", "early_stop_patience", "early_stop_at_full_val",
     "slow_update_samples", "edit_budget_max", "edit_budget_min",
-    "group_size", "base_seed",
+    "group_size", "merge_batch_size", "analyst_edit_budget", "base_seed",
     "_current_skill", "_current_score", "_best_skill", "_best_score",
     "_prev_epoch_skill", "_val_cache", "_edit_budget_step",
     "_meta_skill_text", "_comparison_pairs", "_epoch", "_stale_epochs",
-    "_rng", "_trace",
+    "_trace",
 })
 
 
