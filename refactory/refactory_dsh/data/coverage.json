@@ -305,6 +305,24 @@
       "purpose": "prove a theorem in Lean and score what the Lean checker accepted. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.",
       "reviewed_schema": "f6d0144cf23fcce624f495f873690711972933fbcf05aa374221ff3fbf542a2c"
     },
+    "livemath/solver": {
+      "doc": "refactory/docs/outer-loop.md",
+      "examples": [
+        {
+          "explanation": "Solve LiveMathematicianBench items with an empty skill prompt; set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+          "knobs": {
+            "skill": ""
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=livemath/solver; use refactory help topic=livemath/solver first",
+        "cli": "refactory ceo livemath/solver",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+      "reviewed_schema": "b835a2e77fa190f4e8b27d00efac7c522bacd127fe1bdd3eedfb0215c7294604"
+    },
     "loop_mode/loop": {
       "doc": "refactory/docs/optimization-profiles.md",
       "examples": [

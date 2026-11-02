@@ -11093,6 +11093,101 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 }
 ```
 
+## livemath/solver
+
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a LiveMathematicianBench item with a single agent call",
+  "edges": [
+    {
+      "condition": null,
+      "source": "data",
+      "target": "finish"
+    },
+    {
+      "condition": null,
+      "source": "format_prompt",
+      "target": "solve"
+    }
+  ],
+  "gates": [],
+  "guidance": "",
+  "id": "livemath/solver",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:finish",
+      "id": "finish",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:format_prompt",
+      "id": "format_prompt",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [],
+      "notes": "",
+      "role": "builder"
+    }
+  ],
+  "parameters": {
+    "skill": {
+      "default": "",
+      "description": "skill prompt injected into the system message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/outer-loop.md",
+    "examples": [
+      {
+        "explanation": "Solve LiveMathematicianBench items with an empty skill prompt; set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "knobs": {
+          "skill": ""
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=livemath/solver; use refactory help topic=livemath/solver first",
+      "cli": "refactory ceo livemath/solver",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "b835a2e77fa190f4e8b27d00efac7c522bacd127fe1bdd3eedfb0215c7294604"
+  }
+}
+```
+
 ## loop_mode/loop
 
 The optimizer loop's eight steps as a runnable, searchable graph.. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.
