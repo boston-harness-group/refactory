@@ -5,6 +5,7 @@ Each test fails when the corresponding change is reverted.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import time
 from pathlib import Path
@@ -151,24 +152,72 @@ def test_budget_finished_trial_preserved(tmp_path):
 # ── test_budget_counts_rollouts ────────────────────────────────────────────
 
 def test_budget_counts_rollouts(tmp_path):
-    """The loop counts per-item rollouts, and max_rollouts binds the run."""
+    """The loop counts per-item rollouts, and max_rollouts binds the run.
+
+    The batch holds three candidates; the cap admits two evaluations' worth of
+    items, so the forward pass must stop at the cap with the third unevaluated,
+    and the run must report that the rollout cap is what bound it.
+    """
     with _patch_mode(BudgetProbe):
         loop = Loop(
             MODE, LoopConfig(
-                epochs=4, batch_size=1, optimizer="random", seed=1,
+                epochs=4, batch_size=3, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
-                max_rollouts=10,  # 5 items/eval → allows 2 evals
+                max_rollouts=10,
             ),
             project=Path("."),
         )
+
+
+        def three_wide(seed):
+            # The probe has no knobs to sweep, so fill the batch by hand: two more
+            # candidates, all unevaluated when forward starts.
+            for value in (1, 2):
+                child = Candidate.from_state(copy.deepcopy(seed.state), parent=seed.id)
+                child.id = f"wide{value:08d}"
+                loop.population.append(child)
+
+        loop._seed_population = three_wide
         report = loop.run()
 
-    assert loop.rollouts > 0, "rollouts should be counted"
-    # With 5 items per eval and max_rollouts=10, at most 2 evaluations fit.
-    assert loop.evaluations <= 3, (
-        f"expected ≤3 evaluations with max_rollouts=10 and 5 items; got {loop.evaluations}"
+    seed = loop.population[0]
+    assert len(loop.population) >= 3, "the batch must outlast the cap"
+    per_eval = len(loop._train_item_records[seed.id])
+    assert per_eval > 0, "rollouts should be counted per item"
+    expected_evals = -(-10 // per_eval)  # evaluations until the cap is reached
+    assert loop.evaluations == expected_evals, (
+        f"the batch loop must stop at the rollout cap: {loop.evaluations} evaluations, "
+        f"expected {expected_evals} at {per_eval} items each"
     )
-    assert report["bound"] in ("rollouts", "evaluations", "epochs")
+    assert loop.rollouts == expected_evals * per_eval
+    assert loop.rollouts >= 10
+    assert report["bound"] == "rollouts"
+
+
+def test_run_evaluate_refuses_past_rollout_cap(tmp_path):
+    """Run.evaluate refuses once max_rollouts is spent, on every part."""
+    from refactory_dsh.outerloop import OuterLoopError, Run
+
+    with _patch_mode(BudgetProbe):
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run", max_rollouts=1,
+            ),
+            project=Path("."),
+        )
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        assert loop.rollouts >= 1
+        assert loop.evaluations < loop.config.max_evaluations
+        before = loop.rollouts
+        with pytest.raises(OuterLoopError, match="rollout budget is spent"):
+            run.evaluate(seed)
+        with pytest.raises(OuterLoopError, match="rollout budget is spent"):
+            run.evaluate(seed, part="val")
+        assert loop.rollouts == before
 
 
 # ── test_budget_downtime_not_charged ───────────────────────────────────────

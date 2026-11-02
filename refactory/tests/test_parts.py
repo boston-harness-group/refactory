@@ -100,6 +100,7 @@ def _make_loop_with_manifest(tmp_path, manifest_dict=None):
             "test": ["zeta"],
         }
     # Write manifest file for LoopConfig.
+    tmp_path.mkdir(parents=True, exist_ok=True)
     manifest_path = tmp_path / "source_manifest.json"
     manifest_path.write_text(json.dumps(manifest_dict, indent=2))
     loop = Loop(
@@ -603,40 +604,205 @@ def test_val_without_manifest_raises(tmp_path):
 # ── Fix 2: test_train_val_disjoint_from_manifest ────────────────────────
 
 def test_train_val_disjoint_from_manifest(tmp_path):
-    """Train and val item sets are disjoint and come from the manifest.
+    """The manifest loader refuses overlapping parts and unreadable JSON.
 
-    Write a manifest with disjoint train and val id lists. Evaluate on both parts.
-    Assert the evaluated item sets match the manifest and are disjoint.
+    Overlap would put val/test items into the optimizer's train set; a manifest
+    that silently fell back to the fraction split would grade the run on items
+    nobody chose. Both are LoopErrors at init. Disjoint parts load as written.
+    """
+    from refactory_dsh.loop import LoopError
+
+    overlapping = (
+        {"train": ["alpha", "beta", "epsilon"], "val": ["epsilon"], "test": ["zeta"]},
+        {"train": ["alpha", "beta"], "val": ["gamma"], "test": ["gamma", "zeta"]},
+        {"train": ["alpha", "zeta"], "val": ["gamma"], "test": ["zeta"]},
+    )
+    with _patch_mode(PartsProbe):
+        for index, manifest_dict in enumerate(overlapping):
+            loop = _make_loop_with_manifest(tmp_path / f"overlap{index}", manifest_dict)
+            with pytest.raises(LoopError, match="must be disjoint"):
+                loop.init()
+
+        bad = tmp_path / "bad"
+        bad.mkdir()
+        (bad / "source_manifest.json").write_text("{not json")
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=bad / "run", parts_manifest=str(bad / "source_manifest.json"),
+            ),
+            project=Path("."),
+        )
+        with pytest.raises(LoopError, match="not valid JSON"):
+            loop.init()
+
+        disjoint = {"train": ["alpha", "beta", "gamma"], "val": ["delta", "epsilon"],
+                    "test": ["zeta"]}
+        loop = _make_loop_with_manifest(tmp_path / "ok", disjoint)
+        loop.init()
+        assert loop._parts_manifest == disjoint
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        assert {r["id"] for r in run.item_records(seed)} == set(disjoint["train"])
+
+
+# ── Review round 3 ───────────────────────────────────────────────────────
+
+def _no_manifest_loop(tmp_path, **config):
+    return Loop(
+        MODE, LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1,
+                         runs_root=tmp_path / "run", **config),
+        project=Path("."),
+    )
+
+
+def test_no_manifest_train_items_refuse_holdout(tmp_path):
+    """Without a manifest, train items must come from the train split.
+
+    Held-out ids passed as a 'train' minibatch would grade a candidate on the
+    audit's items, and _measure narrows its expected ids to the items given, so
+    the ownership check cannot catch it afterwards.
     """
     with _patch_mode(PartsProbe):
-        manifest_dict = {
-            "train": ["alpha", "beta", "gamma"],
-            "val": ["delta", "epsilon"],
-            "test": ["zeta"],
-        }
+        loop = _no_manifest_loop(tmp_path)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        items = [{"id": name} for name in NAMES]
+        held = [item["id"] for item in task_module.partition(items, loop.config.holdout)["holdout"]]
+        train = [item["id"] for item in task_module.partition(items, loop.config.holdout)["train"]]
+        assert held and train
+        with pytest.raises(OuterLoopError, match="not in the train split"):
+            run.evaluate(seed, part="train", items=held[:1])
+        assert not seed.evaluated
+        assert loop.rollouts == 0
+        run.evaluate(seed, part="train", items=train[:1])
+        assert seed.exit_ok, seed.error
+        assert {r["id"] for r in run.item_records(seed)} == {train[0]}
+
+
+def test_val_test_items_rejected(tmp_path):
+    """Val and test are evaluated in full: items are refused even when they are
+    a subset of the manifest's part."""
+    manifest_dict = {"train": ["alpha", "beta"], "val": ["gamma", "delta"], "test": ["zeta"]}
+    with _patch_mode(PartsProbe):
         loop = _make_loop_with_manifest(tmp_path, manifest_dict)
         loop.init()
         seed = loop.population[0]
         run = Run(_loop=loop)
-
-        # Evaluate on train.
         run.evaluate(seed)
-        train_records = run.item_records(seed)
-        train_ids = {r["id"] for r in train_records}
-
-        # Evaluate on val.
+        for part, items in (("val", ["gamma"]), ("test", ["zeta"])):
+            with pytest.raises(OuterLoopError, match="evaluated in full"):
+                run.evaluate(seed, part=part, items=items)
+        assert run.val_scores(seed) == []
         run.evaluate(seed, part="val")
-        val_scores = run.val_scores(seed)
-        assert len(val_scores) == 1
-        assert val_scores[0]["part"] == "val"
+        occasion = loop.root / "runs" / seed.id / "occasions" / "val_0"
+        graded = json.loads((occasion / "item_records.json").read_text())
+        assert {r["id"] for r in graded} == {"gamma", "delta"}
 
-        # The train ids should match the manifest.
-        assert train_ids == set(manifest_dict["train"]), (
-            f"train ids {train_ids} != manifest {manifest_dict['train']}"
+
+def test_val_missing_from_manifest_raises(tmp_path):
+    """Val on a manifest with no val entry is a clear refusal, not an E-exam."""
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, {"train": ["alpha", "beta"]})
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        with pytest.raises(OuterLoopError, match="has no 'val' entry"):
+            run.evaluate(seed, part="val")
+        with pytest.raises(OuterLoopError, match="has no 'test' entry"):
+            run.evaluate(seed, part="test")
+        assert loop._occasion_counters == {}
+
+        plain = _no_manifest_loop(tmp_path / "plain")
+        plain.init()
+        with pytest.raises(OuterLoopError, match="no parts manifest exists"):
+            Run(_loop=plain).evaluate(plain.population[0], part="val")
+
+
+def test_val_evaluation_counts_rollouts(tmp_path):
+    """Every val/test item graded counts toward rollouts, not one per occasion."""
+    manifest_dict = {"train": ["alpha"], "val": ["gamma", "delta", "epsilon"],
+                     "test": ["zeta"]}
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        before = loop.rollouts
+        run.evaluate(seed, part="val")
+        assert loop.rollouts == before + 3
+
+
+def test_train_store_never_holds_val_test_ids(tmp_path):
+    """Val/test grading never reaches the optimizer's train record store."""
+    manifest_dict = {"train": ["alpha", "beta"], "val": ["gamma", "delta"],
+                     "test": ["epsilon", "zeta"]}
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        run.evaluate(seed, part="val")
+        run.evaluate(seed, part="test")
+        held = set(manifest_dict["val"]) | set(manifest_dict["test"])
+        stored = {r["id"] for records in loop._train_item_records.values() for r in records}
+        assert stored == set(manifest_dict["train"])
+        assert not stored & held
+        assert not {r["id"] for r in loop._context().item_records} & held
+
+
+def test_resume_replays_part_results_for_audit(tmp_path):
+    """audit_parts after resume still sees the val and test scores."""
+    with _patch_mode(PartsProbe):
+        loop1 = _make_loop_with_manifest(tmp_path)
+        loop1.init()
+        seed = loop1.population[0]
+        run = Run(_loop=loop1)
+        run.evaluate(seed)
+        run.evaluate(seed, part="val")
+        run.evaluate(seed, part="test")
+        before = loop1.audit_parts(seed)
+        assert before is not None and before["status"] == "measured"
+
+        loop2 = Loop(
+            MODE, LoopConfig(
+                epochs=2, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run",
+                parts_manifest=str(tmp_path / "source_manifest.json"),
+                resume=True,
+            ),
+            project=Path("."),
         )
+        loop2.init()
+        after = loop2.audit_parts(loop2.population[0])
+        assert after == before
 
-        # Train and val from manifest must be disjoint.
-        assert set(manifest_dict["train"]).isdisjoint(set(manifest_dict["val"]))
+
+def test_repeat_index_on_joined_records(tmp_path):
+    """Records joined across repeats say which repeat graded them."""
+    manifest_dict = {"train": ["alpha", "beta"], "val": ["gamma"], "test": ["zeta"]}
+    manifest_path = tmp_path / "source_manifest.json"
+    manifest_path.write_text(json.dumps(manifest_dict))
+    with _patch_mode(PartsProbe):
+        loop = Loop(
+            MODE, LoopConfig(
+                epochs=1, batch_size=1, optimizer="random", seed=1,
+                runs_root=tmp_path / "run", parts_manifest=str(manifest_path), repeats=2,
+            ),
+            project=Path("."),
+        )
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        records = run.item_records(seed)
+    assert sorted((r["id"], r["repeat"]) for r in records) == [
+        ("alpha", 1), ("alpha", 2), ("beta", 1), ("beta", 2),
+    ]
 
 
 # ── Fix 3: test_loop_owned_manifest_from_config ──────────────────────────
@@ -1025,3 +1191,44 @@ def test_resume_repeats_all_counted(tmp_path):
         assert loop.rollouts == 8, (
             f"expected rollouts == 8 with 4 items × 2 repeats, got {loop.rollouts}"
         )
+
+
+def test_context_follows_the_parent_between_steps(tmp_path):
+    """Each optimizer step recomputes the parent it edits.
+
+    The leader changes between two steps; the second step's proposal context must
+    carry the new leader's train records, and the parent must not be published as
+    a strategy decision.
+    """
+    manifest_dict = {"train": ["alpha", "beta", "gamma"], "val": ["delta"], "test": ["zeta"]}
+    with _patch_mode(PartsProbe):
+        loop = _make_loop_with_manifest(tmp_path, manifest_dict)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        seen = []
+        original = loop._context
+
+        def spy():
+            context = original()
+            seen.append(context)
+            return context
+
+        loop._context = spy
+        loop.optimizer_step(run)
+        assert seen and {r["id"] for r in seen[-1].item_records} == {"alpha", "beta", "gamma"}
+
+        leader = Candidate.from_state(seed.state, parent=seed.id)
+        leader.id = "leader000001"
+        loop.population.append(leader)
+        run.evaluate(leader, items=["alpha"])
+        leader.score = 99.0
+        assert loop.select_parents(1)[0].id == leader.id
+
+        loop.optimizer_step(run)
+        context = seen[-1]
+        assert [r["id"] for r in context.item_records] == ["alpha"]
+        assert context.item_records == loop._train_item_records[leader.id]
+        assert "parent" not in context.strategy
+        assert "parent" not in loop.strategy_decision

@@ -212,8 +212,8 @@ def test_val_test_records_never_reach_optimizer(tmp_path):
         # Write a manifest so val evaluation can find items.
         manifest_path = tmp_path / "manifest.json"
         manifest_path.write_text(_json.dumps({
-            "train": list(NAMES),
-            "val": list(NAMES),
+            "train": list(NAMES[:2]),
+            "val": list(NAMES[2:]),
         }))
         loop = Loop(
             MODE, LoopConfig(
@@ -245,6 +245,8 @@ def test_val_test_records_never_reach_optimizer(tmp_path):
     assert ctx.item_records == train_records, (
         "context item_records must be exactly the train records, not val/test"
     )
+    # The parts are disjoint, so a val id in the context is a leak.
+    assert {r["id"] for r in ctx.item_records} == set(NAMES[:2])
 
 
 # ── test_failed_item_record_has_full_shape ─────────────────────────────────

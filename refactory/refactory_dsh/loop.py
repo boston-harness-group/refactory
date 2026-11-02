@@ -433,6 +433,11 @@ class Loop(OuterLoop):
         #: The loop-level parts manifest (train/val/test id lists), loaded from
         #: config.parts_manifest or the run root.
         self._parts_manifest: dict[str, list[str]] | None = None
+        #: The candidate the current optimizer step edits, recomputed on every
+        #: ``optimizer_step`` (from ``select_parents(1)``, unless a strategy set
+        #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
+        #: records the proposal context carries, and is not a strategy decision.
+        self._editing_parent: str | None = None
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -578,17 +583,32 @@ class Loop(OuterLoop):
                 )
             self.root.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, dest)
-        if dest.exists():
-            try:
-                data = json.loads(dest.read_text())
-                if isinstance(data, dict):
-                    self._parts_manifest = {
-                        k: [str(x) for x in v]
-                        for k, v in data.items()
-                        if isinstance(v, list)
-                    }
-            except (OSError, json.JSONDecodeError):
-                pass
+        if not dest.exists():
+            return
+        # A manifest that cannot be read is refused rather than ignored: falling back
+        # to the fraction split would grade the run on items nobody chose, and
+        # overlapping parts would let val/test items into the optimizer's train set.
+        try:
+            data = json.loads(dest.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LoopError(f"parts manifest {dest} is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise LoopError(f"parts manifest {dest} must be a JSON object of id lists")
+        parts = {
+            k: [str(x) for x in v]
+            for k, v in data.items()
+            if isinstance(v, list)
+        }
+        names = [name for name in (task_module.TRAIN, task_module.VAL, task_module.TEST) if name in parts]
+        for index, first in enumerate(names):
+            for second in names[index + 1:]:
+                shared = set(parts[first]) & set(parts[second])
+                if shared:
+                    raise LoopError(
+                        f"parts manifest {dest}: {first} and {second} share items "
+                        f"{sorted(shared)}; train, val and test must be disjoint"
+                    )
+        self._parts_manifest = parts
 
     def _seed_population(self, seed: Candidate) -> None:
         """Fill the starting batch with neighbours of the seed.
@@ -892,7 +912,10 @@ class Loop(OuterLoop):
                     continue
             trials.append(trial)
             self.measurements += 1
-            all_item_records.extend(result.item_records)
+            # Each record says which repeat graded it: joined across repeats, the
+            # same item id appears once per repeat, and without the index two
+            # gradings of one item read as a duplicate.
+            all_item_records.extend({**record, "repeat": index + 1} for record in result.item_records)
             last = result
             if not result.exit_ok:
                 break
@@ -1240,15 +1263,19 @@ class Loop(OuterLoop):
             parents = self.select_parents(self.config.elite)
         if not parents:
             return [], []
-        # Publish the parent the strategy selected for editing so
-        # ProposalContext.item_records carries its records, not board[0]'s
-        # (brief ask 5).  Strategies may set "parent" explicitly; when they
-        # do not, use select_parents(1) — which respects kept candidates
-        # and is overridable — rather than assuming the leaderboard best.
-        if "parent" not in self.strategy_decision:
+        # The parent this step edits, so ProposalContext.item_records carries its
+        # records, not board[0]'s (brief ask 5). Recomputed every step: the leader
+        # moves between steps, and a parent fixed at the first step would hand every
+        # later proposal a stale candidate's records. A strategy may name the parent
+        # in strategy_decision; otherwise select_parents(1) -- which respects kept
+        # candidates and is overridable -- decides. Kept out of strategy_decision,
+        # which reaches the proposal as the strategy's own choice.
+        explicit = self.strategy_decision.get("parent")
+        if explicit:
+            self._editing_parent = str(explicit)
+        else:
             selected = self.select_parents(1)
-            if selected:
-                self.strategy_decision["parent"] = selected[0].id
+            self._editing_parent = selected[0].id if selected else None
         before = len(self.rejections)
         proposals = self.propose(run, parents, self.batch_size(run))
         candidates = self.install(run, proposals, parents)
@@ -2509,15 +2536,15 @@ class Loop(OuterLoop):
         """Train records for the parent the strategy selected for editing.
 
         Priority:
-        1. ``strategy_decision["parent"]`` — set by ``optimizer_step`` from
-           ``select_parents(1)`` or overridden by a strategy explicitly.
+        1. ``strategy_decision["parent"]`` when a strategy named one, else the
+           parent ``optimizer_step`` chose this step from ``select_parents(1)``.
         2. The most recently installed candidate's parent — what the optimizer
            actually bred from in the previous round.  This is a better signal
            than ``board[0]`` when the optimizer picks a non-best parent.
         3. ``board[0]`` — leaderboard best as a last resort.
         """
         # Prefer the parent the strategy explicitly selected.
-        parent_id = self.strategy_decision.get("parent")
+        parent_id = self.strategy_decision.get("parent") or self._editing_parent
         if parent_id and parent_id in self._train_item_records:
             return list(self._train_item_records[parent_id])
         # Fall back to the most recently installed candidate's parent:

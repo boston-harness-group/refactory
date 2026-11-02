@@ -109,55 +109,68 @@ class Run:
         """Run the mode and score it. Spends one unit of budget.
 
         When ``part`` is ``'train'``, delegates to the existing train evaluation.
-        When ``part`` is ``'val'`` or ``'test'``, evaluates on that part in a
-        fresh occasion directory without touching ``candidate.score``.
+        ``items`` may pick a train minibatch: a subset of the manifest's train ids,
+        or, with no manifest, of the seed's train split -- never held-out ids.
 
-        When a manifest exists and ``items`` is provided, the items must be a
-        subset of the manifest's ids for that part.
+        When ``part`` is ``'val'`` or ``'test'``, evaluates the manifest's whole part
+        in a fresh occasion directory without touching ``candidate.score``. ``items``
+        is refused there: an optimizer that chose its val subset would choose its
+        own exam.
+
+        Refused once the evaluation or rollout budget is spent, for every part.
         """
-        manifest = getattr(self._loop, '_parts_manifest', None)
+        loop = self._loop
+        manifest = getattr(loop, '_parts_manifest', None)
+        if part not in ("train", "val", "test"):
+            raise OuterLoopError(f"unknown part {part!r}; expected 'train', 'val' or 'test'")
+        max_rollouts = getattr(loop.config, "max_rollouts", None)
+        if max_rollouts is not None and loop.rollouts >= max_rollouts:
+            raise OuterLoopError(
+                f"the rollout budget is spent ({loop.rollouts} of {max_rollouts}); "
+                "a strategy must ask budget_left() before evaluating"
+            )
         if part == "train":
-            if self._loop.evaluations >= self._loop.config.max_evaluations:
+            if loop.evaluations >= loop.config.max_evaluations:
                 raise OuterLoopError(
                     "the evaluation budget is spent; a strategy must ask budget_left() "
                     "before evaluating"
                 )
-            # Validate train items against manifest when both exist.
-            if manifest is not None and items is not None:
-                if "train" not in manifest:
-                    raise OuterLoopError(
-                        f"the parts manifest has no entry for 'train'; "
-                        f"items cannot be provided for a part not in the manifest"
-                    )
-                allowed = set(manifest["train"])
-                extra = set(items) - allowed
+            if items is not None:
+                if manifest is not None:
+                    if "train" not in manifest:
+                        raise OuterLoopError(
+                            "the parts manifest has no entry for 'train'; "
+                            "items cannot be provided for a part not in the manifest"
+                        )
+                    allowed = set(manifest["train"])
+                    where = "the manifest's train ids"
+                else:
+                    seed_state = loop.population[0].state if loop.population else candidate.state
+                    allowed = loop._expected_item_ids(seed_state, "train")[0]  # noqa: SLF001
+                    where = "the train split"
+                extra = set(str(i) for i in items) - allowed
                 if extra:
                     raise OuterLoopError(
-                        f"items {sorted(extra)} are not in the manifest's train ids; "
+                        f"items {sorted(extra)} are not in {where}; "
                         f"an optimizer may pick a train minibatch but never val/test ids as 'train'"
                     )
-            self._loop._evaluate(candidate, seed=seed, items=items)  # noqa: SLF001
-        elif part in ("val", "test"):
-            # Validate items against manifest.
-            if manifest is not None and items is not None:
-                if part not in manifest:
-                    raise OuterLoopError(
-                        f"the parts manifest has no entry for {part!r}; "
-                        f"items cannot be provided for a part not in the manifest"
-                    )
-                allowed = set(manifest[part])
-                extra = set(items) - allowed
-                if extra:
-                    raise OuterLoopError(
-                        f"items {sorted(extra)} are not in the manifest's {part} ids"
-                    )
-            elif manifest is None and items is not None:
-                raise OuterLoopError(
-                    f"no parts manifest exists; val/test items require a manifest"
-                )
-            self._loop._evaluate_part(candidate, part, items, seed)  # noqa: SLF001
-        else:
-            raise OuterLoopError(f"unknown part {part!r}; expected 'train', 'val' or 'test'")
+            loop._evaluate(candidate, seed=seed, items=items)  # noqa: SLF001
+            return candidate
+        if items is not None:
+            raise OuterLoopError(
+                f"items cannot be chosen for {part!r}: val and test are always evaluated "
+                f"in full from the parts manifest"
+            )
+        if manifest is None:
+            raise OuterLoopError(
+                f"no parts manifest exists; evaluating on {part!r} requires one "
+                f"(LoopConfig.parts_manifest)"
+            )
+        if part not in manifest:
+            raise OuterLoopError(
+                f"the parts manifest has no {part!r} entry; add one to evaluate on {part!r}"
+            )
+        loop._evaluate_part(candidate, part, None, seed)  # noqa: SLF001
         return candidate
 
     def item_records(self, candidate: Candidate, *, part: str = "train") -> list[dict[str, Any]]:
