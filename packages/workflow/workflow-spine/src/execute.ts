@@ -88,8 +88,16 @@ export type CommandFailure = CommandResult & { ok: false; error: string }
  * it failed.
  */
 export type CommandOutcome =
-  | (CommandResult & { ok: true; verdict?: string; reason?: string })
+  | (CommandResult & { ok: true; verdict?: string; reason?: string; missing?: true })
   | CommandFailure
+
+/**
+ * The stderr line an optional node (one a fork names in `optional_targets`) prints when
+ * it failed and exits 0: `refactory_dsh.run` and the worker print it. The node is
+ * recorded failed rather than completed, and its branch goes on with its next node,
+ * as the walker records and continues it.
+ */
+export const OPTIONAL_MISSING_MARKER = '--- refactory optional node missing ---'
 
 /**
  * The most of a gate's reason one payload carries, marker included, so a long
@@ -378,6 +386,9 @@ export async function runDeterministic(
     if (verdict === undefined) return { ...outcome, ok: false, error: `${node.id} printed no verdict` }
     const reason = reasonOf(stdout)
     return { ...outcome, ok: true, verdict, ...(reason === '' ? {} : { reason }) }
+  }
+  if (stderr.split('\n').some(line => line.trim() === OPTIONAL_MISSING_MARKER)) {
+    return { ...outcome, ok: true, missing: true }
   }
   return { ...outcome, ok: true }
 }

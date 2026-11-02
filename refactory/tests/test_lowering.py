@@ -568,3 +568,40 @@ def test_fork_refactory_write_refused():
     state = {"graph": graph.to_state(), "knobs": {}}
     with pytest.raises(LoweringError, match="executor metadata as output"):
         lowering.to_workflow(state)
+
+
+def _sibling_fact_graph(*, nested: bool) -> Graph:
+    """Branch ``a`` produces ``finding``; branch ``b``'s prompt reads it. With ``nested``,
+    ``a``'s producer sits inside a fork nested in that branch."""
+    graph = Graph()
+    graph.add(Node("start", "op", call="loop_ops:noop"))
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.connect("start", "fork")
+    if nested:
+        graph.add(Node("a", "fork", targets=("a1", "a2")))
+        graph.add(Node("a1", "op", call="loop_ops:noop", produces=("finding",)))
+        graph.add(Node("a2", "op", call="loop_ops:noop"))
+        graph.add(Node("a_join", "join", sources=("a1", "a2")))
+        graph.connect("a", "a_join")
+        graph.connect("a1", "a_join")
+        graph.connect("a2", "a_join")
+        last = "a_join"
+    else:
+        graph.add(Node("a", "op", call="loop_ops:noop", produces=("finding",)))
+        last = "a"
+    graph.add(Node("b", "agent", prompt_template="Review {{finding}}", writes=("b.md",)))
+    graph.add(Node("join", "join", sources=(last, "b")))
+    graph.connect("fork", "join")
+    graph.connect(last, "join")
+    graph.connect("b", "join")
+    return graph
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_fork_branch_prompt_reading_a_siblings_fact_refused(nested):
+    """Lowering refuses a branch whose prompt reads a fact a sibling branch produces -- the
+    branches run at once, so the fact is not there yet -- as the walker's fork does, also
+    when the sibling produces it inside a nested fork."""
+    state = {"graph": _sibling_fact_graph(nested=nested).to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="a branch prompt depends on a sibling's facts"):
+        lowering.to_workflow(state)

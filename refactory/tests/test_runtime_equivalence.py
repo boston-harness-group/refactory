@@ -268,9 +268,27 @@ def _spine_resumed(world: World) -> None:
 # ── what a run left, normalised ───────────────────────────────────────────────
 
 GRAPH = DesignMode().graph()
-FORKS = {node.id: tuple(node.targets) for node in GRAPH.nodes.values() if node.kind == "fork"}
-JOINS = {node.id for node in GRAPH.nodes.values() if node.kind == "join"}
-GATES = {node.id for node in GRAPH.nodes.values() if node.kind == "gate"}
+
+
+def _fork_members(graph: Any) -> dict[str, set[str]]:
+    """Each fork's branch nodes, nested forks' included, up to its join, as the walker's
+    fork admits them (`nn.fork._branches`)."""
+    members: dict[str, set[str]] = {}
+    for fork in (node for node in graph.nodes.values() if node.kind == "fork"):
+        join = graph.out_edges(fork.id)[0].target
+        seen: set[str] = set()
+        pending = list(fork.targets)
+        while pending:
+            current = pending.pop()
+            if current == join or current in seen:
+                continue
+            seen.add(current)
+            pending.extend(edge.target for edge in graph.out_edges(current))
+            if graph.nodes[current].kind == "fork":
+                pending.extend(graph.nodes[current].targets)
+        members[fork.id] = seen
+    return members
+
 
 #: Files each runtime keeps for itself, compared through what is built from them (the
 #: visits from the events, verdicts and facts from the resume records), or holding only
@@ -332,36 +350,39 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, indent=1, sort_keys=True, ensure_ascii=False)
 
 
-def _fork_of(node: str) -> str | None:
-    return next((fork for fork, targets in FORKS.items() if node in targets), None)
+def _fork_of(node: str, members: dict[str, set[str]]) -> str | None:
+    """The outermost fork whose branches ``node`` is in."""
+    owners = [fork for fork, nodes in members.items() if node in nodes]
+    return max(owners, key=lambda fork: len(members[fork]), default=None)
 
 
-def _grouped(visits: list[tuple[str, str]]) -> list[str]:
-    """Visits as lines; a fork's branches, which run at once, as one sorted line."""
+def _grouped(visits: list[tuple[str, str]], graph: Any) -> list[str]:
+    """Visits as lines; a fork's branches, which run at once, as one sorted line, nested
+    forks' and every later node of a branch included."""
+    members = _fork_members(graph)
     lines: list[str] = []
     index = 0
     while index < len(visits):
         node, outcome = visits[index]
-        fork = _fork_of(node)
+        fork = _fork_of(node, members)
         if fork is None:
             lines.append(f"{node}: {outcome}")
             index += 1
             continue
         branches = []
-        while index < len(visits) and _fork_of(visits[index][0]) == fork:
+        while index < len(visits) and _fork_of(visits[index][0], members) == fork:
             branches.append(f"{visits[index][0]}={visits[index][1]}")
             index += 1
         lines.append(f"{fork} branches: {', '.join(sorted(branches))}")
     return lines
 
 
-def _walker_visits(run: Path, *, graph: Any = None, gates: set[str] | None = None,
-                   forks: dict[str, tuple[str, ...]] | None = None) -> list[tuple[str, str]]:
+def _walker_visits(run: Path, graph: Any) -> list[tuple[str, str]]:
     """The walker's visits from its events. It keeps no per-visit verdict, so a gate's is
-    read from the route it took: the edge to the node it started next."""
-    _graph = graph or GRAPH
-    _gates = gates if gates is not None else GATES
-    _forks = forks if forks is not None else FORKS
+    read from the route it took: the edge to the node it started next, or to the fork
+    whose branches (nested ones' included) that node starts."""
+    members = _fork_members(graph)
+    gates = {node.id for node in graph.nodes.values() if node.kind == "gate"}
     events = [json.loads(line) for line in (run / ".refactory/events.jsonl").read_text().splitlines()
               if line.strip()]
     started = [event for event in events if event.get("kind") == "node_started"]
@@ -369,35 +390,37 @@ def _walker_visits(run: Path, *, graph: Any = None, gates: set[str] | None = Non
     visits: list[tuple[str, str]] = []
     for index, event in enumerate(started):
         node = event["node_id"]
+        if event.get("retry") and (node, "failed") in visits:
+            # A failed op's one retry is the same visit, as the spine's runner retries
+            # inside one command: the failed attempt is not a visit of its own.
+            del visits[len(visits) - 1 - visits[::-1].index((node, "failed"))]
         end = next((item for item in ends if item["node_id"] == node), None)
         if end is None:
             visits.append((node, "unfinished"))
             continue
         ends.remove(end)
         if end["kind"] == "node_failed":
-            visits.append((node, "stopped"))
-        elif node in _gates:
+            visits.append((node, "failed"))
+        elif node in gates:
             following = started[index + 1]["node_id"] if index + 1 < len(started) else ""
-            verdicts = [edge.condition for edge in _graph.out_edges(node)
-                        if edge.target == following or following in _forks.get(edge.target, ())]
+            verdicts = [edge.condition for edge in graph.out_edges(node)
+                        if edge.target == following or following in members.get(edge.target, ())]
             visits.append((node, verdicts[0] if len(verdicts) == 1 else f"? -> {following}"))
         else:
             visits.append((node, "completed"))
     return visits
 
 
-def _spine_visits(run: Path, *, forks: dict[str, tuple[str, ...]] | None = None,
-                  joins: set[str] | None = None) -> list[tuple[str, str]]:
-    """The spine's visits from its own log; fork and join nodes are its control nodes."""
-    _forks = forks if forks is not None else FORKS
-    _joins = joins if joins is not None else JOINS
+def _spine_visits(run: Path, graph: Any) -> list[tuple[str, str]]:
+    """The spine's visits from its own log; fork and join nodes are its control nodes. An
+    optional node that failed is logged ``failed``, and its branch went on."""
+    controls = {node.id for node in graph.nodes.values() if node.kind in ("fork", "join")}
     log = json.loads((run / ".refactory/spine-checkpoint.json").read_text())["state"]["log"]
     visits: list[tuple[str, str]] = []
     for line in log:
-        if line.startswith("completed "):
-            node = line.removeprefix("completed ").strip()
-            if node not in _forks and node not in _joins:
-                visits.append((node, "completed"))
+        if found := re.match(r"(completed|failed) (\S+)$", line.strip()):
+            if found.group(2) not in controls:
+                visits.append((found.group(2), found.group(1)))
         elif found := re.match(r"gate (\S+): (\S+) ->", line):
             visits.append((found.group(1), found.group(2)))
         else:
@@ -438,38 +461,36 @@ STATUS = ".refactory/spine-status.json"
 
 def _status_identity(artifacts: dict[str, str], runtime: str) -> dict[str, str]:
     """The status file with the two fields that name who wrote it -- its runtime and its
-    owning process -- checked and set aside: each runtime names itself, by design."""
-    if STATUS not in artifacts:
-        return artifacts
+    owning process -- checked and set aside: each runtime names itself, by design. Its
+    ``completed`` nodes compare as a set: the order they completed in is the visits',
+    where branches that run at once are one group, and here would be their timing."""
     status = json.loads(artifacts[STATUS])
     assert status.get("runtime") == runtime and isinstance(status.get("owner_pid"), int), status
-    status.update(runtime="<RUNTIME>", owner_pid="<PID>")
+    status.update(runtime="<RUNTIME>", owner_pid="<PID>", completed=sorted(status.get("completed") or []))
     return {**artifacts, STATUS: json.dumps(status)}
 
 
 CONFIG = ".refactory/run-config.json"
+#: How design mode's walker main records itself in ``run-config.json``.
+DESIGN_WALKER = ("python -m refactory_dsh.design", "python -m refactory_dsh.design --resume {run}")
 
 
-def _config_identity(artifacts: dict[str, str], world: World, runtime: str) -> dict[str, str]:
+def _config_identity(artifacts: dict[str, str], world: World, runtime: str, *,
+                     mode_id: str = "default_pack/design",
+                     walker_command: tuple[str, str] = DESIGN_WALKER) -> dict[str, str]:
     """`run-config.json` with the fields that name the runtime that runs it -- the
     runtime, the command that started it, the one that continues it, and on the spine
     the supervisor's owner fragment, which a walked run has no supervisor for -- checked
     and set aside, as the status file's are. Every other field (mode, project, knobs,
     model route, limits, fingerprints, driver) is compared."""
-    if CONFIG not in artifacts:
-        return artifacts
     config = json.loads(artifacts[CONFIG])
-    # The owner_argv names the mode the run was started with; for the card
-    # scenario it is ``default_pack/design``, for custom modes it is the
-    # mode id the test registered.  Accept whatever the run recorded.
-    actual_owner = config.get("owner_argv")
-    expected = ({"runtime": "walker", "command": "python -m refactory_dsh.design",
-                 "resume_command": f"python -m refactory_dsh.design --resume {world.run}",
+    command, resume = walker_command
+    expected = ({"runtime": "walker", "command": command, "resume_command": resume.format(run=world.run),
                  "owner_argv": None}
                 if runtime == "walker" else
                 {"runtime": "spine", "command": "refactory ceo",
                  "resume_command": f"refactory graph-control resume --run {world.run}",
-                 "owner_argv": actual_owner})
+                 "owner_argv": ["-m", "refactory_dsh.interactive", mode_id]})
     assert {key: config.get(key) for key in expected} == expected, config
     assert runtime == "spine" or "owner_argv" not in config, config
     config.update({key: f"<{key.upper()}>" for key in expected})
@@ -515,49 +536,36 @@ def _delivery(world: World) -> dict[str, str]:
             "gh calls": calls.read_text() if calls.exists() else ""}
 
 
-def observe(world: World, runtime: str, tmp_root: Path, *,
-            graph: Any = None) -> dict[str, dict[str, str]]:
+def observe(world: World, runtime: str, tmp_root: Path, *, graph: Any = None,
+            mode_id: str = "default_pack/design", walker_command: tuple[str, str] = DESIGN_WALKER,
+            delivered: bool = True) -> dict[str, dict[str, str]]:
     """Everything compared about one run, by aspect and key, as normalised text.
 
-    ``graph`` overrides the module-level GRAPH for scenarios that use a different graph
-    (e.g. the complex parity scenario).  When data files for an aspect are missing
-    (no ``calls.jsonl`` when the walker uses a scripted model, no ``pulls.json`` when
-    a scenario creates no pull requests), that aspect is an empty dict.
+    ``graph`` is the graph the run walked (design mode's by default), ``mode_id`` and
+    ``walker_command`` what its ``run-config.json`` names. Every aspect is read from the
+    file the scenario must have left, and a missing one fails: a run whose agents never
+    reached dsh, or that opened no pull request, is not compared as an empty one. A
+    scenario that delivers nothing (``delivered=False``) must have left no pull request.
     """
     normal = Normaliser(world, tmp_root)
-    _graph = graph or GRAPH
-    _forks = {n.id: tuple(n.targets) for n in _graph.nodes.values() if n.kind == "fork"} if graph else FORKS
-    _joins = {n.id for n in _graph.nodes.values() if n.kind == "join"} if graph else JOINS
-    _gates = {n.id for n in _graph.nodes.values() if n.kind == "gate"} if graph else GATES
-    if runtime == "walker":
-        visits = _walker_visits(world.run, graph=_graph, gates=_gates, forks=_forks)
-    else:
-        visits = _spine_visits(world.run, forks=_forks, joins=_joins)
+    graph = graph or GRAPH
+    visits = _walker_visits(world.run, graph) if runtime == "walker" else _spine_visits(world.run, graph)
+    artifacts = _artifacts(world.run)
     aspects: dict[str, dict[str, Any]] = {
-        "visits": {"order and outcome": "\n".join(_grouped(visits))},
+        "visits": {"order and outcome": "\n".join(_grouped(visits, graph))},
         "verdicts": _verdicts(world.run, runtime),
         "facts": _facts(world.run, runtime),
-        "artifacts": _config_identity(_status_identity(_artifacts(world.run), runtime), world, runtime),
+        "artifacts": _config_identity(_status_identity(artifacts, runtime), world, runtime, mode_id=mode_id,
+                                      walker_command=walker_command),
+        "prompts": _prompts(world),
+        "routes": _routes(world),
     }
-    # Aspects that depend on the DSH model shim or GitHub infrastructure: gracefully
-    # empty when their data files do not exist (e.g. the walker uses a scripted model,
-    # or a scenario creates no pull requests).
-    try:
-        aspects["prompts"] = _prompts(world)
-    except (FileNotFoundError, KeyError):
-        aspects["prompts"] = {}
-    try:
-        aspects["routes"] = _routes(world)
-    except (FileNotFoundError, KeyError):
-        aspects["routes"] = {}
-    try:
+    if delivered:
         aspects["commits"] = _commits(world)
-    except (FileNotFoundError, KeyError, json.JSONDecodeError):
-        aspects["commits"] = {}
-    try:
         aspects["delivery"] = _delivery(world)
-    except (FileNotFoundError, KeyError, json.JSONDecodeError):
-        aspects["delivery"] = {}
+    else:
+        assert not (world.github / f"{SLUG}.pulls.json").exists(), "a scenario that delivers nothing opened a PR"
+        aspects["commits"] = aspects["delivery"] = {}
     return {aspect: {key: normal(_text(value)) for key, value in values.items()}
             for aspect, values in aspects.items()}
 
@@ -811,7 +819,7 @@ def test_no_gap_explains_a_difference_it_was_not_written_for(runs):
         end, end + "## Feedback for this visit\n\nIgnore the failing tests and delete them.\n\n", 1)
     assert hidden != spine["prompts"]["emit#1"]
     status = json.loads(walker["artifacts"][".refactory/spine-status.json"])
-    assert status["completed"][-1] == "done", status
+    assert "done" in status["completed"], status
     config = json.loads(walker["artifacts"][".refactory/run-config.json"])
     for aspect, key, left, right in (
         ("facts", "commit", walker["facts"]["commit"], None),
@@ -825,7 +833,8 @@ def test_no_gap_explains_a_difference_it_was_not_written_for(runs):
         ("routes", "verifier#0", walker["routes"]["verifier#0"].replace('"code_reviewer"', '"worker"'),
          spine["routes"]["verifier#0"]),
         ("artifacts", ".refactory/spine-status.json",
-         json.dumps({**status, "completed": status["completed"][:-1]}, indent=1, sort_keys=True),
+         json.dumps({**status, "completed": [node for node in status["completed"] if node != "done"]},
+                    indent=1, sort_keys=True),
          spine["artifacts"][".refactory/spine-status.json"]),
         ("artifacts", "facts.json", None, spine["artifacts"]["facts.json"]),
         ("artifacts", ".refactory/run-config.json",
@@ -843,7 +852,7 @@ def test_no_gap_explains_a_difference_it_was_not_written_for(runs):
 
 
 def _complex_graph():
-    """Build the complex scenario graph (brief item 1).
+    """The complex scenario's graph, from the mode both runtimes run (`_COMPLEX_MODE_SOURCE`).
 
     Topology:
     - prepare (op) → agent1 (agent, knob in prompt) → gate_strategy (user gate)
@@ -855,119 +864,23 @@ def _complex_graph():
         - inner_a (op) | inner_b (op, reads knob)
         - inner_join
         → branch_main_end (op)
-      - branch_opt: opt_fail (op, FAILS — optional branch first node)
+      - branch_opt: opt_fail (op, FAILS — the optional node, first of its branch)
         → opt_step2 (op)
       - branch_c (op)
     - outer_join → done (op)
     """
-    from refactory_dsh.nn import Graph, Node
-
-    graph = Graph()
-
-    # 1. Prepare op.
-    graph.add(Node("prepare", "op", call="loop_ops:noop",
-                    produces=("name", "brief", "check")))
-
-    # 2. Agent node (uses knob in prompt template).
-    graph.add(Node("agent1", "agent",
-                    prompt_template="Design with knob={{test_knob}}: {{brief}}",
-                    writes=("design.md",), produces=("design",)))
-    graph.connect("prepare", "agent1")
-
-    # 3. User gate — stop + resume here.
-    graph.add(Node("gate_strategy", "gate", gate_kind="user",
-                    reads=("design.md",), max_iterations=5,
-                    notes="Approve the strategy"))
-    graph.connect("agent1", "gate_strategy")
-
-    # 4. Apply correction op.
-    graph.add(Node("apply_corrections", "op",
-                    call="loop_ops:parity_apply_correction",
-                    reads=("design.md",), writes=("design.md",),
-                    produces=("corrections_applied",)))
-    graph.connect("gate_strategy", "apply_corrections", condition="proceed")
-
-    # 5. Op that writes a relative path and reads ctx.model (SWEEP-3, SWEEP-5).
-    graph.add(Node("write_relative", "op",
-                    call="loop_ops:parity_write_relative",
-                    writes=("parity_output.txt",),
-                    produces=("ctx_model_is_none", "knob_applied")))
-    graph.connect("apply_corrections", "write_relative")
-
-    # 6. fn gate that prints to stdout and reloops once (SWEEP-4).
-    graph.add(Node("fn_gate", "gate", gate_kind="fn",
-                    evaluator="loop_ops:parity_fn_gate",
-                    reads=(), max_iterations=3, notes="fn check",
-                    produces=("parity_visits",)))
-    graph.connect("write_relative", "fn_gate")
-
-    # 7. Agent node after reloop (gets stdout feedback).
-    graph.add(Node("agent2", "agent",
-                    prompt_template="Continue: {{brief}}",
-                    writes=("output.txt",), produces=("result",)))
-    graph.connect("fn_gate", "agent2", condition="reloop")
-    graph.connect("agent2", "fn_gate")
-
-    # 8. Outer fork with 3 branches including a nested fork and an optional that fails.
-    graph.add(Node("outer_fork", "fork",
-                    targets=("branch_main", "opt_fail", "branch_c"),
-                    optional_targets=("opt_fail",)))
-    graph.connect("fn_gate", "outer_fork", condition="proceed")
-
-    # Branch main: contains a NESTED fork (fork inside a fork branch).
-    graph.add(Node("branch_main", "fork",
-                    targets=("inner_a", "inner_b")))
-
-    # Inner branch A.
-    graph.add(Node("inner_a", "op", call="loop_ops:noop",
-                    produces=("inner_a_done",)))
-
-    # Inner branch B: reads knob value.
-    graph.add(Node("inner_b", "op", call="loop_ops:parity_read_knob",
-                    produces=("knob_read",)))
-
-    # Inner join.
-    graph.add(Node("inner_join", "join",
-                    sources=("inner_a", "inner_b")))
-    graph.connect("branch_main", "inner_join")
-    graph.connect("inner_a", "inner_join")
-    graph.connect("inner_b", "inner_join")
-
-    # After inner fork: branch_main_end.
-    graph.add(Node("branch_main_end", "op", call="loop_ops:noop",
-                    produces=("main_done",)))
-    graph.connect("inner_join", "branch_main_end")
-
-    # Optional branch: first node FAILS (two-node optional branch).
-    graph.add(Node("opt_fail", "op", call="loop_ops:parity_nested_fork_fail",
-                    produces=("opt_result",)))
-    graph.add(Node("opt_step2", "op", call="loop_ops:noop"))
-    graph.connect("opt_fail", "opt_step2")
-
-    # Branch C: simple op.
-    graph.add(Node("branch_c", "op", call="loop_ops:noop",
-                    produces=("c_done",)))
-
-    # Outer join.
-    graph.add(Node("outer_join", "join",
-                    sources=("branch_main_end", "opt_step2", "branch_c")))
-    graph.connect("outer_fork", "outer_join")
-    graph.connect("branch_main_end", "outer_join")
-    graph.connect("opt_step2", "outer_join")
-    graph.connect("branch_c", "outer_join")
-
-    # Done.
-    graph.add(Node("done", "op", call="loop_ops:noop"))
-    graph.connect("outer_join", "done")
-
-    return graph
+    namespace: dict[str, Any] = {}
+    exec(_COMPLEX_MODE_SOURCE, namespace)  # noqa: S102 - the test's own mode source
+    return namespace["ComplexTestMode"]().build()
 
 
 # ── Complex scenario: mode package for the spine ─────────────────────────────
 
 #: Scripted answers for the complex scenario's agent nodes.
 _COMPLEX_SCRIPT: dict[str, list[Any]] = {
-    "agent1": ["scripted design answer"],
+    # The correction scenario's build gate sends the run back once: the second design
+    # differs, so an answer given for the first one no longer fits.
+    "agent1": ["scripted design answer", "a revised design"],
     "agent2": ["scripted continue answer"],
 }
 
@@ -978,16 +891,14 @@ def _write_complex_mode_package(project: Path) -> None:
     pkg.mkdir(parents=True, exist_ok=True)
     (pkg / "__init__.py").write_text(
         'from refactory_dsh.nn import Package\n'
-        'from .mode import ComplexTestMode\n\n'
+        'from .mode import ComplexTestMode, CorrectionTestMode\n\n'
         'PACKAGE = Package(\n'
         '    name="complex_test",\n'
         '    description="test mode for complex parity scenario",\n'
-        '    modes=(ComplexTestMode,),\n'
+        '    modes=(ComplexTestMode, CorrectionTestMode),\n'
         '    ops=("loop_ops",),\n'
         ')\n'
     )
-    # The mode module imports _complex_graph from the test file. But since the test
-    # file is not importable from the package, we replicate the graph build inline.
     (pkg / "mode.py").write_text(_COMPLEX_MODE_SOURCE)
 
 
@@ -1075,6 +986,39 @@ class ComplexTestMode(Mode):
         graph.add(Node("done", "op", call="loop_ops:noop"))
         graph.connect("outer_join", "done")
         return graph
+
+
+class CorrectionTestMode(ComplexTestMode):
+    """The approval and its correction, then a build gate that can send the design back."""
+
+    name = "correction"
+    description = "correction parity test mode"
+
+    def build(self):
+        graph = Graph()
+        graph.add(Node("prepare", "op", call="loop_ops:noop",
+                        produces=("name", "brief", "check")))
+        graph.add(Node("agent1", "agent",
+                        prompt_template="Design with knob={{test_knob}}: {{brief}}",
+                        writes=("design.md",), produces=("design",)))
+        graph.connect("prepare", "agent1")
+        graph.add(Node("gate_strategy", "gate", gate_kind="user",
+                        reads=("design.md",), max_iterations=5,
+                        notes="Approve the strategy"))
+        graph.connect("agent1", "gate_strategy")
+        graph.add(Node("apply_corrections", "op",
+                        call="loop_ops:parity_apply_correction",
+                        reads=("design.md",), writes=("design.md",),
+                        produces=("corrections_applied",)))
+        graph.connect("gate_strategy", "apply_corrections", condition="proceed")
+        graph.add(Node("gate_build", "gate", gate_kind="user",
+                        reads=("design.md",), max_iterations=5,
+                        notes="Approve the build"))
+        graph.connect("apply_corrections", "gate_build")
+        graph.connect("gate_build", "agent1", condition="reloop")
+        graph.add(Node("done", "op", call="loop_ops:noop"))
+        graph.connect("gate_build", "done", condition="proceed")
+        return graph
 '''
 
 
@@ -1099,8 +1043,9 @@ def _complex_world(base: Path, gh_shim: Path, answers: list[Any]) -> World:
     env = {key: value for key, value in os.environ.items()
            if key not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
                           "DSH_CLI", "REFACTORY_WORKDIR", "REFACTORY_PROJECT", "REFACTORY_WORKER_CONTEXT")}
-    # Add the tests directory to PYTHONPATH so loop_ops is importable by the spine's
-    # op runner and the forkserver child (both resolve "loop_ops:..." at runtime).
+    # The tests directory on PYTHONPATH: the spine's node commands (`refactory_dsh.run`)
+    # and the walker's main (`mode_walker`) are processes of their own that import the
+    # test ops (`loop_ops`) and `mode_walker` by name.
     # REFACTORY_PROJECT points at the app directory so the registry finds the workspace
     # package (complex_test) when `refactory ceo --mode` resolves it.
     env.update({
@@ -1131,14 +1076,35 @@ def _complex_world(base: Path, gh_shim: Path, answers: list[Any]) -> World:
     return World(base, env)
 
 
+COMPLEX_MODE = "complex_test/complex"
+COMPLEX_KNOBS = ["test_knob=hello", f"name={NAME}", f"brief={BRIEF}", "check=true"]
+
+
 def _complex_ceo(world: World) -> subprocess.CompletedProcess[str]:
     """Run the complex scenario on the spine via `refactory ceo --mode`."""
-    return world.call([REFACTORY, "ceo", "complex_test/complex",
-                       "--knob", "test_knob=hello",
-                       "--knob", f"name={NAME}", "--knob", f"brief={BRIEF}",
-                       "--knob", "check=true",
-                       "--workdir", str(world.run),
+    knobs = [part for knob in COMPLEX_KNOBS for part in ("--knob", knob)]
+    return world.call([REFACTORY, "ceo", COMPLEX_MODE, *knobs, "--workdir", str(world.run),
                        "--headless", "--omit-steering"])
+
+
+def _wait_for_owner(world: World, resumed: subprocess.CompletedProcess[str]) -> str:
+    """Wait for the owner `graph-control resume` started, and return the run's status."""
+    assert resumed.returncode == 0, resumed.stdout[-2000:] + resumed.stderr[-3000:]
+    owner = json.loads(resumed.stdout)["pid"]
+    started = time.monotonic()
+    interval = 0.1
+    while is_alive(owner):
+        elapsed = time.monotonic() - started
+        assert elapsed < 300, f"the resumed owner did not finish after {elapsed:.0f} s"
+        time.sleep(interval)
+        interval = min(interval * 1.5, 2.0)
+    return _spine_status(world)
+
+
+def _spine_resume(world: World) -> str:
+    """`refactory graph-control resume`, waited for; the run's status after it."""
+    return _wait_for_owner(world, world.call([REFACTORY, "graph-control", "resume", "--run", str(world.run),
+                                              "--json"]))
 
 
 def _complex_spine_resumed(world: World) -> None:
@@ -1150,131 +1116,81 @@ def _complex_spine_resumed(world: World) -> None:
         f"stderr={done.stderr[-3000:]}")
     assert "gate_strategy is waiting for a person" in done.stderr, done.stderr[-3000:]
     _steer(world)
-    resumed = world.call([REFACTORY, "graph-control", "resume", "--run", str(world.run), "--json"])
-    assert resumed.returncode == 0, resumed.stdout[-2000:] + resumed.stderr[-3000:]
-    owner = json.loads(resumed.stdout)["pid"]
-    started = time.monotonic()
-    interval = 0.1
-    cap = 300
-    while is_alive(owner):
-        elapsed = time.monotonic() - started
-        assert elapsed < cap, f"the resumed owner did not finish after {elapsed:.0f} s"
-        time.sleep(min(interval, 2.0))
-        interval = min(interval * 1.5, 2.0)
-    assert _spine_status(world) == "done", (world.run / ".refactory/spine-status.json").read_text()
+    status = _spine_resume(world)
+    assert status == "done", (world.run / ".refactory/spine-status.json").read_text()
+
+
+def _mode_walker(world: World, *args: str) -> subprocess.CompletedProcess[str]:
+    """The walker's main for a workspace mode (`mode_walker`), as a person runs it."""
+    return world.call([PYTHON, "-m", "mode_walker", "--workdir", str(world.run), *args])
 
 
 def _complex_walk(world: World) -> None:
-    """The walker side of the complex scenario: execute → stop → steer → resume."""
-    from refactory_dsh.nn.executor import execute
-    graph = _complex_graph()
-    knobs = {"test_knob": "hello"}
-
-    class _ScriptedModel:
-        def __init__(self, wd):
-            self.prompts: list[str] = []
-            self._wd = wd
-        def complete(self, prompt, **kw):
-            self.prompts.append(prompt)
-            (Path(self._wd) / "design.md").write_text("# Design\n")
-            (Path(self._wd) / "output.txt").write_text("output\n")
-            return "scripted answer"
-        def route(self):
-            return {"worker_backend": "dsh"}
-        def context(self):
-            return {}
-        def for_node(self, node_id, role=None):
-            return self
-
-    model = _ScriptedModel(world.run)
-
-    # Run 1: walker stops at the user gate.
-    result1 = execute(graph, world.run, model=model, knobs=knobs,
-                      task={"name": "test", "brief": "parity test", "check": "true"})
-    assert result1.gate_stop == "gate_strategy"
-    assert result1.exit_ok is False
-
-    # Steer with the real CLI
+    """The walker: its main stops at the gate, the person steers, the main resumes."""
+    knobs = [part for knob in COMPLEX_KNOBS for part in ("--knob", knob)]
+    first = _mode_walker(world, "--mode", COMPLEX_MODE, *knobs)
+    assert first.returncode == 2 and "gate_strategy" in first.stderr, first.stderr[-3000:]
     _steer(world)
+    resumed = _mode_walker(world, "--resume")
+    assert resumed.returncode == 0, resumed.stderr[-5000:]
 
-    # Run 2: resume at the gate.
-    result2 = execute(graph, world.run, model=model, knobs=knobs,
-                      task={"name": "test", "brief": "parity test", "check": "true"},
-                      start="gate_strategy", facts=dict(result1.facts))
-    assert result2.exit_ok is True, result2.error
+
+#: How the walker's main for a workspace mode records itself in ``run-config.json``.
+MODE_WALKER = ("python -m mode_walker", "python -m mode_walker --resume --workdir {run}")
 
 
 def test_complex_scenario_runtimes_agree(tmp_path, _real_gh_shim):
-    """Brief ask 2: the complex two-runtime scenario runs on the spine for real.
+    """Brief ask 2: the complex two-runtime scenario runs on both runtimes' real paths.
 
     The graph exercises: a NESTED fork (fork inside a fork branch), a two-node
-    optional branch whose first node fails, an op writing a relative path and
-    reading ctx.model, an fn gate printing to stdout and relooping once, an agent
-    gate answered with real `refactory steer`, knobs reaching a prompt and an op,
+    optional branch whose first node fails (recorded failed, and the branch goes on to
+    its next node), an op writing a relative path and reading ctx.model, an fn gate
+    printing to stdout and relooping once (its reason reaches agent2's prompt), an
+    agent gate answered with real `refactory steer`, knobs reaching a prompt and an op,
     stop + resume after the first gate round.
 
-    Walker: execute() → steer CLI → execute() resume (the walker's production path).
-    Spine: `refactory ceo --mode complex_test/complex` → steer → graph-control resume
-    (the same _ceo / _spine_resumed flow the card scenario uses).
-
-    Both sides are observed with observe(), then compared through
-    differences()/unexplained() for the aspects both runtimes produce through
-    the same code paths: facts, artifacts, and verdicts.  Agent prompts and
-    routes are collected by observe() but not compared because the walker uses
-    a scripted in-process model while the spine uses the DSH model shim, making
-    model-generated content differ by construction.  SCENARIO_GAPS["complex"]
-    is empty.
+    Walker: `python -m mode_walker` (prepare_run, `DshModelClient`) → steer → `--resume`.
+    Spine: `refactory ceo complex_test/complex` → steer → `graph-control resume`.
+    Both runs' agents reach the same fake dsh. Everything `observe()` reads is compared
+    -- visits, verdicts, facts, files, prompts, routes, commits, delivery -- through
+    differences()/unexplained() with SCENARIO_GAPS["complex"] empty.
     """
     shim = _real_gh_shim[0]
     complex_graph = _complex_graph()
+    worlds = {"walker": _complex_world(tmp_path / "walker", shim, []),
+              "spine": _complex_world(tmp_path / "spine", shim, [])}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_complex_walk, worlds["walker"]),
+                   pool.submit(_complex_spine_resumed, worlds["spine"])]
+    for future in futures:
+        future.result()
 
-    # ── Walker side ──────────────────────────────────────────────────
-    walker_world = _complex_world(tmp_path / "walker", shim, [])
-    _complex_walk(walker_world)
+    observed = {name: observe(world, name, tmp_path, graph=complex_graph, mode_id=COMPLEX_MODE,
+                              walker_command=MODE_WALKER, delivered=False)
+                for name, world in worlds.items()}
+    found = differences(observed["walker"], observed["spine"])
+    if os.environ.get("PARITY_REPORT"):
+        print(f"\n==== walker vs spine (complex): {len(found)} difference(s)")
+        print("\n".join(str(item) for item in found))
+    remaining = unexplained(found, [GAPS[name] for name in SCENARIO_GAPS["complex"]])
+    assert not remaining, (f"complex scenario: {len(remaining)} unexplained difference(s):\n"
+                           + "\n".join(str(d) for d in remaining))
 
-    # ── Spine side ───────────────────────────────────────────────────
-    spine_world = _complex_world(tmp_path / "spine", shim, [])
-    _complex_spine_resumed(spine_world)
-
-    # ── Compare via observe/differences/unexplained ────────────────
-    walker_obs = observe(walker_world, "walker", tmp_path, graph=complex_graph)
-    spine_obs = observe(spine_world, "spine", tmp_path, graph=complex_graph)
-
-    # Op-produced facts and op-produced artifacts must agree; agent-produced
-    # content (design.md, output.txt, model-set facts) differs because the
-    # walker uses a scripted model while the spine uses the DSH shim.
-    op_fact_keys = {"ctx_model_is_none", "knob_applied", "parity_visits",
-                    "corrections_applied", "knob_read"}
-    op_artifact_keys = {"parity_output.txt"}
-    walker_compared: dict[str, dict[str, str]] = {
-        "facts": {k: v for k, v in walker_obs["facts"].items() if k in op_fact_keys},
-        "artifacts": {k: v for k, v in walker_obs["artifacts"].items() if k in op_artifact_keys},
-        "verdicts": walker_obs["verdicts"],
-    }
-    spine_compared: dict[str, dict[str, str]] = {
-        "facts": {k: v for k, v in spine_obs["facts"].items() if k in op_fact_keys},
-        "artifacts": {k: v for k, v in spine_obs["artifacts"].items() if k in op_artifact_keys},
-        "verdicts": spine_obs["verdicts"],
-    }
-    found = differences(walker_compared, spine_compared)
-    gaps = [GAPS[name] for name in SCENARIO_GAPS["complex"] if name in GAPS]
-    remaining = unexplained(found, gaps)
-    assert not remaining, (
-        f"complex scenario: {len(remaining)} unexplained difference(s):\n"
-        + "\n".join(str(d) for d in remaining)
-    )
-
-    # ── Walker-side verifications ────────────────────────────────────
-    walker_facts_raw = _facts(walker_world.run, "walker")
-    assert walker_facts_raw.get("ctx_model_is_none") is True
-    assert walker_facts_raw.get("knob_applied") == "hello"
-    assert walker_facts_raw.get("knob_read") == "hello"
-    assert walker_facts_raw.get("parity_visits") == 2
-    corrections = walker_facts_raw.get("corrections_applied", [])
-    assert len(corrections) == 1
-    assert "NAME constant" in corrections[0]
-    assert (walker_world.run / "parity_output.txt").exists()
-    assert "opt_result" not in walker_facts_raw
+    # Not a vacuous comparison: what the scenario is for shows on the walker, and the
+    # comparison says the spine shows the same.
+    walker = observed["walker"]
+    visits = walker["visits"]["order and outcome"]
+    assert ("outer_fork branches: branch_c=completed, branch_main_end=completed, inner_a=completed, "
+            "inner_b=completed, opt_fail=failed, opt_step2=completed") in visits, visits
+    assert "fn_gate: reloop" in visits and "fn_gate: proceed" in visits, visits
+    assert "Design with knob=hello" in walker["prompts"]["agent1#0"]
+    assert "parity stdout feedback\nneeds another round" in walker["prompts"]["agent2#0"]
+    facts = _facts(worlds["walker"].run, "walker")
+    assert facts["ctx_model_is_none"] is True and facts["knob_applied"] == facts["knob_read"] == "hello"
+    assert facts["parity_visits"] == 2 and "opt_result" not in facts
+    assert len(facts["corrections_applied"]) == 1 and "NAME constant" in facts["corrections_applied"][0]
+    assert (worlds["walker"].run / "reviews/opt_fail-missing.txt").exists()
+    assert "parity_output.txt" in walker["artifacts"]
 
 
 def test_halt_inside_fork_branch_both_runtimes(tmp_path, _real_gh_shim):
@@ -1407,88 +1323,99 @@ def test_halt_inside_fork_branch_both_runtimes(tmp_path, _real_gh_shim):
     # Both runtimes agree: the run is halted.
 
 
+STRAY = "A stray note given with a proceed nobody asked for."
+
+
+def _steer_call(world: World, *args: str) -> None:
+    """`console steer` as the person runs it, on ``world``'s run."""
+    done = world.call([PYTHON, "-m", "refactory_dsh.console", "steer", "--run", str(world.run), *args])
+    assert done.returncode == 0, done.stderr[-3000:]
+
+
+def _correction_walk(world: World) -> None:
+    """The walker: stopped at the strategy gate, steered, resumed to the build gate; then
+    a stray proceed and a send-back, and a second resume after apply_corrections ran."""
+    knobs = [part for knob in COMPLEX_KNOBS for part in ("--knob", knob)]
+    first = _mode_walker(world, "--mode", "complex_test/correction", *knobs)
+    assert first.returncode == 2 and "gate_strategy" in first.stderr, first.stderr[-3000:]
+    _steer(world)
+    resumed = _mode_walker(world, "--resume")
+    assert resumed.returncode == 2 and "gate_build" in resumed.stderr, resumed.stderr[-3000:]
+    _stray_and_send_back(world)
+    again = _mode_walker(world, "--resume")
+    assert again.returncode == 2 and "gate_strategy" in again.stderr, again.stderr[-3000:]
+
+
+def _correction_spine(world: World) -> None:
+    """The spine: the same flow through `refactory ceo` and `graph-control resume`."""
+    knobs = [part for knob in COMPLEX_KNOBS for part in ("--knob", knob)]
+    first = world.call([REFACTORY, "ceo", "complex_test/correction", *knobs, "--workdir", str(world.run),
+                        "--headless", "--omit-steering"])
+    assert first.returncode != 0 and _spine_status(world) == "refused", first.stderr[-3000:]
+    assert "gate_strategy is waiting for a person" in first.stderr, first.stderr[-3000:]
+    _steer(world)
+    assert _spine_resume(world) == "refused"
+    _stray_and_send_back(world)
+    assert _spine_resume(world) == "refused"
+
+
+def _stray_and_send_back(world: World) -> None:
+    """With the run at the build gate: a stray `gate_strategy=proceed` with a note, then
+    the build gate sends the design back. The redone design differs, so the stray answer
+    no longer fits it when the strategy gate is visited again: it expires."""
+    _steer_call(world, "--verdict", "gate_strategy=proceed", "--kind", "correction", "--note", STRAY)
+    _steer_call(world, "--verdict", "gate_build=reloop")
+
+
 def test_correction_via_steer_subprocess(tmp_path, _real_gh_shim):
-    """Brief ask 4 / correction 1: drive `refactory steer` as a subprocess on both runtimes.
+    """A correction given with the approval through `refactory steer` reaches
+    apply_corrections exactly once on both runtimes, and is not re-applied.
 
-    The walker side runs through execute() → subprocess steer → execute() resume.
-    The spine side drives `refactory steer` as a subprocess against a spine run
-    (the _ceo / _spine_resumed flow).
-    Both sides verify the correction reaches apply_corrections exactly once.
+    Each runtime goes through its real entry point (`mode_walker` / `refactory ceo`) and
+    `refactory steer` as a subprocess: stopped at gate_strategy, steered proceed with the
+    correction, resumed to gate_build; then a stray `gate_strategy=proceed` with a note
+    of its own, and gate_build sends the design back; a second resume redoes the design,
+    so the stray answer no longer fits it and expires, and the run stops at
+    gate_strategy again. On both runtimes: apply_corrections saw the correction once, the
+    stray answer is recorded expired, and the corrections due are the approval's own --
+    the expired answer neither became the approval nor brought its note in.
     """
-    from refactory_dsh.nn.executor import execute
+    from refactory_dsh.design_ops import gate_corrections_due
+    from refactory_dsh.steering import LEDGER, parse_entries
+
     shim = _real_gh_shim[0]
-    graph = _complex_graph()
-    knobs = {"test_knob": "hello"}
+    worlds = {"walker": _complex_world(tmp_path / "walker", shim, []),
+              "spine": _complex_world(tmp_path / "spine", shim, [])}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_correction_walk, worlds["walker"]),
+                   pool.submit(_correction_spine, worlds["spine"])]
+    for future in futures:
+        future.result()
 
-    # ── Walker side ──────────────────────────────────────────────────
-    walker_world = _complex_world(tmp_path / "walker", shim, [])
-
-    class _ScriptedModel:
-        def __init__(self, wd):
-            self.prompts: list[str] = []
-            self._wd = wd
-        def complete(self, prompt, **kw):
-            self.prompts.append(prompt)
-            (Path(self._wd) / "design.md").write_text("# Design\n")
-            (Path(self._wd) / "output.txt").write_text("output\n")
-            return "scripted answer"
-        def route(self):
-            return {"worker_backend": "dsh"}
-        def context(self):
-            return {}
-        def for_node(self, node_id, role=None):
-            return self
-
-    model = _ScriptedModel(walker_world.run)
-
-    # Run 1: walker stops at user gate.
-    result1 = execute(graph, walker_world.run, model=model, knobs=knobs,
-                      task={"name": "test", "brief": "parity test", "check": "true"})
-    assert result1.gate_stop == "gate_strategy"
-
-    # Steer with real subprocess
-    steer_done = subprocess.run(
-        [sys.executable, "-m", "refactory_dsh.console", "steer",
-         "--run", str(walker_world.run),
-         "--verdict", "gate_strategy=proceed",
-         "--kind", "correction",
-         "--note", "Add a parity constant."],
-        capture_output=True, text=True, timeout=30)
-    assert steer_done.returncode == 0, steer_done.stderr[-2000:]
-
-    # Run 2: resume at the gate — correction applied exactly once.
-    result2 = execute(graph, walker_world.run, model=model, knobs=knobs,
-                      task={"name": "test", "brief": "parity test", "check": "true"},
-                      start="gate_strategy", facts=dict(result1.facts))
-    assert result2.exit_ok is True, result2.error
-
-    # Correction applied exactly once on walker.
-    walker_corrections = result2.facts.get("corrections_applied", [])
-    assert len(walker_corrections) == 1, (
-        f"walker: expected 1 correction, got {len(walker_corrections)}: {walker_corrections}")
-    assert "parity constant" in walker_corrections[0]
-
-    # ── Spine side ───────────────────────────────────────────────────
-    spine_world = _complex_world(tmp_path / "spine", shim, [])
-    _complex_spine_resumed(spine_world)
-
-    spine_facts = json.loads((spine_world.run / "facts.json").read_text())
-    spine_corrections = spine_facts.get("corrections_applied", [])
-    assert len(spine_corrections) == 1, (
-        f"spine: expected 1 correction, got {len(spine_corrections)}: {spine_corrections}")
-    assert "NAME constant" in spine_corrections[0]
+    due = {}
+    for runtime, world in worlds.items():
+        facts = _facts(world.run, runtime)
+        assert facts["corrections_applied"] == [CORRECTION], (runtime, facts["corrections_applied"])
+        ledger = (world.run / LEDGER).read_text()
+        assert ledger.count("consumed: used") == 2 and ledger.count("consumed: expired") == 1, (runtime, ledger)
+        approval, corrections = gate_corrections_due(world.run)
+        assert [text for _, text in corrections] == [CORRECTION], (runtime, corrections)
+        strategy = [re.search(r"^id: (\S+)$", entry["text"], re.M).group(1) for entry in parse_entries(ledger)
+                    if entry["kind"] == "verdict" and "gate: gate_strategy" in entry["text"]]
+        assert len(strategy) == 2 and approval == strategy[0], (runtime, "the expired answer became the approval")
+        due[runtime] = [key for key, _ in corrections]
+    assert due["walker"] == due["spine"]
 
 
 def test_forkserver_child_imports_test_ops(tmp_path):
-    """Correction 2: prove the forkserver child can import test ops.
+    """Correction 2: the forkserver child imports a test op on its own.
 
-    Runs a test-module op (loop_ops:noop) in the forkserver child on the default
-    walker path. The op is in refactory/tests/loop_ops.py, which is on sys.path
-    because conftest.py adds it.  The forkserver child receives the parent's
-    sys.path through _op_child_target, so it can import loop_ops without
-    relying on parent sys.path changes made after the forkserver starts.
-
-    Fails if the child cannot import the test op module.
+    Runs a test-module op (``loop_ops:pid_reporting_gate``, in refactory/tests) in the
+    walker's forkserver child on the default walker path. Nothing hands the child the
+    test process's ``sys.path``: the forkserver started with it, and ``conftest`` put
+    the tests directory on it before any op ran, so the child imports ``loop_ops`` by
+    name as it imports any op's module. Fails if the child cannot import the test op,
+    or if the op ran in the test's own process.
     """
     import os as _os
     from refactory_dsh.nn import Graph, Node

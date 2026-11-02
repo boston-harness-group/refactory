@@ -1807,8 +1807,8 @@ export function apply(ctx: Context, config: Config): void {
         // A halt inside a fork branch removes the cursor for peers that also
         // completed: skip them so assertDue does not throw.
         if (spine.isHalted()) continue
-        if (outcome.verdict === undefined) spine.complete(node.id)
-        else spine.verdict(node.id, outcome.verdict, outcome.reason ?? '')
+        if (outcome.verdict !== undefined) spine.verdict(node.id, outcome.verdict, outcome.reason ?? '')
+        else spine.complete(node.id, outcome.missing === true ? { failed: true } : {})
       }
       recordBoundary()
       // Every peer's warnings, not only a named node's: a warning is about the

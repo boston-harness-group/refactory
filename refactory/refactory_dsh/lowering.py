@@ -310,6 +310,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                     continue
                 seen.add(current)
                 pending.extend(e.target for e in graph.out_edges(current))
+                # A nested fork's branches belong to this branch too (nn/fork.py).
+                if graph.nodes[current].kind == "fork":
+                    pending.extend(graph.nodes[current].targets)
             _branch_lists.append([graph.nodes[n] for n in sorted(seen)])
         _branch_facts = [{name for n in branch for name in n.produces} for branch in _branch_lists]
         _branch_consumed = [{match for n in branch for match in _re.findall(

@@ -9,9 +9,12 @@ like any other, so the same outer loop can be pointed at it.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
+
+import child_patches
 
 from refactory_dsh import nn, optim, registry
 from refactory_dsh.loop import Loop, LoopConfig, LoopError
@@ -124,19 +127,27 @@ def test_it_writes_the_run_the_loop_would_have_written(tmp_path):
     assert report["best_score"] > 0
 
 
-def test_the_graph_closes_each_epoch_with_that_epochs_counts(tmp_path):
-    """The scheduler step counts satisfy proposed == accepted + refused > 0 across epochs."""
+#: Where `recording_scheduler` writes the counts each epoch was closed with.
+SCHEDULED = "LOOP_AS_MODE_SCHEDULED"
+
+
+def recording_scheduler(self, **counts):  # type: ignore[no-untyped-def]
+    """`Loop.scheduler`, each call's counts recorded first: it runs in the op child."""
+    with Path(os.environ[SCHEDULED]).open("a") as handle:
+        handle.write(json.dumps(counts) + "\n")
+    return child_patches.real(Loop, "scheduler")(self, **counts)
+
+
+def test_the_graph_closes_each_epoch_with_that_epochs_counts(tmp_path, monkeypatch):
+    """The scheduler step is handed the optimizer step's own counts, as the loop is."""
+    monkeypatch.setenv(SCHEDULED, str(tmp_path / "scheduled.jsonl"))
+    child_patches.for_test(monkeypatch).setattr(Loop, "scheduler", recording_scheduler)
     _package, result = _run(tmp_path / "graph")
     assert result.exit_ok, result.error
-    # Verify the scheduler ran for both epochs by checking scheduler.json.
-    sched = json.loads((tmp_path / "graph" / "scheduler.json").read_text())
-    assert sched["epoch"] == 2, "both epochs completed"
-    # Verify the counts relation holds on the run's totals (each epoch contributes
-    # positively, so the invariant at the total level implies it per epoch).
-    proposed = int(result.facts["proposed"])
-    accepted = int(result.facts["accepted"])
-    refused = int(result.facts["refused"])
-    assert proposed == accepted + refused > 0, (proposed, accepted, refused)
+    seen = [json.loads(line) for line in (tmp_path / "scheduled.jsonl").read_text().splitlines()]
+    assert len(seen) == 2
+    for counts in seen:
+        assert counts["proposed"] == counts["accepted"] + counts["refused"] > 0, counts
 
 
 def test_the_run_reports_what_bounded_it(tmp_path):

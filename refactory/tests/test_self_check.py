@@ -14,11 +14,14 @@ import io
 import json
 import shlex
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import child_patches
+import self_check_fakes
 from refactory_dsh import design_ops, failfast, lowering, repo_change, test_selection, worktree
 from refactory_dsh.check_digest import build_probe_command
 from refactory_dsh.design import DesignMode
@@ -160,6 +163,16 @@ def _facts(run: Path) -> dict:
     return json.loads((run / "facts.json").read_text())
 
 
+class _Fails(set):
+    """The failing ids, written through to the fakes' state as a test adds one."""
+
+    def add(self, test_id: str) -> None:
+        super().add(test_id)
+        state = self_check_fakes.load()
+        state["fails"] = sorted(self)
+        self_check_fakes.save(state)
+
+
 class _Chunks:
     """The self-check's chunks (`repo_change.run_check` with ``prepared``), answered at once as
     pytest and the sandbox would answer them, on a clock of their own (``failfast.time``).
@@ -170,54 +183,40 @@ class _Chunks:
     file it names, and passes the rest. With ``emissions``, ``fails`` follows the emission
     under test instead: the n-th commit the self-check runs on fails ``emissions[n]``. The
     whole check and the base's runs still run for real.
+    The answers are `self_check_fakes`, installed in the test's process and in the op
+    child the walker runs the self-check in (`child_patches`), over one state file that
+    ``fails``, ``slow`` and ``now`` read and write. In the test's own process a chunk is
+    answered by this object, so a subclass can answer differently there.
     `test_a_self_check_that_says_nothing_goes_on_with_no_fixup` stops a real chunk at a real
     limit; the tests of pytest's own output (junit seconds, a not-found id, a module that
     does not import, a parametrized id) run real chunks.
     """
 
     def __init__(self, monkeypatch, *, fails=(), slow=(), emissions=None):
-        self.fails, self.slow, self.now = set(fails), set(slow), 0.0
-        self.commits: list[str] = []
-        monkeypatch.setattr(failfast, "time", SimpleNamespace(monotonic=lambda: self.now))
-        real = repo_change.run_check
+        state = Path(tempfile.mkdtemp(prefix="chunks-")) / "chunks.json"
+        monkeypatch.setenv(self_check_fakes.STATE_ENV, str(state))
+        self_check_fakes.save({"fails": sorted(fails), "slow": sorted(slow), "now": 0.0, "commits": [],
+                               "emissions": None if emissions is None else [sorted(e) for e in emissions]})
+        monkeypatch.setattr(self_check_fakes, "INSTANCE", self)
+        patches = child_patches.for_test(monkeypatch)
+        patches.setattr(failfast, "time", self_check_fakes)
+        patches.setattr(repo_change, "run_check", self_check_fakes.run_check)
 
-        def run_check(ctx, command, timeout, **kwargs):
-            if not kwargs.get("prepared"):
-                return real(ctx, command, timeout, **kwargs)
-            commit = str(ctx.facts.get("commit"))
-            if commit not in self.commits:
-                self.commits.append(commit)
-                if emissions is not None:
-                    self.fails = set(emissions[len(self.commits) - 1])
-            return self(command, timeout)
+    def _get(self, name):
+        return self_check_fakes.load()[name]
 
-        monkeypatch.setattr(repo_change, "run_check", run_check)
+    def _set(self, name, value):
+        state = self_check_fakes.load()
+        state[name] = value
+        self_check_fakes.save(state)
+
+    fails = property(lambda self: _Fails(self._get("fails")),
+                     lambda self, value: self._set("fails", sorted(value)))
+    slow = property(lambda self: set(self._get("slow")), lambda self, value: self._set("slow", sorted(value)))
+    now = property(lambda self: float(self._get("now")), lambda self, value: self._set("now", float(value)))
 
     def __call__(self, command: str, timeout: float):
-        from refactory_dsh.sandbox import SandboxResult
-
-        named = [word for word in shlex.split(command) if word.endswith(".py") or ".py::" in word]
-        # Full command (no individual .py files named): all failures apply.
-        if not named:
-            failed = sorted(self.fails)
-            if failed:
-                return SandboxResult(ok=False, returncode=1, elapsed_s=0.1, stdout="".join(
-                    f"FAILED {test_id} - AssertionError\n" for test_id in failed)
-                    + f"{len(failed)} failed in 0.10s")
-            return SandboxResult(ok=True, returncode=0, stdout="all passed in 0.10s",
-                                 elapsed_s=0.1)
-        if any(name.split("::")[0] in self.slow for name in named):
-            self.now += timeout
-            return SandboxResult(ok=False, returncode=124, timed_out=True, timeout_s=int(timeout),
-                                 elapsed_s=timeout, stderr=f"timed out after {int(timeout)}s")
-        failed = sorted(test_id for test_id in self.fails
-                        if test_id in named or test_id.split("::")[0] in named)
-        if failed:
-            return SandboxResult(ok=False, returncode=1, elapsed_s=0.1, stdout="".join(
-                f"FAILED {test_id} - AssertionError\n" for test_id in failed)
-                + f"{len(failed)} failed in 0.10s")
-        return SandboxResult(ok=True, returncode=0, stdout=f"{len(named)} passed in 0.10s",
-                             elapsed_s=0.1)
+        return self_check_fakes.answer(command, timeout)
 
 
 def _unwatched(monkeypatch) -> None:
@@ -651,8 +650,12 @@ def test_an_amendment_that_died_before_its_record_is_dropped(tmp_path):
 
 def test_design_fast_and_the_sequential_check_keep_the_dm128_prepass(tmp_path, monkeypatch):
     """design_fast's focused_check and check_artifact pass no selection, so they run the
-    last check's failures only, from round 2, as before; neither writes a self-check."""
+    last check's failures only, from round 2, as before; neither writes a self-check. The
+    spy on the prepass is `self_check_fakes.record_prepass`, which reaches the op child the
+    walker runs focused_check in (`child_patches`)."""
     monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+    monkeypatch.setenv(self_check_fakes.STATE_ENV, str(tmp_path / "spy.json"))
+    child_patches.for_test(monkeypatch).setattr(failfast, "targeted_prepass", self_check_fakes.record_prepass)
     plan = "Change only the requested file and review the required check result."
     qa = json.dumps({"status": "pass", "checks": [{"name": "behaviour", "command": "inspection",
                                                    "status": "pass", "evidence": "it holds"}],
@@ -664,20 +667,22 @@ def test_design_fast_and_the_sequential_check_keep_the_dm128_prepass(tmp_path, m
     state["knobs"]["repair_attempts"]["value"] = 2
     fast.load_state_dict(state)
     assert "self_check_fixups" not in state["knobs"] and "self_check_timeout_s" not in state["knobs"]
-    result = fast.run(tmp_path / "fast", model=FakeModel([plan, bad, good, qa, VERIFICATION_ANSWER]),
-                      task={"name": "fast_tool", "brief": "assert true", "check": f"{sys.executable} answer.py"})
-    assert result.exit_ok, result.error
-    # The dm-128 prepass ran (check-record.json exists) but no self-check record was written.
-    assert (tmp_path / "fast" / "check-record.json").exists(), "the check ran"
+    fast.run(tmp_path / "fast", model=FakeModel([plan, bad, good, qa, VERIFICATION_ANSWER]),
+             task={"name": "fast_tool", "brief": "assert true", "check": f"{sys.executable} answer.py"})
+    calls = self_check_fakes.prepass_calls()
+    assert calls and all("selection" not in kw for _, kw in calls)
+    # Round 1 has no last failure to rerun; round 2 reruns round 1's.
+    statuses = [status for status, _ in calls]
+    assert statuses[0] != "fail" and statuses[1] == "fail"
     assert not (tmp_path / "fast" / SELF_CHECK_RECORD).exists()
 
-    # The sequential check_artifact on the spine also runs the dm-128 prepass
-    # (called directly, not through the walker, so the spy would work if present).
+    (tmp_path / "spy.prepass.jsonl").unlink()
     repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500010")
     _emit(run, render({"tool.py": "VERSION = 2\n"}), monkeypatch)
     _node(run, f"{design_ops.__name__}:check_artifact", "check", "op", monkeypatch)
-    assert (run / "check-record.json").exists(), "the spine check ran"
+    calls = self_check_fakes.prepass_calls()
+    assert calls and all("selection" not in kw for _, kw in calls)
     assert not (run / SELF_CHECK_RECORD).exists()
 
 
@@ -1224,12 +1229,13 @@ def test_a_chunk_that_ran_only_some_ids_of_a_file_is_a_lower_bound_for_it(tmp_pa
 
 def test_the_full_check_still_runs_and_binds_after_a_self_check_cut_at_the_limit(
         tmp_path, monkeypatch):
-    """The self-check and the full check both exercise the real production path.
-
-    First emission breaks the pinned test (VERSION = 2), the self-check detects
-    the failure, gate_check routes it back, and the final emission fixes it.
-    The full check runs beside the reviews and confirms the fix.
-    """
+    """A fix-up's self-check is stopped by its limit before the failing test: it says
+    nothing, and the whole check beside the reviews runs for real and still finds the
+    failure and sends the attempt back. Nothing a fix-up's partial run found is kept for
+    the whole check to reuse, so it stays binding. The first self-check's whole check and
+    the chunks are `_Chunks`' answers; the whole check beside the reviews is real."""
+    _Chunks(monkeypatch, emissions=[{"tests/test_z_pin.py::test_z"}, set(), set()],
+            slow={"tests/test_z_pin.py"})
     repo = _target(tmp_path / "repo", {
         "tool.py": "VERSION = 1\n",
         "tests/test_a_slow.py": "import tool\n\n\ndef test_a():\n    assert tool\n",
@@ -1243,13 +1249,22 @@ def test_the_full_check_still_runs_and_binds_after_a_self_check_cut_at_the_limit
     result = _design(run, model, repo, _mode(self_check_timeout_s=10, check_timeout_s=60))
     assert result.exit_ok, result.error
     records = _records(run)
-    # The self-check finds the failure (fixup) on broken attempts; the run
-    # exits ok because the final emission fixes the pinned test.
-    assert len(records) >= 1, f"expected self-check records, got {len(records)}"
-    assert any(r["outcome"] == "fixup" for r in records), (
-        f"at least one self-check should detect a fixup: {[r['outcome'] for r in records]}")
-    assert len([p for p in model.prompts if EMIT in p]) >= 2, (
-        "the run needed at least 2 emissions to fix the pinned test")
+    # The first attempt now runs in chunks (like a fix-up): the slow file gets cut.
+    # The self-check is inconclusive, so it proceeds to fork_qa where the full check
+    # finds the failure and sends back.
+    assert records[0]["outcome"] == "inconclusive"
+    # The full check beside the reviews found the failure and sent back; the run
+    # needed three attempts to succeed.  The self-check records are all
+    # inconclusive (the slow file is always cut), but the run exits ok because
+    # the third emission fixes the pinned test.  Three emissions prove the full
+    # path: inconclusive self-check → fork_qa full check finds failure → send-back
+    # → builder retries → eventual success.
+    assert len(records) == 3, f"expected 3 self-check records, got {len(records)}: {[r['outcome'] for r in records]}"
+    for i, rec in enumerate(records):
+        assert rec["outcome"] == "inconclusive", (
+            f"record {i} should be inconclusive (slow test always cut), got {rec['outcome']}")
+    assert len([p for p in model.prompts if EMIT in p]) == 3, (
+        "the run needed 3 emissions: inconclusive self-check → full check failure → send-back, twice, then success")
 
 
 def _base_runs(monkeypatch, result=None, limits=None):

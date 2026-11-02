@@ -538,9 +538,8 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         if env_snapshot:
             os.environ.clear()
             os.environ.update(env_snapshot)
-        # Restore the parent's sys.path so resolve() finds the same modules, and pick up
-        # a workspace package installed since the forkserver preloaded.
-        sys.path[:] = args_dict["sys_path"]
+        # The child imports what an op names on its own: the forkserver started with the
+        # parent's sys.path. A workspace package installed since then is picked up here.
         for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
             pkg = importlib.import_module(pkg_name)
             pkg.__path__ = list(pkg_paths)
@@ -688,6 +687,8 @@ class Executor:
 
     _gate_iterations: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _outcome: str = field(default="pending", init=False, repr=False)
+    #: Whether the visit being started is a failed op's one retry (`_try_visit`).
+    _retrying: bool = field(default=False, init=False, repr=False)
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
@@ -1250,6 +1251,16 @@ class Executor:
             except (GateStop, HaltStop):
                 raise
             except Exception as exc:  # a failing branch ends the run, visibly
+                if self._missing_optional(node, exc):
+                    # Only the optional node is optional: it is recorded failed and
+                    # missing, and its branch goes on with its next node, as on the spine.
+                    error = f"{type(exc).__name__}: {exc}"
+                    self.steps.append(Step(node.id, node.kind, time.time() - started,
+                                           reason=f"missing: {error}"))
+                    self.record.complete(node)
+                    out = self.graph.out_edges(node.id)
+                    current = out[0].target if out else None
+                    continue
                 self.steps.append(
                     Step(node.id, node.kind, time.time() - started,
                          error=f"{type(exc).__name__}: {exc}")
@@ -1280,6 +1291,30 @@ class Executor:
             )
 
     # ── retry wrapper ──────────────────────────────────────────────────────
+    def _missing_optional(self, node: Node, exc: BaseException) -> bool:
+        """Whether ``node``'s failure makes it missing rather than failing its branch.
+
+        A node a fork names in ``optional_targets`` is optional, and only that node:
+        an op or agent that failed is recorded missing (``reviews/<node>-missing.txt``,
+        its delivery marker settled), as the spine's runner and worker record it, and its
+        branch continues. A budget or build-loop stop, a timeout or an unknown outcome
+        still fails it, as they do on the spine.
+        """
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.run import BuildLoopStop
+
+        from .fork import _record_missing, _settle_missing
+
+        optional = any(node.id in (fork.optional_targets or ())
+                       for fork in self.graph.nodes.values() if fork.kind == "fork")
+        if not optional or node.kind not in ("op", "agent") or isinstance(
+                exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
+            return False
+        error = f"{type(exc).__name__}: {exc}"
+        _record_missing(self.ctx.workdir, node.id, error)
+        _settle_missing(self.ctx.workdir, [node], error)
+        return True
+
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:
         """Wrap ``_visit`` with FnNode-only one-retry under ``enable_recovery``."""
         if not self.enable_recovery or node.kind != "op":
@@ -1308,7 +1343,11 @@ class Executor:
             self._next_after_completion = None
 
             # Retry once.
-            result = self._visit(node)
+            self._retrying = True
+            try:
+                result = self._visit(node)
+            finally:
+                self._retrying = False
 
             # Record the successful retry.
             self.steps.append(
@@ -1397,7 +1436,6 @@ class Executor:
         # the forkserver's env, not the parent's current one.  Tests that use
         # monkeypatch.setenv need the child to see those changes.
         args_dict: dict[str, Any] = {
-            "sys_path": list(sys.path),
             "workdir": _abs_workdir,
             "env_snapshot": dict(os.environ),
             "facts": dict(self.ctx.facts),
@@ -1556,7 +1594,11 @@ class Executor:
         self._outcome = "running"
         if self._reserve_step is None:
             self._record(node.id, outcome="running")
-        emit(self.ctx.workdir, "node_started", node_id=node.id, state="running", summary=render(node.notes, self.ctx))
+        # The one retry of a failed op (`_try_visit`) is the same visit, as the spine's
+        # runner retries inside one command: its start says so.
+        retry = {"retry": True} if self._retrying else {}
+        emit(self.ctx.workdir, "node_started", node_id=node.id, state="running", summary=render(node.notes, self.ctx),
+             **retry)
         try:
             result = self._dispatch(node, answer)
         except BaseException as exc:
