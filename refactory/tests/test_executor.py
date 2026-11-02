@@ -536,6 +536,67 @@ def test_op_runs_in_run_directory_without_recovery(tmp_path):
         "ctx.model was not None inside op on default path"
 
 
+def test_a_dash_m_main_module_is_not_re_imported_per_op(tmp_path):
+    """Same for a ``python -m`` caller, which is resolved by name, not path.
+
+    ``multiprocessing.spawn.get_preparation_data`` prefers
+    ``__main__.__spec__.name`` over ``__file__``, so clearing only ``__file__``
+    leaves a ``-m`` caller re-importing its main module in every op child.
+    """
+    import os
+    import subprocess
+    import sys
+
+    pkg = tmp_path / "modmain.py"
+    pkg.write_text(
+        "import sys\n"
+        "print('MODULE-LEVEL-RAN', flush=True)\n"
+        "def main():\n"
+        "    from refactory_dsh import nn\n"
+        "    from refactory_dsh.nn.executor import execute\n"
+        "    graph = nn.Graph()\n"
+        "    graph.add(nn.Node('one', 'op', call='loop_ops:noop'))\n"
+        "    graph.add(nn.Node('two', 'op', call='loop_ops:noop'))\n"
+        "    graph.connect('one', 'two')\n"
+        f"    result = execute(graph, {str(tmp_path / 'run')!r})\n"
+        "    print('EXIT_OK', result.exit_ok, flush=True)\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+    here = Path(__file__).resolve().parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(tmp_path), str(here), str(here.parent)]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    done = subprocess.run(
+        [sys.executable, "-m", "modmain"],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=300,
+    )
+    assert "EXIT_OK True" in done.stdout, f"the run failed: {done.stdout}\n{done.stderr}"
+    assert done.stdout.count("MODULE-LEVEL-RAN") == 1, (
+        "the -m caller's main module ran "
+        f"{done.stdout.count('MODULE-LEVEL-RAN')} times, not once:\n{done.stdout}"
+    )
+
+
+def test_an_op_in_the_callers_main_is_refused_with_guidance(tmp_path):
+    """A one-file script cannot name its own op, and is told why.
+
+    The op child cannot import the caller's ``__main__`` without re-running its
+    module-level code once per visit, so the target is refused at resolution
+    rather than failing later with a bare attribute error.
+    """
+    from refactory_dsh.nn.resolve import ResolutionError, resolve
+
+    with pytest.raises(ResolutionError) as caught:
+        resolve("__main__:my_op")
+    message = str(caught.value)
+    assert "__main__" in message
+    assert "importable module" in message, f"no guidance in: {message}"
+    assert "my_ops:my_op" in message, f"no corrected target in: {message}"
+
+
 def test_a_script_main_module_is_not_re_imported_per_op(tmp_path):
     """The caller's module-level code runs once, not once per op child.
 
@@ -578,7 +639,7 @@ def test_a_script_main_module_is_not_re_imported_per_op(tmp_path):
 
 
 def test_op_stdout_reaches_the_parent(tmp_path, capfd):
-    """An op's stdout is forwarded, as its stderr is.
+    """An op's stdout is forwarded, onto the parent's stderr.
 
     The child captures stdout so a fn gate's feedback can be read from it; that
     capture must not swallow the output of an ordinary op. The spine puts it in
@@ -590,7 +651,11 @@ def test_op_stdout_reaches_the_parent(tmp_path, capfd):
     graph.add(nn.Node("say", "op", call="loop_ops:print_to_stdout"))
     result = execute(graph, tmp_path / "run")
     assert result.exit_ok, result.error
-    assert "op stdout output: visible diagnostics" in capfd.readouterr().out
+    captured = capfd.readouterr()
+    assert "op stdout output: visible diagnostics" in captured.err
+    # Not stdout: loop.run() runs the walker in-process and that command's
+    # stdout is the one JSON object its caller parses.
+    assert "op stdout output: visible diagnostics" not in captured.out
 
 
 def test_op_stdout_reaches_the_parent_when_the_op_then_raises(tmp_path, capfd):
@@ -601,7 +666,7 @@ def test_op_stdout_reaches_the_parent_when_the_op_then_raises(tmp_path, capfd):
     graph.add(nn.Node("boom", "op", call="loop_ops:stdout_then_raise"))
     result = execute(graph, tmp_path / "run")
     assert result.exit_ok is False
-    assert "op stdout before the raise" in capfd.readouterr().out
+    assert "op stdout before the raise" in capfd.readouterr().err
 
 
 def test_op_stderr_preserved_on_raise_without_recovery(tmp_path):

@@ -1514,18 +1514,28 @@ class Executor:
             import __main__ as _main_mod
             with _main_file_lock:
                 _saved_main_file = getattr(_main_mod, "__file__", None)
-                # Clear it whenever __main__ has one: a path that is not a
-                # real file makes _fixup_main_from_path raise, and a path that
-                # IS one makes the child re-import the caller's main module,
-                # re-running its module-level code once per op visit.
+                _saved_main_spec = getattr(_main_mod, "__spec__", None)
+                # Clear both whenever __main__ has them. A __file__ that is not
+                # a real file makes _fixup_main_from_path raise; one that IS a
+                # real file makes the child re-import the caller's main module,
+                # re-running its module-level code once per op visit (a
+                # module-level execute() then nests runs on one run directory).
+                # __spec__ matters too: get_preparation_data prefers
+                # __spec__.name over __file__, so a `python -m` caller re-imports
+                # its main module unless this is cleared as well.
                 _need_clear = _saved_main_file is not None
+                _need_clear_spec = _saved_main_spec is not None
                 if _need_clear:
                     _main_mod.__file__ = None  # type: ignore[attr-defined]
+                if _need_clear_spec:
+                    _main_mod.__spec__ = None  # type: ignore[attr-defined]
                 try:
                     child.start()
                 finally:
                     if _need_clear:
                         _main_mod.__file__ = _saved_main_file  # type: ignore[attr-defined]
+                    if _need_clear_spec:
+                        _main_mod.__spec__ = _saved_main_spec  # type: ignore[attr-defined]
         except BaseException:
             parent_conn.close()
             child_conn.close()
@@ -1572,13 +1582,17 @@ class Executor:
             # visible for debugging and test assertions (e.g. capfd).
             if _child_stderr:
                 sys.stderr.write(_child_stderr)
-            # The same for stdout: ops print diagnostics (design_ops.py's
-            # self-check line, repo_change.py's copy notes), and on the spine
-            # those reach the command log. Capturing it for fn-gate feedback
-            # must not swallow it on the walker.
+            # An op's stdout goes to the parent's STDERR, not its stdout.
+            # Ops print diagnostics (design_ops.py's self-check line,
+            # repo_change.py's copy notes) and the spine puts those in its
+            # command log, so capturing stdout for fn-gate feedback must not
+            # swallow them. They cannot go to stdout, though: loop.run() runs
+            # the walker in-process and that command's stdout is the single
+            # JSON object its caller parses, so an op's print() would corrupt
+            # it. stderr keeps the diagnostics and the contract both.
             _child_stdout = payload.get("_stdout", "")
             if _child_stdout:
-                sys.stdout.write(_child_stdout)
+                sys.stderr.write(_child_stdout)
             result = payload.get("result")
             # SWEEP-4: attach child process stdout to the result so fn-gate
             # feedback extraction in _visit_gate can use it.  A plain str
@@ -1603,11 +1617,13 @@ class Executor:
     ) -> Any:
         """Reconstruct and re-raise an exception sent by the child process.
 
-        The child's stdout is forwarded too: an op that prints and then raises
-        is exactly the run whose diagnostics are wanted.
+        The child's stdout is forwarded too, onto the parent's stderr, because
+        an op that prints and then raises is exactly the run whose diagnostics
+        are wanted. stderr is appended to the exception message as well; stdout
+        is only written through.
         """
         if stdout:
-            sys.stdout.write(stdout)
+            sys.stderr.write(stdout)
         exc_type_name = payload.get("type", "RuntimeError")
         exc_msg = payload.get("message", "")
         exc_tb = payload.get("traceback", "")
