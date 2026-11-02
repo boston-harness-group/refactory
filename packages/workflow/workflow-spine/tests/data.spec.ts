@@ -280,7 +280,6 @@ describe('driving the loader commands around each pass', () => {
       execute: async (spec: { command: string }) => ({
         result: async () => {
           const verb = spec.command.split(' ')[3] ?? ''
-          const index = Number(spec.command.match(/--index (\d+)/)?.[1] ?? 0)
           const answers: Record<string, unknown> = {
             list: { count: 1, ids: ['a'] },
             begin: { id: 'a', pass_dir: passDir },
