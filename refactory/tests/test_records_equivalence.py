@@ -400,13 +400,29 @@ def _write_both_runtimes_package(project: Path) -> None:
 
 
 class _ScriptedModel:
-    """A model that returns scripted responses."""
+    """A model that returns scripted responses.
 
-    def __init__(self):
+    When ``fail_first=True``, the model raises ``CompletionTimeout`` on
+    its very first ``complete()`` call, then succeeds on the retry.
+    This proves the exchange-counting claim: one exchange per *completed*
+    agent call — the failed attempt does not record an exchange on the
+    walker side (``_item_exchanges.append`` runs after the model
+    returns), and the spine side only calls ``record_exchange`` inside
+    ``finish`` (which is not reached on failure).
+    """
+
+    def __init__(self, *, fail_first: bool = False):
         self._call_count = 0
+        self._fail_first = fail_first
+        self._has_failed = False
 
     def complete(self, prompt: str, **kwargs) -> str:
+        from refactory_dsh.model import CompletionTimeout
+
         self._call_count += 1
+        if self._fail_first and not self._has_failed:
+            self._has_failed = True
+            raise CompletionTimeout("scripted timeout on first call")
         return f"scripted response #{self._call_count}"
 
     def route(self):
@@ -489,7 +505,13 @@ def test_both_runtimes_full_records(tmp_path):
         graph.add(nn.Node(
             "agent", "agent", role="builder",
             prompt_template="Process item",
-            reads=(CURRENT_ITEM,), writes=(),
+            reads=(CURRENT_ITEM,), writes=("agent_output.txt",),
+            outputs_only=True,
+            # Retry rule: on timeout, retry once.  The scripted model
+            # raises CompletionTimeout on its first call (for pass_item),
+            # proving the exchange-counting claim (correction 3).
+            retry={"times": 1, "on": ["timeout"], "timeout_factor": 1.0},
+            timeout_s=60,
         ))
         graph.add(nn.Node(
             "finish", "op", call="loop_ops:write_best",
@@ -500,7 +522,12 @@ def test_both_runtimes_full_records(tmp_path):
 
         # ── Walker run ──
         walker_dir = tmp_path / "walker"
-        model = _ScriptedModel()
+        # fail_first=True: the model times out on its very first call
+        # (for pass_item's agent node), then succeeds on the retry.
+        # This exercises node_retry and proves both runtimes record
+        # one exchange per completed call — the failed attempt is not
+        # counted on either side.
+        model = _ScriptedModel(fail_first=True)
         walker_result = execute(graph, walker_dir, model=model)
         assert len(walker_result.item_records) == 3, (
             f"walker: expected 3 records, got {len(walker_result.item_records)}: "
@@ -508,6 +535,20 @@ def test_both_runtimes_full_records(tmp_path):
         )
 
         walker_by_id = {r["id"]: r for r in walker_result.item_records}
+
+        # Verify the retry happened: the model was called 3 times
+        # (fail + retry for pass_item, succeed for fail_item; error_item
+        # never reaches the agent node).
+        assert model._call_count == 3, (
+            f"expected 3 model calls (1 fail + 1 retry + 1 direct), got {model._call_count}"
+        )
+        assert model._has_failed, "model should have raised CompletionTimeout once"
+        # Despite the retry, pass_item should have only 1 exchange (the
+        # completed call, not the failed attempt).
+        assert len(walker_by_id["pass_item"]["exchanges"]) == 1, (
+            f"pass_item: expected 1 exchange after retry, got "
+            f"{len(walker_by_id['pass_item']['exchanges'])}"
+        )
 
         # ── Spine run (real TS drain via data-drain-agent.mts) ──
         # For the spine, use the module-qualified task_ref.
@@ -577,8 +618,9 @@ def test_both_runtimes_full_records(tmp_path):
             spine_facts = json.loads((spine_dir / "facts.json").read_text())
             spine_records = spine_facts.get("item_scores", [])
 
-        assert len(spine_records) >= 2, (
-            f"spine: expected >= 2 records, got {len(spine_records)}"
+        assert len(spine_records) == 3, (
+            f"spine: expected 3 records (pass + fail + error), got {len(spine_records)}: "
+            f"{[r.get('id') for r in spine_records]}"
         )
 
         spine_by_id = {r["id"]: r for r in spine_records}
@@ -592,7 +634,12 @@ def test_both_runtimes_full_records(tmp_path):
                 f"walker {record['id']} unexpected keys: {set(record.keys())}"
             )
 
-        # Compare items that both runtimes processed.
+        # All three items must be present on both runtimes.
+        assert set(walker_by_id.keys()) == set(spine_by_id.keys()) == {"pass_item", "fail_item", "error_item"}, (
+            f"item sets differ: walker={set(walker_by_id.keys())}, spine={set(spine_by_id.keys())}"
+        )
+
+        # Compare all items on both runtimes.
         common_ids = set(walker_by_id.keys()) & set(spine_by_id.keys())
         for item_id in common_ids:
             w = walker_by_id[item_id]
@@ -600,7 +647,22 @@ def test_both_runtimes_full_records(tmp_path):
             assert w["passed"] == s["passed"], f"{item_id}: passed differs"
             assert w["score"] == s["score"], f"{item_id}: score differs"
             assert w["label"] == s["label"], f"{item_id}: label differs"
-            assert w["fail_reason"] == s["fail_reason"], f"{item_id}: fail_reason differs"
+            # For error items, fail_reason formatting differs between runtimes
+            # (walker prefixes with node name, spine passes stderr tail).
+            # Check both are non-None and share the core error message.
+            if w.get("error_text"):
+                assert w["fail_reason"] is not None and s["fail_reason"] is not None, (
+                    f"{item_id}: error item's fail_reason should be non-None on both runtimes"
+                )
+                core_msg = "subgraph error for error_item"
+                assert core_msg in str(w["fail_reason"]), (
+                    f"{item_id}: walker fail_reason missing core message"
+                )
+                assert core_msg in str(s["fail_reason"]), (
+                    f"{item_id}: spine fail_reason missing core message"
+                )
+            else:
+                assert w["fail_reason"] == s["fail_reason"], f"{item_id}: fail_reason differs"
             assert w["prediction"] == s["prediction"], (
                 f"{item_id}: prediction differs: walker={w['prediction']!r}, spine={s['prediction']!r}"
             )
@@ -618,8 +680,10 @@ def test_both_runtimes_full_records(tmp_path):
         assert pw["prediction"] == "pass_prediction"
         assert pw["label"] == "PASS"
         assert pw["fail_reason"] is None
-        assert len(pw["exchanges"]) >= 1, (
-            f"pass_item: expected >= 1 exchange, got {len(pw['exchanges'])}"
+        # Exactly 1 exchange despite the retry (the failed attempt does not
+        # count because _item_exchanges.append runs after the model returns).
+        assert len(pw["exchanges"]) == 1, (
+            f"pass_item: expected exactly 1 exchange after retry, got {len(pw['exchanges'])}"
         )
         assert pw["exchanges"][0]["node"] == "agent"
 
@@ -628,7 +692,7 @@ def test_both_runtimes_full_records(tmp_path):
         assert fw["prediction"] == "fail_prediction"
         assert fw["label"] == "FAIL"
         assert fw["fail_reason"] == "wrong answer"
-        assert len(fw["exchanges"]) >= 1
+        assert len(fw["exchanges"]) == 1
 
         ew = walker_by_id["error_item"]
         assert ew["passed"] is False

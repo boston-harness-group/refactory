@@ -1019,8 +1019,9 @@ def test_resume_repeats_all_counted(tmp_path):
         run.evaluate(seed)
 
         # With 4 train items and 2 repeats, rollouts should count items
-        # from both trials (so > 4 if both repeat trials count).
-        # Each trial produces its own item_records; rollouts accumulates.
-        assert loop.rollouts >= 4, (
-            f"expected rollouts >= 4 with 2 repeats, got {loop.rollouts}"
+        # from BOTH trials: 4 items × 2 repeats = 8 rollouts.
+        # Reverting the per-trial accumulation in _measure makes this 4
+        # (only the last trial's items counted).
+        assert loop.rollouts == 8, (
+            f"expected rollouts == 8 with 4 items × 2 repeats, got {loop.rollouts}"
         )

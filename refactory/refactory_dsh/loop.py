@@ -838,6 +838,7 @@ class Loop(OuterLoop):
             expected_ids = set(str(i) for i in items)
 
         trials = []
+        all_item_records: list[dict[str, Any]] = []  # accumulate across repeats
         last = RunResult(exit_ok=False, error="no measurement completed")
         required = (self.config.resolved_profile.get("contract") or {}).get("required_artifacts", [])
         for index in range(self.config.repeats):
@@ -891,6 +892,7 @@ class Loop(OuterLoop):
                     continue
             trials.append(trial)
             self.measurements += 1
+            all_item_records.extend(result.item_records)
             last = result
             if not result.exit_ok:
                 break
@@ -910,6 +912,10 @@ class Loop(OuterLoop):
         last.exit_ok = complete
         last.duration_s = sum(t["duration_s"] for t in trials)
         last.model_calls = sum(t["model_calls"] for t in trials)
+        # Every trial's item records count toward rollouts and are kept
+        # per occasion (brief ask 1: "every trial's items count toward
+        # rollouts and the records of every repeat are kept per occasion").
+        last.item_records = all_item_records
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
         return last, summary
@@ -1234,6 +1240,15 @@ class Loop(OuterLoop):
             parents = self.select_parents(self.config.elite)
         if not parents:
             return [], []
+        # Publish the parent the strategy selected for editing so
+        # ProposalContext.item_records carries its records, not board[0]'s
+        # (brief ask 5).  Strategies may set "parent" explicitly; when they
+        # do not, use select_parents(1) — which respects kept candidates
+        # and is overridable — rather than assuming the leaderboard best.
+        if "parent" not in self.strategy_decision:
+            selected = self.select_parents(1)
+            if selected:
+                self.strategy_decision["parent"] = selected[0].id
         before = len(self.rejections)
         proposals = self.propose(run, parents, self.batch_size(run))
         candidates = self.install(run, proposals, parents)
@@ -2493,19 +2508,23 @@ class Loop(OuterLoop):
     def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """Train records for the parent the strategy selected for editing.
 
-        Uses the strategy_decision's parent when available, then falls back to
-        select_parents(1), and only then to board[0].  This ensures the
-        optimizer sees the records of the candidate it is actually editing,
-        not necessarily the overall best.
+        Priority:
+        1. ``strategy_decision["parent"]`` — set by ``optimizer_step`` from
+           ``select_parents(1)`` or overridden by a strategy explicitly.
+        2. The most recently installed candidate's parent — what the optimizer
+           actually bred from in the previous round.  This is a better signal
+           than ``board[0]`` when the optimizer picks a non-best parent.
+        3. ``board[0]`` — leaderboard best as a last resort.
         """
         # Prefer the parent the strategy explicitly selected.
         parent_id = self.strategy_decision.get("parent")
         if parent_id and parent_id in self._train_item_records:
             return list(self._train_item_records[parent_id])
-        # Fall back to the first parent select_parents would choose.
-        parents = self.select_parents(1)
-        if parents:
-            return list(self._train_item_records.get(parents[0].id, []))
+        # Fall back to the most recently installed candidate's parent:
+        # what the optimizer actually bred from.
+        for c in reversed(self.population):
+            if c.parent and c.parent in self._train_item_records:
+                return list(self._train_item_records[c.parent])
         # Last resort: leaderboard best.
         if not board:
             return []

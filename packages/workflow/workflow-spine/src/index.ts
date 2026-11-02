@@ -1654,6 +1654,10 @@ export function apply(ctx: Context, config: Config): void {
           if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
             return { failure: fb }
           }
+          // Capture per-item record from the fallback end command (F6).
+          if (fb.ok && fb.value != null && typeof fb.value === 'object' && 'id' in fb.value) {
+            spine.addItemRecord(fb.value as Record<string, unknown>)
+          }
           materialised.delete(spine)
           item = undefined
           spine.endPass()
@@ -1674,6 +1678,10 @@ export function apply(ctx: Context, config: Config): void {
         const fb = await runDataCommand(shell, data, 'end', runner, pass.index, reason)
         if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
           return { failure: fb }
+        }
+        // Capture per-item record from the failed-item end command (F6).
+        if (fb.ok && fb.value != null && typeof fb.value === 'object' && 'id' in fb.value) {
+          spine.addItemRecord(fb.value as Record<string, unknown>)
         }
         materialised.delete(spine)
         item = undefined
@@ -1827,10 +1835,19 @@ export function apply(ctx: Context, config: Config): void {
               if (!fb.ok && !fb.error?.includes('timed out') && !fb.error?.includes('was aborted')) {
                 return { next: spine.next(), failure: fb, ran }
               }
+              // Capture per-item record from the fallback end command (F6).
+              if (fb.ok && fb.value != null && typeof fb.value === 'object' && 'id' in fb.value) {
+                spine.addItemRecord(fb.value as Record<string, unknown>)
+              }
             } else {
               // End exited with non-zero (e.g. all-items-failed): propagate.
               return { next: spine.next(), failure: ended, ran }
             }
+          }
+          // Capture per-item record from the failed-item end command (F6).
+          // Without this, error items are silently excluded from spine records.
+          if (ended.ok && ended.value != null && typeof ended.value === 'object' && 'id' in ended.value) {
+            spine.addItemRecord(ended.value as Record<string, unknown>)
           }
           materialised.delete(spine)
           item = undefined
