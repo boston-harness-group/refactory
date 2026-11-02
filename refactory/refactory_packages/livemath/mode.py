@@ -43,6 +43,11 @@ class Solver(nn.Mode):
     def declare(cls) -> dict[str, nn.Knob]:
         return {
             "skill": nn.Knob("", "str", description="skill prompt injected into the system message"),
+            # SkillOpt configs/livemathematicianbench/default.yaml:21-22
+            "use_theorem": nn.Knob(False, "bool",
+                                   description="include the item's theorem as a ## Theorem section"),
+            "use_sketch": nn.Knob(False, "bool",
+                                  description="include the item's proof sketch as a ## Proof Sketch section"),
         }
 
     def build(self) -> nn.Graph:
@@ -59,7 +64,7 @@ class Solver(nn.Mode):
             "format_prompt", "op",
             call=f"{OPS}:format_prompt",
             reads=("current_item.json",),
-            knobs=("skill",),
+            knobs=("skill", "use_theorem", "use_sketch"),
             produces=("user_prompt", "skill_section"),
         ))
         graph.add(nn.Node(

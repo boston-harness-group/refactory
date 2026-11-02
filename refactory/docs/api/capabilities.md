@@ -11095,7 +11095,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -11137,7 +11137,9 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "id": "format_prompt",
       "kind": "op",
       "knobs": [
-        "skill"
+        "skill",
+        "use_theorem",
+        "use_sketch"
       ],
       "notes": "",
       "role": "ceo"
@@ -11148,7 +11150,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "kind": "agent",
       "knobs": [],
       "notes": "",
-      "role": "builder"
+      "role": "solver"
     }
   ],
   "parameters": {
@@ -11163,6 +11165,30 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       ],
       "value": "",
       "values": []
+    },
+    "use_sketch": {
+      "default": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "use_theorem": {
+      "default": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
     }
   },
   "ports": [],
@@ -11171,9 +11197,11 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
     "doc": "refactory/docs/outer-loop.md",
     "examples": [
       {
-        "explanation": "Solve LiveMathematicianBench items with an empty skill prompt; set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "explanation": "Solve LiveMathematicianBench items with an empty skill prompt and SkillOpt's defaults (no theorem or proof sketch in the prompt); set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
-          "skill": ""
+          "skill": "",
+          "use_sketch": false,
+          "use_theorem": false
         }
       }
     ],
@@ -11182,8 +11210,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "b835a2e77fa190f4e8b27d00efac7c522bacd127fe1bdd3eedfb0215c7294604"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "7ae45ec28ac9b7a75fae8932203e473e306327039c5516aa5e7e96e1dbe87cd9"
   }
 }
 ```

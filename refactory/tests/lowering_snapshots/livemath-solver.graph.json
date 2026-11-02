@@ -80,7 +80,9 @@
   "start_node": "data",
   "terminal": true,
   "knob_values": {
-    "skill": ""
+    "skill": "",
+    "use_theorem": 0.0,
+    "use_sketch": 0.0
   },
   "knob_specs": {
     "skill": {
@@ -92,6 +94,28 @@
       "values": [],
       "frozen": false,
       "description": "skill prompt injected into the system message",
+      "required": false
+    },
+    "use_theorem": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "required": false
+    },
+    "use_sketch": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
       "required": false
     }
   }

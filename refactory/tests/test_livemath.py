@@ -265,9 +265,8 @@ def test_response_reaches_extract_answer_unchanged(tmp_path):
     # Patch the task to use fixture data with no shuffling
     original_init = tasks_mod.LiveMathTask.__init__
 
-    def patched_init(self, data_path=None, shuffle_choices=True, use_theorem=False, use_sketch=False):
-        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=False,
-                      use_theorem=use_theorem, use_sketch=use_sketch)
+    def patched_init(self, data_path=None, shuffle_choices=True):
+        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=False)
 
     tasks_mod.LiveMathTask.__init__ = patched_init
     try:
@@ -310,9 +309,8 @@ def walker_result(tmp_path):
     import refactory_packages.livemath.tasks as tasks_mod
     original_init = tasks_mod.LiveMathTask.__init__
 
-    def patched_init(self, data_path=None, shuffle_choices=True, use_theorem=False, use_sketch=False):
-        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=False,
-                      use_theorem=use_theorem, use_sketch=use_sketch)
+    def patched_init(self, data_path=None, shuffle_choices=True):
+        original_init(self, data_path=str(FIXTURE_DIR), shuffle_choices=False)
 
     tasks_mod.LiveMathTask.__init__ = patched_init
     try:
@@ -370,68 +368,75 @@ def test_records_have_prediction_and_label(walker_result):
 
 # ── correction #2: use_theorem / use_sketch gating ───────────────────────
 
-def test_default_prompt_excludes_theorem_and_sketch():
-    """With default use_theorem=False, use_sketch=False (default.yaml:21-22),
-    format_prompt must NOT include ## Theorem or ## Proof Sketch even when
-    the item has non-empty theorem/sketch fields.
-    Proves correction #2 — SkillOpt's _build_user() at rollout.py:41-44 gates
-    on these flags."""
+_GATING_ITEM = {
+    "question": "Which series converges?",
+    "choices": [
+        {"label": "A", "text": "Diverges"},
+        {"label": "B", "text": "Converges"},
+    ],
+    "theorem": "Let $f$ be continuous on $[0,1]$.",
+    "sketch": "Apply the intermediate value theorem.",
+}
+
+
+class _GatingCtx:
+    def __init__(self, knobs):
+        self._knobs = knobs
+
+    def read_json(self, path, default=None):
+        return dict(_GATING_ITEM)
+
+    def knob(self, name, default=""):
+        return self._knobs.get(name, default)
+
+
+def test_gating_knobs_default_to_skillopt_values():
+    """use_theorem / use_sketch are mode knobs defaulting to False
+    (SkillOpt configs/livemathematicianbench/default.yaml:21-22), and the
+    format_prompt node reads them."""
+    from refactory_packages.livemath.mode import Solver
+
+    knobs = Solver.declare()
+    assert knobs["use_theorem"].default is False
+    assert knobs["use_sketch"].default is False
+    node = Solver().build().nodes["format_prompt"]
+    assert {"use_theorem", "use_sketch"} <= set(node.knobs)
+
+
+def test_default_prompt_is_byte_exact_without_theorem_and_sketch():
+    """Defaults (both knobs off): SkillOpt's _build_user (rollout.py:41-44)
+    emits only Question and Choices, even when the item has theorem/sketch."""
     from refactory_packages.livemath.ops import format_prompt
 
-    class FakeCtx:
-        def read_json(self, path, default=None):
-            return {
-                "question": "Which series converges?",
-                "choices": [
-                    {"label": "A", "text": "Diverges"},
-                    {"label": "B", "text": "Converges"},
-                ],
-                "theorem": "Let $f$ be continuous on $[0,1]$.",
-                "sketch": "Apply the intermediate value theorem.",
-                "use_theorem": False,
-                "use_sketch": False,
-            }
-        def knob(self, name, default=""):
-            return default
-
-    result = format_prompt(FakeCtx())
-    prompt = result["user_prompt"]
-    assert "## Question" in prompt
-    assert "## Choices" in prompt
-    # Theorem and sketch must NOT appear with defaults
-    assert "## Theorem" not in prompt, (
-        "Theorem section included despite use_theorem=False"
-    )
-    assert "## Proof Sketch" not in prompt, (
-        "Proof Sketch section included despite use_sketch=False"
+    prompt = format_prompt(_GatingCtx({}))["user_prompt"]
+    assert prompt == (
+        "## Question\nWhich series converges?\n\n"
+        "## Choices\nA. Diverges\nB. Converges"
     )
 
 
-def test_prompt_includes_theorem_when_enabled():
-    """When use_theorem=True and use_sketch=True, sections appear.
-    Complements test_default_prompt_excludes_theorem_and_sketch."""
+def test_enabled_prompt_is_byte_exact_with_theorem_and_sketch():
+    """Both knobs on: Theorem then Proof Sketch, joined by blank lines."""
     from refactory_packages.livemath.ops import format_prompt
 
-    class FakeCtx:
-        def read_json(self, path, default=None):
-            return {
-                "question": "Which series converges?",
-                "choices": [
-                    {"label": "A", "text": "Diverges"},
-                    {"label": "B", "text": "Converges"},
-                ],
-                "theorem": "Let $f$ be continuous on $[0,1]$.",
-                "sketch": "Apply the intermediate value theorem.",
-                "use_theorem": True,
-                "use_sketch": True,
-            }
-        def knob(self, name, default=""):
-            return default
+    prompt = format_prompt(_GatingCtx({"use_theorem": True, "use_sketch": True}))["user_prompt"]
+    assert prompt == (
+        "## Question\nWhich series converges?\n\n"
+        "## Choices\nA. Diverges\nB. Converges\n\n"
+        "## Theorem\nLet $f$ be continuous on $[0,1]$.\n\n"
+        "## Proof Sketch\nApply the intermediate value theorem."
+    )
 
-    result = format_prompt(FakeCtx())
-    prompt = result["user_prompt"]
-    assert "## Theorem" in prompt
-    assert "## Proof Sketch" in prompt
+
+def test_each_gate_is_independent():
+    from refactory_packages.livemath.ops import format_prompt
+
+    only_theorem = format_prompt(_GatingCtx({"use_theorem": True}))["user_prompt"]
+    assert only_theorem.endswith("## Theorem\nLet $f$ be continuous on $[0,1]$.")
+    assert "## Proof Sketch" not in only_theorem
+    only_sketch = format_prompt(_GatingCtx({"use_sketch": True}))["user_prompt"]
+    assert only_sketch.endswith("## Proof Sketch\nApply the intermediate value theorem.")
+    assert "## Theorem" not in only_sketch
 
 
 # ── correction #3: solve node role ────────────────────────────────────────

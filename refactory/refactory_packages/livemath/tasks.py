@@ -158,8 +158,8 @@ class LiveMathTask(Task):
 
     Configuration defaults match SkillOpt's configs/livemathematicianbench/default.yaml:
     - shuffle_choices=True  (default.yaml:20)
-    - use_theorem=False     (default.yaml:21)
-    - use_sketch=False      (default.yaml:22)
+
+    use_theorem / use_sketch (default.yaml:21-22) are the solver mode's knobs.
     """
 
     name = "livemath"
@@ -168,13 +168,9 @@ class LiveMathTask(Task):
         self,
         data_path: str | None = None,
         shuffle_choices: bool = True,   # configs/livemathematicianbench/default.yaml:20
-        use_theorem: bool = False,      # configs/livemathematicianbench/default.yaml:21
-        use_sketch: bool = False,       # configs/livemathematicianbench/default.yaml:22
     ) -> None:
         self.data_path = data_path or os.environ.get("LIVEMATH_DATA_PATH", "")
         self.shuffle_choices = shuffle_choices
-        self.use_theorem = use_theorem
-        self.use_sketch = use_sketch
         self._items: list[dict] | None = None
 
     def _load(self) -> list[dict]:
@@ -206,11 +202,6 @@ class LiveMathTask(Task):
                     "theorem": item.get("theorem", ""),
                     "sketch": item.get("sketch", ""),
                     "theorem_type": item.get("theorem_type", []),
-                    # Propagated to current_item.json so format_prompt
-                    # can gate ## Theorem / ## Proof Sketch sections
-                    # (SkillOpt rollout.py:41-44).
-                    "use_theorem": self.use_theorem,
-                    "use_sketch": self.use_sketch,
                 },
             ))
         return result
