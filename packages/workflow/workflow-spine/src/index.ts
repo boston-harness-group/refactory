@@ -1110,11 +1110,11 @@ export function apply(ctx: Context, config: Config): void {
       if (saved.materialised !== null) {
         const pass = spine.passOf()!
         if (saved.materialised?.key !== `${pass.node}:${pass.index}`) throw new Error('saved item setup belongs to another data pass')
+        // passDir needs no restoring here: state() serialises the whole
+        // DataPass (spine.ts:749) and restore() puts it back (spine.ts:1654),
+        // so spine.restore(saved) above has already recovered it. data.spec.ts
+        // asserts that for both state.pass.passDir and materialised.passDir.
         materialised.set(spine, saved.materialised)
-        // Restore passDir on the spine's DataPass from the saved materialised.
-        if (typeof saved.materialised?.passDir === 'string') {
-          spine.setPassDir(saved.materialised.passDir)
-        }
       }
     }
     unlinkSync(requestPath)

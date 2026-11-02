@@ -1519,6 +1519,15 @@ def test_resume_mid_pass_continues_in_same_pass_directory(tmp_path):
     )
     assert (a_pass / "sentinel.txt").read_text() == "from first run"
 
+    # The sentinel alone cannot prove the skip: prepare_pass_dir is idempotent
+    # and does not wipe an existing pass directory, so a re-run of 'a' leaves
+    # the sentinel in place. Its own record is what shows re-execution -- the
+    # op appends the item id on every visit, so a re-run reads ["a"] and
+    # writes ["a", "a"].
+    assert json.loads((a_pass / "seen.json").read_text()) == {"ids": ["a"]}, (
+        "item 'a' ran a second time on resume instead of being skipped"
+    )
+
     # Item 'b' and 'c' should both be done now.
     assert (b_pass / ".done").exists(), "item 'b' should have .done after resume"
     c_pass = passes_dir / "c_2"
