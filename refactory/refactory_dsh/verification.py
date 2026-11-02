@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from refactory_dsh.create_ops import MARKER_RULE
+from refactory_dsh.probe_rerun import PROBE_TIMEOUT_S, PROBES_TOTAL_S
 
 #: The most wall time the review fork's verifier session may take, on either runtime.
 #: It runs beside the three reviews, which take about eight minutes, so a verifier
@@ -169,7 +170,21 @@ probe every class below that applies, and say which classes do not apply and why
 A probe is new code you write and run. Running the builder's existing tests does
 not count as a probe (you may run them in addition). PROBED means executed, with its
 command and output shown; a check made only by reading code is reported as "READ, not
-probed". Each probe states the exact command you ran and its output. If a probe fails
+probed".
+
+Save every probe as its own file under `reviews/probes/` in your workspace, named
+`<requirement-id>-<n>.py` (a Python script, or a test file with `test_` functions, run
+with pytest) or `<requirement-id>-<n>.sh`, run from the repository root. Its first line
+is a comment stating the requirement, the failure point and the expected outcome. First
+delete any `reviews/probes/` an earlier attempt left. A probe file must not just call an
+existing repository test (pytest on an existing test id, or importing and calling a test
+function): it makes its own check. Each PROBED line in reviews/verification.md names its
+probe file (`reviews/probes/<file>`). After you finish, the runtime reruns every probe
+file on this attempt in a fresh checkout (""" + str(PROBE_TIMEOUT_S) + """ s each,
+""" + str(PROBES_TOTAL_S) + """ s in all): a probe that fails is a blocking defect, and a
+PROBED line whose file is missing or only calls an existing test is UNVERIFIED.
+
+Each probe states the exact command you ran and its output. If a probe fails
 for an environment reason (import path, missing test helper such as loop_ops), fix
 the environment (e.g. set PYTHONPATH to the repo's test helpers) and rerun the same
 probe; never substitute a weaker probe. A failing probe is a
@@ -186,8 +201,8 @@ For each requirement, write a section:
 - Output: <relevant excerpt>
 - Result: CAUGHT | NOT CAUGHT | NOT APPLICABLE | UNCHECKED
 
-Then the edge-case sweep: per requirement, each class as PROBED (command, output,
-result), "READ, not probed", NOT APPLICABLE (why) or UNCHECKED. Then the existing verification methods below.
+Then the edge-case sweep: per requirement, each class as PROBED (probe file
+`reviews/probes/<file>`, command, output, result), "READ, not probed", NOT APPLICABLE (why) or UNCHECKED. Then the existing verification methods below.
 """
 
 _HUNK_REVERT_JUDGING = """

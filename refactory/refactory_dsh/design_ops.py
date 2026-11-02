@@ -3173,6 +3173,17 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
     if rerun_text:
         body += (f"\n\n## {QA_RERUN_REVIEW} (the QA director coverage re-run)"
                  f"\n\n{rerun_text}\n")
+    # The verifier's probe files, rerun by `probe_rerun.rerun_probes` before this step.
+    # Only when there is something to show: a verifier that gave nothing has no probes.
+    from refactory_dsh.probe_rerun import RESULTS_MD, read_results
+    found = read_results(ctx)
+    probe_text = (ctx.read_text(RESULTS_MD).strip()
+                  if (found.get("probes") or found.get("unverified")) and ctx.exists(RESULTS_MD)
+                  else "")
+    if probe_text:
+        body += (f"\n\n## {RESULTS_MD} (the verifier's probe files, rerun by the runtime)\n\n"
+                 "A failing probe is a defect the QA gate sends back; a PROBED claim with no "
+                 "probe file of its own is UNVERIFIED.\n\n" + probe_text + "\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)
@@ -3516,17 +3527,21 @@ def _check_unverified_coverage(ctx: Any) -> tuple[list[str], Verdict | None]:
     Returns ``(advisories, verdict)``.  *verdict* is non-None only when a coverage
     re-run is needed; the caller must return it instead of proceeding.
     """
-    if not ctx.exists("intent-audit.json"):
-        return [], None
+    from refactory_dsh import probe_rerun
 
-    try:
-        audit = ctx.read_json("intent-audit.json", {})
-    except (ValueError, OSError):
-        return [], None
+    audit: Any = {}
+    if ctx.exists("intent-audit.json"):
+        try:
+            audit = ctx.read_json("intent-audit.json", {})
+        except (ValueError, OSError):
+            audit = {}
 
     requirements = audit.get("requirements", []) if isinstance(audit, dict) else []
     unverified = [req for req in requirements
                   if isinstance(req, dict) and req.get("status") == "unverified"]
+    # A verifier PROBED claim with no probe file of its own (`probe_rerun`) is unverified too.
+    unverified += [item for item in probe_rerun.read_results(ctx).get("unverified", [])
+                   if isinstance(item, dict)]
 
     if not unverified:
         return [], None
@@ -3610,6 +3625,16 @@ def gate_qa(ctx: Any) -> Any:
         ctx.write_text("reviews/qa-gate.txt", f"reread: {reread.reason}\n")
         return reread
     advisory = _review_questions_advisory(ctx)
+    # A verifier probe that fails when the runtime reruns it is a blocking defect, whatever
+    # the judge said (`probe_rerun.defects`).
+    from dataclasses import replace
+
+    from refactory_dsh import probe_rerun
+
+    failing = probe_rerun.defects(probe_rerun.read_results(ctx))
+    if failing:
+        judgment = (judges.Judgment("redo", must_fix=tuple(failing)) if judgment is None else
+                    replace(judgment, verdict="redo", must_fix=(*judgment.must_fix, *failing)))
     if judgment is not None:
         stop = judges.unavailable(judgment)
         if stop:

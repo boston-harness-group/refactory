@@ -1073,6 +1073,18 @@ class DesignMode(Mode):
                                 "early_asks_check", "verifier"),
                        notes="wait for the check, all three reviews, the verifier "
                              "and the early asks judge"))
+        # ── the verifier's probe files, rerun by deterministic code (refactory_dsh.probe_rerun) ──
+        graph.add(Node(
+            "rerun_probes", "op", call="refactory_dsh.probe_rerun:rerun_probes",
+            # Not reviews/verification.md: the verifier is optional, and a declared input
+            # must exist on the spine. Its probe files are read from its workspace clone.
+            writes=("reviews/probe-results.md", "reviews/probe-results.json"),
+            produces=("probe_results",),
+            resource_role="final_validation",
+            notes="rerun each probe file the verifier wrote on the attempt in a scratch clone "
+                  "(120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED "
+                  "claim without a probe file of its own is unverified",
+        ))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(
             "synthesize_qa", "op", call=f"{OPS}:synthesize_qa",
@@ -1262,7 +1274,8 @@ class DesignMode(Mode):
         # when one branch completes, before the other branches finish.
         graph.connect("join_qa", "gate_check")
         graph.connect("gate_check", "pick_corrections", condition="reloop")
-        graph.connect("gate_check", "synthesize_qa", condition="proceed")
+        graph.connect("gate_check", "rerun_probes", condition="proceed")
+        graph.connect("rerun_probes", "synthesize_qa")
         graph.connect("gate_check", "report", condition="draft")
         graph.connect("synthesize_qa", "qa_judge")
         graph.connect("qa_judge", "gate_qa")

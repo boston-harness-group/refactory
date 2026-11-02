@@ -732,6 +732,39 @@ def _cmd_pin(args: argparse.Namespace) -> int:
     return 2
 
 
+def _replay_probe_results(run_dir: Path, repo_root: Path, report: str, commit: str | None) -> str:
+    """Rerun the probe files the replayed verifier wrote, in a scratch clone at the commit.
+
+    The probes move from the verifier's checkout to ``run_dir/reviews/probes``; the table
+    goes to ``run_dir/reviews/probe-results.md`` and is returned.
+    """
+    import shutil
+    import tempfile
+
+    from refactory_dsh import clones, probe_rerun, worktree
+
+    written = repo_root / probe_rerun.PROBES
+    probes = run_dir / probe_rerun.PROBES
+    shutil.rmtree(probes, ignore_errors=True)
+    if written.is_dir():
+        shutil.copytree(written, probes)
+        shutil.rmtree(written, ignore_errors=True)
+        if not any(written.parent.iterdir()):
+            written.parent.rmdir()
+    try:
+        rev = commit or worktree.git(repo_root, "rev-parse", "HEAD").strip()
+        found = worktree.recorded(run_dir)
+        base = found.base if found is not None else f"{rev}~1"
+        with tempfile.TemporaryDirectory(prefix="refactory-probe-rerun-") as scratch:
+            checkout = Path(scratch) / "repo"
+            clones.clone_shared(repo_root, checkout, rev)
+            results = probe_rerun.run_probes(probes, checkout, report, base=base,
+                                             reset=clones._clean)
+    except (ValueError, OSError) as exc:  # WorkspaceError is a ValueError
+        return f"# Probe results\n\nThe probes could not be rerun: {exc}\n"
+    return probe_rerun.write_results(run_dir, results)
+
+
 def _cmd_replay_verifier(args: argparse.Namespace) -> int:
     """Replay the verifier on an existing run directory and a commit.
 
@@ -885,6 +918,9 @@ def _cmd_replay_verifier(args: argparse.Namespace) -> int:
 
         # Print the report to stdout
         print(output)
+
+        # ── rerun the verifier's probe files, as design mode's rerun_probes op does ──
+        print(_replay_probe_results(run_dir, repo_root, output, commit))
         return 0
 
     finally:
