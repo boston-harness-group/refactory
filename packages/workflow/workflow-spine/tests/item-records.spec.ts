@@ -5,24 +5,9 @@
  * - addItemRecord stores records retrievable by getItemRecords
  * - item_records.json is written with all records when the spine finishes
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { Spine } from '../src/spine.ts'
 import type { WorkflowGraph } from '../src/types.ts'
-
-const dirs: string[] = []
-
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
-
-function scratch(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-spine-records-'))
-  dirs.push(dir)
-  return dir
-}
 
 function simpleDataGraph(): WorkflowGraph {
   return {
