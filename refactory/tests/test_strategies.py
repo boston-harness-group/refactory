@@ -296,9 +296,9 @@ def test_adaptive_meta_widens_the_batch_when_it_decides_to(tmp_path):
     from refactory_dsh.outerloop import Run
 
     loop.strategy_decision = {"meta": False}
-    calm = loop.batch_size(Run(loop=loop))
+    calm = loop.batch_size(Run(_loop=loop))
     loop.strategy_decision = {"meta": True, "reason": "no progress"}
-    stalled = loop.batch_size(Run(loop=loop))
+    stalled = loop.batch_size(Run(_loop=loop))
     assert stalled > calm, (
         "the meta branch changed nothing, so the loop did not adapt to the stall"
     )
@@ -322,7 +322,7 @@ def test_reflective_merges_two_parents_rather_than_mutating_one(tmp_path):
     loop.population = [left, right]
     loop.config.elite = 2
 
-    proposals = loop.propose(Run(loop=loop), [left, right], 2)
+    proposals = loop.propose(Run(_loop=loop), [left, right], 2)
     assert proposals, "the merge branch proposed nothing"
     knobs = [p.edit.get("name") for p in proposals if p.edit.get("op") == "set_knob"]
     assert "grid" in knobs, (
@@ -342,7 +342,7 @@ def test_reflective_falls_back_when_the_parents_differ_structurally(tmp_path):
     mode = registry.resolve(Path("."), "circle_packing/adaptive")[1]()
     same = Candidate.from_state(mode.state_dict())
     loop.population = [same]
-    proposals = loop.propose(Run(loop=loop), [same, same], 2)
+    proposals = loop.propose(Run(_loop=loop), [same, same], 2)
     assert all(p.edit.get("op") != "set_knob" or p.edit.get("value") is not None
                for p in proposals)
 
@@ -379,7 +379,7 @@ def test_reflective_sampler_drops_an_edit_that_was_already_refused(tmp_path):
     loop = _loop("reflective_sampler", tmp_path / "run", epochs=1)
     edit = {"op": "set_knob", "name": "grid", "value": 24}
     loop.rejections.append(Rejection(attempt=1, edit=edit, reasons=["E-precondition: nope"]))
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     refused = [proposal for proposal in loop.propose(run, loop.select_parents(1), 4)
                if proposal.edit == edit]
     assert refused == [], (
@@ -410,4 +410,64 @@ def test_a_curriculum_stage_reaches_the_proposal(tmp_path):
     assert len(set(seen)) > 1, (
         f"every iteration reported the same stage ({set(seen)}), so the curriculum "
         "did not advance"
+    )
+
+
+# ── test_proposal_context_parent_records ─────────────────────────────────
+
+def test_proposal_context_parent_records(tmp_path):
+    """ProposalContext.item_records carries the parent's records, not board[0]'s.
+
+    Set up a loop with two evaluated candidates where board[0] (the best)
+    and the strategy_decision parent differ.  _context().item_records must
+    match the parent's records.
+
+    Reverting the _parent_train_records fix makes item_records always come
+    from board[0].
+    """
+    loop = _loop("default", tmp_path / "run", epochs=3, batch_size=1)
+    loop.init()
+
+    # Create two candidates with different states (hence different ids).
+    seed = loop.population[0]
+    seed.evaluated = True
+    seed.exit_ok = True
+    seed.score = 1.0
+    seed.raw_score = 1.0
+    seed.mean_score = 1.0
+    loop.evaluations = 1
+    loop._train_item_records[seed.id] = [
+        {"id": "seed_item", "passed": True, "score": 1.0}
+    ]
+    workdir1 = loop.root / "runs" / seed.id
+    workdir1.mkdir(parents=True, exist_ok=True)
+
+    # Create a second candidate with a DIFFERENT state so it gets a different id.
+    child_state = copy.deepcopy(seed.state)
+    child_state.setdefault("knobs", {})["_test_knob"] = {"spec": {"kind": "int"}, "value": 42}
+    child = Candidate.from_state(child_state, parent=seed.id)
+    assert child.id != seed.id, "child must have a different id than seed"
+    child.evaluated = True
+    child.exit_ok = True
+    child.score = 0.5
+    child.raw_score = 0.5
+    child.mean_score = 0.5
+    loop.population.append(child)
+    loop.evaluations = 2
+    loop._train_item_records[child.id] = [
+        {"id": "child_item", "passed": True, "score": 0.5}
+    ]
+    workdir2 = loop.root / "runs" / child.id
+    workdir2.mkdir(parents=True, exist_ok=True)
+
+    # board[0] is the seed (score 1.0), but set strategy_decision.parent to
+    # the child (score 0.5).
+    loop.strategy_decision = {"parent": child.id}
+
+    ctx = loop._context()
+
+    # item_records should come from the child (the parent in strategy_decision),
+    # NOT from board[0] (the seed).
+    assert ctx.item_records == [{"id": "child_item", "passed": True, "score": 0.5}], (
+        f"expected child's records, got {ctx.item_records}"
     )

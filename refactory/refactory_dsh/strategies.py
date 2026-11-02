@@ -188,7 +188,7 @@ class Reflective(Loop):
             self.merges += 1
         else:
             self.mutations += 1
-        run = run or Run(loop=self)
+        run = run or Run(_loop=self)
         self.strategy_decision = {"branch": branch}
         run.log(f"branch={branch}")
         return super().epoch_step(run)

@@ -56,9 +56,12 @@ class Run:
     and validates it for microseconds and no budget, ``evaluate`` runs the mode and
     spends one unit. Every strategy is built on that distinction, so the API makes
     it impossible to blur.
+
+    The loop is kept as a private attribute (``_loop``) so that optimizer-facing
+    code cannot reach val/test records or workdirs through it.
     """
 
-    loop: Any
+    _loop: Any
     log_lines: list[str] = field(default_factory=list)
     stopped: str | None = None
 
@@ -71,39 +74,124 @@ class Run:
         refused = edits.unknown(op_name)
         if refused is not None:
             reason = [refused]
-            self.loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
+            self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
             return reason
-        allowed = self.loop.config.allowed_ops or edits.enabled(self.loop.config.edit_preset)
+        allowed = self._loop.config.allowed_ops or edits.enabled(self._loop.config.edit_preset)
         if op_name not in allowed:
             reason = ["E-policy: operation is outside this run's permitted edits"]
-            self.loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
+            self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
             return reason
-        outcome = self.loop.optimizer.attempt(
+        outcome = self._loop.optimizer.attempt(
             proposal,
             parent,
-            self.loop.invariants,
+            self._loop.invariants,
             True,
-            self.loop.config.frozen,
-            self.loop._tried(),  # noqa: SLF001 - the harness owns the population
-            seed_state=getattr(self.loop, '_original_seed_state', None),
+            self._loop.config.frozen,
+            self._loop._tried(),  # noqa: SLF001 - the harness owns the population
+            seed_state=getattr(self._loop, '_original_seed_state', None),
         )
         if isinstance(outcome, list):
-            self.loop.rejections.append(
+            self._loop.rejections.append(
                 Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
                           rationale=proposal.rationale)
             )
         return outcome
 
     # ── the expensive primitive ────────────────────────────────────────────
-    def evaluate(self, candidate: Candidate) -> Candidate:
-        """Run the mode and score it. Spends one unit of budget."""
-        if self.loop.evaluations >= self.loop.config.max_evaluations:
+    def evaluate(
+        self,
+        candidate: Candidate,
+        *,
+        part: str = "train",
+        items: list[str] | None = None,
+        seed: int | None = None,
+    ) -> Candidate:
+        """Run the mode and score it. Spends one unit of budget.
+
+        When ``part`` is ``'train'``, delegates to the existing train evaluation.
+        ``items`` may pick a train minibatch: a subset of the manifest's train ids,
+        or, with no manifest, of the seed's train split -- never held-out ids.
+
+        When ``part`` is ``'val'`` or ``'test'``, evaluates the manifest's whole part
+        in a fresh occasion directory without touching ``candidate.score``. ``items``
+        is refused there: an optimizer that chose its val subset would choose its
+        own exam.
+
+        Refused once the evaluation or rollout budget is spent, for every part.
+        """
+        loop = self._loop
+        manifest = getattr(loop, '_parts_manifest', None)
+        if part not in ("train", "val", "test"):
+            raise OuterLoopError(f"unknown part {part!r}; expected 'train', 'val' or 'test'")
+        max_rollouts = getattr(loop.config, "max_rollouts", None)
+        if max_rollouts is not None and loop.rollouts >= max_rollouts:
             raise OuterLoopError(
-                "the evaluation budget is spent; a strategy must ask budget_left() "
-                "before evaluating"
+                f"the rollout budget is spent ({loop.rollouts} of {max_rollouts}); "
+                "a strategy must ask budget_left() before evaluating"
             )
-        self.loop._evaluate(candidate)  # noqa: SLF001
+        if part == "train":
+            if loop.evaluations >= loop.config.max_evaluations:
+                raise OuterLoopError(
+                    "the evaluation budget is spent; a strategy must ask budget_left() "
+                    "before evaluating"
+                )
+            if items is not None:
+                if manifest is not None:
+                    if "train" not in manifest:
+                        raise OuterLoopError(
+                            "the parts manifest has no entry for 'train'; "
+                            "items cannot be provided for a part not in the manifest"
+                        )
+                    allowed = set(manifest["train"])
+                    where = "the manifest's train ids"
+                else:
+                    seed_state = loop.population[0].state if loop.population else candidate.state
+                    allowed = loop._expected_item_ids(seed_state, "train")[0]  # noqa: SLF001
+                    where = "the train split"
+                extra = set(str(i) for i in items) - allowed
+                if extra:
+                    raise OuterLoopError(
+                        f"items {sorted(extra)} are not in {where}; "
+                        f"an optimizer may pick a train minibatch but never val/test ids as 'train'"
+                    )
+            loop._evaluate(candidate, seed=seed, items=items)  # noqa: SLF001
+            return candidate
+        if items is not None:
+            raise OuterLoopError(
+                f"items cannot be chosen for {part!r}: val and test are always evaluated "
+                f"in full from the parts manifest"
+            )
+        if manifest is None:
+            raise OuterLoopError(
+                f"no parts manifest exists; evaluating on {part!r} requires one "
+                f"(LoopConfig.parts_manifest)"
+            )
+        if part not in manifest:
+            raise OuterLoopError(
+                f"the parts manifest has no {part!r} entry; add one to evaluate on {part!r}"
+            )
+        loop._evaluate_part(candidate, part, None, seed)  # noqa: SLF001
         return candidate
+
+    def item_records(self, candidate: Candidate, *, part: str = "train") -> list[dict[str, Any]]:
+        """Return train records for the given candidate.
+
+        Val and test records are excluded from optimizer access by design.
+        """
+        if part != "train":
+            raise OuterLoopError("only train records are accessible to an optimizer")
+        return list(self._loop._train_item_records.get(candidate.id, []))  # noqa: SLF001
+
+    def val_scores(self, candidate: Candidate) -> list[dict[str, Any]]:
+        """Score-only view of val occasions: part, occasion, score, exit_ok, error, duration_s.
+
+        No records or workdirs are exposed.
+        """
+        results = self._loop._part_results.get(candidate.id, {}).get("val", [])  # noqa: SLF001
+        return [
+            {k: v for k, v in occ.items() if k in ("part", "occasion", "score", "exit_ok", "error", "duration_s")}
+            for occ in results
+        ]
 
     def keep(self, candidate: Candidate) -> Candidate:
         """Add a candidate to the search. A strategy that evaluates must also keep.
@@ -112,33 +200,37 @@ class Run:
         decide not to keep it -- a fork whose branches are all discarded is a
         legitimate search.
         """
-        self.loop.step([candidate], run=self)  # noqa: SLF001
-        self.loop.update(self, candidate)  # noqa: SLF001
+        self._loop.step([candidate], run=self)  # noqa: SLF001
+        self._loop.update(self, candidate)  # noqa: SLF001
         return candidate
 
     # ── the state of the search ────────────────────────────────────────────
     def seed(self) -> Candidate:
-        return self.loop.population[0]
+        return self._loop.population[0]
 
     def history(self) -> list[Candidate]:
-        return [candidate for candidate in self.loop.population if candidate.evaluated]
+        return [candidate for candidate in self._loop.population if candidate.evaluated]
 
     def parents(self, n: int, *, by: str = "score") -> list[Candidate]:
-        return self.loop.select_parents(n, by=by)
+        return self._loop.select_parents(n, by=by)
 
     def budget_left(self) -> int:
-        return max(0, self.loop.config.max_evaluations - self.loop.evaluations)
+        left = max(0, self._loop.config.max_evaluations - self._loop.evaluations)
+        if hasattr(self._loop, 'rollouts') and getattr(self._loop.config, 'max_rollouts', None) is not None:
+            rollout_left = max(0, self._loop.config.max_rollouts - self._loop.rollouts)
+            left = min(left, rollout_left)
+        return left
 
     def rejections(self) -> list[str]:
         return summarise_reasons(
-            [reason for rejection in self.loop.rejections for reason in rejection.reasons]
+            [reason for rejection in self._loop.rejections for reason in rejection.reasons]
         )
 
     def state(self) -> dict[str, Any]:
-        return self.loop.state_dict()
+        return self._loop.state_dict()
 
     def knob_surface(self) -> list[dict[str, Any]]:
-        return self.loop._context().knobs  # noqa: SLF001
+        return self._loop._context().knobs  # noqa: SLF001
 
     # ── stopping, and saying what happened ────────────────────────────────
     def stop(self, reason: str) -> None:
@@ -156,7 +248,7 @@ class Run:
         consumed. This delegates to the loop's control handler, so the
         consume-once semantics are preserved.
         """
-        return self.loop._apply_control()  # noqa: SLF001
+        return self._loop._apply_control()  # noqa: SLF001
 
     def save_strategy_state(self) -> None:
         """Journal the strategy's current state immediately.
@@ -168,12 +260,12 @@ class Run:
         regardless of whether it was written by this method or by the
         epoch-end journal.
         """
-        self.loop._save_strategy_state()  # noqa: SLF001
+        self._loop._save_strategy_state()  # noqa: SLF001
 
     def log(self, message: str) -> None:
         self.log_lines.append(str(message))
-        (self.loop.root / "strategy.log").parent.mkdir(parents=True, exist_ok=True)
-        with (self.loop.root / "strategy.log").open("a") as handle:
+        (self._loop.root / "strategy.log").parent.mkdir(parents=True, exist_ok=True)
+        with (self._loop.root / "strategy.log").open("a") as handle:
             handle.write(str(message) + "\n")
 
 
@@ -209,7 +301,7 @@ class OuterLoop:
         bound it stopped for, and never ends for an unstated reason.
         """
         self.init()
-        run = Run(loop=self)
+        run = Run(_loop=self)
         self.strategy(run)
         if run.stopped:
             self.bound = str(run.stopped)
@@ -233,7 +325,7 @@ class OuterLoop:
         raise NotImplementedError
 
     def batch_size(self, run: Run) -> int:
-        return int(run.loop.config.batch_size)
+        return int(run._loop.config.batch_size)  # noqa: SLF001
 
     def install(self, run: Run, proposals: Sequence[Proposal], parents: Sequence[Candidate]) -> list[Candidate]:
         """Turn proposals into candidates, refusing what cannot run."""
@@ -297,7 +389,7 @@ def run_strategy(loop: Any) -> dict[str, Any]:
     A run never ends for an unstated reason: whatever a strategy returns as its
     stop reason reaches the report, and a strategy that says nothing says why not.
     """
-    run = Run(loop=loop)
+    run = Run(_loop=loop)
     loop.optimizer_run = run
     loop.run_strategy(run)
     if run.stopped:

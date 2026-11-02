@@ -146,15 +146,30 @@ def test_end_folds_the_task_verdict_into_the_run_facts(tmp_path):
     _probe_task()
     node = _declared(_data_graph(task_ref="counting"), tmp_path)
 
-    assert items.command_end(node, tmp_path, 0) == {
-        "id": "alpha", "passed": True, "score": 1.0,
-    }
+    record = items.command_end(node, tmp_path, 0)
+    assert record["id"] == "alpha"
+    assert record["passed"] is True
+    assert record["score"] == 1.0
+    # F6 fields are present in the extended record.
+    assert "exchanges" in record
+    assert "prediction" in record
+    assert "fail_reason" in record
+    assert "error_kind" in record
+    assert "error_text" in record
+    assert "metadata" in record
     items.command_end(node, tmp_path, 1)
     facts = json.loads((tmp_path / "facts.json").read_text())
-    assert facts["item_scores"] == [
-        {"id": "alpha", "passed": True, "score": 1.0},
-        {"id": "beta", "passed": True, "score": 0.5},
-    ]
+    # F6: item_scores now carry all record fields.
+    for entry in facts["item_scores"]:
+        assert "exchanges" in entry
+        assert "prediction" in entry
+        assert "metadata" in entry
+    assert facts["item_scores"][0]["id"] == "alpha"
+    assert facts["item_scores"][0]["passed"] is True
+    assert facts["item_scores"][0]["score"] == 1.0
+    assert facts["item_scores"][1]["id"] == "beta"
+    assert facts["item_scores"][1]["passed"] is True
+    assert facts["item_scores"][1]["score"] == 0.5
 
 
 def test_a_node_that_declares_no_item_scores_keeps_none(tmp_path):

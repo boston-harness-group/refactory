@@ -137,6 +137,8 @@ class WalkerEvaluator(Evaluator):
         )
 
     def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path) -> RunResult:
+        import json as _json
+
         _persist_steering_option(workdir, self.omit_steering)
         # One store per inner run, and its `run`-retention namespaces are deleted
         # when it ends. The roots already keep candidates apart; forgetting is what
@@ -161,6 +163,12 @@ class WalkerEvaluator(Evaluator):
             # scoped to is the bug, however the run ended.
             store.forget_run_scoped()
         result.duration_s = round(time.time() - started, 4)
+        # Write per-item records to the trial directory (F6).
+        if result.item_records:
+            workdir.mkdir(parents=True, exist_ok=True)
+            (workdir / "item_records.json").write_text(
+                _json.dumps(result.item_records, indent=2, default=str)
+            )
         return result
 
 
@@ -197,6 +205,8 @@ class DshEvaluator(Evaluator):
         )
 
     def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path) -> RunResult:
+        import json as _json
+
         _persist_steering_option(workdir, self.omit_steering)
         from refactory_dsh.dsh_runtime import evaluate_on_dsh
 
@@ -206,10 +216,18 @@ class DshEvaluator(Evaluator):
 
             model = DshModelClient().with_budget(self.budget)
 
-        return evaluate_on_dsh(
+        result = evaluate_on_dsh(
             mode, state, workdir, timeout_s=self.timeout_s, on_output=self.on_output,
             **({"model": model} if model is not None else {}),
         )
+        # Read per-item records from the spine's item_records.json if present.
+        records_path = workdir / "item_records.json"
+        if records_path.exists():
+            try:
+                result.item_records = _json.loads(records_path.read_text())
+            except (OSError, _json.JSONDecodeError):
+                pass
+        return result
 
 
 #: The evaluators the loop can select by name.

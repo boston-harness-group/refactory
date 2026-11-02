@@ -59,6 +59,7 @@ class VerifyResult:
     passed: bool
     score: float
     details: str = ""
+    prediction: str = ""
 
 
 class Task:
@@ -132,12 +133,17 @@ def instance_of(item: dict[str, Any]) -> TaskInstance:
 #: The file in a run directory that names the part of the items it evaluates.
 SUBSET = "subset.json"
 
-#: The two parts an item selection can name.
+#: The parts an item selection can name.
 TRAIN = "train"
 HOLDOUT = "holdout"
+VAL = "val"
+TEST = "test"
 
 #: The holdout fraction used when a run directory names a part but no fraction.
 DEFAULT_HOLDOUT = 0.3
+
+#: An explicit id-list manifest for three-way partitioning.
+MANIFEST = "parts.json"
 
 
 def _item_key(item: dict[str, Any], index: int) -> str:
@@ -181,7 +187,47 @@ def _subset_file(workdir: Path) -> Path:
     return Path(workdir) / SUBSET
 
 
-def write_subset(workdir: Path, part: str, holdout: float) -> Path:
+def make_manifest(
+    workdir: Path,
+    *,
+    train_ids: list[str],
+    val_ids: list[str] | None = None,
+    test_ids: list[str] | None = None,
+) -> Path:
+    """Write an explicit id-list manifest for three-way partitioning."""
+    manifest: dict[str, list[str]] = {"train": list(train_ids)}
+    if val_ids is not None:
+        manifest["val"] = list(val_ids)
+    if test_ids is not None:
+        manifest["test"] = list(test_ids)
+    path = Path(workdir) / MANIFEST
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2))
+    return path
+
+
+def split_to_manifest(
+    workdir: Path,
+    items: Sequence[dict[str, Any]],
+    *,
+    holdout: float = DEFAULT_HOLDOUT,
+    val_fraction: float = 0.0,
+) -> Path:
+    """Partition items by fractions and write the resulting id lists as a manifest."""
+    parts = partition(items, holdout)
+    train_items = parts[TRAIN]
+    test_items = parts[HOLDOUT]
+    train_ids = [str(item.get("id") or i) for i, item in enumerate(items) if item in train_items]
+    test_ids = [str(item.get("id") or i) for i, item in enumerate(items) if item in test_items]
+    val_ids: list[str] | None = None
+    if val_fraction > 0 and len(train_ids) > 1:
+        split_point = max(1, int(round(len(train_ids) * (1 - val_fraction))))
+        val_ids = train_ids[split_point:]
+        train_ids = train_ids[:split_point]
+    return make_manifest(workdir, train_ids=train_ids, val_ids=val_ids, test_ids=test_ids or None)
+
+
+def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None) -> Path:
     """Record which part of a Task's items a run directory evaluates.
 
     The outer loop writes this before it evaluates a candidate and the item loader
@@ -189,7 +235,10 @@ def write_subset(workdir: Path, part: str, holdout: float) -> Path:
     """
     path = _subset_file(workdir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"part": str(part), "holdout": float(holdout)}, indent=2))
+    data: dict[str, Any] = {"part": str(part), "holdout": float(holdout)}
+    if seed is not None:
+        data["seed"] = seed
+    path.write_text(json.dumps(data, indent=2))
     return path
 
 
@@ -211,15 +260,49 @@ def select_subset(
     """The part of ``items`` a run directory names, or all of them when it names none.
 
     Called by the one item loader both runtimes use, so the walker and DSH iterate
-    the same items of the same Task. A mode run outside the outer loop has no run
-    directory naming a part and evaluates everything it has.
+    the same items of the same Task. When a ``parts.json`` manifest exists, item
+    ids are looked up there. When ``seed`` is present in subset.json, the returned
+    items are shuffled within the part using ``random.Random(seed)``.
     """
+    import random as _random
+
     record = read_subset(workdir)
     part = str(record.get("part") or "")
-    if part not in (TRAIN, HOLDOUT):
+
+    # Try manifest first
+    manifest_path = Path(workdir) / MANIFEST
+    if manifest_path.exists() and part:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            if isinstance(manifest, dict) and part in manifest:
+                allowed_ids = set(str(x) for x in manifest[part])
+                selected = [
+                    item for i, item in enumerate(items)
+                    if str(item.get("id") or i) in allowed_ids
+                ]
+                seed = record.get("seed")
+                if seed is not None:
+                    selected = list(selected)
+                    _random.Random(seed).shuffle(selected)
+                return selected
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if part not in (TRAIN, HOLDOUT, VAL, TEST):
         return list(items)
+    if part in (VAL, TEST):
+        raise TaskError(
+            f"part {part!r} requires a parts manifest (parts.json); "
+            f"no manifest was found in {workdir}"
+        )
+    effective = part
     try:
         fraction = float(record.get("holdout", DEFAULT_HOLDOUT))
     except (TypeError, ValueError):
         fraction = DEFAULT_HOLDOUT
-    return partition(items, fraction)[part]
+    selected = partition(items, fraction)[effective]
+    seed = record.get("seed")
+    if seed is not None:
+        selected = list(selected)
+        _random.Random(seed).shuffle(selected)
+    return selected
