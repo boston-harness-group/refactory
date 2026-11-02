@@ -697,13 +697,6 @@ class Executor:
     _item_records: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
-    #: Test seam: when True, ``_effective_timeout`` returns None so ops/fn
-    #: gates run in-process and tests that monkeypatch op functions in the
-    #: parent process can see the patch.  Set after construction
-    #: (``init=False``); production code never sets this.  The race fix
-    #: lives in ``_effective_timeout`` returning a float on every production
-    #: path.
-    _force_inline: bool = field(default=False, init=False, repr=False)
 
     def _record(
         self, node: str, *, error: str | None = None,
@@ -1352,8 +1345,6 @@ class Executor:
         # run-dir CWD, ctx.model=None, and stdout/stderr capture are
         # per-process.  No os.chdir or sys.std* swaps in the parent.
         use_forkserver = is_fn_gate or is_op
-        if use_forkserver and self._force_inline:
-            return None
         if use_forkserver:
             from refactory_dsh.lowering import command_timeout_s as _cmd_timeout_s
 
@@ -1580,121 +1571,12 @@ class Executor:
             self.ctx.budget.checkpoint()
         return result
 
-    def _run_op_inline(self, node: Node) -> Any:
-        """Run an op in-process — dead code on all production walker paths.
-
-        ``_effective_timeout`` always returns a float for ops, so ``_dispatch``
-        always routes through ``_run_op_timed``.  This method is retained only
-        because tests that monkeypatch op functions (e.g. test_delivery) rely
-        on in-process dispatch where the monkeypatch is visible.
-
-        When this code *is* reached (only via a test that overrides
-        ``_effective_timeout`` to return ``None``), it matches the spine's op
-        contract: run directory is the CWD and ctx.model is None.
-        """
-        import contextlib
-        import io
-
-        callable_target = node.call
-        saved_model = self.ctx.model
-        saved_cwd = os.getcwd()
-        saved_workdir = self.ctx.workdir
-        abs_workdir = Path(self.ctx.workdir.resolve())
-        saved_project = os.environ.get("REFACTORY_PROJECT")
-        self.ctx.model = None
-        self.ctx.workdir = abs_workdir
-        _capture_stderr = io.StringIO()
-        try:
-            if not os.environ.get("REFACTORY_PROJECT"):
-                os.environ["REFACTORY_PROJECT"] = saved_cwd
-            os.chdir(str(abs_workdir))
-            fn = resolve(callable_target)
-            with contextlib.redirect_stderr(_capture_stderr):
-                produced = fn(self.ctx)
-            # Pass captured stderr to the real stderr and emit run_warnings.
-            _captured_err = _capture_stderr.getvalue()
-            _emit_run_warnings(self.ctx.workdir, node.id, _captured_err)
-            if _captured_err:
-                sys.stderr.write(_captured_err)
-            return produced
-        except BaseException:
-            _err_stderr = _capture_stderr.getvalue()
-            if _err_stderr and _err_stderr.strip():
-                exc = sys.exc_info()[1]
-                if exc is not None:
-                    try:
-                        exc.args = (f"{exc.args[0]}\nop stderr: {_err_stderr.strip()}",) + exc.args[1:]
-                    except (IndexError, AttributeError):
-                        pass
-            raise
-        finally:
-            self.ctx.model = saved_model
-            self.ctx.workdir = saved_workdir
-            os.chdir(saved_cwd)
-            if saved_project is None:
-                os.environ.pop("REFACTORY_PROJECT", None)
-            else:
-                os.environ["REFACTORY_PROJECT"] = saved_project
-
-    def _run_fn_gate_inline(self, node: Node) -> Any:
-        """Run a fn gate in-process — dead code on all production walker paths.
-
-        ``_effective_timeout`` always returns a float for fn gates, so
-        ``_visit_gate`` always routes through ``_run_op_timed``.  This method
-        is retained only because tests that monkeypatch fn gate functions
-        rely on in-process dispatch where the monkeypatch is visible.
-
-        ctx.model is set to None and CWD is changed to the run directory,
-        matching the spine's op contract.  Stdout is captured for fn-gate
-        feedback extraction.
-        """
-        import contextlib
-        import io
-
-        callable_target = node.evaluator
-        saved_model = self.ctx.model
-        saved_cwd = os.getcwd()
-        saved_workdir = self.ctx.workdir
-        abs_workdir = Path(self.ctx.workdir.resolve())
-        saved_project = os.environ.get("REFACTORY_PROJECT")
-        self.ctx.model = None
-        self.ctx.workdir = abs_workdir
-        _capture_stdout = io.StringIO()
-        try:
-            if not os.environ.get("REFACTORY_PROJECT"):
-                os.environ["REFACTORY_PROJECT"] = saved_cwd
-            os.chdir(str(abs_workdir))
-            with contextlib.redirect_stdout(_capture_stdout):
-                verdict = resolve(callable_target)(self.ctx)
-            # Attach captured stdout for fn-gate feedback extraction.
-            # A plain str does not accept attribute assignment, so wrap it
-            # in Verdict first — this preserves stdout as feedback for fn
-            # gates that return a bare string instead of Verdict.
-            _child_stdout = _capture_stdout.getvalue()
-            if _child_stdout and isinstance(verdict, str):
-                from refactory_dsh.nn import Verdict
-                if not isinstance(verdict, Verdict):
-                    verdict = Verdict(verdict)
-                verdict._fn_stdout = _child_stdout  # type: ignore[attr-defined]
-            return verdict
-        finally:
-            self.ctx.model = saved_model
-            self.ctx.workdir = saved_workdir
-            os.chdir(saved_cwd)
-            if saved_project is None:
-                os.environ.pop("REFACTORY_PROJECT", None)
-            else:
-                os.environ["REFACTORY_PROJECT"] = saved_project
-
     def _dispatch(self, node: Node, answer: str | None = None) -> tuple[str | None, str | None]:
         """Execute a node after resource admission and the durable start marker. ``answer``
         is a user gate's, read before its visit started."""
         if node.kind == "op":
             timeout = self._effective_timeout(node)
-            if timeout is not None:
-                produced = self._run_op_timed(node.call, node, timeout)
-            else:
-                produced = self._run_op_inline(node)
+            produced = self._run_op_timed(node.call, node, timeout)
             if isinstance(produced, dict):
                 for key, value in produced.items():
                     self.ctx.set_fact(key, value)
@@ -1904,12 +1786,9 @@ class Executor:
             verdict = self._answered_verdict(node)
         else:
             timeout = self._effective_timeout(node)
-            if timeout is not None:
-                # Forkserver child: per-process stdout capture, thread-safe,
-                # no global sys.stdout swap.
-                verdict = self._run_op_timed(node.evaluator, node, timeout)
-            else:
-                verdict = self._run_fn_gate_inline(node)
+            # Forkserver child: per-process stdout capture, thread-safe,
+            # no global sys.stdout swap.
+            verdict = self._run_op_timed(node.evaluator, node, timeout)
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"

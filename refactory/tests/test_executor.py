@@ -13,24 +13,6 @@ import pytest
 from refactory_dsh import nn
 
 
-@pytest.fixture
-def _forkserver_dispatch(monkeypatch):
-    """Undo the conftest's ``_force_inline`` so ops run in forkserver children.
-
-    Tests that exercise the race fix or verify forkserver behavior use this
-    fixture to get production-like dispatch.
-    """
-    from refactory_dsh.nn.executor import Executor
-
-    _original_init = Executor.__init__
-
-    def _init_without_inline(self, *args, **kwargs):
-        _original_init(self, *args, **kwargs)
-        self._force_inline = False
-
-    monkeypatch.setattr(Executor, "__init__", _init_without_inline)
-
-
 class FakeModel:
     """A model client that records what it was asked."""
 
@@ -582,12 +564,12 @@ def test_op_stderr_preserved_on_raise(tmp_path):
         f"stderr content not in error: {result.error}"
 
 
-def test_ops_and_fn_gates_always_use_forkserver(tmp_path, _forkserver_dispatch):
+def test_ops_and_fn_gates_always_use_forkserver(tmp_path):
     """Every op and fn gate runs in a forkserver child on every walker path,
     regardless of ``enable_recovery``.
 
-    This test fails if ``_effective_timeout`` is reverted to require
-    ``enable_recovery`` for ops or ``_in_fork_branch`` for fn gates.
+    This test fails if ``_effective_timeout`` is reverted to return ``None``
+    for any op or fn gate.
     """
     import os
 
@@ -599,9 +581,7 @@ def test_ops_and_fn_gates_always_use_forkserver(tmp_path, _forkserver_dispatch):
     graph.add(nn.Node("op", "op", call="loop_ops:noop"))
 
     # Without recovery: both fn gates and ops get a forkserver timeout.
-    # _force_inline=False overrides the conftest's default so we test production behavior.
     exec_no_recovery = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
-    exec_no_recovery._force_inline = False
     assert exec_no_recovery._effective_timeout(graph.nodes["fg"]) == 3600.0, \
         "fn gate without recovery should get a forkserver timeout"
     assert exec_no_recovery._effective_timeout(graph.nodes["op"]) == 3600.0, \
@@ -609,7 +589,6 @@ def test_ops_and_fn_gates_always_use_forkserver(tmp_path, _forkserver_dispatch):
 
     # With recovery: same, both get a forkserver timeout.
     exec_with_recovery = Executor(graph, nn.RunContext(tmp_path), enable_recovery=True)
-    exec_with_recovery._force_inline = False
     assert exec_with_recovery._effective_timeout(graph.nodes["fg"]) == 3600.0, \
         "fn gate with recovery should get a forkserver timeout"
     assert exec_with_recovery._effective_timeout(graph.nodes["op"]) == 3600.0, \
@@ -643,7 +622,7 @@ def test_ops_and_fn_gates_always_use_forkserver(tmp_path, _forkserver_dispatch):
     )
 
 
-def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path, _forkserver_dispatch):
+def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path):
     """Two concurrent fork-branch ops writing relative files each land in the
     run directory, nothing outside it, on repeated runs.
 
@@ -708,7 +687,7 @@ def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path, _forkserver_dispa
             f"iteration {iteration}: branch_b ran in parent process (inline os.chdir race)"
 
 
-def test_fn_gate_plain_str_stdout_is_feedback(tmp_path, _forkserver_dispatch):
+def test_fn_gate_plain_str_stdout_is_feedback(tmp_path):
     """An fn gate that prints to stdout and returns a plain str (not Verdict)
     keeps its stdout as reloop feedback.
 

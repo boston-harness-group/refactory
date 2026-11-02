@@ -845,8 +845,6 @@ def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
     graph.add(nn.Node("fg", "gate", gate_kind="fn",
                       evaluator="walker_recovery_ops:report_interpreter"))
     executor = nn.Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
-    # Override the conftest's _force_inline to test the production path.
-    executor._force_inline = False
     # Ops and fn gates get the default 3600 s forkserver timeout even without recovery.
     assert executor._effective_timeout(graph.nodes["plain"]) == 3600.0
     assert executor._effective_timeout(graph.nodes["fg"]) == 3600.0

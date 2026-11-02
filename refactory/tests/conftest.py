@@ -50,32 +50,6 @@ def _isolate_refactory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatc
 
 
 @pytest.fixture(autouse=True)
-def _executor_inline_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run ops in-process when ``enable_recovery=False`` so monkeypatching is visible.
-
-    Production code always routes ops through forkserver children (``_effective_timeout``
-    returns a float for every op and fn gate), but forkserver children cannot see parent-
-    process monkeypatching.  This fixture sets ``_force_inline=True`` on ``Executor``
-    instances created without ``enable_recovery``, reverting to in-process dispatch for
-    test backward compatibility.  Executors with ``enable_recovery=True`` keep forkserver
-    dispatch so timeout and recovery tests work unchanged.
-
-    Tests that exercise the forkserver path without recovery (e.g. the race-fix tests
-    in ``test_executor.py``) set ``_force_inline=False`` on their executor.
-    """
-    from refactory_dsh.nn.executor import Executor
-
-    _original_init = Executor.__init__
-
-    def _init_with_inline(self: Executor, *args: object, **kwargs: object) -> None:
-        _original_init(self, *args, **kwargs)  # type: ignore[arg-type]
-        if not self.enable_recovery:
-            self._force_inline = True
-
-    monkeypatch.setattr(Executor, "__init__", _init_with_inline)
-
-
-@pytest.fixture(autouse=True)
 def _checkout_guard_leaves_this_checkout_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """The checkout guard (dm-164) never watches the checkout under test.
 

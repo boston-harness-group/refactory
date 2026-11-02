@@ -1723,6 +1723,16 @@ export function apply(ctx: Context, config: Config): void {
       if (spine.passOf()?.finished) continue
       if (state.status === 'done') return { next: state, item, ran }
       if (advanceControl(state)) continue
+      // A dispatch boundary may hold both deterministic nodes and structural
+      // control nodes (ForkNode/JoinNode) when a fork branch is itself a fork
+      // (a nested fork).  Complete the structural peers first so their children
+      // join the ready set, then re-read the state for the dispatch.
+      const controls = state.nodes.filter(node => node._type === 'ForkNode' || node._type === 'JoinNode')
+      if (controls.length > 0 && state.nodes.length > controls.length) {
+        for (const node of controls) spine.complete(node.id)
+        recordBoundary()
+        continue
+      }
       const data = state.nodes.find(node => node._type === 'DataNode')
       if (data !== undefined) {
         const openedPass = await openPass(data)
@@ -1794,6 +1804,9 @@ export function apply(ctx: Context, config: Config): void {
         // A gate's reason is the reloop target's feedback, exactly as a manual
         // verdict's is: without it the node the run goes back to, and the CEO,
         // see an empty string where the cause should be.
+        // A halt inside a fork branch removes the cursor for peers that also
+        // completed: skip them so assertDue does not throw.
+        if (spine.isHalted()) continue
         if (outcome.verdict === undefined) spine.complete(node.id)
         else spine.verdict(node.id, outcome.verdict, outcome.reason ?? '')
       }
