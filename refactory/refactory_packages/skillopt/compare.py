@@ -433,7 +433,16 @@ def compare_runs(
         a_slow_ep = a_slow.get(epoch)
         b_slow_ep = b_entry.get("slow_update")
         if a_slow_ep is not None and b_slow_ep is not None:
-            slow_match = _comparable(a_slow_ep) == _comparable(b_slow_ep)
+            # B may store True (boolean) when A has a full result dict.
+            # Both truthy → presence match; compare structurally only when
+            # both sides have dict data.
+            if isinstance(a_slow_ep, dict) and isinstance(b_slow_ep, dict):
+                slow_match = _comparable(a_slow_ep) == _comparable(b_slow_ep)
+            elif isinstance(a_slow_ep, dict) and b_slow_ep is True:
+                # B ran slow_update but only recorded True; presence matches.
+                slow_match = True
+            else:
+                slow_match = _comparable(a_slow_ep) == _comparable(b_slow_ep)
         else:
             slow_match = None
         epoch_report["slow_update"] = {
@@ -450,7 +459,16 @@ def compare_runs(
         a_meta_ep = a_meta.get(epoch)
         b_meta_ep = b_entry.get("meta_skill")
         if a_meta_ep is not None and b_meta_ep is not None:
-            meta_match = _comparable(a_meta_ep) == _comparable(b_meta_ep)
+            # B may store True (boolean) when A has a full result dict.
+            # Both truthy → presence match; compare structurally only when
+            # both sides have dict data.
+            if isinstance(a_meta_ep, dict) and isinstance(b_meta_ep, dict):
+                meta_match = _comparable(a_meta_ep) == _comparable(b_meta_ep)
+            elif isinstance(a_meta_ep, dict) and b_meta_ep is True:
+                # B ran meta_skill but only recorded True; presence matches.
+                meta_match = True
+            else:
+                meta_match = _comparable(a_meta_ep) == _comparable(b_meta_ep)
         else:
             meta_match = None
         epoch_report["meta_skill"] = {
@@ -576,7 +594,14 @@ def format_report(report: dict[str, Any]) -> str:
             lines.append(f"  Call key: {first_div.get('call_key')}")
         lines.append("")
     else:
-        lines.append("## No divergence found — A and B match completely.")
+        diverged = summary.get("diverged_epochs", 0)
+        if diverged > 0:
+            lines.append(
+                f"## No first-divergence pinpointed, but {diverged} epoch(s) "
+                "have incomplete data (B missing fields A provides)."
+            )
+        else:
+            lines.append("## No divergence found — A and B match completely.")
         lines.append("")
 
     lines.append("## Per-Epoch Detail")

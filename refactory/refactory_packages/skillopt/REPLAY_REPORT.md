@@ -55,12 +55,18 @@ recorded analyst calls.
 
 The 17 validation calls (baseline evaluation of initial skill) also matched.
 
-### Porting Bugs Identified
+### Porting Bugs Identified and Fixed
 
 1. **Missing `source_type` / `support_count` on edits** — A's
-   `_normalise_patches` (trainer.py:157-186, MIT) adds `source_type` and
-   `support_count` to each edit dict before merging. B should do the same.
-   This causes the merge prompt to differ even when analyst responses match.
+   `_normalise_patches` (skillopt/engine/trainer.py:157-186, MIT) adds
+   `source_type` and `support_count` to each edit dict via
+   `item.setdefault()` before merging. B's trainer.py only set
+   `result["source_type"]` on the parent result dict, not on individual
+   edits within `patch["edits"]`. **Fixed** in trainer.py: now propagates
+   `source_type` and `support_count` to each edit dict after extraction,
+   matching A's `_normalise_patches` behavior.
+
+### Behavioral Differences (Not Porting Bugs)
 
 2. **Sequential vs concurrent analyst execution** — A runs analyst
    minibatches concurrently with `ThreadPoolExecutor(max_workers=workers)`.

@@ -1001,6 +1001,13 @@ class SkillOptTrainer:
                 result["source_type"] = "failure"
                 patch = result["patch"]
                 edits = patch.get("edits", [])
+                # Propagate source_type and support_count to individual edits,
+                # matching A's _normalise_patches (skillopt/engine/trainer.py:157-186).
+                support = max(int(result.get("batch_size", 0) or 0), 1)
+                for item in edits:
+                    if isinstance(item, dict):
+                        item.setdefault("source_type", "failure")
+                        item.setdefault("support_count", support)
                 if edits:
                     failure_patches.append(patch)
                 all_raw.append(result)
@@ -1032,6 +1039,13 @@ class SkillOptTrainer:
                 result["source_type"] = "success"
                 patch = result["patch"]
                 edits = patch.get("edits", [])
+                # Propagate source_type and support_count to individual edits,
+                # matching A's _normalise_patches (skillopt/engine/trainer.py:157-186).
+                support = max(int(result.get("batch_size", 0) or 0), 1)
+                for item in edits:
+                    if isinstance(item, dict):
+                        item.setdefault("source_type", "success")
+                        item.setdefault("support_count", support)
                 if edits:
                     success_patches.append(patch)
                 all_raw.append(result)

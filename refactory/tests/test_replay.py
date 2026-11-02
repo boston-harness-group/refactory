@@ -970,3 +970,234 @@ def test_format_report_includes_divergence(tmp_path):
     assert "First Divergence" in text
     assert "val_scores" in text
     assert "Epoch" in text
+
+
+def test_trainer_edits_have_source_type_and_support_count(tmp_path):
+    """B's trainer adds source_type and support_count to each edit dict.
+
+    Mirrors A's _normalise_patches (skillopt/engine/trainer.py:157-186, MIT)
+    which calls item.setdefault('source_type', ...) and
+    item.setdefault('support_count', ...) on each edit.
+    """
+    from refactory_packages.skillopt.trainer import SkillOptTrainer
+
+    analyst_response = json.dumps({
+        "batch_size": 5,
+        "patch": {
+            "reasoning": "test",
+            "edits": [
+                {"op": "append", "content": "## Edit 1"},
+                {"op": "append", "content": "## Edit 2"},
+            ],
+        },
+    })
+
+    class StubModel:
+        def complete(self, prompt, *, system="", **kw):
+            if "failure-analysis" in system or "success-pattern" in system:
+                return analyst_response
+            if "skill-edit coordinator" in system or "FINAL merge" in system:
+                return json.dumps({
+                    "reasoning": "merged",
+                    "edits": [{"op": "append", "content": "## Merged"}],
+                })
+            if "skill-optimization" in system:
+                return json.dumps({
+                    "reasoning": "ranked",
+                    "selected_indices": [0],
+                })
+            return "<answer>A</answer>"
+
+    item = {
+        "id": "test:1",
+        "question": "What is 2+2?",
+        "choices": [
+            {"label": "A", "text": "3"},
+            {"label": "B", "text": "4"},
+        ],
+        "correct_choice": {"label": "B", "text": "4"},
+    }
+    val_item = {
+        "id": "val:1",
+        "question": "What is 1+1?",
+        "choices": [
+            {"label": "A", "text": "1"},
+            {"label": "B", "text": "2"},
+        ],
+        "correct_choice": {"label": "B", "text": "2"},
+    }
+
+    config = {
+        "max_epochs": 1,
+        "early_stop_patience": 0,
+        "early_stop_at_full_val": False,
+        "edit_budget_max": 4,
+        "edit_budget_min": 1,
+        "seed": 42,
+        "slow_update_samples": 5,
+        "group_size": 4,
+        "merge_batch_size": 4,
+        "use_slow_update": False,
+        "use_meta_skill": False,
+    }
+
+    output_dir = tmp_path / "output"
+    trainer = SkillOptTrainer(
+        model=StubModel(),
+        config=config,
+        train_items=[item],
+        val_items=[val_item],
+        initial_skill="",
+        output_dir=output_dir,
+    )
+
+    # Run the reflect stage directly to inspect patch edits
+    failure_patches, success_patches, all_raw = trainer._reflect(
+        failures=[item],
+        successes=[],
+        conversations={"test:1": [{"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}]},
+        skill_text="",
+        edit_budget=4,
+        step_dir=output_dir,
+    )
+
+    assert len(failure_patches) > 0
+    for patch in failure_patches:
+        for edit in patch.get("edits", []):
+            assert "source_type" in edit, (
+                "edit missing source_type — porting bug from "
+                "skillopt/engine/trainer.py:157-186"
+            )
+            assert "support_count" in edit, (
+                "edit missing support_count — porting bug from "
+                "skillopt/engine/trainer.py:157-186"
+            )
+            assert edit["source_type"] == "failure"
+            assert edit["support_count"] == 5  # from batch_size=5
+
+
+def test_slow_update_boolean_vs_dict_match(tmp_path):
+    """slow_update comparison handles B storing True vs A storing a dict.
+
+    B may record slow_update=True while A has the full result dict.
+    The comparison should treat this as a presence match, not a divergence.
+    """
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1,
+            "rollout_hard": 0.5, "rollout_n": 35,
+            "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "candidate_hash": "abcd1234abcd1234",
+            "selection_hard": 0.5, "action": "accept",
+        },
+    ]
+    a_out = _make_a_out(tmp_path, a_epochs)
+
+    # Create A's slow_update result as a full dict
+    slow_dir = a_out / "slow_update" / "epoch_1"
+    slow_dir.mkdir(parents=True)
+    (slow_dir / "slow_result.json").write_text(json.dumps({
+        "updated": True, "accuracy": 0.6, "details": {"n": 20},
+    }))
+
+    # B stores just True
+    b_history = [
+        {
+            "epoch": 1, "step": 1,
+            "rollout_hard": 0.5, "rollout_n": 35,
+            "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "candidate_hash": "abcd1234abcd1234",
+            "selection_hard": 0.5, "action": "accept",
+            "slow_update": True,
+        },
+    ]
+
+    report = compare_runs(a_out, b_history)
+    ep = report["per_epoch"][0]
+    assert ep["slow_update"]["match"] is True, (
+        "slow_update should match when B has True and A has a dict"
+    )
+
+
+def test_meta_skill_boolean_vs_dict_match(tmp_path):
+    """meta_skill comparison handles B storing True vs A storing a dict.
+
+    B may record meta_skill=True while A has the full result dict.
+    The comparison should treat this as a presence match, not a divergence.
+    """
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1,
+            "rollout_hard": 0.5, "rollout_n": 35,
+            "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "candidate_hash": "abcd1234abcd1234",
+            "selection_hard": 0.5, "action": "accept",
+        },
+    ]
+    a_out = _make_a_out(tmp_path, a_epochs)
+
+    # Create A's meta_skill result as a full dict
+    meta_dir = a_out / "meta_skill" / "epoch_1"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "meta_skill_result.json").write_text(json.dumps({
+        "notes": ["Improve step-by-step reasoning"],
+    }))
+
+    # B stores just True
+    b_history = [
+        {
+            "epoch": 1, "step": 1,
+            "rollout_hard": 0.5, "rollout_n": 35,
+            "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "candidate_hash": "abcd1234abcd1234",
+            "selection_hard": 0.5, "action": "accept",
+            "meta_skill": True,
+        },
+    ]
+
+    report = compare_runs(a_out, b_history)
+    ep = report["per_epoch"][0]
+    assert ep["meta_skill"]["match"] is True, (
+        "meta_skill should match when B has True and A has a dict"
+    )
+
+
+def test_format_report_no_false_match_claim(tmp_path):
+    """format_report does not claim 'match completely' when epochs are diverged.
+
+    When first_divergence is None but _epoch_matched marks epochs as
+    diverged (e.g. B missing fields A has), the summary must not say
+    'A and B match completely'.
+    """
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1,
+            "rollout_hard": 0.5, "rollout_n": 35,
+            "n_patches": 4, "n_failure_patches": 2,
+            "n_success_patches": 2, "n_edits_merged": 6, "n_edits_ranked": 4,
+            "candidate_hash": "abcd1234abcd1234",
+            "selection_hard": 0.5, "action": "accept",
+        },
+    ]
+    a_out = _make_a_out(tmp_path, a_epochs)
+
+    # B is missing most fields → diverged_epochs > 0 but first_divergence
+    # may be None (no explicit field match=False, just None+A-has-data).
+    b_history = [
+        {
+            "epoch": 1, "step": 1,
+            "rollout_hard": 0.5,
+        },
+    ]
+
+    report = compare_runs(a_out, b_history)
+    text = format_report(report)
+
+    # Should NOT say "match completely" when diverged_epochs > 0
+    assert "match completely" not in text, (
+        "format_report says 'match completely' but diverged_epochs > 0"
+    )
