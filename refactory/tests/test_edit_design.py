@@ -105,9 +105,9 @@ def test_a_revision_needs_a_mode():
 
 
 def test_a_revision_produces_a_package_and_reports_before_and_after(tmp_path):
-    # Use a unique package name so parallel workers cleaning ``edited_pkg``
-    # cannot break the registration step (pre-existing parallel-execution race).
-    pkg = "edited_revision"
+    # Use a unique package name and tmp_path workdir so parallel workers do not
+    # collide on the shared .factory/edit-run lock or edited_pkg directory.
+    pkg = "edited_produces"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
@@ -127,9 +127,7 @@ def test_a_revision_produces_a_package_and_reports_before_and_after(tmp_path):
 
 
 def test_the_revision_records_what_it_came_from(tmp_path):
-    # Use a unique package name so parallel workers cleaning ``edited_pkg``
-    # cannot break the registration step (pre-existing parallel-execution race).
-    pkg = "edited_provenance"
+    pkg = "edited_records"
     pkg_dir = registry.workspace_root(Path(".")) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:

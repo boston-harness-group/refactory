@@ -2080,6 +2080,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
@@ -2087,6 +2088,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
+    "parts_manifest": null,
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
@@ -2299,6 +2301,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "max_rollouts": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-rollouts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_steps": {
       "default": null,
       "description": "",
@@ -2385,6 +2398,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "number"
+    },
+    "parts_manifest": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--parts-manifest"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
     },
     "permission_mode": {
       "default": null,
@@ -2564,7 +2588,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "f5b6d4c9f9b4853b747650bb49a0aed78137b526db795f341857958f1292dd9b"
+  "reviewed_schema": "9f3b3c21399de33ebebbb07ded1c88e2555eb23f6f74679b9ff9dadd75735dc8"
 }
 ```
 
@@ -3403,6 +3427,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
@@ -3410,6 +3435,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
+    "parts_manifest": null,
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
@@ -3625,6 +3651,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "max_rollouts": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-rollouts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_steps": {
       "default": null,
       "description": "",
@@ -3711,6 +3748,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "number"
+    },
+    "parts_manifest": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--parts-manifest"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
     },
     "permission_mode": {
       "default": null,
@@ -3901,7 +3949,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "73ecff28ddecca400ab767af6aa18b969c9601ad385170626d73eabc4c86817b"
+  "reviewed_schema": "3e5af2caf4a03d69b6fb47c5fda208f38de0cce29d7e7ceeafa8b6b8a06510ae"
 }
 ```
 
@@ -5352,6 +5400,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
     "model": "",
@@ -5359,6 +5408,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "omit_steering": false,
     "optimizer": "autoresearch",
     "parsimony": 0.01,
+    "parts_manifest": null,
     "permission_mode": "skip",
     "prior_runs": 3,
     "provider": "",
@@ -5573,6 +5623,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "max_rollouts": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-rollouts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_steps": {
       "default": null,
       "description": "",
@@ -5659,6 +5720,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "number"
+    },
+    "parts_manifest": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--parts-manifest"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
     },
     "permission_mode": {
       "default": null,
@@ -5827,7 +5899,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "09d1e3ff59a3740637db363f7ce91c1da86768099e7903ff48eb1c2fa1455e08"
+  "reviewed_schema": "84678a4a6faeb47cca0f52dba7795d168f7ed2f81d45a22364a375e3a0675430"
 }
 ```
 

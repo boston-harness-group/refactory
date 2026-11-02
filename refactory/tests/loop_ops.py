@@ -330,3 +330,14 @@ def fn_gate_plain_str_with_stdout(ctx: Any) -> str:
         print("stdout from plain str gate")
         return "reloop"
     return "proceed"
+
+
+def error_on_item(ctx: Any) -> dict[str, Any]:
+    """Like record_item, but raises for item 'error_item' — both-runtimes test."""
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "error_item":
+        raise RuntimeError("subgraph error for error_item")
+    seen = ctx.read_json("seen.json", {"ids": []}) or {"ids": []}
+    seen.setdefault("ids", []).append(str(item.get("id")))
+    ctx.write_json("seen.json", seen)
+    return {"seen": seen["ids"]}

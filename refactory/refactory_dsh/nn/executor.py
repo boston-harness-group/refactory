@@ -691,6 +691,10 @@ class Executor:
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
+    #: Per-item exchanges captured during a data-node pass.
+    _item_exchanges: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    #: Per-item records built during the data-node loop.
+    _item_records: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
     #: Test seam: when True, ``_effective_timeout`` returns None so ops/fn
@@ -929,6 +933,8 @@ class Executor:
                         self.ctx._declared_facts = node.produces  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
                         self.ctx.write_json(CURRENT_ITEM, item)
+                        # Clear per-item exchanges before each pass.
+                        self._item_exchanges = []
 
                         # Disarm deadline before walking the branch.
                         if _alarm_armed:
@@ -969,10 +975,18 @@ class Executor:
                         break
                     except _ItemDeadlineError as exc:
                         # Deadline exceeded: record as timeout, not retryable.
-                        record = make_item_record(item_id, None, error=exc)
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        record = make_item_record(
+                            item_id, None, error=exc,
+                            exchanges=list(self._item_exchanges),
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
+                        )
                         if record is not None:
                             record["error_kind"] = "timeout"
                             scores.append(record)
+                            self._item_records.append(record)
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
@@ -980,27 +994,64 @@ class Executor:
                     except _BranchFailed as exc:
                         # Wrap in RuntimeError so error_kind matches the
                         # spine's "RuntimeError" for subgraph failures.
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
                         record = make_item_record(
-                            item_id, None, error=RuntimeError(str(exc))
+                            item_id, None, error=RuntimeError(str(exc)),
+                            exchanges=list(self._item_exchanges),
+                            fail_reason=str(exc),
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
                         )
                         if record is not None:
                             scores.append(record)
+                            self._item_records.append(record)
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
                         continue
                     except Exception as exc:
-                        record = make_item_record(item_id, None, error=exc)
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        record = make_item_record(
+                            item_id, None, error=exc,
+                            exchanges=list(self._item_exchanges),
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            metadata=metadata,
+                        )
                         if record is not None:
                             scores.append(record)
+                            self._item_records.append(record)
                         _failed_item_step_indices.update(
                             range(_item_steps_start, len(self.steps))
                         )
                         continue
                     else:
-                        record = make_item_record(item_id, verdict)
+                        metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
+                        # Prediction comes from VerifyResult.prediction whenever
+                        # the Task sets it (both pass and fail).  Fall back to
+                        # verdict.details on pass and "" on fail only when the
+                        # Task gives none.
+                        _prediction: str | None = None
+                        if verdict is not None:
+                            if verdict.prediction:
+                                _prediction = verdict.prediction
+                            elif verdict.passed:
+                                _prediction = verdict.details
+                            else:
+                                _prediction = ""
+                        record = make_item_record(
+                            item_id, verdict,
+                            exchanges=list(self._item_exchanges),
+                            prediction=_prediction,
+                            label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
+                            label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                            fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
+                            metadata=metadata,
+                        )
                         if record is not None:
                             scores.append(record)
+                            self._item_records.append(record)
                     finally:
                         # Disarm the per-item deadline and restore the
                         # previous handler/alarm.  The guard is on
@@ -1133,6 +1184,7 @@ class Executor:
             gate_stop=gate_stop_id,
             halted=halted,
             gate_verdicts=dict(self.record.gate_verdicts),
+            item_records=list(self._item_records),
         )
 
     # ── one branch of a fork, or one pass of a data node ───────────────────
@@ -1766,8 +1818,22 @@ class Executor:
         def ask(attempt: Any, sent: str, place: Any) -> str:
             self.model_calls += 1
             if place is None:
-                return _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
-            return workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
+                response = _ask_model(attempt, sent, system=system, workdir=self.ctx.workdir)
+            else:
+                response = workspaces.ask(place, attempt, sent, workdir=self.ctx.workdir, system=system)
+            # Exchange-counting rule: one exchange per completed agent call.
+            # Retries within a single ask() are transparent to the walker
+            # (the model client handles them); the spine path records one
+            # exchange per agent_delivery.finish call via record_exchange.
+            # Both runtimes therefore count one exchange per completed call.
+            # The walker keeps exchanges in memory; the sidecar file is only
+            # for the spine path (where separate processes share state via disk).
+            self._item_exchanges.append({
+                "node": node.id,
+                "prompt": sent,
+                "response": response,
+            })
+            return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
         if tool_policy == "none":

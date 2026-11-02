@@ -77,6 +77,8 @@ class RunResult:
     halted: bool = False
     #: Each gate's last verdict, as the spine's checkpoint keeps them (`gate_verdicts`).
     gate_verdicts: dict[str, str] = field(default_factory=dict)
+    #: Per-item records from a data-node evaluation (F6).
+    item_records: list[dict[str, Any]] = field(default_factory=list)
 
 
 class _Values:

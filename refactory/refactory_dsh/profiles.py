@@ -64,8 +64,8 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
             raise ProfileError(f"{key} must be a positive integer")
     if not isinstance(result["repeats"], int) or not 1 <= result["repeats"] <= 10:
         raise ProfileError("repeats must be an integer from 1 to 10")
-    for key in ("holdout", "parsimony", "max_elapsed_s", "max_tokens", "validation_reserve_s", "validation_reserve_tokens"):
-        value = result[key]
+    for key in ("holdout", "parsimony", "max_elapsed_s", "max_tokens", "validation_reserve_s", "validation_reserve_tokens", "max_rollouts"):
+        value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
     if not 0 <= result["holdout"] < 1:
@@ -276,7 +276,7 @@ def add_arguments(parser: Any) -> None:
         # snapshots, not as a command-line object.
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config"):
             continue
-        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key == "max_tokens" else str
+        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts") else str
         parser.add_argument(flag, dest=key, type=kind, default=None)
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")
