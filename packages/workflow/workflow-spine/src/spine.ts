@@ -680,7 +680,9 @@ export class Spine {
         cursor = cursor.filter(entry => entry !== node)
       } else {
         const target = this.unconditionalTarget(node)
-        cursor = [...new Set([...cursor.filter(entry => entry !== node), ...(target === undefined ? [] : [target])])]
+        // A container's continuation waits for its body to drain, as in `splicePosition`.
+        const reached = target === undefined || [...afters.values()].includes(target) ? [] : [target]
+        cursor = [...new Set([...cursor.filter(entry => entry !== node), ...reached])]
         // Container drain check on local copies
         let drained = true
         while (drained) {
@@ -922,21 +924,31 @@ export class Spine {
     return this.completeDue(pass.node)
   }
 
-  /** Mark a non-gate node complete and advance. */
-  complete(node: string): SpineNext {
+  /**
+   * Mark a non-gate node complete and advance. `failed` records an optional node that
+   * failed (a fork's `optional_targets`): it is logged `failed`, not `completed`, and
+   * its branch goes on with its next node, as the walker records and continues it.
+   */
+  complete(node: string, { failed = false }: { failed?: boolean } = {}): SpineNext {
     this.assertDue(node)
-    return this.completeDue(node)
+    if (failed && !this.optionalNodes().has(node)) throw new Error(`${node} is not optional, so it cannot fail and go on`)
+    return this.completeDue(node, failed)
+  }
+
+  /** The nodes some fork names in its `optional_targets`. */
+  private optionalNodes(): Set<string> {
+    return new Set([...this.nodes.values()].flatMap(body => body.optional_targets ?? []))
   }
 
   /** Completion after public admission, or the runner closing its admitted pass. */
-  private completeDue(node: string): SpineNext {
+  private completeDue(node: string, failed = false): SpineNext {
     const body = this.nodes.get(node)
     if (body === undefined) throw new Error(`unknown node ${node}`)
     if (body._type === 'GateNode') throw new Error(`${node} is a gate — use verdict()`)
     if (this.skipped.includes(node)) return this.next()
     if (!this.completed.includes(node)) {
       this.completed.push(node)
-      this.log.push(`completed ${node}`)
+      this.log.push(`${failed ? 'failed' : 'completed'} ${node}`)
     }
     // Feedback is what a reloop asked of an agent's next run. That run has now
     // happened, so later views stop repeating it — a gate's reason can be a whole
@@ -975,9 +987,18 @@ export class Spine {
    */
   private advance(node: string): void {
     const target = this.unconditionalTarget(node)
-    const rest = this.cursor.filter(entry => entry !== node)
-    const replacement = target === undefined ? [] : [target]
-    this.cursor = [...new Set([...rest, ...replacement])]
+    this.splicePosition(node, target === undefined ? [] : [target])
+  }
+
+  /**
+   * Whether `node` is the continuation (a fork's join, an expanded director's
+   * successor) of a container still in `afters`. Such a node is due only once the
+   * container's body has drained (`checkContainerDrained`), never because one
+   * branch reached it: a branch that ends early must not make the join due while
+   * a sibling branch, or a nested fork's own join, is still running.
+   */
+  private awaited(node: string): boolean {
+    return [...this.afters.values()].includes(node)
   }
 
   /**
@@ -1279,7 +1300,7 @@ export class Spine {
    */
   private splicePosition(old: string, replacements: string[]): void {
     const rest = this.cursor.filter(entry => entry !== old)
-    this.cursor = [...new Set([...rest, ...replacements])]
+    this.cursor = [...new Set([...rest, ...replacements.filter(entry => !this.awaited(entry))])]
   }
 
   /**

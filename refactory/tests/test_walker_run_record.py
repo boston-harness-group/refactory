@@ -238,7 +238,8 @@ def test_a_gate_out_of_reloops_is_recorded_halted_with_nothing_gone_back_over(tm
     graph = _reloop_to_agent("loop_ops:explained_passes", "Write it.")
     graph.nodes["gate"].max_iterations = 1
     result = nn.execute(graph, tmp_path, model=FakeModel())
-    assert result.exit_ok is False and "max_iterations" in (result.error or "")
+    # SWEEP-8: a reloop cap is recorded as halted, not failed.
+    assert result.exit_ok is False and result.halted is True
     progress = _progress(tmp_path)
     assert (progress["completed"], progress["gate_verdicts"], progress["feedback"]) == (
         ["gate", "write"], {"gate": "halt"}, {})

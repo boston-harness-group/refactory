@@ -6,6 +6,7 @@ Phase 3 gate of ``docs/plans/pythonic-modes.md``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -86,7 +87,8 @@ def test_a_gate_loops_until_its_verdict_changes(tmp_path):
 def test_a_gate_loop_is_bounded_by_max_iterations(tmp_path):
     result = nn.execute(_loop_graph("loop_ops:always_retry", max_iterations=2), tmp_path)
     assert result.exit_ok is False
-    assert "max_iterations" in (result.error or "")
+    # SWEEP-8: a reloop cap is recorded as halted, not failed.
+    assert result.halted is True
 
 
 def test_a_gate_must_return_a_declared_verdict(tmp_path):
@@ -497,6 +499,373 @@ def test_resuming_a_directory_with_no_record_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="no run to resume"):
         Two.resume(tmp_path / "nothing-here")
+
+
+def test_op_runs_in_run_directory_with_recovery(tmp_path):
+    """With enable_recovery, ops run in forkserver children: they write relative
+    paths in the run directory and get ctx.model=None, matching the spine."""
+    graph = nn.Graph()
+    graph.add(nn.Node("write", "op", call="loop_ops:write_relative",
+                      writes=("relative_output.txt",), produces=("relative_written",)))
+    graph.add(nn.Node("model_check", "op", call="loop_ops:check_model_is_none",
+                      produces=("model_is_none",)))
+    graph.connect("write", "model_check")
+
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok, result.error
+    # The op wrote in the run directory (relative path resolved there).
+    assert (tmp_path / "relative_output.txt").exists(), \
+        "relative path not written in run directory"
+    assert result.facts["relative_written"] is True
+    # ctx.model is None for ops.
+    assert result.facts["model_is_none"] is True, \
+        "ctx.model was not None inside the op"
+
+
+def test_op_runs_in_run_directory_without_recovery(tmp_path):
+    """Without enable_recovery, ops run in a forkserver child with CWD set to
+    the run directory and ctx.model=None, matching the spine."""
+    graph = nn.Graph()
+    graph.add(nn.Node("write", "op", call="loop_ops:write_relative",
+                      writes=("relative_output.txt",), produces=("relative_written",)))
+    graph.add(nn.Node("model_check", "op", call="loop_ops:check_model_is_none",
+                      produces=("model_is_none",)))
+    graph.connect("write", "model_check")
+
+    # A model is passed but ops must NOT see it (ctx.model=None).
+    class _Model:
+        def complete(self, prompt, **kw):
+            return "answer"
+        def route(self):
+            return {"worker_backend": "dsh"}
+        def context(self):
+            return {}
+    result = nn.execute(graph, tmp_path, model=_Model(), enable_recovery=False)
+    assert result.exit_ok, result.error
+    # The op wrote in the run directory (relative path resolved there).
+    assert (tmp_path / "relative_output.txt").exists(), \
+        "relative path not written in run directory on default path"
+    assert result.facts["relative_written"] is True
+    # ctx.model is None for ops.
+    assert result.facts["model_is_none"] is True, \
+        "ctx.model was not None inside op on default path"
+
+
+def test_a_dash_m_main_module_is_not_re_imported_per_op(tmp_path):
+    """Same for a ``python -m`` caller, which is resolved by name, not path.
+
+    ``multiprocessing.spawn.get_preparation_data`` prefers
+    ``__main__.__spec__.name`` over ``__file__``, so clearing only ``__file__``
+    leaves a ``-m`` caller re-importing its main module in every op child.
+    """
+    import os
+    import subprocess
+    import sys
+
+    pkg = tmp_path / "modmain.py"
+    pkg.write_text(
+        "import sys\n"
+        "print('MODULE-LEVEL-RAN', flush=True)\n"
+        "def main():\n"
+        "    from refactory_dsh import nn\n"
+        "    from refactory_dsh.nn.executor import execute\n"
+        "    graph = nn.Graph()\n"
+        "    graph.add(nn.Node('one', 'op', call='loop_ops:noop'))\n"
+        "    graph.add(nn.Node('two', 'op', call='loop_ops:noop'))\n"
+        "    graph.connect('one', 'two')\n"
+        f"    result = execute(graph, {str(tmp_path / 'run')!r})\n"
+        "    print('EXIT_OK', result.exit_ok, flush=True)\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+    here = Path(__file__).resolve().parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(tmp_path), str(here), str(here.parent)]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    done = subprocess.run(
+        [sys.executable, "-m", "modmain"],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=300,
+    )
+    assert "EXIT_OK True" in done.stdout, f"the run failed: {done.stdout}\n{done.stderr}"
+    assert done.stdout.count("MODULE-LEVEL-RAN") == 1, (
+        "the -m caller's main module ran "
+        f"{done.stdout.count('MODULE-LEVEL-RAN')} times, not once:\n{done.stdout}"
+    )
+
+
+def test_an_op_in_the_callers_main_is_refused_with_guidance(tmp_path):
+    """A one-file script cannot name its own op, and is told why.
+
+    The op child cannot import the caller's ``__main__`` without re-running its
+    module-level code once per visit, so the target is refused at resolution
+    rather than failing later with a bare attribute error.
+    """
+    from refactory_dsh.nn.resolve import ResolutionError, resolve
+
+    with pytest.raises(ResolutionError) as caught:
+        resolve("__main__:my_op")
+    message = str(caught.value)
+    assert "__main__" in message
+    assert "importable module" in message, f"no guidance in: {message}"
+    assert "my_ops:my_op" in message, f"no corrected target in: {message}"
+
+
+def test_a_script_main_module_is_not_re_imported_per_op(tmp_path):
+    """The caller's module-level code runs once, not once per op child.
+
+    The op child runs ``_op_child_target`` and never needs ``__main__``, but
+    multiprocessing's ``get_preparation_data`` passes ``__main__.__file__`` on
+    and the child's ``_fixup_main_from_path`` re-imports it. For a caller that
+    is a real script, that re-runs its module-level code — a heavy import or a
+    dataset open — once per op visit.
+    """
+    import os
+    import subprocess
+    import sys
+
+    script = tmp_path / "caller.py"
+    script.write_text(
+        "import sys\n"
+        "print('MAIN-MODULE-RAN', flush=True)\n"
+        "from refactory_dsh import nn\n"
+        "from refactory_dsh.nn.executor import execute\n"
+        "graph = nn.Graph()\n"
+        "graph.add(nn.Node('one', 'op', call='loop_ops:noop'))\n"
+        "graph.add(nn.Node('two', 'op', call='loop_ops:noop'))\n"
+        "graph.connect('one', 'two')\n"
+        f"result = execute(graph, {str(tmp_path / 'run')!r})\n"
+        "print('EXIT_OK', result.exit_ok, flush=True)\n"
+    )
+    here = Path(__file__).resolve().parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(here), str(here.parent)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    done = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=300,
+    )
+    assert "EXIT_OK True" in done.stdout, f"the run failed: {done.stdout}\n{done.stderr}"
+    assert done.stdout.count("MAIN-MODULE-RAN") == 1, (
+        "the caller's main module ran "
+        f"{done.stdout.count('MAIN-MODULE-RAN')} times, not once:\n{done.stdout}"
+    )
+
+
+def test_op_stdout_reaches_the_parent(tmp_path, capfd):
+    """An op's stdout is forwarded, onto the parent's stderr.
+
+    The child captures stdout so a fn gate's feedback can be read from it; that
+    capture must not swallow the output of an ordinary op. The spine puts it in
+    the command log, so the walker has to show it too.
+    """
+    from refactory_dsh.nn.executor import execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node("say", "op", call="loop_ops:print_to_stdout"))
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    captured = capfd.readouterr()
+    assert "op stdout output: visible diagnostics" in captured.err
+    # Not stdout: loop.run() runs the walker in-process and that command's
+    # stdout is the one JSON object its caller parses.
+    assert "op stdout output: visible diagnostics" not in captured.out
+
+
+def test_op_stdout_reaches_the_parent_when_the_op_then_raises(tmp_path, capfd):
+    """An op that prints and then raises keeps its diagnostics."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node("boom", "op", call="loop_ops:stdout_then_raise"))
+    result = execute(graph, tmp_path / "run")
+    assert result.exit_ok is False
+    assert "op stdout before the raise" in capfd.readouterr().err
+
+
+def test_op_stderr_preserved_on_raise_without_recovery(tmp_path):
+    """An op that prints to stderr then raises has its stderr preserved
+    without enable_recovery (ops run in forkserver children)."""
+    graph = nn.Graph()
+    graph.add(nn.Node("boom", "op", call="loop_ops:stderr_then_raise"))
+
+    result = nn.execute(graph, tmp_path, enable_recovery=False)
+    assert result.exit_ok is False
+    assert "op stderr" in result.error, \
+        f"stderr not preserved in error on default path: {result.error}"
+    assert "important debug info" in result.error, \
+        f"stderr content not in error on default path: {result.error}"
+
+
+def test_op_stderr_preserved_on_raise(tmp_path):
+    """An op that prints to stderr then raises has its stderr included
+    in the propagated error (with enable_recovery, ops run in forkserver children)."""
+    graph = nn.Graph()
+    graph.add(nn.Node("boom", "op", call="loop_ops:stderr_then_raise"))
+
+    result = nn.execute(graph, tmp_path, enable_recovery=True)
+    assert result.exit_ok is False
+    assert "op stderr" in result.error, \
+        f"stderr not preserved in error: {result.error}"
+    assert "important debug info" in result.error, \
+        f"stderr content not in error: {result.error}"
+
+
+def test_ops_and_fn_gates_always_use_forkserver(tmp_path):
+    """Every op and fn gate runs in a forkserver child on every walker path,
+    regardless of ``enable_recovery``.
+
+    This test fails if ``_effective_timeout`` is reverted to return ``None``
+    for any op or fn gate.
+    """
+    import os
+
+    from refactory_dsh.nn.executor import Executor
+
+    graph = nn.Graph()
+    graph.add(nn.Node("fg", "gate", gate_kind="fn",
+                      evaluator="loop_ops:pid_reporting_gate"))
+    graph.add(nn.Node("op", "op", call="loop_ops:noop"))
+
+    # Without recovery: both fn gates and ops get a forkserver timeout.
+    exec_no_recovery = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
+    assert exec_no_recovery._effective_timeout(graph.nodes["fg"]) == 3600.0, \
+        "fn gate without recovery should get a forkserver timeout"
+    assert exec_no_recovery._effective_timeout(graph.nodes["op"]) == 3600.0, \
+        "op without recovery should get a forkserver timeout"
+
+    # With recovery: same, both get a forkserver timeout.
+    exec_with_recovery = Executor(graph, nn.RunContext(tmp_path), enable_recovery=True)
+    assert exec_with_recovery._effective_timeout(graph.nodes["fg"]) == 3600.0, \
+        "fn gate with recovery should get a forkserver timeout"
+    assert exec_with_recovery._effective_timeout(graph.nodes["op"]) == 3600.0, \
+        "op with recovery should get a forkserver timeout"
+
+    # Verify the full fork path: the fn gate in a fork branch runs in a
+    # separate process (PID differs from the parent).
+    parent_pid = os.getpid()
+    graph2 = nn.Graph()
+    graph2.add(nn.Node("start", "op", call="loop_ops:noop"))
+    graph2.add(nn.Node("fork1", "fork", targets=("b_gate", "b_op")))
+    graph2.connect("start", "fork1")
+    graph2.add(nn.Node("b_gate", "gate", gate_kind="fn",
+                        evaluator="loop_ops:pid_reporting_gate",
+                        produces=("gate_pid",)))
+    graph2.add(nn.Node("b_op", "op", call="loop_ops:noop"))
+    graph2.add(nn.Node("join1", "join", sources=("b_gate", "b_op")))
+    graph2.connect("fork1", "join1")
+    graph2.connect("b_gate", "join1", condition="proceed")
+    graph2.connect("b_op", "join1")
+    graph2.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph2.connect("join1", "done")
+
+    result = nn.execute(graph2, tmp_path, enable_recovery=False)
+    assert result.exit_ok, result.error
+    gate_pid = result.facts.get("gate_pid")
+    assert gate_pid is not None, "fn gate did not run inside the fork branch"
+    assert gate_pid != parent_pid, (
+        f"fn gate ran in-process (PID {gate_pid} == parent {parent_pid}); "
+        "it should run in a forkserver child"
+    )
+
+
+def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path):
+    """Two concurrent fork-branch ops writing relative files each land in the
+    run directory, nothing outside it, on repeated runs.
+
+    Fails when _effective_timeout is reverted to exclude ops without
+    enable_recovery (``use_forkserver = ... (is_op and self.enable_recovery)``),
+    because the ops then run in-process (same PID as the parent, with
+    process-wide os.chdir) instead of in forkserver children (separate PIDs,
+    per-process CWD).
+    """
+    import os
+
+    parent_pid = os.getpid()
+    parent_cwd = os.getcwd()
+    for iteration in range(3):
+        run_dir = tmp_path / f"run_{iteration}"
+        run_dir.mkdir()
+        graph = nn.Graph()
+        graph.add(nn.Node("start", "op", call="loop_ops:noop"))
+        graph.add(nn.Node("fork1", "fork",
+                          targets=("branch_a", "branch_b")))
+        graph.connect("start", "fork1")
+        graph.add(nn.Node("branch_a", "op",
+                          call="loop_ops:fork_branch_write_a",
+                          writes=("branch_a_output.txt",),
+                          produces=("branch_a_written", "branch_a_pid")))
+        graph.add(nn.Node("branch_b", "op",
+                          call="loop_ops:fork_branch_write_b",
+                          writes=("branch_b_output.txt",),
+                          produces=("branch_b_written", "branch_b_pid")))
+        graph.add(nn.Node("join1", "join",
+                          sources=("branch_a", "branch_b")))
+        graph.connect("fork1", "join1")
+        graph.connect("branch_a", "join1")
+        graph.connect("branch_b", "join1")
+        graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+        graph.connect("join1", "done")
+
+        # enable_recovery=False: every op runs in a forkserver child on every
+        # walker path, so os.chdir is per-process and race-free.
+        result = nn.execute(graph, run_dir, enable_recovery=False)
+        assert result.exit_ok, f"iteration {iteration}: {result.error}"
+
+        # Both files must land in the run directory.
+        assert (run_dir / "branch_a_output.txt").exists(), \
+            f"iteration {iteration}: branch_a_output.txt not in run dir"
+        assert (run_dir / "branch_b_output.txt").exists(), \
+            f"iteration {iteration}: branch_b_output.txt not in run dir"
+
+        # Nothing was written outside the run directory (into the parent CWD).
+        assert not (Path(parent_cwd) / "branch_a_output.txt").exists(), \
+            f"iteration {iteration}: branch_a_output.txt escaped to parent CWD"
+        assert not (Path(parent_cwd) / "branch_b_output.txt").exists(), \
+            f"iteration {iteration}: branch_b_output.txt escaped to parent CWD"
+
+        # Both ops ran in forkserver children (different PIDs), not in-process.
+        # When reverted to inline dispatch, both PIDs equal the parent PID.
+        a_pid = result.facts.get("branch_a_pid")
+        b_pid = result.facts.get("branch_b_pid")
+        assert a_pid != parent_pid, \
+            f"iteration {iteration}: branch_a ran in parent process (inline os.chdir race)"
+        assert b_pid != parent_pid, \
+            f"iteration {iteration}: branch_b ran in parent process (inline os.chdir race)"
+
+
+def test_fn_gate_plain_str_stdout_is_feedback(tmp_path):
+    """An fn gate that prints to stdout and returns a plain str (not Verdict)
+    keeps its stdout as reloop feedback.
+
+    Fails when the Verdict wrapping at _run_op_timed's return path is
+    reverted, because result._fn_stdout = _child_stdout raises
+    AttributeError on a plain str and is silently swallowed.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("start", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("gate", "gate", gate_kind="fn",
+                      evaluator="loop_ops:fn_gate_plain_str_with_stdout",
+                      produces=("plain_gate_visits",),
+                      max_iterations=5))
+    graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph.connect("start", "gate")
+    graph.connect("gate", "start", condition="reloop")
+    graph.connect("gate", "done", condition="proceed")
+
+    result = nn.execute(graph, tmp_path, enable_recovery=False)
+    assert result.exit_ok, result.error
+    # The gate relooped once (visits=2 to reach proceed).
+    assert result.facts.get("plain_gate_visits") == 2
+    # The stdout from the reloop iteration must appear in the feedback.
+    # Feedback is stored in progress.json by the executor's record.
+    progress = json.loads((tmp_path / ".refactory" / "progress.json").read_text())
+    feedback = progress.get("feedback", {})
+    # The reloop sends feedback to the gate's reloop target (which is "start").
+    start_feedback = feedback.get("start", "")
+    assert "stdout from plain str gate" in start_feedback, \
+        f"fn gate stdout not preserved as feedback: {start_feedback!r}"
 
 
 # ── F4 failure rule: failed items score 0, other items continue ────────

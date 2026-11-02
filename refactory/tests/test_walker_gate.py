@@ -391,3 +391,407 @@ def test_halt_in_fork_branch(tmp_path):
     result = execute(graph, workdir)
     assert result.exit_ok is False
     assert result.halted is True or "halted" in (result.error or "")
+
+
+def test_gate_iteration_count_survives_resume(tmp_path):
+    """ASK-1: A resumed run still enforces the gate iteration budget."""
+    from refactory_dsh.nn.executor import execute, Verdict
+
+    # A graph with an fn-gate that always says reloop (max_iterations=2).
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:always_reloop",
+                    reads=(), max_iterations=2, notes="check"))
+    graph.connect("agent", "gate")
+    graph.connect("gate", "agent", condition="reloop")
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["first", "second", "third", "fourth"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    # The run halts because max_iterations=2 is exceeded.
+    assert result.exit_ok is False
+    assert result.halted is True
+
+    # Resume: the gate iterations should be restored from progress.json.
+    model2 = _FakeModel(["resumed"])
+    result2 = execute(graph, workdir, model=model2,
+                      task={"name": "test", "brief": "test", "check": "true"},
+                      start="gate", facts=dict(result.facts))
+    # With persisted gate iterations, the resumed run immediately refuses
+    # because the count already exceeds max_iterations.
+    assert result2.exit_ok is False
+    assert result2.halted is True
+    # The model was never called: the gate refused before dispatching
+    # the agent node. Without persistence, the gate would get a fresh
+    # budget and the model would be called again.
+    assert len(model2.prompts) == 0, (
+        "the gate did not refuse immediately; gate iterations were not restored"
+    )
+
+
+def test_agent_node_refuses_missing_declared_read(tmp_path):
+    """ASK-4a / gap 15: Both runtimes refuse a node whose declared reads are missing.
+    Tests the spine's worker_node.py check AND the walker's executor._visit_agent check."""
+    from refactory_dsh.agent_delivery import _path
+    workdir = tmp_path / "run"
+    workdir.mkdir(parents=True)
+    # The spine checks reads in worker_node.py:82-84.
+    assert not _path(workdir, "nonexistent.md").exists()
+    try:
+        from refactory_dsh.worker_node import execute as worker_execute
+        spec = {"schema_version": 1, "reads": ["nonexistent.md"], "prompt": "do work",
+                "writes": ["output.txt"], "produces": ["result"], "node_id": "agent",
+                "model_context": None}
+        worker_execute(spec, workdir)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "required worker input is missing" in str(exc)
+
+
+def test_walker_refuses_missing_declared_read(tmp_path):
+    """ASK-4a / gap 15: The walker's executor._visit_agent refuses missing reads,
+    matching the spine's worker_node.py:82-84."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    reads=("nonexistent.md",),
+                    writes=("output.txt",), produces=("result",)))
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok is False
+    assert "required worker input is missing" in (result.error or "")
+    # The model was never called: the check fires before dispatch.
+    assert len(model.prompts) == 0
+
+
+def test_agent_node_refuses_tools_field(tmp_path):
+    """SWEEP-7: An agent node with a tools field is refused on the walker."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    node = Node("agent", "agent", prompt_template="do work",
+                writes=("output.txt",), produces=("result",))
+    node.tools = ["some_tool"]  # type: ignore[attr-defined]
+    graph.add(node)
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok is False
+    assert "tools" in (result.error or "")
+
+
+def test_reloop_cap_records_halted_not_failed(tmp_path):
+    """SWEEP-8: A reloop cap reached records halted, not failed."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:always_reloop",
+                    reads=(), max_iterations=1, notes="check"))
+    graph.connect("agent", "gate")
+    graph.connect("gate", "agent", condition="reloop")
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["first", "second"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok is False
+    assert result.halted is True
+    # Must be "halted", not "failed".
+    status_file = workdir / ".refactory/spine-status.json"
+    if status_file.exists():
+        import json
+        status = json.loads(status_file.read_text())
+        assert status.get("status") == "halted", status
+
+
+def test_fn_gate_stdout_is_feedback(tmp_path):
+    """SWEEP-4: An fn-gate that prints to stdout has that text used as feedback,
+    matching the spine's reasonOf(stdout) behavior (execute.ts:148-157).
+    The stdout text before the verdict line becomes the reloop feedback."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                    evaluator="loop_ops:reloop_with_stdout",
+                    reads=(), max_iterations=2, notes="check",
+                    produces=("passes",)))
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("agent", "gate")
+    graph.connect("gate", "agent", condition="reloop")
+    graph.connect("gate", "done", condition="proceed")
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["first", "second"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    # The second agent prompt should contain the feedback from stdout.
+    # The feedback is consumed when the agent node completes, so it won't
+    # be in the final progress.json, but it should have been in the prompt.
+    assert len(model.prompts) == 2, f"expected 2 prompts, got {len(model.prompts)}"
+    # The second prompt should contain the stdout text as feedback.
+    assert "extra context from stdout" in model.prompts[1], (
+        f"stdout feedback not in second prompt: {model.prompts[1][:500]}"
+    )
+
+
+def test_graph_state_events_emitted(tmp_path):
+    """ASK-4b / gap 20: The walker emits graph_state events, matching the spine."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent", prompt_template="do work",
+                    writes=("output.txt",), produces=("result",)))
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    events_file = workdir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+    graph_state_events = [e for e in events if e.get("kind") == "graph_state"]
+    assert len(graph_state_events) > 0, "no graph_state events emitted"
+    # Should have at least an executing and done status.
+    statuses = [e.get("status") for e in graph_state_events]
+    assert "executing" in statuses or "running" in statuses
+    assert "done" in statuses
+
+
+def test_fork_shape_refusal_on_walker(tmp_path):
+    """SWEEP-1: The walker refuses fork branches that produce the same facts."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("b", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    assert result.exit_ok is False
+    assert "same produced facts" in (result.error or "")
+
+
+def test_fork_shape_refusal_on_spine(tmp_path):
+    """SWEEP-1: The spine's lowering also refuses fork branches with same produced facts."""
+    from refactory_dsh.lowering import LoweringError, to_workflow
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("b", "op", call="loop_ops:noop", produces=("shared_fact",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+
+    state = {"graph": graph.to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="same produced facts"):
+        to_workflow(state)
+
+
+def test_optional_branch_only_target_is_optional(tmp_path):
+    """SWEEP-2: Only the target node is optional, not the whole branch.
+
+    A fork with an optional branch of two nodes: the target (first node)
+    succeeds but the second node fails. Because only the target is optional,
+    the second node's failure is a real failure, not silently absorbed."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("target_a", "b"),
+                    optional_targets=("target_a",)))
+    # Branch A: target_a succeeds, then a_step2 fails.
+    graph.add(Node("target_a", "op", call="loop_ops:noop"))
+    graph.add(Node("a_step2", "op", call="loop_ops:boom"))
+    graph.connect("target_a", "a_step2")
+    # Branch B: succeeds.
+    graph.add(Node("b", "op", call="loop_ops:noop"))
+    # Join.
+    graph.add(Node("join", "join", sources=("a_step2", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a_step2", "join")
+    graph.connect("b", "join")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    # The failure in a_step2 (non-target) must NOT be absorbed: the run fails.
+    assert result.exit_ok is False
+    assert "boom" in (result.error or "").lower() or "fails on purpose" in (result.error or "")
+
+
+def test_optional_branch_target_fails_is_missing(tmp_path):
+    """SWEEP-2: When the target node itself fails, it is recorded as 'missing'."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("target_a", "b"),
+                    optional_targets=("target_a",)))
+    # Branch A: target_a fails (optional → missing).
+    graph.add(Node("target_a", "op", call="loop_ops:boom"))
+    graph.add(Node("a_step2", "op", call="loop_ops:noop"))
+    graph.connect("target_a", "a_step2")
+    # Branch B: succeeds.
+    graph.add(Node("b", "op", call="loop_ops:noop"))
+    # Join.
+    graph.add(Node("join", "join", sources=("a_step2", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a_step2", "join")
+    graph.connect("b", "join")
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir)
+    # The target itself failed → optional → "missing", run succeeds.
+    assert result.exit_ok is True
+
+
+def test_op_runs_in_run_directory(tmp_path):
+    """SWEEP-3: Ops run in the run directory, not the forkserver's start directory.
+
+    The op writes a relative path 'relative_output.txt'; it should land in
+    the run directory (workdir), not wherever the test process started."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("op", "op", call="loop_ops:write_relative",
+                    writes=("relative_output.txt",), produces=("relative_written",)))
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir, enable_recovery=True,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    # The file should be in the run directory because the op ran there.
+    assert (workdir / "relative_output.txt").exists(), (
+        "relative_output.txt not in run directory; op did not run there"
+    )
+
+
+def test_ctx_model_is_none_for_ops(tmp_path):
+    """SWEEP-5: ctx.model for ops is None, matching the spine and the documented op API."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("op", "op", call="loop_ops:check_model_is_none",
+                    produces=("model_is_none",)))
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model, enable_recovery=True,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    assert result.facts.get("model_is_none") is True, (
+        "ctx.model was not None inside the op"
+    )
+
+
+def test_run_warning_from_op_stderr(tmp_path):
+    """Gap 20 / correction C: The walker emits run_warning events from op stderr lines
+    matching the spine's RUN_WARNING pattern."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("op", "op", call="loop_ops:warn_on_stderr",
+                    produces=("warned",)))
+
+    workdir = tmp_path / "run"
+    result = execute(graph, workdir, enable_recovery=True,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    events_file = workdir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+    warnings = [e for e in events if e.get("kind") == "run_warning"]
+    assert len(warnings) > 0, "no run_warning events emitted for op stderr"
+    assert any("something happened" in w.get("summary", "") for w in warnings)
+
+
+def test_unresolved_template_key_emits_run_warning(tmp_path):
+    """Gap 20 / correction C: The walker emits run_warning events for unresolved template keys."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = Graph()
+    graph.add(Node("agent", "agent",
+                    prompt_template="Hello {{missing_key}} world",
+                    writes=("output.txt",), produces=("result",)))
+
+    workdir = tmp_path / "run"
+    model = _FakeModel(["answer"])
+    result = execute(graph, workdir, model=model,
+                     task={"name": "test", "brief": "test", "check": "true"})
+    assert result.exit_ok, result.error
+    events_file = workdir / ".refactory/events.jsonl"
+    assert events_file.exists()
+    events = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+    warnings = [e for e in events if e.get("kind") == "run_warning"]
+    assert len(warnings) > 0, "no run_warning events emitted for unresolved template key"
+    assert any("missing_key" in w.get("summary", "") for w in warnings)
+
+
+def test_fork_shape_refusal_conflicting_file_access_on_spine(tmp_path):
+    """SWEEP-1: The spine's lowering also refuses fork branches with conflicting file access."""
+    from refactory_dsh.lowering import LoweringError, to_workflow
+
+    graph = Graph()
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "op", call="loop_ops:noop", writes=("shared.txt",)))
+    graph.add(Node("b", "op", call="loop_ops:noop", writes=("shared.txt",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+
+    state = {"graph": graph.to_state(), "knobs": {}}
+    with pytest.raises(LoweringError, match="conflicting declared file access"):
+        to_workflow(state)
+
+
+def test_halt_inside_fork_branch_recorded_as_halted(tmp_path):
+    """A halt verdict inside a fork branch must record the run as halted=True,
+    not halted=False with error='a: halted'.
+
+    Correction 1: the review reproduced that a gate returning halt inside a fork
+    branch gave halted=False, error='a: halted' on the PR head. This test verifies
+    the fix: halted=True and the status records 'halted'.
+    """
+    from refactory_dsh.nn.executor import execute
+
+    # Graph: fork with branch 'a' containing a gate that halts.
+    graph = Graph()
+    graph.add(Node("start", "op", call="loop_ops:noop"))
+    graph.add(Node("fork", "fork", targets=("a", "b")))
+    graph.add(Node("a", "gate", gate_kind="fn", evaluator="loop_ops:always_halt",
+                    max_iterations=1))
+    graph.add(Node("b", "op", call="loop_ops:noop"))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.add(Node("end", "op", call="loop_ops:noop"))
+    graph.connect("start", "fork")
+    graph.connect("fork", "join")
+    graph.connect("a", "join")
+    graph.connect("b", "join")
+    graph.connect("join", "end")
+
+    result = execute(graph, tmp_path)
+    # The key assertion: halted must be True, not False with an error string.
+    assert result.halted is True, f"expected halted=True, got halted={result.halted}, error={result.error}"
+    # The status file should record halted.
+    import json
+    status = json.loads((tmp_path / ".refactory/spine-status.json").read_text())
+    assert status["status"] == "halted", f"expected status='halted', got {status['status']}"

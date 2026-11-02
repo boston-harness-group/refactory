@@ -14,11 +14,14 @@ import io
 import json
 import shlex
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import child_patches
+import self_check_fakes
 from refactory_dsh import design_ops, failfast, lowering, repo_change, test_selection, worktree
 from refactory_dsh.check_digest import build_probe_command
 from refactory_dsh.design import DesignMode
@@ -160,6 +163,16 @@ def _facts(run: Path) -> dict:
     return json.loads((run / "facts.json").read_text())
 
 
+class _Fails(set):
+    """The failing ids, written through to the fakes' state as a test adds one."""
+
+    def add(self, test_id: str) -> None:
+        super().add(test_id)
+        state = self_check_fakes.load()
+        state["fails"] = sorted(self)
+        self_check_fakes.save(state)
+
+
 class _Chunks:
     """The self-check's chunks (`repo_change.run_check` with ``prepared``), answered at once as
     pytest and the sandbox would answer them, on a clock of their own (``failfast.time``).
@@ -170,54 +183,40 @@ class _Chunks:
     file it names, and passes the rest. With ``emissions``, ``fails`` follows the emission
     under test instead: the n-th commit the self-check runs on fails ``emissions[n]``. The
     whole check and the base's runs still run for real.
+    The answers are `self_check_fakes`, installed in the test's process and in the op
+    child the walker runs the self-check in (`child_patches`), over one state file that
+    ``fails``, ``slow`` and ``now`` read and write. In the test's own process a chunk is
+    answered by this object, so a subclass can answer differently there.
     `test_a_self_check_that_says_nothing_goes_on_with_no_fixup` stops a real chunk at a real
     limit; the tests of pytest's own output (junit seconds, a not-found id, a module that
     does not import, a parametrized id) run real chunks.
     """
 
     def __init__(self, monkeypatch, *, fails=(), slow=(), emissions=None):
-        self.fails, self.slow, self.now = set(fails), set(slow), 0.0
-        self.commits: list[str] = []
-        monkeypatch.setattr(failfast, "time", SimpleNamespace(monotonic=lambda: self.now))
-        real = repo_change.run_check
+        state = Path(tempfile.mkdtemp(prefix="chunks-")) / "chunks.json"
+        monkeypatch.setenv(self_check_fakes.STATE_ENV, str(state))
+        self_check_fakes.save({"fails": sorted(fails), "slow": sorted(slow), "now": 0.0, "commits": [],
+                               "emissions": None if emissions is None else [sorted(e) for e in emissions]})
+        monkeypatch.setattr(self_check_fakes, "INSTANCE", self)
+        patches = child_patches.for_test(monkeypatch)
+        patches.setattr(failfast, "time", self_check_fakes)
+        patches.setattr(repo_change, "run_check", self_check_fakes.run_check)
 
-        def run_check(ctx, command, timeout, **kwargs):
-            if not kwargs.get("prepared"):
-                return real(ctx, command, timeout, **kwargs)
-            commit = str(ctx.facts.get("commit"))
-            if commit not in self.commits:
-                self.commits.append(commit)
-                if emissions is not None:
-                    self.fails = set(emissions[len(self.commits) - 1])
-            return self(command, timeout)
+    def _get(self, name):
+        return self_check_fakes.load()[name]
 
-        monkeypatch.setattr(repo_change, "run_check", run_check)
+    def _set(self, name, value):
+        state = self_check_fakes.load()
+        state[name] = value
+        self_check_fakes.save(state)
+
+    fails = property(lambda self: _Fails(self._get("fails")),
+                     lambda self, value: self._set("fails", sorted(value)))
+    slow = property(lambda self: set(self._get("slow")), lambda self, value: self._set("slow", sorted(value)))
+    now = property(lambda self: float(self._get("now")), lambda self, value: self._set("now", float(value)))
 
     def __call__(self, command: str, timeout: float):
-        from refactory_dsh.sandbox import SandboxResult
-
-        named = [word for word in shlex.split(command) if word.endswith(".py") or ".py::" in word]
-        # Full command (no individual .py files named): all failures apply.
-        if not named:
-            failed = sorted(self.fails)
-            if failed:
-                return SandboxResult(ok=False, returncode=1, elapsed_s=0.1, stdout="".join(
-                    f"FAILED {test_id} - AssertionError\n" for test_id in failed)
-                    + f"{len(failed)} failed in 0.10s")
-            return SandboxResult(ok=True, returncode=0, stdout="all passed in 0.10s",
-                                 elapsed_s=0.1)
-        if any(name.split("::")[0] in self.slow for name in named):
-            self.now += timeout
-            return SandboxResult(ok=False, returncode=124, timed_out=True, timeout_s=int(timeout),
-                                 elapsed_s=timeout, stderr=f"timed out after {int(timeout)}s")
-        failed = sorted(test_id for test_id in self.fails
-                        if test_id in named or test_id.split("::")[0] in named)
-        if failed:
-            return SandboxResult(ok=False, returncode=1, elapsed_s=0.1, stdout="".join(
-                f"FAILED {test_id} - AssertionError\n" for test_id in failed)
-                + f"{len(failed)} failed in 0.10s")
-        return SandboxResult(ok=True, returncode=0, stdout=f"{len(named)} passed in 0.10s",
-                             elapsed_s=0.1)
+        return self_check_fakes.answer(command, timeout)
 
 
 def _unwatched(monkeypatch) -> None:
@@ -651,16 +650,12 @@ def test_an_amendment_that_died_before_its_record_is_dropped(tmp_path):
 
 def test_design_fast_and_the_sequential_check_keep_the_dm128_prepass(tmp_path, monkeypatch):
     """design_fast's focused_check and check_artifact pass no selection, so they run the
-    last check's failures only, from round 2, as before; neither writes a self-check."""
+    last check's failures only, from round 2, as before; neither writes a self-check. The
+    spy on the prepass is `self_check_fakes.record_prepass`, which reaches the op child the
+    walker runs focused_check in (`child_patches`)."""
     monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
-    calls = []
-    real = failfast.targeted_prepass
-
-    def spy(prev_record, command, run_fn, timeout, **kw):
-        calls.append((prev_record.get("status"), kw))
-        return real(prev_record, command, run_fn, timeout, **kw)
-
-    monkeypatch.setattr(failfast, "targeted_prepass", spy)
+    monkeypatch.setenv(self_check_fakes.STATE_ENV, str(tmp_path / "spy.json"))
+    child_patches.for_test(monkeypatch).setattr(failfast, "targeted_prepass", self_check_fakes.record_prepass)
     plan = "Change only the requested file and review the required check result."
     qa = json.dumps({"status": "pass", "checks": [{"name": "behaviour", "command": "inspection",
                                                    "status": "pass", "evidence": "it holds"}],
@@ -674,17 +669,19 @@ def test_design_fast_and_the_sequential_check_keep_the_dm128_prepass(tmp_path, m
     assert "self_check_fixups" not in state["knobs"] and "self_check_timeout_s" not in state["knobs"]
     fast.run(tmp_path / "fast", model=FakeModel([plan, bad, good, qa, VERIFICATION_ANSWER]),
              task={"name": "fast_tool", "brief": "assert true", "check": f"{sys.executable} answer.py"})
+    calls = self_check_fakes.prepass_calls()
     assert calls and all("selection" not in kw for _, kw in calls)
     # Round 1 has no last failure to rerun; round 2 reruns round 1's.
     statuses = [status for status, _ in calls]
     assert statuses[0] != "fail" and statuses[1] == "fail"
     assert not (tmp_path / "fast" / SELF_CHECK_RECORD).exists()
 
-    calls.clear()
+    (tmp_path / "spy.prepass.jsonl").unlink()
     repo = _target(tmp_path / "repo", PINNED)
     run = _spine_run(repo, tmp_path, monkeypatch, "abcdef500010")
     _emit(run, render({"tool.py": "VERSION = 2\n"}), monkeypatch)
     _node(run, f"{design_ops.__name__}:check_artifact", "check", "op", monkeypatch)
+    calls = self_check_fakes.prepass_calls()
     assert calls and all("selection" not in kw for _, kw in calls)
     assert not (run / SELF_CHECK_RECORD).exists()
 

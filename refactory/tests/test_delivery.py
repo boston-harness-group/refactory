@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+import child_patches
+import delivery_fakes
 from refactory_dsh import cli, console, delivery, nn, projects, worktree
 from refactory_dsh.design import DesignMode
 from refactory_dsh.projects import projects_dir
@@ -29,6 +31,26 @@ from tests_support import DESIGN_DOC_ANSWER, PITFALLS_ANSWER, RESEARCH_ANSWER, V
 NAME = "delivered_tool"
 FAKE_GH = Path(__file__).resolve().parent / "fake_gh.py"
 LOGIN = "octo"
+#: The running test's fakes for the op children (`child_patches`).
+_CHILD: list[child_patches.ChildPatches] = []
+
+
+@pytest.fixture(autouse=True)
+def _child_patches(monkeypatch):
+    """Each test's fakes of what an op calls reach the child the op runs in."""
+    _CHILD[:] = [child_patches.for_test(monkeypatch)]
+    yield
+    _CHILD.clear()
+
+
+def _child() -> child_patches.ChildPatches:
+    """The running test's :class:`child_patches.ChildPatches`."""
+    return _CHILD[0]
+
+
+def _unfake(target, name: str) -> None:
+    """Put ``target.name`` back as it was before any fake, here and in every op child."""
+    _child().setattr(target, name, delivery_fakes.as_real, _module=target.__name__, _name=name)
 
 
 # ── PR title and body unit tests ───────────────────────────────────────────
@@ -1256,7 +1278,7 @@ def _use_github(monkeypatch: pytest.MonkeyPatch, base: Path) -> Path:
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.file://{root}/.insteadOf")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/")
-    monkeypatch.setattr(delivery, "VERIFY_WAIT_S", 0)
+    child_patches.for_test(monkeypatch).setattr(delivery, "VERIFY_WAIT_S", 0)
     return root
 
 
@@ -1621,21 +1643,8 @@ def test_a_persons_own_draft_is_not_marked_ready(opened_pull, tmp_path):
 def test_a_run_whose_whole_change_is_empty_opens_no_pull_request(github, tmp_path, monkeypatch):
     """dm-246: attempt 2 put the tree back to the base, so the branch changes nothing.
     Delivery refuses before it creates the repository or pushes, and says why."""
-    real = delivery.deliver_design
-
-    def put_back(ctx):
-        found = worktree.recorded(ctx.workdir)
-        git(Path(found.path), "rm", "-q", "-r", "tool.py")
-        git(Path(found.path), "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "attempt 2")
-        head = git(Path(found.path), "rev-parse", "HEAD")
-        from dataclasses import asdict, replace
-
-        worktree._write_json(Path(ctx.workdir) / worktree.RECORD, asdict(replace(found, head=head)))
-        ctx.facts["commit"] = head
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", put_back)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after,
+                     steps=[["put_back", {"remove": ["tool.py"], "recursive": True}]])
     run = tmp_path / "run"
     result = _design(run)
     assert result.exit_ok, result.error
@@ -2147,22 +2156,10 @@ def test_an_empty_change_is_refused_before_main_is_merged_in(github, tmp_path, m
     refuses before the merge."""
     repo = git_repo(tmp_path / "repo")
     _published(github, "acme/app", repo)
-    real = delivery.deliver_design
-
-    def put_back_and_move_main(ctx):
-        found = worktree.recorded(ctx.workdir)
-        git(Path(found.path), "rm", "-q", "tool.py")
-        git(Path(found.path), "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "attempt 2")
-        head = git(Path(found.path), "rev-parse", "HEAD")
-        from dataclasses import asdict, replace
-
-        worktree._write_json(Path(ctx.workdir) / worktree.RECORD, asdict(replace(found, head=head)))
-        ctx.facts["commit"] = head
-        _main_moved(github, "acme/app", "theirs.txt", tmp_path)
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", put_back_and_move_main)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after,
+                     steps=[["put_back", {"remove": ["tool.py"]}], ["move_main", {
+                         "slug": "acme/app", "clone": str(tmp_path / "other-theirs.txt"),
+                         "files": {"theirs.txt": "theirs.txt\n"}, "message": "theirs.txt"}]])
     run = tmp_path / "run"
     result = _design(run, target=str(repo))
     assert result.exit_ok, result.error
@@ -2200,54 +2197,37 @@ def test_redeliver_after_someone_else_pushed_to_the_branch_does_not_overwrite_it
 
 
 def _design_draft(workdir, github, tmp_path, *, mode=None, emit=None, target=None,
-                  check="python tool.py", generate="", draft_fact=None,
-                  advance_main=None, monkeypatch=None, seen=None):
-    """Run a full design with the draft_delivery fact injected via monkeypatch.
+                  check="python tool.py", generate="", draft_fact=None, before=(), seen=None):
+    """Run a full design with the draft_delivery fact injected into the ops that read it.
 
     When *target* is None the run creates a new project (same as ``_design``).
     When *target* is a repo path, the run uses that existing repo.
-    *seen*, when given, gets ``head``: the run's reviewed commit as delivery found it,
-    before delivery's own bookkeeping can move the worktree record.
+    *before* are steps of `delivery_fakes.deliver_after` delivery runs first (main
+    moving on GitHub, say). *seen*, when given, gets ``head``: the run's reviewed commit
+    as delivery found it, before delivery's own bookkeeping can move the worktree record.
     """
     fact = draft_fact if draft_fact is not None else DRAFT_FACT
-
     import refactory_dsh.design_ops as design_ops_mod
+
+    seen_file = Path(workdir).with_name(Path(workdir).name + ".seen-head")
+    steps = [["draft", {"fact": fact}],
+             *([["seen_head", {"path": str(seen_file)}]] if seen is not None else []), *before]
     # The report the design graph calls: its judges decided, so it is report_judged.
-    real_report = design_ops_mod.report_judged
-    real_deliver = delivery.deliver_design
-
-    def inject_draft_report(ctx):
-        ctx.facts["draft_delivery"] = fact
-        return real_report(ctx)
-
-    def inject_draft_deliver(ctx):
-        ctx.facts["draft_delivery"] = fact
-        if seen is not None:
-            seen["head"] = worktree.recorded(ctx.workdir).head
-        if advance_main is not None:
-            advance_main()
-        return real_deliver(ctx)
-
-    # Use a simple setattr/restore pattern when monkeypatch is not available.
-    saved_report = design_ops_mod.report_judged
-    saved_deliver = delivery.deliver_design
-    design_ops_mod.report_judged = inject_draft_report
-    delivery.deliver_design = inject_draft_deliver
-    try:
-        task_kw: dict[str, str] = {}
-        if target is not None:
-            task_kw["target"] = str(target)
-        if generate:
-            task_kw["generate"] = generate
-        model = FakeModel(_answers(render(emit or {"tool.py": "print('built')\n"})))
-        result = (mode or DesignMode()).run(
-            workdir, model=model, verdicts={"gate_strategy": "proceed"},
-            task={"name": NAME, "brief": "Build a tool\nthat prints built.",
-                  "check": check, **task_kw},
-        )
-    finally:
-        design_ops_mod.report_judged = saved_report
-        delivery.deliver_design = saved_deliver
+    _child().setattr(design_ops_mod, "report_judged", delivery_fakes.report_with_draft, fact=fact)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=steps)
+    task_kw: dict[str, str] = {}
+    if target is not None:
+        task_kw["target"] = str(target)
+    if generate:
+        task_kw["generate"] = generate
+    model = FakeModel(_answers(render(emit or {"tool.py": "print('built')\n"})))
+    result = (mode or DesignMode()).run(
+        workdir, model=model, verdicts={"gate_strategy": "proceed"},
+        task={"name": NAME, "brief": "Build a tool\nthat prints built.",
+              "check": check, **task_kw},
+    )
+    if seen is not None:
+        seen["head"] = seen_file.read_text()
     return result
 
 
@@ -2528,22 +2508,16 @@ def test_draft_conflict_with_base(github, tmp_path, monkeypatch):
     slug = "acme/draft-conflict"
     _published(github, slug, repo)
 
-    def advance_main():
-        other = tmp_path / "other_conflict"
-        if not other.exists():
-            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-            (other / "authored.py").write_text("line1\nchanged_by_base\nline3\n")
-            git(other, "add", ".")
-            git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-                "commit", "-q", "-m", "base changes authored.py")
-            git(other, "push", "-q", "origin", "main")
+    advance_main = [["move_main", {"slug": slug, "clone": str(tmp_path / "other_conflict"),
+                                   "files": {"authored.py": "line1\nchanged_by_base\nline3\n"},
+                                   "message": "base changes authored.py"}]]
 
     run = tmp_path / "run_conflict"
     seen: dict = {}
     result = _design_draft(run, github, tmp_path, target=repo,
                            emit={"tool.py": "print('built')\n",
                                  "authored.py": "line1\nchanged_by_run\nline3\n"},
-                           advance_main=advance_main, seen=seen)
+                           before=advance_main, seen=seen)
     assert result.exit_ok, result.error
 
     calls = _calls(tmp_path)
@@ -2581,15 +2555,8 @@ def test_draft_failing_merged_check(github, tmp_path, monkeypatch):
     slug = "acme/draft-mfail"
     _published(github, slug, repo)
 
-    def advance_main():
-        other = tmp_path / "other_mfail"
-        if not other.exists():
-            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-            (other / "config.txt").write_text("broken\n")
-            git(other, "add", ".")
-            git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-                "commit", "-q", "-m", "base breaks config")
-            git(other, "push", "-q", "origin", "main")
+    advance_main = [["move_main", {"slug": slug, "clone": str(tmp_path / "other_mfail"),
+                                   "files": {"config.txt": "broken\n"}, "message": "base breaks config"}]]
 
     run = tmp_path / "run_mfail"
     seen: dict = {}
@@ -2597,7 +2564,7 @@ def test_draft_failing_merged_check(github, tmp_path, monkeypatch):
         run, github, tmp_path, target=repo,
         emit={"tool.py": "import sys; sys.exit(1 if open('config.txt').read().strip() == 'broken' else 0)\n"},
         check="python tool.py",
-        advance_main=advance_main, seen=seen,
+        before=advance_main, seen=seen,
     )
     assert result.exit_ok, result.error
 
@@ -2820,14 +2787,8 @@ def test_draft_pr_body_hides_credentials_and_keeps_each_item_on_one_line(github,
     slug = "acme/draft-sec"
     _published(github, slug, repo)
 
-    def advance_main():
-        other = tmp_path / "other_sec"
-        if not other.exists():
-            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-            (other / "config.txt").write_text("broken\n")
-            git(other, "add", ".")
-            git(other, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "brk")
-            git(other, "push", "-q", "origin", "main")
+    advance_main = [["move_main", {"slug": slug, "clone": str(tmp_path / "other_sec"),
+                                   "files": {"config.txt": "broken\n"}, "message": "brk"}]]
 
     fact = {"reason": "limit reached\nANTHROPIC_API_KEY=sk-ant-in-the-reason",
             "unresolved": [{"text": "the reviewer saw OPENAI_API_KEY=sk-live-reviewer-quoted\n## Injected",
@@ -2838,7 +2799,7 @@ def test_draft_pr_body_hides_credentials_and_keeps_each_item_on_one_line(github,
             "    print('second line', file=sys.stderr)\n"
             "    sys.exit(1)\n")
     result = _design_draft(tmp_path / "run_sec", github, tmp_path, target=repo, emit={"tool.py": tool},
-                           check="python tool.py", advance_main=advance_main, draft_fact=fact)
+                           check="python tool.py", before=advance_main, draft_fact=fact)
     assert result.exit_ok, result.error
 
     [pull] = _pulls(github, slug)
@@ -3018,20 +2979,13 @@ def test_a_draft_whose_merge_was_abandoned_is_not_succeeded(github, tmp_path):
     _published(github, slug, repo)
     run = tmp_path / "run"
 
-    def advance_main():
-        other = tmp_path / "other"
-        if not other.exists():
-            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-            (other / "blocker.txt").write_text("from base\n")
-            git(other, "add", ".")
-            git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-                "commit", "-q", "-m", "base adds blocker")
-            git(other, "push", "-q", "origin", "main")
-        # An untracked file of that name in the worktree: git merge refuses, with no
-        # conflicted file, so the merge is abandoned.
-        (Path(worktree.recorded(run).path) / "blocker.txt").write_text("untracked content\n")
+    advance_main = [["move_main", {"slug": slug, "clone": str(tmp_path / "other"),
+                                   "files": {"blocker.txt": "from base\n"}, "message": "base adds blocker"}],
+                    # An untracked file of that name in the worktree: git merge refuses, with
+                    # no conflicted file, so the merge is abandoned.
+                    ["untracked", {"files": {"blocker.txt": "untracked content\n"}}]]
 
-    result = _design_draft(run, github, tmp_path, target=repo, advance_main=advance_main)
+    result = _design_draft(run, github, tmp_path, target=repo, before=advance_main)
     assert result.exit_ok, result.error
     found = worktree.recorded(run)
     assert worktree._json(worktree._record_path(found)).get("outcome") != "succeeded"
@@ -3048,10 +3002,7 @@ def test_a_draft_whose_push_is_refused_keeps_the_work_local_as_without_the_fact(
     repo = git_repo(tmp_path / "repo")
     _published(github, "acme/app", repo)
 
-    def push_refused(*args, **kwargs):
-        raise delivery.NotDelivered("push refused by GitHub")
-
-    monkeypatch.setattr(delivery, "_push", push_refused)
+    _child().setattr(delivery, "_push", delivery_fakes.push_fails, error="push refused by GitHub")
     run = tmp_path / "run"
     result = _design_draft(run, github, tmp_path, target=repo)
     assert result.exit_ok, result.error
@@ -3321,20 +3272,14 @@ def test_delivering_again_opens_no_second_pull_request_and_leaves_its_text_alone
 
 def test_a_delivery_that_failed_after_its_push_opens_one_pull_request_when_resumed(github, tmp_path, monkeypatch):
     run = tmp_path / "run"
-    real = delivery._gh
-
-    def fails_at_create(*args, **kwargs):
-        if args[:2] == ("pr", "create"):
-            raise RuntimeError("the delivery stopped here")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(delivery, "_gh", fails_at_create)
+    _child().setattr(delivery, "_gh", delivery_fakes.gh_fails, command=["pr", "create"],
+                     error="the delivery stopped here", exception="RuntimeError")
     failed = _design(run)
     assert failed.exit_ok is False and "the delivery stopped here" in (failed.error or "")
     slug = f"{LOGIN}/{NAME}"
     branch = worktree.recorded(run).branch
     assert _remote_head(github, slug, branch) and _pulls(github, slug) == []
-    monkeypatch.setattr(delivery, "_gh", real)
+    _unfake(delivery, "_gh")
     resumed = DesignMode.resume(run, model=FakeModel([]))
     assert resumed.exit_ok, resumed.error
     assert [pull["head"] for pull in _pulls(github, slug)] == [branch]
@@ -3359,14 +3304,9 @@ def test_a_plan_that_changed_since_the_gate_keeps_the_work_local(github, tmp_pat
     git(fork.parent, "init", "-q", "--bare", "-b", "main", fork.name)
     (github / "acme/fork.json").write_text(json.dumps({"default_branch": "main"}))
     git(repo, "push", "-q", "https://github.com/acme/fork.git", "main:refs/heads/main")
-    real = delivery.deliver_design
-
-    def repointed(ctx):
-        # Between the approval and delivery, the checkout started pointing elsewhere.
-        git(repo, "remote", "set-url", "origin", "https://github.com/acme/fork.git")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", repointed)
+    # Between the approval and delivery, the checkout started pointing elsewhere.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["run_git", {
+        "path": str(repo), "args": ["remote", "set-url", "origin", "https://github.com/acme/fork.git"]}]])
     result = _design(tmp_path / "run", target=str(repo))
     assert result.exit_ok, result.error
     assert _pulls(github, "acme/app") == [] and _pulls(github, "acme/fork") == []
@@ -3407,18 +3347,9 @@ def test_refine_starts_from_the_pull_requests_head_and_pushes_onto_its_branch(op
 
 def test_refine_pushes_nothing_once_the_pull_requests_branch_has_moved(opened_pull, tmp_path, capsys, monkeypatch):
     repo, url, pull, github = opened_pull.repo, opened_pull.url, opened_pull.pull, opened_pull.github
-    real = delivery.deliver_design
-
-    def someone_pushed(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", "--branch", pull["head"], f"https://github.com/acme/app.git", str(other))
-        (other / "theirs.py").write_text("x = 2\n")
-        git(other, "add", "theirs.py")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "theirs")
-        git(other, "push", "-q", "origin", pull["head"])
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", someone_pushed)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": "acme/app", "clone": str(tmp_path / "other"), "branch": pull["head"],
+        "files": {"theirs.py": "x = 2\n"}, "message": "theirs"}]])
     run = tmp_path / "refine"
     result = _design(run, refine=url)
     assert result.exit_ok, result.error
@@ -3647,18 +3578,12 @@ def test_a_checkout_that_is_only_behind_github_gets_its_pull_request_and_keeps_i
 
 def test_a_creation_that_died_before_its_first_push_goes_on_in_the_repository_it_made(github, tmp_path, monkeypatch):
     run = tmp_path / "run"
-    real = delivery._push
-
-    def first_push_fails(path, slug, commit, branch, **kwargs):
-        if branch == "main":
-            raise RuntimeError("the delivery stopped here")
-        return real(path, slug, commit, branch, **kwargs)
-
-    monkeypatch.setattr(delivery, "_push", first_push_fails)
+    _child().setattr(delivery, "_push", delivery_fakes.push_fails, error="the delivery stopped here",
+                     exception="RuntimeError", only_branch="main")
     assert _design(run).exit_ok is False
     slug = f"{LOGIN}/{NAME}"
     assert (github / f"{slug}.git").is_dir() and not _remote_head(github, slug, "main")
-    monkeypatch.setattr(delivery, "_push", real)
+    _unfake(delivery, "_push")
     resumed = DesignMode.resume(run, model=FakeModel([]))
     assert resumed.exit_ok, resumed.error
     assert _calls(tmp_path).count("repo create") == 1 and len(_pulls(github, slug)) == 1
@@ -3814,15 +3739,8 @@ def test_a_redo_after_its_pull_request_closed_keeps_it_in_the_record(new_run, ca
 
 
 def test_a_pull_request_gh_opened_but_reported_failing_is_the_one_delivered(github, tmp_path, monkeypatch):
-    real = delivery._gh
-
-    def opens_then_fails(*args, **kwargs):
-        said = real(*args, **kwargs)
-        if args[:2] == ("pr", "create"):
-            raise delivery.NotDelivered("`gh pr create` failed: timeout")
-        return said
-
-    monkeypatch.setattr(delivery, "_gh", opens_then_fails)
+    _child().setattr(delivery, "_gh", delivery_fakes.gh_fails, command=["pr", "create"],
+                     error="`gh pr create` failed: timeout", real_first=True)
     run = tmp_path / "run"
     result = _design(run)
     assert result.exit_ok, result.error
@@ -3831,15 +3749,8 @@ def test_a_pull_request_gh_opened_but_reported_failing_is_the_one_delivered(gith
 
 def test_a_repository_gh_made_but_reported_failing_is_adopted_only_when_new_and_empty(github, tmp_path,
                                                                                      monkeypatch):
-    real = delivery._gh
-
-    def creates_then_fails(*args, **kwargs):
-        said = real(*args, **kwargs)
-        if args[:2] == ("repo", "create"):
-            raise delivery.NotDelivered("`gh repo create` failed: timeout")
-        return said
-
-    monkeypatch.setattr(delivery, "_gh", creates_then_fails)
+    _child().setattr(delivery, "_gh", delivery_fakes.gh_fails, command=["repo", "create"],
+                     error="`gh repo create` failed: timeout", real_first=True)
     run = tmp_path / "run"
     result = _design(run)
     assert result.exit_ok, result.error
@@ -3849,15 +3760,8 @@ def test_a_repository_gh_made_but_reported_failing_is_adopted_only_when_new_and_
 
 
 def test_a_new_repository_that_is_slow_to_take_pushes_is_waited_for(github, tmp_path, monkeypatch):
-    real, calls = delivery._heads, []
-
-    def lags(path, slug):
-        calls.append(slug)
-        if len(calls) == 1:
-            raise delivery.NotDelivered("git ls-remote failed: repository not found")
-        return real(path, slug)
-
-    monkeypatch.setattr(delivery, "_heads", lags)
+    _child().setattr(delivery, "_heads", delivery_fakes.heads_lag, counter=str(tmp_path / "heads-calls"),
+                     error="git ls-remote failed: repository not found")
     run = tmp_path / "run"
     result = _design(run)
     assert result.exit_ok, result.error
@@ -4076,14 +3980,8 @@ def test_a_base_branch_github_does_not_have_falls_back_to_the_default_branch(git
 
 
 def test_a_delivery_that_stopped_after_its_push_says_the_branch_is_on_github(github, tmp_path, monkeypatch, capsys):
-    real = delivery._gh
-
-    def no_pull_request(*args, **kwargs):
-        if args[:2] == ("pr", "create"):
-            raise delivery.NotDelivered("`gh pr create` failed: error connecting to api.github.com")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(delivery, "_gh", no_pull_request)
+    _child().setattr(delivery, "_gh", delivery_fakes.gh_fails, command=["pr", "create"],
+                     error="`gh pr create` failed: error connecting to api.github.com")
     run = tmp_path / "run"
     result = _design(run)
     assert result.exit_ok, result.error
@@ -4097,22 +3995,15 @@ def test_a_delivery_that_stopped_after_its_push_says_the_branch_is_on_github(git
 
 def test_a_repository_whose_creation_lost_the_network_is_finished_by_a_redo(github, tmp_path, monkeypatch, capsys):
     """gh reports the creation failed, the network then drops; the redo adopts the repository it made."""
-    real = delivery._gh
-
-    def creates_then_drops(*args, **kwargs):
-        said = real(*args, **kwargs)
-        if args[:2] == ("repo", "create"):
-            (github / "offline").write_text("")
-            raise delivery.NotDelivered("`gh repo create` failed: timeout")
-        return said
-
-    monkeypatch.setattr(delivery, "_gh", creates_then_drops)
+    _child().setattr(delivery, "_gh", delivery_fakes.gh_fails, command=["repo", "create"],
+                     error="`gh repo create` failed: timeout", real_first=True,
+                     touch=str(github / "offline"))
     run = tmp_path / "run"
     result = _design(run)
     assert result.exit_ok, result.error
     assert _record(run)["status"] == "kept local" and (github / LOGIN / f"{NAME}.git").is_dir()
     (github / "offline").unlink()
-    monkeypatch.setattr(delivery, "_gh", real)
+    _unfake(delivery, "_gh")
     again = delivery.deliver_design(nn.RunContext(run, facts=result.facts, enforce_writes=False))
     assert again["pull_request"] == f"https://github.com/{LOGIN}/{NAME}/pull/1"
     assert _calls(tmp_path).count("repo create") == 2 and len(_pulls(github, f"{LOGIN}/{NAME}")) == 1
@@ -4268,13 +4159,8 @@ def test_plan_changed_leaves_pr_text_and_finish_commands(github, tmp_path, capsy
     git(fork.parent, "init", "-q", "--bare", "-b", "main", fork.name)
     (github / "acme/fork.json").write_text(json.dumps({"default_branch": "main"}))
     git(repo, "push", "-q", "https://github.com/acme/fork.git", "main:refs/heads/main")
-    real = delivery.deliver_design
-
-    def repointed(ctx):
-        git(repo, "remote", "set-url", "origin", "https://github.com/acme/fork.git")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", repointed)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["run_git", {
+        "path": str(repo), "args": ["remote", "set-url", "origin", "https://github.com/acme/fork.git"]}]])
     run = tmp_path / "run"
     result = _design(run, target=str(repo))
     assert result.exit_ok, result.error
@@ -4301,12 +4187,7 @@ def test_push_refused_leaves_pr_text_and_finish_commands(github, tmp_path, capsy
     """
     repo = git_repo(tmp_path / "repo")
     _published(github, "acme/app", repo)
-    real_push = delivery._push
-
-    def push_refused(*args, **kwargs):
-        raise delivery.NotDelivered("push refused by GitHub")
-
-    monkeypatch.setattr(delivery, "_push", push_refused)
+    _child().setattr(delivery, "_push", delivery_fakes.push_fails, error="push refused by GitHub")
     run = tmp_path / "run"
     result = _design(run, target=str(repo))
     assert result.exit_ok, result.error
@@ -4331,19 +4212,13 @@ def test_a_push_refused_for_a_missing_workflow_scope_says_so_and_how_to_finish(g
     the push and the pull request commands to run where a credential has that scope."""
     repo = git_repo(tmp_path / "repo")
     _published(github, "acme/app", repo)
-    real_git = delivery._git
-
-    def git(path, *args):
-        if "push" in args:
-            raise delivery.NotDelivered(
-                f"git push -q https://github.com/acme/app.git {args[-1]} failed in {path}: "
-                "To https://github.com/acme/app.git\n"
-                " ! [remote rejected] abc -> refactory/run-abc (refusing to allow an OAuth App to "
-                "create or update workflow `.github/workflows/ci.yml` without `workflow` scope)\n"
-                "error: failed to push some refs to 'https://github.com/acme/app.git'")
-        return real_git(path, *args)
-
-    monkeypatch.setattr(delivery, "_git", git)
+    _child().setattr(
+        delivery, "_git", delivery_fakes.git_fails, arg="push",
+        error="git push -q https://github.com/acme/app.git {last} failed in {path}: "
+              "To https://github.com/acme/app.git\n"
+              " ! [remote rejected] abc -> refactory/run-abc (refusing to allow an OAuth App to "
+              "create or update workflow `.github/workflows/ci.yml` without `workflow` scope)\n"
+              "error: failed to push some refs to 'https://github.com/acme/app.git'")
     run = tmp_path / "run"
     result = _design(run, target=str(repo))
     assert result.exit_ok, result.error
@@ -4560,23 +4435,12 @@ def test_base_moved_with_generated_conflict(github, tmp_path, monkeypatch):
     slug = "acme/merge-gen"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        """Between the run's start and delivery, advance main with a generated-file conflict."""
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        (other / "source2.txt").write_text("gamma\n")
-        (other / "unrelated.txt").write_text("hello\n")
-        # regenerate generated.txt with the base's new sources
-        subprocess.run(["bash", "gen.sh"], cwd=str(other), check=True, capture_output=True)
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base moves: add source2 and unrelated")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Between the run's start and delivery, advance main with a generated-file conflict;
+    # gen.sh regenerates generated.txt with the base's new sources.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"),
+        "files": {"source2.txt": "gamma\n", "unrelated.txt": "hello\n"},
+        "commands": [["bash", "gen.sh"]], "message": "base moves: add source2 and unrelated"}]])
 
     run = tmp_path / "run"
     # The run changes source.txt and writes tool.py; gen.sh is the generate command.
@@ -4633,21 +4497,12 @@ def test_base_changed_authored_file_conflict(github, tmp_path, monkeypatch):
     slug = "acme/merge-auth"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        (other / "authored.py").write_text("line1\nchanged_by_base\nline3\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base changes authored.py line 2")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"),
+        "files": {"authored.py": "line1\nchanged_by_base\nline3\n"},
+        "message": "base changes authored.py line 2"}]])
     # Skip the reloop — this test verifies delivery's behaviour, not the full loop.
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n",
@@ -4675,25 +4530,11 @@ def test_base_changed_authored_file_conflict(github, tmp_path, monkeypatch):
     assert _remote_head(github, slug, branch) == ""
 
 
-def _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit):
-    """Between the run's start and delivery, let ``edit(other_clone)`` commit to main."""
-    real = delivery.deliver_design
-    moved = []
-
-    def advance(ctx):
-        if moved:
-            return real(ctx)  # the reloop delivers again: main has already moved
-        moved.append(1)
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        edit(other)
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "main moves")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance)
+def _move_main_then_deliver(tmp_path, slug, **edit):
+    """Between the run's start and delivery, commit ``edit`` (`delivery_fakes.move_main`'s
+    files, commands, copy_from) to main, once: the reloop delivers again with main moved."""
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"), "message": "main moves", **edit}]])
 
 
 def test_generated_only_conflict_is_regenerated_not_sent_back(github, tmp_path, monkeypatch):
@@ -4714,9 +4555,7 @@ def test_generated_only_conflict_is_regenerated_not_sent_back(github, tmp_path, 
     slug = "acme/merge-gen-only"
     bare = _published(github, slug, repo)
 
-    def edit(other):
-        (other / "generated.txt").write_text("main's own generated text\n")
-    _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit)
+    _move_main_then_deliver(tmp_path, slug, files={"generated.txt": "main's own generated text\n"})
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n", "source.txt": "alpha\nbeta\n"},
@@ -4749,11 +4588,9 @@ def test_mixed_conflict_sends_back_only_the_authored_file(github, tmp_path, monk
     slug = "acme/merge-mixed"
     _published(github, slug, repo)
 
-    def edit(other):
-        (other / "authored.py").write_text("line1\nchanged_by_base\nline3\n")
-        subprocess.run(["bash", "gen.sh"], cwd=str(other), check=True, capture_output=True)
-    _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit)
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _move_main_then_deliver(tmp_path, slug, files={"authored.py": "line1\nchanged_by_base\nline3\n"},
+                            commands=[["bash", "gen.sh"]])
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n", "authored.py": "line1\nchanged_by_run\nline3\n"},
@@ -4787,12 +4624,13 @@ def test_conflict_send_back_stays_bounded_with_multi_megabyte_files(github, tmp_
     slug = "acme/merge-big"
     _published(github, slug, repo)
 
-    def edit(other):
-        for name in ("big_a.txt", "big_b.txt", "big_c.txt"):
-            (other / name).write_text(variant("main"))
-    _move_main_then_deliver(monkeypatch, github, tmp_path, slug, edit)
+    mains = tmp_path / "main-files"  # too large to hand the op child as parameters
+    mains.mkdir()
+    for name in ("big_a.txt", "big_b.txt", "big_c.txt"):
+        (mains / name).write_text(variant("main"))
+    _move_main_then_deliver(tmp_path, slug, copy_from=str(mains))
     gate = delivery.evaluate_delivery_conflicts
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n", **{n: variant("run") for n in
@@ -4826,21 +4664,11 @@ def test_merged_result_fails_check(github, tmp_path, monkeypatch, capsys):
     slug = "acme/merge-fail"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        (other / "config.txt").write_text("broken\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base breaks config")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"), "files": {"config.txt": "broken\n"},
+        "message": "base breaks config"}]])
     # Skip the reloop — this test verifies delivery's behaviour, not the full loop.
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     # tool.py fails when config.txt says "broken"
@@ -4913,22 +4741,12 @@ def test_generated_content_equals_base_version_still_merges(github, tmp_path, mo
     slug = "acme/merge-static-gen"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Base changes generated.txt to something else (simulating a different generator version),
-        # but the generate command always produces 'static-content'.
-        (other / "generated.txt").write_text("old-generated-content\n")
-        (other / "extra.txt").write_text("extra\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base changes generated.txt")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Base changes generated.txt to something else (simulating a different generator version),
+    # but the generate command always produces 'static-content'.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"),
+        "files": {"generated.txt": "old-generated-content\n", "extra.txt": "extra\n"},
+        "message": "base changes generated.txt"}]])
 
     run = tmp_path / "run"
     # The run also changes generated.txt (via generate), causing a conflict.
@@ -4961,30 +4779,15 @@ def test_timeout_uses_check_timeout_s(github, tmp_path, monkeypatch):
     slug = "acme/merge-timeout"
     _published(github, slug, repo)
 
-    real = delivery.deliver_design
-    captured_timeouts: list[float] = []
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        (other / "extra.txt").write_text("new\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base moves")
-        git(other, "push", "-q", "origin", "main")
-
-        from refactory_dsh import sandbox as _sbx
-        _orig_run = _sbx.run_command
-
-        def _spy_run(*args, **kwargs):
-            if "timeout_s" in kwargs:
-                captured_timeouts.append(kwargs["timeout_s"])
-            return _orig_run(*args, **kwargs)
-
-        monkeypatch.setattr(_sbx, "run_command", _spy_run)
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    timeouts = tmp_path / "timeouts.jsonl"
+    # Main moves, then each sandbox.run_command delivery makes records its timeout_s.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["move_main", {"slug": slug, "clone": str(tmp_path / "other"), "files": {"extra.txt": "new\n"},
+                       "message": "base moves"}],
+        ["patch", {"target": "refactory_dsh.sandbox", "name": "run_command",
+                   "function": "delivery_fakes:record_kwarg",
+                   "params": {"_module": "refactory_dsh.sandbox", "_name": "run_command",
+                              "_key": "timeout_s", "_path": str(timeouts)}}]])
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
@@ -4992,6 +4795,8 @@ def test_timeout_uses_check_timeout_s(github, tmp_path, monkeypatch):
                      generate="bash gen.sh",
                      mode=_mode(check_timeout_s=1800))
     assert result.exit_ok, result.error
+    captured_timeouts = ([json.loads(line) for line in timeouts.read_text().splitlines()]
+                         if timeouts.exists() else [])
 
     # Every timeout captured during the merge's generate/setup/check equals the knob.
     assert captured_timeouts, "no sandbox.run_command calls were captured"
@@ -5028,24 +4833,13 @@ def test_conflict_path_regenerates_all_files(github, tmp_path, monkeypatch):
     slug = "acme/merge-regen-all"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Base changes input_b (creates a conflict in gen1.txt because the run
-        # changes input_a) and appends to source2.txt (gen2.txt merges cleanly
-        # from git's perspective but its line-count header becomes stale).
-        (other / "input_b.txt").write_text("B-base\n")
-        (other / "source2.txt").write_text("original\nbase-line\n")
-        subprocess.run(["bash", "gen.sh"], cwd=str(other), check=True, capture_output=True)
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base updates both inputs")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Base changes input_b (creates a conflict in gen1.txt because the run
+    # changes input_a) and appends to source2.txt (gen2.txt merges cleanly
+    # from git's perspective but its line-count header becomes stale).
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"),
+        "files": {"input_b.txt": "B-base\n", "source2.txt": "original\nbase-line\n"},
+        "commands": [["bash", "gen.sh"]], "message": "base updates both inputs"}]])
 
     run = tmp_path / "run"
     # The run changes input_a (making gen1.txt conflict) and prepends to
@@ -5086,21 +4880,12 @@ def test_modify_delete_conflict(github, tmp_path, monkeypatch):
     slug = "acme/merge-moddel"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Base deletes the file.
-        git(other, "rm", "conflicted.txt")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base deletes conflicted.txt")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Base deletes the file.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"), "remove": ["conflicted.txt"],
+        "message": "base deletes conflicted.txt"}]])
     # Skip the reloop — this test verifies delivery's behaviour, not the full loop.
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     # The run modifies the file.
@@ -5140,26 +4925,14 @@ def test_generate_fails_classes_as_authored(github, tmp_path, monkeypatch):
     slug = "acme/merge-genfail"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Base adds the marker that makes generate fail and changes source.txt.
-        (other / "FAIL_GEN").write_text("yes\n")
-        (other / "source.txt").write_text("gamma\n")
-        subprocess.run(["bash", str(other / "gen.sh")], cwd=str(other), capture_output=True)
-        # gen.sh fails, so write generated.txt manually for the base commit.
-        (other / "generated.txt").write_text("gamma\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base adds fail marker")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Base adds the marker that makes generate fail and changes source.txt; gen.sh fails
+    # there, so generated.txt is written by hand for the base commit.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"),
+        "files": {"FAIL_GEN": "yes\n", "source.txt": "gamma\n", "generated.txt": "gamma\n"},
+        "message": "base adds fail marker"}]])
     # Skip the reloop — this test verifies delivery's behaviour, not the full loop.
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n", "source.txt": "alpha\nbeta\n"},
@@ -5192,41 +4965,13 @@ def test_post_checkout_hook_does_not_run(github, tmp_path, monkeypatch):
     slug = "acme/merge-hook"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Add a new file so main moves without conflicting with the run's source.txt.
-        (other / "extra.txt").write_text("added by main\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base adds extra.txt")
-        git(other, "push", "-q", "origin", "main")
-
-        # Install a post-checkout hook in the worktree's git dir.
-        found = worktree.recorded(ctx.workdir)
-        wt = Path(found.path)
-        marker = wt / "HOOK_RAN"
-        # Find the git dir (for a worktree, .git is a file with "gitdir: <path>").
-        dot_git = wt / ".git"
-        if dot_git.is_file():
-            gitdir = Path(dot_git.read_text().strip().removeprefix("gitdir: "))
-            if not gitdir.is_absolute():
-                gitdir = wt / gitdir
-        else:
-            gitdir = dot_git
-        hooks = gitdir / "hooks"
-        hooks.mkdir(parents=True, exist_ok=True)
-        hook = hooks / "post-checkout"
-        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
-        hook.chmod(0o755)
-        result = real(ctx)
-        # The marker must not exist.
-        assert not marker.exists(), "post-checkout hook ran during delivery"
-        return result
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Main moves with a new file (no conflict with the run's source.txt), a post-checkout
+    # hook is installed in the worktree's git dir, and its marker must not exist after delivery.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["move_main", {"slug": slug, "clone": str(tmp_path / "other"),
+                       "files": {"extra.txt": "added by main\n"}, "message": "base adds extra.txt"}],
+        ["hook", {"name": "post-checkout", "marker": "HOOK_RAN"}]],
+        after=[["absent", {"name": "HOOK_RAN"}]])
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
@@ -5249,24 +4994,13 @@ def test_redo_after_merge_pushed(github, tmp_path, monkeypatch):
     slug = "acme/merge-redo"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_and_fail_verify(ctx):
-        """First delivery: advance main, then sabotage _verified via stale-view."""
-        other = tmp_path / "other"
-        if not other.exists():
-            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-            (other / "extra.txt").write_text("new\n")
-            git(other, "add", ".")
-            git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-                "commit", "-q", "-m", "base moves")
-            git(other, "push", "-q", "origin", "main")
-        # Make _verified fail: fake_gh returns stale headRefOid for "headRefOid,url" queries.
-        (github / "stale-view").write_text("0" * 40)
-        monkeypatch.setattr(delivery, "VERIFY_ATTEMPTS", 1)
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_and_fail_verify)
+    # First delivery: advance main, then sabotage _verified via stale-view (fake_gh returns
+    # a stale headRefOid for "headRefOid,url" queries), with one verification attempt.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["move_main", {"slug": slug, "clone": str(tmp_path / "other"), "files": {"extra.txt": "new\n"},
+                       "message": "base moves"}],
+        ["touch", {"path": str(github / "stale-view"), "text": "0" * 40}],
+        ["patch", {"target": "refactory_dsh.delivery", "name": "VERIFY_ATTEMPTS", "value": 1}]])
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
                      target=str(repo), check="python tool.py")
@@ -5284,8 +5018,8 @@ def test_redo_after_merge_pushed(github, tmp_path, monkeypatch):
     # existing redo tests do), not DesignMode.resume which refuses a node
     # whose side-effect outcome is unknown.
     (github / "stale-view").unlink(missing_ok=True)
-    monkeypatch.setattr(delivery, "deliver_design", real)
-    monkeypatch.setattr(delivery, "VERIFY_ATTEMPTS", 5)
+    _unfake(delivery, "deliver_design")
+    _child().setattr(delivery, "VERIFY_ATTEMPTS", 5)
     delivery.deliver_design(nn.RunContext(run, facts=result.facts, enforce_writes=False))
 
     record2 = _record(run)
@@ -5313,35 +5047,22 @@ def test_dependency_install_for_merged_tree(github, tmp_path, monkeypatch):
     slug = "acme/merge-deps"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-    ensure_calls: list[dict] = []
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Base changes pyproject.toml.
-        (other / "pyproject.toml").write_text('[project]\nname = "example"\nversion = "0.1.0"\ndependencies = ["requests"]\n')
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base adds dependency")
-        git(other, "push", "-q", "origin", "main")
-
-        orig_ensure = worktree.ensure_environment
-
-        def _spy_ensure(found, run, budget=None, *, commit_lockfiles=True):
-            ensure_calls.append({"commit_lockfiles": commit_lockfiles})
-            # Don't actually install anything; just return no problems.
-            return found, [], None
-
-        monkeypatch.setattr(worktree, "ensure_environment", _spy_ensure)
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    ensures = tmp_path / "ensure-calls.jsonl"
+    # Base changes pyproject.toml; from then on ensure_environment installs nothing and
+    # records each call.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["move_main", {"slug": slug, "clone": str(tmp_path / "other"), "files": {
+            "pyproject.toml": '[project]\nname = "example"\nversion = "0.1.0"\ndependencies = ["requests"]\n'},
+            "message": "base adds dependency"}],
+        ["patch", {"target": "refactory_dsh.worktree", "name": "ensure_environment",
+                   "function": "delivery_fakes:ensure_recorded", "params": {"path": str(ensures)}}]])
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
                      target=str(repo), check="python tool.py")
     assert result.exit_ok, result.error
+    ensure_calls = ([json.loads(line) for line in ensures.read_text().splitlines()]
+                    if ensures.exists() else [])
 
     # ensure_environment was called with commit_lockfiles=False.
     non_amend = [c for c in ensure_calls if not c["commit_lockfiles"]]
@@ -5370,27 +5091,12 @@ def test_merge_fails_no_conflicted_files(github, tmp_path, monkeypatch):
     slug = "acme/merge-noconflict"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        # Base adds a file.
-        (other / "blocker.txt").write_text("from base\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base adds blocker")
-        git(other, "push", "-q", "origin", "main")
-
-        # Create an untracked file in the worktree with the same name, so git merge
-        # fails with "would be overwritten" and no conflicted files.
-        found = worktree.recorded(ctx.workdir)
-        wt = Path(found.path)
-        (wt / "blocker.txt").write_text("untracked content\n")
-
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    # Base adds a file, and the worktree has an untracked file with the same name, so git
+    # merge fails with "would be overwritten" and no conflicted files.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["move_main", {"slug": slug, "clone": str(tmp_path / "other"),
+                       "files": {"blocker.txt": "from base\n"}, "message": "base adds blocker"}],
+        ["untracked", {"files": {"blocker.txt": "untracked content\n"}}]])
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
@@ -5512,19 +5218,9 @@ def test_merge_failure_leaves_worktree_clean(github, tmp_path, monkeypatch):
     slug = "acme/clean-merge"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-        (other / "shared.py").write_text("def f():\n    return 999\n")
-        git(other, "add", ".")
-        git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-            "commit", "-q", "-m", "base changes shared.py")
-        git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"), "files": {"shared.py": "def f():\n    return 999\n"},
+        "message": "base changes shared.py"}]])
 
     # Provide only one emit answer for the reloop: the model will run out of
     # answers when it tries to produce the conflict-resolution emit.  This
@@ -6001,20 +5697,12 @@ def test_ls_remote_failure_stops_existing_repo(github, tmp_path, monkeypatch):
     slug = "acme/ls-remote-fail"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-    real_git = delivery._git
-
-    def break_ls_remote_then_deliver(ctx):
-        def failing_git(path, *args):
-            if "ls-remote" in args and f"refs/heads/main" in " ".join(str(a) for a in args):
-                raise delivery.NotDelivered("simulated ls-remote failure")
-            return real_git(path, *args)
-        monkeypatch.setattr(delivery, "_git", failing_git)
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", break_ls_remote_then_deliver)
+    # From delivery on, `git ls-remote … refs/heads/main` fails.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["patch", {
+        "target": "refactory_dsh.delivery", "name": "_git", "function": "delivery_fakes:git_fails",
+        "params": {"arg": "ls-remote", "text": "refs/heads/main", "error": "simulated ls-remote failure"}}]])
     # Skip the delivery_gate reloop.
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
@@ -6044,22 +5732,11 @@ def test_delivery_advances_worktree_after_merge_push(github, tmp_path, monkeypat
     slug = "acme/advance-wt"
     bare = _published(github, slug, repo)
 
-    real = delivery.deliver_design
-
-    def advance_main_then_deliver(ctx):
-        other = tmp_path / "other"
-        if not other.exists():
-            git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(other))
-            (other / "new_file.txt").write_text("main advanced\n")
-            git(other, "add", ".")
-            git(other, "-c", "user.name=t", "-c", "user.email=t@example.com",
-                "commit", "-q", "-m", "main advances")
-            git(other, "push", "-q", "origin", "main")
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", advance_main_then_deliver)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"), "files": {"new_file.txt": "main advanced\n"},
+        "message": "main advances"}]])
     # Skip the delivery_gate reloop.
-    monkeypatch.setattr(delivery, "evaluate_delivery_conflicts", lambda ctx: "proceed")
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
 
     run = tmp_path / "run"
     result = _design(run, {"tool.py": "print('built')\n"},
@@ -6555,17 +6232,14 @@ def _redo_delivery_after_merge(github, tmp_path, monkeypatch, slug, *, move_main
             "commit", "-q", "-m", f"main moves: {name}")
         git(other, "push", "-q", "origin", "main")
 
-    real = delivery.deliver_design
-    reviewed = {}
-
-    def first_delivery(ctx):
-        reviewed["found"] = worktree.recorded(ctx.workdir)
-        move_main("extra.txt")
-        (github / "stale-view").write_text("0" * 40)  # the push lands, verification fails
-        monkeypatch.setattr(delivery, "VERIFY_ATTEMPTS", 1)
-        return real(ctx)
-
-    monkeypatch.setattr(delivery, "deliver_design", first_delivery)
+    found_file = tmp_path / "reviewed-record.json"
+    # The first delivery: main moves, the push lands, verification fails.
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["seen_record", {"path": str(found_file)}],
+        ["move_main", {"slug": slug, "clone": str(other), "files": {"extra.txt": "new\n"},
+                       "message": "main moves: extra.txt"}],
+        ["touch", {"path": str(github / "stale-view"), "text": "0" * 40}],
+        ["patch", {"target": "refactory_dsh.delivery", "name": "VERIFY_ATTEMPTS", "value": 1}]])
     run = tmp_path / "run"
     result = _design(run, _counting_tool(counter), target=str(repo), check="python tool.py")
     assert "Unverified" in str(result.error), result.error
@@ -6575,12 +6249,12 @@ def _redo_delivery_after_merge(github, tmp_path, monkeypatch, slug, *, move_main
 
     # The node was stopped before delivery advanced the worktree record to its merge: the
     # run still stands at the reviewed commit, with the merge already on GitHub.
-    found = reviewed["found"]
+    found = worktree.Worktree(**json.loads(found_file.read_text()))
     git(Path(found.path), "reset", "--hard", found.head)
     worktree._write_json(run / worktree.RECORD, asdict(found))
     (github / "stale-view").unlink(missing_ok=True)
-    monkeypatch.setattr(delivery, "deliver_design", real)
-    monkeypatch.setattr(delivery, "VERIFY_ATTEMPTS", 5)
+    _unfake(delivery, "deliver_design")
+    _child().setattr(delivery, "VERIFY_ATTEMPTS", 5)
     if move_main_again:
         move_main("second.txt")
     delivery.deliver_design(nn.RunContext(run, facts=result.facts, enforce_writes=False))
