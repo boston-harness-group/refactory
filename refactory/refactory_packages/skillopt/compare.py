@@ -265,7 +265,9 @@ def compare_runs(
         }
 
         if b_entry is None:
-            # B didn't reach this epoch/step at all.
+            # B didn't reach this epoch/step at all: never a match, however
+            # empty the epoch's fields are.
+            epoch_report["b_missing"] = True
             if first_div is None:
                 first_div = {
                     "epoch": epoch,
@@ -599,6 +601,8 @@ def compare_runs(
     )
 
     def _epoch_matched(ep: dict) -> bool:
+        if ep.get("b_missing") or ep.get("extra_b_epoch"):
+            return False
         for field in fields_to_check:
             info = ep.get(field, {})
             m = info.get("match")
@@ -612,6 +616,25 @@ def compare_runs(
         return True
 
     matched = sum(1 for ep in per_epoch if _epoch_matched(ep))
+    if first_div is None:
+        # An epoch can miss without a field disagreeing: A has data B lacks.
+        for ep in per_epoch:
+            if _epoch_matched(ep):
+                continue
+            for field in fields_to_check:
+                info = ep.get(field, {})
+                if info.get("match") is False or (
+                    info.get("match") is None and _has_data(info.get("a"))
+                ):
+                    first_div = {
+                        "epoch": ep.get("epoch"), "step": ep.get("step"),
+                        "phase": "missing_in_b", "field": field,
+                        "a_value": info.get("a"), "b_value": info.get("b"),
+                        "call_key": None,
+                    }
+                    break
+            if first_div is not None:
+                break
 
     return {
         "per_epoch": per_epoch,
@@ -620,6 +643,7 @@ def compare_runs(
             "total_epochs": total,
             "matched_epochs": matched,
             "diverged_epochs": total - matched,
+            "missing_b_epochs": sum(1 for ep in per_epoch if ep.get("b_missing")),
         },
     }
 

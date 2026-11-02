@@ -21,6 +21,18 @@ class TraceRecorder:
         self.path = path
         self._epoch = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        #: Optimizer calls made through :func:`ask`, and those that failed.
+        self.optimizer_calls = 0
+        self.optimizer_failures: list[str] = []
+        #: Called with each call's error (``None`` on success), when set.
+        self.listener: Any = None
+
+    def count_call(self, error: str | None) -> None:
+        self.optimizer_calls += 1
+        if error is not None:
+            self.optimizer_failures.append(error)
+        if self.listener is not None:
+            self.listener(error)
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = epoch
@@ -66,6 +78,19 @@ class TraceRecorder:
             f.flush()
 
 
+#: Failures that are not a bad reply but the run itself ending or misconfigured:
+#: refactory's own rule re-raises them (``Loop.propose`` re-raises
+#: ``BudgetExhausted``; the model client raises ``CancelledError`` and
+#: ``ModelChoiceError`` to stop, not to be retried around).
+def _fatal() -> tuple[type[BaseException], ...]:
+    from concurrent.futures import CancelledError
+
+    from refactory_dsh.budgets import BudgetExhausted
+    from refactory_dsh.model import ModelChoiceError
+
+    return (BudgetExhausted, CancelledError, ModelChoiceError)
+
+
 def ask(
     client: Any,
     trace: TraceRecorder,
@@ -83,14 +108,24 @@ def ask(
     :261-265), the ranking truncates (clip.py:101-102), and the slow update and
     meta skill produce nothing (slow_update.py:440-441, meta_skill.py:76-77).
     Every caller here parses ``None`` the same way it parses an unusable reply.
+
+    Budget exhaustion, cancellation and a missing model choice are re-raised
+    (:func:`_fatal`): they end the run rather than read as a bad reply. Every
+    call, and every failure, goes to the trace and to ``trace.listener`` (the
+    loop counts them into the run report's proposer health).
     """
     try:
         output = client.complete(user, system=system, call_key=call_key)
+    except _fatal() as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        trace.record_model_call(step_type, system, user, None, call_key=call_key, error=error)
+        trace.count_call(error)
+        raise
     except Exception as exc:  # noqa: BLE001 - SkillOpt's own handling, cited above
-        trace.record_model_call(
-            step_type, system, user, None, call_key=call_key,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        error = f"{type(exc).__name__}: {exc}"
+        trace.record_model_call(step_type, system, user, None, call_key=call_key, error=error)
+        trace.count_call(error)
         return None
     trace.record_model_call(step_type, system, user, output, call_key=call_key)
+    trace.count_call(None)
     return output

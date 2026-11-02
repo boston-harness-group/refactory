@@ -284,6 +284,15 @@ def _patch_files(
     return sorted(names)
 
 
+#: The slow-update and meta-skill fields both runs record
+#: (A: slow_update/epoch_NN/slow_result.json, meta_skill/epoch_NN/meta_skill_result.json;
+#: B: its ``slow_update`` / ``meta_skill`` decisions). Compared on the keys both have.
+_SLOW_UPDATE_FIELDS = (
+    "action", "reasoning", "slow_update_content", "prev_hard", "curr_hard", "candidate_hash",
+)
+_META_SKILL_FIELDS = ("action", "reasoning", "meta_skill_content")
+
+
 def b_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the ``compare_runs`` B-side history from arm B's own trace.
 
@@ -395,7 +404,10 @@ def b_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
         slow = _first(epoch_decisions, "slow_update")
         skipped = _first(epoch_decisions, "slow_update_skipped")
         if slow is not None:
-            entry["slow_update"] = {"action": slow.get("action")}
+            # The fields A's slow_result.json also carries, when B recorded them.
+            entry["slow_update"] = {
+                key: slow[key] for key in _SLOW_UPDATE_FIELDS if key in slow
+            }
         elif _first(epoch_decisions, "slow_update_placeholder"):
             # A's first epoch injects empty markers and writes
             # ``{"action": "inject_placeholder"}`` (trainer.py:1824).
@@ -409,7 +421,9 @@ def b_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         # ── meta skill ──
         meta = _first(epoch_decisions, "meta_skill")
-        entry["meta_skill"] = {"action": meta.get("action")} if meta else None
+        entry["meta_skill"] = (
+            {key: meta[key] for key in _META_SKILL_FIELDS if key in meta} if meta else None
+        )
 
         # ── early stop ──
         entry["early_stop"] = _first(epoch_decisions, "early_stop") is not None
@@ -419,6 +433,18 @@ def b_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ── runner ─────────────────────────────────────────────────────────────────
+
+
+def recording_matcher(recording_dir: Path) -> tuple[CallMatcher, dict[str, Any]]:
+    """The matcher over A's calls.jsonl, with A's late answers marked.
+
+    A's own timeouts are conceded in replay only: the late answers are never
+    served, and the call times out for B as it did for A (CompletionTimeout).
+    """
+    matcher = CallMatcher(Path(recording_dir) / "calls.jsonl")
+    a_timeouts = late_answer_lines(Path(recording_dir) / "out", matcher)
+    matcher.mark_late(a_timeouts["lines"])
+    return matcher, a_timeouts
 
 
 def run_replay(
@@ -444,13 +470,8 @@ def run_replay(
     strategy_options = load_a_config(a_out_dir)
     unsupported = unsupported_a_settings(a_out_dir)
 
-    matcher = CallMatcher(recording_dir / "calls.jsonl")
-    # A's own timeouts are conceded in replay only: the late answers are never
-    # served, and the call times out for B as it did for A (CompletionTimeout).
-    a_timeouts = late_answer_lines(a_out_dir, matcher)
-    matcher.mark_late(a_timeouts["lines"])
-    # Patch order is conceded in replay only — see MergePatchReorder.
-    client = ReplayClient(matcher, reorder_merge_patches=True)
+    matcher, a_timeouts = recording_matcher(recording_dir)
+    client = ReplayClient(matcher)
     # Rollout completion order is conceded in replay only — see RecordedRolloutOrder.
     rollout_order = RecordedRolloutOrder(a_out_dir)
     # So is the analysts' completion order — see RecordedPatchOrder.
@@ -483,7 +504,6 @@ def run_replay(
         "replay_status": "not_started",
         "mismatch": None,
         "unused_recordings": [],
-        "merge_patch_reorders": 0,
         "rollout_orders": [],
         "patch_orders": [],
         "a_timeouts": a_timeouts["events"],
@@ -654,8 +674,6 @@ def run_replay(
         {"system": system[:80], "prompt": prompt[:80], "remaining": remaining}
         for system, prompt, remaining in matcher.unused_recordings()
     ]
-    if client.reorder is not None:
-        report["merge_patch_reorders"] = len(client.reorder.reorders)
     report["a_late_answers_after_its_own_timeout"] = matcher.late_answers()
     report["a_failed_attempts_replayed"] = matcher.failed_attempts_replayed
     report["a_events_replayed"] = [
@@ -680,12 +698,51 @@ def run_replay(
             report["comparison"] = compare_runs(a_out_dir, report["b_history"])
         except Exception as e:  # noqa: BLE001
             report["comparison_error"] = str(e)
+    apply_verdict(report, matcher.unused_before_last_served())
 
     report_path = output_dir / "replay_report.json"
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2, default=str)
 
     return report
+
+
+def apply_verdict(report: dict[str, Any], unused_before_last_served: list[dict[str, Any]]) -> None:
+    """Decide whether a replay that matched every call also reproduced A's run.
+
+    Matching every call B made is not enough: B can stop early, decide
+    differently on data it already had, or skip calls A made. A run stays
+    ``completed`` only when the comparison with A's step records finds no
+    diverged epoch, B reached every epoch A ran, and every recording B did not
+    use was made after the last one it was served (A's work past the end of
+    B's run, such as its post-training evaluations). Otherwise the status is
+    ``diverged`` and ``divergence`` says where, with both sides' values.
+    """
+    report["unused_before_b_last_served_call"] = len(unused_before_last_served)
+    if report.get("replay_status") != "completed":
+        return
+    comparison = report.get("comparison")
+    divergence: dict[str, Any] | None = None
+    if not comparison:
+        divergence = {
+            "phase": "comparison", "field": "comparison",
+            "a_value": "A's step records", "b_value": report.get("comparison_error")
+            or "no comparison (B recorded no epochs)",
+        }
+    elif comparison["summary"].get("diverged_epochs") or comparison.get("first_divergence"):
+        divergence = comparison.get("first_divergence") or {
+            "phase": "comparison", "field": "diverged_epochs",
+            "a_value": 0, "b_value": comparison["summary"].get("diverged_epochs"),
+        }
+    elif unused_before_last_served:
+        divergence = {
+            "phase": "recordings", "field": "unused_before_b_last_served_call",
+            "a_value": len(unused_before_last_served), "b_value": 0,
+            "examples": unused_before_last_served[:5],
+        }
+    if divergence is not None:
+        report["replay_status"] = "diverged"
+        report["divergence"] = divergence
 
 
 def _trim_loop_report(loop_report: Any) -> dict[str, Any]:
@@ -735,7 +792,6 @@ def main() -> None:
     print(f"Arm B strategy ran: {report['strategy_ran']}")
     print(f"Calls total in recording: {report['calls_total']}")
     print(f"Calls matched: {report['calls_matched']}")
-    print(f"Merge patch reorders (replay-only): {report['merge_patch_reorders']}")
     print(f"A's events replayed (timeouts, failed calls): {len(report['a_events_replayed'])}")
     print(f"A's late answers after its own timeout (withheld): "
           f"{len(report['a_late_answers_after_its_own_timeout'])}")
@@ -751,6 +807,10 @@ def main() -> None:
             f"Unused recordings: {n_unused} across "
             f"{len(report['unused_recordings'])} keys"
         )
+
+    if report.get("divergence"):
+        print("\n=== DIVERGED FROM A ===")
+        print(json.dumps(report["divergence"], indent=2, default=str)[:3000])
 
     if report.get("mismatch"):
         print("\n=== MISMATCH ===")

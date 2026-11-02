@@ -1171,11 +1171,111 @@ def test_failed_optimizer_calls_fall_back_like_skillopt(tmp_path):
     calls = [json.loads(line) for line in trace.path.read_text().splitlines()]
     assert calls[0]["raw_output"] is None and "failed after 3 retries" in calls[0]["error"]
 
-    # A whole run whose every optimizer call fails still completes its epochs.
-    loop, _ = _run_loop(tmp_path / "run", client=Failing(), skillopt_options={"max_epochs": 2})
+    # A whole run whose every optimizer call fails still completes its epochs,
+    # and says so: per epoch in the trace, and in the run report's proposer
+    # health, as a run whose proposer never answered (Loop._proposer_health).
+    loop, report = _run_loop(tmp_path / "run", client=Failing(), skillopt_options={"max_epochs": 2})
     run_trace = _read_trace(tmp_path / "run")
     assert _decisions(run_trace, "no_edits_skip")
     assert loop.strategy_state_dict()["epoch"] == 2
+    per_epoch = _decisions(run_trace, "optimizer_calls")
+    assert [d["all_failed"] for d in per_epoch] == [True, True]
+    assert all(d["calls"] == d["failed"] > 0 for d in per_epoch)
+    proposer = report["proposer"]
+    assert proposer["all_failed"] is True
+    assert proposer["failure_count"] == proposer["rounds"] == sum(d["calls"] for d in per_epoch)
+    assert "failed after 3 retries" in proposer["failures"][0]
+    assert "every one of its" in (tmp_path / "run" / "run" / "strategy.log").read_text()
+
+
+def test_optimizer_calls_that_answer_are_counted_and_not_flagged(tmp_path):
+    _, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    epoch = _decisions(_read_trace(tmp_path), "optimizer_calls")[0]
+    assert epoch["calls"] > 0 and epoch["failed"] == 0 and epoch["all_failed"] is False
+    assert report["proposer"]["rounds"] == epoch["calls"]
+    assert report["proposer"]["failure_count"] == 0
+
+
+class _Ending(FakeClient):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+        raise self.error
+
+
+def test_budget_exhaustion_ends_the_run_at_its_bound(tmp_path):
+    """BudgetExhausted is not a bad reply: it leaves the strategy, and the loop
+    ends the run on that bound (Loop.run), instead of every epoch carrying on."""
+    from refactory_dsh.budgets import BudgetExhausted
+
+    _, report = _run_loop(
+        tmp_path, client=_Ending(BudgetExhausted("model budget spent")),
+        skillopt_options={"max_epochs": 3},
+    )
+    assert "model budget spent" in str(report["bound"])
+    trace = _read_trace(tmp_path)
+    assert [d["epoch"] for d in _decisions(trace, "train_rollout")] == [1]
+    assert trace[-1]["type"] == "model_call" and trace[-1]["error"].startswith("BudgetExhausted")
+
+
+@pytest.mark.parametrize("make_error", [
+    lambda: __import__("concurrent.futures", fromlist=["CancelledError"]).CancelledError(),
+    lambda: __import__("refactory_dsh.model", fromlist=["ModelChoiceError"]).ModelChoiceError(),
+])
+def test_cancellation_and_model_choice_end_the_run(tmp_path, make_error):
+    """Not a bad reply: the model client raises these to stop the run."""
+    error = make_error()
+    with pytest.raises(type(error)):
+        _run_loop(tmp_path, client=_Ending(error), skillopt_options={"max_epochs": 1})
+    calls = [d for d in _read_trace(tmp_path) if d["type"] == "model_call"]
+    assert calls and calls[-1]["error"].startswith(type(error).__name__)
+
+
+def test_slow_update_records_skillopt_result_fields(tmp_path):
+    """slow_result.json's fields (trainer.py:1936-1947): reasoning, content,
+    both rollouts' hard scores and the candidate's 16-hex hash."""
+    import hashlib as _hashlib
+
+    monkey_pass = "t1,t2"
+    os.environ[PASS_IDS_ENV] = monkey_pass
+    try:
+        loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
+    finally:
+        os.environ.pop(PASS_IDS_ENV, None)
+    slow = _decisions(_read_trace(tmp_path), "slow_update")[0]
+    assert slow["slow_update_content"] == "Updated guidance text."
+    assert slow["reasoning"] == "reflected"
+    assert slow["prev_hard"] == slow["curr_hard"] == 2 / 8
+    skill = loop.strategy_state_dict()["current_skill"]
+    assert slow["candidate_hash"] == _hashlib.sha256(skill.encode()).hexdigest()[:16]
+    meta = _decisions(_read_trace(tmp_path), "meta_skill")[-1]
+    assert (meta["meta_skill_content"], meta["reasoning"]) == ("USE CONCISE EDITS", "meta reflected")
+
+
+def test_resume_at_epoch_done_still_checks_the_early_stop(tmp_path):
+    """A run interrupted after an epoch's end but before its stop check stops
+    on resume instead of running another epoch."""
+    loop, _ = _run_loop(
+        tmp_path,
+        skillopt_options={"max_epochs": 4, "early_stop_patience": 2},
+        preload_state={
+            "current_skill": INITIAL_SKILL, "epoch": 2, "phase": "epoch_done",
+            "stale_epochs": 2, "early_stop_best": 0.5, "best_score": 0.5,
+            "current_score": 0.5,
+        },
+    )
+    trace = _read_trace(tmp_path)
+    assert [d["reason"] for d in _decisions(trace, "early_stop")] == ["patience"]
+    assert not _decisions(trace, "train_rollout")
+
+
+def test_early_stop_best_survives_a_resume():
+    loop = SkillOptLoop()
+    loop.configure()
+    loop.load_strategy_state({"early_stop_best": 0.7, "best_score": 0.9})
+    assert loop.strategy_state_dict()["early_stop_best"] == 0.7
 
 
 def test_patch_order_feeds_the_merge_and_its_fallback(tmp_path):

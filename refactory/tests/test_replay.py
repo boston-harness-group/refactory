@@ -5,7 +5,7 @@ The tests cover:
   - normalize_recorded_prompt (strips transport wrapping)
   - CallMatcher (content-based matching with positional counters)
   - ReplayClient (executor's agent-node protocol)
-  - MergePatchReorder (replay-only analyst-patch ordering)
+  - RecordedPatchOrder / RecordedRolloutOrder (replay-only orders, set at the source)
   - compare_runs (divergence detection)
   - load_a_config (config mapping)
   - b_history_from_trace (arm B's trace → the comparison's B side)
@@ -1074,7 +1074,7 @@ def test_trainer_import_fails():
         importlib.import_module("refactory_packages.skillopt.trainer")
 
 
-# ── replay-only patch reordering ───────────────────────────────────────────
+# ── merge prompts are matched exactly ──────────────────────────────────────
 
 
 MERGE_SYSTEM = "You are a skill-edit coordinator. Merge the patches."
@@ -1094,15 +1094,6 @@ def _merge_prompt(patches: list[dict]) -> str:
     return prompts.format_merge_user("# Skill\nrules", patches, "", 1)
 
 
-def _reorder_client(tmp_path: Path, a_patches: list[dict], **kwargs):
-    from refactory_packages.skillopt import replay as replay_mod
-
-    calls = _make_calls_jsonl(
-        tmp_path, [(MERGE_SYSTEM, _merge_prompt(a_patches), "MERGED")],
-    )
-    return replay_mod.ReplayClient(replay_mod.CallMatcher(calls), **kwargs)
-
-
 def _mismatch_error():
     """The live ``ReplayMismatch`` class, whatever module object holds it."""
     from refactory_packages.skillopt import replay as replay_mod
@@ -1110,117 +1101,42 @@ def _mismatch_error():
     return replay_mod.ReplayMismatch
 
 
-def test_merge_patches_are_reordered_to_a_order(tmp_path):
-    """B's group order is permuted to A's recorded order, and the call matches.
+def test_merge_prompt_formatting_is_matched_exactly(tmp_path):
+    """A merge prompt is matched as B wrote it: a patch array encoded any other
+    way (indent, ASCII escapes) is a divergence, never rewritten to match."""
+    import json as _json
 
-    A appends analyst patches in ``as_completed`` order
-    (skillopt/gradient/reflect.py:643-650) while arm B keeps group order, so the
-    merge prompt differs by permutation alone. Replay concedes the order.
-    """
-    first, second = _patch("one"), _patch("two")
-    client = _reorder_client(tmp_path, [second, first], reorder_merge_patches=True)
-
-    result = client.complete(
-        _merge_prompt([first, second]),
-        system=MERGE_SYSTEM,
-        call_key=("merge_failure", 1, 0, 1),
-    )
-
-    assert result == "MERGED"
-    assert [entry["order"] for entry in client.reorder.reorders] == [[1, 0]]
-    assert client.match_log[-1]["reordered"] is True
-
-
-def test_merge_reorder_is_off_by_default(tmp_path):
-    """Without the flag the prompt is sent as arm B built it."""
-    first, second = _patch("one"), _patch("two")
-    client = _reorder_client(tmp_path, [second, first])
-
-    assert client.reorder is None
-    with pytest.raises(_mismatch_error()):
-        client.complete(
-            _merge_prompt([first, second]),
-            system=MERGE_SYSTEM,
-            call_key=("merge_failure", 1, 0, 1),
-        )
-
-
-def test_merge_reorder_only_applies_to_merge_group_steps(tmp_path):
-    """A non-merge call key is never rewritten, however similar the prompt."""
-    first, second = _patch("one"), _patch("two")
-    client = _reorder_client(tmp_path, [second, first], reorder_merge_patches=True)
-
-    with pytest.raises(_mismatch_error()):
-        client.complete(
-            _merge_prompt([first, second]),
-            system=MERGE_SYSTEM,
-            call_key=("rank", 1, 0, 0),
-        )
-    assert client.reorder.reorders == []
-
-
-def test_merge_reorder_refuses_when_content_differs(tmp_path):
-    """A different patch is a real divergence: the order is not conceded."""
-    first, second, other = _patch("one"), _patch("two"), _patch("three")
-    client = _reorder_client(tmp_path, [second, other], reorder_merge_patches=True)
-
-    with pytest.raises(_mismatch_error()):
-        client.complete(
-            _merge_prompt([first, second]),
-            system=MERGE_SYSTEM,
-            call_key=("merge_failure", 1, 0, 1),
-        )
-    assert client.reorder.reorders == []
-
-
-def test_merge_reorder_refuses_when_the_skill_differs(tmp_path):
-    """Everything before the patch array must be byte-identical."""
-    from refactory_packages.skillopt import prompts
     from refactory_packages.skillopt import replay as replay_mod
 
-    first, second = _patch("one"), _patch("two")
-    recorded = prompts.format_merge_user("# Skill\nOTHER", [second, first], "", 1)
+    patches = [_patch("é one"), _patch("two")]
+    recorded = _merge_prompt(patches)
     calls = _make_calls_jsonl(tmp_path, [(MERGE_SYSTEM, recorded, "MERGED")])
-    client = replay_mod.ReplayClient(
-        replay_mod.CallMatcher(calls), reorder_merge_patches=True,
-    )
-
-    with pytest.raises(_mismatch_error()):
-        client.complete(
-            _merge_prompt([first, second]),
-            system=MERGE_SYSTEM,
-            call_key=("merge_failure", 1, 0, 1),
-        )
-    assert client.reorder.reorders == []
-
-
-def test_merge_reorder_leaves_a_matching_order_alone(tmp_path):
-    """When B's order already is A's, nothing is rewritten."""
-    first, second = _patch("one"), _patch("two")
-    client = _reorder_client(tmp_path, [first, second], reorder_merge_patches=True)
-
-    assert client.complete(
-        _merge_prompt([first, second]),
-        system=MERGE_SYSTEM,
-        call_key=("merge_failure", 1, 0, 1),
-    ) == "MERGED"
-    assert client.reorder.reorders == []
+    client = replay_mod.ReplayClient(replay_mod.CallMatcher(calls))
+    head = recorded[: recorded.index("[")]
+    for encoded in (
+        _json.dumps(patches, ensure_ascii=True, indent=2),
+        _json.dumps(patches, ensure_ascii=False, indent=4),
+    ):
+        fresh = replay_mod.ReplayClient(replay_mod.CallMatcher(calls))
+        with pytest.raises(_mismatch_error()):
+            fresh.complete(head + encoded, system=MERGE_SYSTEM, call_key=("merge_failure", 1, 0, 1))
+    assert client.complete(recorded, system=MERGE_SYSTEM,
+                           call_key=("merge_failure", 1, 0, 1)) == "MERGED"
 
 
 def test_reordering_never_reaches_a_live_run():
-    """The concession lives on the replay side: arm B's modules do not know it.
-
-    A live arm-B run keeps ``analysts.reflect``'s deterministic group order,
-    because nothing in the strategy, the analysts or the merge can reach the
-    reorderer.
-    """
+    """The replay's order concessions never reach arm B's own modules, and no
+    prompt rewriter exists any more: B's patch order is set at the source
+    (``patch_order``), so its merge prompts are matched as written."""
     import inspect
 
-    from refactory_packages.skillopt import analysts, loop, merge
+    from refactory_packages.skillopt import analysts, loop, merge, replay, replay_runner
 
+    assert not hasattr(replay, "MergePatchReorder")
+    assert "reorder" not in inspect.getsource(replay_runner)
+    assert "reorder" not in inspect.getsource(replay.ReplayClient)
     for module in (loop, analysts, merge):
         source = inspect.getsource(module)
-        assert "MergePatchReorder" not in source, module.__name__
         assert "RecordedRolloutOrder" not in source, module.__name__
         assert "RecordedPatchOrder" not in source, module.__name__
         assert "reorder" not in source, module.__name__
@@ -2217,3 +2133,241 @@ def test_b_edit_apply_report_of_an_unchanged_patch():
         _trace_line("patch_noop", 1, reasons=["E-noop"], n_edits=1, edit_report=report),
     ])[0]
     assert entry["edit_apply_summary"] == {"total": 1, "applied": 0, "skipped": 1, "errors": 0}
+
+
+# ── the verdict: completed only when B reproduced A's run ──────────────────
+
+
+def _verdict_for(history: list[dict], a_history: list[dict], tmp_path: Path,
+                 unused_before: list[dict] | None = None) -> dict:
+    from refactory_packages.skillopt.replay_runner import apply_verdict
+
+    a_out = _a_out_from_b_history(tmp_path, a_history, num_epochs=3)
+    report = {"replay_status": "completed", "comparison": compare_runs(a_out, history)}
+    apply_verdict(report, unused_before or [])
+    return report
+
+
+def test_verdict_completed_when_b_reproduces_a(tmp_path):
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    history = b_history_from_trace(_known_trace())
+    report = _verdict_for(history, history, tmp_path)
+    assert report["replay_status"] == "completed"
+    assert "divergence" not in report
+
+
+def test_verdict_diverged_when_a_decision_differs(tmp_path):
+    """The reviewer's plant: the no-op patch rule reverted, so B refuses where A
+    gated and rejected. Every call can still match; the decisions do not."""
+    import copy
+
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    a_history = b_history_from_trace(_known_trace())
+    b_history = copy.deepcopy(a_history)
+    b_history[0]["action"] = "patch_refused"
+    report = _verdict_for(b_history, a_history, tmp_path)
+    assert report["replay_status"] == "diverged"
+    assert (report["divergence"]["field"], report["divergence"]["a_value"],
+            report["divergence"]["b_value"]) == ("accept_reject", "accept_new_best", "patch_refused")
+
+
+def test_verdict_diverged_when_b_misses_an_epoch_a_ran(tmp_path):
+    """A B epoch that is missing is not matched, however empty its fields."""
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    a_history = b_history_from_trace(_known_trace())
+    report = _verdict_for(a_history[:1], a_history, tmp_path)
+    summary = report["comparison"]["summary"]
+    assert (summary["matched_epochs"], summary["missing_b_epochs"]) == (1, 1)
+    assert report["replay_status"] == "diverged"
+    assert report["divergence"]["phase"] == "epoch_missing"
+
+
+def test_verdict_diverged_when_a_field_a_has_is_missing_in_b(tmp_path):
+    """A has data B lacks: not a match (compare._has_data)."""
+    import copy
+
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    a_history = b_history_from_trace(_known_trace())
+    b_history = copy.deepcopy(a_history)
+    b_history[0]["merged_patch"] = None
+    b_history[0]["n_edits_merged"] = None
+    report = _verdict_for(b_history, a_history, tmp_path)
+    assert report["comparison"]["summary"]["matched_epochs"] == 1
+    assert report["replay_status"] == "diverged"
+    assert report["divergence"]["epoch"] == 1
+
+
+def test_verdict_diverged_when_only_a_early_stopped(tmp_path):
+    """A ended before num_epochs; a B that did not stop there diverges."""
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    a_history = b_history_from_trace(_known_trace())
+    b_history = b_history_from_trace([
+        entry for entry in _known_trace() if entry.get("step_type") != "early_stop"
+    ])
+    report = _verdict_for(b_history, a_history, tmp_path)
+    assert report["replay_status"] == "diverged"
+    assert report["divergence"]["field"] == "early_stop"
+
+
+def test_verdict_diverged_on_a_recording_left_before_b_last_served_call(tmp_path):
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    history = b_history_from_trace(_known_trace())
+    skipped = [{"line": 7, "system": "s", "prompt": "p"}]
+    report = _verdict_for(history, history, tmp_path, unused_before=skipped)
+    assert report["replay_status"] == "diverged"
+    assert report["divergence"]["field"] == "unused_before_b_last_served_call"
+    assert report["unused_before_b_last_served_call"] == 1
+
+
+def test_unused_before_last_served_lists_skipped_calls(tmp_path):
+    matcher = CallMatcher(_calls_with_rc(tmp_path, [
+        ("s", "skipped", "x", 0), ("s", "served", "ok", 0), ("s", "after", "y", 0),
+    ]))
+    matcher.lookup("s", "served")
+    assert [u["line"] for u in matcher.unused_before_last_served()] == [0]
+
+
+def test_slow_update_and_meta_skill_compare_their_content(tmp_path):
+    """slow_result.json / meta_skill_result.json are compared on every key both
+    runs record, not only ``action``: a changed guidance diverges."""
+    import copy
+
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    trace = _known_trace()
+    for entry in trace:
+        if entry.get("step_type") == "slow_update":
+            entry.update(reasoning="why", slow_update_content="GUIDE", prev_hard=0.5,
+                         curr_hard=0.75, candidate_hash="0123456789abcdef")
+        if entry.get("step_type") == "meta_skill" and entry["epoch"] == 2:
+            entry.update(reasoning="r", meta_skill_content="META")
+    a_history = b_history_from_trace(trace)
+    assert a_history[1]["slow_update"] == {
+        "action": "force_accept", "reasoning": "why", "slow_update_content": "GUIDE",
+        "prev_hard": 0.5, "curr_hard": 0.75, "candidate_hash": "0123456789abcdef",
+    }
+    assert a_history[1]["meta_skill"] == {
+        "action": "write_meta_skill", "reasoning": "r", "meta_skill_content": "META",
+    }
+    assert _verdict_for(a_history, a_history, tmp_path)["replay_status"] == "completed"
+    for field, key, value in (
+        ("slow_update", "slow_update_content", "GUIDE plus an appended line"),
+        ("slow_update", "curr_hard", 0.7),
+        ("slow_update", "candidate_hash", "fedcba9876543210"),
+        ("meta_skill", "meta_skill_content", "META2"),
+    ):
+        b_history = copy.deepcopy(a_history)
+        b_history[1][field][key] = value
+        report = _verdict_for(b_history, a_history, tmp_path / f"{field}-{key}")
+        assert report["replay_status"] == "diverged", (field, key)
+        assert report["divergence"]["field"] == field
+
+
+def test_accept_is_a_new_best_only_when_it_beats_the_best(tmp_path):
+    """A's ``accept_new_best`` needs a strictly higher score."""
+    from refactory_packages.skillopt.replay_runner import b_history_from_trace
+
+    entry = b_history_from_trace([
+        _trace_line("initial_val", 0, score=0.5),
+        _trace_line("val_gate_accept", 1, cand_score=0.5, current_score=0.4),
+        _trace_line("val_gate_accept", 2, cand_score=0.6, current_score=0.5),
+    ])
+    assert [e["action"] for e in entry] == ["accept", "accept_new_best"]
+
+
+def test_exhausted_key_sticks_as_the_first_divergence(tmp_path):
+    """A key asked for more often than A recorded it ends the replay there."""
+    matcher = CallMatcher(_calls_with_rc(tmp_path, [("s", "p", "ok", 0), ("s", "q", "ok", 0)]))
+    matcher.lookup("s", "p")
+    with pytest.raises(ReplayExhausted):
+        matcher.lookup("s", "p")
+    assert isinstance(matcher.first_divergence, ReplayExhausted)
+    with pytest.raises(ReplayMismatch, match="already diverged"):
+        matcher.lookup("s", "q")
+    assert isinstance(matcher.first_divergence, ReplayExhausted)
+
+
+def test_recording_matcher_marks_a_late_answers(tmp_path):
+    """run_replay's matcher withholds A's late answers (recording_matcher)."""
+    from refactory_dsh.model import CompletionTimeout
+    from refactory_packages.skillopt.replay_runner import recording_matcher
+
+    recording = tmp_path / "rec"
+    recording.mkdir()
+    _calls_with_rc(recording, [("SYS", "USER", "<answer>D</answer>", 0)])
+    rollout = recording / "out" / "steps" / "step_0001" / "rollout"
+    item = rollout / "predictions" / "item1"
+    item.mkdir(parents=True)
+    (item / "target_system_prompt.txt").write_text("SYS")
+    (item / "target_user_prompt.txt").write_text("USER")
+    (item / "conversation.json").write_text(json.dumps(
+        [{"type": "message", "turn": 1, "content": "<answer>D</answer>"}]
+    ))
+    (rollout / "results.jsonl").write_text(
+        json.dumps({"id": "item1", "fail_reason": "task-timeout-1860s"}) + "\n"
+    )
+    matcher, events = recording_matcher(recording)
+    assert [e["line"] for e in events["events"]] == [0]
+    with pytest.raises(CompletionTimeout):
+        matcher.lookup("SYS", "USER", attempts=5)
+
+
+def test_run_replay_reports_a_fault_in_the_replay_client(tmp_path, monkeypatch, _arm_b_recording):
+    """B carries on past a failed optimizer call; the runner must not: a fault in
+    the replay itself makes the replay an ``error``."""
+    from refactory_packages.skillopt import replay as replay_mod
+    from refactory_packages.skillopt.replay_runner import run_replay
+
+    monkeypatch.setenv("LIVEMATH_DATA_PATH", str(LIVEMATH_FIXTURES))
+    recordings, b_history = _arm_b_recording
+    recording_dir = _recording_dir(tmp_path, recordings, b_history)
+    original = replay_mod.CallMatcher.lookup
+
+    def lookup(self, system, prompt, *, attempts=None):  # noqa: ANN001
+        if attempts == replay_mod.OPTIMIZER_ATTEMPTS:
+            raise TypeError("bug in the replay")
+        return original(self, system, prompt, attempts=attempts)
+
+    monkeypatch.setattr(replay_mod.CallMatcher, "lookup", lookup)
+    report = run_replay(recording_dir, tmp_path / "out", split_dir=LIVEMATH_SPLIT,
+                        data_path=LIVEMATH_FIXTURES)
+    assert report["replay_status"] == "error"
+    assert report["harness_error"] == "TypeError: bug in the replay"
+
+
+def test_run_replay_diverges_when_b_stops_early(tmp_path, monkeypatch, _arm_b_recording):
+    """The reviewer's plant: B's early stop fires an epoch too soon. Every call B
+    made matched, but B never reached A's last epoch: ``diverged``, exit 1."""
+    import sys as _sys
+
+    from refactory_packages.skillopt import replay_runner
+    from refactory_packages.skillopt.loop import SkillOptLoop
+
+    monkeypatch.setenv("LIVEMATH_DATA_PATH", str(LIVEMATH_FIXTURES))
+    recordings, b_history = _arm_b_recording
+    recording_dir = _recording_dir(tmp_path, recordings, b_history)
+
+    def stop_now(self, run):  # noqa: ANN001
+        self._trace.record_decision("early_stop", reason="patience")
+        run.stop("patience_exhausted")
+        return True
+
+    monkeypatch.setattr(SkillOptLoop, "_early_stop", stop_now)
+    out = tmp_path / "out"
+    monkeypatch.setattr(_sys, "argv", [
+        "replay_runner", "--recording-dir", str(recording_dir), "--split-dir",
+        str(LIVEMATH_SPLIT), "--data-path", str(LIVEMATH_FIXTURES), "--output-dir", str(out),
+    ])
+    with pytest.raises(SystemExit) as exit_info:
+        replay_runner.main()
+    assert exit_info.value.code == 1
+    report = json.loads((out / "replay_report.json").read_text())
+    assert report["replay_status"] == "diverged"
+    assert report["divergence"]["field"] in ("early_stop", "epoch_reached")
+    assert report["comparison"]["summary"]["diverged_epochs"] >= 1

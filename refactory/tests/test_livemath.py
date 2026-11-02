@@ -802,3 +802,16 @@ def test_format_prompt_and_view_share_the_prompt_builders():
     facts = format_prompt(_GatingCtx({"skill": " S "}))
     assert facts["user_prompt"] == build_user_prompt(_GATING_ITEM)
     assert build_system(" S ") == _render_system(" S ")
+
+
+def test_skillopt_view_an_errored_record_with_exchanges_is_an_error():
+    """A pass that failed after a model call (an exchange recorded, then an
+    error) is still SkillOpt's failed process_one: its error, no conversation
+    (rollout.py:286-289)."""
+    from refactory_packages.livemath.skillopt_view import rollout_result
+
+    errored = dict(_VIEW_RECORD, error_kind="RuntimeError",
+                   error_text="finish: ValueError: could not write result.json")
+    result = rollout_result(errored, {"skill": "S"})
+    assert result["conversation"] is None and result["n_turns"] == 0
+    assert result["fail_reason"] == "error: could not write result.json"

@@ -330,6 +330,17 @@ class CallMatcher:
                     count += 1
         return count
 
+    def unused_before_last_served(self) -> list[dict[str, Any]]:
+        """Unused recordings A made before the last one B was served: calls A
+        made while B was still running that B never asked for."""
+        unused: list[dict[str, Any]] = []
+        for key, recordings in self._index.items():
+            for recording in recordings[self._counters[key]:]:
+                if recording.line <= self.last_line_served:
+                    unused.append({"line": recording.line, "system": key[0][:80],
+                                   "prompt": key[1][:80]})
+        return sorted(unused, key=lambda item: item["line"])
+
     def consumed_for(self, system: str, prompt: str) -> int:
         """How many recordings for this (system, prompt) pair are already used.
 
@@ -343,7 +354,7 @@ class CallMatcher:
         """Every normalised prompt recorded under *system*, in index order.
 
         Read-only: used to recover the order in which A presented a set of
-        items inside one prompt (see :class:`MergePatchReorder`).
+        items inside one prompt (see :class:`RecordedPatchOrder`).
         """
         wanted = system.rstrip()
         return [prompt for recorded_system, prompt in self._index if recorded_system == wanted]
@@ -384,15 +395,11 @@ class CallMatcher:
         return best_key
 
 
-# ── replay-only patch reordering ───────────────────────────────────────────
+# ── A's analyst-patch order, read from its merge prompts ───────────────────
 
 #: The header ``prompts.format_merge_user`` puts in front of the serialised
 #: patch array.  Split on it to reach the array without re-deriving the prompt.
 _MERGE_HEADER = "\n## Patches to merge ("
-
-#: Step types whose prompt carries an analyst-patch array in group order.
-MERGE_GROUP_STEPS = ("merge_failure", "merge_success")
-
 
 def _split_merge_prompt(prompt: str) -> tuple[str, list[Any]] | None:
     """Split a merge prompt into (text before the array, the parsed array).
@@ -424,70 +431,6 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
 
-class MergePatchReorder:
-    """Replay-only: present B's analyst patches in the order A had them.
-
-    **Why this exists, and why it is not a fix to the algorithm.** SkillOpt
-    runs its analyst minibatches concurrently and appends each patch as its
-    future completes — ``for i, fut in enumerate(as_completed(futs), 1): …
-    raw_patches.append(patch)`` at ``skillopt/gradient/reflect.py:643-650``,
-    with ``analyst_workers: 16``.  ``_normalise_patches``
-    (``skillopt/engine/trainer.py:157-186``) then splits that one list into a
-    failure list and a success list, keeping the completion order inside each.
-    Arm B runs the groups sequentially and keeps two lists in group order
-    (``analysts.reflect``).  The merge prompt serialises the list
-    (``prompts.format_merge_user``), so the two prompts differ by permutation
-    even when every analyst response is identical.  A's order is a race: A is
-    not reproducible against itself here, so there is nothing to port.
-
-    So the replay — and only the replay — re-orders B's patches to A's. The
-    rewrite is refused unless everything else already matches: the text before
-    the array must be byte-identical and the array must be a permutation of
-    B's own patch dicts.  A content divergence therefore still reaches the
-    matcher and still reports as a mismatch; only the order is conceded.
-
-    This lives on the replay side on purpose. ``loop.py``, ``analysts.py`` and
-    ``merge.py`` are untouched, so a live arm-B run keeps its deterministic
-    group order.
-    """
-
-    def __init__(self, matcher: CallMatcher) -> None:
-        self._matcher = matcher
-        #: One entry per rewrite: the step type and the permutation applied.
-        self.reorders: list[dict[str, Any]] = []
-
-    def rewrite(self, system: str, prompt: str) -> str:
-        """Return *prompt* with its patch array in A's order, or unchanged."""
-        split = _split_merge_prompt(prompt)
-        if split is None:
-            return prompt
-        prefix, b_patches = split
-        if len(b_patches) < 2:
-            return prompt
-        b_canonical = [_canonical(patch) for patch in b_patches]
-        b_sorted = sorted(b_canonical)
-
-        for recorded in self._matcher.recorded_prompts(system):
-            if recorded == prompt:
-                return prompt  # already in A's order
-            recorded_split = _split_merge_prompt(recorded)
-            if recorded_split is None:
-                continue
-            recorded_prefix, a_patches = recorded_split
-            if recorded_prefix != prefix:
-                continue
-            a_canonical = [_canonical(patch) for patch in a_patches]
-            if sorted(a_canonical) != b_sorted:
-                continue
-            order = _permutation(a_canonical, b_canonical)
-            if order is None:
-                continue
-            reordered = [b_patches[i] for i in order]
-            self.reorders.append({"system": system[:80], "order": order})
-            return prefix + json.dumps(reordered, ensure_ascii=False, indent=2)
-        return prompt
-
-
 def _permutation(target: list[str], source: list[str]) -> list[int] | None:
     """Indices into *source* that put it in *target*'s order, or ``None``."""
     taken: set[int] = set()
@@ -509,12 +452,12 @@ def _permutation(target: list[str], source: list[str]) -> list[int] | None:
 class RecordedPatchOrder:
     """Replay-only: hand B's merge its analyst patches in A's completion order.
 
-    The same concession as :class:`MergePatchReorder`, made on the patch list
-    instead of the prompt: SkillOpt appends analyst patches as their futures
-    complete (reflect.py:643-650), so the order is a race. The prompt rewrite
-    covers a merge that answers; when A's merge call failed, SkillOpt falls
-    back to concatenating the patches' edits in that order (aggregate.py:70-76)
-    and the order reaches the next prompt as content. A's order is read from
+    SkillOpt appends analyst patches as their futures complete
+    (reflect.py:643-650), so the order is a race. It shows in the merge prompt
+    and, when A's merge call failed, in the fallback concatenation of the
+    patches' edits (aggregate.py:70-76). The order is set on B's patch list at
+    the source, so B's merge prompt is matched byte for byte, never rewritten
+    on the replay side. A's order is read from
     its own recorded merge prompt (served or failed) whose patch array holds
     exactly B's patches; without one, B's order stands.
 
@@ -679,22 +622,12 @@ class ReplayClient:
     ``for_node()``, ``with_tool_policy()``, ``with_wall()``, ``route()``,
     and ``complete()`` accepting ``call_key`` and ``workdir`` kwargs.
 
-    ``reorder_merge_patches`` turns on :class:`MergePatchReorder` for the
-    analyst-patch merge prompts.  It is off by default and only the replay
-    runner turns it on, so nothing outside an offline replay can reach it.
+    Every prompt is matched exactly as B wrote it.
     """
 
-    def __init__(
-        self,
-        matcher: CallMatcher,
-        *,
-        reorder_merge_patches: bool = False,
-    ) -> None:
+    def __init__(self, matcher: CallMatcher) -> None:
         self.matcher = matcher
         self.match_log: list[dict[str, Any]] = []
-        self.reorder = (
-            MergePatchReorder(matcher) if reorder_merge_patches else None
-        )
         #: The first fault of the replay itself (not a divergence, not A's event).
         self.harness_error: str | None = None
 
@@ -711,17 +644,6 @@ class ReplayClient:
         **kwargs: Any,
     ) -> str:
         """Answer a request from A's recordings."""
-        step_type = ""
-        if call_key:
-            try:
-                step_type = str(list(call_key)[0])
-            except (TypeError, IndexError):
-                step_type = ""
-        reordered = False
-        if self.reorder is not None and step_type in MERGE_GROUP_STEPS:
-            rewritten = self.reorder.rewrite(system, prompt)
-            reordered = rewritten != prompt
-            prompt = rewritten
         idx = self.matcher.consumed_for(system, prompt)
         # A solver call (the walker passes no call_key) had the rollout's
         # attempts; every strategy call is an optimizer call.
@@ -730,7 +652,6 @@ class ReplayClient:
             "key": (system[:80], prompt[:80]),
             "index": idx,
             "call_key": call_key,
-            "reordered": reordered,
         }
         try:
             result = self.matcher.lookup(system, prompt, attempts=attempts)

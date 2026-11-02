@@ -190,6 +190,9 @@ class SkillOptLoop(OuterLoop):
         """Drive the full SkillOpt search."""
         # Initialise trace — uses Run.root (public seam)
         self._trace = TraceRecorder(run.root / "skillopt_trace.jsonl")
+        # Every optimizer call counts as a proposal round in the run report, so a
+        # run whose optimizer never answered says so (Loop._proposer_health).
+        self._trace.listener = run.record_proposal_round
         # SkillOpt's env is the adapter the run's env names (envs/base.py:288-296
         # derives it from the adapter's module path); here it is the package that
         # holds the run's mode -- its prompt overrides and rollout rendering.
@@ -243,6 +246,9 @@ class SkillOptLoop(OuterLoop):
 
         for epoch in range(1, self.max_epochs + 1):
             self._epoch = epoch
+            self._epoch_calls_mark = (
+                self._trace.optimizer_calls, len(self._trace.optimizer_failures),
+            )
             self._trace.set_epoch(epoch)
 
             # Skip completed epochs on resume.  An epoch whose phase is
@@ -325,6 +331,7 @@ class SkillOptLoop(OuterLoop):
                     run, current, epoch, train_ids, resume_epoch, resume_phase,
                 )
                 self._count_stale_epoch()
+                self._record_epoch_calls(run, epoch)
                 self._phase = "epoch_done"
                 run.save_strategy_state()
                 if self._early_stop(run):
@@ -437,6 +444,7 @@ class SkillOptLoop(OuterLoop):
                         run, current, epoch, train_ids, resume_epoch, resume_phase,
                     )
                     self._count_stale_epoch()
+                    self._record_epoch_calls(run, epoch)
                     self._phase = "epoch_done"
                     run.save_strategy_state()
                     if self._early_stop(run):
@@ -507,6 +515,7 @@ class SkillOptLoop(OuterLoop):
             )
 
             self._count_stale_epoch()
+            self._record_epoch_calls(run, epoch)
             self._phase = "epoch_done"
             run.save_strategy_state()
 
@@ -548,6 +557,24 @@ class SkillOptLoop(OuterLoop):
     # counts as stale; the run ends once ``early_stop_at_full_val`` sees a full
     # best score, or ``early_stop_patience`` stale epochs in a row. The best is
     # the score at the start of training until an epoch improves it.
+
+    def _record_epoch_calls(self, run: Run, epoch: int) -> None:
+        """The epoch's optimizer calls and failures, in the trace; an epoch whose
+        every call failed is flagged and logged, as the run report flags a run
+        whose every proposal round failed (Loop._proposer_health)."""
+        calls_before, failed_before = getattr(self, "_epoch_calls_mark", (0, 0))
+        calls = self._trace.optimizer_calls - calls_before
+        failures = self._trace.optimizer_failures[failed_before:]
+        all_failed = bool(calls) and len(failures) >= calls
+        self._trace.record_decision(
+            "optimizer_calls", calls=calls, failed=len(failures),
+            failures=failures[:5], all_failed=all_failed,
+        )
+        if all_failed:
+            run.log(
+                f"skillopt epoch {epoch}: every one of its {calls} optimizer call(s) "
+                f"failed ({failures[0]}); the epoch proposed nothing"
+            )
 
     def _count_stale_epoch(self) -> None:
         if not (self.early_stop_patience or self.early_stop_at_full_val):
@@ -780,11 +807,20 @@ class SkillOptLoop(OuterLoop):
             new_hash = self._skill_hash(self._current_skill)
             self._val_cache[new_hash] = pre_update_score
 
+        # SkillOpt's slow_result.json for a guidance it got (trainer.py:1936-1947,
+        # slow_update.py:434-439): the reasoning and content, both stripped, the
+        # two rollouts' hard scores (compute_score, utils/scoring.py:7-23) and the
+        # candidate's short hash (utils/scoring.py:26-28). The replay compares them.
         self._trace.record_decision(
             "slow_update",
             action="force_accept" if not isinstance(outcome, list) else "refused",
             guidance_length=len(guidance),
             n_pairs=len(pairs),
+            reasoning=str(result.get("reasoning", "")).strip(),
+            slow_update_content=guidance,
+            prev_hard=_hard_score(prev_records),
+            curr_hard=_hard_score(curr_records),
+            candidate_hash=hashlib.sha256(new_skill.encode()).hexdigest()[:16],
         )
         run.save_strategy_state()
         return current
@@ -833,6 +869,12 @@ class SkillOptLoop(OuterLoop):
             "meta_skill",
             action="write_meta_skill" if content else "no_content",
             meta_skill_length=len(content),
+            # meta_skill_result.json's own fields (meta_skill.py:70-75), compared
+            # by the replay; SkillOpt writes them only for a skill it got.
+            **({
+                "reasoning": str(result.get("reasoning", "")).strip(),
+                "meta_skill_content": content,
+            } if content else {}),
         )
         run.save_strategy_state()
 
@@ -1014,6 +1056,13 @@ def batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
     is the dataloader-less path and does not apply.
     """
     return seed + epoch * 1000 + batch_idx + 1
+
+
+def _hard_score(records: list[dict]) -> float:
+    """SkillOpt's ``compute_score`` hard half over a rollout (utils/scoring.py:7-23)."""
+    if not records:
+        return 0.0
+    return sum(1.0 if record.get("passed") else 0.0 for record in records) / len(records)
 
 
 def _only_noop(reasons: list[str]) -> bool:
