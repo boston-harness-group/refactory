@@ -1151,16 +1151,19 @@ def test_the_dsh_runtime_loads_the_ledger_into_its_agent_nodes(tmp_path, monkeyp
 
 
 def test_correction_applied_exactly_once_not_on_resume(tmp_path):
-    """A correction given at gate_strategy with a proceed verdict is applied
-    exactly once. A second resume sees no pending verdict and stops at the gate.
+    """A correction steered with an expired proceed (scope mismatch, before any
+    approval) must not be collected. Only a correction from a used verdict counts.
 
     Driven through the real ``console._steer()`` CLI implementation (the
     ``refactory steer`` entry point), not ``ledger.verdict()`` directly, so
     the test exercises the same code path the person uses.
 
-    This test fails with main's ``steering.py``/``design_ops.py`` because they
-    treat expired verdicts as went-on (via legacy ``consumed: yes``), causing
-    corrections to be re-applied on a resume after the verdict was already used.
+    This test fails with main's ``design_ops.py`` because its
+    ``gate_corrections_due`` only guards expired verdicts behind ``if approved``:
+    when the *first* verdict is expired (``approved=False``), it falls through
+    to ``collecting=True`` and the expired verdict's corrections are collected.
+    The fix adds an unconditional ``if consumed == "expired"`` guard before the
+    ``if approved`` check.
     """
     from refactory_dsh.console import _steer
     from refactory_dsh.design_ops import gate_corrections_due
@@ -1210,43 +1213,56 @@ def test_correction_applied_exactly_once_not_on_resume(tmp_path):
     assert result1.exit_ok is False
     assert result1.gate_stop == "gate_strategy"
 
-    # Person steers through the real `refactory steer` CLI implementation.
+    # Person steers through _steer: proceed + correction.
+    # This verdict's scope is computed from the current design.md.
     _steer(workdir, verdicts=["gate_strategy=proceed"],
            note="Add a NAME constant set to 'tool'.", kind="correction",
            scope="product", source="user-relayed")
 
-    # Walker run 2: resumes at the gate, takes the verdict, runs apply_corrections.
+    # Simulate design.md changing (e.g. agent rewrites it), so the verdict's
+    # scope no longer matches the current file hash.  This causes the verdict
+    # to expire when the gate tries to take it.
+    (workdir / "design.md").write_text("# Revised design (changed after steering)\n")
+
+    # Walker run 2: resume at the gate.  The verdict's scope does not match
+    # the new design.md → expires.  Gate stops again.
     result2 = execute(graph, workdir, model=model,
                       task={"name": "test", "brief": "test brief", "check": "true"},
                       start="gate_strategy", facts=dict(result1.facts))
-    assert result2.exit_ok is True, result2.error
-    # apply_corrections was called exactly once and saw the correction.
-    correction_texts = result2.facts.get("correction_texts", [])
+    assert result2.gate_stop == "gate_strategy", \
+        "verdict with stale scope should expire, not proceed"
+
+    # The expired verdict's correction must NOT be collected.
+    # With main's design_ops.py, approved=False so the expired guard is skipped
+    # and collecting=True is set — this assertion catches the double-apply.
+    approval_after_expire, corrections_after_expire = gate_corrections_due(workdir)
+    assert len(corrections_after_expire) == 0, (
+        f"expired verdict's corrections were collected (double-apply bug): "
+        f"{corrections_after_expire}"
+    )
+
+    # Person steers again through _steer: proceed + correction (correct scope now).
+    _steer(workdir, verdicts=["gate_strategy=proceed"],
+           note="Add a NAME constant set to 'tool'.", kind="correction",
+           scope="product", source="user-relayed")
+
+    # Walker run 3: resume at the gate.  Verdict matches → used.
+    result3 = execute(graph, workdir, model=model,
+                      task={"name": "test", "brief": "test brief", "check": "true"},
+                      start="gate_strategy", facts=dict(result2.facts))
+    assert result3.exit_ok is True, result3.error
+    # apply_corrections was called and saw exactly 1 correction.
+    correction_texts = result3.facts.get("correction_texts", [])
     assert len(correction_texts) == 1, \
         f"expected 1 correction, got {len(correction_texts)}: {correction_texts}"
     assert "NAME constant" in correction_texts[0]
 
-    # Walker run 3: resume again — the verdict is consumed, gate stops again.
-    result3 = execute(graph, workdir, model=model,
-                      task={"name": "test", "brief": "test brief", "check": "true"},
-                      start="gate_strategy", facts=dict(result2.facts))
-    # The gate has no pending verdict → stops at the gate again.
-    assert result3.gate_stop == "gate_strategy"
-
     # Also verify the Ledger API path for both runtimes.
-    # The spine uses the same Ledger, so exercising the Ledger proves the
-    # spine path too.
     ledger2 = Ledger(workdir)
     review = ledger2.visit("gate_strategy", ["design.md"])
     labels = ["proceed", "reloop", "halt"]
     taken = ledger2.take_verdict("gate_strategy", review, labels)
     assert taken == "", "a consumed verdict was replayed via Ledger API"
-
-    # Verify gate_corrections_due does NOT report the correction again
-    # (it was already consumed by run 2).
-    _, corrections_again = gate_corrections_due(workdir)
-    assert len(corrections_again) == 1, \
-        f"gate_corrections_due should still report 1 correction, got {len(corrections_again)}"
 
 
 def test_expired_proceed_before_approval_does_not_set_collecting(tmp_path):

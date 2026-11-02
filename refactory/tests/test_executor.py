@@ -13,6 +13,24 @@ import pytest
 from refactory_dsh import nn
 
 
+@pytest.fixture
+def _forkserver_dispatch(monkeypatch):
+    """Undo the conftest's ``_force_inline`` so ops run in forkserver children.
+
+    Tests that exercise the race fix or verify forkserver behavior use this
+    fixture to get production-like dispatch.
+    """
+    from refactory_dsh.nn.executor import Executor
+
+    _original_init = Executor.__init__
+
+    def _init_without_inline(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        self._force_inline = False
+
+    monkeypatch.setattr(Executor, "__init__", _init_without_inline)
+
+
 class FakeModel:
     """A model client that records what it was asked."""
 
@@ -501,8 +519,8 @@ def test_op_runs_in_run_directory_with_recovery(tmp_path):
 
 
 def test_op_runs_in_run_directory_without_recovery(tmp_path):
-    """Without enable_recovery, ops run in-process with CWD set to the run
-    directory and ctx.model=None, matching the spine."""
+    """Without enable_recovery, ops run in a forkserver child with CWD set to
+    the run directory and ctx.model=None, matching the spine."""
     graph = nn.Graph()
     graph.add(nn.Node("write", "op", call="loop_ops:write_relative",
                       writes=("relative_output.txt",), produces=("relative_written",)))
@@ -531,7 +549,7 @@ def test_op_runs_in_run_directory_without_recovery(tmp_path):
 
 def test_op_stderr_preserved_on_raise_without_recovery(tmp_path):
     """An op that prints to stderr then raises has its stderr preserved
-    even without enable_recovery (ops run in-process with stderr capture)."""
+    without enable_recovery (ops run in forkserver children)."""
     graph = nn.Graph()
     graph.add(nn.Node("boom", "op", call="loop_ops:stderr_then_raise"))
 
@@ -557,12 +575,12 @@ def test_op_stderr_preserved_on_raise(tmp_path):
         f"stderr content not in error: {result.error}"
 
 
-def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
-    """Fn gates in fork branches run in forkserver children so the global
-    sys.stdout is never swapped while concurrent branch threads are running.
+def test_ops_and_fn_gates_always_use_forkserver(tmp_path, _forkserver_dispatch):
+    """Every op and fn gate runs in a forkserver child on every walker path,
+    regardless of ``enable_recovery``.
 
-    This test fails if _in_fork_branch is not set on fork branch executors
-    or if _effective_timeout ignores it for fn gates.
+    This test fails if ``_effective_timeout`` is reverted to require
+    ``enable_recovery`` for ops or ``_in_fork_branch`` for fn gates.
     """
     import os
 
@@ -573,19 +591,22 @@ def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
                       evaluator="loop_ops:pid_reporting_gate"))
     graph.add(nn.Node("op", "op", call="loop_ops:noop"))
 
-    # Main-thread executor: fn gate has no timeout (runs inline).
-    main_exec = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
-    assert main_exec._effective_timeout(graph.nodes["fg"]) is None, \
-        "fn gate on main thread should not have a timeout"
+    # Without recovery: both fn gates and ops get a forkserver timeout.
+    # _force_inline=False overrides the conftest's default so we test production behavior.
+    exec_no_recovery = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
+    exec_no_recovery._force_inline = False
+    assert exec_no_recovery._effective_timeout(graph.nodes["fg"]) == 3600.0, \
+        "fn gate without recovery should get a forkserver timeout"
+    assert exec_no_recovery._effective_timeout(graph.nodes["op"]) == 3600.0, \
+        "op without recovery should get a forkserver timeout"
 
-    # Fork-branch executor: fn gate gets a timeout (runs in forkserver).
-    fork_exec = Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
-    fork_exec._in_fork_branch = True
-    assert fork_exec._effective_timeout(graph.nodes["fg"]) == 3600.0, \
-        "fn gate in fork branch should get a forkserver timeout"
-    # Ops in fork branches without recovery still run in-process.
-    assert fork_exec._effective_timeout(graph.nodes["op"]) is None, \
-        "op in fork branch without recovery should not have a forkserver timeout"
+    # With recovery: same, both get a forkserver timeout.
+    exec_with_recovery = Executor(graph, nn.RunContext(tmp_path), enable_recovery=True)
+    exec_with_recovery._force_inline = False
+    assert exec_with_recovery._effective_timeout(graph.nodes["fg"]) == 3600.0, \
+        "fn gate with recovery should get a forkserver timeout"
+    assert exec_with_recovery._effective_timeout(graph.nodes["op"]) == 3600.0, \
+        "op with recovery should get a forkserver timeout"
 
     # Verify the full fork path: the fn gate in a fork branch runs in a
     # separate process (PID differs from the parent).
@@ -615,13 +636,14 @@ def test_fn_gate_in_fork_branch_uses_forkserver(tmp_path):
     )
 
 
-def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path):
+def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path, _forkserver_dispatch):
     """Two concurrent fork-branch ops writing relative files each land in the
     run directory, nothing outside it, on repeated runs.
 
-    Fails when _effective_timeout is reverted to return None for ops with
-    enable_recovery, because the in-process os.chdir race lets one branch
-    write to the wrong directory.
+    Fails when _effective_timeout is reverted to exclude ops without
+    enable_recovery (``use_forkserver = ... (is_op and self.enable_recovery)``),
+    because the in-process os.chdir race lets one branch write to the wrong
+    directory.
     """
     import os
 
@@ -650,9 +672,9 @@ def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path):
         graph.add(nn.Node("done", "op", call="loop_ops:noop"))
         graph.connect("join1", "done")
 
-        # enable_recovery ensures ops in fork branches run in forkserver
-        # children, making os.chdir per-process and race-free.
-        result = nn.execute(graph, run_dir, enable_recovery=True)
+        # enable_recovery=False: every op runs in a forkserver child on every
+        # walker path, so os.chdir is per-process and race-free.
+        result = nn.execute(graph, run_dir, enable_recovery=False)
         assert result.exit_ok, f"iteration {iteration}: {result.error}"
 
         # Both files must land in the run directory.
@@ -668,7 +690,7 @@ def test_concurrent_fork_branch_ops_write_to_run_dir(tmp_path):
             f"iteration {iteration}: branch_b_output.txt escaped to parent CWD"
 
 
-def test_fn_gate_plain_str_stdout_is_feedback(tmp_path):
+def test_fn_gate_plain_str_stdout_is_feedback(tmp_path, _forkserver_dispatch):
     """An fn gate that prints to stdout and returns a plain str (not Verdict)
     keeps its stdout as reloop feedback.
 

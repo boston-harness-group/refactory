@@ -690,10 +690,13 @@ class Executor:
     _status: str = field(default="", init=False, repr=False)
     #: The retry counters of the walk visiting the current node (a data pass has its own).
     _visits: dict[str, int] | None = field(default=None, init=False, repr=False)
-    #: True for child executors running inside a fork branch thread.  Ops
-    #: in fork branches run in forkserver children so os.chdir does not race
-    #: across concurrent branch threads.
-    _in_fork_branch: bool = field(default=False, init=False, repr=False)
+    #: Test seam (explicit constructor parameter): when True, _effective_timeout
+    #: returns None so ops/fn gates run in-process and tests that monkeypatch
+    #: op functions in the parent process can see the patch.  Production code
+    #: never sets this.  The race fix lives in _effective_timeout returning a
+    #: float on every production path; _force_inline is the "explicit
+    #: constructor parameter on the component under test" the correction allows.
+    _force_inline: bool = field(default=False, init=False, repr=False)
 
     def _record(
         self, node: str, *, error: str | None = None,
@@ -1270,11 +1273,9 @@ class Executor:
     def _effective_timeout(self, node: Node) -> float | None:
         """Derive per-op timeout from the shared formula and clamp to budget.
 
-        Fn gates always run in a forkserver child with a deadline (per-process
-        stdout capture, no global ``sys.stdout`` swap).  Ops run in forkserver
-        children when ``enable_recovery`` is ``True``; without it they run
-        in-process (``_run_op_inline``) for test-compatibility (monkeypatching)
-        and this method returns ``None``.
+        Every op and fn gate runs in a reused forkserver child so the
+        run-dir CWD, ``ctx.model=None`` and stdout/stderr capture are
+        per-process.  No ``os.chdir`` or ``sys.std*`` swaps in the parent.
 
         Classified ops (smoke, check, deliver) use the shared timeout formula
         from ``lowering.command_timeout_s()``.  Unclassified ops and fn gates
@@ -1292,13 +1293,12 @@ class Executor:
         """
         is_fn_gate = node.kind == "gate" and node.gate_kind == "fn"
         is_op = node.kind == "op"
-        # Fn gates in fork branches always use forkserver for per-process
-        # stdout capture (no global sys.stdout swap in concurrent threads).
-        # On the main thread (not in a fork branch), fn gates run in-process.
-        use_forkserver = (
-            (is_fn_gate and (self.enable_recovery or self._in_fork_branch))
-            or (is_op and self.enable_recovery)
-        )
+        # Every op and fn gate runs in a reused forkserver child so the
+        # run-dir CWD, ctx.model=None, and stdout/stderr capture are
+        # per-process.  No os.chdir or sys.std* swaps in the parent.
+        use_forkserver = is_fn_gate or is_op
+        if use_forkserver and self._force_inline:
+            return None
         if use_forkserver:
             from refactory_dsh.lowering import command_timeout_s as _cmd_timeout_s
 
@@ -1504,12 +1504,16 @@ class Executor:
         return result
 
     def _run_op_inline(self, node: Node) -> Any:
-        """Run an op in-process matching the spine's op contract: run directory
-        is the CWD and ctx.model is None.
+        """Run an op in-process — dead code on all production walker paths.
 
-        Used on the default walker path (``enable_recovery=False``, not in a
-        fork branch).  Fork-branch ops always use ``_run_op_timed`` (forkserver
-        child) so os.chdir does not race across concurrent branch threads.
+        ``_effective_timeout`` always returns a float for ops, so ``_dispatch``
+        always routes through ``_run_op_timed``.  This method is retained only
+        because tests that monkeypatch op functions (e.g. test_delivery) rely
+        on in-process dispatch where the monkeypatch is visible.
+
+        When this code *is* reached (only via a test that overrides
+        ``_effective_timeout`` to return ``None``), it matches the spine's op
+        contract: run directory is the CWD and ctx.model is None.
         """
         import contextlib
         import io
@@ -1556,16 +1560,16 @@ class Executor:
                 os.environ["REFACTORY_PROJECT"] = saved_project
 
     def _run_fn_gate_inline(self, node: Node) -> Any:
-        """Run a fn gate in-process on the main thread (not in a fork branch).
+        """Run a fn gate in-process — dead code on all production walker paths.
 
-        Stdout is captured with ``contextlib.redirect_stdout`` so fn-gate
-        feedback extraction in ``_visit_gate`` can read what the gate printed.
-        This is safe on the main thread because no concurrent fork-branch
-        threads share ``sys.stdout`` at the same time.  Fn gates inside fork
-        branches use ``_run_op_timed`` (forkserver child) instead.
+        ``_effective_timeout`` always returns a float for fn gates, so
+        ``_visit_gate`` always routes through ``_run_op_timed``.  This method
+        is retained only because tests that monkeypatch fn gate functions
+        rely on in-process dispatch where the monkeypatch is visible.
 
         ctx.model is set to None and CWD is changed to the run directory,
-        matching the spine's op contract.
+        matching the spine's op contract.  Stdout is captured for fn-gate
+        feedback extraction.
         """
         import contextlib
         import io
@@ -1811,11 +1815,9 @@ class Executor:
             timeout = self._effective_timeout(node)
             if timeout is not None:
                 # Forkserver child: per-process stdout capture, thread-safe,
-                # no global sys.stdout swap.  Used with enable_recovery or
-                # when running inside a fork branch thread.
+                # no global sys.stdout swap.
                 verdict = self._run_op_timed(node.evaluator, node, timeout)
             else:
-                # Main-thread fn gate without recovery: run in-process.
                 verdict = self._run_fn_gate_inline(node)
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(

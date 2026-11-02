@@ -207,10 +207,6 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         # must not grant a fresh retry allowance.
         child._gate_iterations = executor._gate_iterations
         child._reserve_step = reserve
-        # Ops and fn gates in fork branches use forkserver children so
-        # os.chdir does not race across concurrent branch threads and
-        # stdout capture is per-process.
-        child._in_fork_branch = True
         children.append(child)
 
     _halt_exc: list[Any] = []  # HaltStop raised inside a branch, propagated after cleanup

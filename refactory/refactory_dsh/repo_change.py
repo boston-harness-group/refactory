@@ -1076,10 +1076,9 @@ def _materialise_directory(ctx: Any, source: Path | None, files: tuple[str, ...]
     finally:
         if not preserve_backup and not (previous.exists() and not root.exists()):
             shutil.rmtree(temporary)
-    # changed-functions.json and changes.diff are legitimate empty results on
-    # no-worktree runs; downstream nodes (verifier, focused_qa) read them.
-    # test-guardedness.json is NOT written — it is only meaningful on worktree
-    # runs and is no longer a required read of the verifier.
+    # changed-functions.json and changes.diff are valid empty results on
+    # no-worktree runs (no changed functions, no diff); downstream nodes
+    # (focused_qa, verifier) declare them as reads.
     ctx.write_json("changed-functions.json", [])
     _workdir = Path(ctx.workdir)
     if not (_workdir / "changes.diff").exists():

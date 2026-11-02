@@ -834,20 +834,19 @@ def test_an_unclassified_op_gets_the_spines_default_deadline(tmp_path):
 
 
 def test_the_deadline_is_gone_when_recovery_is_off(tmp_path):
-    """Without recovery ops and main-thread fn gates run in-process (no forkserver
-    timeout).  Fn gates and ops in fork branches get a forkserver timeout for
-    per-process stdout capture and thread-safe CWD."""
+    """Without recovery, ops and fn gates still run in forkserver children (for
+    per-process CWD and stdout capture), but the budget is not clamped.
+
+    The forkserver timeout is the spine's 3600 s default, not wall-budget-capped.
+    """
     graph = nn.Graph()
     graph.add(nn.Node("plain", "op", call="walker_recovery_ops:report_interpreter",
                       writes=("seen.txt",), produces=("seen",)))
     graph.add(nn.Node("fg", "gate", gate_kind="fn",
                       evaluator="walker_recovery_ops:report_interpreter"))
     executor = nn.Executor(graph, nn.RunContext(tmp_path), enable_recovery=False)
-    assert executor._effective_timeout(graph.nodes["plain"]) is None
-    # Main-thread fn gate without recovery: no forkserver
-    assert executor._effective_timeout(graph.nodes["fg"]) is None
-    # In a fork branch: fn gate gets a timeout (forkserver)
-    executor._in_fork_branch = True
+    # Override the conftest's _force_inline to test the production path.
+    executor._force_inline = False
+    # Ops and fn gates get the default 3600 s forkserver timeout even without recovery.
+    assert executor._effective_timeout(graph.nodes["plain"]) == 3600.0
     assert executor._effective_timeout(graph.nodes["fg"]) == 3600.0
-    # Op still has no timeout in fork branch without recovery
-    assert executor._effective_timeout(graph.nodes["plain"]) is None
