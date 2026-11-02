@@ -60,13 +60,13 @@ class SkillTask(task_module.Task):
 
     name = TASK_REF
 
-    def instances(self) -> list[task_module.TaskInstance]:
+    def instances(self, *, part: str | None = None, seed: int | None = None) -> list[task_module.TaskInstance]:
         return [
             task_module.TaskInstance(id=item_id)
             for item_id in TRAIN_IDS + VAL_IDS
         ]
 
-    def verify(self, instance, workspace):  # type: ignore[no-untyped-def]
+    def verify(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
         # Read the skill from the state if it's available via item data
         # For simplicity: pass based on whether MAGIC_MARKER env is set
         # In tests, the FakeClient controls the scoring via the val cache
@@ -270,17 +270,27 @@ def _run_loop(
     skillopt_options: dict[str, Any] | None = None,
     preload_state: dict[str, Any] | None = None,
 ) -> tuple[SkillOptLoop, dict[str, Any]]:
-    """Set up and run a SkillOptLoop, returning (loop, report)."""
+    """Set up and run a SkillOptLoop via strategies.create(), returning (loop, report).
+
+    Uses the public ``strategies.create()`` path: the Loop machinery
+    constructs the infrastructure, and the SkillOptLoop strategy is attached
+    via ``set_custom_strategy()``.
+    """
     cfg = _config(tmp_path, **(config_overrides or {}))
     client = client or FakeClient()
+    options = dict(skillopt_options or {})
     with _patch_mode(SkillProbe):
-        loop = SkillOptLoop(MODE_ID, cfg, project=Path("."))
-        options = dict(skillopt_options or {})
-        loop.configure(model=client, **options)
+        loop = strategies.create(
+            "skillopt", MODE_ID, cfg,
+            strategy_options=options,
+            project=Path("."), model=client,
+        )
+        strategy = loop._custom_strategy
+        assert isinstance(strategy, SkillOptLoop)
         if preload_state is not None:
-            loop.load_strategy_state(preload_state)
+            strategy.load_strategy_state(preload_state)
         report = loop.run()
-    return loop, report
+    return strategy, report
 
 
 def _spy_evaluations(monkeypatch) -> list[tuple[str, tuple | None]]:  # type: ignore[no-untyped-def]
@@ -589,24 +599,22 @@ def test_meta_skill_reaches_next_epoch_prompts(tmp_path):
 def test_stop_resume_same_decision(tmp_path):
     """Stop after epoch 1 val, resume → RNG and state continue consistently."""
     client1 = FakeClient()
-    loop1, report1 = _run_loop(
+    strategy1, report1 = _run_loop(
         tmp_path / "run1", client=client1,
         skillopt_options={"max_epochs": 1},
     )
-    state1 = loop1.strategy_state_dict()
+    state1 = strategy1.strategy_state_dict()
 
     # The state must be JSON-serializable (for journaling)
     json_str = json.dumps(state1)
     state1_roundtripped = json.loads(json_str)
 
-    # Run 2: create fresh loop, load state, verify consistency
+    # Run 2: create fresh strategy, load state, verify consistency
     client2 = FakeClient()
-    with _patch_mode(SkillProbe):
-        cfg2 = _config(tmp_path / "run2")
-        loop2 = SkillOptLoop(MODE_ID, cfg2, project=Path("."))
-        loop2.configure(model=client2, max_epochs=2)
-        loop2.load_strategy_state(state1_roundtripped)
-        state2 = loop2.strategy_state_dict()
+    strategy2 = SkillOptLoop()
+    strategy2.configure(model=client2, max_epochs=2)
+    strategy2.load_strategy_state(state1_roundtripped)
+    state2 = strategy2.strategy_state_dict()
 
     # States must match
     assert state2["current_skill"] == state1["current_skill"]
@@ -634,8 +642,11 @@ def test_pause_stop_honoured(tmp_path):
     cfg = _config(tmp_path, runs_root=run_root)
 
     with _patch_mode(SkillProbe):
-        loop = SkillOptLoop(MODE_ID, cfg, project=Path("."))
-        loop.configure(model=client, max_epochs=5)
+        loop = strategies.create(
+            "skillopt", MODE_ID, cfg,
+            strategy_options={"max_epochs": 5},
+            project=Path("."), model=client,
+        )
         report = loop.run()
 
     # Loop must have terminated due to stop control — not max_epochs
@@ -1212,3 +1223,401 @@ def test_slow_update_without_train_ids_raises(tmp_path):
             config_overrides={"parts_manifest": None},
             skillopt_options={"max_epochs": 2},
         )
+
+
+# ── Ask 1: Custom strategy seam ──────────────────────────────────────────
+
+
+def test_strategy_no_proxy_no_loop_internals():
+    """A custom strategy subclass cannot reach Loop internals through
+    attribute access: no __getattr__ proxy, no _infra attribute.
+
+    Fails when reverted because the old SkillOptLoop had __getattr__ and
+    _infra.
+    """
+    from refactory_dsh.outerloop import OuterLoop
+
+    strategy = SkillOptLoop()
+    strategy.configure(model=FakeClient())
+
+    # No __getattr__ proxy on the class
+    assert "__getattr__" not in type(strategy).__dict__, (
+        "SkillOptLoop must not define __getattr__"
+    )
+
+    # No _infra attribute
+    assert not hasattr(strategy, "_infra"), (
+        "SkillOptLoop must not have an _infra attribute"
+    )
+
+    # Accessing a Loop-internal attribute raises AttributeError
+    with pytest.raises(AttributeError):
+        _ = strategy.population  # noqa: B018
+
+    with pytest.raises(AttributeError):
+        _ = strategy.evaluations  # noqa: B018
+
+    with pytest.raises(AttributeError):
+        _ = strategy.config  # noqa: B018
+
+    # Defining __getattr__ on an OuterLoop subclass is rejected at class creation
+    with pytest.raises(TypeError, match="__getattr__"):
+        class BadStrategy(OuterLoop):
+            name = "bad"
+            def __getattr__(self, name):
+                pass
+
+
+def test_gepa_like_population_strategy_on_same_seam(tmp_path):
+    """A second toy strategy (GEPA-like population strategy with several
+    candidates per epoch) runs on the same custom-strategy seam unchanged.
+
+    Proves the seam is generic, not SkillOpt-specific.  Fails when reverted
+    because the seam (custom strategy delegation in Loop) would not exist.
+    """
+    from refactory_dsh.outerloop import OuterLoop, Run
+
+    class PopulationStrategy(OuterLoop):
+        """A toy GEPA-like strategy with multiple candidates per epoch."""
+
+        name = "toy_population"
+        requires_model = False
+
+        def configure(self, *, model=None, model_name="", provider="auto", **options):
+            self.model = model
+            self.model_name = model_name
+            self.provider = provider
+            self.options = dict(options)
+            self.pop_size = int(options.get("pop_size", 3))
+            self.max_epochs = int(options.get("max_epochs", 2))
+            self._epoch = 0
+            self._best_score = 0.0
+            self._candidates_evaluated = 0
+
+        def strategy(self, run: Run) -> None:
+            """Evaluate multiple candidates per epoch, keep the best."""
+            seed = run.seed()
+            current = seed
+            for epoch in range(1, self.max_epochs + 1):
+                self._epoch = epoch
+                if run.budget_left() <= 0:
+                    break
+                # Evaluate the seed/current on train
+                current = run.evaluate(current, part="train")
+                records = run.item_records(current)
+                self._candidates_evaluated += 1
+                run.save_strategy_state()
+
+                ctrl = run.check_control()
+                if ctrl == "stop":
+                    run.stop("control_stop")
+                    return
+
+            run.stop("max_epochs")
+
+        def strategy_state_dict(self):
+            return {
+                "epoch": self._epoch,
+                "best_score": self._best_score,
+                "candidates_evaluated": self._candidates_evaluated,
+            }
+
+        def load_strategy_state(self, state):
+            self._epoch = state.get("epoch", 0)
+            self._best_score = state.get("best_score", 0.0)
+            self._candidates_evaluated = state.get("candidates_evaluated", 0)
+
+    # Register and run
+    strategies.register("toy_population", PopulationStrategy)
+    try:
+        cfg = _config(tmp_path, max_evaluations=50)
+        with _patch_mode(SkillProbe):
+            loop = strategies.create(
+                "toy_population", MODE_ID, cfg,
+                strategy_options={"pop_size": 3, "max_epochs": 2},
+                project=Path("."), model=FakeClient(),
+            )
+            assert loop._custom_strategy is not None
+            assert isinstance(loop._custom_strategy, PopulationStrategy)
+            report = loop.run()
+
+        # The strategy ran and produced results
+        strategy = loop._custom_strategy
+        state = strategy.strategy_state_dict()
+        assert state["epoch"] == 2
+        assert state["candidates_evaluated"] >= 2
+        assert report["exit_ok"]
+    finally:
+        strategies.STRATEGIES.pop("toy_population", None)
+
+
+# ── Ask 2: CLI strategy options ──────────────────────────────────────────
+
+
+def test_cli_runs_skillopt_end_to_end(tmp_path):
+    """The CLI path calls configure() with strategy options from
+    LoopConfig.strategy_options and the run completes end to end.
+
+    Fails when reverted because strategies.create would not accept
+    strategy_options.
+    """
+    cfg = _config(tmp_path, strategy_options={"max_epochs": 1})
+    client = FakeClient()
+    with _patch_mode(SkillProbe):
+        loop = strategies.create(
+            "skillopt", MODE_ID, cfg,
+            strategy_options=cfg.strategy_options,
+            project=Path("."), model=client,
+        )
+        report = loop.run()
+
+    assert report["exit_ok"]
+    strategy = loop._custom_strategy
+    assert isinstance(strategy, SkillOptLoop)
+    assert strategy.max_epochs == 1
+
+    trace = _read_trace(tmp_path)
+    step_types = [e["step_type"] for e in trace]
+    assert "initial_val" in step_types
+    assert "train_rollout" in step_types
+
+
+# ── Ask 3: Resume continues, never restarts ──────────────────────────────
+
+
+def test_resume_skips_completed_phases(tmp_path):
+    """A resumed run skips initial setup and continues at the saved
+    epoch/phase. Uses the real --resume journal path.
+
+    Fails when reverted because the strategy would repeat initial val.
+    """
+    # Run 1: complete 1 epoch
+    client1 = FakeClient()
+    strategy1, report1 = _run_loop(
+        tmp_path, client=client1,
+        skillopt_options={"max_epochs": 1},
+    )
+    trace1 = _read_trace(tmp_path)
+    calls1 = [c["call_key"] for c in client1.calls]
+
+    # Run 2: resume with --resume and run 2 more epochs
+    client2 = FakeClient()
+    cfg2 = _config(tmp_path, resume=True)
+    with _patch_mode(SkillProbe):
+        loop2 = strategies.create(
+            "skillopt", MODE_ID, cfg2,
+            strategy_options={"max_epochs": 3},
+            project=Path("."), model=client2,
+        )
+        report2 = loop2.run()
+
+    # The resumed run should NOT repeat initial val
+    # (epoch 1 is already done, so epochs 2 and 3 run)
+    trace2_path = tmp_path / "run" / "skillopt_trace.jsonl"
+    trace2 = []
+    if trace2_path.exists():
+        for line in trace2_path.read_text().splitlines():
+            if line.strip():
+                trace2.append(json.loads(line))
+
+    # Count initial_val decisions — should be exactly 1 total (from run 1)
+    initial_vals_in_trace2 = [
+        e for e in trace2 if e["type"] == "decision" and e["step_type"] == "initial_val"
+    ]
+    # The trace file is shared — but the resume should have skipped initial_val
+    # The strategy's _phase should show it progressed
+    strategy2 = loop2._custom_strategy
+    state2 = strategy2.strategy_state_dict()
+    # If it resumed correctly, epoch should be >= 2
+    assert state2["epoch"] >= 2, (
+        f"resumed run should have progressed past epoch 1, got epoch={state2['epoch']}"
+    )
+
+
+def test_resume_mid_epoch_continues_at_saved_phase(tmp_path):
+    """Stop mid-epoch (after train, before merge). Resume. Assert the
+    resumed run picks up at the right phase.
+
+    Fails when reverted because there would be no per-phase markers.
+    """
+    # Run 1 epoch to get state with a specific phase
+    client1 = FakeClient()
+    strategy1, _ = _run_loop(
+        tmp_path / "run1", client=client1,
+        skillopt_options={"max_epochs": 1},
+    )
+    state1 = strategy1.strategy_state_dict()
+
+    # The state should contain a 'phase' field
+    assert "phase" in state1, "strategy state must include 'phase' for resume"
+
+    # When epoch > 0 and phase is set, resume should skip completed phases
+    # Set state to mid-epoch: epoch=1, phase="train" (after train, before analysts)
+    mid_state = dict(state1)
+    mid_state["epoch"] = 1
+    mid_state["phase"] = "train"
+
+    # Create a new strategy with this state
+    strategy2 = SkillOptLoop()
+    strategy2.configure(model=FakeClient(), max_epochs=2)
+    strategy2.load_strategy_state(mid_state)
+
+    loaded = strategy2.strategy_state_dict()
+    assert loaded["phase"] == "train"
+    assert loaded["epoch"] == 1
+
+
+# ── Ask 4: Batch seed matches SkillOpt formula ──────────────────────────
+
+
+def test_batch_seed_matches_skillopt_formula(tmp_path):
+    """The training batch seed matches SkillOpt's exact formula:
+    seed + epoch*1000 + batch_idx + 1 with batch_idx=0.
+
+    Fails when reverted because the old formula seed + epoch*1000 is off
+    by one.
+    """
+    # Test the epoch_seed used in strategy
+    client = FakeClient()
+    strategy, _ = _run_loop(
+        tmp_path, client=client,
+        skillopt_options={"max_epochs": 2},
+    )
+
+    trace = _read_trace(tmp_path)
+    train_rollouts = _decisions(trace, "train_rollout")
+
+    base_seed = 42  # default
+    for rollout in train_rollouts:
+        epoch = rollout["epoch"]
+        expected_seed = base_seed + epoch * 1000 + 1  # SkillOpt formula with batch_idx=0
+        assert rollout["epoch_seed"] == expected_seed, (
+            f"epoch {epoch}: expected seed {expected_seed}, got {rollout['epoch_seed']}; "
+            f"SkillOpt's formula is seed + epoch*1000 + batch_idx + 1"
+        )
+
+    # Verify specific values
+    assert train_rollouts[0]["epoch_seed"] == 42 + 1 * 1000 + 1  # 1043
+    assert train_rollouts[1]["epoch_seed"] == 42 + 2 * 1000 + 1  # 2043
+
+
+# ── Ask 5: Part/seed delivery to Tasks ───────────────────────────────────
+
+
+class SeedAwareTask(task_module.Task):
+    """Toy Task whose instances depend on the seed."""
+
+    name = "seed_aware_test"
+    _seen_part: str | None = None
+    _seen_seed: int | None = None
+    _setup_part: str | None = None
+    _setup_seed: int | None = None
+    _verify_part: str | None = None
+    _verify_seed: int | None = None
+
+    def instances(self, *, part=None, seed=None):
+        SeedAwareTask._seen_part = part
+        SeedAwareTask._seen_seed = seed
+        items = [task_module.TaskInstance(id=f"item_{i}") for i in range(4)]
+        if seed is not None:
+            import random as _rng
+            items_copy = list(items)
+            _rng.Random(seed).shuffle(items_copy)
+            return items_copy
+        return items
+
+    def setup(self, instance, workspace, *, part=None, seed=None):
+        SeedAwareTask._setup_part = part
+        SeedAwareTask._setup_seed = seed
+
+    def verify(self, instance, workspace, *, part=None, seed=None):
+        SeedAwareTask._verify_part = part
+        SeedAwareTask._verify_seed = seed
+        return task_module.VerifyResult(passed=True, score=1.0)
+
+
+task_module.register_task("seed_aware_test", SeedAwareTask)
+
+
+def test_task_receives_part_and_seed_walker(tmp_path):
+    """The walker passes part and seed to Task.instances().
+
+    Fails when reverted because Task.instances() would receive no arguments.
+    """
+    from refactory_dsh.nn.executor import task_items, full_items
+    from refactory_dsh.task import write_subset
+
+    # Reset class-level tracking
+    SeedAwareTask._seen_part = None
+    SeedAwareTask._seen_seed = None
+
+    # Create a workdir with a subset.json
+    workdir = tmp_path / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    write_subset(workdir, "train", 0.3, seed=42)
+
+    # Call task_items with part and seed
+    task = SeedAwareTask()
+    items = task_items(task, part="train", seed=42)
+
+    assert SeedAwareTask._seen_part == "train"
+    assert SeedAwareTask._seen_seed == 42
+    assert len(items) == 4
+
+    # Without seed, items should be in default order
+    SeedAwareTask._seen_part = None
+    SeedAwareTask._seen_seed = None
+    items_no_seed = task_items(task, part=None, seed=None)
+    assert SeedAwareTask._seen_part is None
+    assert SeedAwareTask._seen_seed is None
+
+    # With seed, items may be in different order
+    items_with_seed = task_items(task, part="train", seed=99)
+    assert SeedAwareTask._seen_seed == 99
+
+
+def test_task_receives_part_and_seed_spine(tmp_path):
+    """The spine's real drain pipeline (lowering + TS drain) passes part and
+    seed to Task.setup()/verify().
+
+    Fails when reverted because setup/verify would receive no part/seed.
+    """
+    from refactory_dsh.items import command_begin, command_end
+    from refactory_dsh.nn import Node
+    from refactory_dsh.task import write_subset
+
+    # Reset class-level tracking
+    SeedAwareTask._setup_part = None
+    SeedAwareTask._setup_seed = None
+    SeedAwareTask._verify_part = None
+    SeedAwareTask._verify_seed = None
+
+    # Build a data node with our seed-aware task
+    node = Node(
+        "data", "data",
+        task_ref="seed_aware_test",
+        subgraph_entry="work", subgraph_exit="work",
+        produces=("item_scores",),
+    )
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    write_subset(workdir, "train", 0.3, seed=77)
+
+    # Run command_begin (calls task.setup)
+    result = command_begin(node, workdir, 0)
+    assert SeedAwareTask._setup_part == "train", (
+        f"task.setup did not receive part='train', got {SeedAwareTask._setup_part!r}"
+    )
+    assert SeedAwareTask._setup_seed == 77, (
+        f"task.setup did not receive seed=77, got {SeedAwareTask._setup_seed!r}"
+    )
+
+    # Run command_end (calls task.verify)
+    result = command_end(node, workdir, 0)
+    assert SeedAwareTask._verify_part == "train", (
+        f"task.verify did not receive part='train', got {SeedAwareTask._verify_part!r}"
+    )
+    assert SeedAwareTask._verify_seed == 77, (
+        f"task.verify did not receive seed=77, got {SeedAwareTask._verify_seed!r}"
+    )

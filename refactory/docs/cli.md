@@ -168,6 +168,7 @@ installed copy.
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | shared limits for proposals, trials, nested work and final validation | unlimited |
 | `--validation-reserve-s <n>` / `--validation-reserve-tokens <n>` | part of the shared allocation reserved for validation | 0 |
 | `--resume` | continue a compatible saved search and retain consumed resources | off |
+| `--strategy-option KEY=VALUE` | strategy-specific option passed to the strategy's `configure()`; may be repeated | none |
 | `--max-steps <n>` | step ceiling for one inner run, enforced by the executor | 2000 |
 | `--history-limit <n>` | how many evaluated candidates the optimizer is shown; bounded so a prompt cannot grow without limit | 200 |
 | `--prior-runs <n>` | how many previous runs are summarised as a prior for this one | 3 |

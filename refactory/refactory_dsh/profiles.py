@@ -274,7 +274,7 @@ def add_arguments(parser: Any) -> None:
         flag = "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
         # provider_config travels in the project file and saved profile
         # snapshots, not as a command-line object.
-        if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config"):
+        if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
         kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts") else str
         parser.add_argument(flag, dest=key, type=kind, default=None)

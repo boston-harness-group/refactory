@@ -67,14 +67,27 @@ class Task:
 
     name = ""
 
-    def instances(self) -> list[TaskInstance]:
-        """The items to process. One unnamed instance unless the Task says otherwise."""
+    def instances(
+        self, *, part: str | None = None, seed: int | None = None,
+    ) -> list[TaskInstance]:
+        """The items to process. One unnamed instance unless the Task says otherwise.
+
+        ``part`` and ``seed`` are optional: a Task that depends on neither
+        ignores them (backward compatible).  A Task whose items vary by seed
+        overrides this and uses them.
+        """
         return [TaskInstance(id="default")]
 
-    def setup(self, instance: TaskInstance, workspace: Path) -> None:
+    def setup(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> None:
         """Prepare the workspace for one item. Nothing to do by default."""
 
-    def verify(self, instance: TaskInstance, workspace: Path) -> VerifyResult | None:
+    def verify(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> VerifyResult | None:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 

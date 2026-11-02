@@ -464,7 +464,9 @@ class Autoscientists(Loop):
 # ── selection ──────────────────────────────────────────────────────────────
 
 #: The strategies, by name. `default` is the harness's own loop.
-STRATEGIES: dict[str, type[Loop]] = {
+#: Values may be ``Loop`` subclasses (built-in strategies) or pure
+#: ``OuterLoop`` subclasses (custom strategies using the custom strategy seam).
+STRATEGIES: dict[str, type[OuterLoop]] = {
     "default": Loop,
     BestOfN.name: BestOfN,
     Reflective.name: Reflective,
@@ -506,18 +508,49 @@ def names() -> list[str]:
     return sorted(STRATEGIES)
 
 
-def resolve(name: str) -> type[Loop]:
+def resolve(name: str) -> type[OuterLoop]:
     if name not in STRATEGIES:
         raise ValueError(f"unknown strategy {name!r}; known: {names()}")
     return STRATEGIES[name]
 
 
-def create(name: str, mode_id: str, config: Any = None, **kwargs: Any) -> Loop:
-    """Build a strategy by name, failing loud on an unknown one."""
-    return resolve(name)(mode_id, config, **kwargs)
+def create(
+    name: str,
+    mode_id: str,
+    config: Any = None,
+    *,
+    strategy_options: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Loop:
+    """Build a strategy by name, failing loud on an unknown one.
+
+    For strategies that subclass ``Loop`` directly, constructs and returns
+    them.  For pure ``OuterLoop`` subclasses (the custom strategy seam),
+    constructs a ``Loop`` for the infrastructure and attaches the strategy
+    via ``set_custom_strategy()``.
+
+    ``strategy_options`` are forwarded to the strategy's ``configure()``
+    method.  The ``model`` kwarg is extracted and passed to ``configure()``
+    as well.
+    """
+    cls = resolve(name)
+    model = kwargs.pop("model", None)
+    if issubclass(cls, Loop):
+        # A Loop subclass: construct directly, configure with options
+        loop = cls(mode_id, config, model=model, **kwargs)
+        if strategy_options:
+            loop.configure(model=model, **strategy_options)
+        return loop
+    # A pure OuterLoop subclass: create a Loop for infrastructure, attach
+    # the strategy object.
+    loop = Loop(mode_id, config, model=model, **kwargs)
+    strategy = cls()
+    strategy.configure(model=model, **(strategy_options or {}))
+    loop.set_custom_strategy(strategy)
+    return loop
 
 
-def register(name: str, cls: type[Loop]) -> None:
+def register(name: str, cls: type[OuterLoop]) -> None:
     """Add a strategy without editing the library."""
     if not issubclass(cls, OuterLoop):
         raise TypeError(f"{cls.__name__} is not an OuterLoop")

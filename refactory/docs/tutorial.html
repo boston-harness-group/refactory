@@ -483,6 +483,7 @@ options:
                                     [--project PROJECT] [--verbose] [--resume]
                                     [--parts PARTS_MANIFEST]
                                     [--resolved-config RESOLVED_CONFIG]
+                                    [--strategy-option KEY=VALUE]
                                     mode
 
 Run the optimizer loop on a mode.
@@ -538,6 +539,8 @@ options:
                         lists
   --resolved-config RESOLVED_CONFIG
                         exact resolved snapshot prepared by the console
+  --strategy-option KEY=VALUE
+                        strategy-specific option as KEY=VALUE; may be repeated
 </code></pre></details>
       <details><summary>What the config defaults to</summary><table><thead><tr><th>LoopConfig field</th><th>default</th></tr></thead><tbody><tr><td><code>epochs</code></td><td>default 2</td></tr><tr><td><code>batch_size</code></td><td>default 4</td></tr><tr><td><code>optimizer</code></td><td>default &#x27;autoresearch&#x27;</td></tr><tr><td><code>edit_preset</code></td><td>default &#x27;broad&#x27;</td></tr><tr><td><code>seed</code></td><td>default 0</td></tr><tr><td><code>elite</code></td><td>default 3</td></tr><tr><td><code>max_evaluations</code></td><td>default 64</td></tr><tr><td><code>attempts</code></td><td>default 3</td></tr><tr><td><code>evaluator</code></td><td>default &#x27;walker&#x27;</td></tr><tr><td><code>dsh_timeout_s</code></td><td>default 900</td></tr></tbody></table></details>
 

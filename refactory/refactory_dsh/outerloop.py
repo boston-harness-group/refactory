@@ -294,7 +294,30 @@ class Run:
 
 
 class OuterLoop:
-    """Base class for a search. Override the steps, or ``run`` entirely."""
+    """Base class for a custom strategy — the **custom strategy seam**.
+
+    A custom strategy subclasses ``OuterLoop`` and overrides the hooks in
+    :attr:`overridable`: ``configure``, ``strategy(run)``,
+    ``strategy_state_dict``, ``load_strategy_state``, and others.
+
+    The loop machinery (``Loop``) is the caller.  It constructs the strategy
+    object, calls ``configure(model=…, **strategy_options)`` after
+    construction, creates a ``Run`` and passes it to ``strategy(run)``, and
+    calls ``strategy_state_dict()`` / ``load_strategy_state()`` for
+    persistence.
+
+    The strategy keeps its own state as plain instance attributes.  It
+    interacts with the loop machinery **only** through ``Run``'s public API
+    (``run.evaluate()``, ``run.save_strategy_state()``, ``run.seed()``, etc.).
+    It never accesses ``Loop`` internals — no ``__getattr__`` proxy, no
+    monkey-patching, no ``_infra`` attribute.
+
+    A second strategy (e.g. a GEPA-like population strategy) must be able to
+    use this seam unchanged, proving it is generic.
+
+    The contract is validated at subclass creation time by
+    ``__init_subclass__``.
+    """
 
     #: The name this loop is selected by.
     name: str = "default"
@@ -308,6 +331,21 @@ class OuterLoop:
         "update", "should_stop", "on_epoch_end", "report", "memory",
         "strategy_state_dict", "load_strategy_state",
     )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Validate that a custom strategy does not proxy Loop internals."""
+        super().__init_subclass__(**kwargs)
+        # A custom OuterLoop subclass must not define __getattr__ (proxy) or
+        # carry a _infra attribute.  Loop itself is exempt because it IS the
+        # infrastructure.
+        from_outerloop = getattr(cls, '_is_loop_infrastructure', False)
+        if from_outerloop:
+            return
+        if "__getattr__" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} defines __getattr__; a custom strategy must "
+                f"not proxy Loop internals — use Run's public API instead"
+            )
 
     def configure(
         self, *, model: Any = None, model_name: str = "", provider: str = "auto", **options: Any

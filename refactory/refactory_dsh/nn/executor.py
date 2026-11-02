@@ -370,12 +370,23 @@ def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     A node bound to a Task and naming no source takes its items from the Task, which
     is what makes ``task_ref`` a binding rather than a line in a prompt. Public
     because the outer loop sizes the partition it writes from the whole selection.
+
+    When ``subset.json`` exists in ``workdir``, its ``part`` and ``seed`` are
+    forwarded to ``Task.instances()`` so a Task whose items depend on the seed
+    sees the evaluation's part and seed.
     """
     items = declared_items(node, workdir)
     if not items and node.task_ref:
-        from refactory_dsh.task import load_task
+        from refactory_dsh.task import load_task, read_subset
 
-        items = task_items(load_task(node.task_ref, workdir))
+        subset = read_subset(workdir)
+        part = subset.get("part") or None
+        seed = subset.get("seed")
+        items = task_items(
+            load_task(node.task_ref, workdir),
+            part=part,
+            seed=int(seed) if seed is not None else None,
+        )
     return items
 
 
@@ -449,11 +460,24 @@ def declared_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     return items
 
 
-def task_items(task: "Task") -> list[dict[str, Any]]:
-    """A Task's instances as the items a data node iterates."""
+def task_items(
+    task: "Task",
+    *,
+    part: str | None = None,
+    seed: int | None = None,
+) -> list[dict[str, Any]]:
+    """A Task's instances as the items a data node iterates.
+
+    Backward compatible: if ``task.instances()`` does not accept ``part``
+    and ``seed``, they are silently dropped.
+    """
+    try:
+        instances = task.instances(part=part, seed=seed)
+    except TypeError:
+        instances = task.instances()
     return [
         {"id": instance.id, "path": instance.path, **instance.metadata}
-        for instance in task.instances()
+        for instance in instances
     ]
 
 

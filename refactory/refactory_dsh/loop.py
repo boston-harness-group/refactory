@@ -201,6 +201,10 @@ class LoopConfig:
     #: items from it.  The optimizer cannot choose val/test items.
     parts_manifest: str | None = None
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: Strategy-specific options passed to the strategy's ``configure()``
+    #: method as keyword arguments.  Set from ``--strategy-option`` on the
+    #: CLI or directly from Python.
+    strategy_options: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -265,9 +269,15 @@ class Loop(OuterLoop):
 
     Every step a different strategy would change is a method here, so a strategy
     subclasses this and overrides one of them rather than copying the loop.
+
+    When ``_custom_strategy`` is set (a pure ``OuterLoop`` subclass), the
+    Loop delegates ``strategy``, ``strategy_state_dict``, and
+    ``load_strategy_state`` to that object — the **custom strategy seam**.
+    The strategy sees only ``Run``'s public API and never the Loop's internals.
     """
 
     name = "default"
+    _is_loop_infrastructure = True
 
     def bind_budget(self, budget: Any) -> None:
         """Share accounting even when a deterministic target has no model client."""
@@ -438,6 +448,19 @@ class Loop(OuterLoop):
         #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
         #: records the proposal context carries, and is not a strategy decision.
         self._editing_parent: str | None = None
+        #: A pure OuterLoop subclass whose hooks this Loop drives.  When set,
+        #: ``strategy()``, ``strategy_state_dict()``, and
+        #: ``load_strategy_state()`` delegate to this object.
+        self._custom_strategy: OuterLoop | None = None
+
+    def set_custom_strategy(self, strategy: OuterLoop) -> None:
+        """Attach a custom strategy (pure OuterLoop subclass) to this Loop.
+
+        The Loop will delegate ``strategy``, ``strategy_state_dict`` and
+        ``load_strategy_state`` calls to the strategy object.  The strategy
+        sees only ``Run``'s public API.
+        """
+        self._custom_strategy = strategy
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -1726,7 +1749,12 @@ class Loop(OuterLoop):
 
         `should_stop` is consulted first so a strategy can end for a reason of its
         own -- a plateau, a convergence -- without replacing the loop.
+
+        When a custom strategy is attached (``_custom_strategy``), delegates
+        to it — the **custom strategy seam**.
         """
+        if self._custom_strategy is not None:
+            return self._custom_strategy.strategy(run)
         while True:
             if self._apply_control() == "stop":
                 run.stop("a person asked the run to stop")
@@ -1942,6 +1970,16 @@ class Loop(OuterLoop):
         """Close the epoch, so the next step opens the next one."""
         self._epoch_open = False
         self._journal("epoch_end", epoch=self.epoch)
+
+    def strategy_state_dict(self) -> dict[str, Any]:
+        if self._custom_strategy is not None:
+            return self._custom_strategy.strategy_state_dict()
+        return super().strategy_state_dict()
+
+    def load_strategy_state(self, state: dict[str, Any]) -> None:
+        if self._custom_strategy is not None:
+            return self._custom_strategy.load_strategy_state(state)
+        return super().load_strategy_state(state)
 
     def _save_strategy_state(self) -> None:
         """Journal the strategy's current state unconditionally.
@@ -3004,6 +3042,23 @@ def run(
     return loop.run()
 
 
+def _coerce_strategy_value(raw: str) -> Any:
+    """Coerce a CLI strategy-option value to int, float, bool, or string."""
+    if raw.lower() in ("true", "yes"):
+        return True
+    if raw.lower() in ("false", "no"):
+        return False
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m refactory_dsh.loop <package>/<mode> [options]``."""
     import argparse
@@ -3023,6 +3078,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parts", default=None, dest="parts_manifest",
                         help="path to a parts.json manifest with train/val/test id lists")
     parser.add_argument("--resolved-config", default="", help="exact resolved snapshot prepared by the console")
+    parser.add_argument(
+        "--strategy-option", action="append", default=[], metavar="KEY=VALUE",
+        help="strategy-specific option as KEY=VALUE; may be repeated",
+    )
     args = parser.parse_args(argv)
     project = Path(args.project)
     from refactory_dsh.model import DshModelClient, ModelChoiceError, require_model_choice
@@ -3067,10 +3126,18 @@ def main(argv: list[str] | None = None) -> int:
                 gated = client(snapshot)
             model = gated
         settings = snapshot["settings"]
+        # Parse --strategy-option KEY=VALUE flags
+        strategy_opts: dict[str, Any] = {}
+        for pair in getattr(args, "strategy_option", []):
+            if "=" not in pair:
+                raise ValueError(f"--strategy-option requires KEY=VALUE, got {pair!r}")
+            key, _, raw = pair.partition("=")
+            strategy_opts[key.strip()] = _coerce_strategy_value(raw.strip())
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
                                       "resume": args.resume, "resolved_profile": snapshot,
-                                      "parts_manifest": getattr(args, "parts_manifest", None)})
+                                      "parts_manifest": getattr(args, "parts_manifest", None),
+                                      "strategy_options": strategy_opts})
     except ModelChoiceError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1
@@ -3079,7 +3146,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         loop = strategies.create(
-            config.strategy, args.mode, config, project=project, model=model
+            config.strategy, args.mode, config,
+            strategy_options=config.strategy_options,
+            project=project, model=model,
         )
         report = loop.run()
     except LoopError as exc:
