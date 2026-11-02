@@ -33,6 +33,7 @@ import random
 import warnings
 from typing import Any
 
+from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.edits import SKILLOPT_PATCH_CONFIG
 from refactory_dsh.optim import Candidate, Proposal
 from refactory_dsh.outerloop import OuterLoop, Run
@@ -98,6 +99,10 @@ class SkillOptLoop(OuterLoop):
         self._best_skill: str = ""
         self._best_score: float = 0.0
         self._prev_epoch_skill: str | None = None
+        # The epoch's last-step skill, taken before its slow update; kept in
+        # the state so a run resumed between the slow update and the meta
+        # skill still compares the right skill (trainer.py:2176).
+        self._epoch_last_step_skill: str = ""
         self._val_cache: dict[str, float] = {}
         self._edit_budget_step: int = 0
         self._meta_skill_text: str = ""
@@ -155,14 +160,24 @@ class SkillOptLoop(OuterLoop):
         # Resume state: saved epoch and phase from a prior run
         resume_epoch = self._epoch
         resume_phase = self._phase
+        resumed = bool(resume_epoch or resume_phase)
 
         seed_candidate = run.seed()
-        self._current_skill = self._get_skill(seed_candidate)
+        if resumed:
+            # Continue from the restored skill, never the seed's: the state the
+            # journal replayed is where the interrupted run stood.
+            current = self._candidate_for_skill(run, self._current_skill)
+        else:
+            self._current_skill = self._get_skill(seed_candidate)
+            current = seed_candidate
 
         # ① Initial val score — mechanism 1 (skip on resume if progressed)
         if not self._past_phase(resume_epoch, resume_phase, 0, "initial_val"):
             self._phase = "initial_val"
-            seed_candidate = run.evaluate(seed_candidate, part="val")
+            # SkillOpt evaluates the selection set with the base seed
+            # (trainer.py:1133-1136; dataloader.py:291-301 shuffles with it).
+            seed_candidate = run.evaluate(seed_candidate, part="val", seed=self.base_seed)
+            current = seed_candidate
             self._current_score = self._val_score(run, seed_candidate)
             skill_hash = self._skill_hash(self._current_skill)
             self._val_cache[skill_hash] = self._current_score
@@ -175,8 +190,6 @@ class SkillOptLoop(OuterLoop):
                 score=self._current_score,
                 skill_hash=skill_hash,
             )
-
-        current = seed_candidate
 
         for epoch in range(1, self.max_epochs + 1):
             self._epoch = epoch
@@ -197,9 +210,9 @@ class SkillOptLoop(OuterLoop):
                 return
 
             # ② Train rollout — mechanism 2
-            # Batch seed matches SkillOpt's formula: seed + epoch*1000 + batch_idx + 1
-            # For LiveMath's single batch (batch_idx=0): seed + epoch*1000 + 1
-            epoch_seed = self.base_seed + epoch * 1000 + 1
+            # The batch seed (dataloader.py:278): seed + epoch*1000 + batch_idx + 1,
+            # with one batch per epoch (batch_idx=0).
+            epoch_seed = batch_seed(self.base_seed, epoch)
             if not self._past_phase(resume_epoch, resume_phase, epoch, "train"):
                 self._phase = "train"
                 current = run.evaluate(current, part="train", seed=epoch_seed)
@@ -215,7 +228,9 @@ class SkillOptLoop(OuterLoop):
             # ③ Analysts — mechanism 3
             if not self._past_phase(resume_epoch, resume_phase, epoch, "analysts"):
                 self._phase = "analysts"
-                analyst_seed = batch_seed(self.base_seed, epoch)
+                # The analysts shuffle with the batch's own seed
+                # (trainer.py:1242, :1283 pass batch.seed as random_seed).
+                analyst_seed = epoch_seed
                 failure_patches, success_patches = analysts.reflect(
                     client=self.model,
                     records=records,
@@ -240,8 +255,11 @@ class SkillOptLoop(OuterLoop):
             if not failure_patches and not success_patches:
                 self._trace.record_decision("no_edits_skip")
                 run.save_strategy_state()
-                current = self._end_epoch(run, current, epoch, train_ids)
+                current = self._finish_epoch(
+                    run, current, epoch, train_ids, resume_epoch, resume_phase,
+                )
                 self._phase = "epoch_done"
+                run.save_strategy_state()
                 continue
 
             # ④ Merge — mechanism 4
@@ -318,7 +336,9 @@ class SkillOptLoop(OuterLoop):
                         "patch_refused", reasons=outcome,
                     )
                     run.save_strategy_state()
-                    current = self._end_epoch(run, current, epoch, train_ids)
+                    current = self._finish_epoch(
+                        run, current, epoch, train_ids, resume_epoch, resume_phase,
+                    )
                     self._phase = "epoch_done"
                     run.save_strategy_state()
                     continue
@@ -350,7 +370,7 @@ class SkillOptLoop(OuterLoop):
                         "val_cache_hit", skill_hash=cand_hash, score=cand_score,
                     )
                 else:
-                    candidate = run.evaluate(candidate, part="val")
+                    candidate = run.evaluate(candidate, part="val", seed=self.base_seed)
                     cand_score = self._val_score(run, candidate)
                     self._val_cache[cand_hash] = cand_score
                     self._trace.record_decision(
@@ -382,8 +402,9 @@ class SkillOptLoop(OuterLoop):
                 run.save_strategy_state()
 
             # ⑧⑨ Slow update & meta skill — mechanisms 8, 9
-            if not self._past_phase(resume_epoch, resume_phase, epoch, "slow_update"):
-                current = self._end_epoch(run, current, epoch, train_ids)
+            current = self._finish_epoch(
+                run, current, epoch, train_ids, resume_epoch, resume_phase,
+            )
 
             self._phase = "epoch_done"
             run.save_strategy_state()
@@ -408,27 +429,35 @@ class SkillOptLoop(OuterLoop):
 
     # ── end of epoch: slow update then meta skill ─────────────────────────
 
-    def _end_epoch(
+    def _finish_epoch(
         self,
         run: Run,
         current: Candidate,
         epoch: int,
         train_ids: list[str],
+        resume_epoch: int,
+        resume_phase: str,
     ) -> Candidate:
         """Slow update, then meta skill, then remember this epoch's skill.
 
-        The meta skill compares against the epoch's last-step skill, taken
-        before this epoch's slow update rewrites it (trainer.py:1763, :2176).
+        Each sub-step saves its own phase, so a run resumed after the slow update
+        makes the meta skill rather than skipping it. The meta skill compares
+        against the epoch's last-step skill, taken before this epoch's slow
+        update rewrites it (trainer.py:1763, :2176).
         """
-        epoch_last_step_skill = self._current_skill
-        self._phase = "slow_update"
-        current = self._do_slow_update(run, current, epoch, train_ids)
-        self._phase = "meta_skill"
-        self._do_meta_skill(run, epoch, epoch_last_step_skill)
-        # The previous epoch's skill for the next epoch is the saved skill of
-        # this epoch's last step, which already carries the slow update
-        # (trainer.py:1838-1839 load it; :2059 saved it after the update).
-        self._prev_epoch_skill = self._current_skill
+        if not self._past_phase(resume_epoch, resume_phase, epoch, "slow_update"):
+            self._epoch_last_step_skill = self._current_skill
+            self._phase = "slow_update"
+            current = self._do_slow_update(run, current, epoch, train_ids)
+            run.save_strategy_state()
+        if not self._past_phase(resume_epoch, resume_phase, epoch, "meta_skill"):
+            self._phase = "meta_skill"
+            self._do_meta_skill(run, epoch, self._epoch_last_step_skill)
+            # The previous epoch's skill for the next epoch is the saved skill of
+            # this epoch's last step, which already carries the slow update
+            # (trainer.py:1838-1839 load it; :2059 saved it after the update).
+            self._prev_epoch_skill = self._current_skill
+            run.save_strategy_state()
         return current
 
     def _do_slow_update(
@@ -470,8 +499,10 @@ class SkillOptLoop(OuterLoop):
             return current
         self._comparison_pairs = []
 
-        # Epoch 2+: compare on a seeded sample — trainer.py:1843-1844
-        sample_rng = random.Random(self.base_seed + epoch * 2000)
+        # Epoch 2+: compare on a seeded sample — trainer.py:1843-1844; the
+        # sample is the first n of the train items shuffled by that seed, rolled
+        # out with the same seed (dataloader.py:278-283 build_train_batch).
+        slow_seed = self.base_seed + epoch * 2000
         n_samples = min(self.slow_update_samples, len(train_ids))
         if n_samples <= 0:
             warnings.warn(
@@ -483,7 +514,9 @@ class SkillOptLoop(OuterLoop):
             )
             self._trace.record_decision("slow_update_skipped", reason="no_samples")
             return current
-        sample_ids = sample_rng.sample(train_ids, n_samples)
+        shuffled = list(train_ids)
+        random.Random(slow_seed).shuffle(shuffled)
+        sample_ids = shuffled[:n_samples]
 
         self._trace.record_decision(
             "slow_update_sample", sample_ids=sample_ids,
@@ -511,15 +544,14 @@ class SkillOptLoop(OuterLoop):
                 )
                 return current
             prev_candidate = prev_outcome
-        epoch_seed = self.base_seed + epoch * 3000
         prev_candidate = run.evaluate(
-            prev_candidate, part="train", items=sample_ids, seed=epoch_seed,
+            prev_candidate, part="train", items=sample_ids, seed=slow_seed,
         )
         prev_records = run.item_records(prev_candidate)
 
         # Evaluate current skill on sample
         curr_candidate = run.evaluate(
-            current, part="train", items=sample_ids, seed=epoch_seed,
+            current, part="train", items=sample_ids, seed=slow_seed,
         )
         curr_records = run.item_records(curr_candidate)
 
@@ -634,6 +666,7 @@ class SkillOptLoop(OuterLoop):
             "best_skill": self._best_skill,
             "best_score": self._best_score,
             "prev_epoch_skill": self._prev_epoch_skill,
+            "epoch_last_step_skill": self._epoch_last_step_skill,
             "val_cache": dict(self._val_cache),
             "edit_budget_step": self._edit_budget_step,
             "meta_skill_text": self._meta_skill_text,
@@ -655,6 +688,7 @@ class SkillOptLoop(OuterLoop):
         self._best_skill = restored.get("best_skill", "")
         self._best_score = restored.get("best_score", 0.0)
         self._prev_epoch_skill = restored.get("prev_epoch_skill")
+        self._epoch_last_step_skill = restored.get("epoch_last_step_skill", "")
         self._val_cache = restored.get("val_cache", {})
         self._edit_budget_step = restored.get("edit_budget_step", 0)
         self._meta_skill_text = restored.get("meta_skill_text", "")
@@ -676,6 +710,25 @@ class SkillOptLoop(OuterLoop):
         knobs = candidate.state.get("knobs", {})
         skill_entry = knobs.get("skill", {})
         return str(skill_entry.get("value", ""))
+
+    @classmethod
+    def _candidate_for_skill(cls, run: Run, skill: str) -> Candidate:
+        """The candidate carrying ``skill``: the seed with that skill set.
+
+        A SkillOpt search edits only the ``skill`` knob, and a candidate's id is
+        its state's, so this is the very candidate the interrupted run held --
+        the evaluated one from the run's history when it was evaluated.
+        """
+        seed = run.seed()
+        if cls._get_skill(seed) == skill:
+            return seed
+        built = Candidate.from_state(
+            nn_edits.configure(seed.state, "skill", skill), parent=seed.id,
+        )
+        for candidate in run.history():
+            if candidate.id == built.id:
+                return candidate
+        return built
 
     @staticmethod
     def _skill_hash(text: str) -> str:
@@ -729,17 +782,16 @@ class SkillOptLoop(OuterLoop):
         return pairs
 
 
-def batch_seed(seed: int, epoch: int, batches_per_epoch: int = 1) -> int:
-    """The seed of an epoch's first batch — SkillOpt's train-batch seed.
+def batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
+    """SkillOpt's train-batch seed for LiveMath: ``seed + epoch*1000 + batch_idx + 1``.
 
-    datasets/base.py:98-109 (and trainer.py:966, :1181-1183): the base seeds
-    are ``seed + i + 1`` for each batch of an epoch, shuffled by
-    ``Random(seed + epoch * 1000)``. This strategy takes one step of one batch
-    per epoch, so the step's batch seed is the first shuffled seed.
+    LiveMath has a dataloader, so the trainer takes each batch's own seed from
+    ``plan_train_epoch`` (trainer.py:1170-1177, :1242; dataloader.py:278) and
+    hands it to the analysts as ``random_seed`` (trainer.py:1283). The
+    ``Random(seed + epoch*1000)`` shuffle of base seeds (datasets/base.py:98-109)
+    is the dataloader-less path and does not apply.
     """
-    base_seeds = [seed + i + 1 for i in range(batches_per_epoch)]
-    random.Random(seed + epoch * 1000).shuffle(base_seeds)
-    return base_seeds[0]
+    return seed + epoch * 1000 + batch_idx + 1
 
 
 def _outcome(record: dict, passed: bool) -> dict[str, Any]:

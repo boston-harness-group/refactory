@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Sequence
 
 from refactory_dsh.loop import Loop
@@ -508,10 +509,40 @@ def names() -> list[str]:
     return sorted(STRATEGIES)
 
 
-def resolve(name: str) -> type[OuterLoop]:
-    if name not in STRATEGIES:
-        raise ValueError(f"unknown strategy {name!r}; known: {names()}")
-    return STRATEGIES[name]
+def package_strategies(project: Path | None = None) -> dict[str, type[OuterLoop]]:
+    """Strategies the discoverable packages contribute, by name.
+
+    A package lists them in ``Package.strategies``, so a strategy shipped as a
+    package is selectable by name (``--strategy``) the way a mode is, without a
+    registration call and without joining the library's own ports in
+    ``STRATEGIES``.
+    """
+    from refactory_dsh import registry
+
+    found: dict[str, type[OuterLoop]] = {}
+    for package in registry.discover(project).values():
+        for cls in package.strategies:
+            if not (isinstance(cls, type) and issubclass(cls, OuterLoop)):
+                raise TypeError(
+                    f"package {package.name!r} lists {cls!r}, which is not an OuterLoop"
+                )
+            found[cls.name] = cls
+    return found
+
+
+def available(project: Path | None = None) -> list[str]:
+    """Every selectable strategy: the library's own and the packages'."""
+    return sorted(set(STRATEGIES) | set(package_strategies(project)))
+
+
+def resolve(name: str, project: Path | None = None) -> type[OuterLoop]:
+    if name in STRATEGIES:
+        return STRATEGIES[name]
+    contributed = package_strategies(project)
+    if name in contributed:
+        return contributed[name]
+    known = sorted(set(STRATEGIES) | set(contributed))
+    raise ValueError(f"unknown strategy {name!r}; known: {known}")
 
 
 def create(
@@ -533,7 +564,8 @@ def create(
     method.  The ``model`` kwarg is extracted and passed to ``configure()``
     as well.
     """
-    cls = resolve(name)
+    project = kwargs.get("project")
+    cls = resolve(name, Path(project) if project is not None else None)
     model = kwargs.pop("model", None)
     if issubclass(cls, Loop):
         # A Loop subclass: construct directly, configure with options

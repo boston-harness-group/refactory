@@ -27,7 +27,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
 | class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None) -> None` |
-| class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '') -> None` |
+| class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
 - **`Edge`** — One connection between two nodes, and the verdict that selects it.
@@ -330,10 +330,12 @@ The SRF strategies, as outer loops.
 | class | `StagedV1` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
 | class | `TreeArchive` | `(members: 'list[Candidate]' = <factory>, parents: 'dict[str, str]' = <factory>, children: 'dict[str, list[str]]' = <factory>) -> None` |
 | class | `TreeSearch` | `(*args: 'Any', **kwargs: 'Any') -> 'None'` |
+| function | `available` | `(project: 'Path \| None' = None) -> 'list[str]'` |
 | function | `create` | `(name: 'str', mode_id: 'str', config: 'Any' = None, *, strategy_options: 'dict[str, Any] \| None' = None, **kwargs: 'Any') -> 'Loop'` |
 | function | `names` | `() -> 'list[str]'` |
+| function | `package_strategies` | `(project: 'Path \| None' = None) -> 'dict[str, type[OuterLoop]]'` |
 | function | `register` | `(name: 'str', cls: 'type[OuterLoop]') -> 'None'` |
-| function | `resolve` | `(name: 'str') -> 'type[OuterLoop]'` |
+| function | `resolve` | `(name: 'str', project: 'Path \| None' = None) -> 'type[OuterLoop]'` |
 
 - **`AdaptiveMeta`** — SRF `adaevolve`: an adaptive meta-level.
 - **`Archive`** — A set of candidates a strategy keeps, and how it picks from them.
@@ -347,7 +349,9 @@ The SRF strategies, as outer loops.
 - **`StagedV1`** — SRF `ai_sci_v1`: the earlier staged variant.
 - **`TreeArchive`** — A tree. A node's parent is the node it was expanded from.
 - **`TreeSearch`** — SRF `aide`: `policy → action_gate(draft|improve|debug) → tree_update`.
+- **`available`** — Every selectable strategy: the library's own and the packages'.
 - **`create`** — Build a strategy by name, failing loud on an unknown one.
+- **`package_strategies`** — Strategies the discoverable packages contribute, by name.
 - **`register`** — Add a strategy without editing the library.
 
 

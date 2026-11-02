@@ -66,7 +66,11 @@ class SkillTask(task_module.Task):
             for item_id in TRAIN_IDS + VAL_IDS
         ]
 
+    #: (part, seed) of every verify, so a test can see what reached the Task.
+    seen: list[tuple[str | None, int | None]] = []
+
     def verify(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+        SkillTask.seen.append((part, seed))
         # Read the skill from the state if it's available via item data
         # For simplicity: pass based on whether MAGIC_MARKER env is set
         # In tests, the FakeClient controls the scoring via the val cache
@@ -325,11 +329,12 @@ def _read_trace(root: Path) -> list[dict[str, Any]]:
 
 
 @pytest.fixture(autouse=True)
-def _register_skillopt():
-    """Register SkillOptLoop for each test, and clean up after."""
-    strategies.register("skillopt", SkillOptLoop)
+def _skillopt_found_by_discovery():
+    """Every test reaches ``skillopt`` the way the CLI does: by package discovery
+    (``Package.strategies``), never a hand ``register()``."""
+    assert "skillopt" not in strategies.STRATEGIES
     yield
-    strategies.STRATEGIES.pop("skillopt", None)
+    assert "skillopt" not in strategies.STRATEGIES
 
 
 # ── tests ──────────────────────────────────────────────────────────────────
@@ -1144,8 +1149,11 @@ def test_analysts_get_constant_L(tmp_path):
 
 def test_analyst_shuffle_uses_batch_seed(tmp_path, monkeypatch):
     """reflect.py:553-554 shuffles failures with the batch seed and successes
-    with batch seed + 1; the batch seed is datasets/base.py:98-109's (43 for
-    seed 42 and one batch per epoch), the same every epoch."""
+    with batch seed + 1. LiveMath has a dataloader, so the batch seed is the
+    batch's own (trainer.py:1242, :1283): ``plan_train_epoch`` gives it as
+    seed + epoch*1000 + batch_idx + 1 (dataloader.py:278). Expected values were
+    computed by SkillOpt's ``LiveMathematicianBenchDataLoader.plan_train_epoch``
+    for seed 42: 1043 in epoch 1, 2043 in epoch 2."""
     import random
 
     from refactory_packages.skillopt import analysts
@@ -1167,8 +1175,8 @@ def test_analyst_shuffle_uses_batch_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(analysts, "reflect", spy)
     _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
     trace = _read_trace(tmp_path)
-    assert batch_seed(42, 1) == batch_seed(42, 2) == 43
-    assert [s for _, _, s in seen] == [43, 43]
+    assert (batch_seed(42, 1), batch_seed(42, 2)) == (1043, 2043)
+    assert [s for _, _, s in seen] == [1043, 2043]
     for epoch, (fails, succs, seed) in enumerate(seen, 1):
         random.Random(seed).shuffle(fails)
         random.Random(seed + 1).shuffle(succs)
@@ -1206,13 +1214,31 @@ def test_val_cache_placeholder_and_slow_update_rules(tmp_path):
     assert state2["val_cache"][h(state2["current_skill"])] == 0.5
 
 
-def test_slow_update_sample_seed(tmp_path):
-    """trainer.py:1844: the sample is seeded with ``seed + epoch * 2000``."""
-    import random
+def test_slow_update_sample_seed(tmp_path, monkeypatch):
+    """trainer.py:1843-1844 + dataloader.py:278-283: the slow-update sample is
+    the train items shuffled by ``Random(seed + epoch*2000)``, first n, and both
+    rollouts use that same seed. Expected ids were computed by SkillOpt's
+    ``build_train_batch(batch_size=5, seed=...)`` over train items t1..t8."""
+    from refactory_dsh.outerloop import Run
 
-    _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
-    sample = _decisions(_read_trace(tmp_path), "slow_update_sample")[0]["sample_ids"]
-    assert sample == random.Random(42 + 2 * 2000).sample(TRAIN_IDS, 8)
+    calls: list[tuple[str, tuple | None, int | None]] = []
+    original = Run.evaluate
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        calls.append((part, tuple(items) if items else None, seed))
+        return original(self, candidate, part=part, items=items, seed=seed)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    _run_loop(tmp_path, skillopt_options={"max_epochs": 3, "slow_update_samples": 5})
+    samples = [d["sample_ids"] for d in _decisions(_read_trace(tmp_path), "slow_update_sample")]
+    expected = {
+        4042: ["t4", "t3", "t8", "t2", "t7"],   # epoch 2
+        6042: ["t8", "t6", "t7", "t2", "t4"],   # epoch 3
+    }
+    assert samples == list(expected.values())
+    for seed, ids in expected.items():
+        rollouts = [c for c in calls if c[1] == tuple(ids)]
+        assert len(rollouts) == 2 and all(c[2] == seed for c in rollouts), rollouts
 
 
 def test_slow_update_without_train_ids_raises(tmp_path):
@@ -1223,6 +1249,25 @@ def test_slow_update_without_train_ids_raises(tmp_path):
             config_overrides={"parts_manifest": None},
             skillopt_options={"max_epochs": 2},
         )
+
+
+def test_seeds_reach_the_task(tmp_path):
+    """The seeds the trace names are the seeds the Task is run with: the base
+    seed for every val evaluation (trainer.py:1133-1136; dataloader.py:291-301),
+    the batch seed for each train rollout (dataloader.py:278) and the slow-update
+    seed for its rollouts (trainer.py:1844). A strategy that traced the right
+    value but evaluated with another fails here."""
+    SkillTask.seen = []
+    _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
+    by_part: dict[str | None, set[int | None]] = {}
+    for part, seed in SkillTask.seen:
+        by_part.setdefault(part, set()).add(seed)
+    # (The loop's own end-of-run holdout audit is not the strategy's and is
+    # left out.)
+    assert by_part["val"] == {42}
+    assert by_part["train"] == {1043, 2043, 4042}
+    traced = [d["epoch_seed"] for d in _decisions(_read_trace(tmp_path), "train_rollout")]
+    assert traced == [1043, 2043]
 
 
 # ── Ask 1: Custom strategy seam ──────────────────────────────────────────
@@ -1266,6 +1311,45 @@ def test_strategy_no_proxy_no_loop_internals():
             name = "bad"
             def __getattr__(self, name):
                 pass
+
+
+def test_attached_strategy_reaches_no_loop_internals(tmp_path, monkeypatch):
+    """Attached to a running loop, the strategy still reaches nothing of the
+    Loop's by attribute: no ``__getattr__`` anywhere in its class hierarchy
+    (``OuterLoop`` included), no reference to the Loop in its own state.
+
+    Fails if a proxy is reintroduced -- on ``OuterLoop`` or by the Loop handing
+    itself to the strategy on attach -- because the probes would then resolve.
+    """
+    probes: dict[str, Any] = {}
+    original = SkillOptLoop.strategy
+
+    def probing(self, run):  # type: ignore[no-untyped-def]
+        for name in ("population", "config", "evaluations", "rejections", "mode",
+                     "_loop", "_infra", "_custom_strategy", "_train_item_records"):
+            try:
+                getattr(self, name)
+            except AttributeError:
+                probes[name] = "refused"
+            else:
+                probes[name] = "reached"
+        probes["getattr_in_mro"] = [
+            k.__name__ for k in type(self).__mro__ if "__getattr__" in k.__dict__
+        ]
+        probes["holds_loop"] = [
+            key for key, value in vars(self).items() if isinstance(value, (Loop, Run))
+        ]
+        return original(self, run)
+
+    from refactory_dsh.outerloop import Run
+
+    monkeypatch.setattr(SkillOptLoop, "strategy", probing)
+    _, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    assert report["exit_ok"]
+    reached = [name for name, how in probes.items() if how == "reached"]
+    assert reached == []
+    assert probes["getattr_in_mro"] == []
+    assert probes["holds_loop"] == []
 
 
 def test_gepa_like_population_strategy_on_same_seam(tmp_path):
@@ -1354,187 +1438,179 @@ def test_gepa_like_population_strategy_on_same_seam(tmp_path):
 # ── Ask 2: CLI strategy options ──────────────────────────────────────────
 
 
-def test_cli_runs_skillopt_end_to_end(tmp_path):
-    """The CLI path calls configure() with strategy options from
-    LoopConfig.strategy_options and the run completes end to end.
+def test_cli_runs_skillopt_end_to_end(tmp_path, monkeypatch):
+    """``python -m refactory_dsh.loop <mode> --strategy skillopt
+    --strategy-option max_epochs=1`` finds the strategy by package discovery,
+    hands the options to ``configure()`` and completes the run.
 
-    Fails when reverted because strategies.create would not accept
-    strategy_options.
+    Fails when reverted because the CLI could not resolve ``skillopt`` (it was
+    reachable only through a hand ``register()``), or would drop the options.
     """
-    cfg = _config(tmp_path, strategy_options={"max_epochs": 1})
+    from refactory_dsh import loop as loop_module
+    from refactory_dsh import model as model_module
+
     client = FakeClient()
+
+    class ScriptedRoute:
+        """Stands in for DshModelClient: building one yields the scripted client."""
+
+        def __new__(cls, **_kwargs: Any) -> Any:
+            return client
+
+    monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
+    configured: list[dict[str, Any]] = []
+    original = SkillOptLoop.configure
+
+    def spy(self, **kwargs):  # type: ignore[no-untyped-def]
+        configured.append(dict(kwargs))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(SkillOptLoop, "configure", spy)
+    parts = _write_parts(tmp_path)
     with _patch_mode(SkillProbe):
-        loop = strategies.create(
-            "skillopt", MODE_ID, cfg,
-            strategy_options=cfg.strategy_options,
-            project=Path("."), model=client,
-        )
-        report = loop.run()
+        code = loop_module.main([
+            MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
+            "--optimizer", "random", "--seed", "42",
+            "--runs-root", str(tmp_path / "run"), "--project", ".",
+            "--parts", str(parts),
+        ])
 
-    assert report["exit_ok"]
-    strategy = loop._custom_strategy
-    assert isinstance(strategy, SkillOptLoop)
-    assert strategy.max_epochs == 1
-
-    trace = _read_trace(tmp_path)
-    step_types = [e["step_type"] for e in trace]
+    assert code == 0
+    assert len(configured) == 1
+    assert configured[0]["max_epochs"] == 1
+    assert configured[0]["model"] is client
+    step_types = [e["step_type"] for e in _read_trace(tmp_path)]
     assert "initial_val" in step_types
     assert "train_rollout" in step_types
+    assert any(c["call_key"][0] == "analyst_failure" for c in client.calls)
+
+
+def test_skillopt_resolves_by_discovery_in_a_fresh_process():
+    """A new interpreter resolves ``skillopt`` through the package discovery the
+    CLI uses, with nothing registered by hand."""
+    import subprocess
+    import sys
+
+    code = (
+        "from refactory_dsh import strategies\n"
+        "cls = strategies.resolve('skillopt')\n"
+        "assert 'skillopt' not in strategies.STRATEGIES\n"
+        "assert 'skillopt' in strategies.available()\n"
+        "print(cls.__module__ + ':' + cls.__name__)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "refactory_packages.skillopt.loop:SkillOptLoop"
 
 
 # ── Ask 3: Resume continues, never restarts ──────────────────────────────
 
 
+class CrashingClient(FakeClient):
+    """A scripted client whose process dies at one call key."""
+
+    def __init__(self, crash_at: tuple) -> None:
+        super().__init__()
+        self.crash_at = crash_at
+
+    def complete(self, prompt, *, system="", call_key=None):  # type: ignore[no-untyped-def]
+        if call_key is not None and tuple(call_key) == self.crash_at:
+            raise RuntimeError(f"model died at {self.crash_at}")
+        return super().complete(prompt, system=system, call_key=call_key)
+
+
+def _crash_then_resume(
+    tmp_path: Path, crash_at: tuple, max_epochs: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], SkillOptLoop]:
+    """An uninterrupted reference run, and the same run killed at ``crash_at``
+    then resumed through the real ``--resume`` journal path.
+
+    Returns (reference calls, calls before the crash, calls after resume, the
+    resumed strategy).
+    """
+    options = {"max_epochs": max_epochs}
+    reference = FakeClient()
+    _run_loop(tmp_path / "ref", client=reference, skillopt_options=options)
+
+    crashing = CrashingClient(crash_at)
+    with pytest.raises(RuntimeError, match="model died"):
+        _run_loop(tmp_path / "split", client=crashing, skillopt_options=options)
+
+    resumed = FakeClient()
+    cfg = _config(tmp_path / "split", resume=True)
+    with _patch_mode(SkillProbe):
+        loop = strategies.create(
+            "skillopt", MODE_ID, cfg, strategy_options=options,
+            project=Path("."), model=resumed,
+        )
+        loop.run()
+    strategy = loop._custom_strategy
+    assert isinstance(strategy, SkillOptLoop)
+    return reference.calls, crashing.calls, resumed.calls, strategy
+
+
+def _keys(calls: list[dict[str, Any]]) -> list[tuple | None]:
+    return [c["call_key"] for c in calls]
+
+
 def test_resume_skips_completed_phases(tmp_path):
-    """A resumed run skips initial setup and continues at the saved
-    epoch/phase.  Uses the real ``--resume`` journal path.
+    """A run killed at the epoch-2 analyst call resumes from the journal and
+    continues with the skill it had, not the seed's: the resumed analyst prompt
+    is the uninterrupted run's, text and all, and every later call matches.
 
-    Asserts:
-    - The resumed run does NOT repeat initial_val.
-    - The next model call key equals the one an uninterrupted run would make.
-
-    Fails when reverted because the strategy would repeat initial val and
-    model call keys would diverge.
+    Fails when reverted because resume reset the skill to the seed's and the
+    candidate to the seed, so the analyst saw a different skill.
     """
-    # Run A: uninterrupted 3-epoch reference run.
-    client_ref = FakeClient()
-    _, _ = _run_loop(
-        tmp_path / "ref", client=client_ref,
-        skillopt_options={"max_epochs": 3},
-    )
-    ref_keys = [c["call_key"] for c in client_ref.calls]
+    crash_at = ("analyst_failure", 2, 0, 0)
+    ref, before, after, strategy = _crash_then_resume(tmp_path, crash_at, 3)
 
-    # Run B1: complete 1 epoch then stop (real journal).
-    client1 = FakeClient()
-    _, _ = _run_loop(
-        tmp_path / "split", client=client1,
-        skillopt_options={"max_epochs": 1},
-    )
-    keys_run1 = [c["call_key"] for c in client1.calls]
-
-    # Run B2: resume from the journal (--resume) and run epochs 2-3.
-    client2 = FakeClient()
-    cfg2 = _config(tmp_path / "split", resume=True)
-    with _patch_mode(SkillProbe):
-        loop2 = strategies.create(
-            "skillopt", MODE_ID, cfg2,
-            strategy_options={"max_epochs": 3},
-            project=Path("."), model=client2,
-        )
-        report2 = loop2.run()
-
-    keys_run2 = [c["call_key"] for c in client2.calls]
-
-    # The resumed run must NOT have repeated initial_val — no call keys from
-    # the first run should appear in the second run's calls.
-    assert len(keys_run2) > 0, "resumed run must make model calls"
-    run1_keys_set = set(tuple(k) if isinstance(k, list) else k for k in keys_run1)
-    for k in keys_run2:
-        key_tuple = tuple(k) if isinstance(k, list) else k
-        assert key_tuple not in run1_keys_set, (
-            f"resumed run repeated call key {k} from the first run"
-        )
-
-    # The concatenation of run1 + run2 call keys must match the reference
-    # run's call keys, proving "the next model call key equals the one an
-    # uninterrupted run would make."
-    combined = keys_run1 + keys_run2
-    assert combined == ref_keys, (
-        f"combined call keys differ from uninterrupted reference:\n"
-        f"  combined: {combined}\n  reference: {ref_keys}"
-    )
-
-    # The resumed run must have progressed past epoch 1.
-    strategy2 = loop2._custom_strategy
-    state2 = strategy2.strategy_state_dict()
-    assert state2["epoch"] >= 2, (
-        f"resumed run should have progressed past epoch 1, got epoch={state2['epoch']}"
-    )
+    assert _keys(before) + _keys(after) == _keys(ref)
+    assert _keys(after)[0] == crash_at
+    ref_prompt = next(c for c in ref if c["call_key"] == crash_at)
+    assert after[0]["prompt"] == ref_prompt["prompt"]
+    assert after[0]["system"] == ref_prompt["system"]
+    assert [c["prompt"] for c in before + after] == [c["prompt"] for c in ref]
+    assert strategy.strategy_state_dict()["epoch"] == 3
 
 
-def test_resume_mid_epoch_continues_at_saved_phase(tmp_path):
-    """Stop mid-epoch (after train/analysts, before merge).  Resume via the
-    real ``--resume`` journal path.  Assert the resumed run picks up at
-    the right phase and does not re-run completed model calls.
+def test_resume_mid_epoch_continues_at_saved_phase(tmp_path, monkeypatch):
+    """Killed at the epoch-2 merge (train and analysts done), the resumed run
+    makes exactly the uninterrupted run's remaining calls, with the same
+    prompts: no analyst call is repeated and none is skipped.
 
-    Fails when reverted because there would be no per-phase markers and the
-    resumed run would restart the epoch from the beginning.
+    Fails when reverted because the resumed run would restart the epoch, or
+    merge against the seed's skill.
     """
-    # Run A: uninterrupted 2-epoch reference run.
-    client_ref = FakeClient()
-    _, _ = _run_loop(
-        tmp_path / "ref", client=client_ref,
-        skillopt_options={"max_epochs": 2},
-    )
-    ref_keys = [c["call_key"] for c in client_ref.calls]
+    monkeypatch.setenv(PASS_IDS_ENV, "t1,t3,t5,t7")
+    crash_at = ("merge_final", 2, 0, 0)
+    ref, before, after, _ = _crash_then_resume(tmp_path, crash_at, 2)
 
-    # Run B1: run 1 epoch, then manually tweak the saved journal state to
-    # pretend we stopped mid-epoch 1 (after analysts, before merge).
-    # We do this by running 1 epoch normally and then modifying the saved
-    # strategy state in the journal.
-    client1 = FakeClient()
-    strategy1, _ = _run_loop(
-        tmp_path / "mid", client=client1,
-        skillopt_options={"max_epochs": 1},
-    )
+    ref_keys = _keys(ref)
+    assert _keys(after) == ref_keys[ref_keys.index(crash_at):]
+    assert _keys(before) == ref_keys[:ref_keys.index(crash_at)]
+    assert [c["prompt"] for c in after] == [c["prompt"] for c in ref[ref_keys.index(crash_at):]]
 
-    # The strategy saved state with phase="epoch_done" and epoch=1.
-    # Override to simulate a mid-epoch stop: phase="analysts" at epoch 1.
-    # This means train and analysts are done; merge/rank/patch/etc are not.
-    # Write the modified state into the journal so --resume picks it up.
-    journal_path = tmp_path / "mid" / "run" / "journal.jsonl"
-    assert journal_path.exists(), "journal must exist after run 1"
-    lines = journal_path.read_text().splitlines()
-    # Find the LAST strategy_state entry and modify only that one,
-    # so the journal replay's final state has phase="analysts" at epoch 1.
-    new_lines = []
-    last_ss_idx = -1
-    for i, line in enumerate(lines):
-        if line.strip():
-            entry = json.loads(line)
-            if entry.get("event") == "strategy_state":
-                last_ss_idx = i
-    for i, line in enumerate(lines):
-        if line.strip():
-            entry = json.loads(line)
-            if i == last_ss_idx and entry.get("event") == "strategy_state":
-                st = entry["state"]
-                st["phase"] = "analysts"
-                st["epoch"] = 1
-                entry["state"] = st
-            new_lines.append(json.dumps(entry))
-    journal_path.write_text("\n".join(new_lines) + "\n")
 
-    # Run B2: resume from the modified journal.
-    client2 = FakeClient()
-    cfg2 = _config(tmp_path / "mid", resume=True)
-    with _patch_mode(SkillProbe):
-        loop2 = strategies.create(
-            "skillopt", MODE_ID, cfg2,
-            strategy_options={"max_epochs": 2},
-            project=Path("."), model=client2,
-        )
-        report2 = loop2.run()
+def test_resume_after_crash_at_meta_skill_makes_the_meta_skill(tmp_path):
+    """Killed at the epoch-2 meta-skill call, after the slow update: the resumed
+    run does not repeat the slow update and does make the meta skill, which
+    then reaches epoch 3 exactly as in the uninterrupted run.
 
-    keys_run2 = [c["call_key"] for c in client2.calls]
+    Fails when reverted because the slow-update phase marker made resume skip
+    the whole end of epoch, so ('meta_skill', 2) was never made.
+    """
+    crash_at = ("meta_skill", 2, 0, 0)
+    ref, before, after, strategy = _crash_then_resume(tmp_path, crash_at, 3)
 
-    # The resumed run should NOT have re-run analyst model calls for epoch 1
-    # (those are past the saved phase).  The first call should be merge or
-    # later, not analyst.
-    epoch1_analyst_calls = [
-        k for k in keys_run2
-        if k is not None and k[0].startswith("analyst_") and k[1] == 1
-    ]
-    assert len(epoch1_analyst_calls) == 0, (
-        f"resumed run re-ran epoch 1 analyst calls: {epoch1_analyst_calls}"
-    )
-
-    # The state should show progress into epoch 2.
-    strategy2 = loop2._custom_strategy
-    state2 = strategy2.strategy_state_dict()
-    assert state2["epoch"] >= 2, (
-        f"resumed run should have progressed to epoch 2, got epoch={state2['epoch']}"
-    )
+    assert ("slow_update", 2, 0, 0) in _keys(before)
+    assert ("slow_update", 2, 0, 0) not in _keys(after)
+    assert _keys(after)[0] == crash_at
+    assert _keys(before) + _keys(after) == _keys(ref)
+    assert [c["prompt"] for c in before + after] == [c["prompt"] for c in ref]
+    assert strategy.strategy_state_dict()["meta_skill_text"] == "USE CONCISE EDITS"
 
 
 # ── Ask 4: Batch seed matches SkillOpt formula ──────────────────────────

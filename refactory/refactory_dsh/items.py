@@ -339,16 +339,13 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         sidecar.unlink(missing_ok=True)
     task = _task_of(node, workdir)
     if task is not None:
-        from refactory_dsh.task import read_subset
-        subset = read_subset(workdir)
-        subset_part = subset.get("part") or None
-        subset_seed = subset.get("seed")
-        subset_seed_int = int(subset_seed) if subset_seed is not None else None
+        from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+        subset_part, subset_seed = subset_part_seed(workdir)
         try:
-            try:
-                task.setup(instance_of(item), workdir, part=subset_part, seed=subset_seed_int)
-            except TypeError:
-                task.setup(instance_of(item), workdir)
+            task.setup(
+                instance_of(item), workdir,
+                **part_seed_kwargs(task.setup, part=subset_part, seed=subset_seed),
+            )
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
@@ -455,16 +452,13 @@ def command_end(
     exchanges = _read_and_clear_exchanges(workdir)
     metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
     # Pass part and seed from subset.json to task.verify (ask 5)
-    from refactory_dsh.task import read_subset as _read_subset_for_verify
-    _subset_for_verify = _read_subset_for_verify(workdir)
-    _verify_part = _subset_for_verify.get("part") or None
-    _verify_seed_raw = _subset_for_verify.get("seed")
-    _verify_seed = int(_verify_seed_raw) if _verify_seed_raw is not None else None
+    from refactory_dsh.task import part_seed_kwargs, subset_part_seed
+    _verify_part, _verify_seed = subset_part_seed(workdir)
     try:
-        try:
-            verdict = task.verify(instance, workdir, part=_verify_part, seed=_verify_seed)
-        except TypeError:
-            verdict = task.verify(instance, workdir)
+        verdict = task.verify(
+            instance, workdir,
+            **part_seed_kwargs(task.verify, part=_verify_part, seed=_verify_seed),
+        )
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:

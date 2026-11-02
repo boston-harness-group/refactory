@@ -3,9 +3,10 @@
 Reproduces the SkillOpt algorithm (microsoft/SkillOpt, MIT) as an OuterLoop
 subclass built entirely from refactory's public extension points.
 
-Registration is explicit — call ``register()`` to add the strategy to the
-registry — so that the library's SRF_PORT_COUNT invariant is never broken
-by an import side-effect.
+The package contributes the strategy through ``Package.strategies``, so
+``strategies.resolve("skillopt")`` (and ``--strategy skillopt`` on the CLI)
+finds it by package discovery. It is not added to the library's own
+``STRATEGIES`` table, which counts the SRF ports.
 
 This is a *strategy* package, not a mode package: it declares no modes,
 only a strategy that drives any mode with a ``skill`` knob.
@@ -19,10 +20,11 @@ PACKAGE = Package(
     name="skillopt",
     description="SkillOpt outer-loop strategy (microsoft/SkillOpt, MIT).",
     modes=(),
+    strategies=(SkillOptLoop,),
 )
 
 
 def register() -> None:
-    """Register the SkillOpt strategy without editing the library."""
+    """Register the SkillOpt strategy in ``STRATEGIES`` by hand (optional)."""
     from refactory_dsh import strategies
     strategies.register("skillopt", SkillOptLoop)
