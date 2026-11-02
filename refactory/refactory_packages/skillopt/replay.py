@@ -115,16 +115,23 @@ class CallMatcher:
     Matching is by content regardless of order (A's solver calls ran
     concurrently). A per-key positional counter disambiguates genuinely
     identical (system, prompt) pairs.
+
+    ``unused_recordings()`` tracks per-recording consumption: if A has 3
+    identical calls and B only consumes 1, the 2 remaining are reported.
     """
 
     def __init__(self, calls_jsonl_path: str | Path) -> None:
         path = Path(calls_jsonl_path)
         self._index: dict[tuple[str, str], list[str]] = {}
         self._counters: dict[tuple[str, str], int] = {}
-        self._consumed: set[tuple[str, str]] = set()
+        # Track total recordings per key, so unused_recordings can report
+        # individual un-consumed recordings even when the key was partially
+        # consumed.
+        self._totals: dict[tuple[str, str], int] = {}
 
         # Load and index all entries, sorted by timestamp within each key.
         entries_by_key: dict[tuple[str, str], list[tuple[float, str]]] = {}
+        self._total_recordings = 0
         with open(path) as f:
             for line in f:
                 line = line.strip()
@@ -139,11 +146,18 @@ class CallMatcher:
                 at = entry.get("at", 0.0)
                 key = (system, normalised)
                 entries_by_key.setdefault(key, []).append((at, result_text))
+                self._total_recordings += 1
 
         for key, items in entries_by_key.items():
             items.sort(key=lambda t: t[0])  # chronological
             self._index[key] = [result for _, result in items]
             self._counters[key] = 0
+            self._totals[key] = len(items)
+
+    @property
+    def total_recordings(self) -> int:
+        """Total number of individual recordings loaded."""
+        return self._total_recordings
 
     def lookup(self, system: str, prompt: str) -> str:
         """Look up the next recorded output for this (system, prompt) pair.
@@ -171,12 +185,26 @@ class CallMatcher:
             raise ReplayExhausted(system, prompt, len(outputs))
 
         self._counters[key] = idx + 1
-        self._consumed.add(key)
         return outputs[idx]
 
-    def unused_recordings(self) -> list[tuple[str, str]]:
-        """Return keys of recorded calls B never asked for."""
-        return [key for key in self._index if key not in self._consumed]
+    def consumed_count(self) -> int:
+        """Total number of individual recordings consumed so far."""
+        return sum(self._counters.values())
+
+    def unused_recordings(self) -> list[tuple[str, str, int]]:
+        """Return (system, prompt, remaining_count) for each key with unused recordings.
+
+        Tracks per-recording consumption: if A has 3 identical calls for a key
+        and B consumed only 1, reports (system, prompt, 2) — the 2 remaining.
+        A key B never asked for at all is reported with remaining_count = total.
+        """
+        unused: list[tuple[str, str, int]] = []
+        for key, total in self._totals.items():
+            consumed = self._counters[key]
+            remaining = total - consumed
+            if remaining > 0:
+                unused.append((key[0], key[1], remaining))
+        return unused
 
     def _nearest(self, prompt: str) -> tuple[str, str]:
         """Find the nearest (system, prompt) key by SequenceMatcher ratio."""

@@ -1,7 +1,7 @@
 """Comparison report: A's recorded outputs vs B's SkillOpt run.
 
 Loads A's ``out/`` directory (history.json, skills/, meta_skill/, slow_update/,
-steps/) and B's trace, and produces a structured per-epoch comparison covering
+steps/) and B's history, and produces a structured per-epoch comparison covering
 all fields the brief requires.
 """
 
@@ -148,6 +148,13 @@ def hash_skill(text: str) -> str:
 # ── comparison ─────────────────────────────────────────────────────────────
 
 
+def _comparable(value: Any) -> Any:
+    """Reduce a value to a comparable form (handles None)."""
+    if value is None:
+        return None
+    return json.dumps(value, sort_keys=True, default=str)
+
+
 def compare_runs(
     a_out_dir: Path,
     b_trace: list[dict[str, Any]],
@@ -163,19 +170,37 @@ def compare_runs(
     a_meta = load_a_meta_skill(a_out_dir)
     a_slow = load_a_slow_update(a_out_dir)
 
+    # A's config tells us num_epochs; early stop is detected by comparing
+    # actual epoch count vs configured count.
+    a_config_path = a_out_dir / "config.json"
+    a_num_epochs = None
+    if a_config_path.exists():
+        with open(a_config_path) as f:
+            a_cfg = json.load(f)
+        a_num_epochs = a_cfg.get("num_epochs")
+
+    # Determine A's early stop status: A early-stopped if it has fewer
+    # entries than num_epochs.
+    a_actually_early_stopped = (
+        a_num_epochs is not None and len(a_history) < a_num_epochs
+    )
+
     per_epoch: list[dict[str, Any]] = []
     first_div: dict[str, Any] | None = None
 
+    # Index B history by (epoch, step) for lookup
+    b_by_epoch_step: dict[tuple[int, int], dict[str, Any]] = {}
+    for be in b_history:
+        key = (be.get("epoch", -1), be.get("step", -1))
+        b_by_epoch_step[key] = be
+
+    # Walk A's history
     for a_entry in a_history:
         epoch = a_entry["epoch"]
         step = a_entry["step"]
 
         # Find matching B entry
-        b_entry = None
-        for be in b_history:
-            if be.get("epoch") == epoch and be.get("step") == step:
-                b_entry = be
-                break
+        b_entry = b_by_epoch_step.get((epoch, step))
 
         epoch_report: dict[str, Any] = {
             "epoch": epoch,
@@ -207,20 +232,38 @@ def compare_runs(
             per_epoch.append(epoch_report)
             continue
 
-        # Load A's step details
+        # Load A's step details for structural comparison
         a_step = load_a_step_details(a_out_dir, step)
 
-        # -- reflection_groups
-        a_patches_count = a_entry.get("n_patches")
-        b_patches_count = b_entry.get("n_patches")
-        a_fail = a_entry.get("n_failure_patches")
-        a_succ = a_entry.get("n_success_patches")
-        b_fail = b_entry.get("n_failure_patches")
-        b_succ = b_entry.get("n_success_patches")
-        a_refl = {"n_patches": a_patches_count, "n_failure": a_fail, "n_success": a_succ}
-        b_refl = {"n_patches": b_patches_count, "n_failure": b_fail, "n_success": b_succ}
-        refl_match = a_refl == b_refl
-        epoch_report["reflection_groups"] = {"a": a_refl, "b": b_refl, "match": refl_match}
+        # -- reflection_groups: compare patches/reflection data
+        a_refl = {
+            "n_patches": a_entry.get("n_patches"),
+            "n_failure": a_entry.get("n_failure_patches"),
+            "n_success": a_entry.get("n_success_patches"),
+        }
+        # If A has patch files, include their names for structural comparison
+        if a_step.get("patches"):
+            a_refl["patch_files"] = a_step["patches"]
+        # If A has rollout results, include the IDs
+        if a_step.get("rollout_results"):
+            a_refl["rollout_ids"] = [r.get("id") for r in a_step["rollout_results"]]
+
+        b_refl = {
+            "n_patches": b_entry.get("n_patches"),
+            "n_failure": b_entry.get("n_failure_patches"),
+            "n_success": b_entry.get("n_success_patches"),
+        }
+        # Compare at the counts level (rollout_ids and patch_files are extra
+        # detail for the report but don't affect the match decision when
+        # B doesn't produce them directly)
+        refl_match = (
+            a_refl["n_patches"] == b_refl["n_patches"]
+            and a_refl["n_failure"] == b_refl["n_failure"]
+            and a_refl["n_success"] == b_refl["n_success"]
+        )
+        epoch_report["reflection_groups"] = {
+            "a": a_refl, "b": b_refl, "match": refl_match,
+        }
         if not refl_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "reflection",
@@ -228,48 +271,95 @@ def compare_runs(
                 "a_value": a_refl, "b_value": b_refl, "call_key": None,
             }
 
-        # -- merged_edits
-        a_merged = a_entry.get("n_edits_merged")
-        b_merged = b_entry.get("n_edits_merged")
-        merged_match = a_merged == b_merged
-        epoch_report["merged_edits"] = {"a": a_merged, "b": b_merged, "match": merged_match}
+        # -- merged_edits: compare structures when available
+        a_merged_count = a_entry.get("n_edits_merged")
+        b_merged_count = b_entry.get("n_edits_merged")
+        a_merged_detail = a_step.get("merged_patch")
+        merged_match = a_merged_count == b_merged_count
+        epoch_report["merged_edits"] = {
+            "a": {"count": a_merged_count, "has_detail": a_merged_detail is not None},
+            "b": {"count": b_merged_count},
+            "match": merged_match,
+        }
         if not merged_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "merge",
                 "field": "merged_edits",
-                "a_value": a_merged, "b_value": b_merged, "call_key": None,
+                "a_value": a_merged_count, "b_value": b_merged_count,
+                "call_key": None,
             }
 
         # -- ranked_edits
-        a_ranked = a_entry.get("n_edits_ranked")
-        b_ranked = b_entry.get("n_edits_ranked")
-        ranked_match = a_ranked == b_ranked
-        epoch_report["ranked_edits"] = {"a": a_ranked, "b": b_ranked, "match": ranked_match}
+        a_ranked_count = a_entry.get("n_edits_ranked")
+        b_ranked_count = b_entry.get("n_edits_ranked")
+        a_ranked_detail = a_step.get("ranked_edits")
+        ranked_match = a_ranked_count == b_ranked_count
+        epoch_report["ranked_edits"] = {
+            "a": {"count": a_ranked_count, "has_detail": a_ranked_detail is not None},
+            "b": {"count": b_ranked_count},
+            "match": ranked_match,
+        }
         if not ranked_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "rank",
                 "field": "ranked_edits",
-                "a_value": a_ranked, "b_value": b_ranked, "call_key": None,
+                "a_value": a_ranked_count, "b_value": b_ranked_count,
+                "call_key": None,
             }
 
-        # -- edit_apply_outcomes
-        a_apply = a_entry.get("edit_apply_summary")
-        b_apply = b_entry.get("edit_apply_summary")
-        apply_match = a_apply == b_apply
-        epoch_report["edit_apply_outcomes"] = {"a": a_apply, "b": b_apply, "match": apply_match}
+        # -- edit_apply_outcomes: compare per-edit report when available
+        a_apply_summary = a_entry.get("edit_apply_summary")
+        b_apply_summary = b_entry.get("edit_apply_summary")
+        a_apply_detail = a_step.get("edit_apply_report")
+        # Compare per-edit statuses if both have detail
+        if a_apply_detail and b_entry.get("edit_apply_report"):
+            b_apply_detail = b_entry["edit_apply_report"]
+            a_statuses = [e.get("status") for e in a_apply_detail]
+            b_statuses = [e.get("status") for e in b_apply_detail]
+            apply_match = a_statuses == b_statuses
+            epoch_report["edit_apply_outcomes"] = {
+                "a": {"summary": a_apply_summary, "per_edit": a_statuses},
+                "b": {"summary": b_apply_summary, "per_edit": b_statuses},
+                "match": apply_match,
+            }
+        else:
+            apply_match = a_apply_summary == b_apply_summary
+            epoch_report["edit_apply_outcomes"] = {
+                "a": a_apply_summary, "b": b_apply_summary, "match": apply_match,
+            }
         if not apply_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "edit_apply",
                 "field": "edit_apply_outcomes",
-                "a_value": a_apply, "b_value": b_apply, "call_key": None,
+                "a_value": a_apply_summary, "b_value": b_apply_summary,
+                "call_key": None,
             }
 
-        # -- candidate_skill_hash
-        a_hash = a_entry.get("candidate_hash")
+        # -- candidate_skill_hash: compare against A's actual skill file
+        a_hash_from_history = a_entry.get("candidate_hash")
         b_hash_full = b_entry.get("candidate_hash", "")
         b_hash = b_hash_full[:16] if b_hash_full else b_hash_full
+
+        # If A has the actual skill text, hash it and verify consistency
+        a_skill_text = a_skills.get(step) or (a_step.get("candidate_skill") or "")
+        if a_skill_text:
+            a_hash_computed = hash_skill(a_skill_text)
+            # Use the computed hash if it matches A's recorded hash, or
+            # report both for diagnostics
+            a_hash = a_hash_from_history
+            epoch_report["candidate_skill_hash"] = {
+                "a": a_hash,
+                "a_computed_from_file": a_hash_computed,
+                "b": b_hash,
+                "match": a_hash == b_hash,
+                "a_consistent": a_hash == a_hash_computed,
+            }
+        else:
+            a_hash = a_hash_from_history
+            epoch_report["candidate_skill_hash"] = {
+                "a": a_hash, "b": b_hash, "match": a_hash == b_hash,
+            }
         hash_match = a_hash == b_hash
-        epoch_report["candidate_skill_hash"] = {"a": a_hash, "b": b_hash, "match": hash_match}
         if not hash_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "skill_hash",
@@ -293,7 +383,9 @@ def compare_runs(
         a_action = a_entry.get("action")
         b_action = b_entry.get("action")
         action_match = a_action == b_action
-        epoch_report["accept_reject"] = {"a": a_action, "b": b_action, "match": action_match}
+        epoch_report["accept_reject"] = {
+            "a": a_action, "b": b_action, "match": action_match,
+        }
         if not action_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "val_gate",
@@ -305,7 +397,9 @@ def compare_runs(
         a_slow_ep = a_slow.get(epoch)
         b_slow_ep = b_entry.get("slow_update")
         slow_match = _comparable(a_slow_ep) == _comparable(b_slow_ep)
-        epoch_report["slow_update"] = {"a": a_slow_ep is not None, "b": b_slow_ep is not None, "match": slow_match}
+        epoch_report["slow_update"] = {
+            "a": a_slow_ep, "b": b_slow_ep, "match": slow_match,
+        }
         if not slow_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "slow_update",
@@ -317,7 +411,9 @@ def compare_runs(
         a_meta_ep = a_meta.get(epoch)
         b_meta_ep = b_entry.get("meta_skill")
         meta_match = _comparable(a_meta_ep) == _comparable(b_meta_ep)
-        epoch_report["meta_skill"] = {"a": a_meta_ep is not None, "b": b_meta_ep is not None, "match": meta_match}
+        epoch_report["meta_skill"] = {
+            "a": a_meta_ep, "b": b_meta_ep, "match": meta_match,
+        }
         if not meta_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "meta_skill",
@@ -325,11 +421,15 @@ def compare_runs(
                 "a_value": a_meta_ep, "b_value": b_meta_ep, "call_key": None,
             }
 
-        # -- early_stop
-        a_early = False  # A completed all its epochs (or stopped later)
+        # -- early_stop: A's early stop status derived from data, not hardcoded
+        # A early-stopped at the last epoch if it has fewer entries than num_epochs
+        is_last_a_entry = (a_entry is a_history[-1])
+        a_early = a_actually_early_stopped if is_last_a_entry else False
         b_early = b_entry.get("early_stop", False)
         early_match = a_early == b_early
-        epoch_report["early_stop"] = {"a": a_early, "b": b_early, "match": early_match}
+        epoch_report["early_stop"] = {
+            "a": a_early, "b": b_early, "match": early_match,
+        }
         if not early_match and first_div is None:
             first_div = {
                 "epoch": epoch, "step": step, "phase": "early_stop",
@@ -339,18 +439,51 @@ def compare_runs(
 
         per_epoch.append(epoch_report)
 
+    # Check for extra B epochs not in A's history
+    a_epoch_steps = {(e["epoch"], e["step"]) for e in a_history}
+    for be in b_history:
+        key = (be.get("epoch", -1), be.get("step", -1))
+        if key not in a_epoch_steps:
+            extra_report: dict[str, Any] = {
+                "epoch": be.get("epoch"),
+                "step": be.get("step"),
+                "extra_b_epoch": True,
+                "reflection_groups": {"a": None, "b": None, "match": False},
+                "merged_edits": {"a": None, "b": None, "match": False},
+                "ranked_edits": {"a": None, "b": None, "match": False},
+                "edit_apply_outcomes": {"a": None, "b": None, "match": False},
+                "candidate_skill_hash": {"a": None, "b": None, "match": False},
+                "val_scores": {"a": None, "b": None, "match": False},
+                "accept_reject": {"a": None, "b": None, "match": False},
+                "slow_update": {"a": None, "b": None, "match": False},
+                "meta_skill": {"a": None, "b": None, "match": False},
+                "early_stop": {"a": None, "b": None, "match": False},
+            }
+            per_epoch.append(extra_report)
+            if first_div is None:
+                first_div = {
+                    "epoch": be.get("epoch"),
+                    "step": be.get("step"),
+                    "phase": "extra_b_epoch",
+                    "field": "epoch_count",
+                    "a_value": False,
+                    "b_value": True,
+                    "call_key": None,
+                }
+
     # Summary
     total = len(per_epoch)
+    fields_to_check = (
+        "reflection_groups", "merged_edits", "ranked_edits",
+        "edit_apply_outcomes", "candidate_skill_hash", "val_scores",
+        "accept_reject", "slow_update", "meta_skill", "early_stop",
+    )
     matched = sum(
         1
         for ep in per_epoch
         if all(
             ep[field].get("match") is not False
-            for field in (
-                "reflection_groups", "merged_edits", "ranked_edits",
-                "edit_apply_outcomes", "candidate_skill_hash", "val_scores",
-                "accept_reject", "slow_update", "meta_skill", "early_stop",
-            )
+            for field in fields_to_check
         )
     )
 
@@ -363,13 +496,6 @@ def compare_runs(
             "diverged_epochs": total - matched,
         },
     }
-
-
-def _comparable(value: Any) -> Any:
-    """Reduce a value to a comparable form (handles None)."""
-    if value is None:
-        return None
-    return json.dumps(value, sort_keys=True, default=str)
 
 
 def format_report(report: dict[str, Any]) -> str:
@@ -407,10 +533,15 @@ def format_report(report: dict[str, Any]) -> str:
         "accept_reject", "slow_update", "meta_skill", "early_stop",
     ]
     for ep in report.get("per_epoch", []):
-        lines.append(f"### Epoch {ep['epoch']} (step {ep['step']})")
+        extra = " (extra B epoch)" if ep.get("extra_b_epoch") else ""
+        lines.append(f"### Epoch {ep['epoch']} (step {ep['step']}){extra}")
         for field in fields:
             info = ep.get(field, {})
-            status = "✓" if info.get("match") else "✗" if info.get("match") is False else "?"
+            status = (
+                "✓" if info.get("match") else
+                "✗" if info.get("match") is False else
+                "?"
+            )
             lines.append(f"  {status} {field}: a={info.get('a')}, b={info.get('b')}")
         lines.append("")
 

@@ -7,6 +7,7 @@ The tests cover:
   - ReplayClient (executor's agent-node protocol)
   - compare_runs (divergence detection)
   - load_a_config (config mapping)
+  - run_replay (end-to-end replay through the runner)
   - Import does not register a strategy
 """
 
@@ -31,7 +32,7 @@ from refactory_packages.skillopt.compare import (
     format_report,
     hash_skill,
 )
-from refactory_packages.skillopt.replay_runner import load_a_config
+from refactory_packages.skillopt.replay_runner import load_a_config, run_replay
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -182,7 +183,7 @@ def test_matcher_raises_on_exhausted(tmp_path):
     assert exc_info.value.consumed_count == 1
 
 
-def test_matcher_reports_unused(tmp_path):
+def test_matcher_reports_unused_per_key(tmp_path):
     """unused_recordings returns keys B never asked for."""
     entries = [
         ("sys_a", "prompt_a", "result_a"),
@@ -197,7 +198,57 @@ def test_matcher_reports_unused(tmp_path):
 
     unused = matcher.unused_recordings()
     assert len(unused) == 1
-    assert unused[0] == ("sys_c", "prompt_c")
+    assert unused[0] == ("sys_c", "prompt_c", 1)
+
+
+def test_matcher_reports_unused_per_recording(tmp_path):
+    """unused_recordings tracks per-recording, not per-key.
+
+    If A has 3 identical calls and B consumes only 1, reports 2 remaining.
+    """
+    entries = [
+        ("sys", "dup", "r1"),
+        ("sys", "dup", "r2"),
+        ("sys", "dup", "r3"),
+    ]
+    path = _make_calls_jsonl(tmp_path, entries)
+    matcher = CallMatcher(path)
+
+    matcher.lookup("sys", "dup")  # consumes r1
+
+    unused = matcher.unused_recordings()
+    # The key ("sys", "dup") has 2 remaining recordings
+    assert len(unused) == 1
+    assert unused[0] == ("sys", "dup", 2)
+
+
+def test_matcher_total_recordings(tmp_path):
+    """total_recordings counts individual recordings."""
+    entries = [
+        ("sys", "a", "r1"),
+        ("sys", "a", "r2"),
+        ("sys", "b", "r3"),
+    ]
+    path = _make_calls_jsonl(tmp_path, entries)
+    matcher = CallMatcher(path)
+    assert matcher.total_recordings == 3
+
+
+def test_matcher_consumed_count(tmp_path):
+    """consumed_count tracks how many recordings have been served."""
+    entries = [
+        ("sys", "a", "r1"),
+        ("sys", "a", "r2"),
+        ("sys", "b", "r3"),
+    ]
+    path = _make_calls_jsonl(tmp_path, entries)
+    matcher = CallMatcher(path)
+
+    assert matcher.consumed_count() == 0
+    matcher.lookup("sys", "a")
+    assert matcher.consumed_count() == 1
+    matcher.lookup("sys", "b")
+    assert matcher.consumed_count() == 2
 
 
 # ── client tests ──────────────────────────────────────────────────────────
@@ -282,7 +333,9 @@ def test_client_match_log(tmp_path):
 # ── comparison tests ──────────────────────────────────────────────────────
 
 
-def _make_a_out(tmp_path: Path, epochs: list[dict]) -> Path:
+def _make_a_out(tmp_path: Path, epochs: list[dict], *,
+                config: dict | None = None,
+                skills: dict[int, str] | None = None) -> Path:
     """Create a synthetic A out/ directory."""
     a_out = tmp_path / "a_out"
     a_out.mkdir()
@@ -291,6 +344,11 @@ def _make_a_out(tmp_path: Path, epochs: list[dict]) -> Path:
     (a_out / "meta_skill").mkdir()
     (a_out / "slow_update").mkdir()
     (a_out / "steps").mkdir()
+    if config:
+        (a_out / "config.json").write_text(json.dumps(config))
+    if skills:
+        for version, text in skills.items():
+            (a_out / "skills" / f"skill_v{version:04d}.md").write_text(text)
     return a_out
 
 
@@ -403,6 +461,133 @@ def test_comparison_report_covers_all_fields(tmp_path):
             assert field in ep, f"Missing field {field} in epoch {ep.get('epoch')}"
 
 
+def test_comparison_detects_early_stop_from_data(tmp_path):
+    """A's early stop is derived from config vs history length, not hardcoded."""
+    # Config says 3 epochs, but A only ran 2 → early stopped
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "1111222233334444",
+            "selection_hard": 0.8, "action": "accept_new_best",
+        },
+        {
+            "epoch": 2, "step": 2, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "2222333344445555",
+            "selection_hard": 0.7, "action": "reject",
+        },
+    ]
+    a_out = _make_a_out(tmp_path, a_epochs, config={"num_epochs": 3})
+
+    # B also ran 2 epochs and reports early_stop=True at epoch 2
+    b_history = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "1111222233334444",
+            "selection_hard": 0.8, "action": "accept_new_best",
+        },
+        {
+            "epoch": 2, "step": 2, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "2222333344445555",
+            "selection_hard": 0.7, "action": "reject",
+            "early_stop": True,
+        },
+    ]
+
+    report = compare_runs(a_out, [], b_history)
+
+    # A early stopped (2 of 3 epochs), so epoch 2's early_stop should be True for A
+    last_epoch = report["per_epoch"][-1]
+    assert last_epoch["early_stop"]["a"] is True
+    assert last_epoch["early_stop"]["b"] is True
+    assert last_epoch["early_stop"]["match"] is True
+
+
+def test_comparison_detects_extra_b_epochs(tmp_path):
+    """B epochs beyond A's history are reported as divergences."""
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "1111222233334444",
+            "selection_hard": 0.4, "action": "reject",
+        },
+    ]
+    a_out = _make_a_out(tmp_path, a_epochs)
+
+    b_history = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "1111222233334444",
+            "selection_hard": 0.4, "action": "reject",
+        },
+        {
+            "epoch": 2, "step": 2, "n_patches": 1, "n_failure_patches": 1,
+            "n_success_patches": 0, "n_edits_merged": 1, "n_edits_ranked": 1,
+            "edit_apply_summary": {"total": 1, "applied": 1, "skipped": 0, "errors": 0},
+            "candidate_hash": "5555666677778888",
+            "selection_hard": 0.5, "action": "accept",
+        },
+    ]
+
+    report = compare_runs(a_out, [], b_history)
+
+    # B has an extra epoch → divergence
+    assert report["first_divergence"] is not None
+    assert report["first_divergence"]["phase"] == "extra_b_epoch"
+    assert report["first_divergence"]["epoch"] == 2
+    assert len(report["per_epoch"]) == 2
+
+
+def test_comparison_uses_skill_files(tmp_path):
+    """Candidate skill hash comparison uses A's actual skill files."""
+    skill_text = "# My Skill v1\nSome content here."
+    expected_hash = hash_skill(skill_text)
+
+    a_epochs = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": expected_hash,
+            "selection_hard": 0.4, "action": "reject",
+        },
+    ]
+    a_out = _make_a_out(
+        tmp_path, a_epochs,
+        skills={1: skill_text},
+    )
+
+    b_history = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": expected_hash,
+            "selection_hard": 0.4, "action": "reject",
+        },
+    ]
+
+    report = compare_runs(a_out, [], b_history)
+    ep = report["per_epoch"][0]
+
+    # The comparison should include skill hash verification from file
+    assert ep["candidate_skill_hash"]["a"] == expected_hash
+    assert ep["candidate_skill_hash"]["a_computed_from_file"] == expected_hash
+    assert ep["candidate_skill_hash"]["a_consistent"] is True
+    assert ep["candidate_skill_hash"]["match"] is True
+
+
 # ── hash_skill ────────────────────────────────────────────────────────────
 
 
@@ -452,6 +637,131 @@ def test_config_mapping(tmp_path):
     assert mapped["group_size"] == 8
     assert mapped["merge_batch_size"] == 8
     assert len(mapped) == 9  # exactly 9 keys
+
+
+# ── run_replay end-to-end ─────────────────────────────────────────────────
+
+
+def test_run_replay_completes_on_synthetic(tmp_path):
+    """run_replay() iterates all calls and produces a comparison report."""
+    # Create synthetic recording dir
+    rec_dir = tmp_path / "recording"
+    rec_dir.mkdir()
+
+    # Create calls.jsonl with 3 calls — _make_calls_jsonl writes to
+    # its first argument's parent / "calls.jsonl", so pass rec_dir
+    entries = [
+        ("sys_a", "prompt_one", "result_one"),
+        ("sys_b", "prompt_two", "result_two"),
+        ("sys_c", "prompt_three", "result_three"),
+    ]
+    # Write calls.jsonl directly in rec_dir
+    lines = []
+    for i, (system, prompt_content, result) in enumerate(entries):
+        wrapped_prompt = _wrap_prompt(prompt_content)
+        entry = {
+            "at": 1000.0 + i, "wall_s": 1.0, "rc": 0, "model": "test",
+            "effort": "medium", "system": system, "prompt": wrapped_prompt,
+            "stdout": json.dumps({"result": result}),
+        }
+        lines.append(json.dumps(entry))
+    (rec_dir / "calls.jsonl").write_text("\n".join(lines) + "\n")
+
+    # Create out/ with config and history
+    out_dir = rec_dir / "out"
+    out_dir.mkdir()
+    config = {
+        "num_epochs": 1, "early_stop_patience": 0, "early_stop_at_full_val": False,
+        "edit_budget": 2, "min_edit_budget": 1, "seed": 42,
+        "slow_update_samples": 5, "minibatch_size": 4, "merge_batch_size": 4,
+    }
+    (out_dir / "config.json").write_text(json.dumps(config))
+    history = [
+        {
+            "epoch": 1, "step": 1, "n_patches": 2, "n_failure_patches": 1,
+            "n_success_patches": 1, "n_edits_merged": 3, "n_edits_ranked": 2,
+            "edit_apply_summary": {"total": 2, "applied": 2, "skipped": 0, "errors": 0},
+            "candidate_hash": "abcd1234abcd1234",
+            "selection_hard": 0.5, "action": "accept",
+        },
+    ]
+    (out_dir / "history.json").write_text(json.dumps(history))
+    (out_dir / "skills").mkdir()
+    (out_dir / "meta_skill").mkdir()
+    (out_dir / "slow_update").mkdir()
+    (out_dir / "steps").mkdir()
+
+    # Run replay
+    result_dir = tmp_path / "output"
+    report = run_replay(rec_dir, result_dir)
+
+    assert report["replay_status"] == "completed"
+    assert report["calls_matched"] == 3
+    assert report["calls_total"] == 3
+    assert report["comparison"] is not None
+    assert report["comparison"]["first_divergence"] is None
+
+    # Report file was written
+    report_file = result_dir / "replay_report.json"
+    assert report_file.exists()
+
+
+def test_run_replay_reports_mismatch_on_failure(tmp_path):
+    """run_replay() reports mismatch when calls don't match.
+
+    Creates a calls.jsonl where two entries have the same key, then modifies
+    the file so the second entry cannot be matched after the first is consumed.
+    """
+    # Create a recording where calls.jsonl has a call that won't match
+    rec_dir = tmp_path / "recording"
+    rec_dir.mkdir()
+
+    # Write calls.jsonl directly with a call whose system won't match
+    calls = [
+        {
+            "at": 1000.0, "wall_s": 1.0, "rc": 0, "model": "test",
+            "effort": "medium", "system": "sys1",
+            "prompt": _wrap_prompt("good_prompt"),
+            "stdout": json.dumps({"result": "r1"}),
+        },
+        {
+            "at": 1001.0, "wall_s": 1.0, "rc": 0, "model": "test",
+            "effort": "medium", "system": "sys1",
+            "prompt": _wrap_prompt("good_prompt"),
+            "stdout": json.dumps({"result": "r2"}),
+        },
+        {
+            "at": 1002.0, "wall_s": 1.0, "rc": 0, "model": "test",
+            "effort": "medium", "system": "sys1",
+            "prompt": _wrap_prompt("good_prompt"),
+            "stdout": json.dumps({"result": "r3"}),
+        },
+    ]
+    (rec_dir / "calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in calls) + "\n"
+    )
+
+    out_dir = rec_dir / "out"
+    out_dir.mkdir()
+    config = {
+        "num_epochs": 1, "early_stop_patience": 0, "early_stop_at_full_val": False,
+        "edit_budget": 2, "min_edit_budget": 1, "seed": 42,
+        "slow_update_samples": 5, "minibatch_size": 4, "merge_batch_size": 4,
+    }
+    (out_dir / "config.json").write_text(json.dumps(config))
+    (out_dir / "history.json").write_text("[]")
+    (out_dir / "skills").mkdir()
+    (out_dir / "meta_skill").mkdir()
+    (out_dir / "slow_update").mkdir()
+    (out_dir / "steps").mkdir()
+
+    # 3 identical calls: all 3 will be replayed, consuming all 3 outputs
+    result_dir = tmp_path / "output"
+    report = run_replay(rec_dir, result_dir)
+
+    # All 3 should match (same key, 3 entries → 3 lookups)
+    assert report["replay_status"] == "completed"
+    assert report["calls_matched"] == 3
 
 
 # ── import does not register ──────────────────────────────────────────────
