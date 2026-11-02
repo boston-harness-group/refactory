@@ -286,6 +286,20 @@ class Run:
         """
         self._loop._save_strategy_state()  # noqa: SLF001
 
+    def record_proposal_round(self, error: str | None = None) -> None:
+        """Count one model call a custom strategy made to propose, and its failure.
+
+        A custom strategy calls its model directly, not through the loop's
+        ``propose``, so the run report's proposer health (``loop._proposer_health``:
+        rounds, failures, ``all_failed``) would otherwise read zero rounds. A
+        strategy that survives a failed call (``error`` names it) records it here,
+        so a run whose model never answered says so in its report.
+        """
+        optimizer = self._loop.optimizer
+        optimizer.proposal_rounds += 1
+        if error is not None:
+            optimizer.proposal_failures.append(str(error))
+
     def log(self, message: str) -> None:
         self.log_lines.append(str(message))
         (self._loop.root / "strategy.log").parent.mkdir(parents=True, exist_ok=True)

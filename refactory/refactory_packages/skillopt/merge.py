@@ -10,7 +10,7 @@ from typing import Any
 
 from refactory_packages.skillopt import prompts
 from refactory_packages.skillopt.json_utils import extract_json
-from refactory_packages.skillopt.trace import TraceRecorder
+from refactory_packages.skillopt.trace import TraceRecorder, ask
 
 # ── hierarchical merge ────────────────────────────────────────────────────
 
@@ -57,10 +57,7 @@ def hierarchical_merge(
     user = prompts.format_merge_final_user(
         skill_text, failure_merged, success_merged, len(f_edits), len(s_edits), meta_skill,
     )
-    output = client.complete(user, system=prompts.MERGE_FINAL_SYSTEM, call_key=key)
-    trace.record_model_call(
-        "merge_final", prompts.MERGE_FINAL_SYSTEM, user, output, call_key=key,
-    )
+    output = ask(client, trace, "merge_final", user, system=prompts.MERGE_FINAL_SYSTEM, call_key=key)
     final = _parse_merge(output)
     if final is not None:
         trace.record_decision("merge_final", fallback=False, n_edits=len(final["edits"]))
@@ -121,8 +118,7 @@ def _merge_batch(
     """Merge one batch of patches into one — aggregate.py:28-76."""
     key = (step_type, epoch, batch_index, level)
     user = prompts.format_merge_user(skill_text, patches, meta_skill, level)
-    output = client.complete(user, system=system, call_key=key)
-    trace.record_model_call(step_type, system, user, output, call_key=key)
+    output = ask(client, trace, step_type, user, system=system, call_key=key)
     merged = _parse_merge(output)
     if merged is not None:
         for edit in merged["edits"]:
@@ -166,8 +162,7 @@ def rank(
 
     call_key = ("rank", epoch, 0, 0)
     user = prompts.format_rank_user(skill_text, merged_edits, budget, meta_skill)
-    output = client.complete(user, system=prompts.RANK_SYSTEM, call_key=call_key)
-    trace.record_model_call("rank", prompts.RANK_SYSTEM, user, output, call_key=call_key)
+    output = ask(client, trace, "rank", user, system=prompts.RANK_SYSTEM, call_key=call_key)
 
     selected = _parse_ranking(output, merged_edits, budget)
     trace.record_decision("rank", edit_budget=budget, selected_count=len(selected))

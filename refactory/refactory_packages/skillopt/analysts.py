@@ -14,8 +14,9 @@ import random
 from typing import Any
 
 from refactory_packages.skillopt import prompts
+from refactory_packages.skillopt.env import SkillOptEnv
 from refactory_packages.skillopt.json_utils import extract_json
-from refactory_packages.skillopt.trace import TraceRecorder
+from refactory_packages.skillopt.trace import TraceRecorder, ask
 
 
 def reflect(
@@ -28,6 +29,9 @@ def reflect(
     group_size: int,
     epoch: int,
     trace: TraceRecorder,
+    *,
+    env: SkillOptEnv | None = None,
+    knobs: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run failure and success analysts over train records.
 
@@ -35,7 +39,14 @@ def reflect(
     "edits"}`` patch per analyst group that proposed edits, in group order.
     ``edit_budget`` is the analysts' constant L (envs/base.py:265 passes the
     adapter's fixed ``edit_budget``, not the scheduler's value).
+
+    ``env`` is the mode's package as SkillOpt's environment: its
+    ``analyst_error``/``analyst_success`` prompts (envs/base.py:304-330 load
+    them with the env override) and its rendering of each record as a rollout
+    result, given the ``knobs`` the records were rolled out with.
     """
+    env = env if env is not None else SkillOptEnv()
+    knobs = dict(knobs or {})
     failures = [r for r in records if not r.get("passed", False)]
     successes = [r for r in records if r.get("passed", False)]
 
@@ -51,23 +62,33 @@ def reflect(
         ("success", successes, success_patches),
     ):
         step_type = f"analyst_{kind}"
-        system = (
-            prompts.FAILURE_ANALYST_SYSTEM if kind == "failure"
-            else prompts.SUCCESS_ANALYST_SYSTEM
-        )
+        system = env.prompt("analyst_error" if kind == "failure" else "analyst_success")
         for gi, group in enumerate(_chunk(items, group_size)):
             call_key = (step_type, epoch, gi, 0)
             user = prompts.format_analyst_user(
-                skill_text, group, edit_budget, meta_skill, failure=(kind == "failure"),
+                skill_text,
+                [env.rollout_result(record, knobs) for record in group],
+                edit_budget, meta_skill, failure=(kind == "failure"),
             )
-            output = client.complete(user, system=system, call_key=call_key)
-            trace.record_model_call(step_type, system, user, output, call_key=call_key)
+            if not user:
+                # No trajectory to show: SkillOpt makes no call (reflect.py:324-325).
+                trace.record_decision(
+                    step_type, group_index=gi,
+                    record_ids=[r.get("id", "") for r in group], n_edits=0,
+                )
+                continue
+            output = ask(client, trace, step_type, user, system=system, call_key=call_key)
             patch = _parse_patch(output, kind, edit_budget)
+            parsed = extract_json(output) if isinstance(output, str) else None
             trace.record_decision(
                 step_type,
                 group_index=gi,
                 record_ids=[r.get("id", "") for r in group],
                 n_edits=len(patch["edits"]) if patch else 0,
+                # Whether the reply carried a patch at all, edits or none: the
+                # groups SkillOpt writes a minibatch_*.json for (reflect.py:646-650
+                # on a reply with "patch", :366 / :460). Observability only.
+                returned_patch=isinstance(parsed, dict) and bool(parsed) and "patch" in parsed,
             )
             if patch:
                 out.append(patch)
