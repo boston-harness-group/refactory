@@ -368,6 +368,87 @@ def test_records_have_prediction_and_label(walker_result):
     assert item_1["label_text"] == "Converges conditionally"
 
 
+# ── correction #2: use_theorem / use_sketch gating ───────────────────────
+
+def test_default_prompt_excludes_theorem_and_sketch():
+    """With default use_theorem=False, use_sketch=False (default.yaml:21-22),
+    format_prompt must NOT include ## Theorem or ## Proof Sketch even when
+    the item has non-empty theorem/sketch fields.
+    Proves correction #2 — SkillOpt's _build_user() at rollout.py:41-44 gates
+    on these flags."""
+    from refactory_packages.livemath.ops import format_prompt
+
+    class FakeCtx:
+        def read_json(self, path, default=None):
+            return {
+                "question": "Which series converges?",
+                "choices": [
+                    {"label": "A", "text": "Diverges"},
+                    {"label": "B", "text": "Converges"},
+                ],
+                "theorem": "Let $f$ be continuous on $[0,1]$.",
+                "sketch": "Apply the intermediate value theorem.",
+                "use_theorem": False,
+                "use_sketch": False,
+            }
+        def knob(self, name, default=""):
+            return default
+
+    result = format_prompt(FakeCtx())
+    prompt = result["user_prompt"]
+    assert "## Question" in prompt
+    assert "## Choices" in prompt
+    # Theorem and sketch must NOT appear with defaults
+    assert "## Theorem" not in prompt, (
+        "Theorem section included despite use_theorem=False"
+    )
+    assert "## Proof Sketch" not in prompt, (
+        "Proof Sketch section included despite use_sketch=False"
+    )
+
+
+def test_prompt_includes_theorem_when_enabled():
+    """When use_theorem=True and use_sketch=True, sections appear.
+    Complements test_default_prompt_excludes_theorem_and_sketch."""
+    from refactory_packages.livemath.ops import format_prompt
+
+    class FakeCtx:
+        def read_json(self, path, default=None):
+            return {
+                "question": "Which series converges?",
+                "choices": [
+                    {"label": "A", "text": "Diverges"},
+                    {"label": "B", "text": "Converges"},
+                ],
+                "theorem": "Let $f$ be continuous on $[0,1]$.",
+                "sketch": "Apply the intermediate value theorem.",
+                "use_theorem": True,
+                "use_sketch": True,
+            }
+        def knob(self, name, default=""):
+            return default
+
+    result = format_prompt(FakeCtx())
+    prompt = result["user_prompt"]
+    assert "## Theorem" in prompt
+    assert "## Proof Sketch" in prompt
+
+
+# ── correction #3: solve node role ────────────────────────────────────────
+
+def test_solve_node_role_is_solver():
+    """The solve node must use role='solver', not 'ceo' or 'builder'.
+    Proves correction #3."""
+    from refactory_packages.livemath.mode import Solver
+
+    mode = Solver()
+    graph = mode.build()
+    solve_node = graph.nodes["solve"]
+    assert solve_node.role == "solver", (
+        f"solve node role is {solve_node.role!r}, expected 'solver'"
+    )
+
+
 # ── lowering ──────────────────────────────────────────────────────────────
 
 def test_lowering_works():
@@ -384,6 +465,8 @@ def test_lowering_works():
     # Agent node solve has tool_policy=none
     solve_node = workflow.nodes["solve"]
     assert solve_node.tool_policy == "none"
+    # Role must be solver (correction #3)
+    assert solve_node.role.value == "solver"
     # System prompt is non-empty
     assert solve_node.system_prompt
     # Prompt template is non-empty

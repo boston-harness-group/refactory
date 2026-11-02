@@ -68,7 +68,7 @@ class Solver(nn.Mode):
             system_prompt_template=SYSTEM_PROMPT,
             writes=("answer.txt",),
             tool_policy="none",
-            role="builder",
+            role="solver",
         ))
         graph.add(nn.Node(
             "finish", "op",

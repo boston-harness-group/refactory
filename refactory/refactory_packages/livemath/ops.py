@@ -29,13 +29,15 @@ def format_prompt(ctx: Any) -> dict[str, Any]:
         f"## Question\n{question}",
         f"## Choices\n{_format_choices(choices)}",
     ]
-    # use_theorem and use_sketch default to False per
-    # configs/livemathematicianbench/default.yaml:21-22
+    # use_theorem and use_sketch gated per SkillOpt's _build_user() at
+    # rollout.py:41-44; defaults False per default.yaml:21-22
+    use_theorem = item.get("use_theorem", False)
+    use_sketch = item.get("use_sketch", False)
     theorem = item.get("theorem", "")
     sketch = item.get("sketch", "")
-    if theorem:
+    if use_theorem and theorem:
         parts.append(f"## Theorem\n{theorem}")
-    if sketch:
+    if use_sketch and sketch:
         parts.append(f"## Proof Sketch\n{sketch}")
     user_prompt = "\n\n".join(parts)
 

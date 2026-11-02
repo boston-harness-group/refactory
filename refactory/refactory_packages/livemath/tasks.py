@@ -15,7 +15,7 @@ from typing import Any
 
 from refactory_dsh.task import Task, TaskInstance, VerifyResult
 
-from .grading import evaluate
+from .grading import evaluate, normalize_label as _normalize_label
 from .shuffling import shuffle_item_choices
 
 # Ported from skillopt/envs/livemathematicianbench/dataloader.py:16 (MIT)
@@ -59,11 +59,6 @@ def _coerce_theorem_types(raw: Any) -> list[str]:
         return []
     text = str(raw).strip()
     return [text] if text else []
-
-
-# Ported from skillopt/envs/livemathematicianbench/dataloader.py:73-74 (MIT)
-def _normalize_label(text: str) -> str:
-    return str(text).strip().upper().rstrip(".):")
 
 
 # Ported from skillopt/envs/livemathematicianbench/dataloader.py:77-120 (MIT)
@@ -211,6 +206,11 @@ class LiveMathTask(Task):
                     "theorem": item.get("theorem", ""),
                     "sketch": item.get("sketch", ""),
                     "theorem_type": item.get("theorem_type", []),
+                    # Propagated to current_item.json so format_prompt
+                    # can gate ## Theorem / ## Proof Sketch sections
+                    # (SkillOpt rollout.py:41-44).
+                    "use_theorem": self.use_theorem,
+                    "use_sketch": self.use_sketch,
                 },
             ))
         return result

@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import random
 
+from .grading import normalize_label as _normalize_label
+
 # Ported from skillopt/envs/livemathematicianbench/dataloader.py:16 (MIT)
 _CHOICE_LABELS = ["A", "B", "C", "D", "E", "F", "G"]
 
@@ -15,10 +17,6 @@ _CHOICE_LABELS = ["A", "B", "C", "D", "E", "F", "G"]
 def item_shuffle_seed(item_id: str, seed: int) -> int:
     digest = hashlib.sha256(f"{seed}:{item_id}".encode("utf-8")).hexdigest()
     return int(digest[:16], 16)
-
-
-def _normalize_label(text: str) -> str:
-    return str(text).strip().upper().rstrip(".):")
 
 
 # Ported from skillopt/envs/livemathematicianbench/dataloader.py:200-226 (MIT)
