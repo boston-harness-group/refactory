@@ -287,6 +287,18 @@ def test_a_pytest_probe_whose_assertion_fails_is_still_a_defect(tmp_path, monkey
     assert [item["where"] for item in probe_rerun.defects(results)] == ["reviews/probes/R1-1.py"]
 
 
+def test_a_pytest_probe_that_cannot_import_the_change_is_still_a_defect(tmp_path, monkeypatch):
+    """pytest exits 2 when collection fails -- here because the function the brief asked
+    for was never added. That is the probe's verdict on the change, not a probe pytest
+    could not run, so it must still block."""
+    probe = ("# R1: triple, which the brief asks for\nfrom calc import triple\n\n\n"
+             "def test_triple():\n    assert triple(2) == 6\n")
+    ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"), {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    assert (results["probes"][0]["status"], results["probes"][0]["exit_code"]) == ("fail", 2)
+    assert [item["where"] for item in probe_rerun.defects(results)] == ["reviews/probes/R1-1.py"]
+
+
 def test_a_timed_out_probe_is_a_blocking_defect():
     results = {"per_probe_s": 120, "probes": [
         {"file": "R1-1.sh", "requirement": "R1", "status": "timed_out", "exit_code": None,

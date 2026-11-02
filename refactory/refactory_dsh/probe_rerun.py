@@ -340,9 +340,11 @@ _NO_MODULE = re.compile(r"ModuleNotFoundError: No module named '([\w.]+)'")
 _UNKNOWN_LOCATION = re.compile(r"ImportError: cannot import name '\w+' from '([\w.]+)' \(unknown location\)")
 _NOT_FOUND = re.compile(r"(?:^|\s)([\w.+-]+): (?:command )?not found\s*$", re.M)
 _NODE_MISSING = re.compile(r"Cannot find (?:module|package) '([^']+)'")
-#: pytest's own exit codes for a run that never got to test anything: interrupted (2),
-#: internal error (3), usage error (4), nothing collected (5).
-_PYTEST_NOT_RUN = {2, 3, 4, 5}
+#: pytest's own exit codes for a run that never got to test anything: internal error (3),
+#: usage error (4), nothing collected (5). Not 2: pytest exits 2 on an error during
+#: collection, which is what a probe importing a function the change never added, or a
+#: changed module that no longer loads, produces -- the probe's verdict on the change.
+_PYTEST_NOT_RUN = {3, 4, 5}
 #: A test function pytest could not call, because a parameter is not a fixture.
 _MISSING_FIXTURE = re.compile(r"^E\s+fixture '[^']+' not found", re.M)
 
