@@ -462,6 +462,20 @@ def write_prompt(ctx: Any) -> dict[str, Any]:
     return {}
 
 
+def read_and_write_notes(ctx: Any) -> dict[str, Any]:
+    """In a pass: read the run-level ``notes.md`` and directory ``data/``, then write both.
+
+    Fails (the item errors) when the run's content is not visible in the pass.
+    """
+    item = str((ctx.read_json("current_item.json", {}) or {}).get("id"))
+    notes = ctx.read_text("notes.md")
+    assert notes.startswith("RUN"), notes
+    assert ctx.read_text("data/seed.txt") == "seed", "data/ not read through"
+    ctx.write_text("notes.md", notes + "+" + item)
+    ctx.write_text(f"data/{item}.txt", item)
+    return {}
+
+
 def read_prompt(ctx: Any) -> dict[str, Any]:
     """In a pass: read the upstream ``prompt.txt``; FileNotFoundError when it is not read through."""
     assert ctx.read_text("prompt.txt") == "from prep"

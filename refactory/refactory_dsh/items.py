@@ -114,23 +114,26 @@ def pass_read_through(
     body: set[str] | list[str] | tuple[str, ...],
     data_writes: tuple[str, ...] | list[str] = (),
 ) -> tuple[str, ...]:
-    """The run-level files a pass reads through: what its own nodes read and do not write.
+    """The run-level files a pass reads through: everything its own nodes read.
 
     *declared* maps node ids to ``(reads, writes)``; *body* names the pass's nodes
     (``Graph.data_body``); *data_writes* are the data node's own writes (the
-    current item). Only the body's writes are subtracted: a file a node upstream
-    of the data node wrote is a run-level input the pass must see. One function
-    for both runtimes, so their pass directories cannot drift.
+    current item), which each pass gets fresh and must not link.
+
+    A file the body both reads and writes is still read through when it exists at
+    run level: its nodes expect the run's content, as before pass isolation, and a
+    write detaches the link into a private copy (`detach_read_through`), so the run's
+    file is not changed. A read the run does not have is simply not linked
+    (`prepare_pass_dir` links only what exists). One function for both runtimes, so
+    their pass directories cannot drift.
     """
     reads: set[str] = set()
-    writes: set[str] = set(data_writes)
     for node_id in body:
         entry = declared.get(node_id)
         if entry is None:
             continue
         reads.update(entry[0])
-        writes.update(entry[1])
-    return tuple(sorted(r for r in reads if r not in writes))
+    return tuple(sorted(r for r in reads if r not in set(data_writes)))
 
 
 def prepare_pass_dir(

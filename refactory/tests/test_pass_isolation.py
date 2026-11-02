@@ -175,6 +175,46 @@ def test_spine_pass_reads_a_file_written_upstream(tmp_path):
     assert "subgraph_nodes" in json.loads((run / ".refactory/declarations.json").read_text())["data"]
 
 
+def _read_and_write_graph() -> nn.Graph:
+    return _graph([nn.Node("work", "op", call="loop_ops:read_and_write_notes",
+                           reads=(CURRENT_ITEM, "notes.md", "data"), writes=("notes.md", "data"))])
+
+
+def _seed_run_level(workdir: Path) -> None:
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "notes.md").write_text("RUN")
+    (workdir / "data").mkdir(exist_ok=True)
+    (workdir / "data" / "seed.txt").write_text("seed")
+
+
+def _assert_read_and_write_isolated(workdir: Path) -> None:
+    for name in ("a_0", "b_1", "c_2"):
+        assert (workdir / "passes/data" / name / "notes.md").read_text().startswith("RUN+"), name
+    assert (workdir / "notes.md").read_text() == "RUN", "a pass changed the run-level file"
+    assert sorted(p.name for p in (workdir / "data").iterdir()) == ["seed.txt"]
+
+
+def test_walker_pass_sees_a_run_level_file_it_both_reads_and_writes(tmp_path):
+    """A file (and a directory) the pass declares as both read and written, and that
+    exists at run level, is read through; the pass's write lands in its own copy.
+
+    Fails when the read-through set subtracts the body's own writes: the pass then sees
+    no notes.md and no data/, as it did not before pass isolation."""
+    run = tmp_path / "run"
+    _seed_run_level(run)
+    result = execute(_read_and_write_graph(), run)
+    assert result.exit_ok, result.error
+    _assert_read_and_write_isolated(run)
+
+
+@needs_spine
+def test_spine_pass_sees_a_run_level_file_it_both_reads_and_writes(tmp_path):
+    run = tmp_path / "spine"
+    _seed_run_level(run)
+    assert _spine(_read_and_write_graph(), run, tmp_path) == 0
+    _assert_read_and_write_isolated(run)
+
+
 def test_data_body_is_the_subgraph_only():
     """``Graph.data_body`` holds entry..exit, not the nodes around the data node."""
     graph = _graph(
