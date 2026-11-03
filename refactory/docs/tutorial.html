@@ -351,7 +351,7 @@ options:
                         stored choice; see `refactory model set`)
   --model MODEL         model id for this run, e.g. deepseek-v4-pro (default:
                         the stored choice; see `refactory model set`)
-  --approve GATE=VALUE, --verdict GATE=VALUE
+  --approve, --verdict GATE=VALUE
                         answer a gate up front, e.g. gate_strategy=proceed,
                         for a run with nobody sitting at it (repeatable;
                         --verdict is an alias of --approve)
@@ -473,6 +473,7 @@ options:
                                     [--validation-reserve-tokens VALIDATION_RESERVE_TOKENS]
                                     [--max-rollouts MAX_ROLLOUTS]
                                     [--parts-manifest PARTS_MANIFEST]
+                                    [--seed-results SEED_RESULTS]
                                     [--knob NAME=VALUE] [--frozen KNOB]
                                     [--allowed-ops OP]
                                     [--role-routes ROLE_ROUTES]
@@ -523,6 +524,7 @@ options:
   --validation-reserve-tokens VALIDATION_RESERVE_TOKENS
   --max-rollouts MAX_ROLLOUTS
   --parts-manifest PARTS_MANIFEST
+  --seed-results SEED_RESULTS
   --knob NAME=VALUE
   --frozen KNOB
   --allowed-ops OP
