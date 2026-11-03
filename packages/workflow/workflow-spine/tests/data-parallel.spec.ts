@@ -106,7 +106,7 @@ describe('data-parallel: resume', () => {
     // Save state (the pass is at index 2).
     const saved = spine.state()
     expect(saved.pass).toBeDefined()
-    expect(saved.pass!.index).toBe(2)
+    expect((saved.pass as Record<string, unknown>).index).toBe(2)
 
     // The spine is mid-pass: the remaining items (2, 3) still need processing.
     // The drain would check .done markers and skip finished items.
@@ -128,7 +128,8 @@ describe('data-parallel: validates graph with parallelism', () => {
   it('accepts a data node with parallelism', () => {
     const issues = validateGraph(parallelDataGraph(4))
     // No blocking issues from parallelism.
-    const blocking = issues.filter(i => i.severity === 'error')
-    expect(blocking.length).toBe(0)
+    // validateGraph returns GraphIssue[] — all issues are blocking (structural).
+    // A graph with parallelism set should have no structural issues.
+    expect(issues.length).toBe(0)
   })
 })
