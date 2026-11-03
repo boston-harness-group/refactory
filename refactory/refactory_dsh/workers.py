@@ -14,6 +14,9 @@ from typing import Any
 
 BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
 CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+#: Claude Code's filesystem settings sources (the SDK's ``settingSources``), as the
+#: ``claude --setting-sources`` flag spells them; ``none`` loads none of them.
+CLAUDE_CODE_SETTING_SOURCES = frozenset({"user", "project", "local"})
 
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
@@ -49,7 +52,8 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
     backend = route.setdefault('worker_backend', 'dsh')
     capabilities(backend)
     unknown = set(route) - {'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
-                             'openshell_gateway', 'openshell_image', 'max_completion_tokens'}
+                             'openshell_gateway', 'openshell_image', 'max_completion_tokens',
+                             'setting_sources'}
     if unknown:
         raise ValueError(f'unknown worker route fields: {sorted(unknown)}')
     if any(not isinstance(value, str) for value in route.values()):
@@ -61,6 +65,14 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
     if backend == 'claude_code' and route.get('effort') and route['effort'] not in CLAUDE_CODE_EFFORT_LEVELS:
         accepted = ', '.join(sorted(CLAUDE_CODE_EFFORT_LEVELS))
         raise ValueError(f'claude_code effort must be one of {accepted}; got {route["effort"]!r}')
+    if route.get('setting_sources'):
+        if backend != 'claude_code':
+            raise ValueError(f'{backend} does not support setting_sources; only claude_code loads Claude Code settings')
+        sources = route['setting_sources'].split(',')
+        if route['setting_sources'] != 'none' and not set(sources) <= CLAUDE_CODE_SETTING_SOURCES:
+            accepted = ', '.join(sorted(CLAUDE_CODE_SETTING_SOURCES))
+            raise ValueError(f'claude_code setting_sources must be "none" or a comma list of {accepted}; '
+                             f'got {route["setting_sources"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route
@@ -82,6 +94,8 @@ def resolve_route(base: dict[str, Any], *, role: str = 'worker', node: str = '',
             permission = route.get('permission_mode')
             route.update(provider='', model='', effort='',
                          permission_mode=permission if permission in ('default', 'skip') else 'skip')
+            if 'setting_sources' in route:
+                route['setting_sources'] = ''
         route.update(override)
     return validate_route(route)
 
@@ -115,11 +129,13 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
     # ── no-tools receipt fields ─────────────────────────────────────────
     if tool_policy == 'none':
         record['requested_tool_policy'] = 'none'
-        record['enforced_tool_policy'] = 'none'
-        # This is adapter policy, not an observation of the provider request.
+        # Nothing is enforced until the runtime says so: DSH's no-tools plugin at the
+        # provider request, Claude Code's adapter from the options it sent the SDK and
+        # the tools the SDK reported. A worker that never got that far enforced nothing.
+        record['enforced_tool_policy'] = None
         record['tool_observation_available'] = False
-        record['tools_permitted'] = []
-        record['tool_policy_source'] = 'configured-adapter-policy'
+        record['tools_permitted'] = None
+        record['tool_policy_source'] = 'not-yet-observed'
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
     return path
@@ -214,7 +230,8 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
-    if system_prompt:
+    if system_prompt and route['worker_backend'] in ('dsh', 'openshell'):
+        # An external worker's adapter takes the text from its own config instead.
         plugin = Path(__file__).with_name('system_prompt_plugin.mjs')
         rows.append({'insert': [{'id': 'refactory-system-prompt', 'name': str(plugin)}]})
     rows.extend(permission_patch(route, workspace_root=workspace_root))
@@ -249,6 +266,19 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
         permission = route.get('permission_mode', 'skip')
         if permission != 'default':
             config['permissionMode'] = SKIP_PERMISSIONS[route['worker_backend']] if permission == 'skip' else permission
+        if inner_backend == 'claude_code':
+            # The Claude Code adapter takes the node's effort, system prompt, tool policy
+            # and settings sources from its own config ``env``, never from this process's
+            # environment; it strips them before starting Claude Code. Codex reads none:
+            # both runtimes refuse those for codex before dispatch (`capabilities`).
+            env = {name: value for name, value in (
+                ('REFACTORY_MODEL_EFFORT', route.get('effort', '')),
+                ('REFACTORY_SYSTEM_PROMPT', system_prompt),
+                ('REFACTORY_TOOL_POLICY', tool_policy),
+                ('REFACTORY_SETTING_SOURCES', route.get('setting_sources', '')),
+            ) if value}
+            if env:
+                config['env'] = env
         rows.append({'insert': [{'id': 'refactory-external-worker', 'name': str(provider / 'lib' / 'index.js'), 'config': config}]})
         # A patch's name is an identity guard, not a replacement operation.
         # Disable the ordinary driver and insert the named-provider driver.

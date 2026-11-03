@@ -414,6 +414,8 @@ class DshModelClient:
         node_wall_s: int | None = None,
         tool_policy: str = "",
         inactivity_s: int | None = None,
+        max_completion_tokens: str = "",
+        setting_sources: str = "",
     ) -> None:
         from refactory_dsh.workers import validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -462,7 +464,14 @@ class DshModelClient:
         self._inactivity_s = int(inactivity_s) if inactivity_s is not None else None
         self._worker_backend = worker_backend or os.environ.get("REFACTORY_WORKER_BACKEND", "dsh")
         self._effort = effort or (os.environ.get("REFACTORY_MODEL_EFFORT", "") if self._worker_backend == "dsh" and not routes_resolved else "")
-        self._max_completion_tokens = inherited.get("max_completion_tokens", "")
+        # Both ride `context()`, so a dispatched worker rebuilt from it (`worker_node`)
+        # takes them as arguments, as the walker's client inherits them.
+        self._max_completion_tokens = max_completion_tokens or inherited.get("max_completion_tokens", "")
+        #: Claude Code's settings sources (`workers.CLAUDE_CODE_SETTING_SOURCES`); empty
+        #: keeps the adapter's default.
+        #: Inherited only within the same product, as effort is: a DSH client in a
+        #: Claude Code worker's child process must not take Claude Code's sources.
+        self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
         self._permission_mode = permission_mode
         self._role_routes = copy.deepcopy(role_routes or {})
         self._node_routes = copy.deepcopy(node_routes or {})
@@ -521,6 +530,8 @@ class DshModelClient:
                   "permission_mode": self._permission_mode}
         if self._max_completion_tokens:
             result["max_completion_tokens"] = self._max_completion_tokens
+        if getattr(self, "_setting_sources", ""):
+            result["setting_sources"] = self._setting_sources
         return result
 
     def output_limit(self) -> int | None:
@@ -631,6 +642,7 @@ class DshModelClient:
                else {}),
             **({"max_completion_tokens": mct} if (mct := getattr(self, "_max_completion_tokens", ""))
                else {}),
+            **({"setting_sources": ss} if (ss := getattr(self, "_setting_sources", "")) else {}),
         }
 
     def _environment(self, *, target_workdir: "Path | None" = None) -> dict[str, str]:
@@ -649,7 +661,10 @@ class DshModelClient:
             result["REFACTORY_TOOL_POLICY"] = "none"
         else:
             result.pop("REFACTORY_TOOL_POLICY", None)
-        if getattr(self, '_system_text', ''):
+        # Only DSH's own system-prompt plugin reads this. An external worker gets the
+        # text in its adapter config (`workers.write_patch`), so a large prompt never
+        # meets the kernel's 128 KiB limit on one environment value.
+        if getattr(self, '_system_text', '') and getattr(self, '_worker_backend', 'dsh') in ('dsh', 'openshell'):
             result["REFACTORY_SYSTEM_PROMPT"] = self._system_text
         if self._budget is not None:
             result["REFACTORY_BUDGET_LEDGER"] = str(self._budget.path)

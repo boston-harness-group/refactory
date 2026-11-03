@@ -26,6 +26,8 @@ export function apply(ctx) {
       for await (const chunk of process.stdin) chunks.push(chunk)
       task = Buffer.concat(chunks).toString('utf8')
     }
+    // As the headless runner does: an empty task is refused, never sent to a model.
+    if (task.trim() === '') throw new Error('a task is required on stdin or as the task argument')
     const handle = await ctx.get('agents').create({
       sessionId: `refactory-parent-${randomUUID()}`,
       meta: { cwd: process.cwd() },

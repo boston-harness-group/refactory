@@ -27,8 +27,14 @@ Keep other workers on DSH and select Codex only for the shipped authoring coder:
 ```
 
 Replace `codex` with `claude_code` for a Claude Code coder. Optional `model` selects
-a native model. DSH also accepts `provider` and `effort`; native backends reject
-those fields. Use `refactory help --topic <package/mode>` to inspect actual node
+a native model. DSH also accepts `provider` and `effort`; `claude_code` accepts
+`effort` but not `provider`, and Codex rejects both. `claude_code` alone accepts
+`setting_sources`: `none` or a comma list of `user`, `project` and `local`, the
+Claude Code settings it loads (as `claude --setting-sources`). Unset, it loads all of
+them, or none for a node with `tool_policy="none"`; set, it replaces either default,
+and such a node still gets no tools. The worker record's `actual_route` shows the
+effort and settings sources Claude Code was started with, and `enforced_tool_policy`
+is set only once the runtime has applied the policy. Use `refactory help --topic <package/mode>` to inspect actual node
 IDs and roles; custom modes may not call their coder `emit`. `role_routes` uses
 the same objects keyed by declared worker role. Node beats role beats run.
 
@@ -65,8 +71,8 @@ workers inherit the conversation's route instead of the nested runtime's default
 For a new run the precedence is built-in defaults, environment selection, project
 file, selected immutable profile, then explicit launch options. Route maps replace
 the lower map as a whole, so explicit `{}` clears project role/node overrides.
-Switching backend clears inherited provider/model/effort and backend-specific
-permissions. Shared `default` and `skip` policies retain their meaning. Invalid
+Switching backend clears inherited provider/model/effort, `setting_sources` and
+backend-specific permissions. Shared `default` and `skip` policies retain their meaning. Invalid
 fields, unsupported native provider/effort, unsupported permissions, and missing
 selected provider packages fail instead of falling back to DSH.
 

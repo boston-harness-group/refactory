@@ -11,7 +11,8 @@ from refactory_dsh.workers import resolve_route, validate_route
 
 FILENAME = "refactory.workers.json"
 ROUTE_FIELDS = ("worker_backend", "provider", "model", "effort", "permission_mode",
-                 "openshell_gateway", "openshell_image", "max_completion_tokens")
+                 "openshell_gateway", "openshell_image", "max_completion_tokens",
+                 "setting_sources")
 FIELDS = (*ROUTE_FIELDS, "role_routes", "node_routes", "provider_config")
 
 
