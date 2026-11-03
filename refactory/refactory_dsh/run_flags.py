@@ -103,6 +103,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--worker-backend", default="",
                         help="the backend every agent node runs on: dsh (default), codex or claude_code")
     parser.add_argument("--effort", default="", help="the workers' reasoning effort")
+    parser.add_argument("--setting-sources", default="",
+                        help="claude_code workers only: the Claude Code settings they load, "
+                             "none or a comma list of user, project and local")
     parser.add_argument("--permission-mode", default="",
                         help="worker permissions: skip (new-run default), default (native policy), or a "
                              "backend-specific mode")
@@ -308,7 +311,8 @@ def worktree_knobs(args: argparse.Namespace, *, deliver: bool = True) -> list[st
 def model_options(args: argparse.Namespace) -> dict[str, Any]:
     """The model route's settings, as `DshModelClient` takes them: only those given."""
     options: dict[str, Any] = {key: getattr(args, key) for key in (
-        "provider", "model", "worker_backend", "effort", "permission_mode") if getattr(args, key)}
+        "provider", "model", "worker_backend", "effort", "permission_mode", "setting_sources")
+        if getattr(args, key, "")}
     for key in ("role_routes", "node_routes"):
         if getattr(args, key) is not None:
             options[key] = getattr(args, key)
@@ -337,7 +341,7 @@ def interactive_options(args: argparse.Namespace) -> list[str]:
     forwarded: list[str] = []
     if args.model_timeout_s is not None:
         forwarded += ["--model-timeout", str(args.model_timeout_s)]
-    for key in ("worker_backend", "effort", "permission_mode", "max_elapsed_s", "max_tokens",
+    for key in ("worker_backend", "effort", "permission_mode", "setting_sources", "max_elapsed_s", "max_tokens",
                 "validation_reserve_s", "validation_reserve_tokens", "warn_tokens"):
         value = getattr(args, key, None)
         if value is not None and value != "":

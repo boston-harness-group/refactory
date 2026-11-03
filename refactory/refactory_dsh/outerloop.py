@@ -187,11 +187,27 @@ class Run:
 
         No records or workdirs are exposed.
         """
-        results = self._loop._part_results.get(candidate.id, {}).get("val", [])  # noqa: SLF001
+        return self.part_scores(candidate, "val")
+
+    def part_scores(self, candidate: Candidate, part: str) -> list[dict[str, Any]]:
+        """Score-only view of a candidate's ``'val'`` or ``'test'`` occasions, oldest first.
+
+        The fields ``val_scores`` gives, for either held-out part. A strategy that
+        evaluates on test after its search (as SkillOpt does) reads the score it
+        reports here; no records or workdirs are exposed.
+        """
+        if part not in ("val", "test"):
+            raise OuterLoopError(f"part_scores covers 'val' and 'test', not {part!r}")
+        results = self._loop._part_results.get(candidate.id, {}).get(part, [])  # noqa: SLF001
         return [
             {k: v for k, v in occ.items() if k in ("part", "occasion", "score", "exit_ok", "error", "duration_s")}
             for occ in results
         ]
+
+    def has_part(self, part: str) -> bool:
+        """Whether the parts manifest declares ``part``. Its ids stay withheld."""
+        manifest = getattr(self._loop, '_parts_manifest', None)  # noqa: SLF001
+        return manifest is not None and part in manifest
 
     def keep(self, candidate: Candidate) -> Candidate:
         """Add a candidate to the search. A strategy that evaluates must also keep.

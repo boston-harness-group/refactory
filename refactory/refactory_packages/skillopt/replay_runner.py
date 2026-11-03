@@ -80,6 +80,12 @@ A_CONFIG_TO_STRATEGY_OPTION = {
     "merge_batch_size": "merge_batch_size",
 }
 
+#: A's config keys mapped only when the recording has them: ``eval_test``
+#: (trainer.py:2241), the post-training evaluation -- the final skill's val check,
+#: then the initial, best and final skills on test. Unset, B runs it when the parts
+#: manifest has a test part, as A's default ``eval_test: true`` does.
+A_CONFIG_OPTIONAL = {"eval_test": "eval_test"}
+
 #: A's settings arm B has no option for, with the value arm B always behaves as.
 #: A recording that differs on one of these cannot be replayed faithfully, so the
 #: runner reports it rather than quietly comparing two different algorithms.
@@ -92,7 +98,14 @@ A_CONFIG_REQUIRED = {
     "steps_per_epoch": 1,
     "batches_per_epoch": 1,
     "accumulation": 1,
+    # B evaluates the whole val and test parts; 0 is A's "every item".
+    "sel_env_num": 0,
+    "test_env_num": 0,
 }
+
+#: A's summary.json post-training figures (trainer.py:2480-2515) that B's strategy
+#: report carries under the same names (``SkillOptLoop.report``).
+A_TEST_EVAL_FIELDS = ("final_selection_hard", "baseline_test_hard", "test_hard", "final_test_hard")
 
 
 def load_a_config(a_out_dir: Path) -> dict[str, Any]:
@@ -109,6 +122,7 @@ def load_a_config(a_out_dir: Path) -> dict[str, Any]:
         option: raw[key] for key, option in A_CONFIG_TO_STRATEGY_OPTION.items()
     }
     options["analyst_edit_budget"] = raw["edit_budget"]
+    options.update({option: raw[key] for key, option in A_CONFIG_OPTIONAL.items() if key in raw})
     return options
 
 
@@ -595,8 +609,8 @@ def run_replay(
             # No held-out audit of the winner: refactory's Loop scores the winner
             # on a holdout after any search (loop.py ``audit_holdout``), which is
             # not part of SkillOpt, so A made no such calls to replay. A's own
-            # post-training evaluations (test_eval*, final_selection_eval) are
-            # likewise outside SkillOptLoop; they stay unused recordings.
+            # post-training evaluations (final_selection_eval, test_eval*) are
+            # SkillOptLoop's too (``eval_test``) and replay A's recorded calls.
             holdout=0.0,
         )
 
@@ -611,6 +625,8 @@ def run_replay(
         )
         loop_report = loop.run()
         report["loop_report"] = _trim_loop_report(loop_report)
+        report["test_eval"] = compare_test_eval(
+            a_out_dir, (loop_report or {}).get("strategy_report") or {})
 
         report["replay_status"] = "completed"
 
@@ -713,9 +729,10 @@ def apply_verdict(report: dict[str, Any], unused_before_last_served: list[dict[s
     Matching every call B made is not enough: B can stop early, decide
     differently on data it already had, or skip calls A made. A run stays
     ``completed`` only when the comparison with A's step records finds no
-    diverged epoch, B reached every epoch A ran, and every recording B did not
-    use was made after the last one it was served (A's work past the end of
-    B's run, such as its post-training evaluations). Otherwise the status is
+    diverged epoch, B reached every epoch A ran, B's post-training scores equal
+    A's summary.json (``compare_test_eval``), and every recording B did not use
+    was made after the last one it was served (A's work past the end of B's
+    run). Otherwise the status is
     ``diverged`` and ``divergence`` says where, with both sides' values.
     """
     report["unused_before_b_last_served_call"] = len(unused_before_last_served)
@@ -734,6 +751,13 @@ def apply_verdict(report: dict[str, Any], unused_before_last_served: list[dict[s
             "phase": "comparison", "field": "diverged_epochs",
             "a_value": 0, "b_value": comparison["summary"].get("diverged_epochs"),
         }
+    elif (report.get("test_eval") or {}).get("diverged"):
+        test_eval = report["test_eval"]
+        field = test_eval["diverged"][0]
+        divergence = {
+            "phase": "test_eval", "field": field,
+            "a_value": test_eval["a"].get(field), "b_value": test_eval["b"].get(field),
+        }
     elif unused_before_last_served:
         divergence = {
             "phase": "recordings", "field": "unused_before_b_last_served_call",
@@ -743,6 +767,21 @@ def apply_verdict(report: dict[str, Any], unused_before_last_served: list[dict[s
     if divergence is not None:
         report["replay_status"] = "diverged"
         report["divergence"] = divergence
+
+
+def compare_test_eval(a_out_dir: Path, strategy_report: dict[str, Any]) -> dict[str, Any]:
+    """A's post-training scores (summary.json) beside B's (its strategy report).
+
+    Compared on :data:`A_TEST_EVAL_FIELDS` that A recorded; ``diverged`` lists the
+    fields whose scores differ (beyond float noise), in A's order.
+    """
+    summary_path = Path(a_out_dir) / "summary.json"
+    a_summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    a = {key: a_summary.get(key) for key in A_TEST_EVAL_FIELDS if a_summary.get(key) is not None}
+    b = {key: strategy_report.get(key) for key in A_TEST_EVAL_FIELDS}
+    diverged = [key for key in a
+                if b.get(key) is None or abs(float(a[key]) - float(b[key])) > 1e-9]
+    return {"a": a, "b": b, "b_status": strategy_report.get("test_eval"), "diverged": diverged}
 
 
 def _trim_loop_report(loop_report: Any) -> dict[str, Any]:
@@ -800,6 +839,12 @@ def main() -> None:
         print("\n=== A SETTINGS ARM B CANNOT MATCH ===")
         for line in report["unsupported_a_settings"]:
             print(f"  - {line}")
+
+    if report.get("test_eval"):
+        test_eval = report["test_eval"]
+        print("Post-training scores (A | B): " + ", ".join(
+            f"{key} {test_eval['a'].get(key)} | {test_eval['b'].get(key)}"
+            for key in A_TEST_EVAL_FIELDS))
 
     if report.get("unused_recordings"):
         n_unused = sum(u["remaining"] for u in report["unused_recordings"])

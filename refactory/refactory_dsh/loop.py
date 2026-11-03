@@ -188,6 +188,10 @@ class LoopConfig:
     model: str = ""
     effort: str = ""
     permission_mode: str = "skip"
+    #: Claude Code's settings sources for every worker (``claude --setting-sources``):
+    #: ``none`` or a comma list of user, project and local. Empty keeps the adapter's
+    #: default. claude_code only; ``node_routes``/``role_routes`` override it per node.
+    setting_sources: str = ""
     role_routes: dict[str, Any] = dataclasses.field(default_factory=dict)
     node_routes: dict[str, Any] = dataclasses.field(default_factory=dict)
     provider_config: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -351,7 +355,7 @@ class Loop(OuterLoop):
         # clients constructed by the CLI do.
         if callable(getattr(model, "context", None)):
             client_context = model.context()
-            for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes", "provider_config"):
+            for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources", "role_routes", "node_routes", "provider_config"):
                 if key in client_context:
                     setattr(self.config, key, client_context[key])
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
@@ -454,6 +458,12 @@ class Loop(OuterLoop):
         #: ``strategy()``, ``strategy_state_dict()``, and
         #: ``load_strategy_state()`` delegate to this object.
         self._custom_strategy: OuterLoop | None = None
+
+    def search_name(self) -> str:
+        """What runs the search, as the run header and report name it: an attached
+        custom strategy's own name, else the optimizer's (#493 G33)."""
+        attached = getattr(self, "_custom_strategy", None)
+        return str(attached.name) if attached is not None else self.optimizer.name
 
     def permitted_ops(self) -> list[str]:
         """The edit operations this run may apply.
@@ -587,7 +597,9 @@ class Loop(OuterLoop):
                 self._journal("bound", bound="", previous_bound=previous_bound,
                               reason="explicit search resume")
             self._write_state()
-            self._progress("init", resumed=True, population=len(self.population))
+            self._progress("init", resumed=True, population=len(self.population),
+                           epochs=self.config.epochs, batch_size=self.config.batch_size,
+                           optimizer=self.search_name())
             return
 
         self._journal("start", mode=self.mode_id, config=self.config.to_dict())
@@ -606,7 +618,7 @@ class Loop(OuterLoop):
             population=len(self.population),
             epochs=self.config.epochs,
             batch_size=self.config.batch_size,
-            optimizer=self.optimizer.name,
+            optimizer=self.search_name(),
         )
 
     def _load_parts_manifest(self) -> None:
@@ -2107,6 +2119,14 @@ class Loop(OuterLoop):
                 strategy_best = strategy.best_candidate(self.population)
             except Exception as e:
                 strategy_error = strategy_error or str(e)
+        # A custom strategy's own figures (``OuterLoop.report``), e.g. SkillOpt's
+        # post-training test scores; empty for the library's strategies.
+        strategy_report: dict[str, Any] = {}
+        if strategy is not None:
+            try:
+                strategy_report = dict(strategy.report(Run(_loop=self)) or {})
+            except Exception as e:
+                strategy_error = strategy_error or f"the strategy's report failed: {e}"
         best = strategy_best if strategy_best is not None else (board[0] if board else None)
 
         audit = self.audit_holdout(winner=best)
@@ -2129,7 +2149,7 @@ class Loop(OuterLoop):
         )
 
         # G33: when a custom strategy is set, report its name and epoch count.
-        optimizer_name = strategy.name if strategy is not None else self.optimizer.name
+        optimizer_name = self.search_name()
         epochs_completed = getattr(strategy, '_epoch', self.epoch) if strategy is not None else self.epoch
 
         payload = {
@@ -2139,6 +2159,7 @@ class Loop(OuterLoop):
                 strategy_error if strategy_error else
                 proposer.get("finding", "every optimizer call failed") if proposer.get("all_failed") else
                 "no successfully evaluated candidate is eligible to win" if best is None else
+                f"the winner overfit ({_holdout_line(audit)})" if audit.get("overfit") else
                 str(audit.get("note") or "the required held-out audit is unavailable")
             ),
             "mode": self.mode_id,
@@ -2191,6 +2212,7 @@ class Loop(OuterLoop):
             "epochs_summary": [asdict(summary) for summary in self.epochs],
             "proposer": proposer,
             "holdout": audit,
+            "strategy_report": strategy_report,
         }
         self._write("report.json", payload)
         self._write_text("report.md", self._render_report(payload))
@@ -2447,6 +2469,7 @@ class Loop(OuterLoop):
             "",
             _holdout_sentence(payload.get("holdout") or {}),
             "",
+            *_strategy_report_section(payload.get("strategy_report") or {}),
             "## Leaderboard",
             "",
             _md_table(
@@ -3009,6 +3032,16 @@ def _holdout_line(audit: dict[str, Any]) -> str:
     """One line saying what the held-out audit found, for `refactory optimize`."""
     if not audit:
         return "holdout: this run recorded no audit of the winner"
+    if "val" in audit and "test" in audit:
+        # ``audit_parts``: the winner's latest val score against its latest test score.
+        if audit["val"] is None or audit["test"] is None:
+            return f"holdout: {audit.get('note') or 'no val or test score'} (val and test parts)"
+        verdict = "overfit" if audit.get("overfit") else "holds up"
+        return (
+            f"holdout: val {audit['val']:.4f}, test {audit['test']:.4f}, "
+            f"gap {audit.get('gap'):.4f} against threshold {audit.get('threshold')} "
+            f"— {verdict} (val and test parts)"
+        )
     instances = audit.get("instances") or {}
     train = audit.get("train")
     holdout = audit.get("holdout")
@@ -3023,6 +3056,16 @@ def _holdout_line(audit: dict[str, Any]) -> str:
         f"gap {audit.get('gap'):.4f} against threshold {audit.get('threshold')} "
         f"— {verdict} ({split})"
     )
+
+
+def _strategy_report_section(report: dict[str, Any]) -> list[str]:
+    """A custom strategy's own figures as a report section, or nothing when it has none."""
+    if not report:
+        return []
+    return ["## Strategy report", "",
+            _md_table(["field", "value"], [[key, json.dumps(value, default=str) if isinstance(value, (dict, list)) else value]
+                                           for key, value in report.items()]),
+            ""]
 
 
 def _holdout_sentence(audit: dict[str, Any]) -> str:
@@ -3154,7 +3197,7 @@ def main(argv: list[str] | None = None) -> int:
     def client(snapshot: dict[str, Any]) -> DshModelClient:
         settings = snapshot["settings"]
         return DshModelClient(routes_resolved=True, routing_provenance=(snapshot.get("worker_configuration") or {}).get("provenance"), **{key: settings[key] for key in
-            ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes", "provider_config")
+            ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources", "role_routes", "node_routes", "provider_config")
             })
 
     try:
@@ -3223,6 +3266,7 @@ def main(argv: list[str] | None = None) -> int:
                 "structural_wins": len(report["structural_wins"]),
                 "rejection_codes": report["rejection_codes"],
                 "accepted_op_mix": report["accepted_op_mix"],
+                **({"strategy_report": report["strategy_report"]} if report.get("strategy_report") else {}),
                 "report": str(Path(args.runs_root) / "report.md"),
             },
             indent=2,

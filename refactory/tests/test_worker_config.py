@@ -196,3 +196,36 @@ def test_invalid_provider_config_never_falls_back(tmp_path, settings, match):
     write(tmp_path, settings)
     with pytest.raises(ValueError, match=match):
         DshModelClient(project=tmp_path)
+
+
+def test_run_level_setting_sources_reach_the_search_and_the_run(tmp_path):
+    """A run-level ``setting_sources`` in the project file (docs/worker-routing.md)
+    resolves for ``refactory optimize`` (profiles/LoopConfig) and for a run
+    (``DshModelClient(project=...)``), as effort does; it was refused as an unknown
+    search setting, and dropped by the run's client."""
+    write(tmp_path, {'worker_backend': 'claude_code', 'effort': 'medium', 'setting_sources': 'user,project'})
+    snapshot = profiles.resolve(tmp_path, 'counting_pack/fixed_step')
+    assert snapshot['settings']['setting_sources'] == 'user,project'
+    assert snapshot['worker_configuration']['provenance']['fields']['setting_sources'] == 'project-file'
+    assert DshModelClient(project=tmp_path).route()['setting_sources'] == 'user,project'
+    # A node's own route map entry still overrides the run's.
+    client = DshModelClient(project=tmp_path, node_routes={'solve': {'setting_sources': 'none'}})
+    assert client.for_node('solve').route()['setting_sources'] == 'none'
+    assert client.for_node('other').route()['setting_sources'] == 'user,project'
+    # An explicit launch flag beats the project file.
+    flagged = profiles.resolve(tmp_path, 'counting_pack/fixed_step', overrides={'setting_sources': 'user'})
+    assert flagged['settings']['setting_sources'] == 'user'
+    # Only claude_code loads Claude Code settings.
+    with pytest.raises(ValueError, match='does not support setting_sources'):
+        profiles.resolve(tmp_path, 'counting_pack/fixed_step',
+                         overrides={'worker_backend': 'codex', 'setting_sources': 'user'})
+
+
+def test_a_run_without_setting_sources_keeps_its_evaluation_context(tmp_path, monkeypatch):
+    """A search that sets no settings sources digests as it did before the field
+    existed, so a run started then still resumes (its saved context_hash matches)."""
+    write(tmp_path, {'worker_backend': 'dsh'})
+    current = profiles.resolve(tmp_path, 'counting_pack/fixed_step')['context_hash']
+    before = profiles.defaults()
+    monkeypatch.setattr(profiles, 'defaults', lambda: {k: v for k, v in before.items() if k != 'setting_sources'})
+    assert profiles.resolve(tmp_path, 'counting_pack/fixed_step')['context_hash'] == current

@@ -42,6 +42,7 @@ CASES: dict[str, tuple[bool, list[str]]] = {
     "--source-project": (True, ["--source-project", "src"]),
     "--worker-backend, --effort, --permission-mode": (False, ["--worker-backend", "codex", "--effort", "high",
                                                               "--permission-mode", "default"]),
+    "--setting-sources": (False, ["--worker-backend", "claude_code", "--setting-sources", "user,project"]),
     "--role-routes, --node-routes": (False, ["--role-routes", '{"builder": {"model": "m2"}}',
                                              "--node-routes", '{"emit": {"model": "m3"}}']),
     "--model-timeout": (False, ["--model-timeout", "90"]),
@@ -120,7 +121,8 @@ def _walker(monkeypatch, tmp_path: Path, fast: bool, flags: list[str]) -> dict[s
 
 def _route(spine: dict[str, Any]) -> dict[str, Any]:
     """The route the spine's launcher builds its model client from, as the walker's is given."""
-    found = {key: spine[key] for key in ("provider", "model", "worker_backend", "effort", "permission_mode")
+    found = {key: spine[key] for key in ("provider", "model", "worker_backend", "effort", "permission_mode",
+                                         "setting_sources")
              if spine.get(key)}
     found.update({key: spine[key] for key in ("role_routes", "node_routes") if spine.get(key) is not None})
     if spine.get("model_timeout_s") is not None:

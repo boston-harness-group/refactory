@@ -83,7 +83,7 @@
     "skill": "",
     "use_theorem": 0.0,
     "use_sketch": 0.0,
-    "max_completion_tokens": 16384.0,
+    "max_completion_tokens": 0.0,
     "data_parallelism": 1.0
   },
   "knob_specs": {
@@ -121,7 +121,7 @@
       "required": false
     },
     "max_completion_tokens": {
-      "default": 16384,
+      "default": 0,
       "kind": "int",
       "lo": 0,
       "hi": null,
