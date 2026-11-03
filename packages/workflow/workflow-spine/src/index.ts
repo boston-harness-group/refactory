@@ -33,9 +33,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { HALT, Spine, validateGraph } from './spine.ts'
-import type { NodeView, SpineNext } from './spine.ts'
+import type { NodeView, SpineNext, TerminalHalt } from './spine.ts'
 import { commandOf, isDeterministic, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
-import type { CommandFailure, CommandOutcome } from './execute.ts'
+import type { CommandFailure, CommandOutcome, CommandRunnerConfig } from './execute.ts'
 import type { WorkflowGraph } from './types.ts'
 import { validateBuild } from './build-stamp.ts'
 import { validateWorkspaceBuild } from './workspace-stamp.ts'
@@ -1437,6 +1437,255 @@ export function apply(ctx: Context, config: Config): void {
     }) + '\n').join(''))
   }
 
+  /** Passed to a concurrent pass's `begin` and `end`: `prepare` and `finish` own the reset and the all-failed rule. */
+  const CONCURRENT = ['--concurrent'] as const
+
+  /** Whether a data command was cut short (a timeout or an abort) rather than failing on its own. */
+  const cutShort = (failure: CommandFailure): boolean =>
+    failure.error?.includes('timed out') === true || failure.error?.includes('was aborted') === true
+
+  /** Bounded stderr tail for error_text parity with the walker. */
+  const failureTail = (failure: CommandFailure): string =>
+    (failure.stderr || failure.error || `failed with exit code ${String(failure.exitCode)}`).slice(-4096)
+
+  /**
+   * Why a pass asked to run `parallelism` > 1 items at once runs them one at a time,
+   * or `undefined` when it can run them concurrently. Every body node must be one
+   * the plugin runs itself (a command, a fn gate, a dispatched agent, a fork or a
+   * join): a node the driving agent runs -- an undispatched agent, a person's gate,
+   * a nested data node, an expansion -- is handed over one item at a time.
+   */
+  function concurrentFallback(spine: Spine, entry: string, exit: string): string | undefined {
+    const reasons: string[] = []
+    for (const id of Object.keys(spine.subgraphFor(entry, exit).nodes)) {
+      const view = spine.view(id)
+      if (view._type === 'ForkNode' || view._type === 'JoinNode') continue
+      if (view.expand !== undefined) reasons.push(`node '${id}' expands the graph, which the driving agent does`)
+      else if (!isDeterministic(view)) reasons.push(`node '${id}' (${view._type}) has no command, so the driving agent runs it`)
+    }
+    return reasons.length > 0 ? reasons.join('; ') : undefined
+  }
+
+  /** Write a node's reloop feedback where its dispatch command reads it (dm-110). */
+  function feedbackFilesFor(dir: string | undefined, nodes: NodeView[], feedback: Record<string, string>): Record<string, string> {
+    const files: Record<string, string> = {}
+    if (dir === undefined) return files
+    const promptDir = join(dir, '.refactory', 'prompts')
+    for (const node of nodes) {
+      const text = feedback[node.id]
+      if (text === undefined || text.trim() === '') continue
+      mkdirSync(promptDir, { recursive: true })
+      const file = join(promptDir, `${node.id}.feedback.md`)
+      // Atomic write: temporary file then rename, so a stale file is never read.
+      const pending = join(promptDir, `${node.id}.feedback.tmp`)
+      writeFileSync(pending, text)
+      renameSync(pending, file)
+      files[node.id] = file
+    }
+    return files
+  }
+
+  /**
+   * Run a data pass's items concurrently, at most `parallelism` at a time, when
+   * every body node is one the plugin runs itself (`concurrentFallback`).
+   *
+   * The sequential drain's contract, item for item: `prepareParallelPass` reset the
+   * node once, before the pass opened (a resumed pass keeps this visit's finished passes);
+   * each item runs `begin`, walks the body on its own spine (`Spine.itemSpine`) in
+   * its pass directory, and runs `end`; a failed node, setup or verify is a failed
+   * item, judged by `end --failed`; a halt in an item stops new items and halts the
+   * run. `finish` then puts `item_scores` in item order and applies the all-failed
+   * rule once; the items' records become the run's, in item order. An
+   * item a resumed pass already finished is not run again (`begin` answers
+   * `pass_finished`).
+   * @returns a failure that ends the run (a data command that could not record its
+   * item, or the all-failed rule), or nothing.
+   */
+  async function drainConcurrentData(
+    spine: Spine,
+    data: NodeView,
+    shell: Parameters<typeof runDeterministic>[0],
+    runner: CommandRunnerConfig & { dataCommand: string },
+    workdir: string | undefined,
+    warnings: string[],
+  ): Promise<{ failure?: CommandFailure }> {
+    const pass = spine.passOf()
+    if (pass === undefined) return {}
+    const parallelism = pass.parallelism ?? 1
+
+    // A slot frees as each item settles, handed straight to the next waiter.
+    let inFlight = 0
+    const waiters: Array<() => void> = []
+    const acquire = async (): Promise<void> => {
+      if (inFlight >= parallelism) await new Promise<void>(resolve => waiters.push(resolve))
+      else inFlight += 1
+    }
+    const release = (): void => {
+      const next = waiters.shift()
+      if (next === undefined) inFlight -= 1
+      else next()
+    }
+    // A halt in one item ends the run: no item starts, and no started item runs
+    // another node, after it (the walker cancels the same way).
+    const halts: Array<TerminalHalt | undefined> = Array.from({ length: pass.count }, () => undefined)
+    let halted = false
+
+    type ItemOutcome = { failure?: CommandFailure; record?: Record<string, unknown> }
+    /** The item record an `end` printed, as the sequential drain keeps it (F6). */
+    const recordOf = (value: Record<string, unknown>): ItemOutcome => ('id' in value ? { record: value } : {})
+    /** Record a failed item through `end --failed`, as the sequential drain does. */
+    const endFailed = async (index: number, reason: string, kind?: string): Promise<ItemOutcome> => {
+      const ended = await runDataCommand(shell, data, 'end', runner, index, reason, kind, CONCURRENT)
+      if (ended.ok) return recordOf(ended.value)
+      if (!cutShort(ended)) return { failure: ended }
+      const fallback = await runDataCommand(shell, data, 'end', runner, index, failureTail(ended), ended.error?.includes('timed out') ? 'timeout' : undefined, CONCURRENT)
+      if (fallback.ok) return recordOf(fallback.value)
+      return cutShort(fallback) ? {} : { failure: fallback }
+    }
+
+    const processItem = async (index: number): Promise<ItemOutcome> => {
+      await acquire()
+      try {
+        if (halted) return {}
+        recordStatus(spine, workdir, 'executing')
+        const started = await runDataCommand(shell, data, 'begin', runner, index, undefined, undefined, CONCURRENT)
+        if (!started.ok) return await endFailed(index, failureTail(started), started.error?.includes('timed out') ? 'timeout' : undefined)
+        const value = started.value
+        // A resumed pass: the item finished before the stop and keeps its record.
+        if (value.pass_finished === true) {
+          const kept = value.record
+          return kept !== null && typeof kept === 'object' ? { record: kept as Record<string, unknown> } : {}
+        }
+        // A setup failure is a response whose only key is `error` (F4).
+        if ('error' in value && Object.keys(value).length === 1) return await endFailed(index, String(value.error ?? 'setup failed'))
+        const passDir = typeof value.pass_dir === 'string' ? value.pass_dir : undefined
+        const itemRunner = passDir !== undefined
+          ? { ...runner, workdir: passDir, env: { ...runner.env, REFACTORY_WORKDIR: passDir } }
+          : runner
+
+        const itemSpine = spine.itemSpine()
+        let failure: CommandFailure | undefined
+        for (;;) {
+          if (halted) return {}
+          const state = itemSpine.next()
+          if (state.status !== 'ready' || state.nodes.length === 0) break
+          const controls = state.nodes.filter(node => node._type === 'ForkNode' || node._type === 'JoinNode')
+          if (controls.length > 0) {
+            for (const node of controls) itemSpine.complete(node.id)
+            continue
+          }
+          const feedbackFiles = feedbackFilesFor(passDir, state.nodes, state.feedback ?? {})
+          const outcomes = await Promise.all(state.nodes.map(node => runDeterministic(shell, node, itemRunner, feedbackFiles[node.id])))
+          const printed = state.nodes.flatMap((node, at) =>
+            runWarningsOf(outcomes[at]!.stderr).map(line => ({ node: node.id, line, ok: outcomes[at]!.ok })))
+          recordWarnings(workdir, printed)
+          warnings.push(...printed.filter(({ ok }) => ok).map(({ node, line }) => `${node}: ${line}`))
+          for (let at = 0; at < state.nodes.length; at += 1) {
+            const node = state.nodes[at]!
+            const outcome = outcomes[at]!
+            if (!outcome.ok) {
+              if (failure === undefined) failure = outcome
+              continue
+            }
+            if (itemSpine.isHalted()) continue
+            if (outcome.verdict !== undefined) itemSpine.verdict(node.id, outcome.verdict, outcome.reason ?? '')
+            else itemSpine.complete(node.id, outcome.missing === true ? { failed: true } : {})
+          }
+          if (failure !== undefined) break
+        }
+        if (failure !== undefined) {
+          return await endFailed(index, failureTail(failure), failure.error?.includes('timed out') ? 'timeout' : undefined)
+        }
+        const stop = itemSpine.haltOf()
+        // A terminal branch short of the exit ('incomplete') still ends the item:
+        // its Task judges the missing answer, as in a sequential pass.
+        if (stop !== undefined && stop.reason !== 'incomplete') {
+          halts[index] = stop
+          halted = true
+          return {}
+        }
+        recordStatus(spine, workdir, 'executing')
+        const ended = await runDataCommand(shell, data, 'end', runner, index, undefined, undefined, CONCURRENT)
+        if (ended.ok) return recordOf(ended.value)
+        // A crash in verify or in `end` itself is a failed item, as in a sequential pass.
+        return await endFailed(index, failureTail(ended), ended.error?.includes('timed out') ? 'timeout' : undefined)
+      } finally {
+        release()
+      }
+    }
+
+    const settled = await Promise.allSettled(Array.from({ length: pass.count }, (_, index) => processItem(index)))
+    const records: Array<Record<string, unknown>> = []
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        const error = result.reason instanceof Error ? result.reason.message : String(result.reason)
+        return { failure: { ok: false, command: data.id, nodeId: data.id, exitCode: null, stdout: '', stderr: '', error } }
+      }
+      if (result.value.failure !== undefined) return { failure: result.value.failure }
+      if (result.value.record !== undefined) records.push(result.value.record)
+    }
+    // Item order, whatever order the items ended in: the run's records here, and
+    // `item_scores` in its facts (`finish`).
+    for (const record of records) spine.addItemRecord(record)
+    const halt = halts.find(entry => entry !== undefined)
+    const finished = await runDataCommand(shell, data, 'finish', runner, undefined, undefined, undefined, halt === undefined ? [] : ['--partial'])
+    if (!finished.ok) return { failure: finished }
+    if (halt !== undefined) spine.haltFromItem(halt)
+    else spine.endAllPasses()
+    return {}
+  }
+
+  /**
+   * Before a data node with `parallelism` > 1 opens its pass -- before the checkpoint
+   * that records the pass as open -- reset it for this visit (`prepare`), or record
+   * why its items will run one at a time: the `data_parallelism_effective` fact and
+   * a run warning, as the walker records them. A run that stops before the pass is
+   * checkpointed reopens the node and prepares it again; one that stops after
+   * resumes a pass whose folder holds only this visit's items.
+   * @returns a failure of the `prepare` command, or nothing.
+   */
+  async function prepareParallelPass(
+    spine: Spine,
+    data: NodeView,
+    shell: Parameters<typeof runDeterministic>[0],
+    runner: CommandRunnerConfig & { dataCommand: string },
+    workdir: string | undefined,
+    warnings: string[],
+  ): Promise<{ failure?: CommandFailure }> {
+    const parallelism = data.parallelism ?? 1
+    if (parallelism <= 1) return {}
+    const reason = concurrentFallback(spine, data.subgraph_entry ?? '', data.subgraph_exit ?? '')
+    const prepared = await runDataCommand(shell, data, 'prepare', runner, undefined, undefined, undefined,
+      ['--requested', String(parallelism), ...(reason === undefined ? [] : ['--fallback', reason])])
+    if (!prepared.ok) return { failure: prepared }
+    if (reason !== undefined) {
+      const line = `data parallelism fallback to serial: ${reason}`
+      recordWarnings(workdir, [{ node: data.id, line }])
+      warnings.push(`${data.id}: ${line}`)
+    }
+    return {}
+  }
+
+  /**
+   * Hand an open pass whose items run concurrently to the concurrent drain;
+   * `prepareParallelPass` already prepared it, or recorded why it runs sequentially.
+   * @returns whether the concurrent drain took the pass, and its failure if any.
+   */
+  async function dispatchParallelPass(
+    spine: Spine,
+    data: NodeView,
+    shell: Parameters<typeof runDeterministic>[0],
+    runner: CommandRunnerConfig & { dataCommand: string },
+    workdir: string | undefined,
+    warnings: string[],
+  ): Promise<{ handled: boolean; failure?: CommandFailure }> {
+    const pass = spine.passOf()
+    if (pass === undefined || (pass.parallelism ?? 1) <= 1) return { handled: false }
+    if (concurrentFallback(spine, pass.entry, pass.exit) !== undefined) return { handled: false }
+    const result = await drainConcurrentData(spine, data, shell, runner, workdir, warnings)
+    return { handled: true, ...result }
+  }
+
   /**
    * Run the deterministic nodes the cursor is sitting on, so `wf_next` reports
    * only work a model must do. A node that fails leaves the cursor where it is
@@ -1544,6 +1793,8 @@ export function apply(ctx: Context, config: Config): void {
         recordBoundary()
         return {}
       }
+      const prepared = await prepareParallelPass(spine, data, shell, runner, workdir, warnings)
+      if (prepared.failure !== undefined) return prepared
       spine.startPass(data.id, count)
       recordBoundary()
       return {}
@@ -1718,6 +1969,17 @@ export function apply(ctx: Context, config: Config): void {
     for (;;) {
       applyControls(spine, workdir, commandEnv, dataCommand, agentCommand)
       if (spine.isHalted() || spine.isPaused()) return { next: spine.next(), item, ran }
+      // A concurrent pass is open only in a restored run: the concurrent drain ends
+      // every pass it starts. It goes on from the items that finished.
+      const restoredPass = spine.passOf()
+      if (restoredPass !== undefined && (restoredPass.parallelism ?? 1) > 1 && !materialised.has(spine)) {
+        const parallel = await dispatchParallelPass(spine, spine.view(restoredPass.node), shell, runner, workdir, warnings)
+        if (parallel.failure !== undefined) return { next: spine.next(), failure: parallel.failure, ran }
+        if (parallel.handled) {
+          recordBoundary()
+          continue
+        }
+      }
       const closed = await close()
       if (closed.failure !== undefined) return { next: spine.next(), failure: closed.failure, ran }
       let state = spine.next()
@@ -1750,6 +2012,11 @@ export function apply(ctx: Context, config: Config): void {
       if (data !== undefined) {
         const openedPass = await openPass(data)
         if (openedPass.failure !== undefined) return { next: state, failure: openedPass.failure, ran }
+        // parallelism > 1: the concurrent drain takes the pass, or the reason it
+        // cannot is recorded and the sequential drain below walks it.
+        const parallel = await dispatchParallelPass(spine, data, shell, runner, workdir, warnings)
+        if (parallel.failure !== undefined) return { next: spine.next(), failure: parallel.failure, ran }
+        if (parallel.handled) recordBoundary()
         continue
       }
       const automatic = state.nodes.filter(isDeterministic)
@@ -1775,23 +2042,7 @@ export function apply(ctx: Context, config: Config): void {
       let inFlight = 0
       const waiters: Array<() => void> = []
       // dm-110: write feedback sidecar files for dispatched agent nodes.
-      const feedbackMap = spine.next().feedback ?? {}
-      const feedbackFiles: Record<string, string> = {}
-      if (workdir !== undefined) {
-        const promptDir = join(workdir, '.refactory', 'prompts')
-        for (const node of automatic) {
-          const fbText = feedbackMap[node.id]
-          if (fbText !== undefined && fbText.trim() !== '') {
-            mkdirSync(promptDir, { recursive: true })
-            const fbFile = join(promptDir, `${node.id}.feedback.md`)
-            // Atomic write: temporary file then rename, so a stale file is never read.
-            const fbTmp = join(promptDir, `${node.id}.feedback.tmp`)
-            writeFileSync(fbTmp, fbText)
-            renameSync(fbTmp, fbFile)
-            feedbackFiles[node.id] = fbFile
-          }
-        }
-      }
+      const feedbackFiles = feedbackFilesFor(workdir, automatic, spine.next().feedback ?? {})
       // Pass isolation: when a data pass has a passDir, subgraph commands
       // run in the pass directory so their files and facts are isolated.
       const activePassForRunner = spine.passOf()

@@ -11245,7 +11245,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -11270,7 +11270,9 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "call": "",
       "id": "data",
       "kind": "data",
-      "knobs": [],
+      "knobs": [
+        "data_parallelism"
+      ],
       "notes": "",
       "role": "ceo"
     },
@@ -11306,6 +11308,18 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
     }
   ],
   "parameters": {
+    "data_parallelism": {
+      "default": 1,
+      "description": "concurrent data-node items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 1,
+      "values": []
+    },
     "max_completion_tokens": {
       "default": 16384,
       "description": "output-token cap on each solve-node model call; 0 = no cap",
@@ -11363,6 +11377,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       {
         "explanation": "Solve LiveMathematicianBench items with an empty skill prompt and SkillOpt's defaults (no theorem or proof sketch in the prompt); set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
+          "data_parallelism": 1,
           "max_completion_tokens": 16384,
           "skill": "",
           "use_sketch": false,
@@ -11375,8 +11390,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "6e9e1f5e6e08c05ea99b1960a1aac24ceae2b5be3ca3ec01e1ac19b76f86def4"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "bf884d6f690b8027c9b35706ccf229e32436ee87c0a3782ae682ad3bdc979a8d"
   }
 }
 ```

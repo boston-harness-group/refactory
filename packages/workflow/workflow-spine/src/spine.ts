@@ -52,6 +52,8 @@ export interface NodeView {
   subgraph_entry?: string
   subgraph_exit?: string
   limit?: number
+  /** `DataNode`: max concurrent items. 1 (default) is sequential. */
+  parallelism?: number
   /** For a `SelectionNode`: the selection strategy. */
   strategy?: string
   /** `AgentNode`: optional tool policy. `'none'` disables all tools. */
@@ -78,6 +80,8 @@ export interface DataPass {
   finished: boolean
   /** The isolated pass directory for this item, set by the drain after command_begin. */
   passDir?: string
+  /** Max concurrent items (from the data node). 1 is sequential. */
+  parallelism?: number
 }
 
 /** A gate stopped the run, rather than completing an item branch. */
@@ -611,6 +615,7 @@ export class Spine {
       view.subgraph_entry = node.subgraph_entry ?? ''
       view.subgraph_exit = node.subgraph_exit ?? ''
       if (node.limit !== undefined) view.limit = node.limit
+      if (typeof node.parallelism === 'number' && node.parallelism > 1) view.parallelism = node.parallelism
     }
     if (node._type === 'SelectionNode') {
       view.strategy = node.strategy ?? 'best_score'
@@ -840,7 +845,8 @@ export class Spine {
     const exit = body.subgraph_exit ?? ''
     if (entry === '' || exit === '') throw new Error(`${node} declares no subgraph to iterate`)
     this.invalidateNodes(this.descendants(entry, exit), false)
-    this.pass = { node, count, index: 0, entry, exit, finished: false }
+    const parallelism = typeof body.parallelism === 'number' && body.parallelism > 1 ? body.parallelism : undefined
+    this.pass = { node, count, index: 0, entry, exit, finished: false, ...(parallelism !== undefined ? { parallelism } : {}) }
     this.splicePosition(node, [entry])
     this.log.push(`data ${node}: ${count} item(s), first pass at ${entry}`)
     return this.next()
@@ -888,6 +894,69 @@ export class Spine {
   /** Append one per-item record (F6). */
   addItemRecord(record: Record<string, unknown>): void {
     this._itemRecords.push(record)
+  }
+
+  /**
+   * The data body between `entry` and `exit`: its nodes and the edges among them.
+   * Used to decide whether a pass's items can run concurrently, and to build the
+   * per-item spine that walks one of them.
+   */
+  subgraphFor(entry: string, exit: string): { nodes: Record<string, WorkflowNode>; edges: WorkflowEdge[]; body: Set<string> } {
+    const body = this.descendants(entry, exit)
+    const nodes: Record<string, WorkflowNode> = {}
+    for (const id of body) {
+      const node = this.nodes.get(id)
+      if (node !== undefined) nodes[id] = node
+    }
+    const edges = this.edges.filter(e => body.has(e.source) && body.has(e.target))
+    return { nodes, edges, body }
+  }
+
+  /**
+   * A spine over the running pass's body, for one item of a pass whose items run
+   * concurrently (`parallelism` > 1). It walks the body as this spine walks a
+   * sequential pass -- forks, joins, gate verdicts and reloops, under the same
+   * iteration cap -- while the items beside it keep their own cursors.
+   */
+  itemSpine(): Spine {
+    const pass = this.pass
+    if (pass === undefined) throw new Error('no data pass is running')
+    const { nodes, edges } = this.subgraphFor(pass.entry, pass.exit)
+    return new Spine({ name: `${pass.node}__item`, start_node: pass.entry, nodes, edges }, { maxIterations: this.maxIterations })
+  }
+
+  /** Why the run stopped short, when a gate halted it. */
+  haltOf(): TerminalHalt | undefined {
+    return this.halted === undefined ? undefined : { ...this.halted }
+  }
+
+  /**
+   * Halt the run from one item of a concurrent pass: the halt the item's own spine
+   * reached, which ends the run exactly as a gate's halt in a sequential pass does.
+   */
+  haltFromItem(halt: TerminalHalt): SpineNext {
+    if (this.pass === undefined) throw new Error('no data pass is running')
+    this.halted = { ...halt }
+    this.cursor = []
+    this.afters = new Map()
+    this.log.push(`data ${this.pass.node}: item halted at ${halt.gate} (${halt.reason})`)
+    return this.next()
+  }
+
+  /**
+   * Complete the data pass after all its concurrent items have finished.
+   * Called by the drain once every item ran (or was kept from a resumed pass).
+   */
+  endAllPasses(): SpineNext {
+    const pass = this.pass
+    if (pass === undefined) throw new Error('no data pass is running')
+    // Remove any subgraph body positions from the cursor.
+    const body = this.descendants(pass.entry, pass.exit)
+    this.cursor = this.cursor.filter(pos => !body.has(pos))
+    this.pass = undefined
+    this.log.push(`data ${pass.node}: ${pass.count} item(s) done (parallel)`)
+    if (!this.cursor.includes(pass.node)) this.cursor.push(pass.node)
+    return this.completeDue(pass.node)
   }
 
   endPass(): SpineNext {
