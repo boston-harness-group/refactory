@@ -175,6 +175,11 @@ class GraphError(ValueError):
     """A graph could not be built or read from its serialized form."""
 
 
+#: The most items a data node runs at once, whether set as ``parallelism`` or by its
+#: ``parallelism_knob`` (a knob with no upper bound of its own is held to it too).
+MAX_PARALLELISM = 64
+
+
 @dataclass
 class Node:
     """One step of a mode.
@@ -309,8 +314,11 @@ class Node:
             raise GraphError(f"fork node {self.id!r} declares no targets")
         if self.kind == "join" and not self.sources:
             raise GraphError(f"join node {self.id!r} declares no sources")
-        if self.parallelism < 1:
-            raise GraphError(f"node {self.id!r}: parallelism must be >= 1")
+        if not 1 <= self.parallelism <= MAX_PARALLELISM:
+            raise GraphError(f"node {self.id!r}: parallelism must be between 1 and {MAX_PARALLELISM}")
+        if self.parallelism != 1 and self.parallelism_knob:
+            raise GraphError(
+                f"node {self.id!r}: set parallelism or parallelism_knob, not both")
         if (self.parallelism != 1 or self.parallelism_knob) and self.kind != "data":
             raise GraphError(f"node {self.id!r}: parallelism is a data-node field")
         if self.parallelism_knob and self.parallelism_knob not in self.knobs:
@@ -498,6 +506,8 @@ class Node:
         """How many items this data node runs at once, given the run's knob values.
 
         The bound knob's value when ``parallelism_knob`` names one, else ``parallelism``.
+        A bound value that is missing, not an integer, or outside 1..``MAX_PARALLELISM``
+        is a ``GraphError``.
         """
         if not self.parallelism_knob:
             return self.parallelism
@@ -506,9 +516,14 @@ class Node:
                 f"node {self.id!r}: parallelism_knob {self.parallelism_knob!r} has no value "
                 "in this run's knobs"
             )
-        value = int(knobs[self.parallelism_knob])
-        if value < 1:
-            raise GraphError(f"node {self.id!r}: {self.parallelism_knob} must be >= 1, got {value}")
+        value = knobs[self.parallelism_knob]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise GraphError(
+                f"node {self.id!r}: {self.parallelism_knob} must be an integer, got {value!r}")
+        if not 1 <= value <= MAX_PARALLELISM:
+            raise GraphError(
+                f"node {self.id!r}: {self.parallelism_knob} must be between 1 and "
+                f"{MAX_PARALLELISM}, got {value}")
         return value
 
     def with_field(self, field_name: str, value: Any) -> "Node":

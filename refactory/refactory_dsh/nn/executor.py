@@ -1086,6 +1086,9 @@ class Executor:
                 self._resume_at = None
                 if not _resuming and _passes_root.exists():
                     _shutil.rmtree(_passes_root)
+                if not _resuming:
+                    from refactory_dsh.items import clear_live
+                    clear_live(_run_workdir, node.id)
 
                 # ── concurrent dispatch ────────────────────────────────
                 # parallelism > 1 runs the items at once, with this loop's contract

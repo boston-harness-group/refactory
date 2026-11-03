@@ -10,8 +10,12 @@ The contract is the sequential loop's, item for item:
 
 - the step cap is the one the sequential loop has, scaled by the item count;
 - the per-item deadline covers each item's setup and its verify, not its walk
-  (``Executor._data_item_deadline``; the spine's per-command timeout); a phase
-  that outlives it is abandoned, and its later writes cannot reach the pass;
+  (``Executor._data_item_deadline``; the spine's per-command timeout). A phase
+  that outlives it is abandoned: a thread cannot be stopped, so its alias is
+  removed and later writes through that path fail. That stops writes made by
+  path through the workspace it was given; it does not stop a subprocess it
+  started with that folder as its cwd, or a path it had already resolved, which
+  keep writing into the pass (the sequential alarm interrupts the phase instead);
 - a halt or a gate stop ends the node and is recorded as the sequential loop
   records it (``Executor._record``), a ``BudgetExhausted`` propagates, and the
   records of the items that finished are kept;
@@ -176,11 +180,22 @@ TIMED_OUT = ".timed_out"
 
 
 def _live_alias(run_workdir: Path, node_id: str, pass_dir: Path) -> Path:
-    """A symlink to *pass_dir* that one item works through, under ``.refactory/live``."""
-    alias = Path(run_workdir) / ".refactory" / "live" / node_id / pass_dir.name
+    """A symlink to *pass_dir* that one item works through, under ``.refactory/live``.
+
+    Whatever is at the alias path is replaced: a dangling link from a stopped run,
+    or a real folder an abandoned phase re-created there (``mkdir(parents=True)``,
+    ``shutil.copytree``) after its alias was removed.
+    """
+    import shutil
+
+    from refactory_dsh.items import live_dir
+
+    alias = live_dir(run_workdir, node_id) / pass_dir.name
     alias.parent.mkdir(parents=True, exist_ok=True)
-    if alias.is_symlink() or alias.exists():
+    if alias.is_symlink() or alias.is_file():
         alias.unlink()
+    elif alias.exists():
+        shutil.rmtree(alias)
     alias.symlink_to(pass_dir.resolve(), target_is_directory=True)
     return alias
 
@@ -266,8 +281,9 @@ def run_data_concurrent(
         child = clone_child_executor(executor, item_model(), reserve_step=reserve, gate_iterations={})
         # The item works through an alias of its pass folder, removed when the item
         # ends -- at once when a setup or verify outlives its deadline, so the
-        # abandoned phase's later writes cannot land in the pass (the sequential
-        # loop's alarm stops the phase instead).
+        # abandoned phase's later writes *through that path* fail. A subprocess it
+        # started in the folder, or a path it resolved, is not stopped (see the
+        # module docstring); the sequential loop's alarm interrupts the phase instead.
         live = _live_alias(run_workdir, node.id, pass_dir) if item_deadline_s is not None else None
         child.ctx.workdir = live or pass_dir
         phase = "setup"
@@ -389,6 +405,14 @@ def run_data_concurrent(
                 future.cancel()
             raise
 
+    # The aliases went with their items; an empty folder is not left behind. One an
+    # abandoned phase wrote into stays until the node is next reset.
+    from refactory_dsh.items import live_dir
+    for leftover in (live_dir(run_workdir, node.id), live_dir(run_workdir, node.id).parent):
+        try:
+            leftover.rmdir()
+        except OSError:
+            break
     outcome = ConcurrentOutcome()
     merge_children_into_parent(executor, [r.child for r in results if r.child is not None])
     step_base = 0

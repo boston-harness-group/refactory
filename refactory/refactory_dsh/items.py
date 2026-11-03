@@ -575,8 +575,27 @@ def _locked_pass_state_update(
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+#: Where a data node's concurrent items keep the aliases they work through.
+LIVE_ROOT = ".refactory/live"
+
+
+def live_dir(workdir: Path, node_id: str) -> Path:
+    """The folder of *node_id*'s per-item aliases (``data_parallel._live_alias``)."""
+    return Path(workdir) / LIVE_ROOT / node_id
+
+
+def clear_live(workdir: Path, node_id: str) -> None:
+    """Remove *node_id*'s per-item aliases, and anything an abandoned phase left there."""
+    live = live_dir(workdir, node_id)
+    if live.is_symlink() or live.is_file():
+        live.unlink()
+    elif live.exists():
+        shutil.rmtree(live)
+
+
 def _reset_node(node: Node, workdir: Path) -> None:
-    """Start a data node clean: pass state, stale ``item_scores`` and old passes."""
+    """Start a data node clean: pass state, stale ``item_scores``, old passes and
+    the aliases of an earlier visit's items."""
     _write_pass_state(workdir, node.id, {"processed": 0, "failed": 0})
     if SCORES_FACT in node.produces:
         from refactory_dsh.run import edit_facts
@@ -584,6 +603,7 @@ def _reset_node(node: Node, workdir: Path) -> None:
     passes_dir = workdir / "passes" / node.id
     if passes_dir.exists():
         shutil.rmtree(passes_dir)
+    clear_live(workdir, node.id)
 
 
 #: The fact a data node whose items were asked to run concurrently records when they

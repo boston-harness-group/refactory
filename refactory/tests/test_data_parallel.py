@@ -927,7 +927,7 @@ def test_pass_state_locked_under_concurrent_writes(tmp_path):
 
 def test_parallelism_validation():
     """Parallelism < 1 and parallelism != 1 on non-data nodes are refused."""
-    with pytest.raises(nn.graph.GraphError, match="parallelism must be >= 1"):
+    with pytest.raises(nn.graph.GraphError, match="parallelism must be between 1 and 64"):
         nn.Node("x", "data", subgraph_entry="a", subgraph_exit="a",
                 writes=("current_item.json",), parallelism=0)
 
@@ -1054,8 +1054,67 @@ def test_finish_folds_declared_facts_in_item_order(tmp_path):
         begun = command_begin(node, run, index, concurrent=True)
         (Path(begun["pass_dir"]) / "facts.json").write_text(json.dumps({"last": begun["id"]}))
         command_end(node, run, index, concurrent=True)
+    # Nothing is folded while the items end; finish folds them, in item order.
+    assert "last" not in json.loads((run / "facts.json").read_text())
     command_finish(node, run)
     assert json.loads((run / "facts.json").read_text())["last"] == "z"
+
+
+# ── the per-item aliases: replaced whatever is there, cleared, not left behind ──
+
+@pytest.mark.parametrize("leftover", ["directory", "dangling"])
+def test_a_leftover_at_an_alias_path_does_not_crash_the_node(tmp_path, monkeypatch, leftover):
+    """A resumed node whose alias path holds a real folder (an abandoned phase's
+    ``mkdir(parents=True)``) or a dangling link (a stopped run) still runs its items."""
+    graph = _noop_graph(tmp_path, monkeypatch, parallelism=2)
+    run = tmp_path / "run"
+    alias = run / ".refactory" / "live" / "data" / "0_0"
+    alias.parent.mkdir(parents=True)
+    if leftover == "directory":
+        (alias / "copied").mkdir(parents=True)
+    else:
+        alias.symlink_to(tmp_path / "gone", target_is_directory=True)
+    result = execute(graph, run, max_steps=200, start="data")
+    assert result.exit_ok, result.error
+    assert len(list((tmp_path / "visited").glob("*"))) == 3
+
+
+def test_no_alias_folder_is_left_after_a_pass(tmp_path, monkeypatch):
+    result = execute(_noop_graph(tmp_path, monkeypatch, parallelism=2), tmp_path / "run", max_steps=200)
+    assert result.exit_ok, result.error
+    assert not (tmp_path / "run" / ".refactory" / "live").exists()
+
+
+def test_prepare_clears_an_earlier_visits_aliases(tmp_path):
+    from refactory_dsh.items import command_prepare
+
+    run, node = _loader_run(tmp_path, ("x",))
+    leftover = run / ".refactory" / "live" / "data" / "x_0"
+    (leftover / "copied").mkdir(parents=True)
+    command_prepare(node, run, requested=4)
+    assert not (run / ".refactory" / "live" / "data").exists()
+
+
+# ── parallelism and its knob: one or the other, an integer in range ───────
+
+def test_parallelism_and_its_knob_are_exclusive():
+    with pytest.raises(nn.graph.GraphError, match="not both"):
+        nn.Node("d", "data", subgraph_entry="a", subgraph_exit="a", writes=("current_item.json",),
+                parallelism=4, parallelism_knob="par", knobs=("par",))
+
+
+@pytest.mark.parametrize("knobs,message", [
+    ({}, "has no value"),
+    ({"par": "4"}, "must be an integer"),
+    ({"par": True}, "must be an integer"),
+    ({"par": 0}, "between 1 and 64"),
+    ({"par": 1000}, "between 1 and 64"),
+])
+def test_a_bad_bound_knob_value_is_a_graph_error(knobs, message):
+    node = nn.Node("d", "data", subgraph_entry="a", subgraph_exit="a", writes=("current_item.json",),
+                   parallelism_knob="par", knobs=("par",))
+    with pytest.raises(nn.graph.GraphError, match=message):
+        node.effective_parallelism(knobs)
 
 
 # ── a setup or verify that outlives its deadline cannot write into the pass ─
