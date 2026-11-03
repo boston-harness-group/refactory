@@ -937,6 +937,7 @@ The per-item half of a data node, from the command line.
 |---|---|---|
 | class | `AllItemsFailedError` | `` |
 | class | `ItemsError` | `` |
+| function | `clear_live` | `(workdir: 'Path', node_id: 'str') -> 'None'` |
 | function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int', *, concurrent: 'bool' = False) -> 'dict[str, Any]'` |
 | function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None, concurrent: 'bool' = False) -> 'dict[str, Any]'` |
 | function | `command_finish` | `(node: 'Node', workdir: 'Path', *, partial: 'bool' = False) -> 'dict[str, Any]'` |
@@ -947,6 +948,7 @@ The per-item half of a data node, from the command line.
 | function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
 | function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
+| function | `live_dir` | `(workdir: 'Path', node_id: 'str') -> 'Path'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `mark_pass_complete` | `(pass_dir: 'Path', record: 'dict[str, Any] \| None' = None) -> 'None'` |
@@ -961,6 +963,7 @@ The per-item half of a data node, from the command line.
 
 - **`AllItemsFailedError`** — Raised when every item in a data pass failed (the all-fail rule).
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
+- **`clear_live`** — Remove *node_id*'s per-item aliases, and anything an abandoned phase left there.
 - **`command_begin`** — Materialise one item and prepare the workspace for its pass.
 - **`command_end`** — The Task's verdict on one pass, folded into the run's facts.
 - **`command_finish`** — Close a concurrent pass: records and ``item_scores`` in item order, then the
@@ -971,6 +974,7 @@ The per-item half of a data node, from the command line.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
+- **`live_dir`** — The folder of *node_id*'s per-item aliases (``data_parallel._live_alias``).
 - **`make_item_record`** — Build a per-item record for one evaluated item.
 - **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
