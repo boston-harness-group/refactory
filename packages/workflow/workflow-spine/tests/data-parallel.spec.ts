@@ -5,16 +5,12 @@
  * T10: item records are collected in item order via endPass.
  * T11: resume only replays unfinished items (pass directories mark .done).
  */
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { describe, expect, it, afterEach } from 'vitest'
 import { Spine, validateGraph } from '../src/spine.ts'
-import { isDeterministic, runDataCommand, runDeterministic } from '../src/execute.ts'
-import type { WorkflowGraph, WorkflowNode } from '../src/types.ts'
-import type { NodeView, DataPass } from '../src/spine.ts'
-import type { ShellExecution, ShellExecRequest, ShellExecSpec, ShellExecutor, ShellRunResult } from '@deepseek-ai/dsh-shell'
+import type { WorkflowGraph } from '../src/types.ts'
 
 const dirs: string[] = []
 
@@ -22,7 +18,10 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function scratch(): string {
+/** @internal used by future tests that need a temp directory */
+// @ts-expect-error kept for future resume-with-disk tests
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _scratch(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-spine-data-parallel-'))
   dirs.push(dir)
   return dir
@@ -121,9 +120,7 @@ describe('data-parallel: spine parallelism field', () => {
     // Each item gets its own sub-spine that walks the subgraph independently.
     let concurrentCount = 0
     let maxConcurrent = 0
-    const lock = { count: 0 }
-
-    const processItem = async (index: number): Promise<string[]> => {
+    const processItem = async (_index: number): Promise<string[]> => {
       const itemSpine = new Spine(subGraph)
       const completed: string[] = []
 
