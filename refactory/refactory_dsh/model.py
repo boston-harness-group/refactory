@@ -340,6 +340,13 @@ def is_transport_failure(text: str) -> bool:
     return any(marker in lowered for marker in TRANSPORT_MARKERS)
 
 
+#: What the headless runner writes before it streams the model's reasoning.
+REASONING_HEADER = "dsh: reasoning:"
+
+#: The cause when dsh exited after streaming reasoning and wrote no diagnostic.
+NO_DIAGNOSTIC = "dsh: the model turn ended without completing and dsh gave no reason"
+
+
 def failure_cause(stderr: str) -> str:
     """The line that says *why* a completion failed, not the model's last paragraph.
 
@@ -351,11 +358,20 @@ def failure_cause(stderr: str) -> str:
     A runtime bootstrap crash may happen before DSH can report anything. Node ends
     those stacks with its version banner; retain the error header instead of that
     banner or a stack frame. Do not expose the full reasoning/stack transcript.
+
+    ``dsh: reasoning:`` is not a diagnostic but the header before the streamed
+    reasoning. Taking it for one made a completion stopped at its output token
+    limit read "dsh: reasoning:". With no diagnostic after it, the cause says so
+    rather than quoting the reasoning.
     """
     lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
     for line in reversed(lines):
+        if line == REASONING_HEADER:
+            continue
         if line.startswith("dsh:") or is_transport_failure(line):
             return line
+    if REASONING_HEADER in lines:
+        return NO_DIAGNOSTIC
     for line in reversed(lines):
         if re.match(r"^(?:[A-Za-z_$][\w$]*Error|Error)(?: \[[A-Z0-9_]+\])?:\s*\S", line):
             return line
@@ -506,6 +522,27 @@ class DshModelClient:
         if self._max_completion_tokens:
             result["max_completion_tokens"] = self._max_completion_tokens
         return result
+
+    def output_limit(self) -> int | None:
+        """The output token limit this client's completions run under, when one is known.
+
+        The smaller of the model's configured ``maxTokens`` and the route's
+        ``max_completion_tokens``, as ``worker_observer.mjs`` applies them.
+        """
+        values: list[Any] = [getattr(self, "_max_completion_tokens", "")]
+        provider = (getattr(self, "_provider_config", None) or {}).get(self._provider) or {}
+        for entry in provider.get("models") or ():
+            if isinstance(entry, dict) and entry.get("id") == self._model:
+                values.append(entry.get("maxTokens"))
+        known: list[int] = []
+        for value in values:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                known.append(number)
+        return min(known) if known else None
 
     def for_node(self, node: str, role: str = "worker") -> DshModelClient:
         from refactory_dsh.workers import resolve_route
@@ -864,6 +901,10 @@ class DshModelClient:
                 if proc.returncode == 0:
                     return proc.stdout
                 cause = failure_cause(proc.stderr)
+                if cause.startswith("dsh: max-tokens:") and (limit := self.output_limit()):
+                    # Name the limit: a reader, or an optimizer, cannot weigh a
+                    # shorter answer against a larger cap without the number.
+                    cause = f"{cause} ({limit} tokens)"
                 if not is_transport_failure(proc.stderr):
                     # The model answered wrongly, the key is dead, the prompt is
                     # rejected: retrying spends two more completions on the same
