@@ -26,7 +26,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Knob` | `(default: 'Any', kind: 'str' = 'float', lo: 'float \| None' = None, hi: 'float \| None' = None, enum: 'tuple[Any, ...]' = (), values: 'tuple[str, ...]' = (), frozen: 'bool' = False, description: 'str' = '', required: 'bool' = False) -> None` |
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None) -> None` |
 | class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
@@ -52,7 +52,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `Edge` | `(source: 'str', target: 'str', condition: 'str \| None' = None) -> None` |
 | class | `Graph` | `(*, auto_start: 'bool' = True) -> 'None'` |
 | class | `GraphError` | `` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None) -> None` |
 | function | `retry_declaration` | `(value: 'Any') -> 'dict[str, Any] \| None'` |
 | function | `workspace_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
 
@@ -937,14 +937,18 @@ The per-item half of a data node, from the command line.
 |---|---|---|
 | class | `AllItemsFailedError` | `` |
 | class | `ItemsError` | `` |
-| function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int') -> 'dict[str, Any]'` |
-| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None) -> 'dict[str, Any]'` |
+| function | `clear_live` | `(workdir: 'Path', node_id: 'str') -> 'None'` |
+| function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int', *, concurrent: 'bool' = False) -> 'dict[str, Any]'` |
+| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None, concurrent: 'bool' = False) -> 'dict[str, Any]'` |
+| function | `command_finish` | `(node: 'Node', workdir: 'Path', *, partial: 'bool' = False) -> 'dict[str, Any]'` |
 | function | `command_list` | `(node: 'Node', workdir: 'Path') -> 'dict[str, Any]'` |
+| function | `command_prepare` | `(node: 'Node', workdir: 'Path', *, requested: 'int', fallback: 'str \| None' = None) -> 'dict[str, Any]'` |
 | function | `command_reset` | `(workdir: 'Path', request: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |
 | function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
 | function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
+| function | `live_dir` | `(workdir: 'Path', node_id: 'str') -> 'Path'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `mark_pass_complete` | `(pass_dir: 'Path', record: 'dict[str, Any] \| None' = None) -> 'None'` |
@@ -959,14 +963,18 @@ The per-item half of a data node, from the command line.
 
 - **`AllItemsFailedError`** — Raised when every item in a data pass failed (the all-fail rule).
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
+- **`clear_live`** — Remove *node_id*'s per-item aliases, and anything an abandoned phase left there.
 - **`command_begin`** — Materialise one item and prepare the workspace for its pass.
 - **`command_end`** — The Task's verdict on one pass, folded into the run's facts.
+- **`command_finish`** — Close a concurrent pass: records and ``item_scores`` in item order, then the
 - **`command_list`** — How many items the node iterates, and what they are called.
+- **`command_prepare`** — Open a pass whose items were asked to run ``requested`` at a time.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
+- **`live_dir`** — The folder of *node_id*'s per-item aliases (``data_parallel._live_alias``).
 - **`make_item_record`** — Build a per-item record for one evaluated item.
 - **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.

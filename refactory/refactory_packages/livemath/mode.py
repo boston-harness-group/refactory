@@ -79,6 +79,12 @@ class Solver(nn.Mode):
             "max_completion_tokens": nn.Knob(
                 MAX_COMPLETION_TOKENS, "int", lo=0, frozen=True,
                 description="output-token cap on each solve-node model call; 0 = no cap"),
+            # Concurrent data-node items. A resource setting, not a search
+            # target: frozen against the optimizer, set with
+            # ``--knob data_parallelism=N``.
+            "data_parallelism": nn.Knob(
+                1, "int", lo=1, hi=64, frozen=True,
+                description="concurrent data-node items"),
         }
 
     def build(self) -> nn.Graph:
@@ -90,6 +96,8 @@ class Solver(nn.Mode):
             task_ref=TASK,
             writes=("current_item.json",),
             produces=("item_scores",),
+            parallelism_knob="data_parallelism",
+            knobs=("data_parallelism",),
         ))
         graph.add(nn.Node(
             "format_prompt", "op",

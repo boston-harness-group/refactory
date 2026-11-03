@@ -11,7 +11,7 @@ Serialization is canonical: nodes are sorted by id and edges by
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 #: The node kinds a mode may declare. `fork`/`join` are a barrier pair and
 #: `data` iterates a subgraph once per item; all three are executed by the
@@ -165,12 +165,19 @@ _NODE_FIELDS = frozenset(
         "workspace",
         "system_prompt_template",
         "tool_policy",
+        "parallelism",
+        "parallelism_knob",
     }
 )
 
 
 class GraphError(ValueError):
     """A graph could not be built or read from its serialized form."""
+
+
+#: The most items a data node runs at once, whether set as ``parallelism`` or by its
+#: ``parallelism_knob`` (a knob with no upper bound of its own is held to it too).
+MAX_PARALLELISM = 64
 
 
 @dataclass
@@ -231,6 +238,15 @@ class Node:
     source_format: str = ""
     inline_items: tuple[dict[str, Any], ...] = ()
     limit: int = 0
+    #: `data`: the most items to run at once. 1 is sequential (the default);
+    #: N > 1 lets up to N items run concurrently on both runtimes.
+    parallelism: int = 1
+    #: `data`: the knob whose value is this node's parallelism, when one is bound. The
+    #: value is read wherever the graph is run -- the walker from the run's knobs, the
+    #: lowering from the state's -- so every path that sets the knob (``--knob`` on
+    #: ``optimize`` or ``run``, a resume, the optimizer) gets it, with no rebuild. The
+    #: node must list the knob in ``knobs``.
+    parallelism_knob: str = ""
     #: Resource phase is independent of worker routing. Unset preserves the
     #: enclosing phase, except the legacy validation role enters validation.
     resource_role: str | None = None
@@ -298,6 +314,18 @@ class Node:
             raise GraphError(f"fork node {self.id!r} declares no targets")
         if self.kind == "join" and not self.sources:
             raise GraphError(f"join node {self.id!r} declares no sources")
+        if not 1 <= self.parallelism <= MAX_PARALLELISM:
+            raise GraphError(f"node {self.id!r}: parallelism must be between 1 and {MAX_PARALLELISM}")
+        if self.parallelism != 1 and self.parallelism_knob:
+            raise GraphError(
+                f"node {self.id!r}: set parallelism or parallelism_knob, not both")
+        if (self.parallelism != 1 or self.parallelism_knob) and self.kind != "data":
+            raise GraphError(f"node {self.id!r}: parallelism is a data-node field")
+        if self.parallelism_knob and self.parallelism_knob not in self.knobs:
+            raise GraphError(
+                f"node {self.id!r}: parallelism_knob {self.parallelism_knob!r} must be "
+                "one of the node's knobs"
+            )
         if self.kind == "data":
             if not self.subgraph_entry or not self.subgraph_exit:
                 raise GraphError(
@@ -415,6 +443,8 @@ class Node:
             **({"inline_items": [dict(item) for item in self.inline_items]}
                if self.inline_items else {}),
             **({"limit": self.limit} if self.limit else {}),
+            **({"parallelism": self.parallelism} if self.parallelism != 1 else {}),
+            **({"parallelism_knob": self.parallelism_knob} if self.parallelism_knob else {}),
             **({"feedback_keys": list(self.feedback_keys)} if self.feedback_keys else {}),
             **({"timeout_s": self.timeout_s} if self.timeout_s is not None else {}),
             **({"retry": {**self.retry, "on": list(self.retry["on"])}}
@@ -460,6 +490,8 @@ class Node:
             source_format=str(state.get("source_format", "")),
             inline_items=tuple(state.get("inline_items") or ()),
             limit=int(state.get("limit", 0)),
+            parallelism=int(state.get("parallelism", 1)),
+            parallelism_knob=str(state.get("parallelism_knob", "")),
             feedback_keys=tuple(state.get("feedback_keys") or ()),
             timeout_s=(int(state["timeout_s"]) if state.get("timeout_s") is not None else None),
             retry=(dict(state["retry"]) if isinstance(state.get("retry"), dict)
@@ -469,6 +501,30 @@ class Node:
                        else state.get("workspace")),
             tool_policy=state.get("tool_policy"),
         )
+
+    def effective_parallelism(self, knobs: Mapping[str, Any]) -> int:
+        """How many items this data node runs at once, given the run's knob values.
+
+        The bound knob's value when ``parallelism_knob`` names one, else ``parallelism``.
+        A bound value that is missing, not an integer, or outside 1..``MAX_PARALLELISM``
+        is a ``GraphError``.
+        """
+        if not self.parallelism_knob:
+            return self.parallelism
+        if self.parallelism_knob not in knobs:
+            raise GraphError(
+                f"node {self.id!r}: parallelism_knob {self.parallelism_knob!r} has no value "
+                "in this run's knobs"
+            )
+        value = knobs[self.parallelism_knob]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise GraphError(
+                f"node {self.id!r}: {self.parallelism_knob} must be an integer, got {value!r}")
+        if not 1 <= value <= MAX_PARALLELISM:
+            raise GraphError(
+                f"node {self.id!r}: {self.parallelism_knob} must be between 1 and "
+                f"{MAX_PARALLELISM}, got {value}")
+        return value
 
     def with_field(self, field_name: str, value: Any) -> "Node":
         """A copy with one field replaced, refusing an unknown field."""

@@ -1086,6 +1086,49 @@ class Executor:
                 self._resume_at = None
                 if not _resuming and _passes_root.exists():
                     _shutil.rmtree(_passes_root)
+                if not _resuming:
+                    from refactory_dsh.items import clear_live
+                    clear_live(_run_workdir, node.id)
+
+                # ── concurrent dispatch ────────────────────────────────
+                # parallelism > 1 runs the items at once, with this loop's contract
+                # (data_parallel's docstring); a recorded fallback runs them below.
+                _parallelism = node.effective_parallelism(self.ctx.knobs)
+                if _parallelism > 1:
+                    from .data_parallel import _check_serial_fallback, run_data_concurrent
+
+                    if _check_serial_fallback(self, node, _parallelism) is None:
+                        _par = run_data_concurrent(
+                            self, node, items, task, _parallelism,
+                            setup_kwargs=_setup_kwargs,
+                            verify_kwargs=_verify_kwargs,
+                            item_deadline_s=_item_deadline_s,
+                        )
+                        scores = _par.scores
+                        _failed_item_step_indices.update(
+                            idx + _data_steps_start for idx in _par.failed_step_indices
+                        )
+                        _data_steps_added = len(self.steps) - _data_steps_start
+                        self.max_steps = _original_max_steps + _data_steps_added
+                        if _par.stop is not None:
+                            # A halt or a gate stop in a pass: recorded and ended
+                            # exactly as the sequential loop records and ends it.
+                            error = _par.error
+                            self._record(node.id, error=error, outcome=_par.stop)
+                            break
+                        if scores:
+                            failed_count = sum(
+                                1 for r in scores if r.get("error_text") is not None
+                            )
+                            if "item_scores" in node.produces:
+                                self.ctx.set_fact("item_scores", scores)
+                            if failed_count == len(items):
+                                error = f"{node.id}: all {len(items)} items failed"
+                                break
+                        self.record.complete(node)
+                        out = self.graph.out_edges(node.id)
+                        current = out[0].target if out else None
+                        continue
 
                 for index, item in enumerate(items):
                     # Resume: an item whose pass finished is not run again; its

@@ -80,6 +80,8 @@ export interface WorkflowNode {
   subgraph_exit?: string
   /** `DataNode`: the most items to iterate, after the source is read. */
   limit?: number
+  /** `DataNode`: max concurrent items. 1 (default) is sequential. */
+  parallelism?: number
   /** `SelectionNode`: the selection strategy. */
   strategy?: string
   /**
