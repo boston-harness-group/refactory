@@ -134,7 +134,7 @@ class Solver(nn.Mode):
         release can read it, but the JS observer does not inject it today.
         """
         if (
-            self.max_completion_tokens
+            self.max_completion_tokens > 0
             and model is not None
             and callable(getattr(model, "for_node", None))
         ):

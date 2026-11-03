@@ -873,6 +873,46 @@ def test_livemath_mode_knob_sets_solver_route():
            "max_completion_tokens" not in injected2._node_routes.get("solve", {})
 
 
+def test_negative_max_completion_tokens_is_not_injected():
+    """A subclass with ``max_completion_tokens = -1`` must NOT inject ``"-1"``
+    into the route.  The ``> 0`` guard (not truthiness) blocks negative values.
+    """
+    from refactory_packages.livemath.mode import Solver
+    from refactory_dsh.nn import Mode
+    import copy
+
+    class Negative(Solver):
+        max_completion_tokens = -1
+
+    class FakeModel:
+        def __init__(self):
+            self._node_routes = {}
+        def for_node(self, node, role="worker"):
+            return copy.copy(self)
+
+    captured_models = []
+    original_run = Mode.run
+
+    def capturing_run(self, workdir, *, model=None, **kwargs):
+        captured_models.append(model)
+        from refactory_dsh.nn import RunResult
+        return RunResult(exit_ok=True, facts={}, workdir=workdir)
+
+    model = FakeModel()
+    neg = Negative()
+    Mode.run = capturing_run
+    try:
+        neg.run(Path("/tmp/fake-workdir"), model=model)
+    finally:
+        Mode.run = original_run
+
+    assert len(captured_models) == 1
+    injected = captured_models[0]
+    # Negative value must NOT be injected
+    assert "solve" not in getattr(injected, "_node_routes", {}) or \
+           "max_completion_tokens" not in injected._node_routes.get("solve", {})
+
+
 def test_skillopt_view_an_errored_record_with_exchanges_is_an_error():
     """A pass that failed after a model call (an exchange recorded, then an
     error) is still SkillOpt's failed process_one: its error, no conversation
