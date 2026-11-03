@@ -143,7 +143,8 @@ def default_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dic
     The fields SkillOpt's formatters read (reflect.py:159-199,
     slow_update.py:242-257): pass, score and prediction; the task under
     ``question``/``task_description``/``instruction`` and its type under
-    ``task_type``/``instruction_type``, from the item's own metadata; the
+    ``task_type``/``instruction_type``, from the item's own metadata, with a
+    ``question`` also given as ``task_description`` for the analyst; the
     record's fail reason; one agent message per exchange; the first exchange's prompt as the
     target user prompt; and the grading as the appended ``system`` entry a
     rollout adds (e.g. livemathematicianbench/rollout.py:272-281).
@@ -159,6 +160,12 @@ def default_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dic
     for key in ("question", "task_description", "instruction", "task_type", "instruction_type"):
         if key in meta:
             result[key] = meta[key]
+    # The analyst's ``Task:`` line reads only task_description/instruction
+    # (reflect.py:159-199), so an item that names its task ``question`` would
+    # otherwise reach the analyst with no task, and with no exchange (e.g. it
+    # ran out of output tokens) nothing else would show the task either.
+    if "question" in result and not ("task_description" in result or "instruction" in result):
+        result["task_description"] = result["question"]
     fail_reason = prompts.record_fail_reason(record)
     result["fail_reason"] = "" if record.get("passed") else fail_reason
     result["n_turns"] = len(exchanges)
