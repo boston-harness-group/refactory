@@ -25,7 +25,7 @@ import threading
 import time
 from concurrent.futures import CancelledError
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 from refactory_dsh.paths import SOURCE_CLI_ENTRY, dsh_command, dsh_root, node_bin, venv_bin
 import importlib.metadata
@@ -388,6 +388,13 @@ class DshModelClient:
     or run configuration from before ``retry_window_s`` carries: when it is given, the
     first wait is ``backoff_s`` and each next one doubles, as it was then.
     """
+
+    #: One client may serve concurrent callers (a fork's branches, a data node's
+    #: parallel items): every completion is its own ``dsh`` subprocess, and every
+    #: ``with_*``/``for_node`` binding is a copy. Read by
+    #: ``nn.data_parallel.is_shareable_model``; a custom client opts in the same way.
+    thread_safe: ClassVar[bool] = True
+
 
     def __init__(
         self,

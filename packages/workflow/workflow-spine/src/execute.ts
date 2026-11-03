@@ -256,11 +256,13 @@ export function dataCommandOf(
   index?: number,
   failedReason?: string,
   failedKind?: string,
+  extra: readonly string[] = [],
 ): string {
   const position = index === undefined ? '' : ` --index ${String(index)}`
   const failed = failedReason === undefined ? '' : ` --failed ${quoted(failedReason)}`
   const kind = failedKind === undefined ? '' : ` --failed-kind ${quoted(failedKind)}`
-  return `${config.dataCommand} ${verb} --node ${quoted(node.id)}${position}${failed}${kind}`
+  const flags = extra.map(flag => ` ${quoted(flag)}`).join('')
+  return `${config.dataCommand} ${verb} --node ${quoted(node.id)}${position}${failed}${kind}${flags}`
 }
 
 /**
@@ -272,9 +274,11 @@ export function dataCommandOf(
  * executor does.
  * @param shell - the shell executor that runs node commands.
  * @param node - the data node view.
- * @param verb - the loader verb: `list`, `begin`, or `end`.
+ * @param verb - the loader verb: `list`, `begin`, `end`, or a concurrent pass's
+ * `prepare` and `finish`.
  * @param config - the data loader command and the settings node commands run under.
  * @param index - the item's position, for `begin` and `end`.
+ * @param extra - further arguments, such as `--concurrent`, each quoted.
  * @returns the parsed JSON the command printed, or a failure carrying its stderr.
  */
 export async function runDataCommand(
@@ -285,8 +289,9 @@ export async function runDataCommand(
   index?: number,
   failedReason?: string,
   failedKind?: string,
+  extra: readonly string[] = [],
 ): Promise<{ ok: true; value: Record<string, unknown> } | CommandFailure> {
-  const command = dataCommandOf(node, verb, config, index, failedReason, failedKind)
+  const command = dataCommandOf(node, verb, config, index, failedReason, failedKind, extra)
   const allowance = resourceCheck(node, config)
   const resolved = shell.resolve(requestFor(node, command, config))
   const spec = allowance === undefined ? resolved : { ...resolved, timeoutMs: Math.min(resolved.timeoutMs, allowance) }

@@ -1,7 +1,8 @@
-"""Parallel data node execution on the walker.
+"""Parallel data node execution on the walker, and the spine's item loader verbs.
 
-Tests T1–T9 from the design document. Every test must fail without the change
-(parallelism > 1 running items concurrently).
+T1-T9 from the design, with the review's fixes: the step cap, the deadline span,
+the stop semantics and the fallback reasons are the sequential loop's, and
+``--knob data_parallelism=N`` reaches the graph ``Loop.run()`` evaluates.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import pytest
 
 from refactory_dsh import nn
 from refactory_dsh.nn.executor import CURRENT_ITEM, execute
+from refactory_dsh.task import Task, VerifyResult
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -323,31 +325,62 @@ def test_resume_reruns_only_unfinished(tmp_path, monkeypatch):
     assert visited == ["2", "3"], f"expected ['2', '3'], got {visited}"
 
 
-# ── T5: budget exhaustion ─────────────────────────────────────────────────
+# ── T5: the step cap is the sequential loop's, scaled by the item count ───
 
-def test_budget_exhaustion(tmp_path, monkeypatch):
-    """T5 — step budget is enforced with parallelism > 1.
+@pytest.mark.parametrize("parallelism", [1, 4])
+def test_step_cap_scaled_like_sequential(tmp_path, monkeypatch, parallelism):
+    """T5 — with 20 items under max_steps=10, every item runs, at any parallelism.
 
-    With 8 items and max_steps=3 (1 data + limited body ops), not all items
-    can complete. The step budget reserve stops new items from getting a step.
+    The sequential loop scales the cap by the item count; the concurrent items
+    reserve their steps against that same scaled cap, not the unscaled one (which
+    left 9 steps for 20 items: 11 items failed "the run exceeded ... steps").
     """
-    N = 8
+    N = 20
     items = tuple({"id": str(i)} for i in range(N))
     visited_dir = tmp_path / "visited"
     visited_dir.mkdir()
     monkeypatch.setenv("VISITED_DIR", str(visited_dir))
 
-    # With max_steps=3: 1 step for data node + at most 2 body steps.
-    # Use parallelism=2 so items are dispatched gradually, not all at once.
-    graph = _data_graph(
-        "test_ops_parallel", "noop_op",
-        items=items, parallelism=2,
-    )
-    result = execute(graph, tmp_path / "run", max_steps=3)
+    graph = _data_graph("test_ops_parallel", "noop_op", items=items, parallelism=parallelism)
+    result = execute(graph, tmp_path / "run", max_steps=10)
 
-    # Not all items should have completed.
-    visited = list(visited_dir.glob("*"))
-    assert len(visited) < N, f"expected < {N} items to complete, got {len(visited)}"
+    assert result.exit_ok, result.error
+    assert len(list(visited_dir.glob("*"))) == N
+    # No Task grades these items, so only a failed item would leave a record.
+    assert result.item_records == []
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_nested_fork_in_item_shares_the_step_cap(tmp_path, monkeypatch, parallelism):
+    """A fork inside a concurrent item charges its branches' steps to the cap the
+    items share, so exactly the items the sequential loop fails fail here too.
+
+    max_steps=3 over 3 items of a 5-step body (fork, a, b, join, last) scales to 15:
+    the data step plus 14 body steps, one short of the 15 the items need.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="fork1", subgraph_exit="last",
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
+        inline_items=tuple({"id": str(i)} for i in range(3)),
+        parallelism=parallelism,
+    ))
+    graph.add(nn.Node("fork1", "fork", targets=("a", "b")))
+    graph.add(nn.Node("a", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("b", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("join1", "join", sources=("a", "b")))
+    graph.add(nn.Node("last", "op", call="loop_ops:noop"))
+    graph.connect("fork1", "join1")
+    graph.connect("a", "join1")
+    graph.connect("b", "join1")
+    graph.connect("join1", "last")
+    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run", max_steps=3)
+    # No Task grades these items: the records are the failed items'.
+    assert len(result.item_records) == 1, result.item_records
+    assert "exceeded" in result.item_records[0]["error_text"]
 
 
 # ── T6: candidate ID stability ───────────────────────────────────────────
@@ -372,242 +405,394 @@ def test_candidate_id_stability():
     assert state2.get("parallelism") == 4
 
 
-# ── T7: per-item deadline in concurrent mode ─────────────────────────────
+# ── T7: the per-item deadline covers setup and verify, as the sequential loop's
 
-def test_per_item_deadline_concurrent(tmp_path, monkeypatch):
-    """T7 — a per-item deadline failure in concurrent mode records the item as
-    failed with timeout while other items complete.
+class _PhaseTask(Task):
+    """Sleeps in the phase an item names, past the one-second deadline."""
 
-    Uses a very short budget wall to trigger the timer-based per-item deadline.
-    The over-deadline item must be recorded as failed with error_kind 'timeout'.
-    The fast item must complete successfully (with a Task for grading).
-    Other items must NOT be cancelled by the slow item's deadline.
-    """
-    barrier_dir = tmp_path / "barrier"
-    barrier_dir.mkdir()
-    monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
+    name = "phase_deadline"
 
-    # Register a task that grades items (so make_item_record returns records
-    # for successful items — without a Task, verdict=None → record=None).
-    _TASK = tmp_path / "deadline_task.py"
-    _TASK.write_text("""\
-from refactory_dsh.task import Task, TaskInstance, VerifyResult
-
-class T(Task):
-    name = "deadline_test"
-    def instances(self):
-        return [
-            TaskInstance(id="fast", metadata={}),
-            TaskInstance(id="slow", metadata={}),
-        ]
     def setup(self, instance, workspace, **kw):
-        pass
+        if instance.metadata.get("phase") == "setup":
+            time.sleep(4)
+
     def verify(self, instance, workspace, **kw):
+        if instance.metadata.get("phase") == "verify":
+            time.sleep(4)
         return VerifyResult(passed=True, score=1.0)
-""")
-    if str(tmp_path) not in sys.path:
-        sys.path.insert(0, str(tmp_path))
+
+
+@pytest.mark.parametrize("parallelism", [1, 4])
+def test_per_item_deadline_covers_setup_and_verify(tmp_path, monkeypatch, parallelism):
+    """T7 — an item whose setup or verify outlasts the deadline is a timeout; an item
+    whose walk does is not (the walk has no item deadline, on either path). The
+    other items are not cancelled, and both paths record the same outcomes.
+    """
+    from refactory_dsh.nn.executor import Executor
     from refactory_dsh.task import register_task
-    import importlib
-    if "deadline_task" in sys.modules:
-        importlib.reload(sys.modules["deadline_task"])
-    else:
-        import deadline_task  # noqa: F401
-    from deadline_task import T  # type: ignore[import-not-found]
-    register_task("deadline_test", T)
 
+    register_task("phase_deadline", _PhaseTask)
+    monkeypatch.setattr(Executor, "_data_item_deadline", lambda self: 1.0)
     items = (
-        {"id": "fast", "delay": "0"},
-        {"id": "slow", "delay": "60"},  # will be killed by deadline
+        {"id": "ok", "delay": "0"},
+        {"id": "slow_setup", "delay": "0", "phase": "setup"},
+        {"id": "slow_verify", "delay": "0", "phase": "verify"},
+        {"id": "slow_walk", "delay": "2"},
     )
-
     graph = nn.Graph()
     graph.add(nn.Node(
-        "data", "data",
-        subgraph_entry="body",
-        subgraph_exit="body",
-        writes=(CURRENT_ITEM,),
-        produces=("item_scores",),
-        task_ref="deadline_test",
-        inline_items=tuple(dict(item) for item in items),
-        parallelism=2,
+        "data", "data", subgraph_entry="body", subgraph_exit="body",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="phase_deadline",
+        inline_items=items, parallelism=parallelism,
     ))
-    graph.add(nn.Node(
-        "body", "op", call="test_ops_parallel:sleep_op",
-        reads=(CURRENT_ITEM,), produces=("counted",),
-    ))
-    graph.add(nn.Node(
-        "report", "op", call="loop_ops:write_best",
-        writes=("best.json",), produces=("best",),
-    ))
+    graph.add(nn.Node("body", "op", call="test_ops_parallel:sleep_op",
+                      reads=(CURRENT_ITEM,), produces=("counted",)))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
     graph.connect("data", "report")
 
-    from refactory_dsh.budgets import ResourceLimits
-    result = execute(
-        graph, tmp_path / "run", max_steps=200,
-        resource_limits=ResourceLimits(max_elapsed_s=5),
-        enable_recovery=True,
-    )
-
-    scores = result.facts.get("item_scores", [])
-    assert len(scores) >= 2, f"expected at least 2 scores, got {len(scores)}: {scores}"
-
-    # The fast item must have completed successfully.
-    fast_items = [s for s in scores if s.get("id") == "fast"]
-    assert len(fast_items) == 1, f"expected 1 fast item, got {fast_items}"
-    assert fast_items[0].get("error_text") is None, f"fast item should not have an error: {fast_items[0]}"
-
-    # The slow/over-deadline item must be recorded as failed with error_kind 'timeout'.
-    slow_items = [s for s in scores if s.get("id") == "slow"]
-    assert len(slow_items) == 1, f"expected 1 slow item, got {slow_items}"
-    assert slow_items[0].get("error_text") is not None, f"slow item should have an error: {slow_items[0]}"
-    assert slow_items[0].get("error_kind") == "timeout", (
-        f"slow item should have error_kind 'timeout', got {slow_items[0].get('error_kind')!r}"
-    )
-
-    # Clean up.
-    if str(tmp_path) in sys.path:
-        sys.path.remove(str(tmp_path))
-    sys.modules.pop("deadline_task", None)
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    assert result.exit_ok, result.error
+    outcomes = [(r["id"], r.get("error_kind"), r.get("passed")) for r in result.facts["item_scores"]]
+    assert outcomes == [
+        ("ok", None, True),
+        ("slow_setup", "timeout", False),
+        ("slow_verify", "timeout", False),
+        ("slow_walk", None, True),
+    ]
 
 
-# ── T8: serial fallback records reason ────────────────────────────────────
+# ── T8: a serial fallback says exactly why, and is never silent ───────────
+
+class _UnsharedModel:
+    """A client that does not declare itself safe to share."""
+
+    def complete(self, prompt: str, *, system: str = "", **kw: Any) -> str:
+        return "ok"
+
+
+def _noop_graph(tmp_path, monkeypatch, parallelism=4):
+    visited_dir = tmp_path / "visited"
+    visited_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("VISITED_DIR", str(visited_dir))
+    return _data_graph("test_ops_parallel", "noop_op",
+                       items=tuple({"id": str(i)} for i in range(3)), parallelism=parallelism)
+
 
 def test_serial_fallback_records_reason(tmp_path, monkeypatch):
-    """T8 — when parallelism > 1 but a serial-fallback fires, the reason is
-    recorded as a fact and the run still produces correct results.
-    """
-    items = tuple({"id": str(i)} for i in range(3))
-    visited_dir = tmp_path / "visited"
-    visited_dir.mkdir()
-    monkeypatch.setenv("VISITED_DIR", str(visited_dir))
-
-    class _CustomModel:
-        """A non-DshModelClient model that triggers serial fallback."""
-        def complete(self, prompt: str, *, system: str = "") -> str:
-            return "ok"
-
-    graph = _data_graph(
-        "test_ops_parallel", "noop_op",
-        items=items, parallelism=4,
-    )
-
-    result = execute(
-        graph, tmp_path / "run", model=_CustomModel(), max_steps=200,
-    )
-    # Run should still succeed (serial fallback).
+    """T8 — an unshareable client runs the items one at a time; the fact and the
+    run warning say which client and why."""
+    result = execute(_noop_graph(tmp_path, monkeypatch), tmp_path / "run",
+                     model=_UnsharedModel(), max_steps=200)
     assert result.exit_ok, result.error
-    # The fallback fact should be recorded.
-    fact = result.facts.get("data_parallelism_effective")
-    assert fact is not None, "serial fallback should record data_parallelism_effective fact"
-    assert fact["requested"] == 4
-    assert fact["effective"] == 1
-    assert "reason" in fact
+    fact = result.facts["data_parallelism_effective"]
+    assert fact == {
+        "node": "data", "requested": 4, "effective": 1,
+        "reason": "model client _UnsharedModel does not declare thread_safe = True, "
+                  "so it is not shared across concurrent items",
+    }
+    events = (tmp_path / "run" / ".refactory" / "events.jsonl").read_text()
+    assert "data parallelism fallback to serial: model client _UnsharedModel" in events
 
 
-# ── T9: Mode.evaluate() overlap with stub solver ─────────────────────────
+def test_serial_fallback_names_a_memory_store_with_namespaces(tmp_path, monkeypatch):
+    """A MemoryStore is named as one, with the namespaces that keep it serial."""
+    from refactory_dsh.memory import MemoryStore
 
-def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
-    """T9 — items overlap through Mode.evaluate() with data_parallelism=K.
+    store = MemoryStore((nn.Memory("notes"),), run_root=tmp_path / "mem",
+                        project_root=tmp_path / "project")
+    result = execute(_noop_graph(tmp_path, monkeypatch), tmp_path / "run",
+                     memory=store, max_steps=200)
+    reason = result.facts["data_parallelism_effective"]["reason"]
+    assert "non-MemoryStore" not in reason
+    assert reason == ("the MemoryStore declares namespace(s) notes, whose reads and "
+                      "writes are not synchronised across concurrent items")
 
-    Exercises the full ``refactory optimize`` evaluation path:
-    ``mode.evaluate()`` → ``Solver.run()`` → ``Mode.run()`` →
-    ``execute(self.graph(), ...)``.
 
-    A Solver subclass overrides ``build()`` with a barrier-op graph while
-    keeping the ``data_parallelism`` knob binding, so the knob → build() →
-    node.parallelism → executor path is exercised end-to-end.
-    Items overlap only when parallelism > 1 is set on the node.
-    """
-    K = 3
+def test_serial_fallback_warning_that_cannot_be_written_is_reported(tmp_path, monkeypatch, capsys):
+    """A run warning that fails to write is reported on stderr and in the fact."""
+    from refactory_dsh import live
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise OSError("events file is read-only")
+
+    monkeypatch.setattr(live, "emit", broken)
+    result = execute(_noop_graph(tmp_path, monkeypatch), tmp_path / "run",
+                     model=_UnsharedModel(), max_steps=200)
+    assert result.facts["data_parallelism_effective"]["warning_error"] == "OSError: events file is read-only"
+    assert '"warning": "data_parallelism_fallback"' in capsys.readouterr().err
+
+
+def test_shareable_custom_client_runs_items_concurrently(tmp_path, monkeypatch):
+    """A client that is not a DshModelClient but declares thread_safe = True is
+    shared: no fallback, and the items overlap (the barrier needs all three)."""
+    class _Shared(_UnsharedModel):
+        thread_safe = True
+
     barrier_dir = tmp_path / "barrier"
     barrier_dir.mkdir()
     monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
-    monkeypatch.setenv("BARRIER_K", str(K))
-
-    from refactory_packages.livemath.mode import Solver
-
-    # Use a DshModelClient subclass that is recognized as thread-safe.
-    from refactory_dsh.model import DshModelClient
-
-    class _StubDsh(DshModelClient):
-        def __init__(self):
-            self._cancellations: tuple[threading.Event, ...] = ()
-
-        def complete(self, prompt: str, *, system: str = "", **kw: Any) -> str:
-            return "ok"
-
-        def with_cancellation(self, event: threading.Event) -> "_StubDsh":
-            c = copy.copy(self)
-            c._cancellations = (*self._cancellations, event)
-            return c
-
-        def for_node(self, node: str, role: str = "worker") -> "_StubDsh":
-            return copy.copy(self)
-
-        def context(self) -> dict[str, Any]:
-            return {}
-
-    # A Solver subclass whose build() returns a barrier-op graph so no live
-    # model calls are made but the data_parallelism knob → node.parallelism
-    # binding is exercised through the real Solver.declare()+build() chain.
-    _items = tuple({"id": str(i)} for i in range(K))
-
-    class _TestSolver(Solver):
-        def build(self) -> nn.Graph:
-            graph = nn.Graph()
-            _par = int(self.values().get("data_parallelism", 1))
-            graph.add(nn.Node(
-                "data", "data",
-                subgraph_entry="body",
-                subgraph_exit="body",
-                writes=(CURRENT_ITEM,),
-                produces=("item_scores",),
-                inline_items=_items,
-                parallelism=_par,
-                knobs=("data_parallelism",),
-            ))
-            graph.add(nn.Node(
-                "body", "op", call="test_ops_parallel:barrier_op",
-                reads=(CURRENT_ITEM,), produces=("counted",),
-            ))
-            graph.add(nn.Node(
-                "report", "op", call="loop_ops:write_best",
-                writes=("best.json",), produces=("best",),
-            ))
-            graph.connect("data", "report")
-            return graph
-
-        def score(self, run: Any) -> float:
-            scores = [e.get("score", 0) for e in run.facts.get("item_scores", [])]
-            return sum(scores) / max(len(scores), 1)
-
-    # Construct the mode with data_parallelism=K via state dict manipulation
-    # (the same mechanism profiles.resolve() → edits.configure() uses).
-    mode = _TestSolver()
-    state = mode.state_dict()
-    state["knobs"]["data_parallelism"]["value"] = K
-    mode_k = _TestSolver(state=state)
-    # Rebuild graph with updated knobs (matching what profiles.resolve does).
-    mode_k._graph_state = mode_k.build().to_state()
-
-    # Verify the graph has parallelism=K.
-    graph = mode_k.graph()
-    assert graph.nodes["data"].parallelism == K, (
-        f"data node parallelism should be {K}, got {graph.nodes['data'].parallelism}"
-    )
-
-    # Call mode.evaluate() — the full evaluate → run → execute chain.
-    result = mode_k.evaluate(
-        tmp_path / "run", model=_StubDsh(), max_steps=200,
-    )
+    monkeypatch.setenv("BARRIER_K", "3")
+    graph = _data_graph("test_ops_parallel", "barrier_op",
+                        items=tuple({"id": str(i)} for i in range(3)), parallelism=3)
+    result = execute(graph, tmp_path / "run", model=_Shared(), max_steps=200)
     assert result.exit_ok, result.error
+    assert "data_parallelism_effective" not in result.facts
 
-    # Verify all K items reached the barrier simultaneously.
-    ready_files = list(barrier_dir.glob("ready_*"))
-    done_files = list(barrier_dir.glob("done_*"))
-    assert len(ready_files) == K, f"expected {K} ready files, got {len(ready_files)}"
-    assert len(done_files) == K, f"expected {K} done files, got {len(done_files)}"
+
+# ── T9: `--knob data_parallelism=N` reaches the evaluated graph ──────────
+
+_LOOP_ITEMS = 8
+
+
+class _SleepyClient:
+    """Answers each solve after a pause, the same answer for the same prompt, and
+    counts how many calls are in flight at once (shared across its copies)."""
+
+    thread_safe = True
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.count = {"now": 0, "max": 0, "calls": 0}
+
+    def complete(self, prompt: str, *, system: str = "", **kw: Any) -> str:
+        import hashlib
+
+        with self.lock:
+            self.count["now"] += 1
+            self.count["calls"] += 1
+            self.count["max"] = max(self.count["max"], self.count["now"])
+        time.sleep(self.delay)
+        with self.lock:
+            self.count["now"] -= 1
+        return f"<answer>{'ABCD'[int(hashlib.sha256(prompt.encode()).hexdigest(), 16) % 4]}</answer>"
+
+    def for_node(self, node_id, role=None):  # noqa: ANN001
+        return self
+
+    def with_tool_policy(self, policy):  # noqa: ANN001
+        return self
+
+    def with_wall(self, seconds):  # noqa: ANN001
+        return self
+
+    def route(self) -> dict[str, Any]:
+        return {"worker_backend": "dsh"}
+
+
+def _livemath_items(root: Path) -> Path:
+    data = root / "data" / "202601"
+    data.mkdir(parents=True)
+    rows = [{
+        "month": "202601", "no": no, "paper_link": f"http://arxiv.org/abs/2601.{no:05d}v1",
+        "theorem": f"Theorem {no}.", "sketch": f"Sketch {no}.", "theorem_type": ["analysis"],
+        "mcq": {"question": f"Question number {no}: which holds?",
+                "choices": [{"label": label, "text": f"choice {label} of {no}"} for label in "ABCD"],
+                "correct_choice": {"label": "ABCD"[no % 4], "text": f"choice {'ABCD'[no % 4]} of {no}"}},
+    } for no in range(1, _LOOP_ITEMS + 1)]
+    (data / "qa_202601_final.json").write_text(json.dumps(rows))
+    return root / "data"
+
+
+def _optimize_livemath(root: Path, parallelism: int) -> tuple[_SleepyClient, Path]:
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    client = _SleepyClient(0.3)
+    config = LoopConfig(knobs={"data_parallelism": parallelism}, epochs=1, batch_size=1,
+                        max_evaluations=1, optimizer="random", seed=1,
+                        runs_root=root / "run", holdout=0.0)
+    Loop("livemath/solver", config, project=Path("."), model=client).run()
+    (trial,) = sorted((root / "run" / "runs").iterdir())
+    return client, trial
+
+
+def test_loop_knob_reaches_the_evaluated_graph(tmp_path, monkeypatch):
+    """T9 — through ``Loop.run()``, as ``refactory optimize --knob data_parallelism=N``
+    runs it: knob 4 runs LiveMath's items four at a time, knob 1 one at a time, and
+    both score every item the same."""
+    monkeypatch.setenv("LIVEMATH_DATA_PATH", str(_livemath_items(tmp_path)))
+    serial, serial_trial = _optimize_livemath(tmp_path / "p1", 1)
+    parallel, parallel_trial = _optimize_livemath(tmp_path / "p4", 4)
+
+    assert serial.count["calls"] == parallel.count["calls"] == _LOOP_ITEMS
+    assert serial.count["max"] == 1
+    assert parallel.count["max"] == 4
+    for name in ("item_records.json", "facts.json"):
+        assert json.loads((serial_trial / name).read_text()) == json.loads((parallel_trial / name).read_text())
+
+
+# ── M5: halts, gate stops and budget stops keep the sequential semantics ──
+
+class _StopTask(Task):
+    """Stops the run in item "stop"'s setup, the way the test's ``kind`` says."""
+
+    name = "stop_task"
+    kind = "halt"
+
+    def setup(self, instance, workspace, **kw):
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.nn.executor import GateStop, HaltStop
+
+        if instance.id != "stop":
+            return
+        if self.kind == "halt":
+            raise HaltStop("item_gate", reason="halted in an item")
+        if self.kind == "gate":
+            raise GateStop("item_gate", [], [])
+        raise BudgetExhausted("budget gone in an item")
+
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=True, score=1.0)
+
+
+def _stop_graph(parallelism: int) -> nn.Graph:
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="body", subgraph_exit="body",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="stop_task",
+        inline_items=({"id": "a"}, {"id": "stop"}, {"id": "c"}), parallelism=parallelism,
+    ))
+    graph.add(nn.Node("body", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+    graph.connect("data", "report")
+    return graph
+
+
+@pytest.mark.parametrize("parallelism", [1, 2])
+@pytest.mark.parametrize("kind,outcome", [("halt", "halted"), ("gate", "refused")])
+def test_item_stop_is_recorded_as_the_sequential_loop_records_it(
+        tmp_path, monkeypatch, parallelism, kind, outcome):
+    """A halt pauses nothing and ends the run halted; a gate stop ends it refused --
+    both recorded in the progress record. The stopped item and the items after it
+    are not finished, so a resume runs them."""
+    from refactory_dsh.task import register_task
+
+    monkeypatch.setattr(_StopTask, "kind", kind)
+    register_task("stop_task", _StopTask)
+    run = tmp_path / "run"
+    result = execute(_stop_graph(parallelism), run, max_steps=200)
+
+    assert result.exit_ok is False
+    assert result.halted is (kind == "halt")
+    progress = json.loads((run / ".refactory" / "progress.json").read_text())
+    assert progress["outcome"] == outcome
+    assert progress["node"] == "data"
+    passes = run / "passes" / "data"
+    assert not (passes / "stop_1" / ".done").exists()
+    assert not (passes / "c_2").exists()
+
+
+@pytest.mark.parametrize("parallelism", [1, 2])
+def test_budget_stop_in_an_item_propagates(tmp_path, monkeypatch, parallelism):
+    """``BudgetExhausted`` in an item ends the run with that exception, not an error string."""
+    from refactory_dsh.budgets import BudgetExhausted
+    from refactory_dsh.task import register_task
+
+    monkeypatch.setattr(_StopTask, "kind", "budget")
+    register_task("stop_task", _StopTask)
+    with pytest.raises(BudgetExhausted, match="budget gone in an item"):
+        execute(_stop_graph(parallelism), tmp_path / "run", max_steps=200)
+
+
+# ── the spine's item loader: prepare, begin/end --concurrent, finish ──────
+
+class _LoaderTask(Task):
+    name = "loader_task"
+
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=instance.id != "fail", score=1.0)
+
+
+def _loader_run(tmp_path: Path, ids: tuple[str, ...]) -> tuple[Path, Any]:
+    from refactory_dsh.items import data_node
+    from refactory_dsh.lowering import write_declarations
+    from refactory_dsh.task import register_task
+
+    register_task("loader_task", _LoaderTask)
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="body", subgraph_exit="body",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="loader_task",
+        inline_items=tuple({"id": item_id} for item_id in ids), parallelism=4,
+    ))
+    graph.add(nn.Node("body", "op", call="loop_ops:noop"))
+    run = tmp_path / "run"
+    write_declarations({"graph": graph.to_state()}, run)
+    return run, data_node(run, "data")
+
+
+def _scores(run: Path) -> list[str]:
+    return [entry["id"] for entry in json.loads((run / "facts.json").read_text())["item_scores"]]
+
+
+def test_concurrent_begin_never_resets_the_node(tmp_path):
+    """Item 0's ``begin`` beside the others leaves their passes and scores alone:
+    ``prepare`` reset the node, once, before any item began."""
+    from refactory_dsh.items import command_begin, command_end, command_prepare
+
+    run, node = _loader_run(tmp_path, ("x", "y", "z"))
+    command_prepare(node, run, requested=4)
+    command_begin(node, run, 1, concurrent=True)
+    command_end(node, run, 1, concurrent=True)
+    command_begin(node, run, 0, concurrent=True)
+    assert (run / "passes" / "data" / "y_1" / ".done").exists()
+    assert _scores(run) == ["y"]
+
+
+def test_finish_puts_item_scores_in_item_order(tmp_path):
+    """Items that end in reverse order are scored in item order after ``finish``."""
+    from refactory_dsh.items import command_begin, command_end, command_finish, command_prepare
+
+    run, node = _loader_run(tmp_path, ("x", "y", "z"))
+    command_prepare(node, run, requested=4)
+    for index in (2, 1, 0):
+        command_begin(node, run, index, concurrent=True)
+        command_end(node, run, index, concurrent=True)
+    assert _scores(run) == ["z", "y", "x"]
+    finished = command_finish(node, run)
+    assert _scores(run) == ["x", "y", "z"]
+    assert [record["id"] for record in finished["records"]] == ["x", "y", "z"]
+
+
+def test_finish_applies_the_all_failed_rule_once(tmp_path):
+    """The last index ending first does not fire the all-failed rule early; ``finish``
+    fires it when every item failed."""
+    from refactory_dsh.items import (
+        AllItemsFailedError, command_begin, command_end, command_finish, command_prepare,
+    )
+
+    run, node = _loader_run(tmp_path, ("fail", "fail2"))
+    command_prepare(node, run, requested=4)
+    command_begin(node, run, 1, concurrent=True)
+    command_end(node, run, 1, concurrent=True, failed_reason="boom")
+    command_begin(node, run, 0, concurrent=True)
+    command_end(node, run, 0, concurrent=True, failed_reason="boom")
+    with pytest.raises(AllItemsFailedError):
+        command_finish(node, run)
+
+
+def test_concurrent_begin_keeps_a_finished_pass(tmp_path):
+    """A resumed concurrent pass does not run a finished item again."""
+    from refactory_dsh.items import command_begin, command_end, command_prepare
+
+    run, node = _loader_run(tmp_path, ("x", "y"))
+    command_prepare(node, run, requested=4)
+    command_begin(node, run, 0, concurrent=True)
+    kept = command_end(node, run, 0, concurrent=True)
+    assert command_begin(node, run, 0, concurrent=True) == {"pass_finished": True, "record": kept}
+
+
+def test_prepare_records_a_fallback_without_resetting(tmp_path):
+    """``prepare --fallback`` records the walker's fact and leaves the reset to item 0."""
+    from refactory_dsh.items import command_prepare
+
+    run, node = _loader_run(tmp_path, ("x",))
+    (run / "passes" / "data" / "kept").mkdir(parents=True)
+    assert command_prepare(node, run, requested=4, fallback="why") == {"effective": 1, "reason": "why"}
+    facts = json.loads((run / "facts.json").read_text())
+    assert facts["data_parallelism_effective"] == {"node": "data", "requested": 4, "effective": 1, "reason": "why"}
+    assert (run / "passes" / "data" / "kept").exists()
 
 
 # ── partial item failure does not make the run fail ───────────────────────
@@ -695,7 +880,7 @@ def test_lowering_preserves_parallelism():
     state = solver.state_dict()
     state["knobs"]["data_parallelism"]["value"] = 8
     solver8 = Solver(state=state)
-    solver8._graph_state = solver8.build().to_state()
+    solver8.rebuild()
 
     wf = to_workflow(solver8.state_dict())
     data_node = wf.nodes["data"]

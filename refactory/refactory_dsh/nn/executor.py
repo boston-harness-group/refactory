@@ -1088,32 +1088,29 @@ class Executor:
                     _shutil.rmtree(_passes_root)
 
                 # ── concurrent dispatch ────────────────────────────────
+                # parallelism > 1 runs the items at once, with this loop's contract
+                # (data_parallel's docstring); a recorded fallback runs them below.
                 if node.parallelism > 1:
                     from .data_parallel import _check_serial_fallback, run_data_concurrent
 
-                    _fallback = _check_serial_fallback(self, node, node.parallelism)
-                    if _fallback is None:
-                        _par_scores, _par_records, _par_error, _par_halted, _par_failed = \
-                            run_data_concurrent(
-                                self, node, items, task, node.parallelism,
-                                setup_kwargs=_setup_kwargs,
-                                verify_kwargs=_verify_kwargs,
-                                original_max_steps=_original_max_steps,
-                            )
-                        scores = _par_scores
-                        self._item_records.extend(_par_records)
-                        _failed_item_step_indices.update(
-                            idx + _data_steps_start for idx in _par_failed
+                    if _check_serial_fallback(self, node, node.parallelism) is None:
+                        _par = run_data_concurrent(
+                            self, node, items, task, node.parallelism,
+                            setup_kwargs=_setup_kwargs,
+                            verify_kwargs=_verify_kwargs,
+                            item_deadline_s=_item_deadline_s,
                         )
-                        # Restore max_steps.
+                        scores = _par.scores
+                        _failed_item_step_indices.update(
+                            idx + _data_steps_start for idx in _par.failed_step_indices
+                        )
                         _data_steps_added = len(self.steps) - _data_steps_start
                         self.max_steps = _original_max_steps + _data_steps_added
-                        if _par_halted:
-                            error = _par_error
-                            _data_halted = True
-                            break
-                        if _par_error is not None:
-                            error = _par_error
+                        if _par.stop is not None:
+                            # A halt or a gate stop in a pass: recorded and ended
+                            # exactly as the sequential loop records and ends it.
+                            error = _par.error
+                            self._record(node.id, error=error, outcome=_par.stop)
                             break
                         if scores:
                             failed_count = sum(
@@ -1128,7 +1125,6 @@ class Executor:
                         out = self.graph.out_edges(node.id)
                         current = out[0].target if out else None
                         continue
-                    # else: fallback recorded, proceed with sequential path below
 
                 for index, item in enumerate(items):
                     # Resume: an item whose pass finished is not run again; its

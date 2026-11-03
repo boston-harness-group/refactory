@@ -195,21 +195,6 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     for knob, value in settings["knobs"].items():
         state = edits.configure(state, knob, value)
     mode.load_state_dict(state)
-    # Rebuild the graph via build() so knob→field bindings take effect.
-    # For example, data_parallelism=24 sets node.parallelism=24 in build().
-    # This is safe because the graph has not been modified by the optimizer yet.
-    if settings["knobs"]:
-        try:
-            mode._graph_state = mode.build().to_state()
-        except NotImplementedError:
-            pass  # Mode doesn't override build()
-        except Exception:
-            import logging as _logging
-            _logging.getLogger("refactory.profiles").warning(
-                "rebuild after knob configuration failed for %s: %s",
-                mode_id, "build() raised; knob→field bindings may not take effect",
-                exc_info=True,
-            )
     source = Path(inspect.getfile(klass))
     inputs = {}
     implementations = {}

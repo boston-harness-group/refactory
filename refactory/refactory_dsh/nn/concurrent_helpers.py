@@ -18,21 +18,21 @@ if TYPE_CHECKING:
 def make_step_budget_reserve(
     executor: "Executor",
     cancelled: threading.Event,
-    *,
-    remaining: int | None = None,
 ) -> Callable[[], bool]:
     """A thread-safe ``reserve()`` closure that deducts one step from the budget.
 
-    Returns ``False`` when the step cap is exhausted or the cancellation event
-    is set, so the walker stops dispatching new work.
+    The budget is the executor's cap as it stands -- for a data loop, the cap the
+    loop already scaled by its item count -- less the steps already taken.
+    Returns ``False`` when it is spent; raises ``CancelledError`` once the
+    cancellation event is set, so the walker stops dispatching new work.
 
-    *remaining* overrides the default (``max_steps - len(steps)``), which
-    callers use when ``max_steps`` has been scaled for a data loop before
-    the reserve is created.
+    When the executor is itself a branch or an item with a reserve (a fork nested in
+    a fork branch or in a concurrent data item), each step is also charged to that
+    reserve, so nested work cannot overrun the cap the outer walk shares.
     """
     lock = threading.Lock()
-    remaining_box: list[int] = [remaining if remaining is not None
-                                else executor.max_steps - len(executor.steps)]
+    remaining_box: list[int] = [executor.max_steps - len(executor.steps)]
+    outer = executor._reserve_step  # noqa: SLF001
 
     def reserve() -> bool:
         from concurrent.futures import CancelledError
@@ -43,7 +43,7 @@ def make_step_budget_reserve(
             if remaining_box[0] <= 0:
                 return False
             remaining_box[0] -= 1
-            return True
+        return outer is None or outer()
 
     return reserve
 

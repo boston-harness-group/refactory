@@ -3,6 +3,14 @@
     python -m refactory_dsh.items list  --node <id>
     python -m refactory_dsh.items begin --node <id> --index <n>
     python -m refactory_dsh.items end   --node <id> --index <n>
+    python -m refactory_dsh.items prepare --node <id> --requested <n> [--fallback <reason>]
+    python -m refactory_dsh.items finish  --node <id> [--partial]
+
+``prepare`` and ``finish`` bracket a pass whose items run concurrently (a data node's
+``parallelism`` > 1): ``prepare`` resets the node once, before any item begins, or
+records why the items run one at a time; ``begin --concurrent`` and ``end
+--concurrent`` then leave the reset and the all-failed rule to them, and ``finish``
+puts ``item_scores`` in item order and applies the all-failed rule once.
 
 The walking executor runs a data node's whole loop in one process, because it owns
 the graph. DSH does not: the subgraph a data node iterates can contain agent nodes,
@@ -567,8 +575,82 @@ def _locked_pass_state_update(
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
-    """Materialise one item and prepare the workspace for its pass."""
+def _reset_node(node: Node, workdir: Path) -> None:
+    """Start a data node clean: pass state, stale ``item_scores`` and old passes."""
+    _write_pass_state(workdir, node.id, {"processed": 0, "failed": 0})
+    if SCORES_FACT in node.produces:
+        from refactory_dsh.run import edit_facts
+        edit_facts(workdir, lambda facts: facts.pop(SCORES_FACT, None))
+    passes_dir = workdir / "passes" / node.id
+    if passes_dir.exists():
+        shutil.rmtree(passes_dir)
+
+
+#: The fact a data node whose items were asked to run concurrently records when they
+#: run one at a time instead -- the walker's ``data_parallel._check_serial_fallback``.
+PARALLELISM_FACT = "data_parallelism_effective"
+
+
+def command_prepare(
+    node: Node, workdir: Path, *, requested: int, fallback: str | None = None,
+) -> dict[str, Any]:
+    """Open a pass whose items were asked to run ``requested`` at a time.
+
+    With a *fallback* reason the items run one at a time: the reason is recorded as
+    the walker records it, and the sequential ``begin`` of item 0 resets the node.
+    Without one, the node is reset here, once, before any item begins -- a reset in
+    item 0's ``begin`` would race the other items' ``begin``.
+    """
+    if fallback is not None:
+        from refactory_dsh.run import edit_facts
+
+        fact = {"node": node.id, "requested": requested, "effective": 1, "reason": fallback}
+        edit_facts(workdir, lambda facts: facts.__setitem__(PARALLELISM_FACT, fact))
+        return {"effective": 1, "reason": fallback}
+    _reset_node(node, workdir)
+    return {"effective": requested}
+
+
+def command_finish(node: Node, workdir: Path, *, partial: bool = False) -> dict[str, Any]:
+    """Close a concurrent pass: records and ``item_scores`` in item order, then the
+    all-failed rule, once, over every item (the sequential loop's last ``end``).
+
+    *partial*: a halt stopped the pass. The items that finished keep their records,
+    in item order, and the all-failed rule does not apply -- as a sequential pass
+    halted part way has recorded the items before the halt and judged no rule.
+    """
+    items = items_of(node, workdir)
+    records: list[dict[str, Any]] = []
+    unfinished: list[int] = []
+    for index, item in enumerate(items):
+        pass_dir = pass_dir_of(workdir, node.id, str(item.get("id") or index), index)
+        if not (pass_dir / ".done").exists():
+            unfinished.append(index)
+            continue
+        record = finished_pass_record(pass_dir)
+        if record is not None:
+            records.append(record)
+    if unfinished and not partial:
+        raise ItemsError(f"{node.id}: item(s) {unfinished} have not finished their pass")
+    if SCORES_FACT in node.produces:
+        from refactory_dsh.run import edit_facts
+        edit_facts(workdir, lambda facts: facts.__setitem__(SCORES_FACT, list(records)))
+    if partial:
+        return {"records": records}
+    failed = sum(1 for record in records if record.get("error_text") is not None)
+    if items and failed == len(items):
+        raise AllItemsFailedError(f"{node.id}: all {len(items)} items failed")
+    return {"records": records}
+
+
+def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = False) -> dict[str, Any]:
+    """Materialise one item and prepare the workspace for its pass.
+
+    *concurrent*: the item is one of several running at once. The node was reset
+    by ``prepare``, so item 0 does not reset it, and an item whose pass already
+    finished -- a resumed pass -- is not run again: its kept record is returned as
+    ``{"pass_finished": true, "record": ...}``.
+    """
     items = items_of(node, workdir)
     if index < 0 or index >= len(items):
         raise ItemsError(
@@ -577,16 +659,14 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     item = items[index]
     item_id = str(item.get("id") or index)
 
-    # On the first item, reset pass state, clear stale item_scores, and
-    # remove old pass directories (rerun creates fresh ones).
-    if index == 0:
-        _write_pass_state(workdir, node.id, {"processed": 0, "failed": 0})
-        if SCORES_FACT in node.produces:
-            from refactory_dsh.run import edit_facts
-            edit_facts(workdir, lambda facts: facts.pop(SCORES_FACT, None))
-        passes_dir = workdir / "passes" / node.id
-        if passes_dir.exists():
-            shutil.rmtree(passes_dir)
+    if concurrent:
+        finished = pass_dir_of(workdir, node.id, item_id, index)
+        if (finished / ".done").exists():
+            return {"pass_finished": True, "record": finished_pass_record(finished)}
+    elif index == 0:
+        # On the first item, reset pass state, clear stale item_scores, and
+        # remove old pass directories (rerun creates fresh ones).
+        _reset_node(node, workdir)
 
     # Track processed count in pass state (locked for concurrent items).
     _locked_pass_state_update(
@@ -659,6 +739,7 @@ def command_end(
     node: Node, workdir: Path, index: int, *,
     failed_reason: str | None = None,
     failed_kind: str | None = None,
+    concurrent: bool = False,
 ) -> dict[str, Any]:
     """The Task's verdict on one pass, folded into the run's facts.
 
@@ -668,6 +749,9 @@ def command_end(
 
     When *failed_kind* is set (e.g. ``"timeout"``), the ``error_kind`` field in
     the record is overridden, so both runtimes record the same kind.
+
+    *concurrent*: the all-failed rule waits for ``finish``; the last index is not
+    the last item to end when items run at once.
     """
     items = items_of(node, workdir)
     if index < 0 or index >= len(items):
@@ -719,7 +803,7 @@ def command_end(
         merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir, record)
         result: dict[str, Any] = {"error": failed_reason, **(record or {})}
-        _check_all_items_failed(node, workdir, items, index)
+        _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return result
 
     task = _task_of(node, workdir)
@@ -727,7 +811,7 @@ def command_end(
         # Merge declared produces even when there is no task.
         merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir)
-        _check_all_items_failed(node, workdir, items, index)
+        _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return {}
     instance = instance_of(item)
     # Read per-node exchanges from the pass directory sidecar.
@@ -762,13 +846,13 @@ def command_end(
         merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir, record)
         result = {"error": str(exc), **(record or {})}
-        _check_all_items_failed(node, workdir, items, index)
+        _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return result
     if verdict is None:
         # Merge declared produces even with no verdict.
         merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir)
-        _check_all_items_failed(node, workdir, items, index)
+        _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return {}
     # Prediction comes from VerifyResult.prediction whenever the Task sets it
     # (both pass and fail).  Fall back to verdict.details on pass and "" on
@@ -794,12 +878,13 @@ def command_end(
     # Merge declared produces from the pass directory to the run directory.
     merge_pass_results(workdir, pass_dir, node.produces)
     mark_pass_complete(pass_dir, record)
-    _check_all_items_failed(node, workdir, items, index)
+    _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
     return record or {}
 
 
 def _check_all_items_failed(
     node: Node, workdir: Path, items: list[dict[str, Any]], index: int,
+    *, concurrent: bool = False,
 ) -> None:
     """After the last item's end, fail the node if every item has an error.
 
@@ -810,8 +895,8 @@ def _check_all_items_failed(
     so it works whether or not the node declares ``item_scores`` in its
     ``produces``.
     """
-    if index + 1 < len(items):
-        return  # not the last item yet
+    if concurrent or index + 1 < len(items):
+        return  # not the last item yet, or `finish` applies the rule
     ps = _read_pass_state(workdir, node.id)
     processed = ps.get("processed", 0)
     failed = ps.get("failed", 0)
@@ -947,13 +1032,34 @@ def _options(argv: list[str]) -> tuple[str, int, str | None, str | None]:
     return node_id, index, failed_reason, failed_kind
 
 
+def _prepare_options(argv: list[str]) -> tuple[int, str | None]:
+    """``prepare``'s ``--requested`` parallelism and optional ``--fallback`` reason."""
+    requested = 1
+    fallback: str | None = None
+    if "--requested" in argv:
+        position = argv.index("--requested")
+        if position + 1 >= len(argv):
+            raise ItemsError("--requested needs a value")
+        try:
+            requested = int(argv[position + 1])
+        except ValueError as exc:
+            raise ItemsError(f"--requested takes a number, not {argv[position + 1]!r}") from exc
+    if "--fallback" in argv:
+        position = argv.index("--fallback")
+        if position + 1 >= len(argv):
+            raise ItemsError("--fallback needs a value")
+        fallback = argv[position + 1]
+    return requested, fallback
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     usage = (
         "usage: python -m refactory_dsh.items "
-        "{list|begin|end} --node <id> [--index <n>] [--failed <reason>] | reset < redo-plan.json"
+        "{list|begin|end|prepare|finish} --node <id> [--index <n>] [--failed <reason>] "
+        "[--concurrent] [--requested <n>] [--fallback <reason>] [--partial] | reset < redo-plan.json"
     )
-    if not argv or argv[0] not in ("list", "begin", "end", "reset"):
+    if not argv or argv[0] not in ("list", "begin", "end", "prepare", "finish", "reset"):
         print(usage, file=sys.stderr)
         return 2
     verb = argv[0]
@@ -967,15 +1073,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(produced, default=str))
             return 0
         node_id, index, failed_reason, failed_kind = _options(argv[1:])
+        concurrent = "--concurrent" in argv[1:]
         node = data_node(workdir, node_id)
         if verb == "list":
             produced: dict[str, Any] = command_list(node, workdir)
+        elif verb == "prepare":
+            requested, fallback = _prepare_options(argv[1:])
+            produced = command_prepare(node, workdir, requested=requested, fallback=fallback)
+        elif verb == "finish":
+            produced = command_finish(node, workdir, partial="--partial" in argv[1:])
         elif verb == "begin":
-            produced = command_begin(node, workdir, index)
+            produced = command_begin(node, workdir, index, concurrent=concurrent)
         else:
             produced = command_end(
                 node, workdir, index,
                 failed_reason=failed_reason, failed_kind=failed_kind,
+                concurrent=concurrent,
             )
     except AllItemsFailedError as exc:
         # The all-fail rule gets its own exit code so the spine can

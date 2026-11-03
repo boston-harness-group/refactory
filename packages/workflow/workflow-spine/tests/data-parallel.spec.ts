@@ -1,14 +1,19 @@
 /**
- * Parallel data node tests on the spine (T2, T10, T11 from the design).
- *
- * T2: concurrent items overlap in time with parallelism > 1.
- * T10: item records are collected in item order via endPass.
- * T11: resume only replays unfinished items (pass directories mark .done).
+ * Parallel data nodes on the spine: the `parallelism` field on the views and the
+ * pass, and the concurrent drain end to end -- overlap, item order, a `wf_open`
+ * run, resume of a half-finished pass, and the recorded fallback.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { exec, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, afterEach } from 'vitest'
+import * as spinePlugin from '../src/index.ts'
+import type { Config } from '../src/index.ts'
 import { Spine, validateGraph } from '../src/spine.ts'
 import type { WorkflowGraph } from '../src/types.ts'
 
@@ -23,8 +28,6 @@ function scratch(): string {
   dirs.push(dir)
   return dir
 }
-// Silence unused-variable lint; scratch is available for resume-with-disk tests.
-void scratch
 
 /** A data graph with a configurable parallelism field. */
 function parallelDataGraph(parallelism?: number): WorkflowGraph {
@@ -96,216 +99,278 @@ describe('data-parallel: spine parallelism field', () => {
     expect(sub.edges.length).toBe(1)
     expect(sub.edges[0]).toMatchObject({ source: 'work', target: 'end' })
   })
+})
 
-  it('T2 — concurrent items overlap via per-item sub-spines', async () => {
-    // This test proves that items CAN overlap by creating per-item sub-spines
-    // (the same mechanism the drain uses for concurrent dispatch) and running
-    // them concurrently. With parallelism=1, the items would run one-at-a-time.
-    const P = 3
-    const spine = new Spine(parallelDataGraph(P))
-    spine.startPass('data', P)
-    const pass = spine.passOf()!
-    expect(pass.parallelism).toBe(P)
+// ── The concurrent drain, end to end, through the real item loader ──────────
+//
+// The plugin drives `python -m refactory_dsh.items` (the run's own interpreter,
+// as execute.spec does) and runs each body command in its own process, so items
+// really overlap and the pass state, `item_scores` and pass directories are the
+// loader's own.
 
-    const subgraph = spine.subgraphFor(pass.entry, pass.exit)
-    const subGraph: WorkflowGraph = {
-      name: 'item-sub',
-      start_node: pass.entry,
-      nodes: subgraph.nodes,
-      edges: subgraph.edges,
-    }
+const PYTHON = resolve('.venv/bin/python')
 
-    // Simulate concurrent item processing using per-item sub-spines.
-    // Each item gets its own sub-spine that walks the subgraph independently.
-    let concurrentCount = 0
-    let maxConcurrent = 0
-    const processItem = async (_index: number): Promise<string[]> => {
-      const itemSpine = new Spine(subGraph)
-      const completed: string[] = []
+/** The Task the loader judges each pass with: an even item passes, an odd one fails. */
+const TASK_MODULE = `from pathlib import Path
+from refactory_dsh.task import Task, VerifyResult
 
-      // Simulate concurrent entry: increment counter
-      concurrentCount++
-      if (concurrentCount > maxConcurrent) maxConcurrent = concurrentCount
+class PTask(Task):
+    name = "ptask"
+    def verify(self, instance, workspace):
+        out = (Path(workspace) / "out.txt").read_text().strip()
+        passed = out == instance.id and int(instance.id[1:]) % 2 == 0
+        return VerifyResult(passed=passed, score=1.0 if passed else 0.0, details=out)
+`
 
-      // Wait a tick to let other items start (simulates I/O)
-      await new Promise(resolve => setTimeout(resolve, 10))
+/**
+ * The body command: note when it starts and ends, sleep the item's delay, write the
+ * answer. It runs in the item's pass directory, where `begin` put the item.
+ */
+const WORK = `${PYTHON} -c 'import json,time,pathlib; d=json.load(open("current_item.json")); `
+  + `pathlib.Path("start").write_text(repr(time.time())); time.sleep(float(d["delay"])); `
+  + `pathlib.Path("end").write_text(repr(time.time())); pathlib.Path("out.txt").write_text(d["id"])'`
 
-      // Walk the subgraph
-      for (;;) {
-        const state = itemSpine.next()
-        if (state.status === 'done') break
-        if (state.status !== 'ready' || state.nodes.length === 0) break
-        for (const node of state.nodes) {
-          if (node._type === 'ForkNode' || node._type === 'JoinNode') {
-            itemSpine.complete(node.id)
-          } else {
-            // Simulate running the node
-            await new Promise(resolve => setTimeout(resolve, 5))
-            itemSpine.complete(node.id)
-            completed.push(node.id)
-          }
-        }
+function loaderGraph(parallelism: number, work = WORK): WorkflowGraph {
+  return {
+    name: 'parallel-loader',
+    start_node: 'data',
+    nodes: {
+      data: {
+        _type: 'DataNode', id: 'data', task_ref: 'ptask:PTask',
+        subgraph_entry: 'work', subgraph_exit: 'work',
+        reads: [], writes: ['current_item.json'],
+        ...(parallelism > 1 ? { parallelism } : {}),
+      },
+      work: { _type: 'FnNode', id: 'work', command: work, reads: ['current_item.json'], writes: ['out.txt'] },
+      after: { _type: 'FnNode', id: 'after', command: 'true', reads: [], writes: [] },
+    },
+    edges: [{ source: 'data', target: 'after' }],
+  }
+}
+
+/** A run directory: the Task module and the declarations the lowering would leave. */
+function loaderRun(items: Array<Record<string, unknown>>, parallelism: number): { workdir: string; taskDir: string } {
+  const workdir = scratch()
+  const taskDir = scratch()
+  writeFileSync(join(taskDir, 'ptask.py'), TASK_MODULE)
+  const script = [
+    'import json, sys',
+    'from pathlib import Path',
+    'from refactory_dsh import nn',
+    'from refactory_dsh.lowering import write_declarations',
+    'g = nn.Graph()',
+    "g.add(nn.Node('data', 'data', subgraph_entry='work', subgraph_exit='work', writes=('current_item.json',),"
+      + " produces=('item_scores',), task_ref='ptask:PTask', inline_items=tuple(json.loads(sys.argv[2])),"
+      + ' parallelism=int(sys.argv[3])))',
+    "g.add(nn.Node('work', 'op', call='ptask:work', reads=('current_item.json',), writes=('out.txt',)))",
+    "g.add(nn.Node('after', 'op', call='ptask:after'))",
+    "g.connect('data', 'after')",
+    "write_declarations({'graph': g.to_state()}, Path(sys.argv[1]))",
+  ].join('\n')
+  const written = spawnSync(PYTHON, ['-c', script, workdir, JSON.stringify(items), String(parallelism)], { encoding: 'utf8' })
+  expect(written.status, written.stderr).toBe(0)
+  return { workdir, taskDir }
+}
+
+interface Ran { command: string; workdir: string; started: number; ended: number }
+
+/**
+ * A shell that runs each command in its own process without blocking the event
+ * loop, so concurrent commands overlap. A command `hold` matches never settles: a
+ * run stopped part way through a pass.
+ */
+function processShell(ran: Ran[], hold?: (command: string, workdir: string) => boolean): object {
+  return {
+    resolve: (request: { command: string; workdir?: string; timeoutMs?: number; env?: Record<string, string> }) => ({
+      command: request.command, workdir: request.workdir ?? process.cwd(),
+      timeoutMs: request.timeoutMs ?? 60_000, onExpiry: 'kill', stdoutMaxBytes: 1_000_000, env: request.env,
+    }),
+    execute: async (spec: { command: string; workdir: string; timeoutMs: number; env?: Record<string, string> }) => ({
+      result: async () => {
+        if (hold?.(spec.command, spec.workdir) === true) return new Promise(() => {})
+        const started = Date.now()
+        return new Promise(settle => {
+          exec(spec.command, { cwd: spec.workdir, env: { ...process.env, ...spec.env }, shell: '/bin/sh', maxBuffer: 10_000_000 },
+            (error, stdout, stderr) => {
+              ran.push({ command: spec.command, workdir: spec.workdir, started, ended: Date.now() })
+              const code = error === null ? 0 : typeof error.code === 'number' ? error.code : 1
+              settle({
+                exitCode: code, signal: null, timedOut: false, aborted: false, timeoutMs: spec.timeoutMs,
+                stdout: { text: stdout, truncated: false }, stderr: { text: stderr, truncated: false },
+              })
+            })
+        })
+      },
+    }),
+  }
+}
+
+async function mountLoader(shell: object, overrides: Partial<Config>): Promise<Context> {
+  const root = new Context()
+  await root.plugin(SystemPrompt)
+  await root.plugin(ToolRuntime)
+  root.provide('shell', shell)
+  await root.plugin(spinePlugin, {
+    toolPrefix: 'wf', maxIterations: 3, interactiveOpen: false, openCommand: '', openArgs: [],
+    executeCommands: true, commandEnv: {}, commandTimeoutMs: 60_000, commandSandboxMode: 'danger-full-access',
+    dataCommand: `${PYTHON} -m refactory_dsh.items`, steerCommand: '', steerArgs: [], ceoDeny: [],
+    ...overrides,
+  } as Config)
+  return root
+}
+
+async function call(ctx: Context, name: string, args: unknown = {}, extra: unknown = {}): Promise<Record<string, unknown>> {
+  const definition = ctx.tools.get(name)
+  if (definition === undefined) throw new Error(`tool ${name} is not registered`)
+  return await definition.execute(args, extra as never) as Record<string, unknown>
+}
+
+/** Call `wf_next` until the run is done, as a driver with nothing to do would. */
+async function drive(ctx: Context, extra: unknown = {}): Promise<Record<string, unknown>> {
+  for (let turn = 0; turn < 20; turn += 1) {
+    const state = await call(ctx, 'wf_next', {}, extra)
+    if (state.status !== 'ready') return state
+  }
+  throw new Error('the run did not finish in 20 turns')
+}
+
+/** The most body commands that were running at one moment, from their own clocks. */
+function peakOverlap(workdir: string): number {
+  const passes = join(workdir, 'passes', 'data')
+  const spans = readdirSync(passes).map(dir => ({
+    start: Number(readFileSync(join(passes, dir, 'start'), 'utf8')),
+    end: Number(readFileSync(join(passes, dir, 'end'), 'utf8')),
+  }))
+  return Math.max(...spans.map(span => spans.filter(other => other.start <= span.start && span.start < other.end).length))
+}
+
+function facts(workdir: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(workdir, 'facts.json'), 'utf8')) as Record<string, unknown>
+}
+
+/** Eight items; the first sleeps longest, so the items end in reverse order. */
+const ITEMS = Array.from({ length: 8 }, (_, index) => ({ id: `i${index}`, delay: (8 - index) * 0.15 }))
+
+describe('data-parallel: the concurrent drain', () => {
+  it('runs items four at a time, keeping item_scores and records in item order', async () => {
+    const results: Record<number, { wall: number; peak: number; scores: unknown; records: unknown; begins: string[] }> = {}
+    for (const parallelism of [1, 4]) {
+      const { workdir, taskDir } = loaderRun(ITEMS, parallelism)
+      const ran: Ran[] = []
+      const ctx = await mountLoader(processShell(ran), {
+        graph: loaderGraph(parallelism), workdir,
+        commandEnv: { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir },
+      })
+      const started = Date.now()
+      expect(await drive(ctx)).toMatchObject({ status: 'done' })
+      const scores = facts(workdir).item_scores as Array<Record<string, unknown>>
+      results[parallelism] = {
+        wall: Date.now() - started,
+        peak: peakOverlap(workdir),
+        scores: scores.map(({ id, passed, score }) => ({ id, passed, score })),
+        records: JSON.parse(readFileSync(join(workdir, 'item_records.json'), 'utf8')),
+        begins: ran.filter(entry => entry.command.includes(' begin ')).map(entry => entry.command),
       }
-
-      concurrentCount--
-      return completed
+      if (parallelism > 1) {
+        // The node is reset once, before any item begins; no begin resets it.
+        const prepare = ran.findIndex(entry => entry.command.includes(' prepare '))
+        const firstBegin = ran.findIndex(entry => entry.command.includes(' begin '))
+        expect(prepare).toBeGreaterThanOrEqual(0)
+        expect(ran[prepare]!.ended).toBeLessThanOrEqual(ran[firstBegin]!.started)
+        expect(results[parallelism]!.begins.every(command => command.includes("'--concurrent'"))).toBe(true)
+        expect(ran.some(entry => entry.command.includes(' finish '))).toBe(true)
+      }
+      console.log(`spine parallelism=${parallelism}: wall ${results[parallelism]!.wall} ms, peak ${results[parallelism]!.peak} items at once`)
     }
+    expect(results[1]!.peak).toBe(1)
+    expect(results[4]!.peak).toBe(4)
+    expect(results[4]!.wall).toBeLessThan(results[1]!.wall)
+    // Item order, though item 7 ended first.
+    expect((results[4]!.scores as Array<{ id: string }>).map(entry => entry.id)).toEqual(ITEMS.map(item => item.id))
+    expect(results[4]!.scores).toEqual(results[1]!.scores)
+    expect(results[4]!.records).toEqual(results[1]!.records)
+  }, 60_000)
 
-    // Run all items concurrently.
-    const results = await Promise.all(
-      Array.from({ length: P }, (_, i) => processItem(i))
-    )
+  it('runs a wf_open run concurrently, with no configured graph', async () => {
+    const { workdir, taskDir } = loaderRun(ITEMS.slice(0, 4), 4)
+    const graphPath = join(workdir, 'graphs', 'parallel.graph.json')
+    mkdirSync(join(workdir, 'graphs'), { recursive: true })
+    writeFileSync(graphPath, JSON.stringify(loaderGraph(4)))
+    const stub = join(scratch(), 'open-stub')
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s' '${JSON.stringify({
+      mode: 'pkg/parallel', run: workdir, name: 'parallel', graph: graphPath,
+      declarations: join(workdir, '.refactory', 'declarations.json'),
+      commandEnv: { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir },
+      dataCommand: `${PYTHON} -m refactory_dsh.items`,
+    })}'\n`)
+    chmodSync(stub, 0o755)
+    const ran: Ran[] = []
+    const ctx = await mountLoader(processShell(ran), { interactiveOpen: true, openCommand: stub })
+    const session = { agent: { session: { id: 'session-1', requestHeader: () => undefined } } }
+    await call(ctx, 'wf_open', { mode: 'pkg/parallel' }, session)
+    expect(await drive(ctx, session)).toMatchObject({ status: 'done' })
+    expect(peakOverlap(workdir)).toBe(4)
+    expect((facts(workdir).item_scores as Array<{ id: string }>).map(entry => entry.id)).toEqual(['i0', 'i1', 'i2', 'i3'])
+  }, 60_000)
 
-    // Each item should have walked the full subgraph.
-    for (const completed of results) {
-      expect(completed).toContain('work')
-      expect(completed).toContain('end')
+  it('resumes a half-finished concurrent pass from the items that finished', async () => {
+    const { workdir, taskDir } = loaderRun(ITEMS.map(item => ({ ...item, delay: 0.05 })), 2)
+    const env = { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir }
+    // The first run stops with items 0 and 1 finished and items 2 and 3 mid-walk.
+    const stopped = (command: string, dir: string): boolean =>
+      command === WORK && !/_[01]$/.test(dir)
+    const first = await mountLoader(processShell([], stopped), { graph: loaderGraph(2), workdir, commandEnv: env })
+    void call(first, 'wf_next')
+    const passes = join(workdir, 'passes', 'data')
+    for (let wait = 0; wait < 200; wait += 1) {
+      const dirs = existsSync(passes) ? readdirSync(passes) : []
+      if (dirs.filter(dir => existsSync(join(passes, dir, '.done'))).length === 2 && dirs.length === 4) break
+      await new Promise(settle => setTimeout(settle, 50))
     }
+    const finishedBefore = readdirSync(passes).filter(dir => existsSync(join(passes, dir, '.done'))).sort()
+    expect(finishedBefore).toEqual(['i0_0', 'i1_1'])
+    const doneAt = statSync(join(passes, 'i0_0', '.done')).mtimeMs
 
-    // With parallelism > 1, multiple items should have been in flight simultaneously.
-    // With parallelism=1 (serial), maxConcurrent would be 1.
-    expect(maxConcurrent).toBeGreaterThan(1)
+    const saved = readFileSync(join(workdir, '.refactory/spine-checkpoint.json'))
+    expect(JSON.parse(saved.toString()).state?.pass).toMatchObject({ node: 'data', parallelism: 2 })
+    // The run died mid-pass (status `executing`): a person acknowledges that before
+    // the resume, as for any node whose side effects are unknown.
+    expect(JSON.parse(saved.toString()).status).toBe('executing')
+    writeFileSync(join(workdir, '.refactory/resume-request.json'), JSON.stringify({
+      checkpoint_sha256: createHash('sha256').update(saved).digest('hex'),
+      acknowledge_executing: true,
+    }))
+    const ran: Ran[] = []
+    const resumed = await mountLoader(processShell(ran), { graph: loaderGraph(2), workdir, commandEnv: env })
+    expect(await drive(resumed)).toMatchObject({ status: 'done' })
 
-    // Complete the data pass.
-    spine.endAllPasses()
-    expect(spine.next().status).toBe('ready')
-    // 'after' should be the next node.
-    expect(spine.next().nodes![0]!.id).toBe('after')
-  })
-})
+    // Items 0 and 1 were not walked again, and their passes were kept, not deleted.
+    const walked = ran.filter(entry => entry.command === WORK).map(entry => entry.workdir.split('/').pop()).sort()
+    expect(walked).toEqual(['i2_2', 'i3_3', 'i4_4', 'i5_5', 'i6_6', 'i7_7'])
+    expect(ran.some(entry => entry.command.includes(' prepare '))).toBe(false)
+    expect(statSync(join(passes, 'i0_0', '.done')).mtimeMs).toBe(doneAt)
+    expect((facts(workdir).item_scores as Array<{ id: string }>).map(entry => entry.id)).toEqual(ITEMS.map(item => item.id))
+    expect((JSON.parse(readFileSync(join(workdir, 'item_records.json'), 'utf8')) as Array<{ id: string }>).map(entry => entry.id))
+      .toEqual(ITEMS.map(item => item.id))
+  }, 60_000)
 
-describe('data-parallel: item order with concurrent processing', () => {
-  it('T10 — item records stay in index order when items finish in reverse', async () => {
-    const P = 4
-    const spine = new Spine(parallelDataGraph(P))
-    spine.startPass('data', P)
-    const pass = spine.passOf()!
-
-    const subgraph = spine.subgraphFor(pass.entry, pass.exit)
-    const subGraph: WorkflowGraph = {
-      name: 'item-sub',
-      start_node: pass.entry,
-      nodes: subgraph.nodes,
-      edges: subgraph.edges,
-    }
-
-    // Process items concurrently, with later items finishing first.
-    // Item 0 sleeps longest, item 3 shortest.
-    // Track actual completion order to prove items finish out of index order.
-    const completionOrder: number[] = []
-
-    // Promise.all preserves index order — this is how drainConcurrentData
-    // collects results.  Items complete in reverse (3, 2, 1, 0) but the
-    // returned array is in index order (0, 1, 2, 3).
-    const results = await Promise.all(
-      Array.from({ length: P }, async (_, i) => {
-        // Later items finish faster.
-        const delay = (P - i) * 10
-        await new Promise(resolve => setTimeout(resolve, delay))
-
-        // Walk the sub-spine.
-        const itemSpine = new Spine(subGraph)
-        for (;;) {
-          const state = itemSpine.next()
-          if (state.status === 'done') break
-          if (state.status !== 'ready' || state.nodes.length === 0) break
-          for (const node of state.nodes) {
-            itemSpine.complete(node.id)
-          }
-        }
-
-        completionOrder.push(i)
-        return { id: String(i), score: i / 10 } as Record<string, unknown>
-      })
-    )
-
-    // Verify items actually finished out of index order (reverse).
-    expect(completionOrder[0]).toBe(P - 1)  // item 3 finished first
-
-    // Add records in the order Promise.all returned them (index order) —
-    // this is exactly what drainConcurrentData does.
-    for (const record of results) {
-      spine.addItemRecord(record)
-    }
-
-    // Complete the data pass.
-    spine.endAllPasses()
-
-    // Records must be in item index order.
-    const records = spine.getItemRecords()
-    expect(records.map(r => r.id)).toEqual(['0', '1', '2', '3'])
-    expect(records.map(r => r.score)).toEqual([0, 0.1, 0.2, 0.3])
-  })
-})
-
-describe('data-parallel: resume', () => {
-  it('T11 — spine re-opens a data pass for resume; finished items are skippable', async () => {
-    // The spine-side resume contract: drainConcurrentData calls `begin` for
-    // each item index.  The `begin` command checks `.done` on disk and
-    // returns early for already-done items.  This test verifies that:
-    // (a) a spine can start a pass, end it (simulating interrupt), then
-    //     re-open the same data pass via a fresh Spine (resume path);
-    // (b) a processItem function that skips already-done indices produces
-    //     the correct merged result.
-    const P = 4
-    const finishedIndices = new Set([0, 1])
-
-    // First spine: interrupted after items 0 and 1.
-    const spine1 = new Spine(parallelDataGraph(P))
-    spine1.startPass('data', P)
-    for (const idx of finishedIndices) {
-      spine1.addItemRecord({ id: String(idx), finished: true })
-    }
-    // Interrupt: endAllPasses without completing unfinished items.
-    spine1.endAllPasses()
-
-    // Second spine (resume): re-open the data pass.
-    const spine2 = new Spine(parallelDataGraph(P))
-    spine2.startPass('data', P)
-    const pass2 = spine2.passOf()!
-    const subgraph = spine2.subgraphFor(pass2.entry, pass2.exit)
-    const subGraph: WorkflowGraph = {
-      name: 'item-sub',
-      start_node: pass2.entry,
-      nodes: subgraph.nodes,
-      edges: subgraph.edges,
-    }
-
-    // Process items concurrently, skipping finished ones (as drainConcurrentData
-    // does when `begin` returns an already-done response).
-    const processedItems: number[] = []
-    const results = await Promise.all(
-      Array.from({ length: P }, async (_, i) => {
-        if (finishedIndices.has(i)) {
-          // Simulate `begin` returning that this item is already done.
-          return { id: String(i), finished: true, resumed: true }
-        }
-        processedItems.push(i)
-        const itemSpine = new Spine(subGraph)
-        for (;;) {
-          const state = itemSpine.next()
-          if (state.status === 'done') break
-          if (state.status !== 'ready' || state.nodes.length === 0) break
-          for (const node of state.nodes) itemSpine.complete(node.id)
-        }
-        return { id: String(i), finished: true }
-      })
-    )
-
-    for (const r of results) spine2.addItemRecord(r as Record<string, unknown>)
-    spine2.endAllPasses()
-
-    // Only items 2 and 3 should have been newly processed.
-    expect(processedItems).toEqual([2, 3])
-
-    // All 4 records present in order.
-    const records = spine2.getItemRecords()
-    expect(records.length).toBe(P)
-    expect(records.map(r => r.id)).toEqual(['0', '1', '2', '3'])
-
-    // The spine should be ready to proceed to 'after'.
-    expect(spine2.next().status).toBe('ready')
-  })
+  it('records why a body the driving agent must run keeps its items one at a time', async () => {
+    const graph = loaderGraph(4)
+    graph.nodes.work = { _type: 'AgentNode', id: 'work', role: 'builder', prompt_template: 'W', reads: [], writes: [] }
+    const { workdir, taskDir } = loaderRun(ITEMS.slice(0, 2), 4)
+    const ran: Ran[] = []
+    const ctx = await mountLoader(processShell(ran), { graph, workdir, commandEnv: { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir } })
+    const state = await call(ctx, 'wf_next')
+    // The sequential drain hands the agent node over, one item at a time.
+    expect(state).toMatchObject({ status: 'ready', nodes: [{ id: 'work' }] })
+    expect(facts(workdir).data_parallelism_effective).toEqual({
+      node: 'data', requested: 4, effective: 1,
+      reason: "node 'work' (AgentNode) has no command, so the driving agent runs it",
+    })
+    const events = readFileSync(join(workdir, '.refactory', 'events.jsonl'), 'utf8')
+    expect(events).toContain('data parallelism fallback to serial: node')
+    expect(ran.filter(entry => entry.command.includes(' begin ')).every(entry => !entry.command.includes('--concurrent'))).toBe(true)
+  }, 60_000)
 })
 
 describe('data-parallel: validates graph with parallelism', () => {

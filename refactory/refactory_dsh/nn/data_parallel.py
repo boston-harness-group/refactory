@@ -6,26 +6,30 @@ gets its own ``Executor`` + ``RunContext`` clone via the shared helpers in
 ``concurrent_helpers.py`` (factored from ``fork.py``), and a
 ``ThreadPoolExecutor`` bounded by ``parallelism`` runs them.
 
-Concurrency safety:
-- ``current_item.json`` is written to the pass directory only (not run-level).
-- ``facts.json`` and ``pass_state`` writes go through file-locked helpers.
-- ``item_scores`` are accumulated per-child and merged in item order after all
-  items complete.
-- Per-item deadlines use ``threading.Timer`` (not SIGALRM) in concurrent mode.
-  Each item gets its own model copy with a per-item cancellation event, so a
-  deadline in one item does not cancel others.
-- Budget is shared and thread-safe (``RunBudget`` uses ``fcntl``).
+The contract is the sequential loop's, item for item:
+
+- the step cap is the one the sequential loop has, scaled by the item count;
+- the per-item deadline covers each item's setup and its verify, not its walk
+  (``Executor._data_item_deadline``; the spine's per-command timeout);
+- a halt or a gate stop ends the node and is recorded as the sequential loop
+  records it (``Executor._record``), a ``BudgetExhausted`` propagates, and the
+  records of the items that finished are kept;
+- an item that a halt, a gate stop or a budget stop cancelled is neither
+  recorded nor marked finished, so a resume runs it again;
+- records, ``item_scores`` and the merged steps are in item order, whatever
+  order the items finished in;
+- a resume skips the items whose pass finished (``.done``), as the sequential
+  loop's resume does.
 """
 from __future__ import annotations
 
 import copy
 import json
+import sys
 import threading
-import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .concurrent_helpers import clone_child_executor, make_step_budget_reserve, merge_children_into_parent
 
@@ -38,30 +42,65 @@ if TYPE_CHECKING:
 class _ItemResult:
     """Outcome of one data-node item."""
     index: int
-    item_id: str
     record: dict[str, Any] | None = None
+    #: "halted" or "refused" when the item stopped the node, as the sequential loop stops.
+    stop: str | None = None
     error: str | None = None
-    halted: bool = False
-    gate_stopped: bool = False
+    #: A halt, gate stop or budget stop elsewhere ended this item before it finished.
+    cancelled: bool = False
     child: Any = None
-    failed_step_indices: list[int] = field(default_factory=list)
 
 
-def _is_thread_safe_model(model: Any) -> bool:
-    """Whether the model client is known to be thread-safe.
+@dataclass
+class ConcurrentOutcome:
+    """What the concurrent item loop hands back to ``Executor.run``."""
+    scores: list[dict[str, Any]] = field(default_factory=list)
+    #: "halted" or "refused" when an item stopped the node; None otherwise.
+    stop: str | None = None
+    error: str | None = None
+    #: Step indices (relative to the data loop's first step) of failed items.
+    failed_step_indices: set[int] = field(default_factory=set)
 
-    Accepts the bare ``DshModelClient`` *and* wrapped/rebound copies
-    (``for_node``, ``with_budget``, ``with_wall``, ``with_cancellation``,
-    ``with_tool_policy``).  All of these are ``copy.copy`` clones of the
-    original that keep ``type(x) is DshModelClient`` true, or are
-    subclasses that maintain the same subprocess-per-call thread-safety
-    contract.
+
+def is_shareable_model(model: Any) -> bool:
+    """Whether one model client may serve several items at once.
+
+    A client says so with a ``thread_safe = True`` attribute (``DshModelClient``
+    does: each completion is its own subprocess). Anything else is not assumed
+    safe, because a client that keeps per-call state would mix items' answers.
     """
-    from refactory_dsh.model import DshModelClient
+    return model is None or getattr(model, "thread_safe", False) is True
 
-    if model is None:
-        return True
-    return isinstance(model, DshModelClient)
+
+def _fallback_reasons(executor: "Executor", node: "Node") -> list[str]:
+    from refactory_dsh.memory import MemoryStore
+
+    ctx = executor.ctx
+    reasons: list[str] = []
+    memory = ctx.memory
+    if memory is not None:
+        if type(memory) is not MemoryStore:
+            reasons.append(
+                f"memory {type(memory).__name__} is not a MemoryStore, the only store "
+                "known safe to share across items")
+        else:
+            declared = sorted(memory.describe())
+            if declared:
+                reasons.append(
+                    f"the MemoryStore declares namespace(s) {', '.join(declared)}, whose "
+                    "reads and writes are not synchronised across concurrent items")
+    if not is_shareable_model(ctx.model):
+        reasons.append(
+            f"model client {type(ctx.model).__name__} does not declare thread_safe = True, "
+            "so it is not shared across concurrent items")
+    for nid in executor.graph.data_body(node.id):
+        body_node = executor.graph.nodes.get(nid)
+        if (body_node is not None
+                and body_node.kind == "gate"
+                and body_node.gate_kind != "fn"
+                and not ctx.verdicts.get(body_node.id)):
+            reasons.append(f"gate {nid!r} needs a person's answer")
+    return reasons
 
 
 def _check_serial_fallback(
@@ -69,46 +108,23 @@ def _check_serial_fallback(
     node: "Node",
     parallelism: int,
 ) -> dict[str, Any] | None:
-    """Return a fallback reason dict if we must run serially, or None.
+    """Return the recorded fallback fact if the node must run serially, or None.
 
-    When a fallback fires, the reason is recorded as a warning and a fact
-    so no run silently claims parallelism it did not get (correction 1).
+    A fallback is recorded as the ``data_parallelism_effective`` fact and a
+    ``run_warning`` event, so no run claims parallelism it did not get. A warning
+    that cannot be written is reported on stderr and in the fact, never dropped.
     """
-    ctx = executor.ctx
-
-    from refactory_dsh.memory import MemoryStore
-
-    reasons: list[str] = []
-
-    if ctx.memory is not None and (
-        type(ctx.memory) is not MemoryStore or bool(ctx.memory.describe())
-    ):
-        reasons.append("non-MemoryStore memory is not thread-safe")
-
-    if not _is_thread_safe_model(ctx.model):
-        reasons.append(f"model client {type(ctx.model).__name__} is not known thread-safe")
-
-    # Check for user/agent gates in the data body that lack pre-supplied verdicts.
-    body_nodes = executor.graph.data_body(node.id)
-    for nid in body_nodes:
-        body_node = executor.graph.nodes.get(nid)
-        if (body_node is not None
-                and body_node.kind == "gate"
-                and body_node.gate_kind != "fn"
-                and not ctx.verdicts.get(body_node.id)):
-            reasons.append(f"gate {nid!r} needs a person's answer")
-
+    reasons = _fallback_reasons(executor, node)
     if not reasons:
         return None
-
+    ctx = executor.ctx
     reason_text = "; ".join(reasons)
-    fact = {
+    fact: dict[str, Any] = {
         "node": node.id,
         "requested": parallelism,
         "effective": 1,
         "reason": reason_text,
     }
-    # Record run warning.
     try:
         from refactory_dsh.live import emit
         emit(
@@ -116,11 +132,50 @@ def _check_serial_fallback(
             node_id=node.id, state="warning",
             summary=f"data parallelism fallback to serial: {reason_text}",
         )
-    except Exception:
-        pass
-    # Record fact.
-    ctx._internal_fact("data_parallelism_effective", fact)
+    except Exception as exc:  # noqa: BLE001 - reported below, not swallowed
+        fact["warning_error"] = f"{type(exc).__name__}: {exc}"
+        print(json.dumps({"warning": "data_parallelism_fallback", **fact}), file=sys.stderr)
+    ctx._internal_fact("data_parallelism_effective", fact)  # noqa: SLF001
     return fact
+
+
+def _within_deadline(fn: Callable[[], Any], deadline_s: float | None, node_id: str, item_id: str) -> Any:
+    """Run ``fn`` under the per-item deadline the sequential loop's alarm enforces.
+
+    The sequential loop arms ``signal.alarm(int(max(1, deadline)))`` around setup
+    and again around verify. A worker thread cannot take SIGALRM, so the phase runs
+    on a helper thread and the item fails with the same timeout error when the
+    phase is still running at the deadline.
+    """
+    from .executor import _ItemDeadlineError
+
+    if deadline_s is None:
+        return fn()
+    box: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the item's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=target, daemon=True, name=f"{node_id}:{item_id}")
+    worker.start()
+    worker.join(int(max(1, deadline_s)))
+    if worker.is_alive():
+        raise _ItemDeadlineError(node_id, item_id, deadline_s)
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _metadata_fields(item: dict[str, Any], instance: Any) -> dict[str, Any]:
+    meta = instance.metadata
+    return {
+        "metadata": {k: v for k, v in item.items() if k not in ("id", "path")},
+        "label": str(meta.get("label", "")) if meta.get("label") is not None else None,
+        "label_text": str(meta.get("label_text", "")) if meta.get("label_text") is not None else None,
+    }
 
 
 def run_data_concurrent(
@@ -132,19 +187,13 @@ def run_data_concurrent(
     *,
     setup_kwargs: dict[str, Any] | None = None,
     verify_kwargs: dict[str, Any] | None = None,
-    original_max_steps: int | None = None,
-) -> tuple[
-    list[dict[str, Any]],   # scores (in item order)
-    list[dict[str, Any]],   # item_records (in item order)
-    str | None,              # error
-    bool,                    # halted
-    set[int],                # failed step indices
-]:
-    """Run data-node items concurrently.
+    item_deadline_s: float | None = None,
+) -> ConcurrentOutcome:
+    """Run data-node items concurrently, with the sequential loop's semantics.
 
-    Returns ``(scores, item_records, error, halted, failed_step_indices)``.
-    The caller merges these into the executor's state the same way the
-    sequential path does.
+    The finished items' records are appended to ``executor._item_records`` in item
+    order before this returns or re-raises, as the sequential loop has appended
+    them by the time it stops.
     """
     from .executor import (
         CURRENT_ITEM,
@@ -159,319 +208,179 @@ def run_data_concurrent(
         make_item_record,
         mark_pass_complete,
         pass_dir_of,
+        pass_read_through,
         prepare_pass_dir,
     )
     from refactory_dsh.task import instance_of
 
-    _PASSTHROUGH = (BudgetExhausted, KeyboardInterrupt, SystemExit)
-    _run_workdir = executor._run_workdir or executor.ctx.workdir
-
+    passthrough = (BudgetExhausted, KeyboardInterrupt, SystemExit)
+    run_workdir = executor._run_workdir or executor.ctx.workdir  # noqa: SLF001
     cancelled = threading.Event()
-
-    # Step budget reserve (shared with fork).
-    # Use the original max_steps (before the data-loop scaling) for the budget.
-    _budget_remaining: int | None = None
-    if original_max_steps is not None:
-        _budget_remaining = original_max_steps - len(executor.steps)
-    reserve = make_step_budget_reserve(executor, cancelled, remaining=_budget_remaining)
-
-    # Base model for creating per-item copies.
+    # The cap the sequential loop walks under: max_steps already scaled by the
+    # item count (Executor.run), less the steps taken so far.
+    reserve = make_step_budget_reserve(executor, cancelled)
     base_model = executor.ctx.model
-
-    # Declared reads for pass isolation.
-    from refactory_dsh.items import pass_read_through
-    _declared_reads = pass_read_through(
+    declared_reads = pass_read_through(
         {n.id: (n.reads, n.writes) for n in executor.graph.nodes.values()},
         executor.graph.data_body(node.id),
         node.writes,
     )
-
-    # Per-item deadline.
-    _item_deadline_s = executor._data_item_deadline()
-
     setup_kwargs = setup_kwargs or {}
     verify_kwargs = verify_kwargs or {}
 
-    results: list[_ItemResult] = [_ItemResult(index=i, item_id="") for i in range(len(items))]
-    lock = threading.Lock()
-    _halt_exc: list[Any] = []
-
-    def _make_per_item_model(item_cancelled: threading.Event) -> Any:
-        """Create a per-item model copy with its own cancellation scope.
-
-        The per-item cancellation event is independent of the global
-        ``cancelled`` event: a deadline timer sets only the per-item event,
-        stopping that item's model calls without affecting other items.
-        The global ``cancelled`` event is also checked (via the step budget
-        reserve), so a HaltStop or budget exhaustion still stops all items.
-        """
-        if base_model is None:
-            return None
-        if not _is_thread_safe_model(base_model):
-            return base_model
-        from refactory_dsh.model import DshModelClient
-        if isinstance(base_model, DshModelClient):
-            # Chain: global cancelled → per-item cancelled
-            m = base_model.with_cancellation(cancelled)
-            m = m.with_cancellation(item_cancelled)
-            return m
-        return base_model
+    def item_model() -> Any:
+        bind = getattr(base_model, "with_cancellation", None)
+        return bind(cancelled) if callable(bind) else base_model
 
     def run_item(index: int) -> _ItemResult:
         item = items[index]
         item_id = str(item.get("id") or index)
-        result = _ItemResult(index=index, item_id=item_id)
+        result = _ItemResult(index=index)
 
-        # Resume: skip finished items.
-        _done_dir = pass_dir_of(_run_workdir, node.id, item_id, index)
-        if (_done_dir / ".done").exists():
-            kept = finished_pass_record(_done_dir)
-            if kept is not None:
-                result.record = kept
+        done_dir = pass_dir_of(run_workdir, node.id, item_id, index)
+        if (done_dir / ".done").exists():
+            result.record = finished_pass_record(done_dir)
             return result
-
         if cancelled.is_set():
+            result.cancelled = True
             return result
 
         instance = instance_of(item)
-
-        # Create isolated pass directory.
-        _pass_dir = prepare_pass_dir(
-            _run_workdir, node.id, item_id, index,
-            declared_reads=_declared_reads,
-        )
-
-        # Per-item cancellation event (independent of global cancelled).
-        _item_cancelled = threading.Event()
-        _item_model = _make_per_item_model(_item_cancelled)
-
-        # Clone child executor for this item with per-item model.
-        child = clone_child_executor(
-            executor, _item_model,
-            reserve_step=reserve,
-            gate_iterations={},  # per-item gate counters
-        )
-        child.ctx.workdir = _pass_dir
-        child.ctx.facts = copy.deepcopy(executor.ctx.facts)
-        child._run_workdir = _run_workdir
+        pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads)
+        child = clone_child_executor(executor, item_model(), reserve_step=reserve, gate_iterations={})
+        child.ctx.workdir = pass_dir
+        child._run_workdir = run_workdir  # noqa: SLF001
         result.child = child
-
-        _pass_completed = False
-        record_out = None
-        _deadline_timer: threading.Timer | None = None
-        _deadline_event = threading.Event()
-
-        # Deep copy task for this item to avoid shared mutable state.
-        _item_task = copy.deepcopy(task) if task is not None else None
+        item_task = copy.deepcopy(task) if task is not None else None
+        fields = _metadata_fields(item, instance)
+        record: dict[str, Any] | None = None
+        finished = False
 
         try:
-            # Setup phase.
-            if _item_task is not None:
-                _item_task.setup(instance, child.ctx.workdir, **setup_kwargs)
-
-            # Write current_item to pass dir only (not run-level for safety).
+            if item_task is not None:
+                _within_deadline(
+                    lambda: item_task.setup(instance, child.ctx.workdir, **setup_kwargs),
+                    item_deadline_s, node.id, item_id,
+                )
             child.ctx.node_id = node.id
-            child.ctx._declared = node.writes
-            child.ctx._declared_reads = node.reads
-            child.ctx._declared_facts = node.produces
-            child.ctx._produced = set()
+            child.ctx._declared = node.writes  # noqa: SLF001
+            child.ctx._declared_reads = node.reads  # noqa: SLF001
+            child.ctx._declared_facts = node.produces  # noqa: SLF001
+            child.ctx._produced = set()  # noqa: SLF001
             child.ctx.write_json(CURRENT_ITEM, item)
-            child._item_exchanges = []
-
-            # Arm per-item deadline via Timer (not SIGALRM).
-            # The timer sets only the per-item cancellation event,
-            # stopping model calls for THIS item only; other items continue.
-            if _item_deadline_s is not None:
-                def _on_deadline():
-                    _deadline_event.set()
-                    _item_cancelled.set()
-
-                _deadline_timer = threading.Timer(_item_deadline_s, _on_deadline)
-                _deadline_timer.daemon = True
-                _deadline_timer.start()
-
-            # Walk the branch.
-            branch_error = child._walk_branch(
+            child._item_exchanges = []  # noqa: SLF001
+            branch_error = child._walk_branch(  # noqa: SLF001
                 node.subgraph_entry, node.subgraph_exit,
                 include_barrier=True, iterations={},
             )
-
-            if _deadline_event.is_set():
-                raise _ItemDeadlineError(node.id, item_id, _item_deadline_s)
-
             if branch_error is not None:
                 raise _BranchFailed(branch_error)
-
-            # Verify phase.
-            if _item_task is not None:
-                verdict = _item_task.verify(instance, child.ctx.workdir, **verify_kwargs)
-            else:
-                verdict = None
-
-        except _PASSTHROUGH:
-            if _deadline_timer is not None:
-                _deadline_timer.cancel()
+            verdict = (
+                _within_deadline(
+                    lambda: item_task.verify(instance, child.ctx.workdir, **verify_kwargs),
+                    item_deadline_s, node.id, item_id,
+                )
+                if item_task is not None else None
+            )
+        except passthrough:
+            cancelled.set()
             raise
         except HaltStop as exc:
-            result.halted = True
-            result.error = str(exc)
-            _halt_exc.append(exc)
+            result.stop, result.error = "halted", str(exc)
             cancelled.set()
-            if _deadline_timer is not None:
-                _deadline_timer.cancel()
             return result
         except GateStop as exc:
-            result.gate_stopped = True
-            result.error = str(exc)
+            result.stop, result.error = "refused", str(exc)
             cancelled.set()
-            if _deadline_timer is not None:
-                _deadline_timer.cancel()
+            return result
+        except CancelledError:
+            result.cancelled = True
             return result
         except _ItemDeadlineError as exc:
-            metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
-            record_out = make_item_record(
-                item_id, None, error=exc,
-                exchanges=list(child._item_exchanges),
-                label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
-                label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
-                metadata=metadata,
-            )
-            if record_out is not None:
-                record_out["error_kind"] = "timeout"
-            _pass_completed = True
+            record = make_item_record(item_id, None, error=exc,
+                                      exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
+            if record is not None:
+                record["error_kind"] = "timeout"
+            finished = True
         except _BranchFailed as exc:
-            metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
-            record_out = make_item_record(
-                item_id, None, error=RuntimeError(str(exc)),
-                exchanges=list(child._item_exchanges),
-                fail_reason=str(exc),
-                label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
-                label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
-                metadata=metadata,
-            )
-            _pass_completed = True
-        except Exception as exc:
-            metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
-            record_out = make_item_record(
-                item_id, None, error=exc,
-                exchanges=list(child._item_exchanges),
-                label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
-                label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
-                metadata=metadata,
-            )
-            _pass_completed = True
+            if cancelled.is_set():
+                # Stopped by another item's halt, gate or budget stop, not failed.
+                result.cancelled = True
+                return result
+            record = make_item_record(item_id, None, error=RuntimeError(str(exc)),
+                                      exchanges=list(child._item_exchanges),  # noqa: SLF001
+                                      fail_reason=str(exc), **fields)
+            finished = True
+        except Exception as exc:  # noqa: BLE001 - a failed item, as in the sequential loop
+            if cancelled.is_set():
+                result.cancelled = True
+                return result
+            record = make_item_record(item_id, None, error=exc,
+                                      exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
+            finished = True
         else:
-            metadata = {k: v for k, v in item.items() if k not in ("id", "path")}
-            _prediction = None
+            prediction: str | None = None
             if verdict is not None:
                 if verdict.prediction:
-                    _prediction = verdict.prediction
+                    prediction = verdict.prediction
                 elif verdict.passed:
-                    _prediction = verdict.details
+                    prediction = verdict.details
                 else:
-                    _prediction = ""
-            record_out = make_item_record(
+                    prediction = ""
+            record = make_item_record(
                 item_id, verdict,
-                exchanges=list(child._item_exchanges),
-                prediction=_prediction,
-                label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
-                label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
+                exchanges=list(child._item_exchanges),  # noqa: SLF001
+                prediction=prediction,
                 fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
-                metadata=metadata,
+                **fields,
             )
-            _pass_completed = True
+            finished = True
         finally:
-            if _deadline_timer is not None:
-                _deadline_timer.cancel()
-            if _pass_completed:
-                mark_pass_complete(_pass_dir, record_out)
-
-        result.record = record_out
+            if finished:
+                mark_pass_complete(pass_dir, record)
+        result.record = record
         return result
 
-    # Submit all items to the thread pool.
-    all_results: list[_ItemResult] = [_ItemResult(index=i, item_id="") for i in range(len(items))]
-    error_out: str | None = None
-    halted_out = False
-    failed_step_indices: set[int] = set()
+    results: list[_ItemResult] = [_ItemResult(index=i) for i in range(len(items))]
+    raised: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=parallelism) as pool:
+        futures = {pool.submit(run_item, i): i for i in range(len(items))}
+        try:
+            for future in as_completed(futures):
+                try:
+                    results[futures[future]] = future.result()
+                except BaseException as exc:  # noqa: BLE001 - re-raised after the merge
+                    cancelled.set()
+                    if raised is None:
+                        raised = exc
+        except BaseException:
+            # Interrupted on this thread: stop scheduling, let the running items stop.
+            cancelled.set()
+            for future in futures:
+                future.cancel()
+            raise
 
-    try:
-        with ThreadPoolExecutor(max_workers=parallelism) as pool:
-            futures = {}
-            try:
-                for i in range(len(items)):
-                    futures[pool.submit(run_item, i)] = i
-                for future in as_completed(futures):
-                    idx = futures[future]
-                    try:
-                        all_results[idx] = future.result()
-                    except BudgetExhausted:
-                        cancelled.set()
-                        raise
-            except BaseException:
-                cancelled.set()
-                for f in futures:
-                    f.cancel()
-                raise
-    except BudgetExhausted as exc:
-        error_out = str(exc)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as exc:
-        error_out = f"{node.id}: {type(exc).__name__}: {exc}"
-
-    # Merge results in item order using the shared helper.
-    scores: list[dict[str, Any]] = []
-    item_records: list[dict[str, Any]] = []
-    children_with_results = []
-    child_order = []
-
-    for i in range(len(items)):
-        r = all_results[i]
+    outcome = ConcurrentOutcome()
+    merge_children_into_parent(executor, [r.child for r in results if r.child is not None])
+    step_base = 0
+    allowed = set(node.produces) - {"item_scores"}
+    for r in results:
         if r.child is not None:
-            children_with_results.append(r.child)
-            child_order.append(len(children_with_results) - 1)
-        else:
-            child_order.append(-1)
-
-    # Use merge_children_into_parent for the ordered merge (shared with fork).
-    if children_with_results:
-        merge_children_into_parent(executor, children_with_results)
-
-    # Now build scores/records and track failed step indices.
-    _merged_step_base = 0
-    for i in range(len(items)):
-        r = all_results[i]
-        if r.child is not None:
-            child = r.child
-            # Track failed item step indices relative to merged position.
+            steps = len(r.child.steps)
             if r.record is not None and r.record.get("error_text") is not None:
-                step_count = len(child.steps)
-                # The steps were already merged into executor.steps by
-                # merge_children_into_parent, so track based on child step count.
-                failed_step_indices.update(range(_merged_step_base, _merged_step_base + step_count))
-            _merged_step_base += len(child.steps)
-
-            # Merge declared facts from child.
-            allowed = set(node.produces) | {"item_scores"}
-            for key in allowed:
-                if key in child.ctx.facts and key != "item_scores":
-                    if key not in executor.ctx.facts or executor.ctx.facts[key] != child.ctx.facts[key]:
-                        executor.ctx.facts[key] = child.ctx.facts[key]
-
+                outcome.failed_step_indices.update(range(step_base, step_base + steps))
+            step_base += steps
+            # The declared facts each finished pass changed, folded in item order
+            # (the sequential loop's pass_scope merge).
+            if not r.cancelled and r.stop is None:
+                for key in allowed & set(r.child.ctx.facts):
+                    if executor.ctx.facts.get(key) != r.child.ctx.facts[key]:
+                        executor.ctx.facts[key] = r.child.ctx.facts[key]
         if r.record is not None:
-            scores.append(r.record)
-            item_records.append(r.record)
-        if r.halted:
-            halted_out = True
-            if error_out is None:
-                error_out = r.error
-        if r.gate_stopped:
-            if error_out is None:
-                error_out = r.error
-
-    if _halt_exc and error_out is None:
-        error_out = str(_halt_exc[0])
-        halted_out = True
-
-    return scores, item_records, error_out, halted_out, failed_step_indices
+            outcome.scores.append(r.record)
+            executor._item_records.append(r.record)  # noqa: SLF001
+        if r.stop is not None and outcome.stop is None:
+            outcome.stop, outcome.error = r.stop, r.error
+    if raised is not None:
+        raise raised
+    return outcome
