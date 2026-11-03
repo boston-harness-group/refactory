@@ -1090,12 +1090,13 @@ class Executor:
                 # ── concurrent dispatch ────────────────────────────────
                 # parallelism > 1 runs the items at once, with this loop's contract
                 # (data_parallel's docstring); a recorded fallback runs them below.
-                if node.parallelism > 1:
+                _parallelism = node.effective_parallelism(self.ctx.knobs)
+                if _parallelism > 1:
                     from .data_parallel import _check_serial_fallback, run_data_concurrent
 
-                    if _check_serial_fallback(self, node, node.parallelism) is None:
+                    if _check_serial_fallback(self, node, _parallelism) is None:
                         _par = run_data_concurrent(
-                            self, node, items, task, node.parallelism,
+                            self, node, items, task, _parallelism,
                             setup_kwargs=_setup_kwargs,
                             verify_kwargs=_verify_kwargs,
                             item_deadline_s=_item_deadline_s,

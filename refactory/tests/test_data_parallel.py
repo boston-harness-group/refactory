@@ -634,6 +634,10 @@ class _StopTask(Task):
         from refactory_dsh.budgets import BudgetExhausted
         from refactory_dsh.nn.executor import GateStop, HaltStop
 
+        if instance.id == "a":
+            # Still in setup long after "stop" stopped the node, so with two workers
+            # the only worker free to take "c" is the one "stop" freed, after the stop.
+            time.sleep(1.0)
         if instance.id != "stop":
             return
         if self.kind == "halt":
@@ -704,7 +708,8 @@ class _LoaderTask(Task):
         return VerifyResult(passed=instance.id != "fail", score=1.0)
 
 
-def _loader_run(tmp_path: Path, ids: tuple[str, ...]) -> tuple[Path, Any]:
+def _loader_run(tmp_path: Path, ids: tuple[str, ...],
+                produces: tuple[str, ...] = ("item_scores",)) -> tuple[Path, Any]:
     from refactory_dsh.items import data_node
     from refactory_dsh.lowering import write_declarations
     from refactory_dsh.task import register_task
@@ -713,7 +718,7 @@ def _loader_run(tmp_path: Path, ids: tuple[str, ...]) -> tuple[Path, Any]:
     graph = nn.Graph()
     graph.add(nn.Node(
         "data", "data", subgraph_entry="body", subgraph_exit="body",
-        writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="loader_task",
+        writes=(CURRENT_ITEM,), produces=produces, task_ref="loader_task",
         inline_items=tuple({"id": item_id} for item_id in ids), parallelism=4,
     ))
     graph.add(nn.Node("body", "op", call="loop_ops:noop"))
@@ -876,13 +881,10 @@ def test_lowering_preserves_parallelism():
     from refactory_dsh.lowering import to_workflow
     from refactory_packages.livemath.mode import Solver
 
-    solver = Solver()
-    state = solver.state_dict()
+    state = Solver().state_dict()
     state["knobs"]["data_parallelism"]["value"] = 8
-    solver8 = Solver(state=state)
-    solver8.rebuild()
 
-    wf = to_workflow(solver8.state_dict())
+    wf = to_workflow(state)
     data_node = wf.nodes["data"]
     assert data_node.parallelism == 8, (
         f"lowering should preserve parallelism=8, got {data_node.parallelism}"
@@ -945,17 +947,153 @@ def test_from_state_roundtrip():
 # ── LiveMath knob test ────────────────────────────────────────────────────
 
 def test_livemath_data_parallelism_knob():
-    """The LiveMath solver's data_parallelism knob sets node.parallelism in build()."""
+    """LiveMath's data node takes its parallelism from the knob, whatever set it."""
     from refactory_packages.livemath.mode import Solver
 
-    # Default: parallelism=1.
-    solver1 = Solver()
-    graph1 = solver1.build()
-    assert graph1.nodes["data"].parallelism == 1
+    solver = Solver()
+    node = solver.graph().nodes["data"]
+    assert node.parallelism_knob == "data_parallelism"
+    assert node.effective_parallelism(solver.values()) == 1
+    assert node.effective_parallelism({**solver.values(), "data_parallelism": 24}) == 24
 
-    # With knob: parallelism=24 via state_dict manipulation.
-    state = solver1.state_dict()
-    state["knobs"]["data_parallelism"]["value"] = 24
-    solver24 = Solver(state=state)
-    graph24 = solver24.build()
-    assert graph24.nodes["data"].parallelism == 24
+
+def test_parallelism_knob_must_be_one_of_the_nodes_knobs():
+    with pytest.raises(nn.graph.GraphError, match="must be one of the node's knobs"):
+        nn.Node("d", "data", subgraph_entry="a", subgraph_exit="a",
+                writes=("current_item.json",), parallelism_knob="par")
+
+
+# ── every path that sets the knob gets it: `refactory run`, resume ─────────
+
+def test_run_knob_reaches_the_lowered_graph(tmp_path):
+    """``refactory run livemath/solver --knob data_parallelism=4`` (interactive.prepare)
+    lowers a data node that runs 4 items at once; without the knob, 1."""
+    from refactory_dsh import interactive
+
+    def lowered(run: Path, knobs: list[str]) -> dict[str, Any]:
+        name, graphs = interactive.prepare("livemath/solver", workdir=run, knobs=knobs, project=REPO_ROOT)
+        return json.loads((graphs / f"{name}.graph.json").read_text())["nodes"]["data"]
+
+    assert lowered(tmp_path / "p4", ["data_parallelism=4"])["parallelism"] == 4
+    assert lowered(tmp_path / "p1", [])["parallelism"] == 1
+
+
+class _ResumeTask(Task):
+    """Halts every item while the flag file exists, so the first run stops in the pass."""
+
+    name = "resume_bound_task"
+
+    def setup(self, instance, workspace, **kw):
+        from refactory_dsh.nn.executor import HaltStop
+
+        if Path(os.environ["HALT_FLAG"]).exists():
+            raise HaltStop("item_gate", reason="stopped for the resume test")
+
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=True, score=1.0)
+
+
+class _BoundMode(nn.Mode):
+    """Three items whose body needs all three in flight (a barrier), at the knob's parallelism."""
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {"par": nn.Knob(1, "int", lo=1, hi=8, frozen=True, description="items at once")}
+
+    def build(self) -> nn.Graph:
+        graph = nn.Graph()
+        graph.add(nn.Node(
+            "data", "data", subgraph_entry="body", subgraph_exit="body",
+            writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="resume_bound_task",
+            inline_items=tuple({"id": str(i)} for i in range(3)),
+            parallelism_knob="par", knobs=("par",),
+        ))
+        graph.add(nn.Node("body", "op", call="test_ops_parallel:barrier_op",
+                          reads=(CURRENT_ITEM,), produces=("counted",)))
+        graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+        graph.connect("data", "report")
+        return graph
+
+
+def test_resume_runs_items_at_the_bound_knobs_parallelism(tmp_path, monkeypatch):
+    """A run started with ``par=3`` and resumed (``Mode.resume``, which configures the
+    recorded knobs on a fresh mode) runs its items three at a time again."""
+    from refactory_dsh.task import register_task
+
+    register_task("resume_bound_task", _ResumeTask)
+    flag = tmp_path / "halt"
+    flag.write_text("")
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    monkeypatch.setenv("HALT_FLAG", str(flag))
+    monkeypatch.setenv("BARRIER_DIR", str(barrier))
+    monkeypatch.setenv("BARRIER_K", "3")
+    state = _BoundMode().state_dict()
+    state["knobs"]["par"]["value"] = 3
+    run = tmp_path / "run"
+
+    first = _BoundMode(state=state).run(run, max_steps=200)
+    assert first.halted
+    flag.unlink()
+    resumed = _BoundMode.resume(run)
+    assert resumed.exit_ok, resumed.error
+    assert [r.get("error_text") for r in resumed.facts["item_scores"]] == [None, None, None]
+    assert len(list(barrier.glob("done_*"))) == 3
+
+
+# ── the spine's loader folds a pass's declared facts in item order ────────
+
+def test_finish_folds_declared_facts_in_item_order(tmp_path):
+    """Items that end in reverse order leave the last item's declared fact, as the
+    walker's item-order fold does, not the last to end."""
+    from refactory_dsh.items import command_begin, command_end, command_finish, command_prepare
+
+    run, node = _loader_run(tmp_path, ("x", "y", "z"), produces=("item_scores", "last"))
+    command_prepare(node, run, requested=4)
+    for index in (2, 1, 0):
+        begun = command_begin(node, run, index, concurrent=True)
+        (Path(begun["pass_dir"]) / "facts.json").write_text(json.dumps({"last": begun["id"]}))
+        command_end(node, run, index, concurrent=True)
+    command_finish(node, run)
+    assert json.loads((run / "facts.json").read_text())["last"] == "z"
+
+
+# ── a setup or verify that outlives its deadline cannot write into the pass ─
+
+class _LateTask(Task):
+    name = "late_task"
+
+    def setup(self, instance, workspace, **kw):
+        if instance.id == "slow":
+            time.sleep(2.5)
+            (Path(workspace) / "late.txt").write_text("written after the deadline")
+
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=True, score=1.0)
+
+
+@pytest.mark.parametrize("parallelism", [1, 4])
+def test_timed_out_phase_cannot_write_into_the_pass(tmp_path, monkeypatch, parallelism):
+    from refactory_dsh.nn.executor import Executor
+    from refactory_dsh.task import register_task
+
+    register_task("late_task", _LateTask)
+    monkeypatch.setattr(Executor, "_data_item_deadline", lambda self: 1.0)
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="body", subgraph_exit="body",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="late_task",
+        inline_items=({"id": "ok"}, {"id": "slow"}), parallelism=parallelism,
+    ))
+    graph.add(nn.Node("body", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+    graph.connect("data", "report")
+    run = tmp_path / "run"
+
+    result = execute(graph, run, max_steps=200)
+    time.sleep(2.5)  # past the abandoned setup's late write
+    slow = run / "passes" / "data" / "slow_1"
+    assert [r.get("error_kind") for r in result.facts["item_scores"]] == [None, "timeout"]
+    assert not (slow / "late.txt").exists()
+    if parallelism > 1:
+        assert (slow / ".timed_out").read_text() == "setup"

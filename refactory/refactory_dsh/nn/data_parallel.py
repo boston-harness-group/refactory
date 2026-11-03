@@ -10,7 +10,8 @@ The contract is the sequential loop's, item for item:
 
 - the step cap is the one the sequential loop has, scaled by the item count;
 - the per-item deadline covers each item's setup and its verify, not its walk
-  (``Executor._data_item_deadline``; the spine's per-command timeout);
+  (``Executor._data_item_deadline``; the spine's per-command timeout); a phase
+  that outlives it is abandoned, and its later writes cannot reach the pass;
 - a halt or a gate stop ends the node and is recorded as the sequential loop
   records it (``Executor._record``), a ``BudgetExhausted`` propagates, and the
   records of the items that finished are kept;
@@ -29,6 +30,7 @@ import sys
 import threading
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from .concurrent_helpers import clone_child_executor, make_step_budget_reserve, merge_children_into_parent
@@ -169,6 +171,20 @@ def _within_deadline(fn: Callable[[], Any], deadline_s: float | None, node_id: s
     return box.get("value")
 
 
+#: Marks a pass whose setup or verify outlived the item deadline; it holds the phase.
+TIMED_OUT = ".timed_out"
+
+
+def _live_alias(run_workdir: Path, node_id: str, pass_dir: Path) -> Path:
+    """A symlink to *pass_dir* that one item works through, under ``.refactory/live``."""
+    alias = Path(run_workdir) / ".refactory" / "live" / node_id / pass_dir.name
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    if alias.is_symlink() or alias.exists():
+        alias.unlink()
+    alias.symlink_to(pass_dir.resolve(), target_is_directory=True)
+    return alias
+
+
 def _metadata_fields(item: dict[str, Any], instance: Any) -> dict[str, Any]:
     meta = instance.metadata
     return {
@@ -248,7 +264,13 @@ def run_data_concurrent(
         instance = instance_of(item)
         pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads)
         child = clone_child_executor(executor, item_model(), reserve_step=reserve, gate_iterations={})
-        child.ctx.workdir = pass_dir
+        # The item works through an alias of its pass folder, removed when the item
+        # ends -- at once when a setup or verify outlives its deadline, so the
+        # abandoned phase's later writes cannot land in the pass (the sequential
+        # loop's alarm stops the phase instead).
+        live = _live_alias(run_workdir, node.id, pass_dir) if item_deadline_s is not None else None
+        child.ctx.workdir = live or pass_dir
+        phase = "setup"
         child._run_workdir = run_workdir  # noqa: SLF001
         result.child = child
         item_task = copy.deepcopy(task) if task is not None else None
@@ -258,6 +280,7 @@ def run_data_concurrent(
 
         try:
             if item_task is not None:
+                phase = "setup"
                 _within_deadline(
                     lambda: item_task.setup(instance, child.ctx.workdir, **setup_kwargs),
                     item_deadline_s, node.id, item_id,
@@ -275,6 +298,7 @@ def run_data_concurrent(
             )
             if branch_error is not None:
                 raise _BranchFailed(branch_error)
+            phase = "verify"
             verdict = (
                 _within_deadline(
                     lambda: item_task.verify(instance, child.ctx.workdir, **verify_kwargs),
@@ -297,6 +321,9 @@ def run_data_concurrent(
             result.cancelled = True
             return result
         except _ItemDeadlineError as exc:
+            if live is not None:
+                live.unlink(missing_ok=True)
+            (pass_dir / TIMED_OUT).write_text(phase)
             record = make_item_record(item_id, None, error=exc,
                                       exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
             if record is not None:
@@ -336,6 +363,8 @@ def run_data_concurrent(
             )
             finished = True
         finally:
+            if live is not None:
+                live.unlink(missing_ok=True)
             if finished:
                 mark_pass_complete(pass_dir, record)
         result.record = record

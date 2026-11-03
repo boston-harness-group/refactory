@@ -510,13 +510,6 @@ class Loop(OuterLoop):
             # the caller deciding what this run operates on is not the search.
             seed_state = nn_edits.configure(seed_state, name, value)
         if self.config.knobs:
-            # A knob build() reads (a node field bound to a frozen resource knob, such
-            # as LiveMath's data_parallelism) reaches the graph only through build():
-            # the seed is the graph the mode builds with these values, as a
-            # constructed mode's is with its defaults.
-            configured = self.mode_class(state=seed_state)
-            configured.rebuild()
-            seed_state = configured.state_dict()
             # The loop's own mode is what the report and the seed candidate's parent
             # read, so it has to carry the same configuration as the population.
             self.mode.load_state_dict(seed_state)

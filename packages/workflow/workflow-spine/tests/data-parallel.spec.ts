@@ -354,6 +354,54 @@ describe('data-parallel: the concurrent drain', () => {
       .toEqual(ITEMS.map(item => item.id))
   }, 60_000)
 
+  /** Stop the first run inside `prepare`, then resume it, acknowledging the stop. */
+  async function stopInPrepareThenResume(graph: WorkflowGraph, workdir: string, env: Record<string, string>, ran: Ran[], once = false): Promise<Record<string, unknown>> {
+    let held = false
+    const first = await mountLoader(processShell([], command => {
+      if (!command.includes(' prepare ')) return false
+      held = true
+      return true
+    }), { graph, workdir, commandEnv: env })
+    void call(first, 'wf_next')
+    for (let wait = 0; wait < 200 && !held; wait += 1) await new Promise(settle => setTimeout(settle, 25))
+    expect(held).toBe(true)
+    const saved = readFileSync(join(workdir, '.refactory/spine-checkpoint.json'))
+    // The pass is not checkpointed as open until its node is prepared for this visit.
+    expect(JSON.parse(saved.toString()).state?.pass).toBeUndefined()
+    writeFileSync(join(workdir, '.refactory/resume-request.json'), JSON.stringify({
+      checkpoint_sha256: createHash('sha256').update(saved).digest('hex'),
+      acknowledge_executing: true,
+    }))
+    const resumed = await mountLoader(processShell(ran), { graph, workdir, commandEnv: env })
+    return once ? await call(resumed, 'wf_next') : await drive(resumed)
+  }
+
+  it('never takes an earlier visit\'s finished passes for this visit\'s, across a stop', async () => {
+    const { workdir, taskDir } = loaderRun(ITEMS.slice(0, 4).map(item => ({ ...item, delay: 0.05 })), 4)
+    // An earlier visit of the node finished item 0, with a different answer.
+    const stale = join(workdir, 'passes', 'data', 'i0_0')
+    mkdirSync(stale, { recursive: true })
+    writeFileSync(join(stale, '.item_record.json'), JSON.stringify({ id: 'i0', passed: false, score: 0, stale: true }))
+    writeFileSync(join(stale, '.done'), '')
+    const ran: Ran[] = []
+    const env = { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir }
+    expect(await stopInPrepareThenResume(loaderGraph(4), workdir, env, ran)).toMatchObject({ status: 'done' })
+    const walked = ran.filter(entry => entry.command === WORK).map(entry => entry.workdir.split('/').pop()).sort()
+    expect(walked).toEqual(['i0_0', 'i1_1', 'i2_2', 'i3_3'])
+    const records = JSON.parse(readFileSync(join(workdir, 'item_records.json'), 'utf8')) as Array<Record<string, unknown>>
+    expect(records.some(record => 'stale' in record)).toBe(false)
+    expect(records[0]).toMatchObject({ id: 'i0', passed: true })
+  }, 60_000)
+
+  it('records the fallback on a run resumed before its pass opened', async () => {
+    const graph = loaderGraph(4)
+    graph.nodes.work = { _type: 'AgentNode', id: 'work', role: 'builder', prompt_template: 'W', reads: [], writes: [] }
+    const { workdir, taskDir } = loaderRun(ITEMS.slice(0, 2), 4)
+    expect(await stopInPrepareThenResume(graph, workdir, { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir }, [], true))
+      .toMatchObject({ status: 'ready', nodes: [{ id: 'work' }] })
+    expect(facts(workdir).data_parallelism_effective).toMatchObject({ node: 'data', requested: 4, effective: 1 })
+  }, 60_000)
+
   it('records why a body the driving agent must run keeps its items one at a time', async () => {
     const graph = loaderGraph(4)
     graph.nodes.work = { _type: 'AgentNode', id: 'work', role: 'builder', prompt_template: 'W', reads: [], writes: [] }

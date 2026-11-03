@@ -632,6 +632,12 @@ def command_finish(node: Node, workdir: Path, *, partial: bool = False) -> dict[
             records.append(record)
     if unfinished and not partial:
         raise ItemsError(f"{node.id}: item(s) {unfinished} have not finished their pass")
+    # The declared facts each pass produced, folded in item order -- the walker's
+    # order -- not in the order the items happened to end.
+    for index, item in enumerate(items):
+        if index not in unfinished:
+            merge_pass_results(workdir, pass_dir_of(workdir, node.id, str(item.get("id") or index), index),
+                               node.produces)
     if SCORES_FACT in node.produces:
         from refactory_dsh.run import edit_facts
         edit_facts(workdir, lambda facts: facts.__setitem__(SCORES_FACT, list(records)))
@@ -735,6 +741,12 @@ def _existing_item_record(workdir: Path, item_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _merge_unless_concurrent(workdir: Path, pass_dir: Path, produces: tuple[str, ...], concurrent: bool) -> None:
+    """Fold a pass's declared facts into the run, unless ``finish`` folds them in item order."""
+    if not concurrent:
+        merge_pass_results(workdir, pass_dir, produces)
+
+
 def command_end(
     node: Node, workdir: Path, index: int, *,
     failed_reason: str | None = None,
@@ -750,8 +762,9 @@ def command_end(
     When *failed_kind* is set (e.g. ``"timeout"``), the ``error_kind`` field in
     the record is overridden, so both runtimes record the same kind.
 
-    *concurrent*: the all-failed rule waits for ``finish``; the last index is not
-    the last item to end when items run at once.
+    *concurrent*: the all-failed rule and the folding of the pass's declared facts
+    wait for ``finish``, which applies them in item order; the last index is not the
+    last item to end when items run at once.
     """
     items = items_of(node, workdir)
     if index < 0 or index >= len(items):
@@ -800,7 +813,7 @@ def command_end(
             lambda ps: ps.__setitem__("failed", ps.get("failed", 0) + 1),
         )
         # Merge declared produces from the pass directory to the run directory.
-        merge_pass_results(workdir, pass_dir, node.produces)
+        _merge_unless_concurrent(workdir, pass_dir, node.produces, concurrent)
         mark_pass_complete(pass_dir, record)
         result: dict[str, Any] = {"error": failed_reason, **(record or {})}
         _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
@@ -809,7 +822,7 @@ def command_end(
     task = _task_of(node, workdir)
     if task is None:
         # Merge declared produces even when there is no task.
-        merge_pass_results(workdir, pass_dir, node.produces)
+        _merge_unless_concurrent(workdir, pass_dir, node.produces, concurrent)
         mark_pass_complete(pass_dir)
         _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return {}
@@ -843,14 +856,14 @@ def command_end(
             lambda ps: ps.__setitem__("failed", ps.get("failed", 0) + 1),
         )
         # Merge declared produces from the pass directory to the run directory.
-        merge_pass_results(workdir, pass_dir, node.produces)
+        _merge_unless_concurrent(workdir, pass_dir, node.produces, concurrent)
         mark_pass_complete(pass_dir, record)
         result = {"error": str(exc), **(record or {})}
         _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return result
     if verdict is None:
         # Merge declared produces even with no verdict.
-        merge_pass_results(workdir, pass_dir, node.produces)
+        _merge_unless_concurrent(workdir, pass_dir, node.produces, concurrent)
         mark_pass_complete(pass_dir)
         _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
         return {}
@@ -876,7 +889,7 @@ def command_end(
     if record is not None and SCORES_FACT in node.produces:
         _write_facts(workdir, SCORES_FACT, [record])
     # Merge declared produces from the pass directory to the run directory.
-    merge_pass_results(workdir, pass_dir, node.produces)
+    _merge_unless_concurrent(workdir, pass_dir, node.produces, concurrent)
     mark_pass_complete(pass_dir, record)
     _check_all_items_failed(node, workdir, items, index, concurrent=concurrent)
     return record or {}

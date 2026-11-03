@@ -33,7 +33,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { HALT, Spine, validateGraph } from './spine.ts'
-import type { DataPass, NodeView, SpineNext, TerminalHalt } from './spine.ts'
+import type { NodeView, SpineNext, TerminalHalt } from './spine.ts'
 import { commandOf, isDeterministic, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
 import type { CommandFailure, CommandOutcome, CommandRunnerConfig } from './execute.ts'
 import type { WorkflowGraph } from './types.ts'
@@ -1455,9 +1455,9 @@ export function apply(ctx: Context, config: Config): void {
    * join): a node the driving agent runs -- an undispatched agent, a person's gate,
    * a nested data node, an expansion -- is handed over one item at a time.
    */
-  function concurrentFallback(spine: Spine, pass: DataPass): string | undefined {
+  function concurrentFallback(spine: Spine, entry: string, exit: string): string | undefined {
     const reasons: string[] = []
-    for (const id of Object.keys(spine.subgraphFor(pass.entry, pass.exit).nodes)) {
+    for (const id of Object.keys(spine.subgraphFor(entry, exit).nodes)) {
       const view = spine.view(id)
       if (view._type === 'ForkNode' || view._type === 'JoinNode') continue
       if (view.expand !== undefined) reasons.push(`node '${id}' expands the graph, which the driving agent does`)
@@ -1489,8 +1489,8 @@ export function apply(ctx: Context, config: Config): void {
    * Run a data pass's items concurrently, at most `parallelism` at a time, when
    * every body node is one the plugin runs itself (`concurrentFallback`).
    *
-   * The sequential drain's contract, item for item: `prepare` resets the node once,
-   * before any item begins (a fresh pass; a resumed one keeps its finished passes);
+   * The sequential drain's contract, item for item: `prepareParallelPass` reset the
+   * node once, before the pass opened (a resumed pass keeps this visit's finished passes);
    * each item runs `begin`, walks the body on its own spine (`Spine.itemSpine`) in
    * its pass directory, and runs `end`; a failed node, setup or verify is a failed
    * item, judged by `end --failed`; a halt in an item stops new items and halts the
@@ -1508,15 +1508,10 @@ export function apply(ctx: Context, config: Config): void {
     runner: CommandRunnerConfig & { dataCommand: string },
     workdir: string | undefined,
     warnings: string[],
-    resuming: boolean,
   ): Promise<{ failure?: CommandFailure }> {
     const pass = spine.passOf()
     if (pass === undefined) return {}
     const parallelism = pass.parallelism ?? 1
-    if (!resuming) {
-      const prepared = await runDataCommand(shell, data, 'prepare', runner, undefined, undefined, undefined, ['--requested', String(parallelism)])
-      if (!prepared.ok) return { failure: prepared }
-    }
 
     // A slot frees as each item settles, handed straight to the next waiter.
     let inFlight = 0
@@ -1641,9 +1636,39 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Hand a pass whose items asked for `parallelism` > 1 to the concurrent drain, or
-   * record why they run one at a time -- the `data_parallelism_effective` fact and a
-   * run warning, as the walker records them -- and leave it to the sequential drain.
+   * Before a data node with `parallelism` > 1 opens its pass -- before the checkpoint
+   * that records the pass as open -- reset it for this visit (`prepare`), or record
+   * why its items will run one at a time: the `data_parallelism_effective` fact and
+   * a run warning, as the walker records them. A run that stops before the pass is
+   * checkpointed reopens the node and prepares it again; one that stops after
+   * resumes a pass whose folder holds only this visit's items.
+   * @returns a failure of the `prepare` command, or nothing.
+   */
+  async function prepareParallelPass(
+    spine: Spine,
+    data: NodeView,
+    shell: Parameters<typeof runDeterministic>[0],
+    runner: CommandRunnerConfig & { dataCommand: string },
+    workdir: string | undefined,
+    warnings: string[],
+  ): Promise<{ failure?: CommandFailure }> {
+    const parallelism = data.parallelism ?? 1
+    if (parallelism <= 1) return {}
+    const reason = concurrentFallback(spine, data.subgraph_entry ?? '', data.subgraph_exit ?? '')
+    const prepared = await runDataCommand(shell, data, 'prepare', runner, undefined, undefined, undefined,
+      ['--requested', String(parallelism), ...(reason === undefined ? [] : ['--fallback', reason])])
+    if (!prepared.ok) return { failure: prepared }
+    if (reason !== undefined) {
+      const line = `data parallelism fallback to serial: ${reason}`
+      recordWarnings(workdir, [{ node: data.id, line }])
+      warnings.push(`${data.id}: ${line}`)
+    }
+    return {}
+  }
+
+  /**
+   * Hand an open pass whose items run concurrently to the concurrent drain;
+   * `prepareParallelPass` already prepared it, or recorded why it runs sequentially.
    * @returns whether the concurrent drain took the pass, and its failure if any.
    */
   async function dispatchParallelPass(
@@ -1653,23 +1678,12 @@ export function apply(ctx: Context, config: Config): void {
     runner: CommandRunnerConfig & { dataCommand: string },
     workdir: string | undefined,
     warnings: string[],
-    resuming: boolean,
   ): Promise<{ handled: boolean; failure?: CommandFailure }> {
     const pass = spine.passOf()
     if (pass === undefined || (pass.parallelism ?? 1) <= 1) return { handled: false }
-    const reason = concurrentFallback(spine, pass)
-    if (reason === undefined) {
-      const result = await drainConcurrentData(spine, data, shell, runner, workdir, warnings, resuming)
-      return { handled: true, ...result }
-    }
-    if (resuming) return { handled: false }  // recorded when the pass opened
-    const recorded = await runDataCommand(shell, data, 'prepare', runner, undefined, undefined, undefined,
-      ['--requested', String(pass.parallelism), '--fallback', reason])
-    if (!recorded.ok) return { handled: false, failure: recorded }
-    const line = `data parallelism fallback to serial: ${reason}`
-    recordWarnings(workdir, [{ node: data.id, line }])
-    warnings.push(`${data.id}: ${line}`)
-    return { handled: false }
+    if (concurrentFallback(spine, pass.entry, pass.exit) !== undefined) return { handled: false }
+    const result = await drainConcurrentData(spine, data, shell, runner, workdir, warnings)
+    return { handled: true, ...result }
   }
 
   /**
@@ -1779,6 +1793,8 @@ export function apply(ctx: Context, config: Config): void {
         recordBoundary()
         return {}
       }
+      const prepared = await prepareParallelPass(spine, data, shell, runner, workdir, warnings)
+      if (prepared.failure !== undefined) return prepared
       spine.startPass(data.id, count)
       recordBoundary()
       return {}
@@ -1957,7 +1973,7 @@ export function apply(ctx: Context, config: Config): void {
       // every pass it starts. It goes on from the items that finished.
       const restoredPass = spine.passOf()
       if (restoredPass !== undefined && (restoredPass.parallelism ?? 1) > 1 && !materialised.has(spine)) {
-        const parallel = await dispatchParallelPass(spine, spine.view(restoredPass.node), shell, runner, workdir, warnings, true)
+        const parallel = await dispatchParallelPass(spine, spine.view(restoredPass.node), shell, runner, workdir, warnings)
         if (parallel.failure !== undefined) return { next: spine.next(), failure: parallel.failure, ran }
         if (parallel.handled) {
           recordBoundary()
@@ -1998,7 +2014,7 @@ export function apply(ctx: Context, config: Config): void {
         if (openedPass.failure !== undefined) return { next: state, failure: openedPass.failure, ran }
         // parallelism > 1: the concurrent drain takes the pass, or the reason it
         // cannot is recorded and the sequential drain below walks it.
-        const parallel = await dispatchParallelPass(spine, data, shell, runner, workdir, warnings, false)
+        const parallel = await dispatchParallelPass(spine, data, shell, runner, workdir, warnings)
         if (parallel.failure !== undefined) return { next: spine.next(), failure: parallel.failure, ran }
         if (parallel.handled) recordBoundary()
         continue

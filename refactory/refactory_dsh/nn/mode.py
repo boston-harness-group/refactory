@@ -473,16 +473,6 @@ class Mode:
         self._graph_state = graph.to_state()
         self._knobs = knobs
 
-    def rebuild(self) -> None:
-        """Rebuild the graph from :meth:`build` with the knob values as they stand.
-
-        ``build()`` may read knobs (a data node's ``parallelism`` from a frozen
-        resource knob, say), but a state's graph is the one built when the mode was
-        constructed. A caller that configured knobs on a seed -- ``Loop.init`` for
-        ``--knob`` -- rebuilds so the graph the run evaluates follows them.
-        """
-        self._graph_state = self.build().to_state()
-
     def clone(self) -> "Mode":
         """A fresh instance holding a copy of this state."""
         return type(self)(state=copy.deepcopy(self.state_dict()))

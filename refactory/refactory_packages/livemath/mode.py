@@ -89,7 +89,6 @@ class Solver(nn.Mode):
 
     def build(self) -> nn.Graph:
         graph = nn.Graph()
-        _par = int(self.values().get("data_parallelism", 1))
         graph.add(nn.Node(
             "data", "data",
             subgraph_entry="format_prompt",
@@ -97,7 +96,7 @@ class Solver(nn.Mode):
             task_ref=TASK,
             writes=("current_item.json",),
             produces=("item_scores",),
-            parallelism=_par,
+            parallelism_knob="data_parallelism",
             knobs=("data_parallelism",),
         ))
         graph.add(nn.Node(
