@@ -3050,3 +3050,49 @@ def test_a_later_all_failed_epoch_exits_the_optimize_cli_non_zero(tmp_path, monk
         ])
     assert code != 0
     assert [d["all_failed"] for d in _decisions(_read_trace(tmp_path), "optimizer_calls")] == [False, True]
+
+
+def test_optimizer_calls_run_without_tools():
+    """SkillOpt's calls are prompt in, JSON out: an agentic route gets no tools.
+
+    On claude_code the optimizer otherwise runs as an agent with tools, reads and
+    tries to edit files outside the run, and answers in prose the analysts can't
+    parse.
+    """
+    from refactory_dsh.model import DshModelClient
+
+    client = DshModelClient(routes_resolved=True, worker_backend="claude_code",
+                            model="claude-sonnet-4-6", permission_mode="dontAsk")
+    strategy = SkillOptLoop()
+    strategy.configure(model=client)
+    assert strategy.model._tool_policy == "none"
+    strategy.bind_model(client.for_node("optimizer", role="optimizer"))
+    assert strategy.model._tool_policy == "none"
+    assert strategy.model.route()["worker_backend"] == "claude_code"
+    assert client._tool_policy == ""  # the run's own client is left alone
+
+    class Plain:
+        def complete(self, prompt, **kwargs):
+            return ""
+
+    plain = Plain()
+    strategy.bind_model(plain)
+    assert strategy.model is plain
+
+
+def test_a_question_reaches_the_analyst_as_the_task():
+    """An item whose metadata names its task ``question`` shows it on the
+    analyst's ``Task:`` line, even with no exchange to show it otherwise."""
+    from refactory_packages.skillopt.env import default_rollout_result
+
+    record = {"id": "m2_20", "passed": False, "score": 0.0, "exchanges": [],
+              "error_text": "max-tokens", "metadata": {"question": "Mate in two. FEN: 8/8"}}
+    result = default_rollout_result(record, {})
+    assert result["task_description"] == "Mate in two. FEN: 8/8"
+    assert "Task: Mate in two. FEN: 8/8\n" in prompts.format_analyst_user(
+        "", [result], 4, "", failure=True)
+
+    # An item that already names a task_description or instruction keeps it.
+    own = default_rollout_result(
+        {**record, "metadata": {"question": "Q", "instruction": "I"}}, {})
+    assert "task_description" not in own

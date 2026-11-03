@@ -80,7 +80,7 @@ class SkillOptLoop(OuterLoop):
         provider: str = "auto",
         **options: Any,
     ) -> None:
-        self.model = model
+        self.model = _text_only(model)
         self.model_name = model_name
         self.provider = provider
         self.options = dict(options)
@@ -167,6 +167,10 @@ class SkillOptLoop(OuterLoop):
         self._cached_success_patches: list[dict] = []
         self._cached_merged: dict = {}
         self._cached_ranked: list[dict] = []
+
+    def bind_model(self, model: Any) -> None:
+        """Take the run's role-routed optimizer client, without tools (see :func:`_text_only`)."""
+        self.model = _text_only(model)
 
     # ── strategy (overrides OuterLoop.strategy) ─────────────────────────────
 
@@ -1101,6 +1105,19 @@ class SkillOptLoop(OuterLoop):
                 "curr_trajectory": _read_trajectory(curr),
             })
         return pairs
+
+
+def _text_only(model: Any) -> Any:
+    """``model`` with ``tool_policy="none"``, when the client supports one.
+
+    Every SkillOpt call (analysts, merges, ranking, slow update, meta skill) is a
+    prompt in and JSON or text out, as SkillOpt's own calls are. On an agentic
+    route such as ``claude_code`` the optimizer otherwise runs with tools: it
+    reads and tries to edit files outside the run and answers in prose, which
+    the analysts parse as no patch.
+    """
+    with_policy = getattr(model, "with_tool_policy", None)
+    return with_policy("none") if callable(with_policy) else model
 
 
 def batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
