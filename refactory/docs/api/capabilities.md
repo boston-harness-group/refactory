@@ -4614,6 +4614,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
       "permission_mode",
       "openshell_gateway",
       "openshell_image",
+      "max_completion_tokens",
       "role_routes",
       "node_routes",
       "provider_config"
@@ -4669,7 +4670,7 @@ Documentation: [refactory/docs/worker-routing.md](../../../refactory/docs/worker
     }
   },
   "purpose": "Inspect effective project worker routing and provenance. Configure refactory.workers.json, CLI or panel; this read-only action never changes workers or the CEO model.",
-  "reviewed_schema": "9924e23a8f60541ec940d87409bdb1ca1db6e32546c0a0eff696d163225f80a4"
+  "reviewed_schema": "2e74d6b007feca3dabf24160379e55b41497c2cc10eaef25919a745575628b14"
 }
 ```
 
