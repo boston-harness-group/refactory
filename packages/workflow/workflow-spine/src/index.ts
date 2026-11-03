@@ -1494,7 +1494,7 @@ export function apply(ctx: Context, config: Config): void {
         recordStatus(spine, workdir, 'executing')
         const started = await runDataCommand(shell, data, 'begin', runner, index)
         if (!started.ok) {
-          // Begin failed: record as failed item.
+          // Begin failed: record as failed item.  No passDir yet, use runner.
           const reason = (started as CommandFailure).stderr || (started as CommandFailure).error || 'begin failed'
           const failedKind = (started as CommandFailure).error?.includes('timed out') ? 'timeout' : undefined
           const fb = await runDataCommand(shell, data, 'end', runner, index, reason.slice(-4096), failedKind)
@@ -1508,7 +1508,7 @@ export function apply(ctx: Context, config: Config): void {
         if (started.value != null && typeof started.value === 'object'
             && 'error' in started.value && Object.keys(started.value).length === 1) {
           const setupError = String((started.value as Record<string, unknown>).error ?? 'setup failed')
-          const ended = await runDataCommand(shell, data, 'end', runner, index, setupError)
+          const ended = await runDataCommand(shell, data, 'end', runner, index, setupError)  // no passDir yet
           if (ended.ok && ended.value != null && typeof ended.value === 'object' && 'id' in ended.value) {
             return { ok: true, record: ended.value as Record<string, unknown> }
           }
@@ -1560,12 +1560,12 @@ export function apply(ctx: Context, config: Config): void {
           if (subFailure !== undefined) break
         }
 
-        // 3. End: judge the item.
+        // 3. End: judge the item.  Use itemRunner (pass dir) for end commands.
         if (subFailure !== undefined) {
           // Subgraph node failed: record as failed item.
           const reason = subFailure.stderr || subFailure.error || 'subgraph node failed'
           const failedKind = subFailure.error?.includes('timed out') ? 'timeout' : undefined
-          const ended = await runDataCommand(shell, data, 'end', runner, index, reason.slice(-4096), failedKind)
+          const ended = await runDataCommand(shell, data, 'end', itemRunner, index, reason.slice(-4096), failedKind)
           if (ended.ok && ended.value != null && typeof ended.value === 'object' && 'id' in ended.value) {
             return { ok: true, record: ended.value as Record<string, unknown> }
           }
@@ -1576,14 +1576,14 @@ export function apply(ctx: Context, config: Config): void {
           return { ok: true }
         }
 
-        const ended = await runDataCommand(shell, data, 'end', runner, index)
+        const ended = await runDataCommand(shell, data, 'end', itemRunner, index)
         if (!ended.ok) {
           if ((ended as CommandFailure).exitCode === ALL_FAIL_EXIT_CODE) {
             return { ok: false, failure: ended as CommandFailure }
           }
           // Non-all-fail: record as failed item.
           const reason = (ended as CommandFailure).stderr || (ended as CommandFailure).error || 'end failed'
-          const fb = await runDataCommand(shell, data, 'end', runner, index, reason.slice(-4096))
+          const fb = await runDataCommand(shell, data, 'end', itemRunner, index, reason.slice(-4096))
           if (fb.ok && fb.value != null && typeof fb.value === 'object' && 'id' in fb.value) {
             return { ok: true, record: fb.value as Record<string, unknown> }
           }
@@ -1934,12 +1934,25 @@ export function apply(ctx: Context, config: Config): void {
         if (openedPass.failure !== undefined) return { next: state, failure: openedPass.failure, ran }
         // Concurrent data dispatch: when parallelism > 1, process multiple
         // items concurrently using per-item sub-spine subgraph walks.
+        // Only when every body node is deterministic (has a command): the spine
+        // cannot dispatch non-deterministic nodes (AgentNodes without
+        // dispatch_command, user gates) concurrently — those need the CEO.
+        // Fall back to the sequential path when the body contains them.
         const pass = spine.passOf()
         if (pass !== undefined && pass.parallelism !== undefined && pass.parallelism > 1) {
-          const result = await drainConcurrentData(spine, pass, data, shell, runner, commandEnv, workdir, dataCommand, agentCommand, warnings)
-          if (result.failure !== undefined) return { next: spine.next(), failure: result.failure, ran }
-          recordBoundary()
-          continue
+          const subInfo = spine.subgraphFor(pass.entry, pass.exit)
+          const bodyNodeViews = Object.keys(subInfo.nodes).map(id => spine.view(id))
+          const allDeterministic = bodyNodeViews.every(n =>
+            n._type === 'ForkNode' || n._type === 'JoinNode' || isDeterministic(n)
+          )
+          if (allDeterministic) {
+            const result = await drainConcurrentData(spine, pass, data, shell, runner, commandEnv, workdir, dataCommand, agentCommand, warnings)
+            if (result.failure !== undefined) return { next: spine.next(), failure: result.failure, ran }
+            recordBoundary()
+            continue
+          }
+          // else: body has non-deterministic nodes; fall back to sequential.
+          // The sequential drain lets the CEO handle agent nodes one at a time.
         }
         continue
       }

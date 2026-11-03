@@ -1102,7 +1102,9 @@ class Executor:
                             )
                         scores = _par_scores
                         self._item_records.extend(_par_records)
-                        _failed_item_step_indices.update(_par_failed)
+                        _failed_item_step_indices.update(
+                            idx + _data_steps_start for idx in _par_failed
+                        )
                         # Restore max_steps.
                         _data_steps_added = len(self.steps) - _data_steps_start
                         self.max_steps = _original_max_steps + _data_steps_added

@@ -131,6 +131,20 @@ def long_sleep_op(ctx):
     delay = float(item.get("delay", 0))
     time.sleep(delay)
     return {"counted": item.get("id")}
+
+
+def maybe_fail_op(ctx):
+    """Fail if the item's 'fail' field is truthy; succeed otherwise."""
+    item = ctx.read_json("current_item.json")
+    item_id = str(item.get("id", "?"))
+    if item.get("fail"):
+        raise RuntimeError(f"item {item_id} forced to fail")
+    visited_dir_str = os.environ.get("VISITED_DIR", "")
+    if visited_dir_str:
+        visited_dir = Path(visited_dir_str)
+        visited_dir.mkdir(parents=True, exist_ok=True)
+        (visited_dir / item_id).write_text("1")
+    return {"counted": item_id}
 '''
 
 
@@ -491,18 +505,19 @@ def test_serial_fallback_records_reason(tmp_path, monkeypatch):
     assert "reason" in fact
 
 
-# ── T9: Loop.run() overlap with stub solver ───────────────────────────────
+# ── T9: Mode.evaluate() overlap with stub solver ─────────────────────────
 
 def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
-    """T9 — items overlap through Mode.evaluate() with data_parallelism=4.
+    """T9 — items overlap through Mode.evaluate() with data_parallelism=K.
 
-    Simulates the ``refactory optimize livemath/solver`` path: constructs a
-    ``Solver`` mode with ``data_parallelism=K`` via the same state-dict
-    mechanism ``profiles.resolve()`` uses, then calls ``mode.evaluate()``
-    which runs ``mode.run()`` → ``execute(self.graph(), ...)``.
+    Exercises the full ``refactory optimize`` evaluation path:
+    ``mode.evaluate()`` → ``Solver.run()`` → ``Mode.run()`` →
+    ``execute(self.graph(), ...)``.
 
-    This exercises the full knob → build() → node.parallelism → executor path,
-    proving that the knob reaches the graph AND that items overlap.
+    A Solver subclass overrides ``build()`` with a barrier-op graph while
+    keeping the ``data_parallelism`` knob binding, so the knob → build() →
+    node.parallelism → executor path is exercised end-to-end.
+    Items overlap only when parallelism > 1 is set on the node.
     """
     K = 3
     barrier_dir = tmp_path / "barrier"
@@ -511,45 +526,6 @@ def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
     monkeypatch.setenv("BARRIER_K", str(K))
 
     from refactory_packages.livemath.mode import Solver
-
-    # Construct the mode with data_parallelism=K via state dict manipulation
-    # (the same mechanism profiles.resolve() → edits.configure() uses).
-    solver = Solver()
-    state = solver.state_dict()
-    state["knobs"]["data_parallelism"]["value"] = K
-    solver_k = Solver(state=state)
-    # Rebuild graph with updated knobs (matching what profiles.resolve does).
-    solver_k._graph_state = solver_k.build().to_state()
-
-    # Verify the graph has parallelism=K.
-    graph = solver_k.graph()
-    assert graph.nodes["data"].parallelism == K, (
-        f"data node parallelism should be {K}, got {graph.nodes['data'].parallelism}"
-    )
-
-    # Override the data body: replace format_prompt→solve→finish with a barrier_op.
-    # We rebuild the graph so the body is a single barrier op.
-    _items = tuple({"id": str(i)} for i in range(K))
-
-    custom_graph = nn.Graph()
-    custom_graph.add(nn.Node(
-        "data", "data",
-        subgraph_entry="body",
-        subgraph_exit="body",
-        writes=(CURRENT_ITEM,),
-        produces=("item_scores",),
-        inline_items=tuple(dict(item) for item in _items),
-        parallelism=K,
-    ))
-    custom_graph.add(nn.Node(
-        "body", "op", call="test_ops_parallel:barrier_op",
-        reads=(CURRENT_ITEM,), produces=("counted",),
-    ))
-    custom_graph.add(nn.Node(
-        "report", "op", call="loop_ops:write_best",
-        writes=("best.json",), produces=("best",),
-    ))
-    custom_graph.connect("data", "report")
 
     # Use a DshModelClient subclass that is recognized as thread-safe.
     from refactory_dsh.model import DshModelClient
@@ -572,8 +548,58 @@ def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
         def context(self) -> dict[str, Any]:
             return {}
 
-    result = execute(
-        custom_graph, tmp_path / "run", model=_StubDsh(), max_steps=200,
+    # A Solver subclass whose build() returns a barrier-op graph so no live
+    # model calls are made but the data_parallelism knob → node.parallelism
+    # binding is exercised through the real Solver.declare()+build() chain.
+    _items = tuple({"id": str(i)} for i in range(K))
+
+    class _TestSolver(Solver):
+        def build(self) -> nn.Graph:
+            graph = nn.Graph()
+            _par = int(self.values().get("data_parallelism", 1))
+            graph.add(nn.Node(
+                "data", "data",
+                subgraph_entry="body",
+                subgraph_exit="body",
+                writes=(CURRENT_ITEM,),
+                produces=("item_scores",),
+                inline_items=_items,
+                parallelism=_par,
+                knobs=("data_parallelism",),
+            ))
+            graph.add(nn.Node(
+                "body", "op", call="test_ops_parallel:barrier_op",
+                reads=(CURRENT_ITEM,), produces=("counted",),
+            ))
+            graph.add(nn.Node(
+                "report", "op", call="loop_ops:write_best",
+                writes=("best.json",), produces=("best",),
+            ))
+            graph.connect("data", "report")
+            return graph
+
+        def score(self, run: Any) -> float:
+            scores = [e.get("score", 0) for e in run.facts.get("item_scores", [])]
+            return sum(scores) / max(len(scores), 1)
+
+    # Construct the mode with data_parallelism=K via state dict manipulation
+    # (the same mechanism profiles.resolve() → edits.configure() uses).
+    mode = _TestSolver()
+    state = mode.state_dict()
+    state["knobs"]["data_parallelism"]["value"] = K
+    mode_k = _TestSolver(state=state)
+    # Rebuild graph with updated knobs (matching what profiles.resolve does).
+    mode_k._graph_state = mode_k.build().to_state()
+
+    # Verify the graph has parallelism=K.
+    graph = mode_k.graph()
+    assert graph.nodes["data"].parallelism == K, (
+        f"data node parallelism should be {K}, got {graph.nodes['data'].parallelism}"
+    )
+
+    # Call mode.evaluate() — the full evaluate → run → execute chain.
+    result = mode_k.evaluate(
+        tmp_path / "run", model=_StubDsh(), max_steps=200,
     )
     assert result.exit_ok, result.error
 
@@ -582,6 +608,132 @@ def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
     done_files = list(barrier_dir.glob("done_*"))
     assert len(ready_files) == K, f"expected {K} ready files, got {len(ready_files)}"
     assert len(done_files) == K, f"expected {K} done files, got {len(done_files)}"
+
+
+# ── partial item failure does not make the run fail ───────────────────────
+
+def test_partial_item_failure_exit_ok(tmp_path, monkeypatch):
+    """A single failed item does NOT set exit_ok=False when other items succeed.
+
+    Without the _data_steps_start offset for _failed_item_step_indices, the
+    post-loop error scan (executor.py ~:1329) would promote the failed item's
+    step error to a run-level error, making exit_ok=False even though not all
+    items failed.
+    """
+    _TASK = tmp_path / "partial_fail_task.py"
+    _TASK.write_text("""\
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class T(Task):
+    name = "partial_fail_test"
+    def instances(self):
+        return [TaskInstance(id=str(i), metadata={}) for i in range(3)]
+    def setup(self, instance, workspace, **kw):
+        pass
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=True, score=1.0)
+""")
+    if str(tmp_path) not in sys.path:
+        sys.path.insert(0, str(tmp_path))
+    from refactory_dsh.task import register_task
+    import importlib
+    if "partial_fail_task" in sys.modules:
+        importlib.reload(sys.modules["partial_fail_task"])
+    else:
+        import partial_fail_task  # noqa: F401
+    from partial_fail_task import T  # type: ignore[import-not-found]
+    register_task("partial_fail_test", T)
+
+    items = (
+        {"id": "0"},
+        {"id": "1"},
+        {"id": "2", "fail": True},  # this one fails
+    )
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data",
+        subgraph_entry="body",
+        subgraph_exit="body",
+        writes=(CURRENT_ITEM,),
+        produces=("item_scores",),
+        task_ref="partial_fail_test",
+        inline_items=tuple(dict(item) for item in items),
+        parallelism=3,
+    ))
+    graph.add(nn.Node(
+        "body", "op", call="test_ops_parallel:maybe_fail_op",
+        reads=(CURRENT_ITEM,), produces=("counted",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    # Not all items failed (only 1 of 3), so the run should succeed.
+    assert result.exit_ok, f"expected exit_ok=True, got error: {result.error}"
+
+    scores = result.facts.get("item_scores", [])
+    assert len(scores) == 3
+    # Item 2 should have an error.
+    assert scores[2].get("error_text") is not None
+
+    if str(tmp_path) in sys.path:
+        sys.path.remove(str(tmp_path))
+    sys.modules.pop("partial_fail_task", None)
+
+
+# ── lowering preserves parallelism ────────────────────────────────────────
+
+def test_lowering_preserves_parallelism():
+    """The lowering step passes node.parallelism through to the IR DataNode."""
+    from refactory_dsh.lowering import to_workflow
+    from refactory_packages.livemath.mode import Solver
+
+    solver = Solver()
+    state = solver.state_dict()
+    state["knobs"]["data_parallelism"]["value"] = 8
+    solver8 = Solver(state=state)
+    solver8._graph_state = solver8.build().to_state()
+
+    wf = to_workflow(solver8.state_dict())
+    data_node = wf.nodes["data"]
+    assert data_node.parallelism == 8, (
+        f"lowering should preserve parallelism=8, got {data_node.parallelism}"
+    )
+
+
+# ── pass_state locking under concurrent writes ───────────────────────────
+
+def test_pass_state_locked_under_concurrent_writes(tmp_path):
+    """Concurrent pass_state updates do not lose increments.
+
+    Without fcntl.LOCK_EX, a concurrent read-modify-write could lose a counter
+    increment. This test writes 20 increments concurrently and checks the final
+    count.
+    """
+    from refactory_dsh.items import _locked_pass_state_update, _read_pass_state, _write_pass_state
+
+    N = 20
+    node_id = "test_node"
+    # Initialise pass state.
+    _write_pass_state(tmp_path, node_id, {"processed": 0})
+
+    def increment(_unused: int) -> None:
+        _locked_pass_state_update(
+            tmp_path, node_id,
+            lambda ps: ps.__setitem__("processed", ps.get("processed", 0) + 1),
+        )
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(increment, range(N)))
+
+    final = _read_pass_state(tmp_path, node_id)
+    assert final["processed"] == N, (
+        f"expected {N} increments, got {final['processed']} — likely a race"
+    )
 
 
 # ── additional: parallelism validation ────────────────────────────────────

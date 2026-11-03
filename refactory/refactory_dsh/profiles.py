@@ -201,8 +201,15 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     if settings["knobs"]:
         try:
             mode._graph_state = mode.build().to_state()
-        except (NotImplementedError, Exception):
-            pass  # Mode doesn't override build() or rebuild failed
+        except NotImplementedError:
+            pass  # Mode doesn't override build()
+        except Exception:
+            import logging as _logging
+            _logging.getLogger("refactory.profiles").warning(
+                "rebuild after knob configuration failed for %s: %s",
+                mode_id, "build() raised; knob→field bindings may not take effect",
+                exc_info=True,
+            )
     source = Path(inspect.getfile(klass))
     inputs = {}
     implementations = {}

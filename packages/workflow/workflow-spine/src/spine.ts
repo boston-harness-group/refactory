@@ -911,27 +911,6 @@ export class Spine {
     return { nodes, edges, body }
   }
 
-  /**
-   * Advance the pass index for concurrent dispatch.
-   * The drain calls this to set which item the spine tracks as "current"
-   * before calling endPass().
-   */
-  setPassIndex(index: number): void {
-    if (this.pass === undefined) throw new Error('no data pass is running')
-    this.pass = { ...this.pass, index }
-  }
-
-  /**
-   * End a specific item's pass during concurrent dispatch.
-   * Unlike endPass() which advances sequentially, this just marks one item done
-   * and does NOT advance to the next (the drain manages the sliding window).
-   * Call endAllPasses() when all items are done.
-   */
-  endPassItem(_index: number): void {
-    if (this.pass === undefined) throw new Error('no data pass is running')
-    // Just invalidate the subgraph nodes for this item so the next item starts clean.
-    this.invalidateNodes(this.descendants(this.pass.entry, this.pass.exit), true)
-  }
 
   /**
    * Complete the data pass after all concurrent items have finished.
