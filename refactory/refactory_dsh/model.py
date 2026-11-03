@@ -469,7 +469,9 @@ class DshModelClient:
         self._max_completion_tokens = max_completion_tokens or inherited.get("max_completion_tokens", "")
         #: Claude Code's settings sources (`workers.CLAUDE_CODE_SETTING_SOURCES`); empty
         #: keeps the adapter's default.
-        self._setting_sources = setting_sources or inherited.get("setting_sources", "")
+        #: Inherited only within the same product, as effort is: a DSH client in a
+        #: Claude Code worker's child process must not take Claude Code's sources.
+        self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
         self._permission_mode = permission_mode
         self._role_routes = copy.deepcopy(role_routes or {})
         self._node_routes = copy.deepcopy(node_routes or {})
@@ -659,7 +661,10 @@ class DshModelClient:
             result["REFACTORY_TOOL_POLICY"] = "none"
         else:
             result.pop("REFACTORY_TOOL_POLICY", None)
-        if getattr(self, '_system_text', ''):
+        # Only DSH's own system-prompt plugin reads this. An external worker gets the
+        # text in its adapter config (`workers.write_patch`), so a large prompt never
+        # meets the kernel's 128 KiB limit on one environment value.
+        if getattr(self, '_system_text', '') and getattr(self, '_worker_backend', 'dsh') in ('dsh', 'openshell'):
             result["REFACTORY_SYSTEM_PROMPT"] = self._system_text
         if self._budget is not None:
             result["REFACTORY_BUDGET_LEDGER"] = str(self._budget.path)

@@ -1182,3 +1182,66 @@ def test_setting_sources_crosses_the_worker_context(monkeypatch):
                             ).for_node('solve')
     rebuilt = DshModelClient(**capped.context()).route()
     assert (rebuilt['setting_sources'], rebuilt['max_completion_tokens']) == ('user', '64')
+
+
+
+def test_a_dsh_client_in_a_claude_code_workers_child_does_not_inherit_its_setting_sources(tmp_path, monkeypatch):
+    """REFACTORY_WORKER_CONTEXT reaches a Claude Code worker's children (DSH keeps
+    REFACTORY_* through its env scrub); a DSH client there takes no Claude Code field."""
+    # A run-level route, as `refactory.workers.json` or the launch sets it.
+    parent = DshModelClient(worker_backend='claude_code', model='m', routes_resolved=True,
+                            setting_sources='user,project')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('REFACTORY_WORKER_CONTEXT', json.dumps(parent.context()))
+    child = DshModelClient(worker_backend='dsh', provider='p', model='m2')
+    assert 'setting_sources' not in child.route()
+    assert 'setting_sources' not in child.context()
+    # The same product still inherits it, as effort is.
+    assert DshModelClient(worker_backend='claude_code').route()['setting_sources'] == 'user,project'
+
+
+def test_an_external_worker_gets_its_system_prompt_from_config_not_the_environment(tmp_path):
+    rows = _patch_rows(tmp_path, {'worker_backend': 'claude_code', 'model': 'm'}, system_prompt='Be brief') \
+        if (Path(__file__).resolve().parents[2] / 'node_modules/@deepseek-ai/dsh-subagent-claude-code/package.json').exists() else None
+    if rows is None:
+        pytest.skip('Claude Code adapter not installed')
+    assert not any(row.get('insert', [{}])[0].get('id') == 'refactory-system-prompt' for row in rows)
+    assert _external_config(rows)['env']['REFACTORY_SYSTEM_PROMPT'] == 'Be brief'
+    dsh_rows = _patch_rows(tmp_path, {'worker_backend': 'dsh', 'provider': 'p', 'model': 'm'}, system_prompt='Be brief')
+    assert any(row.get('insert', [{}])[0].get('id') == 'refactory-system-prompt' for row in dsh_rows)
+    client = DshModelClient(worker_backend='claude_code', model='m', routes_resolved=True)
+    client._system_text = 'Be brief'
+    assert 'REFACTORY_SYSTEM_PROMPT' not in client._environment()
+    dsh = DshModelClient(worker_backend='dsh', provider='p', model='m', routes_resolved=True)
+    dsh._system_text = 'Be brief'
+    assert dsh._environment()['REFACTORY_SYSTEM_PROMPT'] == 'Be brief'
+
+
+_NO_TOOLS_HARNESS = """
+import { pathToFileURL } from 'node:url'
+const handlers = {}
+const plugin = await import(pathToFileURL(process.argv[2]).href)
+plugin.apply({ tools: { guard() {} }, on: (name, handler) => { handlers[name] = handler } })
+if (process.argv[3] === 'request') await handlers['llm/stream']({ tools: [] }, async () => 'sent')
+"""
+
+
+@pytest.mark.parametrize('request_made', [False, True])
+def test_a_dsh_no_tools_worker_is_enforced_only_once_the_plugin_sees_a_request(tmp_path, request_made):
+    """begin() records the request; only no_tools_plugin.mjs, at the provider request
+    it guards, records the policy as enforced."""
+    import os
+    route = {'worker_backend': 'dsh', 'provider': 'p', 'model': 'm', 'effort': '', 'permission_mode': 'skip'}
+    path = workers.begin(tmp_path, route, node='n', tool_policy='none')
+    harness = tmp_path / 'no_tools_harness.mjs'
+    harness.write_text(_NO_TOOLS_HARNESS)
+    plugin = Path(workers.__file__).with_name('no_tools_plugin.mjs')
+    subprocess.run(['node', str(harness), str(plugin), 'request' if request_made else 'none'], check=True,
+                   timeout=60, env={**os.environ, 'REFACTORY_WORKER_RECEIPT': str(path)})
+    record = json.loads(path.read_text())
+    assert record['requested_tool_policy'] == 'none'
+    if request_made:
+        assert (record['enforced_tool_policy'], record['tools_permitted'], record['tool_policy_source']) == (
+            'none', [], 'dsh-provider-request')
+    else:
+        assert (record['enforced_tool_policy'], record['tool_policy_source']) == (None, 'not-yet-observed')

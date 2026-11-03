@@ -36,8 +36,11 @@ _FAKE_SDK = textwrap.dedent("""\
         tools: options.tools ?? null, mcpServers: options.mcpServers ?? null,
         settingSources: options.settingSources ?? null, strictMcpConfig: options.strictMcpConfig ?? null,
         permissionMode: options.permissionMode,
+        systemPromptInChildEnv: 'REFACTORY_SYSTEM_PROMPT' in process.env,
         controlsInChildEnv: Object.keys(options.env).filter(key => key in CONTROLS) }))
-      const tools = options.tools ?? ['Bash', 'Read']
+      // FAKE_SDK_INIT_TOOLS: the tool list the SDK reports, as when it ignores `tools: []`.
+      const tools = process.env.FAKE_SDK_INIT_TOOLS ? JSON.parse(process.env.FAKE_SDK_INIT_TOOLS)
+        : options.tools ?? ['Bash', 'Read']
       return {
         close() { child.kill?.() },
         async *[Symbol.asyncIterator]() {
@@ -187,3 +190,31 @@ def test_the_spine_worker_reaches_claude_code_with_the_node_settings(tmp_path, f
     assert sent["effort"] == "low" and sent["tools"] == []
     assert sent["settingSources"] == ["user", "project"]
     assert _receipt(workdir)["enforced_tool_policy"] == "none"
+
+
+def test_a_system_prompt_over_the_environment_limit_reaches_claude_code_whole(tmp_path, fake_sdk):
+    """A grown skill passes Linux's 128 KiB limit on one environment value; it rides the
+    adapter config, never the DSH process environment, and arrives byte-exact."""
+    system = ("Skill line \u2014 \u00e9t\u00e9 \u2713 " * 9000) + "END"
+    assert len(system.encode("utf-8")) > 128 * 1024
+    workdir = tmp_path / "run"
+    _client(tmp_path).complete("Say a fruit", system=system, workdir=workdir)
+
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["systemPrompt"]["append"] == system
+    assert sent["systemPromptInChildEnv"] is False
+    assert _receipt(workdir)["state"] == "completed"
+
+
+def test_tools_the_sdk_reports_despite_no_tools_are_not_recorded_as_enforced(tmp_path, fake_sdk, monkeypatch):
+    """The receipt reports what the SDK reported: tools in its init mean not enforced."""
+    monkeypatch.setenv("FAKE_SDK_INIT_TOOLS", json.dumps(["Bash"]))
+    workdir = tmp_path / "run"
+    _client(tmp_path).with_tool_policy("none").complete("Say a fruit", workdir=workdir)
+
+    assert json.loads(fake_sdk.read_text())["tools"] == []
+    receipt = _receipt(workdir)
+    assert receipt["requested_tool_policy"] == "none"
+    assert receipt["enforced_tool_policy"] is None
+    assert receipt["tools_permitted"] == ["Bash"]
+    assert receipt["tool_observation_available"] is True

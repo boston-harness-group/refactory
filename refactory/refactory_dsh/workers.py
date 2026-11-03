@@ -230,7 +230,8 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
         {'id': 'refactory-worker-observer', 'name': str(observer)}]}]
-    if system_prompt:
+    if system_prompt and route['worker_backend'] in ('dsh', 'openshell'):
+        # An external worker's adapter takes the text from its own config instead.
         plugin = Path(__file__).with_name('system_prompt_plugin.mjs')
         rows.append({'insert': [{'id': 'refactory-system-prompt', 'name': str(plugin)}]})
     rows.extend(permission_patch(route, workspace_root=workspace_root))
