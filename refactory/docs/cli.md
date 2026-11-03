@@ -174,6 +174,7 @@ installed copy.
 | `--prior-runs <n>` | how many previous runs are summarised as a prior for this one | 3 |
 | `--dsh-timeout-s <n>` | wall-clock ceiling for one inner run when the evaluator is DSH | 900 |
 | `--parts-manifest <path>` | path to a parts.json manifest with train/val/test id lists; the loop copies it to the run root and every evaluation draws items from it | none |
+| `--seed-results <path>` | seed results exported from an earlier run (`python -m refactory_dsh.seed_cache export`); the seed's first evaluation of each part is read from the file instead of run, when the seed, item set and score context match; a differing context stops the run (see [optimization profiles](optimization-profiles.md)) | none |
 | `--verbose` | print every event, and each candidate's own run output, not only the meaningful ones | off |
 
 **For Task-bound modes, candidates use the training items and the winner is audited on held-out items.** Modes without a data split report holdout as not applicable. The part travels in the run directory (`subset.json` beside each candidate), not in a knob, so a search cannot choose its own exam; the audit lands in `<run root>/holdout.json` and in the report as `{"train", "holdout", "gap", "overfit", "threshold", "instances"}`, with `overfit` true when `train − holdout` exceeds 0.15. The score the search compares has the size cost taken off it, and the unpenalised number is recorded beside it as `raw_score`. `refactory best` reports the audit, and `refactory adopt` refuses an overfit winner unless you pass `--allow-overfit`.

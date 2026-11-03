@@ -59,6 +59,7 @@
     "refactory_dsh.run_preparation",
     "refactory_dsh.run_state",
     "refactory_dsh.sandbox",
+    "refactory_dsh.seed_cache",
     "refactory_dsh.steer_probe",
     "refactory_dsh.steering",
     "refactory_dsh.strategies",
