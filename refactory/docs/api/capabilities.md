@@ -2096,6 +2096,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
+    "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
     "validation_reserve_s": 0,
@@ -2532,6 +2533,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "settings_json": {
       "default": null,
       "description": "",
@@ -2589,7 +2601,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "a92a06a129a98b6d2dfb7f263e47875dfc657c1cdf82890ec8476ddf9b6b8dcd"
+  "reviewed_schema": "9ff564d710197680ba0f5117cbbbb726ba7a19248862c8e67af62fcb6e0dcc6b"
 }
 ```
 
@@ -3444,6 +3456,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
+    "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
     "validation_reserve_s": 0,
@@ -3894,6 +3907,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "settings_json": {
       "default": null,
       "description": "",
@@ -3951,7 +3975,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "ce755b1e47cbaf02093f0ad850e94c14a4845ebd3c213e74ccccb1ccae035a17"
+  "reviewed_schema": "5c38f63f34ef8ee05828239e6ec06cb4ec66e58a5ee63f891a36c6ce7041dd1f"
 }
 ```
 
@@ -5024,6 +5048,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "object"
     },
+    "setting_sources": {
+      "default": "",
+      "description": "claude_code workers only: the Claude Code settings they load, none or a comma list of user, project and local",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "setup": {
       "default": "",
       "description": "design and design_fast: a command run in the worktree before each check, such as a build",
@@ -5200,7 +5235,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "fefb28cd8b637915329c68d8d817790f72a76862b6ead493cfec65e539b6ad81"
+  "reviewed_schema": "8de41bdaa3e1e0f5561b3b6537bd24da2e41f76aa98a559543ab971801489968"
 }
 ```
 
@@ -5420,6 +5455,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
+    "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
     "validation_reserve_s": 0,
@@ -5847,6 +5883,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "strategy": {
       "default": null,
       "description": "",
@@ -5918,7 +5965,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "96d2d260b5f5ea618b3865fcdc01e8bed9d59e881f5e637861f9dc42b791ea7a"
+  "reviewed_schema": "a927e042211f7a9956d66705facdf35b1456bea8b2e8cf66b6b278380d85c30a"
 }
 ```
 
@@ -11245,7 +11292,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources user,project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -11321,7 +11368,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "values": []
     },
     "max_completion_tokens": {
-      "default": 16384,
+      "default": 0,
       "description": "output-token cap on each solve-node model call; 0 = no cap",
       "frozen": true,
       "kind": "int",
@@ -11329,7 +11376,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
         0,
         null
       ],
-      "value": 16384,
+      "value": 0,
       "values": []
     },
     "skill": {
@@ -11378,7 +11425,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
         "explanation": "Solve LiveMathematicianBench items with an empty skill prompt and SkillOpt's defaults (no theorem or proof sketch in the prompt); set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
           "data_parallelism": 1,
-          "max_completion_tokens": 16384,
+          "max_completion_tokens": 0,
           "skill": "",
           "use_sketch": false,
           "use_theorem": false
@@ -11390,8 +11437,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "bf884d6f690b8027c9b35706ccf229e32436ee87c0a3782ae682ad3bdc979a8d"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources user,project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "df67447ca311658d6b5ea8783d137ca9bf9dde44d995391aaf3b347cd6bf6576"
   }
 }
 ```

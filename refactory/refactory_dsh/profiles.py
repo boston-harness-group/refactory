@@ -95,6 +95,8 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     from refactory_dsh.workers import resolve_route, validate_route
     route = {key: result[key] for key in ("worker_backend", "provider", "model", "effort")}
     route["permission_mode"] = result["permission_mode"]
+    if result.get("setting_sources"):
+        route["setting_sources"] = result["setting_sources"]
     try:
         validate_route(route)
         for role in result["role_routes"]:
@@ -236,6 +238,10 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs")}
+    # A run that sets no settings sources digests as it did before the field existed,
+    # so a run started then still resumes; one that sets them binds its evidence to them.
+    if not evaluation_fields.get("setting_sources"):
+        evaluation_fields.pop("setting_sources", None)
     route_context = runtime_identity(settings, project, model_client=model_client, uses_models=settings["optimizer"] == "autoresearch" or any(n.get("kind") == "agent" for n in (nodes.values() if isinstance(nodes, dict) else nodes) if isinstance(n, dict)))
     context = {"mode": mode_id, "seed_state": digest(state), "implementation": hashlib.sha256(source.read_bytes()).hexdigest(), "dependencies": implementations, "routing": route_context,
                "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k != "termination"}),
@@ -263,7 +269,7 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
     from refactory_dsh.model import DshModelClient
     model = model_client if callable(getattr(model_client, "route", None)) and callable(getattr(model_client, "readiness", None)) else DshModelClient(routes_resolved=True, **{key: settings[key] for key in
         ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes")
-        })
+        }, setting_sources=settings.get("setting_sources") or "")
     # The route is the one the client holds: a flag, a route map or the one stored
     # choice. A provider or model a readiness probe reports is never taken into it —
     # that was the profile default, the source a run must not use (dm-258).

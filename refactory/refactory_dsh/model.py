@@ -433,12 +433,16 @@ class DshModelClient:
             selected = resolve(project or Path("."), {key: value for key, value in {
                 "worker_backend": worker_backend, "provider": provider, "model": model,
                 "effort": effort, "permission_mode": permission_mode,
+                "setting_sources": setting_sources,
                 "role_routes": role_routes, "node_routes": node_routes,
                 "provider_config": provider_config,
             }.items() if value is not None and value != ""}, inherited=inherited)
             route = selected["settings"]
             worker_backend, provider, model, effort, permission_mode = (route[key] for key in
                 ("worker_backend", "provider", "model", "effort", "permission_mode"))
+            # The run-level settings sources a flag or the project file names; a
+            # route map's per-node entry still overrides them (`for_node`).
+            setting_sources = route.get("setting_sources", "")
             role_routes, node_routes = route["role_routes"], route["node_routes"]
             provider_config = route.get("provider_config") or None
             routing_provenance = inherited.get("routing_provenance", selected["provenance"])

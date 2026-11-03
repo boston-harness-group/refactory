@@ -300,6 +300,7 @@ def run(
     worker_backend: str = "",
     effort: str = "",
     permission_mode: str = "",
+    setting_sources: str = "",
     role_routes: dict[str, Any] | None = None,
     node_routes: dict[str, Any] | None = None,
     model_context: dict[str, Any] | None = None,
@@ -368,6 +369,7 @@ def run(
             timeout_kwargs = {"timeout_s": model_timeout_s} if model_timeout_s is not None else {}
             model_context = DshModelClient(project=route_project, provider=provider, model=model, worker_backend=worker_backend,
                                            effort=effort, permission_mode=permission_mode,
+                                           setting_sources=setting_sources,
                                            role_routes=role_routes, node_routes=node_routes, **timeout_kwargs).context()
         needed = not headless or calls_models(with_knobs(registry.resolve(route_project, identifier)[1]().state_dict(),
                                                         list(knobs or [])))
@@ -378,7 +380,7 @@ def run(
             print(OPENSHELL_MODEL_NOTE, file=sys.stderr)
     with ownership(workdir) as owner:
         if resume:
-            if source or source_format not in ('', 'directory') or approve or knobs or intent or model_context or provider or model or bool(worker_backend) or effort or permission_mode or role_routes or node_routes or model_timeout_s is not None:
+            if source or source_format not in ('', 'directory') or approve or knobs or intent or model_context or provider or model or bool(worker_backend) or effort or permission_mode or setting_sources or role_routes or node_routes or model_timeout_s is not None:
                 raise ValueError('resume retains saved inputs, knobs, instructions and routes; changes require explicit invalidation')
             import json
 
@@ -708,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--worker-backend", choices=["dsh", "codex", "claude_code"], default="")
     parser.add_argument("--effort", default="")
+    parser.add_argument("--setting-sources", default="",
+                        help="claude_code workers only: the Claude Code settings they load, "
+                             "none or a comma list of user, project and local")
     parser.add_argument("--permission-mode", default="", help="worker permissions: skip (new-run default), default (native policy), or a backend-specific mode")
     parser.add_argument(
         "--model-timeout", type=int, default=None, dest="model_timeout_s",
@@ -744,6 +749,7 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             headless=args.headless, resume=args.resume, worker_backend=args.worker_backend,
             effort=args.effort, permission_mode=args.permission_mode,
+            setting_sources=args.setting_sources,
             role_routes=args.role_routes, node_routes=args.node_routes,
             resource_limits=run_flags.resource_limits(args),
             omit_steering=getattr(args, 'omit_steering', False),
