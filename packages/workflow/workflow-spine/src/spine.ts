@@ -896,6 +896,59 @@ export class Spine {
     this._itemRecords.push(record)
   }
 
+  /**
+   * Create a sub-graph containing only the data body subgraph nodes.
+   * Used by the drain for per-item concurrent subgraph walks.
+   */
+  subgraphFor(entry: string, exit: string): { nodes: Record<string, WorkflowNode>; edges: WorkflowEdge[]; body: Set<string> } {
+    const body = this.descendants(entry, exit)
+    const nodes: Record<string, WorkflowNode> = {}
+    for (const id of body) {
+      const node = this.nodes.get(id)
+      if (node !== undefined) nodes[id] = node
+    }
+    const edges = this.edges.filter(e => body.has(e.source) && body.has(e.target))
+    return { nodes, edges, body }
+  }
+
+  /**
+   * Advance the pass index for concurrent dispatch.
+   * The drain calls this to set which item the spine tracks as "current"
+   * before calling endPass().
+   */
+  setPassIndex(index: number): void {
+    if (this.pass === undefined) throw new Error('no data pass is running')
+    this.pass = { ...this.pass, index }
+  }
+
+  /**
+   * End a specific item's pass during concurrent dispatch.
+   * Unlike endPass() which advances sequentially, this just marks one item done
+   * and does NOT advance to the next (the drain manages the sliding window).
+   * Call endAllPasses() when all items are done.
+   */
+  endPassItem(_index: number): void {
+    if (this.pass === undefined) throw new Error('no data pass is running')
+    // Just invalidate the subgraph nodes for this item so the next item starts clean.
+    this.invalidateNodes(this.descendants(this.pass.entry, this.pass.exit), true)
+  }
+
+  /**
+   * Complete the data pass after all concurrent items have finished.
+   * Called by the drain after processing all items concurrently.
+   */
+  endAllPasses(): SpineNext {
+    const pass = this.pass
+    if (pass === undefined) throw new Error('no data pass is running')
+    // Remove any subgraph body positions from the cursor.
+    const body = this.descendants(pass.entry, pass.exit)
+    this.cursor = this.cursor.filter(pos => !body.has(pos))
+    this.pass = undefined
+    this.log.push(`data ${pass.node}: ${pass.count} item(s) done (parallel)`)
+    if (!this.cursor.includes(pass.node)) this.cursor.push(pass.node)
+    return this.completeDue(pass.node)
+  }
+
   endPass(): SpineNext {
     const pass = this.pass
     if (pass === undefined) throw new Error('no data pass is running')

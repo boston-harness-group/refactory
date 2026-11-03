@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import threading
-from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -163,7 +163,7 @@ def run_fork(executor: Executor, node: Node) -> str | None:
                 "shared_memory_serial": serial_memory, "custom_model_serial": serial_model,
                 "live_gate_answers_serial": serial_gate}
 
-    from .concurrent_helpers import clone_child_executor, make_step_budget_reserve
+    from .concurrent_helpers import clone_child_executor, make_step_budget_reserve, merge_children_into_parent
 
     lock = threading.Lock()
     cancelled = threading.Event()
@@ -252,10 +252,7 @@ def run_fork(executor: Executor, node: Node) -> str | None:
         # own calling thread and retains its own cleanup contract. Keep the fork
         # resumable without merging facts or acknowledging its join as successful.
         cancelled.set()
-        for child in children:
-            executor.steps.extend(child.steps)
-            executor.model_calls += child.model_calls
-            ctx.writes_made.extend(child.ctx.writes_made)
+        merge_children_into_parent(executor, children)
         for target in node.targets:
             if status[target]["status"] == "queued":
                 status[target] = {"status": "not-started"}
@@ -270,10 +267,7 @@ def run_fork(executor: Executor, node: Node) -> str | None:
                                    [{member.id for member in branch} for branch in branches])
     # An optional node that failed is missing, and its branch went on past it
     # (`Executor._missing_optional`), so a branch's error is a real failure.
-    for child in children:
-        executor.steps.extend(child.steps)
-        executor.model_calls += child.model_calls
-        ctx.writes_made.extend(child.ctx.writes_made)
+    merge_children_into_parent(executor, children)
     error = next((e for e in errors if e), None)
     visited = {step.node for child in children for step in child.steps}
     missing = set(join.sources) - visited

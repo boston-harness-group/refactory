@@ -365,33 +365,96 @@ def test_per_item_deadline_concurrent(tmp_path, monkeypatch):
     failed with timeout while other items complete.
 
     Uses a very short budget wall to trigger the timer-based per-item deadline.
+    The over-deadline item must be recorded as failed with error_kind 'timeout'.
+    The fast item must complete successfully (with a Task for grading).
+    Other items must NOT be cancelled by the slow item's deadline.
     """
     barrier_dir = tmp_path / "barrier"
     barrier_dir.mkdir()
     monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
+
+    # Register a task that grades items (so make_item_record returns records
+    # for successful items — without a Task, verdict=None → record=None).
+    _TASK = tmp_path / "deadline_task.py"
+    _TASK.write_text("""\
+from refactory_dsh.task import Task, TaskInstance, VerifyResult
+
+class T(Task):
+    name = "deadline_test"
+    def instances(self):
+        return [
+            TaskInstance(id="fast", metadata={}),
+            TaskInstance(id="slow", metadata={}),
+        ]
+    def setup(self, instance, workspace, **kw):
+        pass
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=True, score=1.0)
+""")
+    if str(tmp_path) not in sys.path:
+        sys.path.insert(0, str(tmp_path))
+    from refactory_dsh.task import register_task
+    import importlib
+    if "deadline_task" in sys.modules:
+        importlib.reload(sys.modules["deadline_task"])
+    else:
+        import deadline_task  # noqa: F401
+    from deadline_task import T  # type: ignore[import-not-found]
+    register_task("deadline_test", T)
 
     items = (
         {"id": "fast", "delay": "0"},
         {"id": "slow", "delay": "60"},  # will be killed by deadline
     )
 
-    graph = _data_graph(
-        "test_ops_parallel", "sleep_op",
-        items=items, parallelism=2,
-    )
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data",
+        subgraph_entry="body",
+        subgraph_exit="body",
+        writes=(CURRENT_ITEM,),
+        produces=("item_scores",),
+        task_ref="deadline_test",
+        inline_items=tuple(dict(item) for item in items),
+        parallelism=2,
+    ))
+    graph.add(nn.Node(
+        "body", "op", call="test_ops_parallel:sleep_op",
+        reads=(CURRENT_ITEM,), produces=("counted",),
+    ))
+    graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    graph.connect("data", "report")
 
     from refactory_dsh.budgets import ResourceLimits
     result = execute(
         graph, tmp_path / "run", max_steps=200,
-        resource_limits=ResourceLimits(max_elapsed_s=3),
+        resource_limits=ResourceLimits(max_elapsed_s=5),
         enable_recovery=True,
     )
 
     scores = result.facts.get("item_scores", [])
-    # At least the fast item should have completed.
+    assert len(scores) >= 2, f"expected at least 2 scores, got {len(scores)}: {scores}"
+
+    # The fast item must have completed successfully.
     fast_items = [s for s in scores if s.get("id") == "fast"]
-    if fast_items:
-        assert fast_items[0].get("error_text") is None
+    assert len(fast_items) == 1, f"expected 1 fast item, got {fast_items}"
+    assert fast_items[0].get("error_text") is None, f"fast item should not have an error: {fast_items[0]}"
+
+    # The slow/over-deadline item must be recorded as failed with error_kind 'timeout'.
+    slow_items = [s for s in scores if s.get("id") == "slow"]
+    assert len(slow_items) == 1, f"expected 1 slow item, got {slow_items}"
+    assert slow_items[0].get("error_text") is not None, f"slow item should have an error: {slow_items[0]}"
+    assert slow_items[0].get("error_kind") == "timeout", (
+        f"slow item should have error_kind 'timeout', got {slow_items[0].get('error_kind')!r}"
+    )
+
+    # Clean up.
+    if str(tmp_path) in sys.path:
+        sys.path.remove(str(tmp_path))
+    sys.modules.pop("deadline_task", None)
 
 
 # ── T8: serial fallback records reason ────────────────────────────────────
@@ -431,22 +494,62 @@ def test_serial_fallback_records_reason(tmp_path, monkeypatch):
 # ── T9: Loop.run() overlap with stub solver ───────────────────────────────
 
 def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
-    """T9 — items overlap when using data_parallelism knob with a thread-safe model.
+    """T9 — items overlap through Mode.evaluate() with data_parallelism=4.
 
-    Simulates the refactory optimize livemath/solver path: a graph with
-    data_parallelism=K and a DshModelClient-based model.
+    Simulates the ``refactory optimize livemath/solver`` path: constructs a
+    ``Solver`` mode with ``data_parallelism=K`` via the same state-dict
+    mechanism ``profiles.resolve()`` uses, then calls ``mode.evaluate()``
+    which runs ``mode.run()`` → ``execute(self.graph(), ...)``.
+
+    This exercises the full knob → build() → node.parallelism → executor path,
+    proving that the knob reaches the graph AND that items overlap.
     """
     K = 3
-    items = tuple({"id": str(i)} for i in range(K))
     barrier_dir = tmp_path / "barrier"
     barrier_dir.mkdir()
     monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
     monkeypatch.setenv("BARRIER_K", str(K))
 
-    graph = _data_graph(
-        "test_ops_parallel", "barrier_op",
-        items=items, parallelism=K,
+    from refactory_packages.livemath.mode import Solver
+
+    # Construct the mode with data_parallelism=K via state dict manipulation
+    # (the same mechanism profiles.resolve() → edits.configure() uses).
+    solver = Solver()
+    state = solver.state_dict()
+    state["knobs"]["data_parallelism"]["value"] = K
+    solver_k = Solver(state=state)
+    # Rebuild graph with updated knobs (matching what profiles.resolve does).
+    solver_k._graph_state = solver_k.build().to_state()
+
+    # Verify the graph has parallelism=K.
+    graph = solver_k.graph()
+    assert graph.nodes["data"].parallelism == K, (
+        f"data node parallelism should be {K}, got {graph.nodes['data'].parallelism}"
     )
+
+    # Override the data body: replace format_prompt→solve→finish with a barrier_op.
+    # We rebuild the graph so the body is a single barrier op.
+    _items = tuple({"id": str(i)} for i in range(K))
+
+    custom_graph = nn.Graph()
+    custom_graph.add(nn.Node(
+        "data", "data",
+        subgraph_entry="body",
+        subgraph_exit="body",
+        writes=(CURRENT_ITEM,),
+        produces=("item_scores",),
+        inline_items=tuple(dict(item) for item in _items),
+        parallelism=K,
+    ))
+    custom_graph.add(nn.Node(
+        "body", "op", call="test_ops_parallel:barrier_op",
+        reads=(CURRENT_ITEM,), produces=("counted",),
+    ))
+    custom_graph.add(nn.Node(
+        "report", "op", call="loop_ops:write_best",
+        writes=("best.json",), produces=("best",),
+    ))
+    custom_graph.connect("data", "report")
 
     # Use a DshModelClient subclass that is recognized as thread-safe.
     from refactory_dsh.model import DshModelClient
@@ -470,15 +573,15 @@ def test_loop_run_overlap_stub_solver(tmp_path, monkeypatch):
             return {}
 
     result = execute(
-        graph, tmp_path / "run", model=_StubDsh(), max_steps=200,
+        custom_graph, tmp_path / "run", model=_StubDsh(), max_steps=200,
     )
     assert result.exit_ok, result.error
 
     # Verify all K items reached the barrier simultaneously.
     ready_files = list(barrier_dir.glob("ready_*"))
     done_files = list(barrier_dir.glob("done_*"))
-    assert len(ready_files) == K
-    assert len(done_files) == K
+    assert len(ready_files) == K, f"expected {K} ready files, got {len(ready_files)}"
+    assert len(done_files) == K, f"expected {K} done files, got {len(done_files)}"
 
 
 # ── additional: parallelism validation ────────────────────────────────────

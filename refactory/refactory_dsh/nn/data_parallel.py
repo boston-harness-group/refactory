@@ -12,6 +12,8 @@ Concurrency safety:
 - ``item_scores`` are accumulated per-child and merged in item order after all
   items complete.
 - Per-item deadlines use ``threading.Timer`` (not SIGALRM) in concurrent mode.
+  Each item gets its own model copy with a per-item cancellation event, so a
+  deadline in one item does not cancel others.
 - Budget is shared and thread-safe (``RunBudget`` uses ``fcntl``).
 """
 from __future__ import annotations
@@ -25,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .concurrent_helpers import clone_child_executor, make_step_budget_reserve
+from .concurrent_helpers import clone_child_executor, make_step_budget_reserve, merge_children_into_parent
 
 if TYPE_CHECKING:
     from .executor import Executor
@@ -173,12 +175,8 @@ def run_data_concurrent(
         _budget_remaining = original_max_steps - len(executor.steps)
     reserve = make_step_budget_reserve(executor, cancelled, remaining=_budget_remaining)
 
-    # Model with cancellation scope.
-    model = executor.ctx.model
-    if _is_thread_safe_model(model) and model is not None:
-        from refactory_dsh.model import DshModelClient
-        if isinstance(model, DshModelClient):
-            model = model.with_cancellation(cancelled)
+    # Base model for creating per-item copies.
+    base_model = executor.ctx.model
 
     # Declared reads for pass isolation.
     from refactory_dsh.items import pass_read_through
@@ -197,6 +195,27 @@ def run_data_concurrent(
     results: list[_ItemResult] = [_ItemResult(index=i, item_id="") for i in range(len(items))]
     lock = threading.Lock()
     _halt_exc: list[Any] = []
+
+    def _make_per_item_model(item_cancelled: threading.Event) -> Any:
+        """Create a per-item model copy with its own cancellation scope.
+
+        The per-item cancellation event is independent of the global
+        ``cancelled`` event: a deadline timer sets only the per-item event,
+        stopping that item's model calls without affecting other items.
+        The global ``cancelled`` event is also checked (via the step budget
+        reserve), so a HaltStop or budget exhaustion still stops all items.
+        """
+        if base_model is None:
+            return None
+        if not _is_thread_safe_model(base_model):
+            return base_model
+        from refactory_dsh.model import DshModelClient
+        if isinstance(base_model, DshModelClient):
+            # Chain: global cancelled → per-item cancelled
+            m = base_model.with_cancellation(cancelled)
+            m = m.with_cancellation(item_cancelled)
+            return m
+        return base_model
 
     def run_item(index: int) -> _ItemResult:
         item = items[index]
@@ -222,9 +241,13 @@ def run_data_concurrent(
             declared_reads=_declared_reads,
         )
 
-        # Clone child executor for this item.
+        # Per-item cancellation event (independent of global cancelled).
+        _item_cancelled = threading.Event()
+        _item_model = _make_per_item_model(_item_cancelled)
+
+        # Clone child executor for this item with per-item model.
         child = clone_child_executor(
-            executor, model,
+            executor, _item_model,
             reserve_step=reserve,
             gate_iterations={},  # per-item gate counters
         )
@@ -238,10 +261,13 @@ def run_data_concurrent(
         _deadline_timer: threading.Timer | None = None
         _deadline_event = threading.Event()
 
+        # Deep copy task for this item to avoid shared mutable state.
+        _item_task = copy.deepcopy(task) if task is not None else None
+
         try:
             # Setup phase.
-            if task is not None:
-                task.setup(instance, child.ctx.workdir, **setup_kwargs)
+            if _item_task is not None:
+                _item_task.setup(instance, child.ctx.workdir, **setup_kwargs)
 
             # Write current_item to pass dir only (not run-level for safety).
             child.ctx.node_id = node.id
@@ -253,15 +279,12 @@ def run_data_concurrent(
             child._item_exchanges = []
 
             # Arm per-item deadline via Timer (not SIGALRM).
+            # The timer sets only the per-item cancellation event,
+            # stopping model calls for THIS item only; other items continue.
             if _item_deadline_s is not None:
                 def _on_deadline():
                     _deadline_event.set()
-                    cancelled_copy = threading.Event()
-                    cancelled_copy.set()
-                    # Stop model calls for this item.
-                    if hasattr(child.ctx.model, '_cancellations'):
-                        for c in child.ctx.model._cancellations:
-                            c.set()
+                    _item_cancelled.set()
 
                 _deadline_timer = threading.Timer(_item_deadline_s, _on_deadline)
                 _deadline_timer.daemon = True
@@ -280,8 +303,8 @@ def run_data_concurrent(
                 raise _BranchFailed(branch_error)
 
             # Verify phase.
-            if task is not None:
-                verdict = task.verify(instance, child.ctx.workdir, **verify_kwargs)
+            if _item_task is not None:
+                verdict = _item_task.verify(instance, child.ctx.workdir, **verify_kwargs)
             else:
                 verdict = None
 
@@ -397,27 +420,45 @@ def run_data_concurrent(
     except Exception as exc:
         error_out = f"{node.id}: {type(exc).__name__}: {exc}"
 
-    # Merge results in item order.
+    # Merge results in item order using the shared helper.
     scores: list[dict[str, Any]] = []
     item_records: list[dict[str, Any]] = []
-    _step_base = len(executor.steps)
+    children_with_results = []
+    child_order = []
 
     for i in range(len(items)):
         r = all_results[i]
         if r.child is not None:
-            step_start = len(executor.steps)
-            executor.steps.extend(r.child.steps)
-            executor.model_calls += r.child.model_calls
-            executor.ctx.writes_made.extend(r.child.ctx.writes_made)
-            # Track failed item step indices.
+            children_with_results.append(r.child)
+            child_order.append(len(children_with_results) - 1)
+        else:
+            child_order.append(-1)
+
+    # Use merge_children_into_parent for the ordered merge (shared with fork).
+    if children_with_results:
+        merge_children_into_parent(executor, children_with_results)
+
+    # Now build scores/records and track failed step indices.
+    _merged_step_base = 0
+    for i in range(len(items)):
+        r = all_results[i]
+        if r.child is not None:
+            child = r.child
+            # Track failed item step indices relative to merged position.
             if r.record is not None and r.record.get("error_text") is not None:
-                failed_step_indices.update(range(step_start, len(executor.steps)))
+                step_count = len(child.steps)
+                # The steps were already merged into executor.steps by
+                # merge_children_into_parent, so track based on child step count.
+                failed_step_indices.update(range(_merged_step_base, _merged_step_base + step_count))
+            _merged_step_base += len(child.steps)
+
             # Merge declared facts from child.
             allowed = set(node.produces) | {"item_scores"}
             for key in allowed:
-                if key in r.child.ctx.facts and key != "item_scores":
-                    if key not in executor.ctx.facts or executor.ctx.facts[key] != r.child.ctx.facts[key]:
-                        executor.ctx.facts[key] = r.child.ctx.facts[key]
+                if key in child.ctx.facts and key != "item_scores":
+                    if key not in executor.ctx.facts or executor.ctx.facts[key] != child.ctx.facts[key]:
+                        executor.ctx.facts[key] = child.ctx.facts[key]
+
         if r.record is not None:
             scores.append(r.record)
             item_records.append(r.record)
