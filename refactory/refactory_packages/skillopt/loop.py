@@ -911,6 +911,7 @@ class SkillOptLoop(OuterLoop):
             "best_skill": self._best_skill,
             "best_score": self._best_score,
             "best_candidate_id": self._best_candidate_id,
+            "run_error": self._run_error,
             "prev_epoch_skill": self._prev_epoch_skill,
             "epoch_last_step_skill": self._epoch_last_step_skill,
             "patched_skill": self._patched_skill,
@@ -936,6 +937,7 @@ class SkillOptLoop(OuterLoop):
         self._best_skill = restored.get("best_skill", "")
         self._best_score = restored.get("best_score", 0.0)
         self._best_candidate_id = restored.get("best_candidate_id")
+        self._run_error = restored.get("run_error", "")
         self._prev_epoch_skill = restored.get("prev_epoch_skill")
         self._epoch_last_step_skill = restored.get("epoch_last_step_skill", "")
         self._patched_skill = restored.get("patched_skill", "")

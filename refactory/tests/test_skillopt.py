@@ -3016,6 +3016,19 @@ def test_a_later_all_failed_epoch_fails_the_run(tmp_path):
     assert "failed after 3 retries" in report["error"]
 
 
+def test_an_all_failed_epoch_survives_resume(tmp_path):
+    """The failure reason is strategy state: a resumed run still reports it."""
+    loop, _ = _run_loop(
+        tmp_path, client=_FailsFromEpochTwo(), skillopt_options={"max_epochs": 3},
+    )
+    state = loop.strategy_state_dict()
+    assert "in epoch 2 failed" in state["run_error"]
+    fresh = SkillOptLoop()
+    fresh.configure(model=FakeClient())
+    fresh.load_strategy_state(state)
+    assert fresh.run_error() == loop.run_error()
+
+
 def test_a_later_all_failed_epoch_exits_the_optimize_cli_non_zero(tmp_path, monkeypatch):
     from refactory_dsh import loop as loop_module
     from refactory_dsh import model as model_module
