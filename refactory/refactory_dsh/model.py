@@ -446,6 +446,7 @@ class DshModelClient:
         self._inactivity_s = int(inactivity_s) if inactivity_s is not None else None
         self._worker_backend = worker_backend or os.environ.get("REFACTORY_WORKER_BACKEND", "dsh")
         self._effort = effort or (os.environ.get("REFACTORY_MODEL_EFFORT", "") if self._worker_backend == "dsh" and not routes_resolved else "")
+        self._max_completion_tokens = inherited.get("max_completion_tokens", "")
         self._permission_mode = permission_mode
         self._role_routes = copy.deepcopy(role_routes or {})
         self._node_routes = copy.deepcopy(node_routes or {})
@@ -499,9 +500,12 @@ class DshModelClient:
         validate_route(self.route())
 
     def route(self) -> dict[str, str]:
-        return {"worker_backend": self._worker_backend, "provider": self._provider,
-                "model": self._model, "effort": self._effort,
-                "permission_mode": self._permission_mode}
+        result = {"worker_backend": self._worker_backend, "provider": self._provider,
+                  "model": self._model, "effort": self._effort,
+                  "permission_mode": self._permission_mode}
+        if self._max_completion_tokens:
+            result["max_completion_tokens"] = self._max_completion_tokens
+        return result
 
     def for_node(self, node: str, role: str = "worker") -> DshModelClient:
         from refactory_dsh.workers import resolve_route
@@ -587,6 +591,8 @@ class DshModelClient:
             **({"tool_policy": tp} if (tp := getattr(self, "_tool_policy", ""))
                else {}),
             **({"inactivity_s": ia} if (ia := getattr(self, "_inactivity_s", None)) is not None
+               else {}),
+            **({"max_completion_tokens": mct} if (mct := getattr(self, "_max_completion_tokens", ""))
                else {}),
         }
 

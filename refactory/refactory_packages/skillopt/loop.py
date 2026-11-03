@@ -136,6 +136,7 @@ class SkillOptLoop(OuterLoop):
         self._current_score: float = 0.0
         self._best_skill: str = ""
         self._best_score: float = 0.0
+        self._best_candidate_id: str | None = None
         self._prev_epoch_skill: str | None = None
         # The epoch's last-step skill, taken before its slow update; kept in
         # the state so a run resumed between the slow update and the meta
@@ -235,6 +236,7 @@ class SkillOptLoop(OuterLoop):
             self._val_cache[skill_hash] = self._current_score
             self._best_skill = self._current_skill
             self._best_score = self._current_score
+            self._best_candidate_id = seed_candidate.id
             self._early_stop_best = self._best_score
             run.save_strategy_state()
 
@@ -331,7 +333,10 @@ class SkillOptLoop(OuterLoop):
                     run, current, epoch, train_ids, resume_epoch, resume_phase,
                 )
                 self._count_stale_epoch()
-                self._record_epoch_calls(run, epoch)
+                if self._record_epoch_calls(run, epoch):
+                    self._phase = "epoch_done"
+                    run.save_strategy_state()
+                    return
                 self._phase = "epoch_done"
                 run.save_strategy_state()
                 if self._early_stop(run):
@@ -444,7 +449,10 @@ class SkillOptLoop(OuterLoop):
                         run, current, epoch, train_ids, resume_epoch, resume_phase,
                     )
                     self._count_stale_epoch()
-                    self._record_epoch_calls(run, epoch)
+                    if self._record_epoch_calls(run, epoch):
+                        self._phase = "epoch_done"
+                        run.save_strategy_state()
+                        return
                     self._phase = "epoch_done"
                     run.save_strategy_state()
                     if self._early_stop(run):
@@ -495,6 +503,7 @@ class SkillOptLoop(OuterLoop):
                     if cand_score > self._best_score:
                         self._best_skill = cand_skill
                         self._best_score = cand_score
+                        self._best_candidate_id = candidate.id
                     self._trace.record_decision(
                         "val_gate_accept",
                         cand_score=cand_score,
@@ -515,7 +524,10 @@ class SkillOptLoop(OuterLoop):
             )
 
             self._count_stale_epoch()
-            self._record_epoch_calls(run, epoch)
+            if self._record_epoch_calls(run, epoch):
+                self._phase = "epoch_done"
+                run.save_strategy_state()
+                return
             self._phase = "epoch_done"
             run.save_strategy_state()
 
@@ -558,10 +570,13 @@ class SkillOptLoop(OuterLoop):
     # best score, or ``early_stop_patience`` stale epochs in a row. The best is
     # the score at the start of training until an epoch improves it.
 
-    def _record_epoch_calls(self, run: Run, epoch: int) -> None:
+    def _record_epoch_calls(self, run: Run, epoch: int) -> bool:
         """The epoch's optimizer calls and failures, in the trace; an epoch whose
         every call failed is flagged and logged, as the run report flags a run
-        whose every proposal round failed (Loop._proposer_health)."""
+        whose every proposal round failed (Loop._proposer_health).
+
+        Returns ``True`` when every call failed, so the caller can stop the run.
+        """
         calls_before, failed_before = getattr(self, "_epoch_calls_mark", (0, 0))
         calls = self._trace.optimizer_calls - calls_before
         failures = self._trace.optimizer_failures[failed_before:]
@@ -575,6 +590,11 @@ class SkillOptLoop(OuterLoop):
                 f"skillopt epoch {epoch}: every one of its {calls} optimizer call(s) "
                 f"failed ({failures[0]}); the epoch proposed nothing"
             )
+            run.stop(
+                f"all {calls} optimizer call(s) in epoch {epoch} failed: "
+                f"{failures[0]}"
+            )
+        return all_failed
 
     def _count_stale_epoch(self) -> None:
         if not (self.early_stop_patience or self.early_stop_at_full_val):
@@ -886,6 +906,7 @@ class SkillOptLoop(OuterLoop):
             "current_score": self._current_score,
             "best_skill": self._best_skill,
             "best_score": self._best_score,
+            "best_candidate_id": self._best_candidate_id,
             "prev_epoch_skill": self._prev_epoch_skill,
             "epoch_last_step_skill": self._epoch_last_step_skill,
             "patched_skill": self._patched_skill,
@@ -910,6 +931,7 @@ class SkillOptLoop(OuterLoop):
         self._current_score = restored.get("current_score", 0.0)
         self._best_skill = restored.get("best_skill", "")
         self._best_score = restored.get("best_score", 0.0)
+        self._best_candidate_id = restored.get("best_candidate_id")
         self._prev_epoch_skill = restored.get("prev_epoch_skill")
         self._epoch_last_step_skill = restored.get("epoch_last_step_skill", "")
         self._patched_skill = restored.get("patched_skill", "")
@@ -926,6 +948,23 @@ class SkillOptLoop(OuterLoop):
         self._cached_success_patches = restored.get("cached_success_patches", [])
         self._cached_merged = restored.get("cached_merged", {})
         self._cached_ranked = restored.get("cached_ranked", [])
+
+    def best_candidate(self, population: "list[Candidate]") -> "Candidate | None":
+        """Return the val-gated best candidate by id from the population.
+
+        If the strategy has a best id that is not in the population, raise
+        ValueError so the caller reports exit_ok=False with a clear message.
+        Never falls back silently to the leaderboard.
+        """
+        if not self._best_candidate_id:
+            return None
+        for candidate in population:
+            if candidate.id == self._best_candidate_id:
+                return candidate
+        raise ValueError(
+            f"strategy's best candidate {self._best_candidate_id!r} "
+            f"is not in the population of {len(population)} candidates"
+        )
 
     # ── helpers ────────────────────────────────────────────────────────────
 

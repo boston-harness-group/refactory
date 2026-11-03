@@ -603,7 +603,7 @@ class _DeadClient:
         raise RuntimeError(self.message)
 
 
-def test_a_run_survives_a_proposer_that_cannot_be_reached(tmp_path):
+def test_a_run_with_an_unreachable_proposer_reports_failure(tmp_path):
     from refactory_dsh.loop import Loop, LoopConfig
 
     loop = Loop(
@@ -619,6 +619,8 @@ def test_a_run_survives_a_proposer_that_cannot_be_reached(tmp_path):
     assert proposer["failure_count"] >= 1, "the failure was not recorded"
     assert proposer["all_failed"] is True
     assert proposer["optimizer"] == "autoresearch"
+    # G32: all-failed runs now exit non-zero
+    assert report["exit_ok"] is False
 
 
 def test_the_report_says_the_proposer_never_answered(tmp_path):

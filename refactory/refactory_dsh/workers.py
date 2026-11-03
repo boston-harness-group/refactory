@@ -49,7 +49,7 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
     backend = route.setdefault('worker_backend', 'dsh')
     capabilities(backend)
     unknown = set(route) - {'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
-                             'openshell_gateway', 'openshell_image'}
+                             'openshell_gateway', 'openshell_image', 'max_completion_tokens'}
     if unknown:
         raise ValueError(f'unknown worker route fields: {sorted(unknown)}')
     if any(not isinstance(value, str) for value in route.values()):

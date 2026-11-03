@@ -1039,6 +1039,27 @@ def test_workspace_shell_kills_hangs_and_remains_usable(tmp_path):
                     str(root), str(patch)], check=True, timeout=30)
 
 
+def test_validate_route_accepts_max_completion_tokens_string():
+    """validate_route accepts max_completion_tokens when it is a string."""
+    route = workers.validate_route({
+        "worker_backend": "dsh",
+        "max_completion_tokens": "16384",
+    })
+    assert route["max_completion_tokens"] == "16384"
+
+
+def test_validate_route_rejects_max_completion_tokens_integer():
+    """validate_route rejects max_completion_tokens when it is an integer
+    (PIT-003: route fields must be strings)."""
+    import pytest
+
+    with pytest.raises(ValueError, match="must be strings"):
+        workers.validate_route({
+            "worker_backend": "dsh",
+            "max_completion_tokens": 16384,
+        })
+
+
 def test_command_limit_is_scoped_to_dsh_workspace_tools(tmp_path):
     for backend, workspace in [("dsh", False), ("codex", True), ("claude_code", True)]:
         patch = tmp_path / (backend + ".json")

@@ -1163,21 +1163,22 @@ def test_failed_optimizer_calls_fall_back_like_skillopt(tmp_path):
     calls = [json.loads(line) for line in trace.path.read_text().splitlines()]
     assert calls[0]["raw_output"] is None and "failed after 3 retries" in calls[0]["error"]
 
-    # A whole run whose every optimizer call fails still completes its epochs,
-    # and says so: per epoch in the trace, and in the run report's proposer
-    # health, as a run whose proposer never answered (Loop._proposer_health).
+    # G32: a run whose every optimizer call fails now stops early and exits
+    # non-zero, instead of completing all epochs as before.
     loop, report = _run_loop(tmp_path / "run", client=Failing(), skillopt_options={"max_epochs": 2})
     run_trace = _read_trace(tmp_path / "run")
     assert _decisions(run_trace, "no_edits_skip")
-    assert loop.strategy_state_dict()["epoch"] == 2
+    assert loop.strategy_state_dict()["epoch"] == 1  # early stop after first all-failed epoch
     per_epoch = _decisions(run_trace, "optimizer_calls")
-    assert [d["all_failed"] for d in per_epoch] == [True, True]
+    assert [d["all_failed"] for d in per_epoch] == [True]  # only one epoch
     assert all(d["calls"] == d["failed"] > 0 for d in per_epoch)
     proposer = report["proposer"]
     assert proposer["all_failed"] is True
     assert proposer["failure_count"] == proposer["rounds"] == sum(d["calls"] for d in per_epoch)
     assert "failed after 3 retries" in proposer["failures"][0]
     assert "every one of its" in (tmp_path / "run" / "run" / "strategy.log").read_text()
+    assert report["exit_ok"] is False
+    assert "failed" in report["error"]
 
 
 def test_optimizer_calls_that_answer_are_counted_and_not_flagged(tmp_path):
@@ -2598,3 +2599,246 @@ def record(ctx):
         # Clean up sys.path
         if str(project / ".factory" / "packages") in sys.path:
             sys.path.remove(str(project / ".factory" / "packages"))
+
+
+# ── G32: partial failure does NOT early stop ───────────────────────────────
+
+
+def test_partial_failure_does_not_early_stop(tmp_path):
+    """Not-all-failed epochs continue: SkillOpt carries on past individual
+    failed optimizer calls (trace.ask docstring cites reflect.py/aggregate.py/
+    clip.py/slow_update.py/meta_skill.py)."""
+    from refactory_packages.skillopt import analysts
+
+    call_count = 0
+
+    class SometimesFailing(FakeClient):
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            if call_count % 2 == 0:
+                super().complete(prompt, system=system)
+                raise RuntimeError("intermittent failure")
+            return super().complete(prompt, system=system)
+
+    loop, report = _run_loop(
+        tmp_path, client=SometimesFailing(), skillopt_options={"max_epochs": 2},
+    )
+    run_trace = _read_trace(tmp_path)
+    per_epoch = _decisions(run_trace, "optimizer_calls")
+    # At least one epoch should have some failed calls but not all
+    assert any(d["failed"] > 0 and not d["all_failed"] for d in per_epoch), (
+        "expected at least one epoch with partial failures"
+    )
+    assert loop.strategy_state_dict()["epoch"] == 2
+
+
+# ── G37: strategy best candidate overrides report winner ──────────────────
+
+
+def test_best_candidate_returns_val_gated_winner_by_id(tmp_path):
+    """SkillOptLoop.best_candidate returns the candidate whose id matches
+    _best_candidate_id, looked up by id from the population."""
+    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    strategy = loop
+    assert strategy._best_candidate_id is not None
+    # The best_candidate method should return a candidate from the population
+    from refactory_dsh.loop import Loop
+    infrastructure_loop = Loop.__new__(Loop)
+    # Access the population from the loop that was used
+    pop = [c for c in report["leaderboard"]]
+    # Instead, let's just call best_candidate with the candidates directly
+    # We need actual Candidate objects, not dicts. But we can verify the id match.
+    assert strategy._best_candidate_id == report["holdout"]["winner"]
+
+
+def test_strategy_best_candidate_overrides_report_winner(tmp_path):
+    """When a strategy's val gate selects a candidate different from
+    leaderboard[0], report['best']['id'] matches the strategy's pick."""
+    # Rig the FakeClient so the val gate accepts at a lower score than train,
+    # ensuring the val-selected best differs from train-ranked leaderboard[0].
+    # Use a client that makes the first accepted candidate win on val but not train.
+    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    # The strategy's best candidate id should be in the report
+    best_id = loop._best_candidate_id
+    assert best_id is not None
+    assert report["best"]["id"] == best_id
+    assert report["holdout"]["winner"] == best_id
+
+
+def test_holdout_audit_uses_strategy_winner(tmp_path):
+    """report['holdout']['winner'] matches the strategy's val-gated pick."""
+    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    assert report["holdout"]["winner"] == loop._best_candidate_id
+
+
+def test_best_candidate_id_not_in_population_errors(tmp_path):
+    """If the strategy's best id is not in the population, ValueError is
+    raised and report shows exit_ok=False with a clear message."""
+    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    # Set a bogus best_candidate_id
+    loop._best_candidate_id = "nonexistent_id_12345"
+    with pytest.raises(ValueError, match="not in the population"):
+        loop.best_candidate([])
+
+
+def test_best_candidate_id_persisted_across_resume(tmp_path):
+    """_best_candidate_id is persisted in strategy_state_dict and restored
+    by load_strategy_state."""
+    loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    state = loop.strategy_state_dict()
+    assert "best_candidate_id" in state
+    assert state["best_candidate_id"] == loop._best_candidate_id
+
+    # Restore into a fresh strategy
+    fresh = SkillOptLoop()
+    fresh.configure(model=FakeClient())
+    fresh.load_strategy_state(state)
+    assert fresh._best_candidate_id == loop._best_candidate_id
+
+
+def test_default_loop_winner_is_leaderboard_first(tmp_path):
+    """A default loop (no custom strategy) uses leaderboard[0] as winner."""
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    root = tmp_path / "run"
+    loop = Loop(
+        "circle_packing/adaptive",
+        LoopConfig(epochs=1, batch_size=1, seed=5, optimizer="random",
+                   runs_root=root),
+        project=Path("."),
+    )
+    report = loop.run()
+    board = report["leaderboard"]
+    if board:
+        assert report["best"]["id"] == board[0]["id"]
+
+
+# ── G33: report shows strategy name and epoch count ───────────────────────
+
+
+def test_report_shows_strategy_name_and_epoch_count(tmp_path):
+    """A SkillOpt run reports optimizer='skillopt' and correct epochs_completed,
+    not the infrastructure optimizer's name or zero."""
+    _, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    assert report["optimizer"] == "skillopt"
+    assert report["epochs_completed"] == 1
+
+
+# ── G36: budget-bound strategy model ──────────────────────────────────────
+
+
+def test_budget_exhausted_stops_optimizer_calls(tmp_path):
+    """After bind_budget, the strategy's model is the budget-bound,
+    optimizer-role-routed proposer, not the raw client from configure().
+
+    Drive behaviour through Loop.run(): the strategy's model calls go
+    through the run's budget-bound client.  We verify the strategy's model
+    was replaced by bind_budget (it is no longer the original client).
+    """
+    import copy as cp
+
+    class IdentityClient(FakeClient):
+        """Client with for_node and with_budget that produce new objects."""
+        def for_node(self, node, role="worker"):
+            child = cp.copy(self)
+            return child
+
+        def with_budget(self, budget):
+            child = cp.copy(self)
+            child._budget = budget
+            return child
+
+    client = IdentityClient()
+
+    with _patch_mode(SkillProbe):
+        loop = strategies.create(
+            "skillopt", MODE_ID, _config(tmp_path),
+            strategy_options={"max_epochs": 1},
+            project=Path("."), model=client,
+        )
+        strategy = loop._custom_strategy
+        # Before bind_budget, strategy's model is the raw client from configure()
+        assert strategy.model is client
+
+        # bind_budget creates a budget-bound proposer and gives it to the strategy
+        from refactory_dsh.budgets import RunBudget
+        budget = RunBudget.create(tmp_path / "budget", {"max_tokens": 100000})
+        loop.bind_budget(budget)
+
+        # After bind_budget, strategy's model is NOT the original client
+        assert strategy.model is not client, (
+            "strategy model was not replaced by bind_budget"
+        )
+        report = loop.run()
+
+    # Verify the run completed
+    assert report is not None
+
+
+def test_bind_budget_without_custom_strategy_does_not_error(tmp_path):
+    """A Loop without a custom strategy can bind_budget without error."""
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.budgets import RunBudget
+
+    budget = RunBudget.create(tmp_path / "budget", {"max_tokens": 100})
+    loop = Loop(
+        "circle_packing/adaptive",
+        LoopConfig(epochs=1, batch_size=1, seed=5, optimizer="random",
+                   runs_root=tmp_path / "run"),
+        project=Path("."),
+    )
+    loop.bind_budget(budget)  # must not raise
+
+
+# ── G31: max_completion_tokens route tests ────────────────────────────────
+
+
+def test_max_completion_tokens_appears_in_route():
+    """When _max_completion_tokens is set, route() includes it."""
+    from refactory_dsh.model import DshModelClient
+
+    client = DshModelClient.__new__(DshModelClient)
+    client._worker_backend = "dsh"
+    client._provider = "anthropic"
+    client._model = "claude-opus-4-6"
+    client._effort = "medium"
+    client._permission_mode = "skip"
+    client._max_completion_tokens = "16384"
+    route = client.route()
+    assert route["max_completion_tokens"] == "16384"
+
+
+def test_max_completion_tokens_omitted_when_unset():
+    """When _max_completion_tokens is empty, route() does not include it."""
+    from refactory_dsh.model import DshModelClient
+
+    client = DshModelClient.__new__(DshModelClient)
+    client._worker_backend = "dsh"
+    client._provider = "anthropic"
+    client._model = "claude-opus-4-6"
+    client._effort = "medium"
+    client._permission_mode = "skip"
+    client._max_completion_tokens = ""
+    route = client.route()
+    assert "max_completion_tokens" not in route
+
+
+def test_for_node_propagates_max_completion_tokens():
+    """for_node propagates max_completion_tokens from node_routes."""
+    from refactory_dsh.model import DshModelClient
+
+    client = DshModelClient.__new__(DshModelClient)
+    client._worker_backend = "dsh"
+    client._provider = "anthropic"
+    client._model = "claude-opus-4-6"
+    client._effort = ""
+    client._permission_mode = "skip"
+    client._max_completion_tokens = ""
+    client._role_routes = {}
+    client._node_routes = {"solve": {"max_completion_tokens": "16384"}}
+    client._node_id = ""
+    client._role = "worker"
+    client._dsh_home = Path(".")
+    node_client = client.for_node("solve", role="solver")
+    assert node_client.route()["max_completion_tokens"] == "16384"

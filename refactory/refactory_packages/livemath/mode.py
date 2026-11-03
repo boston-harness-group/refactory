@@ -19,7 +19,9 @@ SkillOpt solver defaults:
 """
 from __future__ import annotations
 
-from typing import ClassVar
+import copy
+from pathlib import Path
+from typing import Any, ClassVar, Mapping
 
 from refactory_dsh import nn
 
@@ -57,6 +59,10 @@ class Solver(nn.Mode):
     #: The solve node's wall limit; a subclass (or a graph edit of ``timeout_s``)
     #: changes it.
     solve_timeout_s: ClassVar[int] = SOLVE_TIMEOUT_S
+    #: Per-call output cap for the solve node.  Default matches arm A's
+    #: ``max_completion_tokens: 16384`` (livemathematicianbench/default.yaml:16).
+    #: Set to ``0`` to disable the cap.
+    max_completion_tokens: ClassVar[int] = 16384
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
@@ -104,6 +110,42 @@ class Solver(nn.Mode):
         graph.connect("format_prompt", "solve")
         graph.connect("data", "finish")
         return graph
+
+    def run(
+        self,
+        workdir: Path,
+        *,
+        model: Any = None,
+        task: Mapping[str, Any] | None = None,
+        memory: Any = None,
+        **kwargs: Any,
+    ) -> nn.RunResult:
+        """Inject ``max_completion_tokens`` into the solve node's route.
+
+        The cap is a livemath mode setting, not a global default: only the
+        solver node's model calls carry it, via ``node_routes``.
+
+        **Evidence (G31)**: DSH's ``agent/request`` hook returns
+        ``ModelSelection`` (provider, model, reasoningEffort).
+        ``maxOutputTokens``/``maxTokens`` is NOT part of ``ModelSelection``
+        — it lives in ``AgentOptions``/``LlmCallConfig``
+        (dsh-subagent/lib/types/child-agent.js:243, :495), which the hook
+        cannot set.  The Python route carries the value so a future DSH
+        release can read it, but the JS observer does not inject it today.
+        """
+        if (
+            self.max_completion_tokens
+            and model is not None
+            and callable(getattr(model, "for_node", None))
+        ):
+            model = copy.copy(model)
+            solve_routes = dict(getattr(model, "_node_routes", {}).get("solve", {}))
+            solve_routes["max_completion_tokens"] = str(self.max_completion_tokens)
+            model._node_routes = {
+                **getattr(model, "_node_routes", {}),
+                "solve": solve_routes,
+            }
+        return super().run(workdir, model=model, task=task, memory=memory, **kwargs)
 
     def score(self, run: nn.RunResult) -> float:
         scores = [entry["score"] for entry in run.facts.get("item_scores", [])]

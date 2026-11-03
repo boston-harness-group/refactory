@@ -358,7 +358,7 @@ def test_overfit_verdict_exit_code(tmp_path):
 
         # Mock audit_holdout to return a clear overfit result.
         _original_audit = loop.audit_holdout
-        def _overfit_audit():
+        def _overfit_audit(*, winner=None):
             return {
                 "status": "measured",
                 "train": 1.0,
