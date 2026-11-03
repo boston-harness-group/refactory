@@ -73,6 +73,59 @@ def test_a_mode_with_no_guidance_says_so_rather_than_showing_nothing():
     assert "offered no guidance" in prompt
 
 
+# ── item results ───────────────────────────────────────────────────────────
+_CAPPED = ("solve: RuntimeError: model completion failed (exit 1): dsh: max-tokens: "
+           "the model reached its output token limit before it finished (32768 tokens)")
+
+
+def _records() -> list[dict]:
+    return [
+        {"id": "m2_0", "passed": True, "score": 1.0, "error_text": None},
+        {"id": "m2_1", "passed": False, "score": 0.0, "error_text": None,
+         "fail_reason": "Qh7+ is not mate: the king escapes to f8"},
+        {"id": "m2_2", "passed": False, "score": 0.0, "error_text": _CAPPED, "fail_reason": _CAPPED},
+        {"id": "m2_3", "passed": False, "score": 0.0, "error_text": _CAPPED, "fail_reason": _CAPPED},
+        {"id": "m2_4", "passed": False, "score": 0.0,
+         "error_text": "solve: CompletionTimeout: model completion timed out after 600s"},
+    ]
+
+
+def test_the_prompt_tells_errored_items_from_wrong_answers():
+    """The loop handed the proposer its parent's item records, and the prompt never
+    showed them: a run that lost a third of its items to the output token limit read
+    exactly like one that answered them wrong."""
+    ctx = _ctx()
+    ctx.item_records = _records()
+    prompt = ctx.render()
+    assert "## Item results of the candidate being edited" in prompt
+    assert "5 train item(s): 1 passed, 1 answered wrong, 3 failed with an error, mean score 0.2" in prompt
+    # Errors are grouped by cause, the most common first, with example items.
+    errors = prompt.split("Errors, by cause:")[1]
+    assert errors.index("max-tokens") < errors.index("timed out")
+    assert "| 2 | " in errors and "m2_2, m2_3" in errors
+    # A wrong answer shows the grader's reason; an errored item is not listed twice.
+    wrong = prompt.split("Wrong answers, with the grader's reason:")[1]
+    assert "the king escapes to f8" in wrong
+    assert "m2_2" not in wrong
+
+
+def test_no_item_records_adds_no_section():
+    assert "Item results" not in _ctx().render()
+
+
+def test_the_item_section_is_bounded():
+    from refactory_dsh.optim.base import ITEM_EVIDENCE_CHARS, ITEM_EVIDENCE_ROWS
+
+    ctx = _ctx()
+    ctx.item_records = [
+        {"id": f"i{k}", "passed": False, "score": 0.0, "error_text": f"cause {k}: " + "x" * 1000}
+        for k in range(ITEM_EVIDENCE_ROWS + 4)
+    ]
+    section = ctx.render().split("## Item results of the candidate being edited")[1].split("\n## ")[0]
+    assert "(4 more cause(s) not shown)" in section
+    assert "x" * ITEM_EVIDENCE_CHARS not in section
+
+
 def test_the_sampler_favours_the_preferred_operations(tmp_path):
     """A prior, not a restriction: the sampler still covers the catalogue."""
     mode = registry.resolve(Path("."), MODE)[1]()
