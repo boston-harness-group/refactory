@@ -12,7 +12,7 @@ index bb5eb2a..d931e78 100644
  - id: hmr
    disabled: true
 diff --git a/lib/index.js b/lib/index.js
-index 0b3c309..55ad65f 100644
+index 0b3c309..c8aa9c4 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -106,7 +106,9 @@ const inject = [
@@ -55,6 +55,15 @@ index 0b3c309..55ad65f 100644
  			assembled: void 0
  		});
  	};
+@@ -342,6 +356,8 @@ async function run(ctx, config, io) {
+ 		if (projection === void 0) io.stdout.write(outcome.text + "\n");
+ 		else projection.finish(outcome.text);
+ 		if (outcome.reason?.kind === "error") io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`);
++		else if (outcome.reason?.kind === "max-tokens") io.stderr.write("dsh: max-tokens: the model reached its output token limit before it finished\n");
++		else if (outcome.reason?.kind !== "completed") io.stderr.write(`dsh: the model turn ended without completing (${outcome.reason?.kind ?? "no outcome recorded"})\n`);
+ 		io.exit(outcome.reason?.kind === "completed" ? 0 : 1);
+ 	} finally {
+ 		projection?.dispose();
 diff --git a/lib/startup.js b/lib/startup.js
 index c2ce95c..c653080 100644
 --- a/lib/startup.js

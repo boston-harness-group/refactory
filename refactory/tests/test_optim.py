@@ -398,6 +398,55 @@ def test_the_model_client_reports_a_failed_run(monkeypatch):
         DshModelClient().complete("hello")
 
 
+#: What dsh's headless runner writes when a turn stops at the output token limit:
+#: the streamed reasoning under its header, then (with the patch) the diagnostic.
+_CAPPED_REASONING = "dsh: reasoning:\nList every check. Qh7+ Kf8, then Qh8+ Ke7 and the king walks...\n"
+
+
+def test_a_completion_stopped_at_its_output_limit_says_so(monkeypatch):
+    """A capped completion read "dsh: reasoning:" -- the header of the streamed
+    reasoning -- so neither a person nor an optimizer could tell it from any other
+    failure. The cause now names the stop and the limit it hit."""
+    from refactory_dsh.model import DshModelClient
+
+    class Capped:
+        returncode = 1
+        stdout = ""
+        stderr = _CAPPED_REASONING + "dsh: max-tokens: the model reached its output token limit before it finished\n"
+
+    monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: Capped())
+    config = {"litellm": {"models": [{"id": "glm", "maxTokens": 32768}]}}
+    client = DshModelClient(provider="litellm", model="glm", provider_config=config)
+    with pytest.raises(RuntimeError) as raised:
+        client.complete("hello")
+    assert str(raised.value) == (
+        "model completion failed (exit 1): dsh: max-tokens: the model reached its "
+        "output token limit before it finished (32768 tokens)"
+    )
+
+
+def test_the_reasoning_header_is_never_the_cause():
+    """Without a diagnostic after the reasoning (an unpatched runner), the cause says
+    dsh gave none -- not the header, and not the model's last line of reasoning."""
+    from refactory_dsh.model import NO_DIAGNOSTIC, failure_cause
+
+    assert failure_cause(_CAPPED_REASONING) == NO_DIAGNOSTIC
+    assert failure_cause(_CAPPED_REASONING + "dsh: E_AUTH: key rejected\n") == "dsh: E_AUTH: key rejected"
+    # Stderr with no reasoning stream keeps the old fallbacks.
+    assert failure_cause("no credentials") == "no credentials"
+
+
+def test_the_output_limit_is_the_smaller_of_model_and_route():
+    from refactory_dsh.model import DshModelClient
+
+    config = {"litellm": {"models": [{"id": "glm", "maxTokens": 32768}, {"id": "other", "maxTokens": 8}]}}
+    client = DshModelClient(provider="litellm", model="glm", provider_config=config)
+    assert client.output_limit() == 32768
+    client._max_completion_tokens = 4096  # noqa: SLF001 - a node route's cap
+    assert client.output_limit() == 4096
+    assert DshModelClient(provider="litellm", model="unlisted", provider_config=config).output_limit() is None
+
+
 def test_a_transport_blip_is_ridden_out_over_about_a_minute(monkeypatch):
     """A DNS blip outlasted retries one and two seconds apart and failed the run (dm-218).
     The waits double and add up to about a minute, whatever the attempt count; a clock
