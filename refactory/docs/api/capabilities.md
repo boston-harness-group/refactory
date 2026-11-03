@@ -11244,7 +11244,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -11297,12 +11297,26 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "call": "",
       "id": "solve",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "max_completion_tokens"
+      ],
       "notes": "",
       "role": "solver"
     }
   ],
   "parameters": {
+    "max_completion_tokens": {
+      "default": 16384,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        0,
+        null
+      ],
+      "value": 16384,
+      "values": []
+    },
     "skill": {
       "default": "",
       "description": "skill prompt injected into the system message",
@@ -11348,6 +11362,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       {
         "explanation": "Solve LiveMathematicianBench items with an empty skill prompt and SkillOpt's defaults (no theorem or proof sketch in the prompt); set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
+          "max_completion_tokens": 16384,
           "skill": "",
           "use_sketch": false,
           "use_theorem": false
@@ -11359,8 +11374,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "7ae45ec28ac9b7a75fae8932203e473e306327039c5516aa5e7e96e1dbe87cd9"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "6e9e1f5e6e08c05ea99b1960a1aac24ceae2b5be3ca3ec01e1ac19b76f86def4"
   }
 }
 ```

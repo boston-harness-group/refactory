@@ -137,6 +137,9 @@ class SkillOptLoop(OuterLoop):
         self._best_skill: str = ""
         self._best_score: float = 0.0
         self._best_candidate_id: str | None = None
+        # Why the run stopped as a failure (an epoch whose every optimizer call
+        # failed), for the report; empty while the run is healthy.
+        self._run_error: str = ""
         self._prev_epoch_skill: str | None = None
         # The epoch's last-step skill, taken before its slow update; kept in
         # the state so a run resumed between the slow update and the meta
@@ -590,10 +593,11 @@ class SkillOptLoop(OuterLoop):
                 f"skillopt epoch {epoch}: every one of its {calls} optimizer call(s) "
                 f"failed ({failures[0]}); the epoch proposed nothing"
             )
-            run.stop(
+            self._run_error = (
                 f"all {calls} optimizer call(s) in epoch {epoch} failed: "
                 f"{failures[0]}"
             )
+            run.stop(self._run_error)
         return all_failed
 
     def _count_stale_epoch(self) -> None:
@@ -949,14 +953,26 @@ class SkillOptLoop(OuterLoop):
         self._cached_merged = restored.get("cached_merged", {})
         self._cached_ranked = restored.get("cached_ranked", [])
 
+    def run_error(self) -> str | None:
+        return self._run_error or None
+
     def best_candidate(self, population: "list[Candidate]") -> "Candidate | None":
         """Return the val-gated best candidate by id from the population.
 
         If the strategy has a best id that is not in the population, raise
         ValueError so the caller reports exit_ok=False with a clear message.
-        Never falls back silently to the leaderboard.
+        Never falls back silently to the leaderboard: a best SkillOpt recorded
+        without its id (state saved before the id was kept) is an error too.
+        ``None`` only when no val score was ever recorded (the seed's initial
+        val never ran), so there is no SkillOpt best to report.
         """
         if not self._best_candidate_id:
+            if self._best_skill or self._val_cache:
+                raise ValueError(
+                    "skillopt recorded a best skill (val score "
+                    f"{self._best_score}) but not its candidate id, so its winner "
+                    "cannot be named; the strategy state predates best_candidate_id"
+                )
             return None
         for candidate in population:
             if candidate.id == self._best_candidate_id:

@@ -2101,10 +2101,12 @@ class Loop(OuterLoop):
         strategy_best = None
         strategy_error = None
         if strategy is not None:
+            # A run the strategy says failed (G32) reports that reason first.
+            strategy_error = strategy.run_error() or None
             try:
                 strategy_best = strategy.best_candidate(self.population)
             except Exception as e:
-                strategy_error = str(e)
+                strategy_error = strategy_error or str(e)
         best = strategy_best if strategy_best is not None else (board[0] if board else None)
 
         audit = self.audit_holdout(winner=best)

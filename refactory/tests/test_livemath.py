@@ -810,107 +810,64 @@ def test_format_prompt_and_view_share_the_prompt_builders():
     assert build_system(" S ") == _render_system(" S ")
 
 
-def test_livemath_mode_knob_sets_solver_route():
-    """The livemath Solver.run() injects max_completion_tokens into the solve
-    node's route by default (16384), and setting it to 0 omits the cap.
+def _route_client():
+    """A real DshModelClient with only the fields routing reads."""
+    from refactory_dsh.model import DshModelClient
 
-    Calls through Solver.run() and intercepts the model passed to super().run()
-    to verify node_routes are set by the actual implementation."""
+    client = DshModelClient.__new__(DshModelClient)
+    client._worker_backend, client._provider, client._model = "dsh", "anthropic", "claude-opus-4-6"
+    client._effort, client._permission_mode, client._max_completion_tokens = "medium", "skip", ""
+    client._role_routes, client._node_routes = {}, {"solve": {"effort": "high"}}
+    client._node_id, client._role, client._dsh_home = "", "worker", Path(".")
+    return client
+
+
+def _solver_model(monkeypatch, knob_text=None):
+    """The model Solver.run hands the graph, with the knob set as ``--knob`` sets it."""
+    from refactory_dsh import nn
+    from refactory_dsh.nn import edits as nn_edits
     from refactory_packages.livemath.mode import Solver
-    from refactory_dsh.nn import Mode
-    import copy
 
-    assert Solver.max_completion_tokens == 16384
-
-    class FakeModel:
-        """Model with _node_routes and for_node for the mode.run() injection."""
-        def __init__(self):
-            self._node_routes = {}
-
-        def for_node(self, node, role="worker"):
-            return copy.copy(self)
-
-    # Capture the model that Solver.run() passes to super().run()
-    captured_models = []
-    original_run = Mode.run
-
-    def capturing_run(self, workdir, *, model=None, **kwargs):
-        captured_models.append(model)
-        # Return a dummy RunResult instead of executing
-        from refactory_dsh.nn import RunResult
-        return RunResult(exit_ok=True, facts={}, workdir=workdir)
-
-    # Default: cap is set (16384)
-    model = FakeModel()
     solver = Solver()
-    Mode.run = capturing_run
-    try:
-        solver.run(Path("/tmp/fake-workdir"), model=model)
-    finally:
-        Mode.run = original_run
-
-    assert len(captured_models) == 1
-    injected = captured_models[0]
-    assert injected._node_routes["solve"]["max_completion_tokens"] == "16384"
-
-    # Cap disabled: 0 means no cap
-    class NoCap(Solver):
-        max_completion_tokens = 0
-
-    captured_models.clear()
-    no_cap = NoCap()
-    model2 = FakeModel()
-    Mode.run = capturing_run
-    try:
-        no_cap.run(Path("/tmp/fake-workdir"), model=model2)
-    finally:
-        Mode.run = original_run
-
-    assert len(captured_models) == 1
-    injected2 = captured_models[0]
-    # With max_completion_tokens=0, the injection is skipped
-    assert "solve" not in getattr(injected2, "_node_routes", {}) or \
-           "max_completion_tokens" not in injected2._node_routes.get("solve", {})
+    if knob_text is not None:
+        solver.load_state_dict(nn_edits.configure(solver.state_dict(), "max_completion_tokens", knob_text))
+    captured = []
+    monkeypatch.setattr(nn.Mode, "run", lambda self, workdir, *, model=None, **kw: (
+        captured.append(model) or nn.RunResult(exit_ok=True, facts={}, workdir=workdir)))
+    client = _route_client()
+    solver.run(Path("/tmp/unused-workdir"), model=client)
+    assert client._node_routes == {"solve": {"effort": "high"}}, "the caller's client is not mutated"
+    return captured[0]
 
 
-def test_negative_max_completion_tokens_is_not_injected():
-    """A subclass with ``max_completion_tokens = -1`` must NOT inject ``"-1"``
-    into the route.  The ``> 0`` guard (not truthiness) blocks negative values.
-    """
+def test_max_completion_tokens_knob_caps_the_solve_node_only(monkeypatch):
+    """G31: the declared knob (default 16384, arm A's) reaches the solve node's
+    route and no other node's; ``--knob max_completion_tokens=0`` adds no cap."""
     from refactory_packages.livemath.mode import Solver
-    from refactory_dsh.nn import Mode
-    import copy
 
-    class Negative(Solver):
-        max_completion_tokens = -1
+    knob = Solver.declare()["max_completion_tokens"]
+    assert (knob.default, knob.kind, knob.frozen) == (16384, "int", True)
+    assert "max_completion_tokens" in Solver().graph().nodes["solve"].knobs
 
-    class FakeModel:
-        def __init__(self):
-            self._node_routes = {}
-        def for_node(self, node, role="worker"):
-            return copy.copy(self)
+    model = _solver_model(monkeypatch)
+    solve = model.for_node("solve", role="solver").route()
+    assert solve["max_completion_tokens"] == "16384"
+    assert solve["effort"] == "high", "an existing solve route entry is kept"
+    for node, role in (("format_prompt", "worker"), ("optimizer", "optimizer")):
+        assert "max_completion_tokens" not in model.for_node(node, role=role).route()
 
-    captured_models = []
-    original_run = Mode.run
+    uncapped = _solver_model(monkeypatch, "0")
+    assert "max_completion_tokens" not in uncapped.for_node("solve", role="solver").route()
 
-    def capturing_run(self, workdir, *, model=None, **kwargs):
-        captured_models.append(model)
-        from refactory_dsh.nn import RunResult
-        return RunResult(exit_ok=True, facts={}, workdir=workdir)
+    assert _solver_model(monkeypatch, "4096").for_node("solve").route()["max_completion_tokens"] == "4096"
 
-    model = FakeModel()
-    neg = Negative()
-    Mode.run = capturing_run
-    try:
-        neg.run(Path("/tmp/fake-workdir"), model=model)
-    finally:
-        Mode.run = original_run
 
-    assert len(captured_models) == 1
-    injected = captured_models[0]
-    # Negative value must NOT be injected
-    assert "solve" not in getattr(injected, "_node_routes", {}) or \
-           "max_completion_tokens" not in injected._node_routes.get("solve", {})
+def test_max_completion_tokens_knob_refuses_a_negative_cap():
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    with pytest.raises(nn_edits.EditError, match="below the lower bound"):
+        nn_edits.configure(Solver().state_dict(), "max_completion_tokens", "-1")
 
 
 def test_skillopt_view_an_errored_record_with_exchanges_is_an_error():

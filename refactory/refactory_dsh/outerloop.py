@@ -349,7 +349,7 @@ class OuterLoop:
         "strategy", "select_parents", "propose", "batch_size", "install", "accepts",
         "update", "should_stop", "on_epoch_end", "report", "memory",
         "strategy_state_dict", "load_strategy_state",
-        "bind_model", "best_candidate",
+        "bind_model", "best_candidate", "run_error",
     )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -394,6 +394,15 @@ class OuterLoop:
         know (e.g. validation score) overrides this.
 
         ``population`` is the list of candidates the Loop has evaluated.
+        """
+        return None
+
+    def run_error(self) -> str | None:
+        """Why the strategy's run failed, though it stopped normally; ``None`` if it did not.
+
+        ``Run.stop`` only names the bound. A strategy that stops because its search
+        cannot go on (e.g. every optimizer call of an epoch failed) returns the
+        reason here, and the report says the run failed with it as the error.
         """
         return None
 

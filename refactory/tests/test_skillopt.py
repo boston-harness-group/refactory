@@ -2942,3 +2942,98 @@ def test_bind_budget_without_custom_strategy_does_not_error(tmp_path):
         project=Path("."),
     )
     loop.bind_budget(budget)  # must not raise
+
+
+# ── G37: the winner is SkillOpt's val-gated best, through the real loop ────
+
+
+def test_report_winner_is_a_later_candidate_that_beat_the_seed_on_val(tmp_path, monkeypatch):
+    """Two epochs through the real loop: each epoch's patch adds a rule, and the
+    val score counts the rules, so epoch 2's candidate is the val-gated best.
+    The report names that candidate, by the id the val gate recorded."""
+    monkeypatch.setattr(
+        SkillOptLoop, "_val_score",
+        staticmethod(lambda run, cand: 0.1 * SkillOptLoop._get_skill(cand).count("Always check.")),
+    )
+    strategy, infra_loop, report = _run_loop_with_infra(
+        tmp_path, skillopt_options={"max_epochs": 2},
+    )
+    trace = _read_trace(tmp_path)
+    assert len(_decisions(trace, "val_gate_accept")) == 2
+    seed = infra_loop.population[0]
+    best = [c for c in infra_loop.population
+            if c.evaluated and SkillOptLoop._get_skill(c) == strategy._best_skill]
+    assert best and strategy._best_score > 0.1, "setup: a later candidate beats the seed on val"
+    winner = best[0]
+    assert winner.id != seed.id
+    assert report["best"]["id"] == winner.id
+    assert report["holdout"]["winner"] == winner.id
+    assert report["exit_ok"] is True
+
+
+def test_best_recorded_without_its_id_is_an_error_not_a_leaderboard_fallback(tmp_path):
+    """State saved before ``best_candidate_id`` existed has a best skill and val
+    scores but no id: the report fails rather than quietly naming leaderboard[0]."""
+    strategy, infra_loop, _ = _run_loop_with_infra(tmp_path, skillopt_options={"max_epochs": 1})
+    state = strategy.strategy_state_dict()
+    del state["best_candidate_id"]
+    strategy.load_strategy_state(state)
+    assert strategy._best_candidate_id is None
+    with pytest.raises(ValueError, match="not its candidate id"):
+        strategy.best_candidate(infra_loop.population)
+    infra_loop.holdout_audit = None
+    report = infra_loop.report()
+    assert report["exit_ok"] is False
+    assert "not its candidate id" in report["error"]
+
+    # A strategy that never recorded a val score has no best to name.
+    fresh = SkillOptLoop()
+    fresh.configure(model=FakeClient())
+    assert fresh.best_candidate(infra_loop.population) is None
+
+
+# ── G32: an epoch whose every optimizer call failed fails the run ──────────
+
+
+class _FailsFromEpochTwo(FakeClient):
+    def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+        response = super().complete(prompt, system=system)
+        key = current_call_key()
+        if key and key[1] >= 2:
+            raise RuntimeError("Claude backend failed after 3 retries")
+        return response
+
+
+def test_a_later_all_failed_epoch_fails_the_run(tmp_path):
+    loop, report = _run_loop(
+        tmp_path, client=_FailsFromEpochTwo(), skillopt_options={"max_epochs": 3},
+    )
+    per_epoch = _decisions(_read_trace(tmp_path), "optimizer_calls")
+    assert [d["all_failed"] for d in per_epoch] == [False, True]
+    assert report["proposer"]["all_failed"] is False, "setup: epoch 1's calls answered"
+    assert report["exit_ok"] is False
+    assert report["error"].startswith("all ") and "in epoch 2 failed" in report["error"]
+    assert "failed after 3 retries" in report["error"]
+
+
+def test_a_later_all_failed_epoch_exits_the_optimize_cli_non_zero(tmp_path, monkeypatch):
+    from refactory_dsh import loop as loop_module
+    from refactory_dsh import model as model_module
+
+    client = _FailsFromEpochTwo()
+
+    class ScriptedRoute:
+        def __new__(cls, **_kwargs: Any) -> Any:
+            return client
+
+    monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
+    parts = _write_parts(tmp_path)
+    with _patch_mode(SkillProbe):
+        code = loop_module.main([
+            MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=2",
+            "--optimizer", "random", "--seed", "42",
+            "--runs-root", str(tmp_path / "run"), "--project", ".",
+            "--parts", str(parts),
+        ])
+    assert code != 0
+    assert [d["all_failed"] for d in _decisions(_read_trace(tmp_path), "optimizer_calls")] == [False, True]

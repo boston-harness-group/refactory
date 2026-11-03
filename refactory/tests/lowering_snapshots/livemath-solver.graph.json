@@ -82,7 +82,8 @@
   "knob_values": {
     "skill": "",
     "use_theorem": 0.0,
-    "use_sketch": 0.0
+    "use_sketch": 0.0,
+    "max_completion_tokens": 16384.0
   },
   "knob_specs": {
     "skill": {
@@ -116,6 +117,17 @@
       "values": [],
       "frozen": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "required": false
+    },
+    "max_completion_tokens": {
+      "default": 16384,
+      "kind": "int",
+      "lo": 0,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
       "required": false
     }
   }
