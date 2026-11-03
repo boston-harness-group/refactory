@@ -352,6 +352,8 @@ class ProposalContext:
             _table(["what", "value"],
                    [[str(k), json.dumps(v, default=str)] for k, v in _flatten(self.traces)]),
         ]
+        if self.item_records:
+            sections += ["", *_item_evidence(self.item_records)]
         sections += [
             "",
             "## What this run has already tried",
@@ -422,6 +424,65 @@ Rules:
   you expect and how you could be wrong.
 - If the evidence justifies no change, return an empty proposal list and say why.
 """
+
+
+#: How many error causes and wrong answers the item summary lists, and how much of
+#: each it quotes: enough to see a pattern, bounded so a large part stays a section.
+ITEM_EVIDENCE_ROWS = 6
+ITEM_EVIDENCE_CHARS = 240
+
+
+def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
+    """How the candidate being edited did item by item, on its train part.
+
+    A score is a mean over items, and a mean cannot say *why* it is low: an item
+    answered wrong and an item whose completion failed (a model call that stopped
+    at its output token limit, a timeout) cost the same. The loop already hands the
+    proposer these records (``item_records``); this is where it reads them. Train
+    records only, as ``OuterLoop.item_records`` enforces.
+    """
+    errored = [r for r in records if r.get("error_text")]
+    passed = [r for r in records if not r.get("error_text") and r.get("passed")]
+    wrong = [r for r in records if not r.get("error_text") and not r.get("passed")]
+    scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
+    mean = f", mean score {sum(scores) / len(scores):.3g}" if scores else ""
+    lines = [
+        "## Item results of the candidate being edited",
+        f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
+        f"wrong, {len(errored)} failed with an error{mean}. An error is the item's "
+        "run failing (its cause is below), not a wrong answer.",
+    ]
+    if errored:
+        causes: dict[str, list[str]] = {}
+        for record in errored:
+            causes.setdefault(_clip(record["error_text"]), []).append(str(record.get("id", "")))
+        ranked = sorted(causes.items(), key=lambda kv: -len(kv[1]))
+        lines += [
+            "",
+            "Errors, by cause:",
+            _table(["items", "cause", "e.g."],
+                   [[len(ids), cause, ", ".join(ids[:3])]
+                    for cause, ids in ranked[:ITEM_EVIDENCE_ROWS]]),
+        ]
+        if len(ranked) > ITEM_EVIDENCE_ROWS:
+            lines.append(f"({len(ranked) - ITEM_EVIDENCE_ROWS} more cause(s) not shown)")
+    reasons = [r for r in wrong if r.get("fail_reason")]
+    if reasons:
+        lines += [
+            "",
+            "Wrong answers, with the grader's reason:",
+            _table(["item", "score", "reason"],
+                   [[r.get("id"), r.get("score"), _clip(r["fail_reason"])]
+                    for r in reasons[:ITEM_EVIDENCE_ROWS]]),
+        ]
+        if len(reasons) > ITEM_EVIDENCE_ROWS:
+            lines.append(f"({len(reasons) - ITEM_EVIDENCE_ROWS} more not shown)")
+    return lines
 
 
 def _rules_text() -> str:
