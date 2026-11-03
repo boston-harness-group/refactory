@@ -1070,3 +1070,37 @@ def test_command_limit_is_scoped_to_dsh_workspace_tools(tmp_path):
                             tool_home=tmp_path if workspace else None)
         assert not any(row.get("id") in ("bash-sandbox", "tool-bash")
                        for row in json.loads(patch.read_text()))
+
+
+def _bridge_prompt(tmp_path, startup: dict, stdin: bytes) -> dict:
+    """Run the real worker bridge (fake services) and return the prompt it dispatched."""
+    bridge = Path(__file__).resolve().parents[1] / 'refactory_dsh' / 'worker_bridge.mjs'
+    (tmp_path / 'startup.json').write_text(json.dumps(startup))
+    out = tmp_path / 'out.json'
+    subprocess.run(['node', str(Path(__file__).with_name('worker_bridge_stdin_test.mjs')),
+                    str(bridge), str(tmp_path / 'startup.json'), str(out)],
+                   input=stdin, check=True, timeout=60, capture_output=True)
+    return json.loads(out.read_text())
+
+
+# Multi-byte characters of every width, so a 64 KB pipe chunk boundary splits some of them.
+_LARGE_PROMPT = ('é ünïcödé — 棋盘 ♞♛ 🐴🏁 ' * 20000) + 'end'
+
+
+def test_the_bridge_reads_the_prompt_from_stdin_when_the_task_is_a_dash(tmp_path):
+    """The launcher sends large prompts on stdin with task "-"; the external-worker
+    config disables the headless runner that resolves it, so the bridge must."""
+    data = _LARGE_PROMPT.encode('utf-8')
+    assert len(data) > 500_000
+    sent = _bridge_prompt(tmp_path, {'task': '-'}, data)
+    assert sent == {'code': 0, 'prompts': [_LARGE_PROMPT]}
+
+
+def test_the_bridge_reads_stdin_when_no_task_is_given(tmp_path):
+    sent = _bridge_prompt(tmp_path, {}, 'write answer.txt — ✓'.encode('utf-8'))
+    assert sent == {'code': 0, 'prompts': ['write answer.txt — ✓']}
+
+
+def test_the_bridge_passes_a_literal_task_through_and_ignores_stdin(tmp_path):
+    sent = _bridge_prompt(tmp_path, {'task': 'write answer.txt with 42'}, b'not the prompt')
+    assert sent == {'code': 0, 'prompts': ['write answer.txt with 42']}
