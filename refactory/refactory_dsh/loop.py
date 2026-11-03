@@ -289,6 +289,8 @@ class Loop(OuterLoop):
             self.evaluator.model = self.model
             proposer = self.model.for_node("optimizer", role="optimizer") if callable(getattr(self.model, "for_node", None)) else self.model
             self.optimizer.bind_model(proposer, workdir=self.root / "proposer")
+            if self._custom_strategy is not None:
+                self._custom_strategy.bind_model(proposer)
         self.evaluator.budget = budget
 
     def run(self) -> dict[str, Any]:
@@ -2092,33 +2094,59 @@ class Loop(OuterLoop):
     def report(self) -> dict[str, Any]:
         # The audit runs before the payload is built: it needs the winner, and the
         # report is where its numbers are read.
-        audit = self.audit_holdout()
         board = self.leaderboard()
-        best = board[0] if board else None
+
+        # G37: a custom strategy may declare its own best candidate.
+        strategy = self._custom_strategy
+        strategy_best = None
+        strategy_error = None
+        if strategy is not None:
+            # A run the strategy says failed (G32) reports that reason first.
+            strategy_error = strategy.run_error() or None
+            try:
+                strategy_best = strategy.best_candidate(self.population)
+            except Exception as e:
+                strategy_error = strategy_error or str(e)
+        best = strategy_best if strategy_best is not None else (board[0] if board else None)
+
+        audit = self.audit_holdout(winner=best)
         # When the winner has explicit val/test parts, use audit_parts for a
         # like-with-like overfit comparison (both unseen by the optimizer).
         if best is not None:
             parts_audit = self.audit_parts(best)
             if parts_audit is not None:
                 audit = parts_audit
+
+        # G32: a run whose every proposal round failed is not a success.
+        proposer = self._proposer_health()
+
         exit_ok = (
             best is not None and audit.get("winner") == best.id
             and audit.get("status") in ("measured", "not_applicable")
             and not audit.get("overfit")
+            and not proposer.get("all_failed")
+            and strategy_error is None
         )
+
+        # G33: when a custom strategy is set, report its name and epoch count.
+        optimizer_name = strategy.name if strategy is not None else self.optimizer.name
+        epochs_completed = getattr(strategy, '_epoch', self.epoch) if strategy is not None else self.epoch
+
         payload = {
             "exit_ok": exit_ok,
             "error": (
                 None if exit_ok else
+                strategy_error if strategy_error else
+                proposer.get("finding", "every optimizer call failed") if proposer.get("all_failed") else
                 "no successfully evaluated candidate is eligible to win" if best is None else
                 str(audit.get("note") or "the required held-out audit is unavailable")
             ),
             "mode": self.mode_id,
             "bound": self.bound,
             "epochs": self.config.epochs,
-            "epochs_completed": self.epoch,
+            "epochs_completed": epochs_completed,
             "batch_size": self.config.batch_size,
-            "optimizer": self.optimizer.name,
+            "optimizer": optimizer_name,
             "evaluator": self.config.evaluator,
             "evaluations": self.evaluations,
             "measurements": self.measurements,
@@ -2131,7 +2159,7 @@ class Loop(OuterLoop):
             "raw_best_score": best.raw_score if best else None,
             "seed_score": self.population[0].score if self.population and self.population[0].exit_ok else None,
             "seed_raw_score": self.population[0].raw_score if self.population and self.population[0].exit_ok else None,
-            "improvement": {"status": "observed" if best and self.population and self.population[0].score is not None and best.score > self.population[0].score else "none",
+            "improvement": {"status": "observed" if best and self.population and self.population[0].score is not None and best.score is not None and best.score > self.population[0].score else "none",
                             "interpretation": "sample means are observations, not proof of a stochastic improvement"},
             "scoring": self.scoring(),
             "leaderboard": [self._row(c) for c in board],
@@ -2161,7 +2189,7 @@ class Loop(OuterLoop):
             },
             "proposal_outcomes": self._proposal_outcomes(),
             "epochs_summary": [asdict(summary) for summary in self.epochs],
-            "proposer": self._proposer_health(),
+            "proposer": proposer,
             "holdout": audit,
         }
         self._write("report.json", payload)
@@ -2178,7 +2206,7 @@ class Loop(OuterLoop):
         return payload
 
     # ── the held-out audit ─────────────────────────────────────────────────
-    def audit_holdout(self) -> dict[str, Any]:
+    def audit_holdout(self, *, winner: "Candidate | None" = None) -> dict[str, Any]:
         """Re-evaluate the winner on the items no candidate saw, once.
 
         The search evaluated every candidate on the train part, so this is the only
@@ -2187,9 +2215,13 @@ class Loop(OuterLoop):
         while this is a measurement of the same mode on items it was not tuned
         against. A winner that only works on its training items is reported rather
         than rewarded.
+
+        When ``winner`` is provided (e.g. by a custom strategy's
+        ``best_candidate``), it overrides the leaderboard's first entry.
         """
-        board = self.leaderboard()
-        winner = board[0] if board else None
+        if winner is None:
+            board = self.leaderboard()
+            winner = board[0] if board else None
         winner_id = winner.id if winner is not None else None
         if self.holdout_audit is not None and self.holdout_audit.get("winner") == winner_id:
             return self.holdout_audit

@@ -156,6 +156,48 @@ try {
     }
   }
 
+  // --- G31: the route's output cap reaches the DSH request ---
+  {
+    const capRoot = mkdtempSync(join(tmpdir(), 'refactory-cap-'))
+    try {
+      const capDir = join(capRoot, '.refactory', 'workers')
+      mkdirSync(capDir, { recursive: true })
+      const savedReceipt = process.env.REFACTORY_WORKER_RECEIPT
+      const hook = (route, id) => {
+        const capPath = join(capDir, id + '.json')
+        writeFileSync(capPath, JSON.stringify({
+          requested_route: route, worker_id: id, run_id: capRoot, node_id: 'solve',
+          usage: { status: 'unavailable', tokens: null }
+        }))
+        process.env.REFACTORY_WORKER_RECEIPT = capPath
+        const capEvents = new Map()
+        apply({ on: (name, callback) => capEvents.set(name, callback), subagents: { list: () => ['spawn', 'fork'] } })
+        return { request: capEvents.get('agent/request'), path: capPath }
+      }
+
+      // A capped route: the root request and a child's both carry it as a number.
+      const capped = hook({ worker_backend: 'dsh', max_completion_tokens: '16384' }, 'capped')
+      const root = await capped.request({ agent: { session: { id: 'cap-root' } } }, async () => ({ provider: 'p', model: 'm' }))
+      assert.equal(root.maxTokens, 16384, 'root request should carry the route cap')
+      assert.equal(JSON.parse(readFileSync(capped.path)).actual_route.max_tokens, 16384)
+      const child = await capped.request({ agent: { session: { id: 'cap-child' } } }, async () => ({ provider: 'p', model: 'm' }))
+      assert.equal(child.maxTokens, 16384, 'a child request is bounded by the same cap')
+      const smaller = await capped.request({ agent: { session: { id: 'cap-small' } } }, async () => ({ provider: 'p', model: 'm', maxTokens: 100 }))
+      assert.equal(smaller.maxTokens, 100, 'a smaller cap already on the request is kept')
+
+      // No cap on the route: the request carries none and the receipt records none.
+      const open = hook({ worker_backend: 'dsh' }, 'open')
+      const free = await open.request({ agent: { session: { id: 'open-root' } } }, async () => ({ provider: 'p', model: 'm' }))
+      assert.equal('maxTokens' in free, false, 'an uncapped route must not add maxTokens')
+      assert.equal('max_tokens' in JSON.parse(readFileSync(open.path)).actual_route, false)
+
+      process.env.REFACTORY_WORKER_RECEIPT = savedReceipt
+      console.log('route output cap passed')
+    } finally {
+      rmSync(capRoot, { recursive: true, force: true })
+    }
+  }
+
   // --- T-9: journal usage is bounded; a 30-request worker stays linear ---
   {
     const linearRoot = mkdtempSync(join(tmpdir(), 'refactory-linear-'))

@@ -349,6 +349,7 @@ class OuterLoop:
         "strategy", "select_parents", "propose", "batch_size", "install", "accepts",
         "update", "should_stop", "on_epoch_end", "report", "memory",
         "strategy_state_dict", "load_strategy_state",
+        "bind_model", "best_candidate", "run_error",
     )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -374,6 +375,36 @@ class OuterLoop:
         self.model_name = model_name
         self.provider = provider
         self.options = dict(options)
+
+    def bind_model(self, model: Any) -> None:
+        """Receive the run's budget-bound, role-routed model client.
+
+        Called by ``Loop.bind_budget()`` after the budget is attached, replacing
+        whatever ``configure()`` stored.  Override when a strategy caches derived
+        clients from ``self.model`` during ``configure()``; the default just
+        reassigns ``self.model``.
+        """
+        self.model = model
+
+    def best_candidate(self, population: "list[Candidate]") -> "Candidate | None":
+        """The strategy's own best, when it differs from leaderboard rank.
+
+        Return ``None`` to use the leaderboard's first entry (today's behaviour).
+        A strategy that gates winners by a criterion the leaderboard does not
+        know (e.g. validation score) overrides this.
+
+        ``population`` is the list of candidates the Loop has evaluated.
+        """
+        return None
+
+    def run_error(self) -> str | None:
+        """Why the strategy's run failed, though it stopped normally; ``None`` if it did not.
+
+        ``Run.stop`` only names the bound. A strategy that stops because its search
+        cannot go on (e.g. every optimizer call of an epoch failed) returns the
+        reason here, and the report says the run failed with it as the error.
+        """
+        return None
 
     # ── the entry point, in one place ──────────────────────────────────────
     def run(self) -> dict[str, Any]:

@@ -88,8 +88,17 @@ export function apply(ctx) {
     if (backend === 'dsh' && initial.requested_route.effort && agent.session.id === rootSessionId) {
       route = { ...route, reasoningEffort: initial.requested_route.effort }
     }
+    // The route's output cap (a node route's `max_completion_tokens`, e.g. the
+    // LiveMath solve node's) bounds every request of this worker, the root's
+    // and any delegated child's alike: it is a limit on the node's calls, and a
+    // child's own smaller cap is kept. DSH validates it as a positive integer.
+    const cap = Number(initial.requested_route.max_completion_tokens || 0)
+    if (backend === 'dsh' && Number.isSafeInteger(cap) && cap > 0) {
+      route = { ...route, maxTokens: route.maxTokens != null && route.maxTokens < cap ? route.maxTokens : cap }
+    }
     const actual = { worker_backend: 'dsh', provider: route.provider, model: route.model,
-      effort: route.reasoningEffort ?? null, source: 'runtime-request' }
+      effort: route.reasoningEffort ?? null,
+      ...(route.maxTokens != null ? { max_tokens: route.maxTokens } : {}), source: 'runtime-request' }
     sessions.set(agent.session.id, actual)
     save({ ...(agent.session.id === rootSessionId ? { actual_route: actual, runtime_session_id: rootSessionId } : {}),
       sessions: Object.fromEntries(sessions) }, 'running',

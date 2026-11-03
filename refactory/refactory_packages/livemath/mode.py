@@ -11,15 +11,19 @@ SkillOpt solver defaults:
     with ``--cfg-options env.exec_timeout=1800`` (SkillOpt's run-train.sh:14 and
     run-train-seed.sh:20, recorded in each run's out/config.json ``exec_timeout``),
     and the outer-loop protocol has arm B match arm A.
-  max_completion_tokens = 16384 (livemathematicianbench/default.yaml:16) and
+  max_completion_tokens = 16384 (livemathematicianbench/default.yaml:16) -- the
+    ``max_completion_tokens`` knob (``0`` = no cap), applied to the solve node's
+    route only (``Solver.run``).
   reasoning_effort = medium (_base_/default.yaml:10) -- an agent node carries no
-    per-node token cap or effort; both are run settings (``--effort medium``, or
-    ``node_routes`` for ``solve``), not part of this graph.
+    per-node effort; it is a run setting (``--effort medium``, or ``node_routes``
+    for ``solve``), not part of this graph.
   model = gpt-5.5 (_base_/default.yaml:7) -- likewise a run setting.
 """
 from __future__ import annotations
 
-from typing import ClassVar
+import copy
+from pathlib import Path
+from typing import Any, ClassVar, Mapping
 
 from refactory_dsh import nn
 
@@ -47,6 +51,8 @@ SYSTEM_PROMPT = (
 # Arm A's exec_timeout (run-train.sh:14, run-train-seed.sh:20); SkillOpt's own
 # configs/livemathematicianbench/default.yaml:17 default is 300.
 SOLVE_TIMEOUT_S = 1800
+# Arm A's solver output cap (configs/livemathematicianbench/default.yaml:16).
+MAX_COMPLETION_TOKENS = 16384
 
 
 class Solver(nn.Mode):
@@ -67,6 +73,12 @@ class Solver(nn.Mode):
                                    description="include the item's theorem as a ## Theorem section"),
             "use_sketch": nn.Knob(False, "bool",
                                   description="include the item's proof sketch as a ## Proof Sketch section"),
+            # SkillOpt configs/livemathematicianbench/default.yaml:16. A run
+            # setting, not a search target: frozen against the optimizer, set
+            # with ``--knob max_completion_tokens=N``.
+            "max_completion_tokens": nn.Knob(
+                MAX_COMPLETION_TOKENS, "int", lo=0, frozen=True,
+                description="output-token cap on each solve-node model call; 0 = no cap"),
         }
 
     def build(self) -> nn.Graph:
@@ -94,6 +106,7 @@ class Solver(nn.Mode):
             tool_policy="none",
             role="solver",
             timeout_s=self.solve_timeout_s,
+            knobs=("max_completion_tokens",),
         ))
         graph.add(nn.Node(
             "finish", "op",
@@ -104,6 +117,33 @@ class Solver(nn.Mode):
         graph.connect("format_prompt", "solve")
         graph.connect("data", "finish")
         return graph
+
+    def run(
+        self,
+        workdir: Path,
+        *,
+        model: Any = None,
+        task: Mapping[str, Any] | None = None,
+        memory: Any = None,
+        **kwargs: Any,
+    ) -> nn.RunResult:
+        """Put the ``max_completion_tokens`` knob on the solve node's route.
+
+        The graph has no per-node route field, so the cap travels the way any
+        per-node route setting does: as the ``solve`` entry of the model's
+        ``node_routes``. ``for_node("solve")`` then carries it in the worker's
+        requested route, and the worker observer (``worker_observer.mjs``) sets
+        it as ``maxTokens`` on the DSH ``agent/request`` config, which DSH passes
+        to ``llm.prepareCall``. Other nodes' routes are untouched; ``0`` adds no
+        cap.
+        """
+        cap = int(self.values().get("max_completion_tokens") or 0)
+        if cap > 0 and model is not None and callable(getattr(model, "for_node", None)):
+            routes = dict(getattr(model, "_node_routes", None) or {})
+            routes["solve"] = {**routes.get("solve", {}), "max_completion_tokens": str(cap)}
+            model = copy.copy(model)
+            model._node_routes = routes
+        return super().run(workdir, model=model, task=task, memory=memory, **kwargs)
 
     def score(self, run: nn.RunResult) -> float:
         scores = [entry["score"] for entry in run.facts.get("item_scores", [])]

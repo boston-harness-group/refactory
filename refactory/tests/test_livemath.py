@@ -810,6 +810,66 @@ def test_format_prompt_and_view_share_the_prompt_builders():
     assert build_system(" S ") == _render_system(" S ")
 
 
+def _route_client():
+    """A real DshModelClient with only the fields routing reads."""
+    from refactory_dsh.model import DshModelClient
+
+    client = DshModelClient.__new__(DshModelClient)
+    client._worker_backend, client._provider, client._model = "dsh", "anthropic", "claude-opus-4-6"
+    client._effort, client._permission_mode, client._max_completion_tokens = "medium", "skip", ""
+    client._role_routes, client._node_routes = {}, {"solve": {"effort": "high"}}
+    client._node_id, client._role, client._dsh_home = "", "worker", Path(".")
+    return client
+
+
+def _solver_model(monkeypatch, knob_text=None):
+    """The model Solver.run hands the graph, with the knob set as ``--knob`` sets it."""
+    from refactory_dsh import nn
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    solver = Solver()
+    if knob_text is not None:
+        solver.load_state_dict(nn_edits.configure(solver.state_dict(), "max_completion_tokens", knob_text))
+    captured = []
+    monkeypatch.setattr(nn.Mode, "run", lambda self, workdir, *, model=None, **kw: (
+        captured.append(model) or nn.RunResult(exit_ok=True, facts={}, workdir=workdir)))
+    client = _route_client()
+    solver.run(Path("/tmp/unused-workdir"), model=client)
+    assert client._node_routes == {"solve": {"effort": "high"}}, "the caller's client is not mutated"
+    return captured[0]
+
+
+def test_max_completion_tokens_knob_caps_the_solve_node_only(monkeypatch):
+    """G31: the declared knob (default 16384, arm A's) reaches the solve node's
+    route and no other node's; ``--knob max_completion_tokens=0`` adds no cap."""
+    from refactory_packages.livemath.mode import Solver
+
+    knob = Solver.declare()["max_completion_tokens"]
+    assert (knob.default, knob.kind, knob.frozen) == (16384, "int", True)
+    assert "max_completion_tokens" in Solver().graph().nodes["solve"].knobs
+
+    model = _solver_model(monkeypatch)
+    solve = model.for_node("solve", role="solver").route()
+    assert solve["max_completion_tokens"] == "16384"
+    assert solve["effort"] == "high", "an existing solve route entry is kept"
+    for node, role in (("format_prompt", "worker"), ("optimizer", "optimizer")):
+        assert "max_completion_tokens" not in model.for_node(node, role=role).route()
+
+    uncapped = _solver_model(monkeypatch, "0")
+    assert "max_completion_tokens" not in uncapped.for_node("solve", role="solver").route()
+
+    assert _solver_model(monkeypatch, "4096").for_node("solve").route()["max_completion_tokens"] == "4096"
+
+
+def test_max_completion_tokens_knob_refuses_a_negative_cap():
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    with pytest.raises(nn_edits.EditError, match="below the lower bound"):
+        nn_edits.configure(Solver().state_dict(), "max_completion_tokens", "-1")
+
+
 def test_skillopt_view_an_errored_record_with_exchanges_is_an_error():
     """A pass that failed after a model call (an exchange recorded, then an
     error) is still SkillOpt's failed process_one: its error, no conversation
