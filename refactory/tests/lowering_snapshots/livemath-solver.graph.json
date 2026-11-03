@@ -83,7 +83,8 @@
     "skill": "",
     "use_theorem": 0.0,
     "use_sketch": 0.0,
-    "max_completion_tokens": 16384.0
+    "max_completion_tokens": 16384.0,
+    "data_parallelism": 1.0
   },
   "knob_specs": {
     "skill": {
@@ -128,6 +129,17 @@
       "values": [],
       "frozen": true,
       "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "required": false
+    },
+    "data_parallelism": {
+      "default": 1,
+      "kind": "int",
+      "lo": 1,
+      "hi": 64,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "concurrent data-node items",
       "required": false
     }
   }

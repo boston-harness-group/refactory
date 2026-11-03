@@ -52,6 +52,8 @@ export interface NodeView {
   subgraph_entry?: string
   subgraph_exit?: string
   limit?: number
+  /** `DataNode`: max concurrent items. 1 (default) is sequential. */
+  parallelism?: number
   /** For a `SelectionNode`: the selection strategy. */
   strategy?: string
   /** `AgentNode`: optional tool policy. `'none'` disables all tools. */
@@ -78,6 +80,8 @@ export interface DataPass {
   finished: boolean
   /** The isolated pass directory for this item, set by the drain after command_begin. */
   passDir?: string
+  /** Max concurrent items (from the data node). 1 is sequential. */
+  parallelism?: number
 }
 
 /** A gate stopped the run, rather than completing an item branch. */
@@ -611,6 +615,7 @@ export class Spine {
       view.subgraph_entry = node.subgraph_entry ?? ''
       view.subgraph_exit = node.subgraph_exit ?? ''
       if (node.limit !== undefined) view.limit = node.limit
+      if (typeof node.parallelism === 'number' && node.parallelism > 1) view.parallelism = node.parallelism
     }
     if (node._type === 'SelectionNode') {
       view.strategy = node.strategy ?? 'best_score'
@@ -840,7 +845,8 @@ export class Spine {
     const exit = body.subgraph_exit ?? ''
     if (entry === '' || exit === '') throw new Error(`${node} declares no subgraph to iterate`)
     this.invalidateNodes(this.descendants(entry, exit), false)
-    this.pass = { node, count, index: 0, entry, exit, finished: false }
+    const parallelism = typeof body.parallelism === 'number' && body.parallelism > 1 ? body.parallelism : undefined
+    this.pass = { node, count, index: 0, entry, exit, finished: false, ...(parallelism !== undefined ? { parallelism } : {}) }
     this.splicePosition(node, [entry])
     this.log.push(`data ${node}: ${count} item(s), first pass at ${entry}`)
     return this.next()

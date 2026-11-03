@@ -1087,6 +1087,47 @@ class Executor:
                 if not _resuming and _passes_root.exists():
                     _shutil.rmtree(_passes_root)
 
+                # ── concurrent dispatch ────────────────────────────────
+                if node.parallelism > 1:
+                    from .data_parallel import _check_serial_fallback, run_data_concurrent
+
+                    _fallback = _check_serial_fallback(self, node, node.parallelism)
+                    if _fallback is None:
+                        _par_scores, _par_records, _par_error, _par_halted, _par_failed = \
+                            run_data_concurrent(
+                                self, node, items, task, node.parallelism,
+                                setup_kwargs=_setup_kwargs,
+                                verify_kwargs=_verify_kwargs,
+                                original_max_steps=_original_max_steps,
+                            )
+                        scores = _par_scores
+                        self._item_records.extend(_par_records)
+                        _failed_item_step_indices.update(_par_failed)
+                        # Restore max_steps.
+                        _data_steps_added = len(self.steps) - _data_steps_start
+                        self.max_steps = _original_max_steps + _data_steps_added
+                        if _par_halted:
+                            error = _par_error
+                            _data_halted = True
+                            break
+                        if _par_error is not None:
+                            error = _par_error
+                            break
+                        if scores:
+                            failed_count = sum(
+                                1 for r in scores if r.get("error_text") is not None
+                            )
+                            if "item_scores" in node.produces:
+                                self.ctx.set_fact("item_scores", scores)
+                            if failed_count == len(items):
+                                error = f"{node.id}: all {len(items)} items failed"
+                                break
+                        self.record.complete(node)
+                        out = self.graph.out_edges(node.id)
+                        current = out[0].target if out else None
+                        continue
+                    # else: fallback recorded, proceed with sequential path below
+
                 for index, item in enumerate(items):
                     # Resume: an item whose pass finished is not run again; its
                     # record -- kept with the pass when it finished -- is.

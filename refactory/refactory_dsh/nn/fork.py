@@ -129,8 +129,7 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
 
 def run_fork(executor: Executor, node: Node) -> str | None:
     """Wait for all scheduled work; merge in target order; never join on failure."""
-    from .executor import ExecutionError, Executor, RunContext
-    from .record import RunRecord
+    from .executor import ExecutionError
 
     edges = executor.graph.out_edges(node.id)
     if len(edges) != 1 or edges[0].condition is not None:
@@ -164,22 +163,14 @@ def run_fork(executor: Executor, node: Node) -> str | None:
                 "shared_memory_serial": serial_memory, "custom_model_serial": serial_model,
                 "live_gate_answers_serial": serial_gate}
 
+    from .concurrent_helpers import clone_child_executor, make_step_budget_reserve
+
     lock = threading.Lock()
     cancelled = threading.Event()
     branch_model = (ctx.model.with_cancellation(cancelled)
                     if not serial and type(ctx.model) is DshModelClient else ctx.model)
-    remaining = executor.max_steps - len(executor.steps)
     status: dict[str, dict[str, Any]] = {target: {"status": "queued"} for target in node.targets}
-
-    def reserve() -> bool:
-        nonlocal remaining
-        with lock:
-            if cancelled.is_set():
-                raise CancelledError("fork cancelled before the next branch step")
-            if remaining <= 0:
-                return False
-            remaining -= 1
-            return True
+    reserve = make_step_budget_reserve(executor, cancelled)
 
     def record(target: str, state: str, error: str | None = None) -> None:
         with lock:
@@ -191,22 +182,9 @@ def run_fork(executor: Executor, node: Node) -> str | None:
     # leave half a fork running. The shipped client uses separate subprocesses;
     # arbitrary custom clients retain caller-thread serial execution.
     for _ in branches:
-        child_ctx = RunContext(
-            ctx.workdir, knobs=copy.deepcopy(ctx.knobs), facts=copy.deepcopy(ctx.facts),
-            verdicts=copy.deepcopy(ctx.verdicts), task=copy.deepcopy(ctx.task),
-            model=branch_model, memory=ctx.memory, enforce_writes=ctx.enforce_writes,
+        child = clone_child_executor(
+            executor, branch_model, reserve_step=reserve,
         )
-        # Each branch keeps its own record, starting from the run's pending feedback;
-        # the branches' records are folded into the run's once they are done.
-        child = Executor(executor.graph, child_ctx, max_steps=executor.max_steps,
-                         enable_recovery=executor.enable_recovery,
-                         record=RunRecord(feedback=dict(executor.record.feedback)))
-        child_ctx.budget = ctx.budget
-        # Branch gate IDs are disjoint. Keep their own counters across a later
-        # outer re-entry of this fork, as the DSH spine does; a new child object
-        # must not grant a fresh retry allowance.
-        child._gate_iterations = executor._gate_iterations
-        child._reserve_step = reserve
         children.append(child)
 
     _halt_exc: list[Any] = []  # HaltStop raised inside a branch, propagated after cleanup

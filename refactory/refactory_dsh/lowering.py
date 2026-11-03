@@ -254,6 +254,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 source_format=node.source_format or None,
                 inline_items=[dict(item) for item in node.inline_items],
                 limit=node.limit or None,
+                parallelism=node.parallelism,
             )
         else:
             try:

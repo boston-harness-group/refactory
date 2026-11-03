@@ -165,6 +165,7 @@ _NODE_FIELDS = frozenset(
         "workspace",
         "system_prompt_template",
         "tool_policy",
+        "parallelism",
     }
 )
 
@@ -231,6 +232,9 @@ class Node:
     source_format: str = ""
     inline_items: tuple[dict[str, Any], ...] = ()
     limit: int = 0
+    #: `data`: the most items to run at once. 1 is sequential (the default);
+    #: N > 1 lets up to N items run concurrently on both runtimes.
+    parallelism: int = 1
     #: Resource phase is independent of worker routing. Unset preserves the
     #: enclosing phase, except the legacy validation role enters validation.
     resource_role: str | None = None
@@ -298,6 +302,10 @@ class Node:
             raise GraphError(f"fork node {self.id!r} declares no targets")
         if self.kind == "join" and not self.sources:
             raise GraphError(f"join node {self.id!r} declares no sources")
+        if self.parallelism < 1:
+            raise GraphError(f"node {self.id!r}: parallelism must be >= 1")
+        if self.parallelism != 1 and self.kind != "data":
+            raise GraphError(f"node {self.id!r}: parallelism is a data-node field")
         if self.kind == "data":
             if not self.subgraph_entry or not self.subgraph_exit:
                 raise GraphError(
@@ -415,6 +423,7 @@ class Node:
             **({"inline_items": [dict(item) for item in self.inline_items]}
                if self.inline_items else {}),
             **({"limit": self.limit} if self.limit else {}),
+            **({"parallelism": self.parallelism} if self.parallelism != 1 else {}),
             **({"feedback_keys": list(self.feedback_keys)} if self.feedback_keys else {}),
             **({"timeout_s": self.timeout_s} if self.timeout_s is not None else {}),
             **({"retry": {**self.retry, "on": list(self.retry["on"])}}
@@ -460,6 +469,7 @@ class Node:
             source_format=str(state.get("source_format", "")),
             inline_items=tuple(state.get("inline_items") or ()),
             limit=int(state.get("limit", 0)),
+            parallelism=int(state.get("parallelism", 1)),
             feedback_keys=tuple(state.get("feedback_keys") or ()),
             timeout_s=(int(state["timeout_s"]) if state.get("timeout_s") is not None else None),
             retry=(dict(state["retry"]) if isinstance(state.get("retry"), dict)

@@ -545,6 +545,28 @@ def _write_pass_state(workdir: Path, node_id: str, state: dict[str, int]) -> Non
     path.write_text(json.dumps(state))
 
 
+def _locked_pass_state_update(
+    workdir: Path, node_id: str, updater: Any,  # Callable[[dict], None]
+) -> None:
+    """Read-modify-write pass_state under an exclusive file lock.
+
+    The lock-file pattern matches ``edit_facts`` (``run.py:178``):
+    ``fcntl.flock(lock, fcntl.LOCK_EX)`` around read + modify + write.
+    """
+    import fcntl
+
+    lock_path = _pass_state_path(workdir, node_id).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            state = _read_pass_state(workdir, node_id)
+            updater(state)
+            _write_pass_state(workdir, node_id, state)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
     """Materialise one item and prepare the workspace for its pass."""
     items = items_of(node, workdir)
@@ -566,10 +588,11 @@ def command_begin(node: Node, workdir: Path, index: int) -> dict[str, Any]:
         if passes_dir.exists():
             shutil.rmtree(passes_dir)
 
-    # Track processed count in pass state.
-    ps = _read_pass_state(workdir, node.id)
-    ps["processed"] = ps.get("processed", 0) + 1
-    _write_pass_state(workdir, node.id, ps)
+    # Track processed count in pass state (locked for concurrent items).
+    _locked_pass_state_update(
+        workdir, node.id,
+        lambda ps: ps.__setitem__("processed", ps.get("processed", 0) + 1),
+    )
 
     # Create the isolated pass directory.
     declared_reads = _subgraph_declared_reads(workdir, node)
@@ -687,10 +710,11 @@ def command_end(
                     # actual exception class (e.g. ValueError), not
                     # RuntimeError from the end --failed wrapper.
                     record = existing
-        # Track failed count in pass state.
-        ps = _read_pass_state(workdir, node.id)
-        ps["failed"] = ps.get("failed", 0) + 1
-        _write_pass_state(workdir, node.id, ps)
+        # Track failed count in pass state (locked for concurrent items).
+        _locked_pass_state_update(
+            workdir, node.id,
+            lambda ps: ps.__setitem__("failed", ps.get("failed", 0) + 1),
+        )
         # Merge declared produces from the pass directory to the run directory.
         merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir, record)
@@ -729,10 +753,11 @@ def command_end(
         )
         if record is not None and SCORES_FACT in node.produces:
             _write_facts(workdir, SCORES_FACT, [record])
-        # Track failed count in pass state.
-        ps = _read_pass_state(workdir, node.id)
-        ps["failed"] = ps.get("failed", 0) + 1
-        _write_pass_state(workdir, node.id, ps)
+        # Track failed count in pass state (locked for concurrent items).
+        _locked_pass_state_update(
+            workdir, node.id,
+            lambda ps: ps.__setitem__("failed", ps.get("failed", 0) + 1),
+        )
         # Merge declared produces from the pass directory to the run directory.
         merge_pass_results(workdir, pass_dir, node.produces)
         mark_pass_complete(pass_dir, record)

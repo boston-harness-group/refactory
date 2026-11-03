@@ -26,6 +26,8 @@
     "refactory_dsh.memory",
     "refactory_dsh.model",
     "refactory_dsh.nn",
+    "refactory_dsh.nn.concurrent_helpers",
+    "refactory_dsh.nn.data_parallel",
     "refactory_dsh.nn.declarations",
     "refactory_dsh.nn.edits",
     "refactory_dsh.nn.executor",
