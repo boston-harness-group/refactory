@@ -937,9 +937,11 @@ The per-item half of a data node, from the command line.
 |---|---|---|
 | class | `AllItemsFailedError` | `` |
 | class | `ItemsError` | `` |
-| function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int') -> 'dict[str, Any]'` |
-| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None) -> 'dict[str, Any]'` |
+| function | `command_begin` | `(node: 'Node', workdir: 'Path', index: 'int', *, concurrent: 'bool' = False) -> 'dict[str, Any]'` |
+| function | `command_end` | `(node: 'Node', workdir: 'Path', index: 'int', *, failed_reason: 'str \| None' = None, failed_kind: 'str \| None' = None, concurrent: 'bool' = False) -> 'dict[str, Any]'` |
+| function | `command_finish` | `(node: 'Node', workdir: 'Path', *, partial: 'bool' = False) -> 'dict[str, Any]'` |
 | function | `command_list` | `(node: 'Node', workdir: 'Path') -> 'dict[str, Any]'` |
+| function | `command_prepare` | `(node: 'Node', workdir: 'Path', *, requested: 'int', fallback: 'str \| None' = None) -> 'dict[str, Any]'` |
 | function | `command_reset` | `(workdir: 'Path', request: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |
 | function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
@@ -961,7 +963,9 @@ The per-item half of a data node, from the command line.
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
 - **`command_begin`** — Materialise one item and prepare the workspace for its pass.
 - **`command_end`** — The Task's verdict on one pass, folded into the run's facts.
+- **`command_finish`** — Close a concurrent pass: records and ``item_scores`` in item order, then the
 - **`command_list`** — How many items the node iterates, and what they are called.
+- **`command_prepare`** — Open a pass whose items were asked to run ``requested`` at a time.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
