@@ -334,15 +334,18 @@ def _eval_condition(expr: str, values: dict[str, Any]) -> bool:
 
     expr = expr.strip()
 
-    m = re.match(
-        r"([A-Za-z_]\w*)\s*(==|!=)\s*['\"]([^'\"]*)['\"]$", expr,
+    # A literal ends at the quote that opened it, so either quote may appear inside
+    # the other: "don't explain", 'say "hi"'.
+    m = re.fullmatch(
+        r"""([A-Za-z_]\w*)\s*(==|!=)\s*(?:'([^']*)'|"([^"]*)")""", expr,
     )
     if m:
-        var, op, lit = m.group(1), m.group(2), m.group(3)
+        var, op = m.group(1), m.group(2)
+        lit = m.group(3) if m.group(3) is not None else m.group(4)
         val = str(values.get(var, ""))
         return (val == lit) if op == "==" else (val != lit)
 
-    m = re.match(r"([A-Za-z_]\w*)$", expr)
+    m = re.fullmatch(r"([A-Za-z_]\w*)", expr)
     if m:
         return bool(values.get(m.group(1)))
 
@@ -353,7 +356,9 @@ def _render_conditionals(template: str, values: dict[str, Any]) -> str:
     """Process ``{% if %}`` / ``{% elif %}`` / ``{% else %}`` / ``{% endif %}``."""
     import re
 
-    pattern = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}")
+    # DOTALL: a condition may span lines, and its opening tag must be recognized
+    # whenever its else/endif are, or raw syntax and every branch reach the model.
+    pattern = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}", re.DOTALL)
 
     result: list[str] = []
     # Each frame: (emitting: is the current branch active, settled: has any

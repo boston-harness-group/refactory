@@ -153,27 +153,80 @@ def test_a_prompt_with_stray_braces_is_left_alone(tmp_path):
     assert model.prompts[0][1].endswith('json: {"a": 1}, knob 1')
 
 
+_BRANCHES = (
+    "{% if style == 'verbose' %}Explain in detail. "
+    "{% elif style == 'brief' %}Be brief. "
+    "{% else %}Answer. {% endif %}"
+    "Question: {{question}}"
+)
+
+
+def _render(template, tmp_path, **values):
+    from refactory_dsh.nn.executor import render
+
+    return render(template, nn.RunContext(tmp_path, knobs=values))
+
+
 def test_a_prompt_template_with_conditionals_renders_the_active_branch(tmp_path):
+    """Through a real agent node: only the active branch reaches the model."""
     graph = nn.Graph()
-    graph.add(nn.Node(
-        "ask", "agent",
-        prompt_template=(
-            "{% if style == 'verbose' %}Explain in detail. "
-            "{% elif style == 'brief' %}Be brief. "
-            "{% else %}Answer. {% endif %}"
-            "Question: {{question}}"
-        ),
-        writes=("answer.txt",), knobs=("style",),
-    ))
-    for style, expected in (
-        ("verbose", "Explain in detail. Question: what?"),
-        ("brief", "Be brief. Question: what?"),
-        ("direct", "Answer. Question: what?"),
-    ):
+    graph.add(nn.Node("ask", "agent", prompt_template=_BRANCHES,
+                      writes=("answer.txt",), knobs=("style",)))
+    branches = {"verbose": "Explain in detail. ", "brief": "Be brief. ", "direct": "Answer. "}
+    for style, active in branches.items():
         model = FakeModel()
         result = nn.execute(graph, tmp_path, knobs={"style": style}, facts={"question": "what?"}, model=model)
         assert result.exit_ok, result.error
-        assert model.prompts[0][1].endswith(expected), f"{style}: {model.prompts[0][1]!r}"
+        prompt = model.prompts[0][1]
+        assert prompt.endswith(active + "Question: what?"), f"{style}: {prompt!r}"
+        assert "{%" not in prompt and "%}" not in prompt, prompt
+        for other, text in branches.items():
+            assert (text in prompt) == (other == style), f"{style}: {prompt!r}"
+
+
+@pytest.mark.parametrize(("style", "expected"), [
+    ("verbose", "Explain in detail. Question: what?"),
+    ("brief", "Be brief. Question: what?"),
+    ("direct", "Answer. Question: what?"),
+])
+def test_render_keeps_exactly_the_active_branch(tmp_path, style, expected):
+    assert _render(_BRANCHES, tmp_path, style=style, question="what?") == expected
+
+
+@pytest.mark.parametrize(("template", "values", "expected"), [
+    # An apostrophe inside double quotes, and a double quote inside single quotes.
+    ("""{% if style == "don't explain" %}SHORT{% else %}LONG{% endif %}""", {"style": "don't explain"}, "SHORT"),
+    ("""{% if style == 'say "hi"' %}SHORT{% else %}LONG{% endif %}""", {"style": 'say "hi"'}, "SHORT"),
+    ("""{% if style == "don't" %}SHORT{% else %}LONG{% endif %}""", {"style": "other"}, "LONG"),
+    # Mismatched quotes are not a literal, so the condition is false.
+    ("""{% if style == 'brief" %}SHORT{% else %}LONG{% endif %}""", {"style": "brief"}, "LONG"),
+    # A condition that spans lines.
+    ("{% if style\n == 'brief' %}SHORT{% else %}LONG{% endif %}", {"style": "brief"}, "SHORT"),
+    ("{% if style\n == 'brief' %}SHORT{% else %}LONG{% endif %}", {"style": "verbose"}, "LONG"),
+    ("{%\nif style == 'brief'\n%}SHORT{%\nelse\n%}LONG{%\nendif\n%}", {"style": "brief"}, "SHORT"),
+    # !=
+    ("{% if style != 'brief' %}LONG{% else %}SHORT{% endif %}", {"style": "brief"}, "SHORT"),
+    ("{% if style != 'brief' %}LONG{% else %}SHORT{% endif %}", {"style": "verbose"}, "LONG"),
+    # Truthiness of a bare name, including a missing one.
+    ("{% if hint %}H{% else %}-{% endif %}", {"hint": "use the board"}, "H"),
+    ("{% if hint %}H{% else %}-{% endif %}", {"hint": ""}, "-"),
+    ("{% if hint %}H{% else %}-{% endif %}", {"hint": 0}, "-"),
+    ("{% if hint %}H{% else %}-{% endif %}", {}, "-"),
+    # Nesting: an inner block only counts inside an active outer branch.
+    ("{% if a %}A{% if b %}B{% else %}b{% endif %}{% else %}x{% if b %}B{% endif %}{% endif %}.",
+     {"a": 1, "b": 1}, "AB."),
+    ("{% if a %}A{% if b %}B{% else %}b{% endif %}{% else %}x{% if b %}B{% endif %}{% endif %}.",
+     {"a": 1, "b": 0}, "Ab."),
+    ("{% if a %}A{% if b %}B{% else %}b{% endif %}{% else %}x{% if b %}B{% endif %}{% endif %}.",
+     {"a": 0, "b": 1}, "xB."),
+    ("{% if a %}A{% if b %}B{% else %}b{% endif %}{% else %}x{% if b %}B{% endif %}{% endif %}.",
+     {"a": 0, "b": 0}, "x."),
+    # elif after a taken branch is skipped, even when its own condition holds.
+    ("{% if a %}1{% elif b %}2{% else %}3{% endif %}", {"a": 1, "b": 1}, "1"),
+])
+def test_render_conditionals(tmp_path, template, values, expected):
+    rendered = _render(template, tmp_path, **values)
+    assert rendered == expected, rendered
 
 
 def test_a_path_outside_the_work_directory_is_refused(tmp_path):
