@@ -2636,50 +2636,131 @@ def test_partial_failure_does_not_early_stop(tmp_path):
 # ── G37: strategy best candidate overrides report winner ──────────────────
 
 
+def _run_loop_with_infra(
+    tmp_path: Path,
+    client: FakeClient | ReplayClient | None = None,
+    config_overrides: dict[str, Any] | None = None,
+    skillopt_options: dict[str, Any] | None = None,
+) -> tuple[SkillOptLoop, Loop, dict[str, Any]]:
+    """Like _run_loop but also returns the infrastructure Loop object."""
+    cfg = _config(tmp_path, **(config_overrides or {}))
+    client = client or FakeClient()
+    options = dict(skillopt_options or {})
+    with _patch_mode(SkillProbe):
+        loop = strategies.create(
+            "skillopt", MODE_ID, cfg,
+            strategy_options=options,
+            project=Path("."), model=client,
+        )
+        strategy = loop._custom_strategy
+        assert isinstance(strategy, SkillOptLoop)
+        report = loop.run()
+    return strategy, loop, report
+
+
 def test_best_candidate_returns_val_gated_winner_by_id(tmp_path):
     """SkillOptLoop.best_candidate returns the candidate whose id matches
     _best_candidate_id, looked up by id from the population."""
-    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
-    strategy = loop
+    strategy, infra_loop, report = _run_loop_with_infra(
+        tmp_path, skillopt_options={"max_epochs": 1},
+    )
     assert strategy._best_candidate_id is not None
-    # The best_candidate method should return a candidate from the population
-    from refactory_dsh.loop import Loop
-    infrastructure_loop = Loop.__new__(Loop)
-    # Access the population from the loop that was used
-    pop = [c for c in report["leaderboard"]]
-    # Instead, let's just call best_candidate with the candidates directly
-    # We need actual Candidate objects, not dicts. But we can verify the id match.
-    assert strategy._best_candidate_id == report["holdout"]["winner"]
+    # The best_candidate method returns the candidate object from the population
+    winner = strategy.best_candidate(infra_loop.population)
+    assert winner is not None
+    assert winner.id == strategy._best_candidate_id
+    assert winner.id == report["holdout"]["winner"]
 
 
 def test_strategy_best_candidate_overrides_report_winner(tmp_path):
-    """When a strategy's val gate selects a candidate different from
-    leaderboard[0], report['best']['id'] matches the strategy's pick."""
-    # Rig the FakeClient so the val gate accepts at a lower score than train,
-    # ensuring the val-selected best differs from train-ranked leaderboard[0].
-    # Use a client that makes the first accepted candidate win on val but not train.
-    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
-    # The strategy's best candidate id should be in the report
-    best_id = loop._best_candidate_id
-    assert best_id is not None
-    assert report["best"]["id"] == best_id
-    assert report["holdout"]["winner"] == best_id
+    """When the strategy's val-gated pick differs from leaderboard[0],
+    report['best'] and report['holdout']['winner'] use the strategy's pick,
+    NOT the leaderboard's top entry.
+
+    Proves divergence: add a candidate with a higher train score to the
+    population so it becomes leaderboard[0], but the strategy's val-selected
+    best stays on the original seed.  report() must use the strategy's pick."""
+    strategy, infra_loop, report1 = _run_loop_with_infra(
+        tmp_path, skillopt_options={"max_epochs": 1},
+    )
+    board = infra_loop.leaderboard()
+    assert len(board) >= 1
+    seed = board[0]
+    # strategy's val-selected best is the seed
+    assert strategy._best_candidate_id == seed.id
+
+    # Insert a synthetic candidate that outscores the seed on train.
+    # This becomes leaderboard[0]; the strategy still prefers the seed.
+    fake = Candidate(
+        id="fake_high_train",
+        parent=None,
+        state=seed.state,
+        score=(seed.score or 0) + 1.0,
+        raw_score=(seed.raw_score or 0) + 1.0,
+        exit_ok=True,
+        evaluated=True,
+    )
+    infra_loop.population.append(fake)
+    new_board = infra_loop.leaderboard()
+    assert new_board[0].id == "fake_high_train", "setup: fake should top leaderboard"
+    assert new_board[0].id != seed.id, "setup: divergence needed"
+
+    # Clear cached holdout so report() re-runs with the new winner
+    infra_loop.holdout_audit = None
+    report2 = infra_loop.report()
+    # The report must use the strategy's val-selected best, NOT leaderboard[0]
+    assert report2["best"]["id"] == seed.id, (
+        f"report used {report2['best']['id']}, expected strategy's {seed.id}"
+    )
+    assert report2["best"]["id"] != "fake_high_train", (
+        "report must NOT use leaderboard[0] when the strategy overrides"
+    )
+    assert report2["holdout"]["winner"] == seed.id
 
 
 def test_holdout_audit_uses_strategy_winner(tmp_path):
-    """report['holdout']['winner'] matches the strategy's val-gated pick."""
-    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
-    assert report["holdout"]["winner"] == loop._best_candidate_id
+    """report['holdout']['winner'] matches the strategy's val-gated pick,
+    not leaderboard[0], when they diverge."""
+    strategy, infra_loop, _ = _run_loop_with_infra(
+        tmp_path, skillopt_options={"max_epochs": 1},
+    )
+    board = infra_loop.leaderboard()
+    assert len(board) >= 1
+    seed = board[0]
+    assert strategy._best_candidate_id == seed.id
+
+    # Insert a higher-scoring candidate
+    fake = Candidate(
+        id="fake_high_train_2",
+        parent=None,
+        state=seed.state,
+        score=(seed.score or 0) + 1.0,
+        raw_score=(seed.raw_score or 0) + 1.0,
+        exit_ok=True,
+        evaluated=True,
+    )
+    infra_loop.population.append(fake)
+    infra_loop.holdout_audit = None
+    report2 = infra_loop.report()
+    assert report2["holdout"]["winner"] == seed.id
+    assert report2["holdout"]["winner"] != "fake_high_train_2"
 
 
 def test_best_candidate_id_not_in_population_errors(tmp_path):
     """If the strategy's best id is not in the population, ValueError is
-    raised and report shows exit_ok=False with a clear message."""
-    loop, report = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    raised.  report() catches it and sets exit_ok=False with a clear message."""
+    strategy, infra_loop, _ = _run_loop_with_infra(
+        tmp_path, skillopt_options={"max_epochs": 1},
+    )
     # Set a bogus best_candidate_id
-    loop._best_candidate_id = "nonexistent_id_12345"
+    strategy._best_candidate_id = "nonexistent_id_12345"
     with pytest.raises(ValueError, match="not in the population"):
-        loop.best_candidate([])
+        strategy.best_candidate(infra_loop.population)
+    # report() catches the ValueError and sets exit_ok=False
+    infra_loop.holdout_audit = None
+    report2 = infra_loop.report()
+    assert report2["exit_ok"] is False
+    assert "not in the population" in report2["error"]
 
 
 def test_best_candidate_id_persisted_across_resume(tmp_path):
@@ -2729,51 +2810,123 @@ def test_report_shows_strategy_name_and_epoch_count(tmp_path):
 
 
 def test_budget_exhausted_stops_optimizer_calls(tmp_path):
-    """After bind_budget, the strategy's model is the budget-bound,
-    optimizer-role-routed proposer, not the raw client from configure().
+    """G36 behaviour: when a token budget is set, the strategy's optimizer calls
+    go through the budget-bound client.  A budget too small for optimizer calls
+    causes BudgetExhausted, which stops the run with the budget bound.
 
-    Drive behaviour through Loop.run(): the strategy's model calls go
-    through the run's budget-bound client.  We verify the strategy's model
-    was replaced by bind_budget (it is no longer the original client).
+    Without the fix (strategy.bind_model not called in bind_budget), the
+    strategy keeps its raw FakeClient from configure(), which has no budget,
+    so the run completes all epochs and the budget is never enforced.
     """
     import copy as cp
+    from refactory_dsh.budgets import BudgetExhausted
 
-    class IdentityClient(FakeClient):
-        """Client with for_node and with_budget that produce new objects."""
-        def for_node(self, node, role="worker"):
-            child = cp.copy(self)
-            return child
+    # Shared mutable counter: all copies of this client share it.
+    call_counter = [0]
+
+    class BudgetTrackingClient(FakeClient):
+        """Client that simulates budget enforcement: raises BudgetExhausted
+        after a configurable number of complete() calls when budget-bound."""
+        def __init__(self, responses=None, max_budget_calls=2):
+            super().__init__(responses)
+            self._budget = None
+            self._max_budget_calls = max_budget_calls
 
         def with_budget(self, budget):
             child = cp.copy(self)
             child._budget = budget
             return child
 
-    client = IdentityClient()
+        def for_node(self, node, role="worker"):
+            child = cp.copy(self)
+            return child
 
-    with _patch_mode(SkillProbe):
-        loop = strategies.create(
-            "skillopt", MODE_ID, _config(tmp_path),
-            strategy_options={"max_epochs": 1},
-            project=Path("."), model=client,
-        )
-        strategy = loop._custom_strategy
-        # Before bind_budget, strategy's model is the raw client from configure()
-        assert strategy.model is client
+        def context(self):
+            return {}
 
-        # bind_budget creates a budget-bound proposer and gives it to the strategy
-        from refactory_dsh.budgets import RunBudget
-        budget = RunBudget.create(tmp_path / "budget", {"max_tokens": 100000})
-        loop.bind_budget(budget)
+        def complete(self, prompt, *, system=""):
+            if self._budget is not None:
+                call_counter[0] += 1
+                if call_counter[0] > self._max_budget_calls:
+                    raise BudgetExhausted("token budget exhausted")
+            return super().complete(prompt, system=system)
 
-        # After bind_budget, strategy's model is NOT the original client
-        assert strategy.model is not client, (
-            "strategy model was not replaced by bind_budget"
-        )
-        report = loop.run()
+    # max_budget_calls=2: the first 2 optimizer calls succeed, then BudgetExhausted
+    client = BudgetTrackingClient(max_budget_calls=2)
 
-    # Verify the run completed
-    assert report is not None
+    strategy, report = _run_loop(
+        tmp_path, client=client,
+        skillopt_options={"max_epochs": 3},
+    )
+    # The run must have stopped early with the budget bound, not completed all 3 epochs.
+    assert "budget" in report.get("bound", "").lower() or "exhausted" in report.get("bound", "").lower(), (
+        f"expected budget-related bound, got {report.get('bound')!r}"
+    )
+    # The strategy should NOT have completed all epochs
+    assert strategy.strategy_state_dict()["epoch"] < 3, (
+        "the run should have stopped before completing all 3 epochs"
+    )
+    # The counter proves optimizer calls went through the budget-tracking client
+    assert call_counter[0] > 0, "no optimizer calls went through the budget-bound client"
+
+
+def test_budget_bound_model_survives_resume(tmp_path):
+    """G36 resume: after load_strategy_state, the strategy's model is still
+    the budget-bound client (bind_budget runs again on resume)."""
+    import copy as cp
+    from refactory_dsh.budgets import BudgetExhausted
+
+    call_counter = [0]
+
+    class BudgetTrackingClient(FakeClient):
+        """Client that tracks budget-bound calls."""
+        def __init__(self, responses=None, max_budget_calls=100):
+            super().__init__(responses)
+            self._budget = None
+            self._max_budget_calls = max_budget_calls
+
+        def with_budget(self, budget):
+            child = cp.copy(self)
+            child._budget = budget
+            return child
+
+        def for_node(self, node, role="worker"):
+            child = cp.copy(self)
+            return child
+
+        def context(self):
+            return {}
+
+        def complete(self, prompt, *, system=""):
+            if self._budget is not None:
+                call_counter[0] += 1
+            return super().complete(prompt, system=system)
+
+    # First run: 1 epoch, completes normally with budget tracking
+    client1 = BudgetTrackingClient(max_budget_calls=100)
+    strategy1, report1 = _run_loop(
+        tmp_path / "run1", client=client1,
+        skillopt_options={"max_epochs": 1},
+    )
+    state = strategy1.strategy_state_dict()
+    calls_after_first = call_counter[0]
+    assert calls_after_first > 0, "first run made no budget-tracked optimizer calls"
+
+    # Second run: resume with the saved state, using a fresh budget-tracking client
+    call_counter[0] = 0
+    client2 = BudgetTrackingClient(max_budget_calls=100)
+    strategy2, report2 = _run_loop(
+        tmp_path / "run2", client=client2,
+        skillopt_options={"max_epochs": 2},
+        preload_state=state,
+    )
+    calls_after_resume = call_counter[0]
+    # The resumed run must also have budget-tracked optimizer calls,
+    # proving bind_budget ran again and the strategy's model is budget-bound.
+    assert calls_after_resume > 0, (
+        "resumed run made no budget-tracked optimizer calls — "
+        "bind_budget did not re-bind the strategy's model after resume"
+    )
 
 
 def test_bind_budget_without_custom_strategy_does_not_error(tmp_path):

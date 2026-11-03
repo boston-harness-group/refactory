@@ -278,7 +278,7 @@ def test_dsh_composition_boot_system_channel(tmp_path):
         ("_role", "worker"), ("_cancellations", []), ("_routing_provenance", {}),
         ("_python_bin", "/usr/bin/python3"), ("_permission_mode", "skip"),
         ("_role_routes", {}), ("_node_routes", {}), ("_provider_config", {}), ("_cwd", tmp_path),
-        ("_confine", False),
+        ("_confine", False), ("_max_completion_tokens", ""),
     ]:
         setattr(client, attr, value)
 

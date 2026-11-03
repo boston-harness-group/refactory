@@ -811,69 +811,66 @@ def test_format_prompt_and_view_share_the_prompt_builders():
 
 
 def test_livemath_mode_knob_sets_solver_route():
-    """The livemath Solver mode injects max_completion_tokens into the solve
-    node's route by default (16384), and setting it to 0 omits the cap."""
+    """The livemath Solver.run() injects max_completion_tokens into the solve
+    node's route by default (16384), and setting it to 0 omits the cap.
+
+    Calls through Solver.run() and intercepts the model passed to super().run()
+    to verify node_routes are set by the actual implementation."""
     from refactory_packages.livemath.mode import Solver
+    from refactory_dsh.nn import Mode
     import copy
 
     assert Solver.max_completion_tokens == 16384
 
     class FakeModel:
         """Model with _node_routes and for_node for the mode.run() injection."""
-        def __init__(self, responses=None):
+        def __init__(self):
             self._node_routes = {}
-            self.responses = responses or ["<answer>B</answer>"] * 20
-            self._call_idx = 0
 
         def for_node(self, node, role="worker"):
-            client = copy.copy(self)
-            solve_routes = self._node_routes.get(node, {})
-            for key, value in solve_routes.items():
-                setattr(client, "_" + key, value)
-            return client
-
-        def route(self):
-            return {"worker_backend": "dsh", "provider": "test", "model": "test",
-                    "effort": "", "permission_mode": "skip"}
-
-        def with_tool_policy(self, policy):
             return copy.copy(self)
 
-        def complete(self, prompt, *, system=""):
-            idx = self._call_idx
-            self._call_idx += 1
-            return self.responses[idx] if idx < len(self.responses) else "<answer>A</answer>"
+    # Capture the model that Solver.run() passes to super().run()
+    captured_models = []
+    original_run = Mode.run
 
-    # Default: cap is set
+    def capturing_run(self, workdir, *, model=None, **kwargs):
+        captured_models.append(model)
+        # Return a dummy RunResult instead of executing
+        from refactory_dsh.nn import RunResult
+        return RunResult(exit_ok=True, facts={}, workdir=workdir)
+
+    # Default: cap is set (16384)
     model = FakeModel()
     solver = Solver()
-    # Check that run() injects node_routes
-    model_copy = copy.copy(model)
-    solver_copy = copy.copy(solver)
-    # Directly test the run() injection by checking the model's node_routes
-    import copy as cp
-    test_model = cp.copy(model)
-    if solver.max_completion_tokens and callable(getattr(test_model, "for_node", None)):
-        test_model = cp.copy(test_model)
-        solve_routes = dict(getattr(test_model, "_node_routes", {}).get("solve", {}))
-        solve_routes["max_completion_tokens"] = str(solver.max_completion_tokens)
-        test_model._node_routes = {**getattr(test_model, "_node_routes", {}), "solve": solve_routes}
-    assert test_model._node_routes["solve"]["max_completion_tokens"] == "16384"
+    Mode.run = capturing_run
+    try:
+        solver.run(Path("/tmp/fake-workdir"), model=model)
+    finally:
+        Mode.run = original_run
+
+    assert len(captured_models) == 1
+    injected = captured_models[0]
+    assert injected._node_routes["solve"]["max_completion_tokens"] == "16384"
 
     # Cap disabled: 0 means no cap
     class NoCap(Solver):
         max_completion_tokens = 0
 
+    captured_models.clear()
     no_cap = NoCap()
-    test_model2 = cp.copy(model)
-    if no_cap.max_completion_tokens and callable(getattr(test_model2, "for_node", None)):
-        test_model2 = cp.copy(test_model2)
-        solve_routes = dict(getattr(test_model2, "_node_routes", {}).get("solve", {}))
-        solve_routes["max_completion_tokens"] = str(no_cap.max_completion_tokens)
-        test_model2._node_routes = {**getattr(test_model2, "_node_routes", {}), "solve": solve_routes}
+    model2 = FakeModel()
+    Mode.run = capturing_run
+    try:
+        no_cap.run(Path("/tmp/fake-workdir"), model=model2)
+    finally:
+        Mode.run = original_run
+
+    assert len(captured_models) == 1
+    injected2 = captured_models[0]
     # With max_completion_tokens=0, the injection is skipped
-    assert "solve" not in getattr(test_model2, "_node_routes", {}) or \
-           "max_completion_tokens" not in test_model2._node_routes.get("solve", {})
+    assert "solve" not in getattr(injected2, "_node_routes", {}) or \
+           "max_completion_tokens" not in injected2._node_routes.get("solve", {})
 
 
 def test_skillopt_view_an_errored_record_with_exchanges_is_an_error():
