@@ -294,9 +294,11 @@ def test_receipt_records_no_tools_dsh(tmp_path):
     path = begin(tmp_path, route, node="test", tool_policy="none")
     record = json.loads(path.read_text())
     assert record["requested_tool_policy"] == "none"
-    assert record["enforced_tool_policy"] == "none"
+    # Requested, not yet enforced: the runtime records enforcement when it applies it.
+    assert record["enforced_tool_policy"] is None
     assert record["tool_observation_available"] is False
-    assert record["tools_permitted"] == []
+    assert record["tools_permitted"] is None
+    assert record["tool_policy_source"] == "not-yet-observed"
 
 
 def test_receipt_records_no_tools_claude_code(tmp_path):
@@ -308,9 +310,11 @@ def test_receipt_records_no_tools_claude_code(tmp_path):
     path = begin(tmp_path, route, node="test", tool_policy="none")
     record = json.loads(path.read_text())
     assert record["requested_tool_policy"] == "none"
-    assert record["enforced_tool_policy"] == "none"
+    # Requested, not yet enforced: the runtime records enforcement when it applies it.
+    assert record["enforced_tool_policy"] is None
     assert record["tool_observation_available"] is False
-    assert record["tools_permitted"] == []
+    assert record["tools_permitted"] is None
+    assert record["tool_policy_source"] == "not-yet-observed"
 
 
 def test_receipt_default_no_extra_fields(tmp_path):

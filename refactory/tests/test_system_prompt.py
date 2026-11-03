@@ -567,15 +567,15 @@ def test_claude_code_effort_rejects_values_outside_pinned_sdk_type():
             DshModelClient(worker_backend="claude_code", effort=unsupported)
 
 
-def test_actual_route_effort_not_copied_from_request():
-    """actual_route.effort stays null in adapter metadata (CEO correction #3).
-    Revert: adapter patch effort: null in consumeClaudeQuery."""
+def test_actual_route_effort_is_the_effort_sent_to_the_sdk():
+    """actual_route.effort is what the adapter's options sent the SDK, never the
+    request copied and never a hardcoded null (#493 G40); the end-to-end values are
+    checked in test_claude_code_route.py."""
     patch_path = Path(__file__).resolve().parent.parent.parent / "patches" / "@deepseek-ai__dsh-subagent-claude-code@0.2.0-rc.2.patch"
     content = patch_path.read_text()
-    assert "effort: null" in content
-    # options.effort is not in the metadata init block
-    init_block = content[content.index("actual_route"):content.index("source: \"native-sdk-init\"")]
-    assert "effort: null" in init_block
+    init_block = content[content.index("actual_route: {"):content.index("source: \"native-sdk-init\"")]
+    assert "effort: sent?.effort ?? null" in init_block
+    assert "effort: options.effort" in content
 
 
 def test_real_mode_resume_retains_omit_steering(tmp_path):

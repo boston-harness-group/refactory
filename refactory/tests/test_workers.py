@@ -1104,3 +1104,81 @@ def test_the_bridge_reads_stdin_when_no_task_is_given(tmp_path):
 def test_the_bridge_passes_a_literal_task_through_and_ignores_stdin(tmp_path):
     sent = _bridge_prompt(tmp_path, {'task': 'write answer.txt with 42'}, b'not the prompt')
     assert sent == {'code': 0, 'prompts': ['write answer.txt with 42']}
+
+
+
+@pytest.mark.parametrize('stdin', [b'', b'  \n\t'])
+def test_the_bridge_refuses_an_empty_prompt_on_stdin(tmp_path, stdin):
+    """As the headless runner does: an empty task fails loud, never reaches a worker."""
+    sent = _bridge_prompt(tmp_path, {'task': '-'}, stdin)
+    assert sent == {'code': 1, 'prompts': []}
+
+
+def _patch_rows(tmp_path, route, **kwargs):
+    from refactory_dsh.workers import write_patch
+    root = Path(__file__).resolve().parents[2]
+    patch = tmp_path / 'worker.patch.yml'
+    write_patch(patch, root, route, **kwargs)
+    return json.loads(patch.read_text())
+
+
+def _external_config(rows):
+    [row] = [row for row in rows if 'insert' in row and row['insert'][0]['id'] == 'refactory-external-worker']
+    return row['insert'][0]['config']
+
+
+def test_claude_code_patch_carries_node_settings_in_adapter_config(tmp_path):
+    """The adapter reads effort, system prompt, tool policy and settings sources from
+    its config env only; the DSH process env never reached it (#493 G40)."""
+    route = {'worker_backend': 'claude_code', 'model': 'm', 'effort': 'low',
+             'permission_mode': 'dontAsk', 'setting_sources': 'user,project'}
+    try:
+        config = _external_config(_patch_rows(tmp_path, route, system_prompt='Be brief', tool_policy='none'))
+    except ValueError as error:
+        pytest.skip(str(error))
+    assert config['env'] == {'REFACTORY_MODEL_EFFORT': 'low', 'REFACTORY_SYSTEM_PROMPT': 'Be brief',
+                             'REFACTORY_TOOL_POLICY': 'none', 'REFACTORY_SETTING_SOURCES': 'user,project'}
+    plain = _external_config(_patch_rows(tmp_path, {'worker_backend': 'claude_code', 'model': 'm'}))
+    assert 'env' not in plain
+
+
+def test_codex_patch_carries_no_claude_code_settings(tmp_path):
+    """Codex's adapter reads none of them; both runtimes refuse them before dispatch."""
+    try:
+        config = _external_config(_patch_rows(tmp_path, {'worker_backend': 'codex', 'model': 'm'},
+                                              system_prompt='Be brief'))
+    except ValueError as error:
+        pytest.skip(str(error))
+    assert 'env' not in config
+
+
+def test_setting_sources_route_field_is_claude_code_only():
+    from refactory_dsh.workers import resolve_route, validate_route
+    assert validate_route({'worker_backend': 'claude_code', 'setting_sources': 'user,project'})['setting_sources'] == 'user,project'
+    assert validate_route({'worker_backend': 'claude_code', 'setting_sources': 'none'})['setting_sources'] == 'none'
+    with pytest.raises(ValueError, match='setting_sources must be'):
+        validate_route({'worker_backend': 'claude_code', 'setting_sources': 'user,everything'})
+    with pytest.raises(ValueError, match='codex does not support setting_sources'):
+        validate_route({'worker_backend': 'codex', 'setting_sources': 'user'})
+    # A node that switches product does not inherit Claude Code's settings sources.
+    switched = resolve_route({'worker_backend': 'claude_code', 'setting_sources': 'user,project'},
+                             node='n', node_routes={'n': {'worker_backend': 'dsh', 'provider': 'p', 'model': 'm'}})
+    assert switched['setting_sources'] == ''
+
+
+def test_setting_sources_crosses_the_worker_context(monkeypatch):
+    """Carried in the client's context like max_completion_tokens, so a dispatched
+    worker (the spine's worker_node) keeps the node route's value."""
+    from refactory_dsh.model import DshModelClient
+    client = DshModelClient(worker_backend='claude_code', model='m', routes_resolved=True,
+                            node_routes={'solve': {'setting_sources': 'user,project'}}).for_node('solve')
+    assert client.route()['setting_sources'] == 'user,project'
+    monkeypatch.setenv('REFACTORY_WORKER_CONTEXT', json.dumps(client.context()))
+    assert DshModelClient().route()['setting_sources'] == 'user,project'
+    monkeypatch.delenv('REFACTORY_WORKER_CONTEXT')
+    # The spine's worker rebuilds its client from the spec's context as arguments.
+    capped = DshModelClient(worker_backend='claude_code', model='m', routes_resolved=True,
+                            node_routes={'solve': {'setting_sources': 'user', 'max_completion_tokens': '64'}}
+                            ).for_node('solve')
+    rebuilt = DshModelClient(**capped.context()).route()
+    assert (rebuilt['setting_sources'], rebuilt['max_completion_tokens']) == ('user', '64')

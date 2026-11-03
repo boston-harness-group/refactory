@@ -1,19 +1,29 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..3f912e46ab670c895ded59caa3fc9c3f7ae818e2 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd537db3950d 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -231,15 +231,30 @@ function successfulResult(message) {
+@@ -231,15 +231,40 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
 -async function consumeClaudeQuery(query, onPermissionDenied, onResult) {
-+async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata) {
++async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata, sent) {
  	let answer;
  	for await (const message of query) {
 +		if (message.type === "system" && message.subtype === "init") {
++			// Effort and settings sources are what these options sent the SDK; the
++			// tool policy is enforced only when no tools were sent and the SDK's own
++			// tool list does not contradict it.
++			const observedTools = Array.isArray(message.tools) ? message.tools : null;
++			const toolFacts = sent?.toolsNone ? {
++				enforced_tool_policy: observedTools === null || observedTools.length === 0 ? "none" : null,
++				tools_permitted: observedTools, tool_observation_available: observedTools !== null,
++				tool_policy_source: "claude-agent-sdk-options"
++			} : {};
 +			onRefactoryMetadata?.({ actual_route: { worker_backend: "claude_code", provider: null,
-+				model: typeof message.model === "string" ? message.model : null, effort: null, source: "native-sdk-init" },
-+				product_session_id: typeof message.session_id === "string" ? message.session_id : null, resumable: false });
++				model: typeof message.model === "string" ? message.model : null, effort: sent?.effort ?? null,
++				...sent?.settingSources === void 0 ? {} : { setting_sources: sent.settingSources }, source: "native-sdk-init" },
++				product_session_id: typeof message.session_id === "string" ? message.session_id : null, resumable: false, ...toolFacts });
 +		}
 +
  		if (message.type === "system" && message.subtype === "permission_denied") {
@@ -34,7 +44,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..3f912e46ab670c895ded59caa3fc9c3f
  		answer = successfulResult(message);
  	}
  	if (answer === void 0) throw new ClaudeCodeFailure({
-@@ -295,7 +310,10 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,14 +320,21 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -42,11 +52,26 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..3f912e46ab670c895ded59caa3fc9c3f
 +	const _rfSystemText = (spec.env && spec.env.REFACTORY_SYSTEM_PROMPT) || "";
 +	const _rfEffort = (spec.env && spec.env.REFACTORY_MODEL_EFFORT) || "";
 +	const _rfToolPolicy = (spec.env && spec.env.REFACTORY_TOOL_POLICY) || "";
++	const _rfSettingSources = (spec.env && spec.env.REFACTORY_SETTING_SOURCES) || "";
++	const _rfEnv = {
++		...scrubbedParentEnv(),
++		...spec.env
++	};
++	// Adapter controls, not Claude Code's environment.
++	for (const key of ["REFACTORY_SYSTEM_PROMPT", "REFACTORY_MODEL_EFFORT", "REFACTORY_TOOL_POLICY", "REFACTORY_SETTING_SOURCES"]) delete _rfEnv[key];
 +	const options = {
  		abortController: controller,
  		cwd: spec.cwd,
  		...spec.model === void 0 ? {} : { model: spec.model },
-@@ -327,8 +345,21 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+-		env: {
+-			...scrubbedParentEnv(),
+-			...spec.env
+-		},
++		env: _rfEnv,
+ 		persistSession: false,
+ 		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
+ 		permissionMode: spec.permissionMode,
+@@ -327,8 +359,26 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -65,20 +90,50 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..3f912e46ab670c895ded59caa3fc9c3f
 +		options.settingSources = [];
 +		options.strictMcpConfig = true;
 +	}
++	// A route's explicit settings sources ("none" or e.g. "user,project") replace the
++	// default; tools stay disabled under tool_policy none either way.
++	if (_rfSettingSources) {
++		options.settingSources = _rfSettingSources === "none" ? [] : _rfSettingSources.split(",");
++	}
 +	return options;
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -434,7 +465,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +408,7 @@ async function startClaudeCodeRun(request, spec) {
+ 	let query$1;
+ 	let managedProcess;
+ 	let diagnostic;
++	let sent;
+ 	const capturePermissionDiagnostic = (value) => {
+ 		diagnostic = value;
+ 	};
+@@ -375,9 +426,15 @@ async function startClaudeCodeRun(request, spec) {
+ 		childProcessFailure.catch(() => {});
+ 	};
+ 	try {
++		const options = claudeQueryOptions(spec, controller, captureChild, capturePermissionDiagnostic);
++		sent = {
++			effort: options.effort,
++			toolsNone: Array.isArray(options.tools) && options.tools.length === 0,
++			settingSources: options.settingSources
++		};
+ 		query$1 = query({
+ 			prompt,
+-			options: claudeQueryOptions(spec, controller, captureChild, capturePermissionDiagnostic)
++			options
+ 		});
+ 		if (child === void 0 || childProcessFailure === void 0) throw new Error("subagent-claude-code: official SDK did not publish a controllable Claude Code process");
+ 		if (isAborted(controller.signal)) throw new Error("subagent-claude-code: request was aborted before SDK startup");
+@@ -434,7 +491,7 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
 -				}), publishedProcessFailure]);
-+				}, spec.onRefactoryMetadata), publishedProcessFailure]);
++				}, spec.onRefactoryMetadata, sent), publishedProcessFailure]);
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -529,6 +560,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +586,9 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),
