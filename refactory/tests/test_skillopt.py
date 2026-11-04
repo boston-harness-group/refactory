@@ -3448,3 +3448,57 @@ def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
     assert built and all(kwargs["setting_sources"] == "user,project" for kwargs in built)
     config = json.loads((tmp_path / "run" / "config.json").read_text())
     assert config["setting_sources"] == "user,project"
+
+
+def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeypatch):
+    """When the epoch's candidate is rejected, the previous skill and the
+    current skill are one candidate. SkillOpt still rolls it out twice
+    (trainer.py:1866-1867) and compares the two rollouts. Train records are
+    kept per candidate, so the second rollout must not overwrite the first
+    before it is read: the comparison pairs must come from two record sets.
+
+    The toy task alternates pass/fail on every grading of an item, so two
+    rollouts of one item always differ. Mutation check: rolling both out in
+    one ``evaluate_many`` call (refused now) or reading both records after
+    both rollouts makes every pair stable (identical records).
+    """
+    from refactory_dsh.outerloop import Run
+
+    gradings: dict[str, int] = {}
+
+    def alternating(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+        n = gradings.get(instance.id, 0)
+        gradings[instance.id] = n + 1
+        passed = n % 2 == 0
+        return task_module.VerifyResult(passed=passed, score=1.0 if passed else 0.5)
+
+    monkeypatch.setattr(SkillTask, "verify", alternating)
+    # No patch ever beats the current skill on val, so every epoch is rejected.
+    monkeypatch.setattr(SkillOptLoop, "_val_score", staticmethod(lambda run, cand: 0.5))
+
+    sampled: list[str] = []
+    original = Run.evaluate
+    original_many = Run.evaluate_many
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        if part == "train" and items:
+            sampled.append(candidate.id)
+        return original(self, candidate, part=part, items=items, seed=seed)
+
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        sampled.extend(r.candidate.id for r in requests if r.part == "train" and r.items)
+        return original_many(self, requests, on_result=on_result)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+
+    loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
+    trace = _read_trace(tmp_path)
+    assert not _decisions(trace, "val_gate_accept")
+    assert _decisions(trace, "slow_update_sample")
+    # Both slow-update rollouts are of one candidate.
+    assert len(sampled) == 2 and sampled[0] == sampled[1], sampled
+    pairs = loop._comparison_pairs
+    assert pairs
+    categories = [p["category"] for p in pairs]
+    assert set(categories) <= {"improved", "regressed"}, categories

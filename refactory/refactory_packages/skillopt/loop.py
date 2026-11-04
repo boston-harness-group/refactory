@@ -1026,20 +1026,29 @@ class SkillOptLoop(OuterLoop):
                 )
                 return current
             prev_candidate = prev_outcome
-        # Evaluate both prev and current concurrently via evaluate_many.
-        # When prev_candidate and current share the same candidate id,
-        # evaluate_many's same-candidate serialization rule keeps them
-        # sequential automatically (correction 3).
-        slow_requests = [
-            EvalRequest(candidate=prev_candidate, part="train", items=sample_ids, seed=slow_seed),
-            EvalRequest(candidate=current, part="train", items=sample_ids, seed=slow_seed),
-        ]
-        eval_results = run.evaluate_many(slow_requests)
-        prev_candidate = eval_results[0]
-        prev_records = run.item_records(prev_candidate)
-
-        curr_candidate = eval_results[1]
-        curr_records = run.item_records(curr_candidate)
+        if prev_candidate.id == current.id:
+            # The epoch's candidate was rejected, so prev and current are one
+            # candidate. Train records are kept per candidate, so the second
+            # rollout would overwrite the first: run them one after the other
+            # and read each rollout's records before the next starts
+            # (evaluate_many refuses two train runs of one candidate).
+            prev_candidate = run.evaluate(
+                prev_candidate, part="train", items=sample_ids, seed=slow_seed,
+            )
+            prev_records = run.item_records(prev_candidate)
+            curr_candidate = run.evaluate(
+                current, part="train", items=sample_ids, seed=slow_seed,
+            )
+            curr_records = run.item_records(curr_candidate)
+        else:
+            # Distinct candidates: roll both out concurrently.
+            slow_requests = [
+                EvalRequest(candidate=prev_candidate, part="train", items=sample_ids, seed=slow_seed),
+                EvalRequest(candidate=current, part="train", items=sample_ids, seed=slow_seed),
+            ]
+            prev_candidate, curr_candidate = run.evaluate_many(slow_requests)
+            prev_records = run.item_records(prev_candidate)
+            curr_records = run.item_records(curr_candidate)
 
         # Build comparison pairs — slow_update.py:206-269
         pairs = self._build_comparison_pairs(

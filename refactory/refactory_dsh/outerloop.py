@@ -196,6 +196,14 @@ class Run:
         requests with distinct candidate ids run concurrently.  Budget is
         reserved atomically for the whole batch before any evaluation starts.
 
+        At most one ``part="train"`` request per candidate id: train records
+        are kept per candidate (``item_records``), so a second train run of the
+        same candidate would overwrite the first before the caller could read
+        it.  Such a batch is refused before anything runs or any budget is
+        reserved; call ``evaluate`` for each run and read ``item_records``
+        between.  Val and test occasions are kept per occasion, so several
+        val/test requests for one candidate are allowed (run in order).
+
         ``on_result(index, candidate)`` fires in completion order, if provided.
         """
         import threading
@@ -248,6 +256,19 @@ class Run:
                         f"request {i}: the parts manifest has no {req.part!r} entry"
                     )
 
+        # ── one train request per candidate ───────────────────────────────
+        train_ids_seen: set[str] = set()
+        for req in requests:
+            if req.part != "train":
+                continue
+            if req.candidate.id in train_ids_seen:
+                raise OuterLoopError(
+                    f"evaluate_many cannot evaluate candidate {req.candidate.id} on train "
+                    "twice in one call: its train records would be overwritten; call "
+                    "run.evaluate for each and read run.item_records between"
+                )
+            train_ids_seen.add(req.candidate.id)
+
         # ── atomic budget reservation ─────────────────────────────────────
         train_count = sum(1 for r in requests if r.part == "train")
         total_rollouts = 0
@@ -289,8 +310,9 @@ class Run:
         loop._init_item_gate()  # noqa: SLF001
 
         # ── group requests by candidate id ────────────────────────────────
-        # Requests with the same candidate id run sequentially in request order;
-        # distinct candidate ids run concurrently.
+        # Requests with the same candidate id (at most one train, plus any
+        # val/test occasions) run sequentially in request order; distinct
+        # candidate ids run concurrently.
         groups: dict[str, list[int]] = defaultdict(list)
         for i, req in enumerate(requests):
             groups[req.candidate.id].append(i)

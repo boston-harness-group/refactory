@@ -528,8 +528,7 @@ def test_budget_refuses_entire_batch_evaluations(tmp_path):
     assert loop.evaluations == 1
 
     # Now try to evaluate_many with 2 train requests — exceeds budget
-    c1 = Candidate.from_state(seed.state, parent=seed.id, edits=())
-    c2 = Candidate.from_state(seed.state, parent=seed.id, edits=())
+    c1, c2 = _distinct_candidates(seed, 2)
     requests = [
         EvalRequest(candidate=c1, part="train"),
         EvalRequest(candidate=c2, part="train"),
@@ -557,8 +556,7 @@ def test_budget_refuses_entire_batch_rollouts(tmp_path):
     max_rollouts = loop.rollouts + rollouts_per_eval  # room for 1 more, not 2
     loop.config.max_rollouts = max_rollouts
 
-    c1 = Candidate.from_state(seed.state, parent=seed.id, edits=())
-    c2 = Candidate.from_state(seed.state, parent=seed.id, edits=())
+    c1, c2 = _distinct_candidates(seed, 2)
     requests = [
         EvalRequest(candidate=c1, part="train"),
         EvalRequest(candidate=c2, part="train"),
@@ -568,37 +566,45 @@ def test_budget_refuses_entire_batch_rollouts(tmp_path):
         run.evaluate_many(requests)
 
 
-# ── test_same_candidate_sequential (correction 3) ───────────────────────
+# ── test_duplicate_train_candidate_refused ──────────────────────────────
 
-def test_same_candidate_sequential(tmp_path):
-    """Two requests for the same candidate never overlap in time."""
+def test_duplicate_train_candidate_refused(tmp_path):
+    """Two train requests for the same candidate are refused before anything
+    runs: train records are kept per candidate, so the second run would
+    overwrite the first (SkillOpt's slow update read identical prev/curr
+    records). No evaluation runs and no budget is reserved.
+
+    Mutation check: dropping the refusal runs both evaluations and the
+    evaluation count becomes 2.
+    """
     loop, seed, run = _make_loop_and_seed(
         tmp_path, max_concurrent_evaluations=4, max_evaluations=10)
-
-    # Same candidate for both requests
     candidate = Candidate.from_state(seed.state, parent=seed.id, edits=())
+    other = _distinct_candidates(seed, 1)[0]
 
-    tracker = _TimingTracker()
-    delays = {candidate.id: 0.1}
-    _patch_evaluate_with_delay(loop, delays, tracker=tracker)
+    calls: list[str] = []
+    original = loop._evaluate
 
+    def counting(cand, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(cand.id)
+        return original(cand, **kwargs)
+
+    loop._evaluate = counting
+    before = (loop.evaluations, loop.rollouts)
     requests = [
         EvalRequest(candidate=candidate, part="train"),
+        EvalRequest(candidate=other, part="train"),
         EvalRequest(candidate=candidate, part="train"),
     ]
-    results = run.evaluate_many(requests)
+    with pytest.raises(
+        OuterLoopError,
+        match=f"cannot evaluate candidate {candidate.id} on train twice in one call",
+    ):
+        run.evaluate_many(requests)
 
-    assert len(results) == 2
-    # The two evaluations for the same candidate must not overlap
-    spans = tracker.times[candidate.id]
-    assert len(spans) == 2
-    t0_start, t0_end = spans[0]
-    t1_start, t1_end = spans[1]
-    # Second must start after first ends (with small tolerance)
-    assert t1_start >= t0_end - 0.005 or t0_start >= t1_end - 0.005, (
-        f"same-candidate evaluations overlapped: [{t0_start:.4f}—{t0_end:.4f}] "
-        f"vs [{t1_start:.4f}—{t1_end:.4f}]"
-    )
+    assert calls == []
+    assert (loop.evaluations, loop.rollouts) == before
+    assert run.item_records(candidate) == []
 
 
 # ── test_on_result_fires_in_completion_order ─────────────────────────────
@@ -1202,46 +1208,46 @@ def test_resume_skips_completed_phases():
 # ── test_skipped_train_budget_released (correction 2) ────────────────────
 
 def test_skipped_train_budget_released(tmp_path):
-    """When _run_group stops on an error, skipped train requests have their
+    """When _run_group stops on an error, a skipped train request has its
     reserved budget released.
 
-    Three requests for the same candidate (sequential group).  The first
-    succeeds, the second raises, the third is skipped.  Budget afterwards
-    equals 1 (only the completed one).
+    One candidate, a val request then a train request (one sequential group).
+    The val evaluation raises, so the train request is skipped.  Budget
+    afterwards equals 0.
+
+    Mutation check: not counting skipped train requests leaves evaluations=1.
     """
     loop, seed, run = _make_loop_and_seed(
         tmp_path, max_evaluations=10, max_concurrent_evaluations=4)
+    # A manifest with a val part only, so the val request validates and the
+    # train request still runs on the task's own train split.
+    loop._parts_manifest = {"val": ["v1"]}
 
     candidate = Candidate.from_state(seed.state, parent=seed.id, edits=())
+    train_calls: list[str] = []
 
-    call_count = 0
-    original = loop._evaluate
+    def failing_part(cand, part, items, seed, *, item_gate=None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("deliberate failure on val eval")
 
-    def failing_on_second(cand, *, seed=None, items=None, _budget_reserved=False,
-                          item_gate=None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 2:
-            raise RuntimeError("deliberate failure on second eval")
-        return original(cand, seed=seed, items=items,
-                        _budget_reserved=_budget_reserved,
-                        item_gate=item_gate)
+    def counting(cand, **kwargs):  # type: ignore[no-untyped-def]
+        train_calls.append(cand.id)
+        raise AssertionError("the train request must be skipped")
 
-    loop._evaluate = failing_on_second
+    loop._evaluate_part = failing_part
+    loop._evaluate = counting
 
     requests = [
-        EvalRequest(candidate=candidate, part="train"),
-        EvalRequest(candidate=candidate, part="train"),
+        EvalRequest(candidate=candidate, part="val"),
         EvalRequest(candidate=candidate, part="train"),
     ]
 
-    with pytest.raises(RuntimeError, match="deliberate failure on second eval"):
+    with pytest.raises(RuntimeError, match="deliberate failure on val eval"):
         run.evaluate_many(requests)
 
-    # 3 were reserved.  1 succeeded, 1 failed, 1 skipped.
-    # Failed + skipped = 2 un-reserved.  Net = 1.
-    assert loop.evaluations == 1, (
-        f"expected evaluations=1 (only the completed one), got {loop.evaluations}"
+    assert train_calls == []
+    # 1 train reserved, skipped, un-reserved.  Net = 0.
+    assert loop.evaluations == 0, (
+        f"expected evaluations=0 (the train request was skipped), got {loop.evaluations}"
     )
 
 
