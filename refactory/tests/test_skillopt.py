@@ -3096,3 +3096,23 @@ def test_a_question_reaches_the_analyst_as_the_task():
     own = default_rollout_result(
         {**record, "metadata": {"question": "Q", "instruction": "I"}}, {})
     assert "task_description" not in own
+
+
+@pytest.mark.parametrize("budget, last_parts", [
+    # Spent by the initial val: the epoch's train rollout is skipped.
+    (len(VAL_IDS), ["val"]),
+    # Spent by epoch 1's train rollout: the val gate is skipped.
+    (len(VAL_IDS) + len(TRAIN_IDS), ["val", "train"]),
+])
+def test_a_spent_rollout_budget_stops_the_run_on_its_bound(tmp_path, monkeypatch, budget, last_parts):
+    """A budget that runs out before max_epochs ends the run on the rollouts
+    bound, with a report, rather than on Run.evaluate's refusal."""
+    calls = _spy_evaluations(monkeypatch)
+    strategy, report = _run_loop(
+        tmp_path, config_overrides={"max_rollouts": budget},
+        skillopt_options={"max_epochs": 3},
+    )
+    assert [part for part, _ in calls] == last_parts
+    assert report["bound"] == "rollouts"
+    spent = _decisions(_read_trace(tmp_path), "budget_spent")
+    assert len(spent) == 1

@@ -172,6 +172,22 @@ class SkillOptLoop(OuterLoop):
         """Take the run's role-routed optimizer client, without tools (see :func:`_text_only`)."""
         self.model = _text_only(model)
 
+    def _out_of_budget(self, run: Run) -> bool:
+        """Stop the run, saving where it stood, when no rollout is left.
+
+        Asked before every evaluation: ``Run.evaluate`` refuses one once the
+        budget is spent, so a run whose budget runs out before ``max_epochs``
+        would otherwise end on that error, with no report, instead of
+        stopping on its bound. The phase is set after this check, so a run
+        resumed with more budget starts at the evaluation it skipped.
+        """
+        if run.budget_left() > 0:
+            return False
+        self._trace.record_decision("budget_spent", phase=self._phase, epoch=self._epoch)
+        run.save_strategy_state()
+        run.stop("rollouts")
+        return True
+
     # ── strategy (overrides OuterLoop.strategy) ─────────────────────────────
 
     # Phase names for per-phase resume markers (ask 3).
@@ -233,6 +249,8 @@ class SkillOptLoop(OuterLoop):
 
         # ① Initial val score — mechanism 1 (skip on resume if progressed)
         if not self._past_phase(resume_epoch, resume_phase, 0, "initial_val"):
+            if self._out_of_budget(run):
+                return
             self._phase = "initial_val"
             # SkillOpt evaluates the selection set with the base seed
             # (trainer.py:1133-1136; dataloader.py:291-301 shuffles with it).
@@ -281,6 +299,8 @@ class SkillOptLoop(OuterLoop):
             # with one batch per epoch (batch_idx=0).
             epoch_seed = batch_seed(self.base_seed, epoch)
             if not self._past_phase(resume_epoch, resume_phase, epoch, "train"):
+                if self._out_of_budget(run):
+                    return
                 self._phase = "train"
                 current = run.evaluate(current, part="train", seed=epoch_seed)
                 run.save_strategy_state()
@@ -488,6 +508,8 @@ class SkillOptLoop(OuterLoop):
 
             # ⑦ Val gate — mechanism 7
             if not self._past_phase(resume_epoch, resume_phase, epoch, "val_gate"):
+                if cand_hash not in self._val_cache and self._out_of_budget(run):
+                    return
                 self._phase = "val_gate"
                 if cand_hash in self._val_cache:
                     cand_score = self._val_cache[cand_hash]
@@ -529,6 +551,8 @@ class SkillOptLoop(OuterLoop):
             current = self._finish_epoch(
                 run, current, epoch, train_ids, resume_epoch, resume_phase,
             )
+            if run.stopped:
+                return
 
             self._count_stale_epoch()
             if self._record_epoch_calls(run, epoch):
@@ -674,6 +698,8 @@ class SkillOptLoop(OuterLoop):
             self._epoch_last_step_skill = self._current_skill
             self._phase = "slow_update"
             current = self._do_slow_update(run, current, epoch, train_ids)
+            if run.stopped:
+                return current
             run.save_strategy_state()
         if not self._past_phase(resume_epoch, resume_phase, epoch, "meta_skill"):
             self._phase = "meta_skill"
@@ -770,12 +796,16 @@ class SkillOptLoop(OuterLoop):
                 )
                 return current
             prev_candidate = prev_outcome
+        if self._out_of_budget(run):
+            return current
         prev_candidate = run.evaluate(
             prev_candidate, part="train", items=sample_ids, seed=slow_seed,
         )
         prev_records = run.item_records(prev_candidate)
 
         # Evaluate current skill on sample
+        if self._out_of_budget(run):
+            return current
         curr_candidate = run.evaluate(
             current, part="train", items=sample_ids, seed=slow_seed,
         )
