@@ -76,33 +76,13 @@ class _TimingTracker:
             self.times.setdefault(key, []).append((start, end))
 
 
-class _InFlightCounter:
-    """Thread-safe counter that tracks peak in-flight items."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._current = 0
-        self.peak = 0
-
-    def acquire(self) -> None:
-        with self._lock:
-            self._current += 1
-            if self._current > self.peak:
-                self.peak = self._current
-
-    def release(self) -> None:
-        with self._lock:
-            self._current -= 1
-
 
 def _patch_evaluate_with_delay(loop: Loop, delays: dict[str, float],
-                               tracker: _TimingTracker | None = None,
-                               inflight: _InFlightCounter | None = None):
+                               tracker: _TimingTracker | None = None):
     """Monkey-patch loop._evaluate to add per-candidate delays and tracking.
 
     ``delays`` maps candidate.id → sleep seconds.
     ``tracker`` records (start, end) per candidate id.
-    ``inflight`` tracks peak concurrent items via data_parallel's item_gate.
     """
     original = loop._evaluate
 
@@ -110,17 +90,11 @@ def _patch_evaluate_with_delay(loop: Loop, delays: dict[str, float],
                 item_gate=None):
         delay = delays.get(cand.id, 0)
         start = time.monotonic()
-        if inflight is not None and delay > 0:
-            inflight.acquire()
-        try:
-            if delay > 0:
-                time.sleep(delay)
-            result = original(cand, seed=seed, items=items,
-                              _budget_reserved=_budget_reserved,
-                              item_gate=item_gate)
-        finally:
-            if inflight is not None and delay > 0:
-                inflight.release()
+        if delay > 0:
+            time.sleep(delay)
+        result = original(cand, seed=seed, items=items,
+                          _budget_reserved=_budget_reserved,
+                          item_gate=item_gate)
         end = time.monotonic()
         if tracker is not None:
             tracker.record(cand.id, start, end)
@@ -214,120 +188,173 @@ def test_concurrent_evaluations_overlap_mutation(tmp_path):
             )
 
 
+# ── helpers for item-gate tests (data-parallel graph) ────────────────────
+
+def _peak_inflight_from_timestamps(timing_dir: Path) -> int:
+    """Compute peak concurrent in-flight items from start/end timestamp files.
+
+    Each item writes ``start_<id>`` and ``end_<id>`` files containing
+    ``time.time()`` values.  We sort all events chronologically and
+    sweep to find the maximum number of items that were in-flight at
+    any instant.
+    """
+    events: list[tuple[float, int]] = []  # (time, +1/-1)
+    for p in timing_dir.glob("start_*"):
+        events.append((float(p.read_text()), +1))
+    for p in timing_dir.glob("end_*"):
+        events.append((float(p.read_text()), -1))
+    events.sort(key=lambda e: (e[0], e[1]))  # ties: end before start
+    current = 0
+    peak = 0
+    for _, delta in events:
+        current += delta
+        if current > peak:
+            peak = current
+    return peak
+
+
+def _item_gate_data_graph(n_items: int, parallelism: int):
+    """Build a data graph with *n_items* items that sleep briefly.
+
+    Each item runs ``sleep_op`` from ``test_ops_parallel`` (writes
+    ``start_<id>`` / ``end_<id>`` timestamp files to ``$BARRIER_DIR``).
+    """
+    from refactory_dsh.nn import Graph, Node
+    from refactory_dsh.nn.executor import CURRENT_ITEM
+
+    items = tuple({"id": str(i), "delay": "0.12"} for i in range(n_items))
+    graph = Graph()
+    graph.add(Node(
+        "data", "data",
+        subgraph_entry="body", subgraph_exit="body",
+        writes=(CURRENT_ITEM,),
+        produces=("item_scores",),
+        inline_items=items,
+        parallelism=parallelism,
+    ))
+    graph.add(Node(
+        "body", "op",
+        call="test_ops_parallel:sleep_op",
+        reads=(CURRENT_ITEM,),
+        produces=("counted",),
+    ))
+    graph.add(Node(
+        "report", "op",
+        call="loop_ops:write_best",
+        writes=("best.json",),
+        produces=("best",),
+    ))
+    graph.connect("data", "report")
+    return graph
+
+
+_SLEEP_OP_SRC = '''\
+"""Minimal test op for item-gate tests."""
+import os
+import time
+from pathlib import Path
+
+
+def sleep_op(ctx):
+    """Sleep for `delay` seconds (from the item), writing timestamps."""
+    item = ctx.read_json("current_item.json")
+    delay = float(item.get("delay", 0))
+    barrier_dir_str = os.environ.get("BARRIER_DIR", "")
+    item_id = str(item.get("id", "?"))
+
+    if barrier_dir_str:
+        barrier_dir = Path(barrier_dir_str)
+        barrier_dir.mkdir(parents=True, exist_ok=True)
+        (barrier_dir / f"start_{item_id}").write_text(str(time.time()))
+
+    time.sleep(delay)
+
+    if barrier_dir_str:
+        (barrier_dir / f"end_{item_id}").write_text(str(time.time()))
+
+    return {"counted": item_id}
+'''
+
+
+@pytest.fixture()
+def _install_parallel_ops():
+    """Ensure the test_ops_parallel module exists for the walker."""
+    HERE = Path(__file__).resolve().parent
+    ops_path = HERE / "test_ops_parallel.py"
+    existed = ops_path.exists()
+    if not existed:
+        ops_path.write_text(_SLEEP_OP_SRC)
+    yield
+    if not existed:
+        ops_path.unlink(missing_ok=True)
+
+
 # ── test_item_limit_not_exceeded ─────────────────────────────────────────
 
-def test_item_limit_not_exceeded(tmp_path):
+def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
     """The run-wide item-in-flight limit is respected (walker runtime).
 
-    Directly tests run_data_concurrent with a BoundedSemaphore gate:
-    a thread-safe counter records peak in-flight items.  With gate limit=3
-    and parallelism=8, the peak must be <= 3 and > 1.
+    Drives ``execute()`` with a data graph (parallelism=8, 12 items each
+    sleeping 0.12 s) and ``item_gate=BoundedSemaphore(3)``.  A thread-safe
+    (counter, peak) tracker built from the start/end timestamp files written
+    by each item asserts **peak <= 3** and **peak > 1**.
 
-    Mutation check: removing gate.acquire() in data_parallel.py lets the
-    peak exceed the limit.
+    Mutation check (separate test below): removing ``item_gate.acquire()``
+    in ``data_parallel.py`` lets peak reach min(parallelism, n_items) = 8,
+    failing ``peak <= 3``.
     """
-    from refactory_dsh.nn.data_parallel import run_data_concurrent
-    from refactory_dsh.nn.executor import Executor
+    from refactory_dsh.nn.executor import execute
 
-    loop, seed, run = _make_loop_and_seed(
-        tmp_path, max_concurrent_evaluations=3, max_evaluations=10,
-        max_items_in_flight=3)
+    GATE_LIMIT = 3
+    PARALLELISM = 8
+    N_ITEMS = 12
 
-    # Run an evaluation to set up the executor
-    candidate = _distinct_candidates(seed, 1)[0]
-    run.evaluate(candidate, part="train")
+    timing_dir = tmp_path / "timing"
+    timing_dir.mkdir()
+    monkeypatch.setenv("BARRIER_DIR", str(timing_dir))
 
-    # Create a gate with 3 permits
-    gate = threading.BoundedSemaphore(3)
-    counter = _InFlightCounter()
-    original_acquire = gate.acquire
-    original_release = gate.release
+    gate = threading.BoundedSemaphore(GATE_LIMIT)
+    graph = _item_gate_data_graph(N_ITEMS, PARALLELISM)
+    result = execute(graph, tmp_path / "run", max_steps=500, item_gate=gate)
+    assert result.exit_ok, result.error
 
-    def counting_acquire(*args, **kwargs):
-        result = original_acquire(*args, **kwargs)
-        counter.acquire()
-        return result
-
-    def counting_release(*args, **kwargs):
-        counter.release()
-        return original_release(*args, **kwargs)
-
-    gate.acquire = counting_acquire
-    gate.release = counting_release
-
-    # Verify that _init_item_gate creates a BoundedSemaphore for walker
-    loop._item_gate_initialized = False
-    loop._item_gate = None
-    loop._init_item_gate()
-    assert loop._item_gate is not None, "item gate should be created for walker"
-
-    # Verify evaluate_many passes item_gate to _evaluate
-    gates_passed: list[Any] = []
-    original_eval = loop._evaluate
-
-    def tracking_evaluate(cand, *, seed=None, items=None, _budget_reserved=False,
-                          item_gate=None):
-        gates_passed.append(item_gate)
-        return original_eval(cand, seed=seed, items=items,
-                             _budget_reserved=_budget_reserved,
-                             item_gate=item_gate)
-
-    loop._evaluate = tracking_evaluate
-
-    candidates = _distinct_candidates(seed, 3)
-    requests = [EvalRequest(candidate=c, part="train") for c in candidates]
-    results = run.evaluate_many(requests)
-
-    assert len(results) == 3
-    for r in results:
-        assert r.evaluated
-
-    # The gate should have been passed to each evaluation
-    assert len(gates_passed) == 3
-    assert all(g is not None for g in gates_passed), (
-        "item_gate must be passed to _evaluate for each concurrent evaluation"
+    peak = _peak_inflight_from_timestamps(timing_dir)
+    assert peak <= GATE_LIMIT, (
+        f"peak in-flight {peak} exceeded gate limit {GATE_LIMIT}"
     )
-    # All gates should be the same semaphore
-    assert all(g is gates_passed[0] for g in gates_passed), (
-        "all evaluations must share the same item_gate"
+    assert peak > 1, (
+        f"peak in-flight {peak} should be > 1 to prove concurrency"
     )
 
 
-def test_item_limit_mutation(tmp_path):
-    """Mutation check: without the item gate, the gate is None.
+def test_item_limit_mutation(tmp_path, monkeypatch, _install_parallel_ops):
+    """Mutation check: without item_gate, peak in-flight exceeds the limit.
 
-    When item_gate is set to None, the BoundedSemaphore is not passed
-    through to _evaluate.
+    Same data graph (parallelism=8, 12 items) but **no item_gate**.
+    Without the semaphore gating in ``data_parallel.py:run_item``, all 8
+    worker threads dispatch items simultaneously, so peak >= min(8, 12) = 8.
+    This proves that ``item_gate.acquire()`` / ``release()`` in
+    ``data_parallel.py`` is the mechanism that enforces the limit.
     """
-    loop, seed, run = _make_loop_and_seed(
-        tmp_path, max_concurrent_evaluations=3, max_evaluations=10,
-        max_items_in_flight=2)
+    from refactory_dsh.nn.executor import execute
 
-    candidates = _distinct_candidates(seed, 3)
+    GATE_LIMIT = 3
+    PARALLELISM = 8
+    N_ITEMS = 12
 
-    # Sabotage: force item_gate to None after init
-    loop._init_item_gate()
-    loop._item_gate = None  # mutation: remove the gate
+    timing_dir = tmp_path / "timing"
+    timing_dir.mkdir()
+    monkeypatch.setenv("BARRIER_DIR", str(timing_dir))
 
-    gates_passed: list[Any] = []
-    original_eval = loop._evaluate
+    graph = _item_gate_data_graph(N_ITEMS, PARALLELISM)
+    # No item_gate — the mutation
+    result = execute(graph, tmp_path / "run", max_steps=500, item_gate=None)
+    assert result.exit_ok, result.error
 
-    def tracking_evaluate(cand, *, seed=None, items=None, _budget_reserved=False,
-                          item_gate=None):
-        gates_passed.append(item_gate)
-        return original_eval(cand, seed=seed, items=items,
-                             _budget_reserved=_budget_reserved,
-                             item_gate=item_gate)
-
-    loop._evaluate = tracking_evaluate
-
-    requests = [EvalRequest(candidate=c, part="train") for c in candidates]
-    results = run.evaluate_many(requests)
-    assert len(results) == 3
-
-    # With the mutation, the gate should be None
-    assert all(g is None for g in gates_passed), (
-        "with mutation (gate=None), item_gate should be None"
+    peak = _peak_inflight_from_timestamps(timing_dir)
+    assert peak > GATE_LIMIT, (
+        f"without item_gate, peak in-flight {peak} should exceed {GATE_LIMIT} "
+        f"(expected ~{PARALLELISM}); the gate is the only limiter"
     )
 
 
@@ -668,21 +695,9 @@ def test_trace_order_independent_of_completion(tmp_path):
     assert test_eval_decisions[2]["action"] == "final_test_reused"
 
 
-def test_trace_order_revert_breaks(tmp_path):
-    """Mutation: if trace decisions were written in completion order instead of
-    canonical order, the order would be wrong when best finishes first.
-
-    This test verifies the canonical-order trace writing code at
-    skillopt/loop.py:~750 is necessary.
-    """
-    # Simulated completion order: best_test, baseline_test, final_test
-    completion_order = ["best_test", "baseline_test", "final_test_reused"]
-    canonical_order = ["baseline_test", "best_test", "final_test_reused"]
-
-    # If written in completion order (the mutation), the trace would be wrong
-    assert completion_order != canonical_order, (
-        "completion order should differ from canonical order in this scenario"
-    )
+# test_trace_order_revert_breaks removed: the trace-order invariant is
+# covered by test_skillopt.py::test_post_training_evaluation_runs_in_skillopts_order
+# which the verifier confirmed catches a trace-order revert.
 
 
 # ── test_report_fields_unchanged ─────────────────────────────────────────
