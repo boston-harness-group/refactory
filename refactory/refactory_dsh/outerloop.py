@@ -326,9 +326,16 @@ class Run:
 
         def _run_group(indices: list[int]) -> None:
             """Run a group of requests for the same candidate sequentially."""
-            for idx in indices:
+            for i, idx in enumerate(indices):
                 _run_one(idx)
                 if errors[idx] is not None:
+                    # Count skipped train requests as failed so their
+                    # pre-reserved budget is un-reserved below.
+                    for skipped_idx in indices[i + 1:]:
+                        if requests[skipped_idx].part == "train":
+                            with failed_train_lock:
+                                nonlocal failed_train_count
+                                failed_train_count += 1
                     break
 
         max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
