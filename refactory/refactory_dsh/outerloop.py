@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import structlog
 
@@ -42,6 +42,15 @@ from refactory_dsh.optim import Candidate, Optimizer, Proposal, Rejection
 from refactory_dsh.optim.base import summarise_reasons
 
 log = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class EvalRequest:
+    """One evaluation request for :meth:`Run.evaluate_many`."""
+    candidate: Candidate
+    part: str = "train"
+    items: list[str] | None = None
+    seed: int | None = None
 
 
 class OuterLoopError(RuntimeError):
@@ -172,6 +181,183 @@ class Run:
             )
         loop._evaluate_part(candidate, part, None, seed)  # noqa: SLF001
         return candidate
+
+    # ── concurrent evaluation ──────────────────────────────────────────────
+    def evaluate_many(
+        self,
+        requests: list[EvalRequest],
+        *,
+        on_result: Callable[[int, Candidate], None] | None = None,
+    ) -> list[Candidate]:
+        """Evaluate several independent candidates concurrently.
+
+        Returns results in request order regardless of completion order.
+        Requests naming the same candidate id run sequentially in request order;
+        requests with distinct candidate ids run concurrently.  Budget is
+        reserved atomically for the whole batch before any evaluation starts.
+
+        ``on_result(index, candidate)`` fires in completion order, if provided.
+        """
+        import threading
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        loop = self._loop
+        manifest = getattr(loop, '_parts_manifest', None)
+
+        if not requests:
+            return []
+
+        # ── validate every request ────────────────────────────────────────
+        for i, req in enumerate(requests):
+            if req.part not in ("train", "val", "test"):
+                raise OuterLoopError(
+                    f"request {i}: unknown part {req.part!r}; expected 'train', 'val' or 'test'"
+                )
+            if req.part == "train" and req.items is not None:
+                if manifest is not None:
+                    if "train" not in manifest:
+                        raise OuterLoopError(
+                            f"request {i}: the parts manifest has no entry for 'train'; "
+                            "items cannot be provided for a part not in the manifest"
+                        )
+                    allowed = set(manifest["train"])
+                    where = "the manifest's train ids"
+                else:
+                    seed_state = loop.population[0].state if loop.population else req.candidate.state
+                    allowed = loop._expected_item_ids(seed_state, "train")[0]  # noqa: SLF001
+                    where = "the train split"
+                extra = set(str(x) for x in req.items) - allowed
+                if extra:
+                    raise OuterLoopError(
+                        f"request {i}: items {sorted(extra)} are not in {where}"
+                    )
+            if req.part != "train":
+                if req.items is not None:
+                    raise OuterLoopError(
+                        f"request {i}: items cannot be chosen for {req.part!r}: "
+                        "val and test are always evaluated in full from the parts manifest"
+                    )
+                if manifest is None:
+                    raise OuterLoopError(
+                        f"request {i}: no parts manifest exists; evaluating on {req.part!r} "
+                        "requires one (LoopConfig.parts_manifest)"
+                    )
+                if req.part not in manifest:
+                    raise OuterLoopError(
+                        f"request {i}: the parts manifest has no {req.part!r} entry"
+                    )
+
+        # ── atomic budget reservation ─────────────────────────────────────
+        train_count = sum(1 for r in requests if r.part == "train")
+        total_rollouts = 0
+        for req in requests:
+            if req.part == "train":
+                if req.items is not None:
+                    total_rollouts += max(len(req.items), 1)
+                elif manifest is not None and "train" in manifest:
+                    total_rollouts += max(len(manifest["train"]), 1)
+                else:
+                    seed_state = loop.population[0].state if loop.population else req.candidate.state
+                    ids = loop._expected_item_ids(seed_state, "train")[0]  # noqa: SLF001
+                    total_rollouts += max(len(ids), 1)
+            else:
+                if manifest is not None and req.part in manifest:
+                    total_rollouts += max(len(manifest[req.part]), 1)
+                else:
+                    total_rollouts += 1
+
+        with loop._state_lock:
+            max_rollouts = getattr(loop.config, "max_rollouts", None)
+            if train_count > 0:
+                if loop.evaluations + train_count > loop.config.max_evaluations:
+                    raise OuterLoopError(
+                        "the evaluation budget is spent; a strategy must ask budget_left() "
+                        "before evaluating"
+                    )
+            if max_rollouts is not None:
+                if loop.rollouts + total_rollouts > max_rollouts:
+                    raise OuterLoopError(
+                        f"the rollout budget is spent ({loop.rollouts} of {max_rollouts}); "
+                        "a strategy must ask budget_left() before evaluating"
+                    )
+            # Pre-increment evaluations for train requests so concurrent
+            # budget_left() calls see the reservation.
+            loop.evaluations += train_count
+
+        # ── ensure item gate / slot dir ───────────────────────────────────
+        loop._init_item_gate()  # noqa: SLF001
+
+        # ── group requests by candidate id ────────────────────────────────
+        # Requests with the same candidate id run sequentially in request order;
+        # distinct candidate ids run concurrently.
+        groups: dict[str, list[int]] = defaultdict(list)
+        for i, req in enumerate(requests):
+            groups[req.candidate.id].append(i)
+
+        results: list[Candidate | None] = [None] * len(requests)
+        errors: list[BaseException | None] = [None] * len(requests)
+        failed_train_count = 0
+        failed_train_lock = threading.Lock()
+
+        def _run_one(index: int) -> None:
+            req = requests[index]
+            try:
+                if req.part == "train":
+                    loop._evaluate(  # noqa: SLF001
+                        req.candidate, seed=req.seed, items=req.items,
+                        _budget_reserved=True,
+                        item_gate=getattr(loop, '_item_gate', None),
+                    )
+                else:
+                    loop._evaluate_part(  # noqa: SLF001
+                        req.candidate, req.part, req.items, req.seed,
+                        item_gate=getattr(loop, '_item_gate', None),
+                    )
+                results[index] = req.candidate
+                if on_result is not None:
+                    on_result(index, req.candidate)
+            except BaseException as exc:
+                errors[index] = exc
+                if req.part == "train":
+                    with failed_train_lock:
+                        nonlocal failed_train_count
+                        failed_train_count += 1
+
+        def _run_group(indices: list[int]) -> None:
+            """Run a group of requests for the same candidate sequentially."""
+            for idx in indices:
+                _run_one(idx)
+                if errors[idx] is not None:
+                    break
+
+        max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
+        # Each distinct candidate group is one concurrent unit
+        group_list = list(groups.values())
+
+        if len(group_list) == 1:
+            # Single candidate or single request: run inline
+            _run_group(group_list[0])
+        else:
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(group_list))) as pool:
+                futures = {pool.submit(_run_group, g): g for g in group_list}
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except BaseException:
+                        pass  # errors recorded in errors[]
+
+        # ── un-reserve budget for failed train evals ──────────────────────
+        if failed_train_count > 0:
+            with loop._state_lock:
+                loop.evaluations -= failed_train_count
+
+        # ── re-raise the first error ──────────────────────────────────────
+        first_error = next((e for e in errors if e is not None), None)
+        if first_error is not None:
+            raise first_error
+
+        return [r for r in results if r is not None]  # type: ignore[misc]
 
     def item_records(self, candidate: Candidate, *, part: str = "train") -> list[dict[str, Any]]:
         """Return train records for the given candidate.

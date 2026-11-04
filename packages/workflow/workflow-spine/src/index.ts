@@ -1513,6 +1513,69 @@ export function apply(ctx: Context, config: Config): void {
     if (pass === undefined) return {}
     const parallelism = pass.parallelism ?? 1
 
+    // ── shared slot-directory gating (cross-evaluation item limiter) ──────
+    // When REFACTORY_ITEM_SLOTS_DIR and REFACTORY_ITEM_SLOTS are set, acquire
+    // a file-based slot before dispatching each item, so multiple concurrent
+    // evaluations share one run-wide item limit.  The spine's own per-node
+    // parallelism bound still applies as the local concurrency limit.
+    const itemSlotsDir = process.env.REFACTORY_ITEM_SLOTS_DIR
+    const itemSlotsCount = process.env.REFACTORY_ITEM_SLOTS ? parseInt(process.env.REFACTORY_ITEM_SLOTS, 10) : 0
+    const useSlots = !!itemSlotsDir && itemSlotsCount > 0
+
+    /** Try to acquire a shared slot by atomically creating slot-<k>. */
+    const acquireSlot = async (): Promise<number> => {
+      if (!useSlots) return -1
+      const fs = await import('fs')
+      const path = await import('path')
+      const pid = String(process.pid)
+      let backoff = 10  // ms
+      for (;;) {
+        for (let k = 0; k < itemSlotsCount; k++) {
+          const slotPath = path.join(itemSlotsDir!, `slot-${k}`)
+          try {
+            const fd = fs.openSync(slotPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL)
+            fs.writeSync(fd, pid)
+            fs.closeSync(fd)
+            return k
+          } catch (err: any) {
+            if (err.code !== 'EEXIST') throw err
+            // Slot exists: check if the owner pid is still alive
+            try {
+              const ownerPid = parseInt(fs.readFileSync(slotPath, 'utf8').trim(), 10)
+              if (ownerPid > 0) {
+                try {
+                  process.kill(ownerPid, 0)
+                } catch (killErr: any) {
+                  if (killErr.code === 'ESRCH') {
+                    // Dead pid: reclaim the slot
+                    try {
+                      fs.unlinkSync(slotPath)
+                      const fd = fs.openSync(slotPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL)
+                      fs.writeSync(fd, pid)
+                      fs.closeSync(fd)
+                      return k
+                    } catch { /* another process claimed it */ }
+                  }
+                }
+              }
+            } catch { /* cannot read slot file */ }
+          }
+        }
+        // No slot free: wait with exponential backoff
+        await new Promise<void>(resolve => setTimeout(resolve, backoff))
+        backoff = Math.min(backoff * 2, 200)
+      }
+    }
+
+    const releaseSlot = (slotIndex: number): void => {
+      if (!useSlots || slotIndex < 0) return
+      try {
+        const fs = require('fs')
+        const path = require('path')
+        fs.unlinkSync(path.join(itemSlotsDir!, `slot-${slotIndex}`))
+      } catch { /* already cleaned up */ }
+    }
+
     // A slot frees as each item settles, handed straight to the next waiter.
     let inFlight = 0
     const waiters: Array<() => void> = []
@@ -1545,6 +1608,7 @@ export function apply(ctx: Context, config: Config): void {
 
     const processItem = async (index: number): Promise<ItemOutcome> => {
       await acquire()
+      const slotIndex = await acquireSlot()
       try {
         if (halted) return {}
         recordStatus(spine, workdir, 'executing')
@@ -1610,6 +1674,7 @@ export function apply(ctx: Context, config: Config): void {
         // A crash in verify or in `end` itself is a failed item, as in a sequential pass.
         return await endFailed(index, failureTail(ended), ended.error?.includes('timed out') ? 'timeout' : undefined)
       } finally {
+        releaseSlot(slotIndex)
         release()
       }
     }

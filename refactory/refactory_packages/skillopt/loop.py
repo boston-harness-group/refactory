@@ -43,7 +43,7 @@ from typing import Any
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.edits import SKILLOPT_PATCH_CONFIG
 from refactory_dsh.optim import Candidate, Proposal
-from refactory_dsh.outerloop import OuterLoop, OuterLoopError, Run
+from refactory_dsh.outerloop import EvalRequest, OuterLoop, OuterLoopError, Run
 
 from refactory_packages.skillopt import analysts, merge, prompts, schedule, state
 from refactory_packages.skillopt.env import SkillOptEnv
@@ -188,6 +188,8 @@ class SkillOptLoop(OuterLoop):
         self._train_stop: str = ""
         # The post-training evaluation's outcome, under A's summary.json names.
         self._final_eval: dict[str, Any] = {}
+        # Completed post-training phases for set-based resume (correction 2).
+        self._completed_phases: set[str] = set()
 
     # ── strategy (overrides OuterLoop.strategy) ─────────────────────────────
 
@@ -635,6 +637,10 @@ class SkillOptLoop(OuterLoop):
         choices) shows each item as A's did. Each step saves its phase, so a
         resumed run continues where it stopped; the scores are A's summary.json
         names (trainer.py:2480-2515), in the strategy state and its report.
+
+        The three test evaluations (baseline, best, final) run concurrently via
+        ``evaluate_many`` (correction 2).  Trace decisions are written after
+        ``evaluate_many`` returns, in A's canonical order, not completion order.
         """
         skip = self._final_eval_skip(run)
         if skip:
@@ -643,21 +649,30 @@ class SkillOptLoop(OuterLoop):
             run.log(f"skillopt: no post-training test evaluation: {skip}")
             run.save_strategy_state()
             return
-        done = self._phase if self._phase in self._FINAL_PHASES else ""
-        if not done:
-            # A fresh evaluation: nothing from an earlier, stopped attempt carries over.
-            self._final_eval = {}
+        # Use _completed_phases for set-based resume (correction 2).
+        if not self._completed_phases:
+            # A fresh evaluation (or backward-compat from _phase-based resume).
+            done = self._phase if self._phase in self._FINAL_PHASES else ""
+            if done:
+                # Backward compat: populate from linear _phase
+                idx = self._FINAL_PHASES.index(done)
+                self._completed_phases = set(self._FINAL_PHASES[:idx + 1])
+            else:
+                self._final_eval = {}
         result = self._final_eval
         result["status"] = "running"
 
         def pending(phase: str) -> bool:
-            return not done or self._FINAL_PHASES.index(phase) > self._FINAL_PHASES.index(done)
+            return phase not in self._completed_phases
 
         def finished(phase: str) -> None:
+            self._completed_phases.add(phase)
             self._phase = phase
             run.save_strategy_state()
 
         try:
+            # Step 1: final_selection runs first (sequential, as its result
+            # can promote the best skill).
             if pending("final_selection"):
                 if self._is_best(self._current_skill):
                     result["final_selection_hard"] = self._best_score
@@ -678,30 +693,82 @@ class SkillOptLoop(OuterLoop):
                         score=score, best_score=self._best_score,
                     )
                 finished("final_selection")
-            for phase, key, candidate in (
-                ("baseline_test", "baseline_test_hard", lambda: run.seed()),
-                ("best_test", "test_hard", lambda: self._candidate_for_skill(run, self._best_skill)),
-            ):
-                if pending(phase):
-                    picked = candidate()
-                    run.evaluate(picked, part="test", seed=self.base_seed)
-                    result[key] = self._latest_score(run, picked, "test")
-                    self._trace.record_decision(
-                        "test_eval", action=phase, score=result[key], candidate=picked.id)
-                    finished(phase)
+
+            # Step 2-4: collect pending test phases and run concurrently.
+            # Each entry: (phase, result_key, candidate, is_reuse)
+            test_plan: list[tuple[str, str, Candidate, bool]] = []
+            final_is_best = self._is_best(self._current_skill)
+
+            if pending("baseline_test"):
+                test_plan.append(("baseline_test", "baseline_test_hard", run.seed(), False))
+            if pending("best_test"):
+                test_plan.append(("best_test", "test_hard",
+                                  self._candidate_for_skill(run, self._best_skill), False))
             if pending("final_test"):
-                if self._is_best(self._current_skill):
-                    result["final_test_hard"] = result.get("test_hard")
-                    self._trace.record_decision(
-                        "test_eval", action="final_test_reused", score=result["final_test_hard"])
+                if final_is_best:
+                    # Reuse best_test score — no evaluation needed
+                    test_plan.append(("final_test", "final_test_hard", None, True))
                 else:
-                    final = self._candidate_for_skill(run, self._current_skill)
-                    run.evaluate(final, part="test", seed=self.base_seed)
-                    result["final_test_hard"] = self._latest_score(run, final, "test")
+                    test_plan.append(("final_test", "final_test_hard",
+                                      self._candidate_for_skill(run, self._current_skill), False))
+
+            # Build EvalRequests for phases that need actual evaluation
+            requests: list[EvalRequest] = []
+            request_plan: list[tuple[str, str]] = []  # (phase, result_key) per request
+            reuse_phases: list[tuple[str, str]] = []  # phases that reuse a score
+
+            for phase, key, cand, is_reuse in test_plan:
+                if is_reuse:
+                    reuse_phases.append((phase, key))
+                else:
+                    requests.append(EvalRequest(candidate=cand, part="test", seed=self.base_seed))
+                    request_plan.append((phase, key))
+
+            # Collected scores from concurrent evaluations
+            eval_scores: dict[str, float | None] = {}
+            eval_candidates: dict[str, str] = {}
+
+            if requests:
+                def _on_result(index: int, candidate: Candidate) -> None:
+                    phase, key = request_plan[index]
+                    score = self._latest_score(run, candidate, "test")
+                    eval_scores[phase] = score
+                    eval_candidates[phase] = candidate.id
+                    result[key] = score
+                    finished(phase)
+
+                run.evaluate_many(requests, on_result=_on_result)
+
+            # Handle reuse phases (final_test when final == best)
+            for phase, key in reuse_phases:
+                result[key] = result.get("test_hard")
+                eval_scores[phase] = result[key]
+                finished(phase)
+
+            # Write trace decisions in A's canonical order AFTER evaluate_many
+            # returns (correction 2: order must not depend on completion order).
+            _test_order = [
+                ("baseline_test", "baseline_test_hard"),
+                ("best_test", "test_hard"),
+            ]
+            for phase, key in _test_order:
+                if phase in eval_scores:
                     self._trace.record_decision(
-                        "test_eval", action="final_test", score=result["final_test_hard"],
-                        candidate=final.id)
-                finished("final_test")
+                        "test_eval", action=phase,
+                        score=eval_scores[phase],
+                        candidate=eval_candidates.get(phase, ""))
+            # final_test trace
+            if "final_test" in eval_scores:
+                if final_is_best:
+                    self._trace.record_decision(
+                        "test_eval", action="final_test_reused",
+                        score=eval_scores["final_test"])
+                else:
+                    self._trace.record_decision(
+                        "test_eval", action="final_test",
+                        score=eval_scores["final_test"],
+                        candidate=eval_candidates.get("final_test", ""))
+
         except OuterLoopError as error:
             # A's evaluation tolerates a failed step (trainer.py:2299-2302, :2439-2441);
             # here the harness refused one (a spent rollout budget): say so and stop.
@@ -959,15 +1026,19 @@ class SkillOptLoop(OuterLoop):
                 )
                 return current
             prev_candidate = prev_outcome
-        prev_candidate = run.evaluate(
-            prev_candidate, part="train", items=sample_ids, seed=slow_seed,
-        )
+        # Evaluate both prev and current concurrently via evaluate_many.
+        # When prev_candidate and current share the same candidate id,
+        # evaluate_many's same-candidate serialization rule keeps them
+        # sequential automatically (correction 3).
+        slow_requests = [
+            EvalRequest(candidate=prev_candidate, part="train", items=sample_ids, seed=slow_seed),
+            EvalRequest(candidate=current, part="train", items=sample_ids, seed=slow_seed),
+        ]
+        eval_results = run.evaluate_many(slow_requests)
+        prev_candidate = eval_results[0]
         prev_records = run.item_records(prev_candidate)
 
-        # Evaluate current skill on sample
-        curr_candidate = run.evaluate(
-            current, part="train", items=sample_ids, seed=slow_seed,
-        )
+        curr_candidate = eval_results[1]
         curr_records = run.item_records(curr_candidate)
 
         # Build comparison pairs — slow_update.py:206-269
@@ -1116,6 +1187,7 @@ class SkillOptLoop(OuterLoop):
             "stale_epochs": self._stale_epochs,
             "early_stop_best": self._early_stop_best,
             "phase": self._phase,
+            "completed_phases": sorted(self._completed_phases),
             # Cached intermediate outputs for mid-epoch resume.
             "cached_failure_patches": self._cached_failure_patches,
             "cached_success_patches": self._cached_success_patches,
@@ -1144,6 +1216,12 @@ class SkillOptLoop(OuterLoop):
         self._stale_epochs = restored.get("stale_epochs", 0)
         self._early_stop_best = restored.get("early_stop_best", self._best_score)
         self._phase = restored.get("phase", "")
+        self._completed_phases = set(restored.get("completed_phases", []))
+        # Backward compat: if completed_phases is empty and _phase is a final
+        # phase, populate the set from all phases up to and including _phase.
+        if not self._completed_phases and self._phase in self._FINAL_PHASES:
+            idx = self._FINAL_PHASES.index(self._phase)
+            self._completed_phases = set(self._FINAL_PHASES[:idx + 1])
         # Cached intermediate outputs for mid-epoch resume.
         self._cached_failure_patches = restored.get("cached_failure_patches", [])
         self._cached_success_patches = restored.get("cached_success_patches", [])

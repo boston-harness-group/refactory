@@ -2078,8 +2078,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "max_concurrent_evaluations": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_items_in_flight": null,
     "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
@@ -2281,6 +2283,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "max_concurrent_evaluations": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_elapsed_s": {
       "default": null,
       "description": "",
@@ -2297,6 +2310,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_items_in_flight": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-items-in-flight"
       ],
       "nargs": null,
       "positional": false,
@@ -2601,7 +2625,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "9ff564d710197680ba0f5117cbbbb726ba7a19248862c8e67af62fcb6e0dcc6b"
+  "reviewed_schema": "244cbfc6a0c49d093488b25e13a5a88c452ec0fa1074361869364f9dd262715e"
 }
 ```
 
@@ -3438,8 +3462,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "max_concurrent_evaluations": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_items_in_flight": null,
     "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
@@ -3644,6 +3670,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "max_concurrent_evaluations": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_elapsed_s": {
       "default": null,
       "description": "",
@@ -3660,6 +3697,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_items_in_flight": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-items-in-flight"
       ],
       "nargs": null,
       "positional": false,
@@ -3975,7 +4023,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "5c38f63f34ef8ee05828239e6ec06cb4ec66e58a5ee63f891a36c6ce7041dd1f"
+  "reviewed_schema": "cb744f40e121ae4369c28c10b7070dfe87b26defa58c90757ee307851f3a4dc8"
 }
 ```
 
@@ -5437,8 +5485,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "max_concurrent_evaluations": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_items_in_flight": null,
     "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
@@ -5642,6 +5692,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "max_concurrent_evaluations": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_elapsed_s": {
       "default": null,
       "description": "",
@@ -5658,6 +5719,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_items_in_flight": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-items-in-flight"
       ],
       "nargs": null,
       "positional": false,
@@ -5965,7 +6037,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "a927e042211f7a9956d66705facdf35b1456bea8b2e8cf66b6b278380d85c30a"
+  "reviewed_schema": "8500b01318e8ba9002d48660e173d57761d11586f776582ac1cd7735048e2663"
 }
 ```
 

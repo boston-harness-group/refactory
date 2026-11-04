@@ -219,6 +219,7 @@ def run_data_concurrent(
     setup_kwargs: dict[str, Any] | None = None,
     verify_kwargs: dict[str, Any] | None = None,
     item_deadline_s: float | None = None,
+    item_gate: threading.BoundedSemaphore | None = None,
 ) -> ConcurrentOutcome:
     """Run data-node items concurrently, with the sequential loop's semantics.
 
@@ -275,6 +276,11 @@ def run_data_concurrent(
         if cancelled.is_set():
             result.cancelled = True
             return result
+
+        # Acquire run-wide item gate (cross-evaluation limiter)
+        _has_gate = item_gate is not None
+        if _has_gate:
+            item_gate.acquire()
 
         instance = instance_of(item)
         pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads)
@@ -383,6 +389,8 @@ def run_data_concurrent(
                 live.unlink(missing_ok=True)
             if finished:
                 mark_pass_complete(pass_dir, record)
+            if _has_gate:
+                item_gate.release()
         result.record = record
         return result
 

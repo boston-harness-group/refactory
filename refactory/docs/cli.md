@@ -157,6 +157,8 @@ installed copy.
 | `--elite <n>` | how many parents each round proposes against | 3 |
 | `--max-evaluations <n>` | a hard ceiling on evaluated candidates | 64 |
 | `--max-rollouts <n>` | per-item budget: how many item-level evaluations the run may perform | unlimited |
+| `--max-concurrent-evaluations <n>` | how many evaluations run at once in evaluate_many | 4 |
+| `--max-items-in-flight <n>` | run-wide cap on items evaluated concurrently across all concurrent evaluations; when unset, uses the mode's data_parallelism | the mode's data_parallelism |
 | `--holdout <fraction>` | the share of a Task's items kept out of the search and used to audit the winner afterwards; one item cannot be split, which the audit records | 0.3 |
 | `--parsimony <cost>` | what each node of a candidate's graph costs its score: the search compares `raw_score − parsimony × nodes` | 0.01 |
 | `--attempts <n>` | retries per batch after a refusal | 3 |

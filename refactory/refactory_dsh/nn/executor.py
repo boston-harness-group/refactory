@@ -827,6 +827,8 @@ class Executor:
     #: The completed nodes, gate verdicts and reloop feedback, kept by the spine's rules.
     record: RunRecord = field(default_factory=RunRecord)
     _reserve_step: Callable[[], bool] | None = field(default=None, repr=False)
+    #: Run-wide item-in-flight limiter passed from evaluate_many.
+    item_gate: Any = field(default=None, repr=False)
 
     _gate_iterations: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _outcome: str = field(default="pending", init=False, repr=False)
@@ -1103,6 +1105,7 @@ class Executor:
                             setup_kwargs=_setup_kwargs,
                             verify_kwargs=_verify_kwargs,
                             item_deadline_s=_item_deadline_s,
+                            item_gate=self.item_gate,
                         )
                         scores = _par.scores
                         _failed_item_step_indices.update(
@@ -2198,6 +2201,7 @@ def execute(
     shared_budget: Any = None,
     omit_steering: bool | None = None,
     enable_recovery: bool = False,
+    item_gate: Any = None,
 ) -> RunResult:
     """Build a context and run the graph once.
 
@@ -2257,7 +2261,7 @@ def execute(
             pass
     try:
         executor = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
-                            record=record)
+                            record=record, item_gate=item_gate)
         if gate_iterations:
             executor._gate_iterations.update(gate_iterations)
         result = executor.run(start=start)

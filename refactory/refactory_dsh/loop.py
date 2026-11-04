@@ -31,6 +31,7 @@ import random
 import shutil
 import statistics
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from contextlib import nullcontext
@@ -200,6 +201,11 @@ class LoopConfig:
     validation_reserve_s: float = 0
     validation_reserve_tokens: int = 0
     max_rollouts: int | None = None
+    #: How many evaluations run at once in evaluate_many. Default 4.
+    max_concurrent_evaluations: int = 4
+    #: Run-wide cap on items evaluated concurrently across all concurrent
+    #: evaluations.  ``None`` means use the mode's data_parallelism.
+    max_items_in_flight: int | None = None
     #: Path to a parts manifest (parts.json) with train/val/test id lists.
     #: When set, the loop copies it to the run root and every evaluation draws
     #: items from it.  The optimizer cannot choose val/test items.
@@ -458,6 +464,52 @@ class Loop(OuterLoop):
         #: ``strategy()``, ``strategy_state_dict()``, and
         #: ``load_strategy_state()`` delegate to this object.
         self._custom_strategy: OuterLoop | None = None
+        #: Reentrant lock protecting concurrent access to post-measure
+        #: state mutations (budget counters, records, journal writes).
+        self._state_lock: threading.RLock = threading.RLock()
+        #: Run-wide item-in-flight limiter (walker: BoundedSemaphore).
+        self._item_gate: threading.BoundedSemaphore | None = None
+        #: Whether _init_item_gate has been called.
+        self._item_gate_initialized: bool = False
+
+    def _init_item_gate(self) -> None:
+        """Create the item-in-flight limiter on first evaluate_many call.
+
+        For the walker runtime: a ``BoundedSemaphore`` whose permit count is
+        ``max_items_in_flight`` (defaulting to the mode's data-node
+        ``effective_parallelism``).  For the spine runtime: ensures the slot
+        directory exists.
+        """
+        if self._item_gate_initialized:
+            return
+        self._item_gate_initialized = True
+        max_items = self.config.max_items_in_flight
+        if max_items is None:
+            # Resolve from the mode's data-node effective_parallelism
+            state = self.mode.state_dict()
+            graph = state.get("graph") or {}
+            nodes = graph.get("nodes") if isinstance(graph, dict) else None
+            if isinstance(nodes, dict):
+                entries = list(nodes.values())
+            elif isinstance(nodes, list):
+                entries = nodes
+            else:
+                entries = []
+            for node_data in entries:
+                if isinstance(node_data, dict) and node_data.get("kind") == "data":
+                    p = node_data.get("parallelism", 1)
+                    if isinstance(p, int) and p > 1:
+                        max_items = p
+                        break
+            if max_items is None:
+                max_items = 24  # sensible default
+        if self.config.evaluator == "walker":
+            self._item_gate = threading.BoundedSemaphore(max_items)
+        else:
+            # Spine: ensure slot directory exists
+            slot_dir = self.root / ".refactory" / "item-slots"
+            slot_dir.mkdir(parents=True, exist_ok=True)
+        self._resolved_max_items_in_flight = max_items
 
     def search_name(self) -> str:
         """What runs the search, as the run header and report name it: an attached
@@ -792,6 +844,8 @@ class Loop(OuterLoop):
 
     def _evaluate(
         self, candidate: Candidate, *, seed: int | None = None, items: list[str] | None = None,
+        _budget_reserved: bool = False,
+        item_gate: threading.BoundedSemaphore | None = None,
     ) -> None:
         """Run one candidate through the evaluator, and record what it scored.
 
@@ -803,6 +857,9 @@ class Loop(OuterLoop):
         The evaluator runs the train part of the item selection, and the loop takes
         the size cost off afterwards. ``raw_score`` keeps the evaluator's number, so
         the report can say whether a candidate won on merit or on size.
+
+        When ``_budget_reserved`` is True, the caller has already pre-incremented
+        ``self.evaluations``; this method skips that increment.
         """
         workdir = self.root / "runs" / candidate.id
         mode = self.mode_class(state=candidate.state)
@@ -816,7 +873,10 @@ class Loop(OuterLoop):
         if items is not None:
             workdir.mkdir(parents=True, exist_ok=True)
             task_module.make_manifest(workdir, train_ids=items)
-        result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed, items=items)
+        result, measurements = self._measure(
+            candidate, workdir, task_module.TRAIN, seed=seed, items=items,
+            item_gate=item_gate,
+        )
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
         candidate.score = result.score - self.config.parsimony * nodes if result.exit_ok else None
@@ -828,38 +888,43 @@ class Loop(OuterLoop):
         candidate.duration_s = result.duration_s
         candidate.model_calls = result.model_calls
         candidate.evaluated = True
-        self._train_item_records[candidate.id] = list(result.item_records)
-        self.evaluations += 1
-        self.rollouts += len(result.item_records) or 1
-        self._journal("train_records", id=candidate.id,
-                      records=list(result.item_records))
-        self._journal("rollouts", rollouts=self.rollouts)
-        self._journal(
-            "score",
-            id=candidate.id,
-            score=candidate.score,
-            raw_score=candidate.raw_score,
-            nodes=nodes,
-            parsimony=self.config.parsimony,
-            exit_ok=candidate.exit_ok,
-            error=candidate.error,
-            duration_s=candidate.duration_s,
-            model_calls=candidate.model_calls,
-            facts=candidate.facts,
-            measurements=measurements,
-        )
-        self._write_candidate(candidate, workdir, mode=mode)
+        with self._state_lock:
+            self._train_item_records[candidate.id] = list(result.item_records)
+            if not _budget_reserved:
+                self.evaluations += 1
+            self.rollouts += len(result.item_records) or 1
+            self._journal("train_records", id=candidate.id,
+                          records=list(result.item_records))
+            self._journal("rollouts", rollouts=self.rollouts)
+            self._journal(
+                "score",
+                id=candidate.id,
+                score=candidate.score,
+                raw_score=candidate.raw_score,
+                nodes=nodes,
+                parsimony=self.config.parsimony,
+                exit_ok=candidate.exit_ok,
+                error=candidate.error,
+                duration_s=candidate.duration_s,
+                model_calls=candidate.model_calls,
+                facts=candidate.facts,
+                measurements=measurements,
+            )
+            self._write_candidate(candidate, workdir, mode=mode)
 
     def _evaluate_part(
         self, candidate: Candidate, part: str,
         items: list[str] | None, seed: int | None,
+        *,
+        item_gate: threading.BoundedSemaphore | None = None,
     ) -> None:
         """Evaluate on val or test in a fresh occasion directory (F18)."""
-        counters = self._occasion_counters.setdefault(candidate.id, {})
-        counter = counters.get(part, 0)
-        counters[part] = counter + 1
-        self._journal("occasion_counter", id=candidate.id, part=part,
-                      counter=counters[part])
+        with self._state_lock:
+            counters = self._occasion_counters.setdefault(candidate.id, {})
+            counter = counters.get(part, 0)
+            counters[part] = counter + 1
+            self._journal("occasion_counter", id=candidate.id, part=part,
+                          counter=counters[part])
         workdir = self.root / "runs" / candidate.id / "occasions" / f"{part}_{counter}"
         workdir.mkdir(parents=True, exist_ok=True)
         task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
@@ -873,7 +938,10 @@ class Loop(OuterLoop):
             if manifest_src.exists():
                 shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
         self._carry_ledger(workdir)
-        result, measurements = self._measure(candidate, workdir, part, seed=seed, items=items)
+        result, measurements = self._measure(
+            candidate, workdir, part, seed=seed, items=items,
+            item_gate=item_gate,
+        )
         # Score-only occasion record for optimizer-facing storage (no records,
         # no workdir).
         occasion_public = {
@@ -882,13 +950,14 @@ class Loop(OuterLoop):
             "exit_ok": result.exit_ok, "error": result.error,
             "duration_s": result.duration_s,
         }
-        self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
-            occasion_public
-        )
-        self._journal("part_result", id=candidate.id, part=part,
-                      result=occasion_public)
-        self.rollouts += len(result.item_records) or 1
-        self._journal("rollouts", rollouts=self.rollouts)
+        with self._state_lock:
+            self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
+                occasion_public
+            )
+            self._journal("part_result", id=candidate.id, part=part,
+                          result=occasion_public)
+            self.rollouts += len(result.item_records) or 1
+            self._journal("rollouts", rollouts=self.rollouts)
         if result.item_records:
             (workdir / "item_records.json").write_text(
                 json.dumps(result.item_records, indent=2, default=str))
@@ -896,6 +965,7 @@ class Loop(OuterLoop):
     def _measure(
         self, candidate: Candidate, workdir: Path, part: str, *,
         seed: int | None = None, items: list[str] | None = None,
+        item_gate: threading.BoundedSemaphore | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
@@ -931,7 +1001,19 @@ class Loop(OuterLoop):
                     self.budget.checkpoint(("final_validation" if part == task_module.HOLDOUT else "work")
                                            if self._owns_resource_budget else None)
                 with self.budget.retain_validation_reserve() if self.budget else nullcontext():
-                    result = self.evaluator.evaluate(self.mode_class(state=candidate.state), candidate.state, trial_dir)
+                    eval_kwargs: dict[str, Any] = {}
+                    if item_gate is not None:
+                        eval_kwargs["item_gate"] = item_gate
+                    elif (hasattr(self, '_resolved_max_items_in_flight')
+                          and self.evaluator.out_of_process):
+                        # Spine: pass slot directory info
+                        slot_dir = self.root / ".refactory" / "item-slots"
+                        eval_kwargs["item_slots_dir"] = str(slot_dir)
+                        eval_kwargs["item_slots"] = self._resolved_max_items_in_flight
+                    result = self.evaluator.evaluate(
+                        self.mode_class(state=candidate.state), candidate.state,
+                        trial_dir, **eval_kwargs,
+                    )
             except BudgetExhausted as exc:
                 last = RunResult(exit_ok=False, error=str(exc))
                 self.bound = str(exc)
@@ -2770,10 +2852,14 @@ class Loop(OuterLoop):
         population has to be kept consistent with the counters, and the old glue's
         rehydrate did exactly that and produced real bugs. One log means one source
         of truth, and the same one the report already reads.
+
+        Thread-safe: the RLock prevents interleaved JSONL lines when
+        concurrent evaluations write to the journal simultaneously.
         """
-        self.root.mkdir(parents=True, exist_ok=True)
-        with (self.root / JOURNAL).open("a") as handle:
-            handle.write(json.dumps({"event": event, **payload}, default=str) + "\n")
+        with self._state_lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            with (self.root / JOURNAL).open("a") as handle:
+                handle.write(json.dumps({"event": event, **payload}, default=str) + "\n")
 
     def _journal_candidate(self, candidate: Candidate) -> None:
         self._journal(

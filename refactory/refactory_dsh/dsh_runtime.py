@@ -62,6 +62,8 @@ def run_on_dsh(
     repo_root: Path | None = None,
     on_output: Callable[[str], None] | None = None,
     model: Any = None,
+    item_slots_dir: str | None = None,
+    item_slots: int | None = None,
 ) -> DshRun:
     """Lower ``state``, run it on DSH, and read back the facts it produced.
 
@@ -142,6 +144,9 @@ def run_on_dsh(
     ]
     env = {**os.environ, "DSH_HOME": str(selected_home),
            "REFACTORY_MODEL_DSH_HOME": str(selected_home)}
+    if item_slots_dir is not None and item_slots is not None:
+        env["REFACTORY_ITEM_SLOTS_DIR"] = str(item_slots_dir)
+        env["REFACTORY_ITEM_SLOTS"] = str(item_slots)
     env.update(workers.environment(context))
     telemetry = workers.GraphTelemetry(workdir, context, budget) if context else None
     if telemetry is not None:
@@ -264,6 +269,8 @@ def evaluate_on_dsh(
     mode: Any, state: dict[str, Any], workdir: Path, *, timeout_s: int = DEFAULT_TIMEOUT_S,
     on_output: Callable[[str], None] | None = None,
     model: Any = None,
+    item_slots_dir: str | None = None,
+    item_slots: int | None = None,
 ) -> RunResult:
     """One forward pass on DSH, scored by the mode's own `score()`.
 
@@ -274,7 +281,9 @@ def evaluate_on_dsh(
     """
     name = f"{type(mode).__module__.split('.')[-2]}-{mode.name}"
     run = run_on_dsh(state, workdir, name=name, timeout_s=timeout_s, on_output=on_output,
-                     **({"model": model} if model is not None else {}))
+                     **({"model": model} if model is not None else {}),
+                     **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
+                        if item_slots_dir is not None else {}))
     # The DSH evaluator's run end (a spine run it launched and waited for): the
     # same cleanups the walker runs when its own run ends.
     from refactory_dsh.nn.executor import _run_end_cleanup
