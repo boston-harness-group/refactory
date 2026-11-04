@@ -570,10 +570,39 @@ def halt_branch_on_first_item(ctx: Any) -> dict[str, Any]:
 
 
 def write_item_result(ctx: Any) -> dict[str, Any]:
-    """Write item_result fact with value 1.0 — used to feed the item's score.
+    """Write ``item_result.json`` with score 1.0 into the pass workspace.
 
-    The data node's Task reads this fact in ``verify()`` and returns it as
+    The data node's Task reads this file in ``verify()`` and returns it as
     the score, proving the join's output feeds the item's score.
+    This runs as d_exit (after the join), so its output is the fork/join's
+    merged result flowing to the item scorer.
     """
-    ctx.set_fact("item_result", 1.0)
-    return {"item_result": 1.0}
+    ctx.write_json("item_result.json", {"score": 1.0})
+    return {}
+
+
+def halt_branch_on_first_item_spine(ctx: Any) -> dict[str, Any]:
+    """Raises stop / kills drain on item 0; no-ops otherwise.
+
+    Used by ``test_fork_inside_data_resume_spine``: item 0's fork is
+    interrupted mid-pass and the run resumes from checkpoint.
+    """
+    import os
+    import signal
+    from pathlib import Path
+
+    item_id = _current_id(ctx)
+    log_env = os.environ.get("PASS_TEST_LOG", "")
+    if log_env:
+        log = Path(log_env)
+        with log.open("a") as handle:
+            handle.write(item_id + "\n")
+    flag = Path(os.environ.get("PASS_TEST_FLAG", "/tmp/_f21_spine_stop"))
+    if item_id == "0" and not flag.exists():
+        flag.write_text("stopped")
+        if os.environ.get("PASS_TEST_RUNTIME") == "spine":
+            os.kill(os.getppid(), signal.SIGKILL)
+            raise SystemExit(1)
+        from refactory_dsh.nn.executor import HaltStop
+
+        raise HaltStop("data", reason="test stop on item 0")
