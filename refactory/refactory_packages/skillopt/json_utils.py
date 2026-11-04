@@ -98,6 +98,53 @@ def _looks_json_like(span: str) -> bool:
     return after_brace[:1] in ('"', '}')
 
 
+def _close_unterminated(text: str) -> dict | None:
+    """Parse a reply whose only JSON object stops before its closing brackets.
+
+    Claude analysts sometimes end a complete patch without the outermost ``}``
+    (``{"patch": {...}]}`` then end of text). When the text holds no complete
+    top-level object and exactly one that starts but never closes, append the
+    closers its open ``{``/``[`` still need, in order, and parse that -- but only
+    when the reply ends on a ``}`` or ``]``. A reply that ends anywhere else (in
+    a string, after a key or a bare value) was cut off: its last object may lack
+    fields, and closing it would invent a partial edit, so it stays ``None``.
+    """
+    start = text.find("{")
+    if start < 0 or _top_level_brace_objects(text):
+        return None
+    stack: list[str] = []
+    in_str = esc = False
+    for ch in text[start:]:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack.pop() != ch:
+                return None
+            if not stack:
+                return None  # closed after all: a malformed object, not a truncated one
+    span = text[start:].rstrip()
+    # Ending on a closer means the reply finished its inner values and only the
+    # outer closers are missing; ending anywhere else means it was cut off.
+    if in_str or not stack or not span.endswith(("}", "]")):
+        return None
+    if not _looks_json_like(span + "}"):
+        return None
+    try:
+        parsed = json.loads(span + "".join(reversed(stack)))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) and parsed else None
+
+
 def extract_json(text: str) -> dict | None:
     """Extract a JSON object from LLM response text.
 
@@ -115,6 +162,9 @@ def extract_json(text: str) -> dict | None:
             return json.loads(m.group(0))
         except json.JSONDecodeError:
             pass
+    closed = _close_unterminated(text)
+    if closed is not None:
+        return closed
     # Tolerant fallback for non-OpenAI backends (Claude/Qwen, …) whose free-form
     # JSON strict json.loads rejects — unescaped ASCII quotes inside CJK string
     # values, trailing commas, etc. Repair so the analyst's edits aren't silently

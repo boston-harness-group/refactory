@@ -1486,6 +1486,25 @@ def test_tolerant_json_in_every_parser(tmp_path):
     assert state_dict["meta_skill_text"] == "META2"
 
 
+def test_an_analyst_reply_missing_its_closing_braces_is_closed():
+    """A Claude analyst ended a whole patch without the outer ``}`` (sonnet46 pilot);
+    the edits survive, but a reply cut off inside a value is still dropped."""
+    from refactory_packages.skillopt import analysts
+    from refactory_packages.skillopt.json_utils import extract_json
+
+    whole = json.dumps({"batch_size": 2, "patch": {"edits": [{"op": "append", "content": "x }"}]}})
+    truncated = whole[:-1] + "\n"
+    patch = analysts._parse_patch(truncated, "failure", 4)
+    assert patch is not None
+    assert patch["edits"] == [
+        {"op": "append", "content": "x }", "source_type": "failure", "support_count": 2},
+    ]
+    assert extract_json('{"patch": {"edits": [{"op": "append"') is None
+    assert extract_json('{"patch": {"edits": [{"op": "append", "content": "cut off') is None
+    assert extract_json('{"patch": {"edits": [], "n": 3') is None
+    assert extract_json('prose {op: append, "edits": [1]') is None
+
+
 # ── item 4: merge as SkillOpt ─────────────────────────────────────────────
 
 
