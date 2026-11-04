@@ -5,7 +5,7 @@
  * nodes due together, checking five invariants on each run.
  */
 import { describe, expect, it } from 'vitest'
-import { shapes, crossContainerReloopGraph, dataInsideForkGraph, dataInsideBranch, designGraphRefineLightRelooped, forkInsideData } from './graph-shapes.ts'
+import { shapes, crossContainerReloopGraph, dataInsideForkGraph, dataInsideBranch, designGraphRefineLightRelooped } from './graph-shapes.ts'
 import { allOrders, seededOrders, driveToEnd } from './shape-driver.ts'
 import {
   checkCompletedOncePerVisit, checkJoinAfterBranches, checkNoDueDrop,
