@@ -2098,6 +2098,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
+    "seed_results": null,
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
@@ -2557,6 +2558,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "seed_results": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--seed-results"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "setting_sources": {
       "default": null,
       "description": "",
@@ -2625,7 +2637,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "244cbfc6a0c49d093488b25e13a5a88c452ec0fa1074361869364f9dd262715e"
+  "reviewed_schema": "5a406ef1c14fc971c4d6020a201071bfb90125c2570bce3e7d57974f032d0671"
 }
 ```
 
@@ -3482,6 +3494,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
+    "seed_results": null,
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
@@ -3955,6 +3968,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "seed_results": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--seed-results"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "setting_sources": {
       "default": null,
       "description": "",
@@ -4023,7 +4047,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "cb744f40e121ae4369c28c10b7070dfe87b26defa58c90757ee307851f3a4dc8"
+  "reviewed_schema": "b6eb0e63ea61953055fcd5c3ea20d1e42c4b36c5440a69ca5abfed43abe7ae93"
 }
 ```
 
@@ -5505,6 +5529,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "repeats": 1,
     "role_routes": {},
     "seed": 0,
+    "seed_results": null,
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
@@ -5955,6 +5980,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "seed_results": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--seed-results"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "setting_sources": {
       "default": null,
       "description": "",
@@ -6037,7 +6073,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "8500b01318e8ba9002d48660e173d57761d11586f776582ac1cd7735048e2663"
+  "reviewed_schema": "489bb36b574b0b381a65d6c1251a0b2ee55c70b604fd35427a6e53e7014178db"
 }
 ```
 

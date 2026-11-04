@@ -210,6 +210,10 @@ class LoopConfig:
     #: When set, the loop copies it to the run root and every evaluation draws
     #: items from it.  The optimizer cannot choose val/test items.
     parts_manifest: str | None = None
+    #: Path to a seed-results file (``python -m refactory_dsh.seed_cache export``).
+    #: The seed's first evaluation on each part it covers is read from it instead
+    #: of run, when the run's score context matches. See :mod:`refactory_dsh.seed_cache`.
+    seed_results: str | None = None
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
     #: Strategy-specific options passed to the strategy's ``configure()``
     #: method as keyword arguments.  Set from ``--strategy-option`` on the
@@ -455,6 +459,9 @@ class Loop(OuterLoop):
         #: The loop-level parts manifest (train/val/test id lists), loaded from
         #: config.parts_manifest or the run root.
         self._parts_manifest: dict[str, list[str]] | None = None
+        #: The loaded ``--seed-results`` file, and the parts it has already served.
+        self._seed_cache: dict[str, Any] | None = None
+        self._seed_cache_used: set[str] = set()
         #: The candidate the current optimizer step edits, recomputed on every
         #: ``optimizer_step`` (from ``select_parents(1)``, unless a strategy set
         #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
@@ -619,6 +626,15 @@ class Loop(OuterLoop):
         (self.root / "config.json").write_text(
             json.dumps({"mode": self.mode_id, **self.config.to_dict()}, indent=2, default=str)
         )
+        # Recorded for every run, so its seed results can be exported for later ones.
+        from refactory_dsh import seed_cache
+        context = seed_cache.score_context(self.config, self.mode_class)
+        (self.root / seed_cache.CONTEXT_FILE).write_text(json.dumps(context, indent=2, default=str))
+        if self.config.seed_results:
+            try:
+                self._seed_cache = seed_cache.load(self.config.seed_results, context)
+            except seed_cache.SeedCacheError as exc:
+                raise LoopError(str(exc)) from exc
         self._seed_ledger()
         resumed = self._replay_if_asked()
         (self.root / run_history.RUN_FILE).write_text(
@@ -888,7 +904,8 @@ class Loop(OuterLoop):
             self._train_item_records[candidate.id] = list(result.item_records)
             if not _budget_reserved:
                 self.evaluations += 1
-            self.rollouts += len(result.item_records) or 1
+            if not measurements.get("cached_from"):
+                self.rollouts += len(result.item_records) or 1
             self._journal("train_records", id=candidate.id,
                           records=list(result.item_records))
             self._journal("rollouts", rollouts=self.rollouts)
@@ -954,7 +971,8 @@ class Loop(OuterLoop):
             )
             self._journal("part_result", id=candidate.id, part=part,
                           result=occasion_public)
-            self.rollouts += len(result.item_records) or 1
+            if not measurements.get("cached_from"):
+                self.rollouts += len(result.item_records) or 1
             self._journal("rollouts", rollouts=self.rollouts)
         if result.item_records:
             (workdir / "item_records.json").write_text(
@@ -980,6 +998,10 @@ class Loop(OuterLoop):
         # items that were intentionally excluded.
         if items is not None:
             expected_ids = set(str(i) for i in items)
+
+        cached = self._cached_measure(candidate, workdir, part, expected_ids)
+        if cached is not None:
+            return cached
 
         trials = []
         all_item_records: list[dict[str, Any]] = []  # accumulate across repeats
@@ -1082,6 +1104,61 @@ class Loop(OuterLoop):
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
         return last, summary
+
+    def _cached_measure(
+        self, candidate: Candidate, workdir: Path, part: str, expected_ids: set[str],
+    ) -> tuple[Any, dict[str, Any]] | None:
+        """The ``--seed-results`` entry for this evaluation, if one applies.
+
+        Only the cache's own candidate, only on the exact item set it recorded,
+        and only once per part: a later occasion is a fresh measurement. The
+        recorded run directory is copied in, so an optimizer that reads a
+        candidate's pass files finds them as if the evaluation had run here.
+        """
+        from refactory_dsh.nn.mode import RunResult
+
+        cache = self._seed_cache
+        if cache is None or candidate.id != cache.get("candidate"):
+            return None
+        entry = (cache.get("parts") or {}).get(part)
+        if entry is None or self.config.repeats != 1 or set(entry.get("items") or ()) != expected_ids:
+            return None
+        # Claim the part under the state lock: concurrent evaluations
+        # (``Run.evaluate_many``) must not both replay the same entry.
+        with self._state_lock:
+            if part in self._seed_cache_used:
+                return None
+            self._seed_cache_used.add(part)
+        source = Path(entry.get("workdir") or "")
+        if source.is_dir():
+            shutil.copytree(source, workdir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+                "occasions", "trials", task_module.MANIFEST, "subset.json", "measurements.json"))
+        recorded = entry["result"]
+        result = RunResult(
+            exit_ok=True, score=float(recorded["score"]), error=None,
+            duration_s=float(recorded.get("duration_s") or 0.0),
+            model_calls=int(recorded.get("model_calls") or 0),
+            facts=dict(recorded.get("facts") or {}),
+            item_records=[{**record, "repeat": 1} for record in recorded["item_records"]],
+            workdir=workdir,
+        )
+        origin = f"{cache.get('source')}#{part}"
+        summary = {"requested": 1, "count": 1, "successful": 1, "mean": result.score, "stdev": None,
+                   "min": result.score, "max": result.score, "complete": True,
+                   "trials": [{"trial": 1, "score": result.score, "exit_ok": True, "error": None,
+                               "duration_s": result.duration_s, "model_calls": result.model_calls,
+                               "required_contract": {"passed": True, "missing_artifacts": []},
+                               "tokens": None, "cost": None, "workdir": str(workdir),
+                               "workers": [], "cached_from": origin}],
+                   "context_hash": self.config.resolved_profile.get("context_hash"),
+                   "tokens": None, "cost": None, "cached_from": origin,
+                   "interpretation": "recorded by an earlier run under the same score context"}
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
+        with self._state_lock:
+            self._journal("seed_cache_hit", id=candidate.id, part=part, source=origin,
+                          items=len(result.item_records), score=result.score)
+        return result, summary
 
     def _write_candidate(
         self, candidate: Candidate, workdir: Path, *, mode: Any = None
@@ -2993,6 +3070,9 @@ class Loop(OuterLoop):
                     self._occasion_counters.setdefault(cid, {})[part_name] = int(counter_val)
             elif event == "rollouts":
                 self.rollouts = int(record.get("rollouts") or 0)
+            elif event == "seed_cache_hit":
+                if record.get("part"):
+                    self._seed_cache_used.add(str(record["part"]))
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")
