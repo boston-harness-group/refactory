@@ -2660,6 +2660,7 @@ def _run_loop_with_infra(
     client: FakeClient | ReplayClient | None = None,
     config_overrides: dict[str, Any] | None = None,
     skillopt_options: dict[str, Any] | None = None,
+    preload_state: dict[str, Any] | None = None,
 ) -> tuple[SkillOptLoop, Loop, dict[str, Any]]:
     """Like _run_loop but also returns the infrastructure Loop object."""
     cfg = _config(tmp_path, **(config_overrides or {}))
@@ -2673,6 +2674,8 @@ def _run_loop_with_infra(
         )
         strategy = loop._custom_strategy
         assert isinstance(strategy, SkillOptLoop)
+        if preload_state is not None:
+            strategy.load_strategy_state(preload_state)
         report = loop.run()
     return strategy, loop, report
 
@@ -2689,6 +2692,59 @@ def test_best_candidate_returns_val_gated_winner_by_id(tmp_path):
     assert winner is not None
     assert winner.id == strategy._best_candidate_id
     assert winner.id == report["holdout"]["winner"]
+
+
+def _journal_records(loop: Loop) -> list[dict[str, Any]]:
+    from refactory_dsh.loop import JOURNAL
+
+    return [json.loads(line) for line in (loop.root / JOURNAL).read_text().splitlines() if line.strip()]
+
+
+def test_kept_skills_are_journaled_with_their_state(tmp_path):
+    """A skill SkillOpt keeps goes into the population through Run.keep, never
+    through propose; it is journaled once, with its state, so a tool reading the
+    run (or a resume) finds the winner without rebuilding it."""
+    # Every fake evaluation scores 0.5, so give the patched skill a better val
+    # score (as test_accept_only_if_strictly_better does) to make it kept.
+    _run_loop(tmp_path / "probe", skillopt_options={"max_epochs": 1})
+    patched = next(e["skill_hash"] for e in _read_trace(tmp_path / "probe")
+                   if e["step_type"] in ("val_evaluate", "val_cache_hit") and e.get("skill_hash"))
+    strategy, infra_loop, _ = _run_loop_with_infra(
+        tmp_path / "kept", skillopt_options={"max_epochs": 1},
+        preload_state={"val_cache": {patched: 0.9}},
+    )
+    assert strategy._best_candidate_id != infra_loop.population[0].id
+
+    candidates = [r for r in _journal_records(infra_loop) if r["event"] == "candidate"]
+    ids = [r["id"] for r in candidates]
+    assert len(ids) == len(set(ids))
+    assert set(ids) == {c.id for c in infra_loop.population}
+    best = next(r for r in candidates if r["id"] == strategy._best_candidate_id)
+    assert Candidate.from_state(best["state"]).id == strategy._best_candidate_id
+
+
+def test_a_score_journaled_before_its_candidate_is_replayed(tmp_path):
+    """Run.keep's contract is evaluate, then keep, so a strategy's candidate can be
+    journaled after its score; replay still gives it the score."""
+    _, infra_loop, _ = _run_loop_with_infra(tmp_path, skillopt_options={"max_epochs": 1})
+    records = _journal_records(infra_loop)
+    seed = next(r for r in records if r["event"] == "candidate")
+    other_state = nn.edits.configure(seed["state"], "skill", "a later skill")
+    other = Candidate.from_state(other_state, parent=seed["id"])
+    journal = tmp_path / "replay.jsonl"
+    journal.write_text("\n".join(json.dumps(r) for r in [
+        seed,
+        {"event": "score", "id": other.id, "score": 0.5, "raw_score": 0.5, "exit_ok": True},
+        {"event": "candidate", "id": other.id, "parent": seed["id"], "edits": [],
+         "edit_reports": [], "state": other_state},
+    ]) + "\n")
+
+    infra_loop._replay(journal)
+
+    replayed = {c.id: c for c in infra_loop.population}
+    assert replayed[other.id].evaluated
+    assert replayed[other.id].score == 0.5
+    assert replayed[other.id].exit_ok is True
 
 
 def test_strategy_best_candidate_overrides_report_winner(tmp_path):

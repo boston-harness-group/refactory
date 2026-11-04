@@ -397,6 +397,9 @@ class Loop(OuterLoop):
             project=self.project,
         )
         self.population: list[Candidate] = []
+        #: Ids with a ``candidate`` journal event, so ``step`` journals a candidate
+        #: a strategy built itself (``Run.keep``) exactly once.
+        self._journaled_ids: set[str] = set()
         self.rejections: list[Rejection] = []
         #: Candidates a person pinned, in the order they were pinned. A keep is not
         #: a score: it changes which candidates the next proposals are made against,
@@ -1576,6 +1579,12 @@ class Loop(OuterLoop):
             known.add(candidate.id)
             self.population.append(candidate)
             added.append(candidate)
+            # A strategy that builds and evaluates its own candidates (SkillOpt)
+            # adds them here through Run.keep without going through propose, which
+            # journals proposals. Journal it now so the run's record holds its
+            # state and a resume rebuilds it.
+            if candidate.id not in self._journaled_ids:
+                self._journal_candidate(candidate)
         self.generation += 1
         self._journal(
             "step",
@@ -2753,6 +2762,7 @@ class Loop(OuterLoop):
             handle.write(json.dumps({"event": event, **payload}, default=str) + "\n")
 
     def _journal_candidate(self, candidate: Candidate) -> None:
+        self._journaled_ids.add(candidate.id)
         self._journal(
             "candidate",
             id=candidate.id,
@@ -2777,10 +2787,33 @@ class Loop(OuterLoop):
         self._replay(journal)
         return True
 
+    @staticmethod
+    def _replay_score(candidate: Candidate, record: dict[str, Any]) -> None:
+        """Apply one journaled ``score`` event to its candidate."""
+        candidate.score = record.get("score")
+        # A journal written before the size cost existed has no `raw_score`;
+        # its `score` is the evaluator's own number, which is then the raw
+        # one too.
+        raw = record.get("raw_score", record.get("score"))
+        candidate.raw_score = None if raw is None else float(raw)
+        # Old records without an explicit outcome cannot establish a
+        # successful run. Keep them inspectable but ineligible, matching
+        # adoption and console winner selection.
+        candidate.exit_ok = record.get("exit_ok") is True
+        candidate.error = record.get("error")
+        candidate.duration_s = float(record.get("duration_s") or 0.0)
+        candidate.model_calls = int(record.get("model_calls") or 0)
+        candidate.facts = dict(record.get("facts") or {})
+        candidate.measurements = dict(record.get("measurements") or {})
+        candidate.evaluated = True
+
     def _replay(self, journal: Path) -> None:
         """Rebuild the population, the counters and the refusals from the log."""
         by_id: dict[str, Candidate] = {}
         order: list[str] = []
+        # A kept candidate a strategy evaluated before keeping it is journaled
+        # after its score; hold such scores until the candidate appears.
+        early_scores: dict[str, dict[str, Any]] = {}
         for line in journal.read_text().splitlines():
             if not line.strip():
                 continue
@@ -2798,29 +2831,19 @@ class Loop(OuterLoop):
                     edits=record.get("edits") or (),
                     edit_reports=record.get("edit_reports") or (),
                 )
+                self._journaled_ids.add(candidate.id)
                 if candidate.id not in by_id:
                     by_id[candidate.id] = candidate
                     order.append(candidate.id)
+                    if candidate.id in early_scores:
+                        self._replay_score(candidate, early_scores.pop(candidate.id))
             elif event == "score":
                 candidate = by_id.get(record.get("id"))
                 if candidate is None:
+                    if record.get("id") is not None:
+                        early_scores[str(record["id"])] = record
                     continue
-                candidate.score = record.get("score")
-                # A journal written before the size cost existed has no `raw_score`;
-                # its `score` is the evaluator's own number, which is then the raw
-                # one too.
-                raw = record.get("raw_score", record.get("score"))
-                candidate.raw_score = None if raw is None else float(raw)
-                # Old records without an explicit outcome cannot establish a
-                # successful run. Keep them inspectable but ineligible, matching
-                # adoption and console winner selection.
-                candidate.exit_ok = record.get("exit_ok") is True
-                candidate.error = record.get("error")
-                candidate.duration_s = float(record.get("duration_s") or 0.0)
-                candidate.model_calls = int(record.get("model_calls") or 0)
-                candidate.facts = dict(record.get("facts") or {})
-                candidate.measurements = dict(record.get("measurements") or {})
-                candidate.evaluated = True
+                self._replay_score(candidate, record)
             elif event == "rejection":
                 self.rejections.append(
                     Rejection(
