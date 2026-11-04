@@ -542,6 +542,8 @@ describe('data-parallel: slot-directory gating', () => {
       expect(peak).toBeLessThanOrEqual(N)
       // Exceeded N/2 (proves sharing: if divided, each drain gets N/2=2)
       expect(peak).toBeGreaterThan(N / 2)
+      // Every slot was released by the drain that held it.
+      expect(readdirSync(slotDir)).toEqual([])
     } finally {
       // Restore env
       if (origSlotsDir === undefined) delete process.env.REFACTORY_ITEM_SLOTS_DIR
@@ -557,77 +559,87 @@ describe('data-parallel: slot-directory gating', () => {
     }
   }, 60_000)
 
-  it('a stale slot with a dead pid is reclaimed', async () => {
+  it('a slot whose holder pid is gone is reclaimed through the real claim, and no tombstone is left', () => {
     const slotDir = join(scratch(), 'item-slots')
     mkdirSync(slotDir, { recursive: true })
-
-    const fs = await import('fs')
-    const path = await import('path')
-
-    // Create a stale slot with a definitely-dead pid
-    const stalePid = 2147483647 // max pid, almost certainly dead
-    const slotPath = path.join(slotDir, 'slot-0')
-    fs.writeFileSync(slotPath, String(stalePid))
-
-    // Verify the pid is dead
-    let pidDead = false
-    try {
-      process.kill(stalePid, 0)
-    } catch (err: any) {
-      if (err.code === 'ESRCH') pidDead = true
-    }
-
-    if (!pidDead) {
-      // Skip test if pid happens to be alive (extremely unlikely)
-      return
-    }
-
-    // The stale slot should be reclaimable
-    const currentPid = String(process.pid)
-    let reclaimed = false
-
-    try {
-      // Try exclusive create — will fail since file exists
-      const fd = fs.openSync(slotPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL)
-      fs.writeSync(fd, currentPid)
-      fs.closeSync(fd)
-      reclaimed = true
-    } catch (err: any) {
-      if (err.code === 'EEXIST') {
-        // Check pid
-        const ownerPid = parseInt(fs.readFileSync(slotPath, 'utf8').trim(), 10)
-        try {
-          process.kill(ownerPid, 0)
-        } catch (killErr: any) {
-          if (killErr.code === 'ESRCH') {
-            // Dead: reclaim
-            fs.unlinkSync(slotPath)
-            const fd = fs.openSync(slotPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL)
-            fs.writeSync(fd, currentPid)
-            fs.closeSync(fd)
-            reclaimed = true
-          }
-        }
-      }
-    }
-
-    expect(reclaimed).toBe(true)
-    expect(fs.readFileSync(slotPath, 'utf8').trim()).toBe(currentPid)
+    const dead = spawnSync('true')
+    expect(dead.pid).toBeGreaterThan(0)
+    writeFileSync(join(slotDir, 'slot-0'), `${dead.pid}:stale`)
+    const token = spinePlugin.itemSlotToken()
+    expect(spinePlugin.tryAcquireItemSlot(slotDir, 1, token)).toBe(0)
+    expect(readFileSync(join(slotDir, 'slot-0'), 'utf8')).toBe(token)
+    expect(readdirSync(slotDir)).toEqual(['slot-0'])
   })
 
-  it('mutation: divided cap fails the > N/2 assertion', () => {
-    // This test documents that the design intentionally does NOT divide the
-    // cap per drain. With N=4 total slots and 2 drains, a divided cap would
-    // give each drain N/2=2 slots, so peak overlap across both drains would
-    // be at most 2 (= N/2), failing the > N/2 assertion above.
-    // This is the mutation check for the shared slot directory.
-    const N = 4
-    const dividedCap = Math.floor(N / 2)
-    // With divided cap, each drain can use at most dividedCap slots
-    // So peak overlap is at most dividedCap (which is N/2)
-    // The test above requires peak > N/2, so divided cap would fail
-    expect(dividedCap).toBe(N / 2)
-    // This proves that the shared approach (where peak can reach N)
-    // is strictly more concurrent than the divided approach
+  it('a claimant that loses the reclaim race leaves the winner its slot', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    const dead = spawnSync('true')
+    const slot = join(slotDir, 'slot-0')
+    writeFileSync(slot, `${dead.pid}:stale`)
+    const winner = `${process.pid}:winner`
+    // Between our read of the dead token and our move, another claimant
+    // reclaims the slot and holds it.
+    const result = spinePlugin.tryAcquireItemSlot(slotDir, 1, spinePlugin.itemSlotToken(), () => {
+      rmSync(slot)
+      writeFileSync(slot, winner)
+    })
+    expect(result).toBe(-1)
+    expect(readFileSync(slot, 'utf8')).toBe(winner)
+    expect(readdirSync(slotDir)).toEqual(['slot-0'])
   })
+
+  it('the spine source loads node:fs only through its imports (an ESM build has no require)', () => {
+    const source = readFileSync(resolve('packages/workflow/workflow-spine/src/index.ts'), 'utf8')
+    expect(source).not.toMatch(/\brequire\(/)
+  })
+
+  it('a slot whose holder is alive, or still writing its token, is not reclaimed', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    writeFileSync(join(slotDir, 'slot-0'), `${process.pid}:other`)
+    writeFileSync(join(slotDir, 'slot-1'), '')
+    expect(spinePlugin.tryAcquireItemSlot(slotDir, 2, spinePlugin.itemSlotToken())).toBe(-1)
+    expect(readFileSync(join(slotDir, 'slot-0'), 'utf8')).toBe(`${process.pid}:other`)
+  })
+
+  it('release frees only a slot that still holds the releasing token', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    const mine = spinePlugin.itemSlotToken()
+    expect(spinePlugin.tryAcquireItemSlot(slotDir, 1, mine)).toBe(0)
+    // Another claimant took the slot over (as a reclaim would): our late
+    // release must leave its slot alone.
+    writeFileSync(join(slotDir, 'slot-0'), `${process.pid}:theirs`)
+    spinePlugin.releaseItemSlot(slotDir, 0, mine)
+    expect(readFileSync(join(slotDir, 'slot-0'), 'utf8')).toBe(`${process.pid}:theirs`)
+    spinePlugin.releaseItemSlot(slotDir, 0, `${process.pid}:theirs`)
+    expect(existsSync(join(slotDir, 'slot-0'))).toBe(false)
+  })
+
+  it('a slot error ends the items instead of stranding the drain on its local permits', async () => {
+    const items = Array.from({ length: 4 }, (_, i) => ({ id: `e${i}`, delay: 0 }))
+    const origSlotsDir = process.env.REFACTORY_ITEM_SLOTS_DIR
+    const origSlots = process.env.REFACTORY_ITEM_SLOTS
+    // A slot directory that does not exist: every claim throws ENOENT.
+    process.env.REFACTORY_ITEM_SLOTS_DIR = join(scratch(), 'missing', 'item-slots')
+    process.env.REFACTORY_ITEM_SLOTS = '2'
+    try {
+      const run = loaderRun(items, 2)
+      const ctx = await mountLoader(processShell([]), {
+        graph: loaderGraph(2), workdir: run.workdir,
+        commandEnv: { REFACTORY_WORKDIR: run.workdir, PYTHONPATH: run.taskDir },
+      })
+      const stranded = new Promise<string>(settle => setTimeout(() => settle('stranded'), 15_000))
+      const outcome = await Promise.race([drive(ctx).then(state => String(state.status)), stranded])
+      expect(outcome).not.toBe('stranded')
+      expect(outcome).not.toBe('done')
+    } finally {
+      if (origSlotsDir === undefined) delete process.env.REFACTORY_ITEM_SLOTS_DIR
+      else process.env.REFACTORY_ITEM_SLOTS_DIR = origSlotsDir
+      if (origSlots === undefined) delete process.env.REFACTORY_ITEM_SLOTS
+      else process.env.REFACTORY_ITEM_SLOTS = origSlots
+    }
+  }, 30_000)
+
 })

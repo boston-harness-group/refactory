@@ -1020,13 +1020,18 @@ class Executor:
                 # the budget's remaining time, defaulting to 3600 s.
                 _item_deadline_s = self._data_item_deadline()
 
-                # Ask 4: SIGALRM can only be armed on the main thread.
-                # Off the main thread, skip arming and emit a run_warning
-                # event so the unarmed deadline is recorded in the run's
-                # events (the same channel the spine uses for warnings).
+                # Ask 4: the sequential loop's SIGALRM can only be armed on the
+                # main thread. The concurrent path's deadline is thread-based
+                # and holds on any thread, so only the sequential loop below
+                # disarms it off the main thread, with a run_warning event so
+                # the unarmed deadline is recorded (the spine's warning channel).
                 _on_main_thread = threading.current_thread() is threading.main_thread()
-                if _item_deadline_s is not None and not _on_main_thread:
-                    _item_deadline_s = None  # disable deadline
+
+                def _disarm_serial_deadline() -> None:
+                    nonlocal _item_deadline_s
+                    if _item_deadline_s is None or _on_main_thread:
+                        return
+                    _item_deadline_s = None
                     try:
                         from refactory_dsh import live
                         live.emit(
@@ -1133,6 +1138,7 @@ class Executor:
                         current = out[0].target if out else None
                         continue
 
+                _disarm_serial_deadline()
                 for index, item in enumerate(items):
                     # Resume: an item whose pass finished is not run again; its
                     # record -- kept with the pass when it finished -- is.

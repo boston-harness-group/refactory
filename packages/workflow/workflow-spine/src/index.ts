@@ -21,9 +21,9 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { setTimeout as wait } from 'node:timers/promises'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, lstatSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, constants as fsConstants, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, lstatSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
@@ -1522,60 +1522,6 @@ export function apply(ctx: Context, config: Config): void {
     const itemSlotsCount = process.env.REFACTORY_ITEM_SLOTS ? parseInt(process.env.REFACTORY_ITEM_SLOTS, 10) : 0
     const useSlots = !!itemSlotsDir && itemSlotsCount > 0
 
-    /** Try to acquire a shared slot by atomically creating slot-<k>. */
-    const acquireSlot = async (): Promise<number> => {
-      if (!useSlots) return -1
-      const fs = await import('fs')
-      const path = await import('path')
-      const pid = String(process.pid)
-      let backoff = 10  // ms
-      for (;;) {
-        for (let k = 0; k < itemSlotsCount; k++) {
-          const slotPath = path.join(itemSlotsDir!, `slot-${k}`)
-          try {
-            const fd = fs.openSync(slotPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL)
-            fs.writeSync(fd, pid)
-            fs.closeSync(fd)
-            return k
-          } catch (err: any) {
-            if (err.code !== 'EEXIST') throw err
-            // Slot exists: check if the owner pid is still alive
-            try {
-              const ownerPid = parseInt(fs.readFileSync(slotPath, 'utf8').trim(), 10)
-              if (ownerPid > 0) {
-                try {
-                  process.kill(ownerPid, 0)
-                } catch (killErr: any) {
-                  if (killErr.code === 'ESRCH') {
-                    // Dead pid: reclaim the slot
-                    try {
-                      fs.unlinkSync(slotPath)
-                      const fd = fs.openSync(slotPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL)
-                      fs.writeSync(fd, pid)
-                      fs.closeSync(fd)
-                      return k
-                    } catch { /* another process claimed it */ }
-                  }
-                }
-              }
-            } catch { /* cannot read slot file */ }
-          }
-        }
-        // No slot free: wait with exponential backoff
-        await new Promise<void>(resolve => setTimeout(resolve, backoff))
-        backoff = Math.min(backoff * 2, 200)
-      }
-    }
-
-    const releaseSlot = (slotIndex: number): void => {
-      if (!useSlots || slotIndex < 0) return
-      try {
-        const fs = require('fs')
-        const path = require('path')
-        fs.unlinkSync(path.join(itemSlotsDir!, `slot-${slotIndex}`))
-      } catch { /* already cleaned up */ }
-    }
-
     // A slot frees as each item settles, handed straight to the next waiter.
     let inFlight = 0
     const waiters: Array<() => void> = []
@@ -1608,8 +1554,11 @@ export function apply(ctx: Context, config: Config): void {
 
     const processItem = async (index: number): Promise<ItemOutcome> => {
       await acquire()
-      const slotIndex = await acquireSlot()
+      const token = useSlots ? itemSlotToken() : ''
+      let slotIndex = -1
       try {
+        // Inside the try: a slot error still frees this drain's local permit.
+        if (useSlots) slotIndex = await acquireItemSlot(itemSlotsDir!, itemSlotsCount, token)
         if (halted) return {}
         recordStatus(spine, workdir, 'executing')
         const started = await runDataCommand(shell, data, 'begin', runner, index, undefined, undefined, CONCURRENT)
@@ -1674,7 +1623,7 @@ export function apply(ctx: Context, config: Config): void {
         // A crash in verify or in `end` itself is a failed item, as in a sequential pass.
         return await endFailed(index, failureTail(ended), ended.error?.includes('timed out') ? 'timeout' : undefined)
       } finally {
-        releaseSlot(slotIndex)
+        if (slotIndex >= 0) releaseItemSlot(itemSlotsDir!, slotIndex, token)
         release()
       }
     }
@@ -3209,4 +3158,111 @@ export function apply(ctx: Context, config: Config): void {
     dispose()
     restrictions.delete(agent)
   })
+}
+
+// ── Shared item slots (Run.evaluate_many's run-wide item limit) ────────────
+//
+// Concurrent spines of one run share `count` slot files `slot-<k>` in one
+// directory. A slot file holds its holder's token, `<pid>:<nonce>`.
+
+/** A fresh slot token for this process: its pid and a one-use nonce. */
+export function itemSlotToken(): string {
+  return `${process.pid}:${randomBytes(8).toString('hex')}`
+}
+
+/** Create `path` exclusively holding `token`; false when it exists. */
+function createItemSlot(path: string, token: string): boolean {
+  let fd: number
+  try {
+    fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+  try {
+    writeSync(fd, token)
+  } finally {
+    closeSync(fd)
+  }
+  return true
+}
+
+/** Whether a slot's holder may be alive: false only for a pid that is gone. */
+function itemSlotHolderAlive(content: string): boolean {
+  const pid = Number.parseInt(content.split(':')[0] ?? '', 10)
+  // Empty (a holder still writing its token) or unreadable: held.
+  if (!(pid > 0)) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+/**
+ * Take one free slot of `count` in `dir` for `token`, or -1 when every slot is
+ * held. A slot whose holder's pid is gone is reclaimed: renamed aside to a
+ * tombstone unique to this claimant (one rename wins), then created afresh. A
+ * claimant whose rename moved a slot another claimant had just re-created
+ * (not the dead holder's) puts it back. `beforeReclaim` runs between reading a
+ * dead holder's token and moving its slot aside (a test seam for that race).
+ */
+export function tryAcquireItemSlot(dir: string, count: number, token: string, beforeReclaim?: () => void): number {
+  for (let k = 0; k < count; k++) {
+    const slotPath = join(dir, `slot-${k}`)
+    if (createItemSlot(slotPath, token)) return k
+    let seen: string
+    try {
+      seen = readFileSync(slotPath, 'utf8').trim()
+    } catch {
+      continue
+    }
+    if (itemSlotHolderAlive(seen)) continue
+    beforeReclaim?.()
+    const tombstone = `${slotPath}.stale-${token.replace(':', '-')}`
+    try {
+      renameSync(slotPath, tombstone)
+    } catch {
+      continue
+    }
+    let moved = ''
+    try {
+      moved = readFileSync(tombstone, 'utf8').trim()
+    } catch { /* gone */ }
+    if (moved !== seen) {
+      try {
+        linkSync(tombstone, slotPath)
+      } catch { /* a third claimant holds it now */ }
+      try {
+        unlinkSync(tombstone)
+      } catch { /* already gone */ }
+      continue
+    }
+    try {
+      unlinkSync(tombstone)
+    } catch { /* already gone */ }
+    if (createItemSlot(slotPath, token)) return k
+  }
+  return -1
+}
+
+/** Wait for a slot, backing off from 10 ms to 200 ms between tries. */
+export async function acquireItemSlot(dir: string, count: number, token: string): Promise<number> {
+  let backoff = 10
+  for (;;) {
+    const slot = tryAcquireItemSlot(dir, count, token)
+    if (slot >= 0) return slot
+    await wait(backoff)
+    backoff = Math.min(backoff * 2, 200)
+  }
+}
+
+/** Free slot `index` if it still holds `token`; another holder's slot is left alone. */
+export function releaseItemSlot(dir: string, index: number, token: string): void {
+  const slotPath = join(dir, `slot-${index}`)
+  try {
+    if (readFileSync(slotPath, 'utf8').trim() !== token) return
+    unlinkSync(slotPath)
+  } catch { /* already gone */ }
 }

@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
@@ -51,6 +53,52 @@ class DshRun:
     stderr: str = ""
     duration_s: float = 0.0
     best_score: float | None = None
+
+
+#: Spine runs in flight in this process, so a stop that reaches the main thread
+#: while pool threads run them (``Run.evaluate_many``) can shut them down: they
+#: start in their own session, and only a main-thread run installs the SIGTERM
+#: handler that would unwind them.
+_TRACKED_RUNS: set[subprocess.Popen] = set()
+_TRACKED_LOCK = threading.Lock()
+
+
+def track_run(process: subprocess.Popen) -> None:
+    """Track ``process`` as an in-flight spine run (see ``shutdown_tracked_runs``)."""
+    with _TRACKED_LOCK:
+        _TRACKED_RUNS.add(process)
+
+
+def untrack_run(process: subprocess.Popen) -> None:
+    with _TRACKED_LOCK:
+        _TRACKED_RUNS.discard(process)
+
+
+def shutdown_tracked_runs() -> int:
+    """Ask every tracked spine run to shut down and wait for it; return how many.
+
+    Each gets SIGTERM (its own disposal path), then the shutdown grace; one
+    still running after it is killed.
+    """
+    from refactory_dsh.owned_process import SHUTDOWN_GRACE_S
+    with _TRACKED_LOCK:
+        running = [proc for proc in _TRACKED_RUNS if proc.poll() is None]
+    for proc in running:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + SHUTDOWN_GRACE_S
+    for proc in running:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+    return len(running)
 
 
 def run_on_dsh(
@@ -172,6 +220,7 @@ def run_on_dsh(
         process = subprocess.Popen(command, cwd=str(repo_root or REPO_ROOT), env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, start_new_session=os.name == "posix")
+        track_run(process)
         out_lines: list[str] = []
         err_lines: list[str] = []
 
@@ -203,7 +252,10 @@ def run_on_dsh(
                 except subprocess.TimeoutExpired:
                     continue
         except BaseException as error:
-            shutdown(process)
+            try:
+                shutdown(process)
+            finally:
+                untrack_run(process)
             for reader in readers:
                 reader.join(timeout=5)
             if telemetry is not None:
@@ -214,6 +266,7 @@ def run_on_dsh(
                               stderr=f"dsh timed out after {timeout_s}s; owned runtime shutdown requested",
                               duration_s=time.time() - started)
             raise
+        untrack_run(process)
         for reader in readers:
             reader.join()
         stdout, stderr = "".join(out_lines), "".join(err_lines)

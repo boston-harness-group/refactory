@@ -87,14 +87,14 @@ def _patch_evaluate_with_delay(loop: Loop, delays: dict[str, float],
     original = loop._evaluate
 
     def patched(cand, *, seed=None, items=None, _budget_reserved=False,
-                item_gate=None):
+                item_gate=None, **kw):
         delay = delays.get(cand.id, 0)
         start = time.monotonic()
         if delay > 0:
             time.sleep(delay)
         result = original(cand, seed=seed, items=items,
                           _budget_reserved=_budget_reserved,
-                          item_gate=item_gate)
+                          item_gate=item_gate, **kw)
         end = time.monotonic()
         if tracker is not None:
             tracker.record(cand.id, start, end)
@@ -345,7 +345,7 @@ def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
     # across all concurrent evaluations and writes the peak to PEAK_FILE.
     def _patched_evaluate(
         cand, *, seed=None, items=None, _budget_reserved=False,
-        item_gate=None,
+        item_gate=None, **kw,
     ):
         workdir = loop.root / "runs" / cand.id
         workdir.mkdir(parents=True, exist_ok=True)
@@ -665,12 +665,12 @@ def test_error_in_one_does_not_cancel_others(tmp_path):
     original = loop._evaluate
 
     def failing_evaluate(cand, *, seed=None, items=None, _budget_reserved=False,
-                         item_gate=None):
+                         item_gate=None, **kw):
         if cand.id == fail_id:
             raise RuntimeError("deliberate test failure")
         return original(cand, seed=seed, items=items,
                         _budget_reserved=_budget_reserved,
-                        item_gate=item_gate)
+                        item_gate=item_gate, **kw)
 
     loop._evaluate = failing_evaluate
 
@@ -771,244 +771,216 @@ def test_report_fields_unchanged(tmp_path):
         assert final_eval[key] is not None, f"final_eval[{key!r}] is None"
 
 
-# ── test_spine_slot_directory_shared_limit ───────────────────────────────
-# Correction 1: spine slot directory must be shared and exact, not divided.
+# ── the item limit's default and the spine's slot directory ─────────────
 
-def test_spine_slot_directory_shared_limit(tmp_path):
-    """Spine slot-directory gating: two concurrent drains against one slot dir
-    never exceed N in flight and do exceed N/2 (proves sharing).
+def test_item_limit_default_follows_the_data_nodes_parallelism_knob(tmp_path):
+    """With no max_items_in_flight, the run-wide item limit is the seed's
+    data-node effective_parallelism, read through its parallelism_knob
+    (LiveMath's data_parallelism=8 gives 8); a mode with no data node gets 1.
+    Fails on a hard-coded default (24)."""
+    from refactory_dsh import registry
+    from refactory_dsh.nn import edits as nn_edits
 
-    Tests the slot-directory mechanism from the Python side by exercising
-    the file-based lock/semaphore protocol directly.
-    """
-    slot_dir = tmp_path / "item-slots"
-    slot_dir.mkdir()
-    N = 4
-    pid = str(os.getpid())
+    _pkg, mode = registry.resolve(Path("."), "livemath/solver")
+    state = nn_edits.configure(mode().state_dict(), "data_parallelism", "8")
+    loop = Loop("livemath/solver", _config(tmp_path / "lm"), project=Path("."))
+    loop._init_item_gate(Candidate.from_state(state, parent=None, edits=()))
+    assert loop._resolved_max_items_in_flight == 8
+    assert loop._item_gate is not None and loop._item_gate._value == 8
 
-    # Simulate acquiring and releasing slots
-    acquired_slots: list[int] = []
-    for k in range(N):
-        slot_path = slot_dir / f"slot-{k}"
+    no_data, seed, _run = _make_loop_and_seed(tmp_path / "cp")
+    no_data._init_item_gate(seed)
+    assert no_data._resolved_max_items_in_flight == 1
+
+
+def test_spine_slot_directory_starts_empty(tmp_path):
+    """On the spine, the slot directory is emptied when the item limit is set
+    up: nothing is in flight in this Loop yet, and a slot left by an earlier
+    process whose pid was since reused would never be reclaimed. Fails when
+    the directory is kept."""
+    loop, seed, _run = _make_loop_and_seed(tmp_path, evaluator="dsh")
+    slot_dir = loop.root / ".refactory" / "item-slots"
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    (slot_dir / "slot-0").write_text(f"{os.getpid()}:left-by-an-earlier-run")
+    loop._init_item_gate(seed)
+    assert slot_dir.is_dir() and list(slot_dir.iterdir()) == []
+
+
+def _capture_dsh_runs(monkeypatch) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+    from refactory_dsh import dsh_runtime
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_on_dsh(state, workdir, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return dsh_runtime.DshRun(facts={}, workdir=Path(workdir), returncode=1)
+
+    monkeypatch.setattr(dsh_runtime, "run_on_dsh", fake_run_on_dsh)
+    return calls
+
+
+def test_slot_directory_reaches_the_spine_only_from_evaluate_many(tmp_path, monkeypatch):
+    """The spine gets the shared slot directory for evaluate_many requests
+    only; a plain Run.evaluate launches as before, even after evaluate_many
+    set the limit up. Fails when the slot arguments follow the loop's state
+    instead of the request."""
+    calls = _capture_dsh_runs(monkeypatch)
+    loop, seed, run = _make_loop_and_seed(tmp_path, evaluator="dsh", max_items_in_flight=5)
+    c1, c2 = _distinct_candidates(seed, 2)
+    run.evaluate_many([EvalRequest(candidate=c1, part="train"), EvalRequest(candidate=c2, part="train")])
+    run.evaluate(seed)
+    slot_dir = str(loop.root / ".refactory" / "item-slots")
+    assert [(c.get("item_slots_dir"), c.get("item_slots")) for c in calls] == [
+        (slot_dir, 5), (slot_dir, 5), (None, None)]
+
+
+def test_run_on_dsh_puts_the_slot_directory_in_the_spine_environment(tmp_path, monkeypatch):
+    """run_on_dsh hands the slot directory and count to the spine process's
+    environment when given them, and leaves them out otherwise."""
+    from refactory_dsh import dsh_profile, dsh_runtime, lowering
+
+    envs: list[dict[str, str]] = []
+
+    class FakeSpine:
+        def __init__(self, command, *, env, **kwargs):  # type: ignore[no-untyped-def]
+            envs.append(env)
+            self.stdout: list[str] = []
+            self.stderr: list[str] = []
+            self.returncode = 0
+
+        def wait(self, timeout=None):  # type: ignore[no-untyped-def]
+            return 0
+
+        def poll(self):  # type: ignore[no-untyped-def]
+            return 0
+
+    monkeypatch.setattr(dsh_profile, "requirement", lambda **kw: None)
+    monkeypatch.setattr(dsh_runtime, "require_build", lambda **kw: None)
+    monkeypatch.setattr(dsh_runtime, "dsh_command", lambda **kw: ["dsh"])
+    monkeypatch.setattr(lowering, "write_mode_graph", lambda *a, **kw: None)
+    monkeypatch.setattr(lowering, "write_declarations", lambda *a, **kw: None)
+    monkeypatch.setattr(dsh_runtime.subprocess, "Popen", FakeSpine)
+    monkeypatch.delenv("REFACTORY_ITEM_SLOTS_DIR", raising=False)
+    monkeypatch.delenv("REFACTORY_ITEM_SLOTS", raising=False)
+    _loop, seed, _run = _make_loop_and_seed(tmp_path)
+
+    dsh_runtime.run_on_dsh(seed.state, tmp_path / "a", item_slots_dir="/slots", item_slots=6)
+    dsh_runtime.run_on_dsh(seed.state, tmp_path / "b")
+    assert (envs[0]["REFACTORY_ITEM_SLOTS_DIR"], envs[0]["REFACTORY_ITEM_SLOTS"]) == ("/slots", "6")
+    assert "REFACTORY_ITEM_SLOTS_DIR" not in envs[1] and "REFACTORY_ITEM_SLOTS" not in envs[1]
+
+
+# ── a stop during evaluate_many shuts its spines down ───────────────────
+
+def test_a_stop_during_evaluate_many_shuts_down_the_spines_in_flight(tmp_path, monkeypatch):
+    """Spines started from pool threads run in their own session and miss the
+    main thread's SIGTERM handler. When a stop (SystemExit, as the handler
+    raises it) reaches evaluate_many on the main thread, it shuts down every
+    tracked spine before the pool is joined, instead of waiting on them.
+    Fails without the shutdown (the stand-in spines run for 60 s)."""
+    import concurrent.futures
+    import subprocess
+
+    from refactory_dsh import dsh_runtime
+
+    loop, seed, run = _make_loop_and_seed(tmp_path, max_evaluations=10)
+    started: list[subprocess.Popen] = []
+    lock = threading.Lock()
+
+    def spine_evaluate(cand, **kw):  # type: ignore[no-untyped-def]
+        proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        dsh_runtime.track_run(proc)
+        with lock:
+            started.append(proc)
         try:
-            fd = os.open(str(slot_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            os.write(fd, pid.encode())
-            os.close(fd)
-            acquired_slots.append(k)
-        except FileExistsError:
-            pass
+            proc.wait()
+        finally:
+            dsh_runtime.untrack_run(proc)
 
-    # All N slots should be acquired
-    assert len(acquired_slots) == N
+    loop._evaluate = spine_evaluate
 
-    # Try to acquire one more — should fail (all taken)
-    extra_path = slot_dir / f"slot-{N}"
+    def stopped(futures):  # type: ignore[no-untyped-def]
+        deadline = time.monotonic() + 10
+        while len(started) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        raise SystemExit(143)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(concurrent.futures, "as_completed", stopped)
+    c1, c2 = _distinct_candidates(seed, 2)
+    began = time.monotonic()
     try:
-        fd = os.open(str(extra_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        os.write(fd, pid.encode())
-        os.close(fd)
-        # This slot index is out of range [0..N-1], so the loop wouldn't try it
-    except FileExistsError:
-        pass
-
-    # With all N slots taken, trying slots 0..N-1 should all fail
-    for k in range(N):
-        try:
-            fd = os.open(str(slot_dir / f"slot-{k}"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            os.close(fd)
-            pytest.fail(f"slot-{k} should be taken")
-        except FileExistsError:
-            pass  # Expected
-
-    # Release some slots
-    for k in acquired_slots[:2]:
-        os.unlink(str(slot_dir / f"slot-{k}"))
-
-    # Now can acquire those released slots
-    reacquired = []
-    for k in range(N):
-        try:
-            fd = os.open(str(slot_dir / f"slot-{k}"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            os.write(fd, pid.encode())
-            os.close(fd)
-            reacquired.append(k)
-        except FileExistsError:
-            pass
-
-    assert len(reacquired) == 2  # The two released slots
-
-    # Clean up
-    for k in range(N):
-        (slot_dir / f"slot-{k}").unlink(missing_ok=True)
+        with pytest.raises(SystemExit):
+            run.evaluate_many([EvalRequest(candidate=c1, part="train"),
+                               EvalRequest(candidate=c2, part="train")])
+        elapsed = time.monotonic() - began
+        assert len(started) == 2
+        assert all(proc.poll() is not None for proc in started)
+        assert elapsed < 20, f"evaluate_many waited {elapsed:.1f}s on its spines"
+    finally:
+        for proc in started:
+            if proc.poll() is None:
+                proc.kill()
 
 
-def test_spine_slot_directory_concurrent_sharing(tmp_path):
-    """Two concurrent 'drains' sharing one slot directory: in-flight items
-    never exceed N and do exceed N/2 (proves sharing — idle slots from one
-    drain are available to the other).
+def test_shutdown_tracked_runs_ends_every_tracked_process():
+    """shutdown_tracked_runs terminates each tracked run and waits for it."""
+    import subprocess
 
-    Mutation check: a divided cap (N//2 per drain) fails the > N/2 assertion.
-    """
-    slot_dir = tmp_path / "item-slots"
-    slot_dir.mkdir()
-    N = 6  # total shared slots
-    pid = os.getpid()
-    peak_lock = threading.Lock()
-    current_in_flight = 0
-    peak_in_flight = 0
-    n_drains = 3
-    barrier = threading.Barrier(n_drains)  # synchronize drains
+    from refactory_dsh import dsh_runtime
 
-    def acquire_slot() -> int:
-        """Acquire a slot by atomically creating slot-<k>."""
-        for _ in range(500):
-            for k in range(N):
-                slot_path = str(slot_dir / f"slot-{k}")
-                try:
-                    fd = os.open(slot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-                    os.write(fd, str(pid).encode())
-                    os.close(fd)
-                    return k
-                except FileExistsError:
-                    pass
-            time.sleep(0.005)
-        raise TimeoutError("could not acquire slot")
-
-    def release_slot(k: int) -> None:
-        try:
-            os.unlink(str(slot_dir / f"slot-{k}"))
-        except FileNotFoundError:
-            pass
-
-    def drain(drain_id: int, items_per_drain: int, results: list[int]) -> None:
-        nonlocal current_in_flight, peak_in_flight
-        barrier.wait()  # synchronize start
-        # Each drain runs items concurrently using threads
-        threads = []
-        for _ in range(items_per_drain):
-            def item_work():
-                nonlocal current_in_flight, peak_in_flight
-                slot = acquire_slot()
-                with peak_lock:
-                    current_in_flight += 1
-                    if current_in_flight > peak_in_flight:
-                        peak_in_flight = current_in_flight
-                try:
-                    time.sleep(0.1)  # simulate work
-                finally:
-                    with peak_lock:
-                        current_in_flight -= 1
-                    release_slot(slot)
-                results.append(slot)
-            t = threading.Thread(target=item_work)
-            threads.append(t)
-            t.start()
-        for t in threads:
-            t.join()
-
-    all_results: list[list[int]] = [[] for _ in range(n_drains)]
-    drain_threads = []
-    for i in range(n_drains):
-        t = threading.Thread(target=drain, args=(i, 4, all_results[i]))
-        drain_threads.append(t)
-        t.start()
-    for t in drain_threads:
-        t.join(timeout=30)
-    for t in drain_threads:
-        assert not t.is_alive()
-
-    # Never exceeded N
-    assert peak_in_flight <= N, f"peak {peak_in_flight} exceeded limit {N}"
-    # Exceeded N/2 (proves sharing: idle slots from one drain are available
-    # to another; if cap were divided as N//n_drains=2, peak would be ≤2)
-    assert peak_in_flight > N // n_drains, (
-        f"peak {peak_in_flight} did not exceed N//{n_drains}={N // n_drains}; "
-        "sharing not proven"
-    )
-
-
-# ── test_spine_stale_slot_reclaimed ──────────────────────────────────────
-# Correction 1: stale slot with dead pid is reclaimed.
-
-def test_spine_stale_slot_reclaimed(tmp_path):
-    """A slot file with a dead pid is reclaimed.
-
-    Creates a slot file written by a now-dead pid, then tries to acquire
-    that slot.  The stale slot should be reclaimed (unlinked and re-created).
-    """
-    slot_dir = tmp_path / "item-slots"
-    slot_dir.mkdir()
-
-    # Find a dead pid
-    dead_pid = 99999
-    while True:
-        try:
-            os.kill(dead_pid, 0)
-            dead_pid += 1
-        except ProcessLookupError:
-            break  # This pid is dead
-        except PermissionError:
-            dead_pid += 1  # Process exists but we can't signal it
-
-    # Create a stale slot with the dead pid
-    stale_slot = slot_dir / "slot-0"
-    stale_slot.write_text(str(dead_pid))
-
-    # Now try to reclaim it (simulating the spine's logic)
-    pid = os.getpid()
-    reclaimed = False
-    slot_path = str(stale_slot)
-
+    procs = [subprocess.Popen(["sleep", "60"], start_new_session=True) for _ in range(2)]
     try:
-        fd = os.open(slot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        os.write(fd, str(pid).encode())
-        os.close(fd)
-        reclaimed = True  # Slot was free (shouldn't happen since we created it)
-    except FileExistsError:
-        # Slot exists: check if owner pid is dead
-        owner_pid = int(stale_slot.read_text().strip())
-        try:
-            os.kill(owner_pid, 0)
-        except ProcessLookupError:
-            # Dead pid: reclaim
-            os.unlink(slot_path)
-            fd = os.open(slot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            os.write(fd, str(pid).encode())
-            os.close(fd)
-            reclaimed = True
-        except PermissionError:
-            pass  # Process exists
-
-    assert reclaimed, "stale slot with dead pid should be reclaimed"
-    # Verify the slot now belongs to us
-    assert int(stale_slot.read_text().strip()) == pid
+        for proc in procs:
+            dsh_runtime.track_run(proc)
+        assert dsh_runtime.shutdown_tracked_runs() == 2
+        assert [proc.returncode for proc in procs] == [-signal.SIGTERM] * 2
+    finally:
+        for proc in procs:
+            dsh_runtime.untrack_run(proc)
+            if proc.poll() is None:
+                proc.kill()
 
 
-# ── test_spine_evaluator_passes_env ──────────────────────────────────────
+# ── evaluate_many's own bookkeeping ─────────────────────────────────────
 
-def test_spine_evaluator_passes_slot_env(tmp_path):
-    """DshEvaluator passes REFACTORY_ITEM_SLOTS_DIR and REFACTORY_ITEM_SLOTS
-    to the subprocess environment when evaluate_many is used with the spine runtime.
-    """
-    from refactory_dsh.dsh_runtime import evaluate_on_dsh
+def test_on_result_calls_never_overlap(tmp_path):
+    """on_result (and the strategy-state saves it makes) runs one call at a
+    time, though the evaluations run concurrently. Fails without the lock."""
+    loop, seed, run = _make_loop_and_seed(tmp_path, max_evaluations=10, max_concurrent_evaluations=4)
+    active = 0
+    peak = 0
+    guard = threading.Lock()
 
-    slot_dir = str(tmp_path / "item-slots")
-    slot_count = 12
+    def slow_on_result(index: int, candidate: Candidate) -> None:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.2)
+        with guard:
+            active -= 1
 
-    # Verify the DshEvaluator accept these kwargs
-    from refactory_dsh.evaluators import DshEvaluator
+    loop._evaluate = lambda cand, **kw: None
+    requests = [EvalRequest(candidate=c, part="train") for c in _distinct_candidates(seed, 3)]
+    run.evaluate_many(requests, on_result=slow_on_result)
+    assert peak == 1
 
-    evaluator = DshEvaluator(timeout_s=10)
 
-    # We can't run the full evaluate because it needs a real mode,
-    # but we can verify the evaluate method accepts the kwargs
-    # by checking the code path exists.
-    import inspect
-    sig = inspect.signature(evaluator.evaluate)
-    # kwargs are passed through **kwargs, so the signature just needs **kwargs
-    assert "kwargs" in str(sig) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    ), "DshEvaluator.evaluate must accept **kwargs"
+def test_an_item_gate_error_returns_the_reserved_budget(tmp_path):
+    """An error after the budget is reserved but before anything runs (the
+    item limit's setup) returns the whole reservation. Fails when only
+    evaluations that ran are settled."""
+    loop, seed, run = _make_loop_and_seed(tmp_path, max_evaluations=10)
+
+    def broken_gate(candidate=None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("item gate setup failed")
+
+    loop._init_item_gate = broken_gate
+    requests = [EvalRequest(candidate=c, part="train") for c in _distinct_candidates(seed, 2)]
+    with pytest.raises(RuntimeError, match="item gate setup failed"):
+        run.evaluate_many(requests)
+    assert loop.evaluations == 0
 
 
 # ── test_completed_phases_roundtrip ──────────────────────────────────────
@@ -1226,7 +1198,7 @@ def test_skipped_train_budget_released(tmp_path):
     candidate = Candidate.from_state(seed.state, parent=seed.id, edits=())
     train_calls: list[str] = []
 
-    def failing_part(cand, part, items, seed, *, item_gate=None):  # type: ignore[no-untyped-def]
+    def failing_part(cand, part, items, seed, *, item_gate=None, **kw):  # type: ignore[no-untyped-def]
         raise RuntimeError("deliberate failure on val eval")
 
     def counting(cand, **kwargs):  # type: ignore[no-untyped-def]

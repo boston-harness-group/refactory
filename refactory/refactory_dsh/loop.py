@@ -472,44 +472,38 @@ class Loop(OuterLoop):
         #: Whether _init_item_gate has been called.
         self._item_gate_initialized: bool = False
 
-    def _init_item_gate(self) -> None:
-        """Create the item-in-flight limiter on first evaluate_many call.
+    def _init_item_gate(self, candidate: Candidate | None = None) -> None:
+        """Create the item-in-flight limiter on the first evaluate_many call.
 
-        For the walker runtime: a ``BoundedSemaphore`` whose permit count is
-        ``max_items_in_flight`` (defaulting to the mode's data-node
-        ``effective_parallelism``).  For the spine runtime: ensures the slot
-        directory exists.
+        The limit is ``max_items_in_flight``, defaulting to the largest
+        ``effective_parallelism`` over the data nodes of ``candidate`` (the
+        seed), which honours a ``parallelism_knob`` such as LiveMath's
+        ``data_parallelism``; 1 when there is no data node.  The walker gets a
+        ``BoundedSemaphore``; the spine a slot directory, emptied here: nothing
+        is in flight in this Loop yet, and a slot left by an earlier process
+        whose pid was reused would otherwise never be reclaimed.
         """
         if self._item_gate_initialized:
             return
-        self._item_gate_initialized = True
         max_items = self.config.max_items_in_flight
         if max_items is None:
-            # Resolve from the mode's data-node effective_parallelism
-            state = self.mode.state_dict()
-            graph = state.get("graph") or {}
-            nodes = graph.get("nodes") if isinstance(graph, dict) else None
-            if isinstance(nodes, dict):
-                entries = list(nodes.values())
-            elif isinstance(nodes, list):
-                entries = nodes
-            else:
-                entries = []
-            for node_data in entries:
-                if isinstance(node_data, dict) and node_data.get("kind") == "data":
-                    p = node_data.get("parallelism", 1)
-                    if isinstance(p, int) and p > 1:
-                        max_items = p
-                        break
-            if max_items is None:
-                max_items = 24  # sensible default
+            source = candidate if candidate is not None else (
+                self.population[0] if self.population else None)
+            mode = self.mode_class(state=source.state) if source is not None else self.mode
+            knobs = mode.values()
+            levels = [
+                node.effective_parallelism(knobs)
+                for node in mode.graph().nodes.values() if node.kind == "data"
+            ]
+            max_items = max(levels, default=1)
         if self.config.evaluator == "walker":
             self._item_gate = threading.BoundedSemaphore(max_items)
         else:
-            # Spine: ensure slot directory exists
             slot_dir = self.root / ".refactory" / "item-slots"
+            shutil.rmtree(slot_dir, ignore_errors=True)
             slot_dir.mkdir(parents=True, exist_ok=True)
         self._resolved_max_items_in_flight = max_items
+        self._item_gate_initialized = True
 
     def search_name(self) -> str:
         """What runs the search, as the run header and report name it: an attached
@@ -846,6 +840,7 @@ class Loop(OuterLoop):
         self, candidate: Candidate, *, seed: int | None = None, items: list[str] | None = None,
         _budget_reserved: bool = False,
         item_gate: threading.BoundedSemaphore | None = None,
+        item_slots: bool = False,
     ) -> None:
         """Run one candidate through the evaluator, and record what it scored.
 
@@ -875,7 +870,7 @@ class Loop(OuterLoop):
             task_module.make_manifest(workdir, train_ids=items)
         result, measurements = self._measure(
             candidate, workdir, task_module.TRAIN, seed=seed, items=items,
-            item_gate=item_gate,
+            item_gate=item_gate, item_slots=item_slots,
         )
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
@@ -917,6 +912,7 @@ class Loop(OuterLoop):
         items: list[str] | None, seed: int | None,
         *,
         item_gate: threading.BoundedSemaphore | None = None,
+        item_slots: bool = False,
     ) -> None:
         """Evaluate on val or test in a fresh occasion directory (F18)."""
         with self._state_lock:
@@ -940,7 +936,7 @@ class Loop(OuterLoop):
         self._carry_ledger(workdir)
         result, measurements = self._measure(
             candidate, workdir, part, seed=seed, items=items,
-            item_gate=item_gate,
+            item_gate=item_gate, item_slots=item_slots,
         )
         # Score-only occasion record for optimizer-facing storage (no records,
         # no workdir).
@@ -966,6 +962,7 @@ class Loop(OuterLoop):
         self, candidate: Candidate, workdir: Path, part: str, *,
         seed: int | None = None, items: list[str] | None = None,
         item_gate: threading.BoundedSemaphore | None = None,
+        item_slots: bool = False,
     ) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
@@ -1004,9 +1001,10 @@ class Loop(OuterLoop):
                     eval_kwargs: dict[str, Any] = {}
                     if item_gate is not None:
                         eval_kwargs["item_gate"] = item_gate
-                    elif (hasattr(self, '_resolved_max_items_in_flight')
-                          and self.evaluator.out_of_process):
-                        # Spine: pass slot directory info
+                    elif (item_slots and self.evaluator.out_of_process
+                          and hasattr(self, '_resolved_max_items_in_flight')):
+                        # Spine, under evaluate_many only: the shared slot
+                        # directory. A plain Run.evaluate launches as before.
                         slot_dir = self.root / ".refactory" / "item-slots"
                         eval_kwargs["item_slots_dir"] = str(slot_dir)
                         eval_kwargs["item_slots"] = self._resolved_max_items_in_flight
@@ -1047,7 +1045,8 @@ class Loop(OuterLoop):
                 except (OSError, json.JSONDecodeError):
                     continue
             trials.append(trial)
-            self.measurements += 1
+            with self._state_lock:
+                self.measurements += 1
             # Each record says which repeat graded it: joined across repeats, the
             # same item id appears once per repeat, and without the index two
             # gradings of one item read as a duplicate.

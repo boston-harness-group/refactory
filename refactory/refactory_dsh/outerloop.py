@@ -195,6 +195,10 @@ class Run:
         Requests naming the same candidate id run sequentially in request order;
         requests with distinct candidate ids run concurrently.  Budget is
         reserved atomically for the whole batch before any evaluation starts.
+        The rollout check is all-or-nothing too: the batch is refused when the
+        rollouts of all its requests together would pass ``max_rollouts``, which
+        is stricter than ``evaluate`` (refused only once the budget is spent).
+        Budget of a train request that fails or never starts is returned.
 
         At most one ``part="train"`` request per candidate id: train records
         are kept per candidate (``item_records``), so a second train run of the
@@ -204,7 +208,9 @@ class Run:
         between.  Val and test occasions are kept per occasion, so several
         val/test requests for one candidate are allowed (run in order).
 
-        ``on_result(index, candidate)`` fires in completion order, if provided.
+        ``on_result(index, candidate)`` fires in completion order, if provided;
+        calls never overlap.  Called on the main thread, a SIGTERM shuts down
+        the spine runs in flight before it ends the call.
         """
         import threading
         from collections import defaultdict
@@ -306,47 +312,46 @@ class Run:
             # budget_left() calls see the reservation.
             loop.evaluations += train_count
 
-        # ── ensure item gate / slot dir ───────────────────────────────────
-        loop._init_item_gate()  # noqa: SLF001
-
-        # ── group requests by candidate id ────────────────────────────────
-        # Requests with the same candidate id (at most one train, plus any
-        # val/test occasions) run sequentially in request order; distinct
-        # candidate ids run concurrently.
-        groups: dict[str, list[int]] = defaultdict(list)
-        for i, req in enumerate(requests):
-            groups[req.candidate.id].append(i)
-
+        # Everything after the reservation runs under one try/finally, so an
+        # error anywhere (the item gate, a stop signal) returns the budget of
+        # every train request that did not run, and of every one that failed.
         results: list[Candidate | None] = [None] * len(requests)
         errors: list[BaseException | None] = [None] * len(requests)
         # on_result errors are tracked separately: they must not release
         # the evaluation's budget because the evaluation itself succeeded.
         on_result_errors: list[BaseException | None] = [None] * len(requests)
-        failed_train_count = 0
-        skipped_train_count = 0
-        failed_train_lock = threading.Lock()
+        counts_lock = threading.Lock()
+        # on_result calls (and the strategy-state saves they make) never overlap.
+        on_result_lock = threading.Lock()
+        started_train = 0
+        failed_train = 0
 
         def _run_one(index: int) -> None:
+            nonlocal started_train, failed_train
             req = requests[index]
+            if req.part == "train":
+                with counts_lock:
+                    started_train += 1
             try:
                 if req.part == "train":
                     loop._evaluate(  # noqa: SLF001
                         req.candidate, seed=req.seed, items=req.items,
                         _budget_reserved=True,
                         item_gate=getattr(loop, '_item_gate', None),
+                        item_slots=True,
                     )
                 else:
                     loop._evaluate_part(  # noqa: SLF001
                         req.candidate, req.part, req.items, req.seed,
                         item_gate=getattr(loop, '_item_gate', None),
+                        item_slots=True,
                     )
                 results[index] = req.candidate
             except BaseException as exc:
                 errors[index] = exc
                 if req.part == "train":
-                    with failed_train_lock:
-                        nonlocal failed_train_count
-                        failed_train_count += 1
+                    with counts_lock:
+                        failed_train += 1
                 return
 
             # on_result is called only after a successful evaluation.
@@ -355,45 +360,68 @@ class Run:
             # all evaluations settle.
             if on_result is not None:
                 try:
-                    on_result(index, req.candidate)
+                    with on_result_lock:
+                        on_result(index, req.candidate)
                 except BaseException as exc:
                     on_result_errors[index] = exc
 
         def _run_group(indices: list[int]) -> None:
-            """Run a group of requests for the same candidate sequentially."""
-            for i, idx in enumerate(indices):
+            """Run a group of requests for the same candidate sequentially.
+
+            A failure skips the group's later requests; a skipped train
+            request never starts, so its reserved budget is returned.
+            """
+            for idx in indices:
                 _run_one(idx)
                 if errors[idx] is not None:
-                    # Count skipped train requests so their pre-reserved
-                    # budget is un-reserved below.
-                    for skipped_idx in indices[i + 1:]:
-                        if requests[skipped_idx].part == "train":
-                            with failed_train_lock:
-                                nonlocal skipped_train_count
-                                skipped_train_count += 1
                     break
 
-        max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
-        # Each distinct candidate group is one concurrent unit
-        group_list = list(groups.values())
+        try:
+            # ── ensure item gate / slot dir ───────────────────────────────
+            seed_candidate = loop.population[0] if loop.population else requests[0].candidate
+            loop._init_item_gate(seed_candidate)  # noqa: SLF001
 
-        if len(group_list) == 1:
-            # Single candidate or single request: run inline
-            _run_group(group_list[0])
-        else:
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(group_list))) as pool:
-                futures = {pool.submit(_run_group, g): g for g in group_list}
-                for future in as_completed(futures):
+            # ── group requests by candidate id ────────────────────────────
+            # Requests with the same candidate id (at most one train, plus any
+            # val/test occasions) run sequentially in request order; distinct
+            # candidate ids run concurrently.
+            groups: dict[str, list[int]] = defaultdict(list)
+            for i, req in enumerate(requests):
+                groups[req.candidate.id].append(i)
+            group_list = list(groups.values())
+            max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
+
+            if len(group_list) == 1:
+                # Single candidate or single request: run inline
+                _run_group(group_list[0])
+            else:
+                from refactory_dsh.dsh_runtime import shutdown_tracked_runs
+                from refactory_dsh.owned_process import _termination_as_exit
+                # On the main thread a SIGTERM becomes SystemExit here (pool
+                # threads cannot install the handler run_on_dsh uses); spines
+                # the pool started are shut down before the pool is joined.
+                with _termination_as_exit():
+                    pool = ThreadPoolExecutor(max_workers=min(max_workers, len(group_list)))
+                    futures = [pool.submit(_run_group, g) for g in group_list]
                     try:
-                        future.result()
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                            except BaseException:
+                                pass  # errors recorded in errors[]
                     except BaseException:
-                        pass  # errors recorded in errors[]
-
-        # ── un-reserve budget for failed and skipped train evals ──────────
-        unreserve = failed_train_count + skipped_train_count
-        if unreserve > 0:
-            with loop._state_lock:
-                loop.evaluations -= unreserve
+                        for future in futures:
+                            future.cancel()
+                        shutdown_tracked_runs()
+                        raise
+                    finally:
+                        pool.shutdown(wait=True)
+        finally:
+            # ── un-reserve budget for failed and never-started train evals ──
+            unreserve = (train_count - started_train) + failed_train
+            if unreserve > 0:
+                with loop._state_lock:
+                    loop.evaluations -= unreserve
 
         # ── re-raise the first error ──────────────────────────────────────
         # Evaluation errors take priority over on_result errors.
