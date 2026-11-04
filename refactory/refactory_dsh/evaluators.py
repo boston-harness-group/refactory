@@ -165,6 +165,11 @@ class WalkerEvaluator(Evaluator):
             # Also on a crash or a stop: a namespace that outlives the run it was
             # scoped to is the bug, however the run ended.
             store.forget_run_scoped()
+        # A stop under evaluate_many: items in flight may have finished, but the
+        # evaluation raises rather than returning a partial result.
+        check = getattr(item_gate, "check", None)
+        if callable(check):
+            check()
         result.duration_s = round(time.time() - started, 4)
         # Write per-item records to the trial directory (F6).
         if result.item_records:
@@ -222,12 +227,14 @@ class DshEvaluator(Evaluator):
         # Extract spine slot-directory parameters
         item_slots_dir = kwargs.pop("item_slots_dir", None)
         item_slots = kwargs.pop("item_slots", None)
+        stop_event = kwargs.pop("stop_event", None)
 
         result = evaluate_on_dsh(
             mode, state, workdir, timeout_s=self.timeout_s, on_output=self.on_output,
             **({"model": model} if model is not None else {}),
             **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
                if item_slots_dir is not None else {}),
+            **({"stop_event": stop_event} if stop_event is not None else {}),
         )
         # Read per-item records from the spine's item_records.json if present.
         records_path = workdir / "item_records.json"

@@ -1261,12 +1261,19 @@ class SkillOptLoop(OuterLoop):
         self._early_stop_best = restored.get("early_stop_best", self._best_score)
         self._phase = restored.get("phase", "")
         self._completed_phases = set(restored.get("completed_phases", []))
-        self._traced_phases = set(restored.get("traced_phases", []))
         # Backward compat: if completed_phases is empty and _phase is a final
         # phase, populate the set from all phases up to and including _phase.
         if not self._completed_phases and self._phase in self._FINAL_PHASES:
             idx = self._FINAL_PHASES.index(self._phase)
             self._completed_phases = set(self._FINAL_PHASES[:idx + 1])
+        if "traced_phases" in restored:
+            self._traced_phases = set(restored["traced_phases"])
+        else:
+            # A state saved before traces were tracked: that code traced each
+            # test phase as it finished, so a finished phase is traced.
+            self._traced_phases = {
+                phase for phase, _key in self._TEST_PHASES if phase in self._completed_phases
+            }
         # Cached intermediate outputs for mid-epoch resume.
         self._cached_failure_patches = restored.get("cached_failure_patches", [])
         self._cached_success_patches = restored.get("cached_success_patches", [])

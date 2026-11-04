@@ -3341,6 +3341,13 @@ def _fail_best_test(monkeypatch, error):  # type: ignore[no-untyped-def]
         return original_evaluate_part(self, candidate, part, items, seed, item_gate=item_gate, **kw)
 
     monkeypatch.setattr(Loop, "_evaluate_part", _evaluate_part_spy)
+    _three_test_candidates(monkeypatch)
+    return state
+
+
+def _three_test_candidates(monkeypatch):  # type: ignore[no-untyped-def]
+    """Val scores that make the seed, the best and the final skill three
+    distinct test candidates (with _THREE_TEST_CANDIDATES)."""
     # Epoch 1 accepts its patch (the best skill is not the seed's). Epoch 2's
     # slow update puts guidance in the current skill, which scores lower, so
     # epoch 2's patch is rejected and the final skill is not the best's. The
@@ -3351,7 +3358,6 @@ def _fail_best_test(monkeypatch, error):  # type: ignore[no-untyped-def]
         return 1.0 + 0.1 * skill.count("Always check.") - 0.2 * ("Updated guidance text." in skill)
 
     monkeypatch.setattr(SkillOptLoop, "_val_score", staticmethod(_val_score))
-    return state
 
 
 _THREE_TEST_CANDIDATES = {"max_epochs": 2, "seed": 7}
@@ -3381,6 +3387,121 @@ def test_a_refused_test_rollout_leaves_the_evaluation_incomplete(tmp_path, monke
     # Traced in A's order up to the refused phase, then the refusal.
     actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
     assert actions == ["baseline_test", "incomplete"]
+
+
+def test_a_stop_during_the_post_training_test_rollouts_records_none_of_them(tmp_path, monkeypatch):
+    """A stop (SIGTERM, as SystemExit) while the three test rollouts run in
+    evaluate_many: each walker evaluation starts no new item, raises instead
+    of returning a result, and no phase is marked finished. The resumed run
+    rolls all three out again and reports their scores. Fails when a stopped
+    evaluation returns its partial result (the phases are kept with partial
+    scores and not rerun)."""
+    import concurrent.futures
+    import threading
+
+    from refactory_dsh import dsh_runtime
+    from refactory_dsh.outerloop import Run
+
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    _three_test_candidates(monkeypatch)
+    armed = {"on": True, "test_batch": False}
+    test_started = threading.Event()
+    stopping = threading.Event()
+    graded: list[str] = []
+
+    original_verify = SkillTask.verify
+
+    def verify(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+        if armed["on"] and part == "test":
+            graded.append(instance.id)
+            test_started.set()
+            # In flight when the stop comes: finishes after it.
+            stopping.wait(10)
+        return original_verify(self, instance, workspace, part=part, seed=seed)
+
+    monkeypatch.setattr(SkillTask, "verify", verify)
+
+    original_many = Run.evaluate_many
+
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        armed["test_batch"] = any(r.part == "test" for r in requests)
+        return original_many(self, requests, on_result=on_result)
+
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    original_as_completed = concurrent.futures.as_completed
+
+    def as_completed(futures, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if armed["on"] and armed["test_batch"]:
+            test_started.wait(10)
+            raise SystemExit(143)
+        return original_as_completed(futures, *args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "as_completed", as_completed)
+    original_shutdown = dsh_runtime.shutdown_tracked_runs
+
+    def shutdown_tracked_runs():  # type: ignore[no-untyped-def]
+        # evaluate_many sets its stop event first; then the items in flight finish.
+        stopping.set()
+        return original_shutdown()
+
+    monkeypatch.setattr(dsh_runtime, "shutdown_tracked_runs", shutdown_tracked_runs)
+    overrides = _with_test_part(tmp_path)
+    options = dict(_THREE_TEST_CANDIDATES)
+    with pytest.raises(SystemExit):
+        _run_loop(tmp_path, config_overrides=overrides, skillopt_options=options)
+    assert not _decisions(_read_trace(tmp_path), "test_eval")
+    # Each of the three evaluations had one item in flight; none started another.
+    assert len(graded) == 3, graded
+    journal = [json.loads(line) for line in (tmp_path / "run" / "journal.jsonl").read_text().splitlines()]
+    assert not [e for e in journal if e["event"] == "part_result" and e.get("part") == "test"]
+
+    armed["on"] = False
+    calls = _spy_part_evaluations(monkeypatch)
+    cfg = _config(tmp_path, resume=True, **overrides)
+    with _patch_mode(SkillProbe):
+        loop = strategies.create("skillopt", MODE_ID, cfg, strategy_options=options,
+                                 project=Path("."), model=FakeClient())
+        report = loop.run()
+    strategy = loop._custom_strategy
+    resumed = sorted(cid for part, cid, _, _ in calls if part == "test")
+    assert len(resumed) == 3 and len(set(resumed)) == 3, resumed
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "done"
+    for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
+        assert strategy_report[key] is not None, key
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
+    assert actions == ["baseline_test", "best_test", "final_test"]
+
+
+def test_resume_from_a_state_saved_before_test_phases_were_kept(tmp_path):
+    """A state saved by the code before this change has a phase, no
+    test_phases and no traced_phases; that code traced each test phase as it
+    finished. Resumed after best_test, only final_test is evaluated and
+    traced, and the earlier phases are not traced again. Fails when the old
+    phases count as untraced (the trace stops at baseline_test, so final_test
+    is never traced)."""
+    strategy, report = _run_loop(tmp_path / "first", skillopt_options={"max_epochs": 1},
+                                 config_overrides=_with_test_part(tmp_path / "first"))
+    first = report["strategy_report"]
+    old = dict(strategy.strategy_state_dict())
+    old.pop("completed_phases", None)
+    old.pop("traced_phases", None)
+    old["phase"] = "best_test"
+    old["final_eval"] = {
+        "status": "running",
+        "final_selection_hard": first["final_selection_hard"],
+        "baseline_test_hard": first["baseline_test_hard"],
+        "test_hard": first["test_hard"],
+    }
+    _, resumed = _run_loop(tmp_path / "second", skillopt_options={"max_epochs": 1},
+                           config_overrides=_with_test_part(tmp_path / "second"),
+                           preload_state=old)
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path / "second"), "test_eval")]
+    assert len(actions) == 1 and actions[0] in ("final_test", "final_test_reused"), actions
+    resumed_report = resumed["strategy_report"]
+    assert resumed_report["test_eval"] == "done"
+    assert resumed_report["baseline_test_hard"] == first["baseline_test_hard"]
+    assert resumed_report["final_test_hard"] is not None
 
 
 def test_post_training_evaluation_resumes_where_it_stopped(tmp_path, monkeypatch):

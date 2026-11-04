@@ -841,6 +841,7 @@ class Loop(OuterLoop):
         _budget_reserved: bool = False,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
+        stop_event: threading.Event | None = None,
     ) -> None:
         """Run one candidate through the evaluator, and record what it scored.
 
@@ -870,7 +871,7 @@ class Loop(OuterLoop):
             task_module.make_manifest(workdir, train_ids=items)
         result, measurements = self._measure(
             candidate, workdir, task_module.TRAIN, seed=seed, items=items,
-            item_gate=item_gate, item_slots=item_slots,
+            item_gate=item_gate, item_slots=item_slots, stop_event=stop_event,
         )
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
@@ -913,6 +914,7 @@ class Loop(OuterLoop):
         *,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
+        stop_event: threading.Event | None = None,
     ) -> None:
         """Evaluate on val or test in a fresh occasion directory (F18)."""
         with self._state_lock:
@@ -936,7 +938,7 @@ class Loop(OuterLoop):
         self._carry_ledger(workdir)
         result, measurements = self._measure(
             candidate, workdir, part, seed=seed, items=items,
-            item_gate=item_gate, item_slots=item_slots,
+            item_gate=item_gate, item_slots=item_slots, stop_event=stop_event,
         )
         # Score-only occasion record for optimizer-facing storage (no records,
         # no workdir).
@@ -963,6 +965,7 @@ class Loop(OuterLoop):
         seed: int | None = None, items: list[str] | None = None,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
+        stop_event: threading.Event | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         """Independent bounded trials; any failed contract makes a candidate ineligible."""
         from refactory_dsh.nn.mode import RunResult
@@ -999,6 +1002,8 @@ class Loop(OuterLoop):
                                            if self._owns_resource_budget else None)
                 with self.budget.retain_validation_reserve() if self.budget else nullcontext():
                     eval_kwargs: dict[str, Any] = {}
+                    if stop_event is not None and self.evaluator.out_of_process:
+                        eval_kwargs["stop_event"] = stop_event
                     if item_gate is not None:
                         eval_kwargs["item_gate"] = item_gate
                     elif (item_slots and self.evaluator.out_of_process

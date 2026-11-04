@@ -209,8 +209,11 @@ class Run:
         val/test requests for one candidate are allowed (run in order).
 
         ``on_result(index, candidate)`` fires in completion order, if provided;
-        calls never overlap.  Called on the main thread, a SIGTERM shuts down
-        the spine runs in flight before it ends the call.
+        calls never overlap.  Called on the main thread, a stop (SIGTERM) ends
+        the call: no request starts after it, the spine runs in flight are shut
+        down, a walker evaluation starts no new item, and every evaluation it
+        ended raises instead of recording a result (no on_result fires for it,
+        and its train budget is returned).
         """
         import threading
         from collections import defaultdict
@@ -321,6 +324,13 @@ class Run:
         # the evaluation's budget because the evaluation itself succeeded.
         on_result_errors: list[BaseException | None] = [None] * len(requests)
         counts_lock = threading.Lock()
+        # Set when a stop reaches this call: no request starts after it, no
+        # on_result fires for one it ended, and a stopped evaluation raises.
+        stop_event = threading.Event()
+        from refactory_dsh.owned_process import EvaluationStopped, StoppableGate
+        # The walker's item gate, wrapped to refuse new items after a stop;
+        # set once the gate exists (below).
+        stoppable_gate: StoppableGate | None = None
         # on_result calls (and the strategy-state saves they make) never overlap.
         on_result_lock = threading.Lock()
         started_train = 0
@@ -329,6 +339,9 @@ class Run:
         def _run_one(index: int) -> None:
             nonlocal started_train, failed_train
             req = requests[index]
+            if stop_event.is_set():
+                errors[index] = EvaluationStopped("the request was not started: evaluate_many was stopped")
+                return
             if req.part == "train":
                 with counts_lock:
                     started_train += 1
@@ -337,14 +350,14 @@ class Run:
                     loop._evaluate(  # noqa: SLF001
                         req.candidate, seed=req.seed, items=req.items,
                         _budget_reserved=True,
-                        item_gate=getattr(loop, '_item_gate', None),
-                        item_slots=True,
+                        item_gate=stoppable_gate,
+                        item_slots=True, stop_event=stop_event,
                     )
                 else:
                     loop._evaluate_part(  # noqa: SLF001
                         req.candidate, req.part, req.items, req.seed,
-                        item_gate=getattr(loop, '_item_gate', None),
-                        item_slots=True,
+                        item_gate=stoppable_gate,
+                        item_slots=True, stop_event=stop_event,
                     )
                 results[index] = req.candidate
             except BaseException as exc:
@@ -361,6 +374,8 @@ class Run:
             if on_result is not None:
                 try:
                     with on_result_lock:
+                        if stop_event.is_set():
+                            return
                         on_result(index, req.candidate)
                 except BaseException as exc:
                     on_result_errors[index] = exc
@@ -380,6 +395,9 @@ class Run:
             # ── ensure item gate / slot dir ───────────────────────────────
             seed_candidate = loop.population[0] if loop.population else requests[0].candidate
             loop._init_item_gate(seed_candidate)  # noqa: SLF001
+            gate = getattr(loop, '_item_gate', None)
+            if gate is not None:
+                stoppable_gate = StoppableGate(gate, stop_event)
 
             # ── group requests by candidate id ────────────────────────────
             # Requests with the same candidate id (at most one train, plus any
@@ -410,6 +428,7 @@ class Run:
                             except BaseException:
                                 pass  # errors recorded in errors[]
                     except BaseException:
+                        stop_event.set()
                         for future in futures:
                             future.cancel()
                         shutdown_tracked_runs()

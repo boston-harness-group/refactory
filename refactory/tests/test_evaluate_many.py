@@ -872,55 +872,198 @@ def test_run_on_dsh_puts_the_slot_directory_in_the_spine_environment(tmp_path, m
 
 # ── a stop during evaluate_many shuts its spines down ───────────────────
 
-def test_a_stop_during_evaluate_many_shuts_down_the_spines_in_flight(tmp_path, monkeypatch):
-    """Spines started from pool threads run in their own session and miss the
-    main thread's SIGTERM handler. When a stop (SystemExit, as the handler
-    raises it) reaches evaluate_many on the main thread, it shuts down every
-    tracked spine before the pool is joined, instead of waiting on them.
-    Fails without the shutdown (the stand-in spines run for 60 s)."""
+def test_a_stop_during_evaluate_many_records_nothing_for_the_spines_it_ended(tmp_path, monkeypatch):
+    """A stop (SIGTERM, raised as SystemExit on the main thread) during
+    evaluate_many on the spine, through the real _evaluate/_evaluate_part and
+    run_on_dsh: the spines in flight are shut down and raise instead of
+    returning a result, so no score, part result, journal entry or on_result
+    is recorded for them; no request starts after the stop (the val request
+    queued behind c1's train never launches); the train budget is returned;
+    and the call ends at once rather than waiting out its spines. Fails when
+    a shut-down spine returns a failed result (recorded and journaled), or
+    without the shutdown (the stand-in spines run 60 s)."""
     import concurrent.futures
     import subprocess
+
+    from refactory_dsh import dsh_profile, dsh_runtime, lowering
+
+    monkeypatch.setattr(dsh_profile, "requirement", lambda **kw: None)
+    monkeypatch.setattr(dsh_runtime, "require_build", lambda **kw: None)
+    # A stand-in spine: runs 60 s, ignoring the runner's arguments.
+    monkeypatch.setattr(dsh_runtime, "dsh_command", lambda **kw: ["bash", "-c", "sleep 60", "stand-in"])
+    monkeypatch.setattr(lowering, "write_mode_graph", lambda *a, **kw: None)
+    monkeypatch.setattr(lowering, "write_declarations", lambda *a, **kw: None)
+    launched: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+        proc = real_popen(*args, **kwargs)
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(dsh_runtime.subprocess, "Popen", popen)
+
+    def stopped(futures):  # type: ignore[no-untyped-def]
+        deadline = time.monotonic() + 10
+        while len(dsh_runtime._TRACKED_RUNS) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        raise SystemExit(143)
+
+    monkeypatch.setattr(concurrent.futures, "as_completed", stopped)
+
+    loop, seed, run = _make_loop_and_seed(tmp_path, evaluator="dsh", max_evaluations=10)
+    loop._parts_manifest = {"val": ["v1"]}
+    c1, c2 = _distinct_candidates(seed, 2)
+    journal = loop.root / "journal.jsonl"
+    journal_before = journal.read_text() if journal.exists() else ""
+    seen: list[int] = []
+    began = time.monotonic()
+    try:
+        with pytest.raises(SystemExit):
+            run.evaluate_many(
+                [EvalRequest(candidate=c1, part="train"),
+                 EvalRequest(candidate=c1, part="val"),
+                 EvalRequest(candidate=c2, part="train")],
+                on_result=lambda index, cand: seen.append(index),
+            )
+        elapsed = time.monotonic() - began
+        assert len(launched) == 2, "a request started after the stop"
+        assert all(proc.poll() is not None for proc in launched)
+        assert elapsed < 20, f"evaluate_many waited {elapsed:.1f}s on its spines"
+        assert seen == []
+        assert c1.score is None and c2.score is None
+        assert c1.id not in loop._train_item_records and c2.id not in loop._train_item_records
+        assert loop._part_results == {}
+        assert (journal.read_text() if journal.exists() else "") == journal_before
+        assert loop.evaluations == 0
+        assert dsh_runtime._TRACKED_RUNS == set()
+    finally:
+        for proc in launched:
+            if proc.poll() is None:
+                proc.kill()
+
+
+def test_no_request_starts_after_a_stop(tmp_path, monkeypatch):
+    """A group whose request finished before the stop starts no further
+    request after it, through the real _evaluate_part and run_on_dsh. c1's
+    first val spine ends at once; its on_result is still running when the
+    stop comes; c1's second val request must not start (no occasion is
+    opened or journaled for it). Fails without the start check."""
+    import concurrent.futures
+    import subprocess
+    import threading as _threading
+
+    from refactory_dsh import dsh_profile, dsh_runtime, lowering
+
+    monkeypatch.setattr(dsh_profile, "requirement", lambda **kw: None)
+    monkeypatch.setattr(dsh_runtime, "require_build", lambda **kw: None)
+    # The first val occasion's stand-in spine ends at once; every other runs 60 s.
+    monkeypatch.setattr(dsh_runtime, "dsh_command", lambda **kw: [
+        "bash", "-c", 'case "$*" in *occasions/val_0*) exit 0;; *) exec sleep 60;; esac', "stand-in"])
+    monkeypatch.setattr(lowering, "write_mode_graph", lambda *a, **kw: None)
+    monkeypatch.setattr(lowering, "write_declarations", lambda *a, **kw: None)
+    launched: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+        proc = real_popen(*args, **kwargs)
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(dsh_runtime.subprocess, "Popen", popen)
+    in_on_result = _threading.Event()
+    stopping = _threading.Event()
+
+    def on_result(index, cand):  # type: ignore[no-untyped-def]
+        in_on_result.set()
+        stopping.wait(10)
+
+    def stopped(futures):  # type: ignore[no-untyped-def]
+        in_on_result.wait(10)
+        deadline = time.monotonic() + 10
+        while len(dsh_runtime._TRACKED_RUNS) < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        raise SystemExit(143)
+
+    original_shutdown = dsh_runtime.shutdown_tracked_runs
+
+    def shutdown_tracked_runs():  # type: ignore[no-untyped-def]
+        stopping.set()
+        return original_shutdown()
+
+    monkeypatch.setattr(concurrent.futures, "as_completed", stopped)
+    monkeypatch.setattr(dsh_runtime, "shutdown_tracked_runs", shutdown_tracked_runs)
+    loop, seed, run = _make_loop_and_seed(tmp_path, evaluator="dsh", max_evaluations=10)
+    loop._parts_manifest = {"val": ["v1"]}
+    c1, c2 = _distinct_candidates(seed, 2)
+    try:
+        with pytest.raises(SystemExit):
+            run.evaluate_many(
+                [EvalRequest(candidate=c1, part="val"),
+                 EvalRequest(candidate=c1, part="val"),
+                 EvalRequest(candidate=c2, part="train")],
+                on_result=on_result,
+            )
+        assert len(launched) == 2, "c1's second val request started after the stop"
+        assert loop._occasion_counters.get(c1.id) == {"val": 1}
+        assert len(loop._part_results[c1.id]["val"]) == 1
+        assert loop.evaluations == 0
+    finally:
+        for proc in launched:
+            if proc.poll() is None:
+                proc.kill()
+
+
+def test_no_on_result_for_an_evaluation_that_returns_after_the_stop(tmp_path, monkeypatch):
+    """An evaluation that returns just after the stop (between its evaluator
+    and on_result) gets no on_result, so a strategy does not mark it done.
+    Fails without the check before on_result."""
+    import concurrent.futures
+    import threading as _threading
 
     from refactory_dsh import dsh_runtime
 
     loop, seed, run = _make_loop_and_seed(tmp_path, max_evaluations=10)
-    started: list[subprocess.Popen] = []
-    lock = threading.Lock()
+    started = _threading.Event()
+    stopping = _threading.Event()
 
-    def spine_evaluate(cand, **kw):  # type: ignore[no-untyped-def]
-        proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
-        dsh_runtime.track_run(proc)
-        with lock:
-            started.append(proc)
-        try:
-            proc.wait()
-        finally:
-            dsh_runtime.untrack_run(proc)
+    def evaluate(cand, **kw):  # type: ignore[no-untyped-def]
+        started.set()
+        stopping.wait(10)
 
-    loop._evaluate = spine_evaluate
+    loop._evaluate = evaluate
 
     def stopped(futures):  # type: ignore[no-untyped-def]
-        deadline = time.monotonic() + 10
-        while len(started) < 2 and time.monotonic() < deadline:
-            time.sleep(0.02)
+        started.wait(10)
         raise SystemExit(143)
-        yield  # pragma: no cover
+
+    original_shutdown = dsh_runtime.shutdown_tracked_runs
+
+    def shutdown_tracked_runs():  # type: ignore[no-untyped-def]
+        stopping.set()
+        return original_shutdown()
 
     monkeypatch.setattr(concurrent.futures, "as_completed", stopped)
-    c1, c2 = _distinct_candidates(seed, 2)
-    began = time.monotonic()
-    try:
-        with pytest.raises(SystemExit):
-            run.evaluate_many([EvalRequest(candidate=c1, part="train"),
-                               EvalRequest(candidate=c2, part="train")])
-        elapsed = time.monotonic() - began
-        assert len(started) == 2
-        assert all(proc.poll() is not None for proc in started)
-        assert elapsed < 20, f"evaluate_many waited {elapsed:.1f}s on its spines"
-    finally:
-        for proc in started:
-            if proc.poll() is None:
-                proc.kill()
+    monkeypatch.setattr(dsh_runtime, "shutdown_tracked_runs", shutdown_tracked_runs)
+    seen: list[int] = []
+    with pytest.raises(SystemExit):
+        run.evaluate_many([EvalRequest(candidate=c, part="train") for c in _distinct_candidates(seed, 2)],
+                          on_result=lambda index, cand: seen.append(index))
+    assert seen == []
+
+
+def test_run_on_dsh_does_not_start_once_stopped(tmp_path):
+    """run_on_dsh refuses to launch a spine once the stop event is set."""
+    import threading as _threading
+
+    from refactory_dsh import dsh_runtime
+    from refactory_dsh.owned_process import EvaluationStopped
+
+    _loop, seed, _run = _make_loop_and_seed(tmp_path)
+    stop = _threading.Event()
+    stop.set()
+    with pytest.raises(EvaluationStopped):
+        dsh_runtime.run_on_dsh(seed.state, tmp_path / "w", stop_event=stop)
 
 
 def test_shutdown_tracked_runs_ends_every_tracked_process():

@@ -1139,7 +1139,11 @@ class Executor:
                         continue
 
                 _disarm_serial_deadline()
+                _stop_check = getattr(self.item_gate, "check", None)
                 for index, item in enumerate(items):
+                    # A stop under evaluate_many: no new item starts.
+                    if callable(_stop_check):
+                        _stop_check()
                     # Resume: an item whose pass finished is not run again; its
                     # record -- kept with the pass when it finished -- is.
                     if _resuming:

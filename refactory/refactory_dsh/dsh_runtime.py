@@ -112,6 +112,7 @@ def run_on_dsh(
     model: Any = None,
     item_slots_dir: str | None = None,
     item_slots: int | None = None,
+    stop_event: threading.Event | None = None,
 ) -> DshRun:
     """Lower ``state``, run it on DSH, and read back the facts it produced.
 
@@ -119,8 +120,20 @@ def run_on_dsh(
     It is not a replacement for capturing: the same lines are still collected, and
     the runner's final JSON object is still parsed out of them, because
     ``best_score`` comes from there.
+
+    ``stop_event`` (``Run.evaluate_many``'s): once it is set the run does not
+    start, and a run in flight is shut down and raises ``EvaluationStopped``
+    rather than returning a result.
     """
     import time
+
+    from refactory_dsh.owned_process import EvaluationStopped
+
+    def _stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
+    if _stopped():
+        raise EvaluationStopped("the spine run was not started: the evaluation was stopped")
 
     from refactory_dsh import dsh_profile
 
@@ -243,6 +256,8 @@ def run_on_dsh(
                     budget.checkpoint()
                 if callable(getattr(model, "_raise_if_cancelled", None)):
                     model._raise_if_cancelled()
+                if _stopped():
+                    raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout_s)
@@ -251,6 +266,9 @@ def run_on_dsh(
                     break
                 except subprocess.TimeoutExpired:
                     continue
+            # Ended by the stop's shutdown (or just as it came): not a result.
+            if _stopped():
+                raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
         except BaseException as error:
             try:
                 shutdown(process)
@@ -324,6 +342,7 @@ def evaluate_on_dsh(
     model: Any = None,
     item_slots_dir: str | None = None,
     item_slots: int | None = None,
+    stop_event: threading.Event | None = None,
 ) -> RunResult:
     """One forward pass on DSH, scored by the mode's own `score()`.
 
@@ -336,7 +355,8 @@ def evaluate_on_dsh(
     run = run_on_dsh(state, workdir, name=name, timeout_s=timeout_s, on_output=on_output,
                      **({"model": model} if model is not None else {}),
                      **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
-                        if item_slots_dir is not None else {}))
+                        if item_slots_dir is not None else {}),
+                     **({"stop_event": stop_event} if stop_event is not None else {}))
     # The DSH evaluator's run end (a spine run it launched and waited for): the
     # same cleanups the walker runs when its own run ends.
     from refactory_dsh.nn.executor import _run_end_cleanup
