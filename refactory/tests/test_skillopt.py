@@ -3139,6 +3139,62 @@ def test_post_training_evaluation_runs_in_skillopts_order(tmp_path, monkeypatch)
     assert [d["action"] for d in decisions] == ["baseline_test", "best_test", "final_test"]
 
 
+def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
+    """Correction 2: trace decisions for test_eval are in A's canonical order
+    (baseline_test, best_test, final_test) regardless of completion order.
+
+    Forces baseline_test to finish *after* best_test by sleeping 0.3 s on the
+    seed candidate's test evaluation.  After evaluate_many returns, the trace
+    decisions must still appear in canonical order — not in completion order.
+
+    Mutation: writing trace decisions inside on_result (completion order)
+    instead of after evaluate_many makes the test fail.
+    """
+    import threading
+    import time
+    from refactory_dsh.loop import Loop
+
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    calls = _spy_part_evaluations(monkeypatch)
+    original_evaluate_part = Loop._evaluate_part
+
+    # Track completion order via on_result
+    completion_order: list[str] = []
+    completion_lock = threading.Lock()
+
+    def _slow_baseline(self, candidate, part, items, seed, *, item_gate=None):
+        """Delay baseline_test so best_test finishes first."""
+        result = original_evaluate_part(self, candidate, part, items, seed,
+                                        item_gate=item_gate)
+        # After evaluation completes, record which phase completed
+        if part == "test":
+            # The seed candidate is baseline_test; delay it
+            pop = getattr(self, 'population', [])
+            if pop and candidate.id == pop[0].id:
+                time.sleep(0.3)
+        return result
+
+    monkeypatch.setattr(Loop, "_evaluate_part", _slow_baseline)
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path),
+        skillopt_options={"max_epochs": 1, "seed": 7},
+    )
+    assert strategy._current_skill != strategy._best_skill, "setup: slow update changed the final skill"
+
+    decisions = _decisions(_read_trace(tmp_path), "test_eval")
+    actions = [d["action"] for d in decisions]
+    # Must be in canonical order regardless of completion order
+    assert actions == ["baseline_test", "best_test", "final_test"], (
+        f"trace decisions in wrong order: {actions}"
+    )
+
+    # Report fields must still be correct
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "done"
+    for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
+        assert strategy_report[key] is not None, f"report key {key!r} is None"
+
+
 def test_post_training_evaluation_reuses_the_best_when_the_final_skill_is_it(tmp_path, monkeypatch):
     """A final skill that is the best skill is not rolled out again: its val score
     is the best's and its test score the best's test score (trainer.py:2253-2258,

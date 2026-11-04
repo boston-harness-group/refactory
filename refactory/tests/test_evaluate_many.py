@@ -614,90 +614,14 @@ def test_journal_integrity_under_concurrency(tmp_path):
 
 
 # ── test_trace_order_independent_of_completion ───────────────────────────
+# The real end-to-end test is in test_skillopt.py:
+#   test_trace_order_when_best_finishes_before_baseline
+# which forces best to finish before baseline via delays and checks trace order.
+# test_post_training_evaluation_runs_in_skillopts_order also covers it.
+# This test verifies the evaluate_many + on_result plumbing at the Run level:
+# on_result fires in completion order while results are in request order.
 
-def test_trace_order_independent_of_completion(tmp_path):
-    """Trace decisions for test_eval phases appear in A's canonical order
-    regardless of which evaluation finishes first.
-
-    With the best eval finishing before the baseline, the skillopt_trace.jsonl
-    test_eval decisions must still appear in order:
-    baseline_test, best_test, final_test (or final_test_reused).
-    """
-    from refactory_packages.skillopt.loop import SkillOptLoop
-
-    # Create a SkillOpt instance and simulate the post-training trace order
-    strategy = SkillOptLoop()
-    strategy.configure()
-
-    # Set up mock trace
-    class MockTrace:
-        def __init__(self):
-            self.decisions = []
-        def record_decision(self, kind, **kwargs):
-            self.decisions.append({"kind": kind, **kwargs})
-
-    trace = MockTrace()
-    strategy._trace = trace
-    strategy._completed_phases = set()
-    strategy._final_eval = {}
-    strategy._current_skill = "test_skill"
-    strategy._best_skill = "test_skill"
-    strategy._best_score = 0.5
-    strategy._best_candidate_id = "best_cand"
-    strategy.base_seed = 42
-    strategy.eval_test = True
-
-    # Simulate evaluate_many completing in reverse order (best before baseline)
-    # by calling the internal logic in the right order
-    result = strategy._final_eval
-
-    # Simulated eval_scores as if best finished before baseline
-    eval_scores = {
-        "best_test": 0.7,
-        "baseline_test": 0.4,
-        "final_test": 0.7,  # reused since final == best
-    }
-    eval_candidates = {
-        "baseline_test": "baseline_cand",
-        "best_test": "best_cand",
-    }
-
-    # Write trace in A's canonical order (the code does this AFTER evaluate_many)
-    _test_order = [
-        ("baseline_test", "baseline_test_hard"),
-        ("best_test", "test_hard"),
-    ]
-    for phase, key in _test_order:
-        if phase in eval_scores:
-            trace.record_decision(
-                "test_eval", action=phase,
-                score=eval_scores[phase],
-                candidate=eval_candidates.get(phase, ""))
-
-    # final_test trace (reused since final == best)
-    final_is_best = True
-    if "final_test" in eval_scores:
-        if final_is_best:
-            trace.record_decision(
-                "test_eval", action="final_test_reused",
-                score=eval_scores["final_test"])
-        else:
-            trace.record_decision(
-                "test_eval", action="final_test",
-                score=eval_scores["final_test"],
-                candidate=eval_candidates.get("final_test", ""))
-
-    # Verify trace order: baseline_test, best_test, final_test_reused
-    test_eval_decisions = [d for d in trace.decisions if d["kind"] == "test_eval"]
-    assert len(test_eval_decisions) == 3
-    assert test_eval_decisions[0]["action"] == "baseline_test"
-    assert test_eval_decisions[1]["action"] == "best_test"
-    assert test_eval_decisions[2]["action"] == "final_test_reused"
-
-
-# test_trace_order_revert_breaks removed: the trace-order invariant is
-# covered by test_skillopt.py::test_post_training_evaluation_runs_in_skillopts_order
-# which the verifier confirmed catches a trace-order revert.
+# (covered by test_on_result_fires_in_completion_order + the skillopt tests above)
 
 
 # ── test_report_fields_unchanged ─────────────────────────────────────────
