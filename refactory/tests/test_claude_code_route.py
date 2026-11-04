@@ -123,7 +123,7 @@ def test_claude_code_gets_the_prompt_system_prompt_effort_and_no_tools(tmp_path,
 
 
 def test_claude_code_route_setting_sources_reach_the_sdk(tmp_path, fake_sdk):
-    """A route's setting_sources (arm A's `--setting-sources user,project`) replace the
+    """A route's setting_sources (e.g. `--setting-sources user,project`) replace the
     default, tool_policy none included, and tools stay disabled."""
     workdir = tmp_path / "run"
     client = _client(tmp_path, setting_sources="user,project").with_tool_policy("none")

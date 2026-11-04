@@ -26,12 +26,20 @@ SkillOpt solver defaults:
     claude-opus-4-6 (its out/config.json ``target_model``).
 
 Arm-A parity. Arm A's solver is ``claude -p`` (claude_backend.py ``_run_claude_print``)
-with Claude Code's user and project settings loaded, effort medium and 24 workers.
-The invocation that matches it::
+with only Claude Code's project settings loaded, effort medium and 24 workers.
+SkillOpt's own default is ``user,project`` (claude_backend.py:19), but arm A's runs
+set ``CLAUDE_SETTING_SOURCES=project`` (SkillOpt's run-train-seed.sh:17): every solver
+and optimizer call in A's runs/skillopt-train-20261023-e10-s<seed>/calls.jsonl
+records ``setting_sources`` ``project``. Loading ``user`` as well puts the host
+account's own CLAUDE.md and settings into every call. One known difference remains:
+A's solver carries Claude Code's default tools (the ``dontAsk`` mode refuses them;
+2-4% of A's solves spend a turn on a refused call), while this solve node runs with
+no tools. The scores below were measured with ``user,project``; the ``project``-only
+route has not been measured yet. The invocation that matches A::
 
     refactory optimize livemath/solver --strategy skillopt \
         --worker-backend claude_code --permission-mode dontAsk \
-        --model claude-opus-4-6 --effort medium --setting-sources user,project \
+        --model claude-opus-4-6 --effort medium --setting-sources project \
         --knob data_parallelism=24 --parts <parts.json> --holdout 0 \
         --strategy-option max_epochs=10 --strategy-option early_stop_patience=3 \
         --strategy-option early_stop_at_full_val=true --strategy-option seed=<seed>
@@ -40,8 +48,9 @@ The invocation that matches it::
 ``early_stop_patience``, ``early_stop_at_full_val`` and ``seed``; the SkillOpt
 strategy evaluates on the manifest's test part after training, as A does). The
 route matters: with A's best seed-42 skill on the 125 test items, this solver
-scored 57.6% on the plain DSH API route and 69.6% on ``claude_code`` with these
-settings, against A's 72.8%.
+scored 57.6% on the plain DSH API route and 69.6% on ``claude_code`` with
+``user,project`` settings, against A's 72.8%; A's four best skills (seeds 42-45)
+averaged 72.0% on ``claude_code`` with ``user,project`` against A's 73.2%.
 """
 from __future__ import annotations
 
