@@ -31,9 +31,11 @@ SkillOpt's own default is ``user,project`` (claude_backend.py:19), but arm A's r
 set ``CLAUDE_SETTING_SOURCES=project`` (SkillOpt's run-train-seed.sh:17): every solver
 and optimizer call in A's runs/skillopt-train-20261023-e10-s<seed>/calls.jsonl
 records ``setting_sources`` ``project``. Loading ``user`` as well puts the host
-account's own CLAUDE.md and settings into every call. One difference remains: A's solver carries Claude Code's
-default tools (the ``dontAsk`` mode refuses them; 2-4% of A's solves spend a turn on a
-refused call), while this solve node runs with no tools. The invocation that matches it::
+account's own CLAUDE.md and settings into every call. One known difference remains:
+A's solver carries Claude Code's default tools (the ``dontAsk`` mode refuses them;
+2-4% of A's solves spend a turn on a refused call), while this solve node runs with
+no tools. The scores below were measured with ``user,project``; the ``project``-only
+route has not been measured yet. The invocation that matches A::
 
     refactory optimize livemath/solver --strategy skillopt \
         --worker-backend claude_code --permission-mode dontAsk \
