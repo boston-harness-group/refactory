@@ -193,8 +193,9 @@ def test_concurrent_evaluations_overlap_mutation(tmp_path):
 def _item_gate_data_graph(n_items: int, parallelism: int):
     """Build a data graph with *n_items* items that sleep briefly.
 
-    Each item runs ``sleep_op`` from ``test_ops_parallel`` (writes
-    ``start_<id>`` / ``end_<id>`` timestamp files to ``$BARRIER_DIR``).
+    Each item runs ``sleep_op`` from ``test_ops_parallel`` which uses a
+    module-level thread-safe counter to track in-flight items and writes
+    the peak to ``$PEAK_FILE``.
     """
     from refactory_dsh.nn import Graph, Node
     from refactory_dsh.nn.executor import CURRENT_ITEM
@@ -226,28 +227,58 @@ def _item_gate_data_graph(n_items: int, parallelism: int):
 
 
 _SLEEP_OP_SRC = '''\
-"""Minimal test op for item-gate tests."""
+"""Minimal test op for item-gate tests.
+
+Provides a process-safe in-flight counter via fcntl-locked shared files.
+Every ``sleep_op`` call increments the counter on entry, records the peak,
+sleeps, and decrements in ``finally``.  The peak is written to ``$PEAK_FILE``.
+
+The counter file (``$COUNTER_FILE``) stores "current peak" and is protected
+by fcntl.flock so it works across forkserver child processes.
+"""
+import fcntl
 import os
 import time
 from pathlib import Path
 
 
+def _update_counter(counter_file, delta):
+    """Atomically update the shared counter; return (new_current, new_peak)."""
+    with open(counter_file, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            parts = f.read().strip().split()
+            current = int(parts[0]) if len(parts) > 0 else 0
+            peak = int(parts[1]) if len(parts) > 1 else 0
+            current += delta
+            if current > peak:
+                peak = current
+            f.seek(0)
+            f.truncate()
+            f.write(f"{current} {peak}")
+            f.flush()
+            return current, peak
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def sleep_op(ctx):
-    """Sleep for `delay` seconds (from the item), writing timestamps."""
+    """Sleep for `delay` seconds, tracking in-flight count via counter."""
     item = ctx.read_json("current_item.json")
     delay = float(item.get("delay", 0))
-    barrier_dir_str = os.environ.get("BARRIER_DIR", "")
     item_id = str(item.get("id", "?"))
 
-    if barrier_dir_str:
-        barrier_dir = Path(barrier_dir_str)
-        barrier_dir.mkdir(parents=True, exist_ok=True)
-        (barrier_dir / f"start_{item_id}").write_text(str(time.time()))
-
-    time.sleep(delay)
-
-    if barrier_dir_str:
-        (barrier_dir / f"end_{item_id}").write_text(str(time.time()))
+    counter_file = os.environ.get("COUNTER_FILE", "")
+    if counter_file:
+        _update_counter(counter_file, +1)
+    try:
+        time.sleep(delay)
+    finally:
+        if counter_file:
+            _, peak = _update_counter(counter_file, -1)
+            peak_file = os.environ.get("PEAK_FILE", "")
+            if peak_file:
+                Path(peak_file).write_text(str(peak))
 
     return {"counted": item_id}
 '''
@@ -255,31 +286,19 @@ def sleep_op(ctx):
 
 @pytest.fixture()
 def _install_parallel_ops():
-    """Ensure the test_ops_parallel module exists for the walker."""
+    """Install test_ops_parallel module with counter-instrumented sleep_op."""
+    import sys
     HERE = Path(__file__).resolve().parent
     ops_path = HERE / "test_ops_parallel.py"
     existed = ops_path.exists()
-    if not existed:
-        ops_path.write_text(_SLEEP_OP_SRC)
+    # Always write our version so the counter-instrumented sleep_op is used.
+    ops_path.write_text(_SLEEP_OP_SRC)
+    # Remove cached module so the fresh source is loaded.
+    sys.modules.pop("test_ops_parallel", None)
     yield
     if not existed:
         ops_path.unlink(missing_ok=True)
-
-
-def _peak_inflight_from_timestamps(timing_dir: Path) -> int:
-    """Compute peak concurrent in-flight items from start/end timestamp files."""
-    events: list[tuple[float, int]] = []
-    for p in timing_dir.glob("start_*"):
-        events.append((float(p.read_text()), +1))
-    for p in timing_dir.glob("end_*"):
-        events.append((float(p.read_text()), -1))
-    events.sort(key=lambda e: (e[0], e[1]))
-    current = peak = 0
-    for _, delta in events:
-        current += delta
-        if current > peak:
-            peak = current
-    return peak
+    sys.modules.pop("test_ops_parallel", None)
 
 
 # ── test_item_limit_not_exceeded ─────────────────────────────────────────
@@ -304,13 +323,13 @@ def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
     N_ITEMS = 8
     N_EVALS = 3
 
-    # Shared barrier directory for timestamp files.
-    barrier_dir = tmp_path / "barrier"
-    barrier_dir.mkdir()
-    monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
-
-    # Build the data graph each evaluation will run.
-    graph = _item_gate_data_graph(N_ITEMS, DATA_PARALLELISM)
+    # Shared counter file (fcntl-locked) tracks in-flight items across
+    # forkserver child processes.  Peak is written to peak_file.
+    counter_file = tmp_path / "counter.txt"
+    counter_file.write_text("0 0")
+    peak_file = tmp_path / "peak.txt"
+    monkeypatch.setenv("COUNTER_FILE", str(counter_file))
+    monkeypatch.setenv("PEAK_FILE", str(peak_file))
 
     loop, seed, run = _make_loop_and_seed(
         tmp_path, max_evaluations=64,
@@ -320,20 +339,16 @@ def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
 
     candidates = _distinct_candidates(seed, N_EVALS)
 
-    # Patch _evaluate: each eval runs execute() with the data graph,
-    # forwarding the item_gate from evaluate_many.  The sleep_op writes
-    # start/end timestamp files per item; unique candidate ids prevent
-    # filename collisions across concurrent evaluations.
+    # Patch _evaluate: each eval runs execute() with a data graph,
+    # forwarding the item_gate from evaluate_many.  The sleep_op uses
+    # a module-level thread-safe counter that tracks in-flight items
+    # across all concurrent evaluations and writes the peak to PEAK_FILE.
     def _patched_evaluate(
         cand, *, seed=None, items=None, _budget_reserved=False,
         item_gate=None,
     ):
-        # Use a per-candidate workdir so each eval's data-pass directories
-        # are separate and the item-id filenames don't collide.
         workdir = loop.root / "runs" / cand.id
         workdir.mkdir(parents=True, exist_ok=True)
-        # Build a per-evaluation graph with unique item ids so the
-        # start_<id>/end_<id> timestamp files don't collide.
         from refactory_dsh.nn import Graph, Node
         from refactory_dsh.nn.executor import CURRENT_ITEM
         prefix = cand.id[:8]
@@ -381,9 +396,9 @@ def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
 
     assert len(results) == N_EVALS
 
-    # Compute peak concurrency from the timestamp files written by the
-    # sleep_op across all evaluations.
-    peak = _peak_inflight_from_timestamps(barrier_dir)
+    # Read peak concurrency from the thread-safe counter in sleep_op.
+    assert peak_file.exists(), "sleep_op did not write peak file"
+    peak = int(peak_file.read_text().strip())
 
     assert peak <= GATE_LIMIT, (
         f"peak in-flight {peak} exceeded limit {GATE_LIMIT}"
@@ -409,16 +424,19 @@ def test_item_limit_mutation(tmp_path, monkeypatch, _install_parallel_ops):
     PARALLELISM = 8
     N_ITEMS = 12
 
-    timing_dir = tmp_path / "timing"
-    timing_dir.mkdir()
-    monkeypatch.setenv("BARRIER_DIR", str(timing_dir))
+    counter_file = tmp_path / "counter.txt"
+    counter_file.write_text("0 0")
+    peak_file = tmp_path / "peak.txt"
+    monkeypatch.setenv("COUNTER_FILE", str(counter_file))
+    monkeypatch.setenv("PEAK_FILE", str(peak_file))
 
     graph = _item_gate_data_graph(N_ITEMS, PARALLELISM)
     # No item_gate — the mutation
     result = execute(graph, tmp_path / "run", max_steps=500, item_gate=None)
     assert result.exit_ok, result.error
 
-    peak = _peak_inflight_from_timestamps(timing_dir)
+    assert peak_file.exists(), "sleep_op did not write peak file"
+    peak = int(peak_file.read_text().strip())
     assert peak > GATE_LIMIT, (
         f"without item_gate, peak in-flight {peak} should exceed {GATE_LIMIT} "
         f"(expected ~{PARALLELISM}); the gate is the only limiter"
