@@ -58,7 +58,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     # A new recipe records its effective policy, rather than depending on a
     # future worker default. Explicit native defaults remain a distinct choice.
     result["permission_mode"] = result["permission_mode"] or "skip"
-    for key in ("epochs", "batch_size", "elite", "max_evaluations", "attempts", "max_steps", "dsh_timeout_s", "history_limit"):
+    for key in ("epochs", "batch_size", "elite", "max_evaluations", "attempts", "max_steps", "dsh_timeout_s", "history_limit", "max_concurrent_evaluations"):
         value = result[key]
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ProfileError(f"{key} must be a positive integer")
@@ -68,6 +68,11 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
+    # max_items_in_flight: None or positive int
+    mif = result.get("max_items_in_flight")
+    if mif is not None:
+        if isinstance(mif, bool) or not isinstance(mif, int) or mif < 1:
+            raise ProfileError("max_items_in_flight must be a positive integer or None")
     if not 0 <= result["holdout"] < 1:
         raise ProfileError("holdout must be at least 0 and less than 1")
     from refactory_dsh.budgets import ResourceLimits
@@ -237,7 +242,8 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     # another scoring/input/model contract. They still live in the exact snapshot.
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
-        "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs")}
+        "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
+        "max_concurrent_evaluations", "max_items_in_flight")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
@@ -292,7 +298,7 @@ def add_arguments(parser: Any) -> None:
         # snapshots, not as a command-line object.
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
-        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts") else str
+        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight") else str
         parser.add_argument(flag, dest=key, type=kind, default=None)
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")

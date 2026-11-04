@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import structlog
 
@@ -42,6 +42,15 @@ from refactory_dsh.optim import Candidate, Optimizer, Proposal, Rejection
 from refactory_dsh.optim.base import summarise_reasons
 
 log = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class EvalRequest:
+    """One evaluation request for :meth:`Run.evaluate_many`."""
+    candidate: Candidate
+    part: str = "train"
+    items: list[str] | None = None
+    seed: int | None = None
 
 
 class OuterLoopError(RuntimeError):
@@ -172,6 +181,276 @@ class Run:
             )
         loop._evaluate_part(candidate, part, None, seed)  # noqa: SLF001
         return candidate
+
+    # ── concurrent evaluation ──────────────────────────────────────────────
+    def evaluate_many(
+        self,
+        requests: list[EvalRequest],
+        *,
+        on_result: Callable[[int, Candidate], None] | None = None,
+    ) -> list[Candidate]:
+        """Evaluate several independent candidates concurrently.
+
+        Returns results in request order regardless of completion order.
+        Requests naming the same candidate id run sequentially in request order;
+        requests with distinct candidate ids run concurrently.  Budget is
+        reserved atomically for the whole batch before any evaluation starts.
+        The rollout check is all-or-nothing too: the batch is refused when the
+        rollouts of all its requests together would pass ``max_rollouts``, which
+        is stricter than ``evaluate`` (refused only once the budget is spent).
+        Budget of a train request that fails or never starts is returned.
+
+        At most one ``part="train"`` request per candidate id: train records
+        are kept per candidate (``item_records``), so a second train run of the
+        same candidate would overwrite the first before the caller could read
+        it.  Such a batch is refused before anything runs or any budget is
+        reserved; call ``evaluate`` for each run and read ``item_records``
+        between.  Val and test occasions are kept per occasion, so several
+        val/test requests for one candidate are allowed (run in order).
+
+        ``on_result(index, candidate)`` fires in completion order, if provided;
+        calls never overlap.  Called on the main thread, a stop (SIGTERM) ends
+        the call: no request starts after it, the spine runs in flight are shut
+        down, a walker evaluation starts no new item, and every evaluation it
+        ended raises instead of recording a result (no on_result fires for it,
+        and its train budget is returned).
+        """
+        import threading
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        loop = self._loop
+        manifest = getattr(loop, '_parts_manifest', None)
+
+        if not requests:
+            return []
+
+        # ── validate every request ────────────────────────────────────────
+        for i, req in enumerate(requests):
+            if req.part not in ("train", "val", "test"):
+                raise OuterLoopError(
+                    f"request {i}: unknown part {req.part!r}; expected 'train', 'val' or 'test'"
+                )
+            if req.part == "train" and req.items is not None:
+                if manifest is not None:
+                    if "train" not in manifest:
+                        raise OuterLoopError(
+                            f"request {i}: the parts manifest has no entry for 'train'; "
+                            "items cannot be provided for a part not in the manifest"
+                        )
+                    allowed = set(manifest["train"])
+                    where = "the manifest's train ids"
+                else:
+                    seed_state = loop.population[0].state if loop.population else req.candidate.state
+                    allowed = loop._expected_item_ids(seed_state, "train")[0]  # noqa: SLF001
+                    where = "the train split"
+                extra = set(str(x) for x in req.items) - allowed
+                if extra:
+                    raise OuterLoopError(
+                        f"request {i}: items {sorted(extra)} are not in {where}"
+                    )
+            if req.part != "train":
+                if req.items is not None:
+                    raise OuterLoopError(
+                        f"request {i}: items cannot be chosen for {req.part!r}: "
+                        "val and test are always evaluated in full from the parts manifest"
+                    )
+                if manifest is None:
+                    raise OuterLoopError(
+                        f"request {i}: no parts manifest exists; evaluating on {req.part!r} "
+                        "requires one (LoopConfig.parts_manifest)"
+                    )
+                if req.part not in manifest:
+                    raise OuterLoopError(
+                        f"request {i}: the parts manifest has no {req.part!r} entry"
+                    )
+
+        # ── one train request per candidate ───────────────────────────────
+        train_ids_seen: set[str] = set()
+        for req in requests:
+            if req.part != "train":
+                continue
+            if req.candidate.id in train_ids_seen:
+                raise OuterLoopError(
+                    f"evaluate_many cannot evaluate candidate {req.candidate.id} on train "
+                    "twice in one call: its train records would be overwritten; call "
+                    "run.evaluate for each and read run.item_records between"
+                )
+            train_ids_seen.add(req.candidate.id)
+
+        # ── atomic budget reservation ─────────────────────────────────────
+        train_count = sum(1 for r in requests if r.part == "train")
+        total_rollouts = 0
+        for req in requests:
+            if req.part == "train":
+                if req.items is not None:
+                    total_rollouts += max(len(req.items), 1)
+                elif manifest is not None and "train" in manifest:
+                    total_rollouts += max(len(manifest["train"]), 1)
+                else:
+                    seed_state = loop.population[0].state if loop.population else req.candidate.state
+                    ids = loop._expected_item_ids(seed_state, "train")[0]  # noqa: SLF001
+                    total_rollouts += max(len(ids), 1)
+            else:
+                if manifest is not None and req.part in manifest:
+                    total_rollouts += max(len(manifest[req.part]), 1)
+                else:
+                    total_rollouts += 1
+
+        with loop._state_lock:
+            max_rollouts = getattr(loop.config, "max_rollouts", None)
+            if train_count > 0:
+                if loop.evaluations + train_count > loop.config.max_evaluations:
+                    raise OuterLoopError(
+                        "the evaluation budget is spent; a strategy must ask budget_left() "
+                        "before evaluating"
+                    )
+            if max_rollouts is not None:
+                if loop.rollouts + total_rollouts > max_rollouts:
+                    raise OuterLoopError(
+                        f"the rollout budget is spent ({loop.rollouts} of {max_rollouts}); "
+                        "a strategy must ask budget_left() before evaluating"
+                    )
+            # Pre-increment evaluations for train requests so concurrent
+            # budget_left() calls see the reservation.
+            loop.evaluations += train_count
+
+        # Everything after the reservation runs under one try/finally, so an
+        # error anywhere (the item gate, a stop signal) returns the budget of
+        # every train request that did not run, and of every one that failed.
+        results: list[Candidate | None] = [None] * len(requests)
+        errors: list[BaseException | None] = [None] * len(requests)
+        # on_result errors are tracked separately: they must not release
+        # the evaluation's budget because the evaluation itself succeeded.
+        on_result_errors: list[BaseException | None] = [None] * len(requests)
+        counts_lock = threading.Lock()
+        # Set when a stop reaches this call: no request starts after it, no
+        # on_result fires for one it ended, and a stopped evaluation raises.
+        stop_event = threading.Event()
+        from refactory_dsh.owned_process import EvaluationStopped, StoppableGate
+        # The walker's item gate, wrapped to refuse new items after a stop;
+        # set once the gate exists (below).
+        stoppable_gate: StoppableGate | None = None
+        # on_result calls (and the strategy-state saves they make) never overlap.
+        on_result_lock = threading.Lock()
+        started_train = 0
+        failed_train = 0
+
+        def _run_one(index: int) -> None:
+            nonlocal started_train, failed_train
+            req = requests[index]
+            if stop_event.is_set():
+                errors[index] = EvaluationStopped("the request was not started: evaluate_many was stopped")
+                return
+            if req.part == "train":
+                with counts_lock:
+                    started_train += 1
+            try:
+                if req.part == "train":
+                    loop._evaluate(  # noqa: SLF001
+                        req.candidate, seed=req.seed, items=req.items,
+                        _budget_reserved=True,
+                        item_gate=stoppable_gate,
+                        item_slots=True, stop_event=stop_event,
+                    )
+                else:
+                    loop._evaluate_part(  # noqa: SLF001
+                        req.candidate, req.part, req.items, req.seed,
+                        item_gate=stoppable_gate,
+                        item_slots=True, stop_event=stop_event,
+                    )
+                results[index] = req.candidate
+            except BaseException as exc:
+                errors[index] = exc
+                if req.part == "train":
+                    with counts_lock:
+                        failed_train += 1
+                return
+
+            # on_result is called only after a successful evaluation.
+            # An exception here must NOT release the evaluation's budget
+            # (it ran and was paid for).  Record it and re-raise after
+            # all evaluations settle.
+            if on_result is not None:
+                try:
+                    with on_result_lock:
+                        if stop_event.is_set():
+                            return
+                        on_result(index, req.candidate)
+                except BaseException as exc:
+                    on_result_errors[index] = exc
+
+        def _run_group(indices: list[int]) -> None:
+            """Run a group of requests for the same candidate sequentially.
+
+            A failure skips the group's later requests; a skipped train
+            request never starts, so its reserved budget is returned.
+            """
+            for idx in indices:
+                _run_one(idx)
+                if errors[idx] is not None:
+                    break
+
+        try:
+            # ── ensure item gate / slot dir ───────────────────────────────
+            seed_candidate = loop.population[0] if loop.population else requests[0].candidate
+            loop._init_item_gate(seed_candidate)  # noqa: SLF001
+            gate = getattr(loop, '_item_gate', None)
+            if gate is not None:
+                stoppable_gate = StoppableGate(gate, stop_event)
+
+            # ── group requests by candidate id ────────────────────────────
+            # Requests with the same candidate id (at most one train, plus any
+            # val/test occasions) run sequentially in request order; distinct
+            # candidate ids run concurrently.
+            groups: dict[str, list[int]] = defaultdict(list)
+            for i, req in enumerate(requests):
+                groups[req.candidate.id].append(i)
+            group_list = list(groups.values())
+            max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
+
+            if len(group_list) == 1:
+                # Single candidate or single request: run inline
+                _run_group(group_list[0])
+            else:
+                from refactory_dsh.dsh_runtime import shutdown_tracked_runs
+                from refactory_dsh.owned_process import _termination_as_exit
+                # On the main thread a SIGTERM becomes SystemExit here (pool
+                # threads cannot install the handler run_on_dsh uses); spines
+                # the pool started are shut down before the pool is joined.
+                with _termination_as_exit():
+                    pool = ThreadPoolExecutor(max_workers=min(max_workers, len(group_list)))
+                    futures = [pool.submit(_run_group, g) for g in group_list]
+                    try:
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                            except BaseException:
+                                pass  # errors recorded in errors[]
+                    except BaseException:
+                        stop_event.set()
+                        for future in futures:
+                            future.cancel()
+                        shutdown_tracked_runs()
+                        raise
+                    finally:
+                        pool.shutdown(wait=True)
+        finally:
+            # ── un-reserve budget for failed and never-started train evals ──
+            unreserve = (train_count - started_train) + failed_train
+            if unreserve > 0:
+                with loop._state_lock:
+                    loop.evaluations -= unreserve
+
+        # ── re-raise the first error ──────────────────────────────────────
+        # Evaluation errors take priority over on_result errors.
+        first_error = next((e for e in errors if e is not None), None)
+        first_on_result_error = next((e for e in on_result_errors if e is not None), None)
+        error_to_raise = first_error or first_on_result_error
+        if error_to_raise is not None:
+            raise error_to_raise
+
+        return [r for r in results if r is not None]  # type: ignore[misc]
 
     def item_records(self, candidate: Candidate, *, part: str = "train") -> list[dict[str, Any]]:
         """Return train records for the given candidate.

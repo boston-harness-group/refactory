@@ -12,6 +12,49 @@ from typing import Any, Iterator
 SHUTDOWN_GRACE_S = 10
 
 
+class EvaluationStopped(SystemExit):
+    """An evaluation ended by a stop (``Run.evaluate_many``'s stop event).
+
+    Raised instead of returning a result, so nothing is recorded for it. A
+    ``SystemExit`` so every passthrough that lets a stop through lets it through.
+    """
+
+    def __init__(self, detail: str = "the evaluation was stopped") -> None:
+        super().__init__(143)
+        self.detail = detail
+
+    def __str__(self) -> str:
+        return self.detail
+
+
+class StoppableGate:
+    """An item gate that refuses new items once ``event`` is set.
+
+    Wraps the walker's run-wide item semaphore for one ``evaluate_many`` call:
+    an item that has not started raises ``EvaluationStopped`` instead of
+    starting; one in flight finishes, and ``check`` then ends the evaluation.
+    """
+
+    def __init__(self, gate: Any, event: threading.Event) -> None:
+        self._gate = gate
+        self._event = event
+
+    def check(self) -> None:
+        if self._event.is_set():
+            raise EvaluationStopped("the evaluation was stopped before it finished")
+
+    def acquire(self, *args: Any, **kwargs: Any) -> bool:
+        self.check()
+        acquired = self._gate.acquire(*args, **kwargs)
+        if acquired and self._event.is_set():
+            self._gate.release()
+            self.check()
+        return acquired
+
+    def release(self) -> None:
+        self._gate.release()
+
+
 @contextmanager
 def _termination_as_exit() -> Iterator[None]:
     """Let a CLI's default SIGTERM path unwind its owned subprocess first."""

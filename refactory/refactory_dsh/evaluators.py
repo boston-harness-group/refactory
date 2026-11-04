@@ -136,7 +136,7 @@ class WalkerEvaluator(Evaluator):
             omit_steering=getattr(config, "omit_steering", False),
         )
 
-    def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path) -> RunResult:
+    def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path, **kwargs: Any) -> RunResult:
         import json as _json
 
         _persist_steering_option(workdir, self.omit_steering)
@@ -151,17 +151,25 @@ class WalkerEvaluator(Evaluator):
             project_root=self.project / ".factory",
             global_root=self.memory_global_root,
         )
+        # Extract item_gate from kwargs if provided; pass through to mode.evaluate
+        item_gate = kwargs.pop("item_gate", None)
         started = time.time()
         try:
             result = mode.evaluate(
                 workdir, model=self.model, memory=store, max_steps=self.max_steps,
                 **({"shared_budget": self.budget} if self.budget is not None else {}),
                 enable_recovery=True, omit_steering=self.omit_steering,
+                **({"item_gate": item_gate} if item_gate is not None else {}),
             )
         finally:
             # Also on a crash or a stop: a namespace that outlives the run it was
             # scoped to is the bug, however the run ended.
             store.forget_run_scoped()
+        # A stop under evaluate_many: items in flight may have finished, but the
+        # evaluation raises rather than returning a partial result.
+        check = getattr(item_gate, "check", None)
+        if callable(check):
+            check()
         result.duration_s = round(time.time() - started, 4)
         # Write per-item records to the trial directory (F6).
         if result.item_records:
@@ -204,7 +212,7 @@ class DshEvaluator(Evaluator):
             omit_steering=getattr(config, "omit_steering", False),
         )
 
-    def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path) -> RunResult:
+    def evaluate(self, mode: Any, state: dict[str, Any], workdir: Path, **kwargs: Any) -> RunResult:
         import json as _json
 
         _persist_steering_option(workdir, self.omit_steering)
@@ -216,9 +224,17 @@ class DshEvaluator(Evaluator):
 
             model = DshModelClient().with_budget(self.budget)
 
+        # Extract spine slot-directory parameters
+        item_slots_dir = kwargs.pop("item_slots_dir", None)
+        item_slots = kwargs.pop("item_slots", None)
+        stop_event = kwargs.pop("stop_event", None)
+
         result = evaluate_on_dsh(
             mode, state, workdir, timeout_s=self.timeout_s, on_output=self.on_output,
             **({"model": model} if model is not None else {}),
+            **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
+               if item_slots_dir is not None else {}),
+            **({"stop_event": stop_event} if stop_event is not None else {}),
         )
         # Read per-item records from the spine's item_records.json if present.
         records_path = workdir / "item_records.json"
