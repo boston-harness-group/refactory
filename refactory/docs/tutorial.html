@@ -251,6 +251,7 @@
                                       [--refine-design {light,full}]
                                       [--worker-backend WORKER_BACKEND]
                                       [--effort EFFORT]
+                                      [--setting-sources SETTING_SOURCES]
                                       [--permission-mode PERMISSION_MODE]
                                       [--role-routes JSON]
                                       [--node-routes JSON]
@@ -326,6 +327,10 @@ options:
                         the backend every agent node runs on: dsh (default),
                         codex or claude_code
   --effort EFFORT       the workers&#x27; reasoning effort
+  --setting-sources SETTING_SOURCES
+                        claude_code workers only: the Claude Code settings
+                        they load, none or a comma list of user, project and
+                        local
   --permission-mode PERMISSION_MODE
                         worker permissions: skip (new-run default), default
                         (native policy), or a backend-specific mode
@@ -467,11 +472,14 @@ options:
                                     [--provider PROVIDER] [--model MODEL]
                                     [--effort EFFORT]
                                     [--permission-mode PERMISSION_MODE]
+                                    [--setting-sources SETTING_SOURCES]
                                     [--max-elapsed-s MAX_ELAPSED_S]
                                     [--max-tokens MAX_TOKENS]
                                     [--validation-reserve-s VALIDATION_RESERVE_S]
                                     [--validation-reserve-tokens VALIDATION_RESERVE_TOKENS]
                                     [--max-rollouts MAX_ROLLOUTS]
+                                    [--max-concurrent-evaluations MAX_CONCURRENT_EVALUATIONS]
+                                    [--max-items-in-flight MAX_ITEMS_IN_FLIGHT]
                                     [--parts-manifest PARTS_MANIFEST]
                                     [--seed-results SEED_RESULTS]
                                     [--knob NAME=VALUE] [--frozen KNOB]
@@ -518,11 +526,14 @@ options:
   --model MODEL
   --effort EFFORT
   --permission-mode PERMISSION_MODE
+  --setting-sources SETTING_SOURCES
   --max-elapsed-s MAX_ELAPSED_S
   --max-tokens MAX_TOKENS
   --validation-reserve-s VALIDATION_RESERVE_S
   --validation-reserve-tokens VALIDATION_RESERVE_TOKENS
   --max-rollouts MAX_ROLLOUTS
+  --max-concurrent-evaluations MAX_CONCURRENT_EVALUATIONS
+  --max-items-in-flight MAX_ITEMS_IN_FLIGHT
   --parts-manifest PARTS_MANIFEST
   --seed-results SEED_RESULTS
   --knob NAME=VALUE

@@ -462,6 +462,41 @@ def test_per_item_deadline_covers_setup_and_verify(tmp_path, monkeypatch, parall
     ]
 
 
+def test_per_item_deadline_holds_on_a_pool_thread(tmp_path, monkeypatch):
+    """Run.evaluate_many runs evaluations on pool threads. The concurrent
+    path's deadline is thread-based, so a hung item there is still a timeout
+    (only the sequential loop's SIGALRM needs the main thread). Fails when the
+    executor disarms the deadline off the main thread."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from refactory_dsh.nn.executor import Executor
+    from refactory_dsh.task import register_task
+
+    register_task("phase_deadline", _PhaseTask)
+    monkeypatch.setattr(Executor, "_data_item_deadline", lambda self: 1.0)
+    items = (
+        {"id": "ok", "delay": "0"},
+        {"id": "hung_verify", "delay": "0", "phase": "verify"},
+    )
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="body", subgraph_exit="body",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="phase_deadline",
+        inline_items=items, parallelism=4,
+    ))
+    graph.add(nn.Node("body", "op", call="test_ops_parallel:sleep_op",
+                      reads=(CURRENT_ITEM,), produces=("counted",)))
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(execute, graph, tmp_path / "run", max_steps=200).result()
+    assert result.exit_ok, result.error
+    outcomes = [(r["id"], r.get("error_kind"), r.get("passed")) for r in result.facts["item_scores"]]
+    assert outcomes == [("ok", None, True), ("hung_verify", "timeout", False)]
+
+
 # ── T8: a serial fallback says exactly why, and is never silent ───────────
 
 class _UnsharedModel:

@@ -475,3 +475,171 @@ describe('data-parallel: non-deterministic body detection', () => {
     // isDeterministic(solveView) would be false.
   })
 })
+
+// ── Slot-directory gating (correction 1): shared cross-evaluation item limit ──
+
+describe('data-parallel: slot-directory gating', () => {
+  it('two concurrent drains against one slot dir never exceed N in flight and do exceed N/2', async () => {
+    const N = 4
+    const itemsPerDrain = 6
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    const items = Array.from({ length: itemsPerDrain }, (_, i) => ({ id: `d${i}`, delay: 0.1 }))
+
+    // Set process.env so drainConcurrentData reads the slot directory
+    const origSlotsDir = process.env.REFACTORY_ITEM_SLOTS_DIR
+    const origSlots = process.env.REFACTORY_ITEM_SLOTS
+    process.env.REFACTORY_ITEM_SLOTS_DIR = slotDir
+    process.env.REFACTORY_ITEM_SLOTS = String(N)
+
+    try {
+      // Run two concurrent drains with the shared slot directory
+      const drain1Run = loaderRun(items, 4)
+      const drain2Run = loaderRun(items, 4)
+      const ran1: Ran[] = []
+      const ran2: Ran[] = []
+
+      const ctx1 = await mountLoader(processShell(ran1), {
+        graph: loaderGraph(4), workdir: drain1Run.workdir,
+        commandEnv: { REFACTORY_WORKDIR: drain1Run.workdir, PYTHONPATH: drain1Run.taskDir },
+      })
+      const ctx2 = await mountLoader(processShell(ran2), {
+        graph: loaderGraph(4), workdir: drain2Run.workdir,
+        commandEnv: { REFACTORY_WORKDIR: drain2Run.workdir, PYTHONPATH: drain2Run.taskDir },
+      })
+
+      // Drive both concurrently
+      const [r1, r2] = await Promise.all([drive(ctx1), drive(ctx2)])
+      expect(r1).toMatchObject({ status: 'done' })
+      expect(r2).toMatchObject({ status: 'done' })
+
+      // Collect all start/end times from both drains
+      const allSpans: Array<{ start: number; end: number }> = []
+      for (const workdir of [drain1Run.workdir, drain2Run.workdir]) {
+        const passes = join(workdir, 'passes', 'data')
+        if (existsSync(passes)) {
+          for (const dir of readdirSync(passes)) {
+            const startFile = join(passes, dir, 'start')
+            const endFile = join(passes, dir, 'end')
+            if (existsSync(startFile) && existsSync(endFile)) {
+              allSpans.push({
+                start: Number(readFileSync(startFile, 'utf8')),
+                end: Number(readFileSync(endFile, 'utf8')),
+              })
+            }
+          }
+        }
+      }
+
+      // Compute peak overlap across both drains
+      const peak = Math.max(...allSpans.map(span =>
+        allSpans.filter(other => other.start <= span.start && span.start < other.end).length
+      ))
+
+      console.log(`slot-dir gating: peak=${peak}, N=${N}, spans=${allSpans.length}`)
+
+      // Never exceeded N
+      expect(peak).toBeLessThanOrEqual(N)
+      // Exceeded N/2 (proves sharing: if divided, each drain gets N/2=2)
+      expect(peak).toBeGreaterThan(N / 2)
+      // Every slot was released by the drain that held it.
+      expect(readdirSync(slotDir)).toEqual([])
+    } finally {
+      // Restore env
+      if (origSlotsDir === undefined) delete process.env.REFACTORY_ITEM_SLOTS_DIR
+      else process.env.REFACTORY_ITEM_SLOTS_DIR = origSlotsDir
+      if (origSlots === undefined) delete process.env.REFACTORY_ITEM_SLOTS
+      else process.env.REFACTORY_ITEM_SLOTS = origSlots
+
+      // Clean up slot files
+      for (let k = 0; k < N; k++) {
+        const slotPath = join(slotDir, `slot-${k}`)
+        if (existsSync(slotPath)) rmSync(slotPath)
+      }
+    }
+  }, 60_000)
+
+  it('a slot whose holder pid is gone is reclaimed through the real claim, and no tombstone is left', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    const dead = spawnSync('true')
+    expect(dead.pid).toBeGreaterThan(0)
+    writeFileSync(join(slotDir, 'slot-0'), `${dead.pid}:stale`)
+    const token = spinePlugin.itemSlotToken()
+    expect(spinePlugin.tryAcquireItemSlot(slotDir, 1, token)).toBe(0)
+    expect(readFileSync(join(slotDir, 'slot-0'), 'utf8')).toBe(token)
+    expect(readdirSync(slotDir)).toEqual(['slot-0'])
+  })
+
+  it('a claimant that loses the reclaim race leaves the winner its slot', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    const dead = spawnSync('true')
+    const slot = join(slotDir, 'slot-0')
+    writeFileSync(slot, `${dead.pid}:stale`)
+    const winner = `${process.pid}:winner`
+    // Between our read of the dead token and our move, another claimant
+    // reclaims the slot and holds it.
+    const result = spinePlugin.tryAcquireItemSlot(slotDir, 1, spinePlugin.itemSlotToken(), () => {
+      rmSync(slot)
+      writeFileSync(slot, winner)
+    })
+    expect(result).toBe(-1)
+    expect(readFileSync(slot, 'utf8')).toBe(winner)
+    expect(readdirSync(slotDir)).toEqual(['slot-0'])
+  })
+
+  it('the spine source loads node:fs only through its imports (an ESM build has no require)', () => {
+    const source = readFileSync(resolve('packages/workflow/workflow-spine/src/index.ts'), 'utf8')
+    expect(source).not.toMatch(/\brequire\(/)
+  })
+
+  it('a slot whose holder is alive, or still writing its token, is not reclaimed', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    writeFileSync(join(slotDir, 'slot-0'), `${process.pid}:other`)
+    writeFileSync(join(slotDir, 'slot-1'), '')
+    expect(spinePlugin.tryAcquireItemSlot(slotDir, 2, spinePlugin.itemSlotToken())).toBe(-1)
+    expect(readFileSync(join(slotDir, 'slot-0'), 'utf8')).toBe(`${process.pid}:other`)
+  })
+
+  it('release frees only a slot that still holds the releasing token', () => {
+    const slotDir = join(scratch(), 'item-slots')
+    mkdirSync(slotDir, { recursive: true })
+    const mine = spinePlugin.itemSlotToken()
+    expect(spinePlugin.tryAcquireItemSlot(slotDir, 1, mine)).toBe(0)
+    // Another claimant took the slot over (as a reclaim would): our late
+    // release must leave its slot alone.
+    writeFileSync(join(slotDir, 'slot-0'), `${process.pid}:theirs`)
+    spinePlugin.releaseItemSlot(slotDir, 0, mine)
+    expect(readFileSync(join(slotDir, 'slot-0'), 'utf8')).toBe(`${process.pid}:theirs`)
+    spinePlugin.releaseItemSlot(slotDir, 0, `${process.pid}:theirs`)
+    expect(existsSync(join(slotDir, 'slot-0'))).toBe(false)
+  })
+
+  it('a slot error ends the items instead of stranding the drain on its local permits', async () => {
+    const items = Array.from({ length: 4 }, (_, i) => ({ id: `e${i}`, delay: 0 }))
+    const origSlotsDir = process.env.REFACTORY_ITEM_SLOTS_DIR
+    const origSlots = process.env.REFACTORY_ITEM_SLOTS
+    // A slot directory that does not exist: every claim throws ENOENT.
+    process.env.REFACTORY_ITEM_SLOTS_DIR = join(scratch(), 'missing', 'item-slots')
+    process.env.REFACTORY_ITEM_SLOTS = '2'
+    try {
+      const run = loaderRun(items, 2)
+      const ctx = await mountLoader(processShell([]), {
+        graph: loaderGraph(2), workdir: run.workdir,
+        commandEnv: { REFACTORY_WORKDIR: run.workdir, PYTHONPATH: run.taskDir },
+      })
+      const stranded = new Promise<string>(settle => setTimeout(() => settle('stranded'), 15_000))
+      const outcome = await Promise.race([drive(ctx).then(state => String(state.status)), stranded])
+      expect(outcome).not.toBe('stranded')
+      expect(outcome).not.toBe('done')
+    } finally {
+      if (origSlotsDir === undefined) delete process.env.REFACTORY_ITEM_SLOTS_DIR
+      else process.env.REFACTORY_ITEM_SLOTS_DIR = origSlotsDir
+      if (origSlots === undefined) delete process.env.REFACTORY_ITEM_SLOTS
+      else process.env.REFACTORY_ITEM_SLOTS = origSlots
+    }
+  }, 30_000)
+
+})

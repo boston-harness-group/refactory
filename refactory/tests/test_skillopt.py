@@ -35,6 +35,7 @@ MODE_ID = "skillopt_probe/skill_probe"
 # Train/val split
 TRAIN_IDS = [f"t{i}" for i in range(1, 9)]  # 8 train
 VAL_IDS = [f"v{i}" for i in range(1, 5)]     # 4 val
+TEST_IDS = [f"x{i}" for i in range(1, 4)]    # 3 test (only in a manifest that names them)
 
 # A magic marker the toy task looks for to decide pass/fail
 MAGIC_MARKER = "SKILL_MAGIC_PASS"
@@ -65,7 +66,7 @@ class SkillTask(task_module.Task):
     def instances(self, *, part: str | None = None, seed: int | None = None) -> list[task_module.TaskInstance]:
         return [
             task_module.TaskInstance(id=item_id)
-            for item_id in TRAIN_IDS + VAL_IDS
+            for item_id in TRAIN_IDS + VAL_IDS + TEST_IDS
         ]
 
     #: (part, seed) of every verify, so a test can see what reached the Task.
@@ -233,9 +234,9 @@ def _patch_mode(mode_class: type[nn.Mode]):  # type: ignore[no-untyped-def]
     return patched()
 
 
-def _write_parts(root: Path) -> Path:
-    """Write a parts.json manifest and return its path."""
-    manifest = {"train": TRAIN_IDS, "val": VAL_IDS}
+def _write_parts(root: Path, *, test: bool = False) -> Path:
+    """Write a parts.json manifest and return its path; ``test`` adds a test part."""
+    manifest = {"train": TRAIN_IDS, "val": VAL_IDS, **({"test": TEST_IDS} if test else {})}
     parts_path = root / "parts.json"
     parts_path.parent.mkdir(parents=True, exist_ok=True)
     parts_path.write_text(json.dumps(manifest))
@@ -291,17 +292,24 @@ def _run_loop(
 
 
 def _spy_evaluations(monkeypatch) -> list[tuple[str, tuple | None]]:  # type: ignore[no-untyped-def]
-    """Record (part, items) for every Run.evaluate call."""
+    """Record (part, items) for every Run.evaluate and Run.evaluate_many call."""
     from refactory_dsh.outerloop import Run
 
     calls: list[tuple[str, tuple | None]] = []
     original = Run.evaluate
+    original_many = Run.evaluate_many
 
     def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
         calls.append((part, tuple(items) if items else None))
         return original(self, candidate, part=part, items=items, seed=seed)
 
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        for req in requests:
+            calls.append((req.part, tuple(req.items) if req.items else None))
+        return original_many(self, requests, on_result=on_result)
+
     monkeypatch.setattr(Run, "evaluate", evaluate)
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
     return calls
 
 
@@ -1753,12 +1761,19 @@ def test_slow_update_sample_seed(tmp_path, monkeypatch):
 
     calls: list[tuple[str, tuple | None, int | None]] = []
     original = Run.evaluate
+    original_many = Run.evaluate_many
 
     def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
         calls.append((part, tuple(items) if items else None, seed))
         return original(self, candidate, part=part, items=items, seed=seed)
 
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        for req in requests:
+            calls.append((req.part, tuple(req.items) if req.items else None, req.seed))
+        return original_many(self, requests, on_result=on_result)
+
     monkeypatch.setattr(Run, "evaluate", evaluate)
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
     _run_loop(tmp_path, skillopt_options={"max_epochs": 3, "slow_update_samples": 5})
     samples = [d["sample_ids"] for d in _decisions(_read_trace(tmp_path), "slow_update_sample")]
     expected = {
@@ -3050,3 +3065,584 @@ def test_a_later_all_failed_epoch_exits_the_optimize_cli_non_zero(tmp_path, monk
         ])
     assert code != 0
     assert [d["all_failed"] for d in _decisions(_read_trace(tmp_path), "optimizer_calls")] == [False, True]
+
+
+# ── G39: SkillOpt's post-training evaluation (trainer.py:2241-2441) ────────
+
+
+def _with_test_part(tmp_path: Path) -> dict[str, Any]:
+    """Config overrides for a run whose parts manifest has a test part."""
+    return {"parts_manifest": str(_write_parts(tmp_path / "with_test", test=True))}
+
+
+def _spy_part_evaluations(monkeypatch) -> list[tuple[str, str, int | None, str]]:  # type: ignore[no-untyped-def]
+    """Record (part, candidate id, seed, skill) for every val/test Run.evaluate/evaluate_many call."""
+    from refactory_dsh.outerloop import Run
+
+    calls: list[tuple[str, str, int | None, str]] = []
+    original = Run.evaluate
+    original_many = Run.evaluate_many
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        if part != "train":
+            calls.append((part, candidate.id, seed, SkillOptLoop._get_skill(candidate)))
+        return original(self, candidate, part=part, items=items, seed=seed)
+
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        for req in requests:
+            if req.part != "train":
+                calls.append((req.part, req.candidate.id, req.seed, SkillOptLoop._get_skill(req.candidate)))
+        return original_many(self, requests, on_result=on_result)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    return calls
+
+
+def test_post_training_evaluation_runs_in_skillopts_order(tmp_path, monkeypatch):
+    """After training, with a test part: the final skill on val (it differs from
+    the best: the epoch-1 slow update rewrote it), then the initial, the best and
+    the final skill on test, all with the run seed (trainer.py:2241-2441). The
+    scores are reported under A's summary.json names, in the strategy report and
+    the run report. Fails when the evaluation, its order, its seed or a report
+    field is reverted."""
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    calls = _spy_part_evaluations(monkeypatch)
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path),
+        skillopt_options={"max_epochs": 1, "seed": 7},
+    )
+    seed = infra.population[0]
+    final_skill = strategy._current_skill
+    assert final_skill != strategy._best_skill, "setup: the slow update changed the final skill"
+    after = calls[calls.index(next(c for c in calls if c[0] == "test")) - 1:]
+    assert [(part, s) for part, _, s, _ in after] == [("val", 7), ("test", 7), ("test", 7), ("test", 7)]
+    assert after[0][3] == final_skill
+    assert after[1][1] == seed.id
+    assert after[2][1] == strategy._best_candidate_id
+    assert after[3][3] == final_skill
+
+    # The toy task passes x1 and x2 of the three test items: 1, 1, 0.5.
+    expected = (1.0 + 1.0 + 0.5) / 3
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "done"
+    for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
+        assert strategy_report[key] == pytest.approx(expected), key
+    assert strategy_report["test_delta_hard"] == pytest.approx(0.0)
+    assert strategy_report["final_test_delta_hard"] == pytest.approx(0.0)
+    assert strategy_report["final_selection_hard"] == pytest.approx(0.5)
+    assert strategy_report["best_selection_hard"] == pytest.approx(0.5)
+    assert strategy.report(None) == strategy_report
+    assert "## Strategy report" in (infra.root / "report.md").read_text()
+    assert json.loads((infra.root / "report.json").read_text())["strategy_report"] == strategy_report
+    decisions = _decisions(_read_trace(tmp_path), "test_eval")
+    assert [d["action"] for d in decisions] == ["baseline_test", "best_test", "final_test"]
+
+
+def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
+    """Correction 2: trace decisions for test_eval are in A's canonical order
+    (baseline_test, best_test, final_test) regardless of completion order.
+
+    Forces baseline_test to finish *after* best_test by sleeping 0.3 s on the
+    seed candidate's test evaluation.  After evaluate_many returns, the trace
+    decisions must still appear in canonical order — not in completion order.
+
+    Mutation: writing trace decisions inside on_result (completion order)
+    instead of after evaluate_many makes the test fail.
+    """
+    import threading
+    import time
+    from refactory_dsh.loop import Loop
+
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    calls = _spy_part_evaluations(monkeypatch)
+    original_evaluate_part = Loop._evaluate_part
+
+    # Track completion order via on_result
+    completion_order: list[str] = []
+    completion_lock = threading.Lock()
+
+    def _slow_baseline(self, candidate, part, items, seed, *, item_gate=None, **kw):
+        """Delay baseline_test so best_test finishes first."""
+        result = original_evaluate_part(self, candidate, part, items, seed,
+                                        item_gate=item_gate, **kw)
+        # After evaluation completes, record which phase completed
+        if part == "test":
+            # The seed candidate is baseline_test; delay it
+            pop = getattr(self, 'population', [])
+            if pop and candidate.id == pop[0].id:
+                time.sleep(0.3)
+        return result
+
+    monkeypatch.setattr(Loop, "_evaluate_part", _slow_baseline)
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path),
+        skillopt_options={"max_epochs": 1, "seed": 7},
+    )
+    assert strategy._current_skill != strategy._best_skill, "setup: slow update changed the final skill"
+
+    decisions = _decisions(_read_trace(tmp_path), "test_eval")
+    actions = [d["action"] for d in decisions]
+    # Must be in canonical order regardless of completion order
+    assert actions == ["baseline_test", "best_test", "final_test"], (
+        f"trace decisions in wrong order: {actions}"
+    )
+
+    # Report fields must still be correct
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "done"
+    for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
+        assert strategy_report[key] is not None, f"report key {key!r} is None"
+
+
+def test_post_training_evaluation_reuses_the_best_when_the_final_skill_is_it(tmp_path, monkeypatch):
+    """A final skill that is the best skill is not rolled out again: its val score
+    is the best's and its test score the best's test score (trainer.py:2253-2258,
+    :2383-2402). Fails when the reuse is reverted (two extra rollouts)."""
+    monkeypatch.setattr(prompts, "inject_empty_slow_update_field", lambda skill: skill)
+    calls = _spy_part_evaluations(monkeypatch)
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path),
+        skillopt_options={"max_epochs": 1},
+    )
+    assert strategy._current_skill == strategy._best_skill
+    seed = infra.population[0]
+    assert strategy._best_candidate_id == seed.id
+    # The initial val and epoch 1's val gate; then no final-skill val rollout,
+    # the seed (baseline) and the best (the seed again) on test, and no third.
+    assert [(part, cid) for part, cid, _, _ in calls][-2:] == [("test", seed.id), ("test", seed.id)]
+    assert [part for part, _, _, _ in calls] == ["val", "val", "test", "test"]
+    strategy_report = report["strategy_report"]
+    assert strategy_report["final_selection_hard"] == strategy._best_score
+    assert strategy_report["final_test_hard"] == strategy_report["test_hard"]
+
+
+def test_post_training_val_check_promotes_a_better_final_skill(tmp_path, monkeypatch):
+    """A final skill whose val score beats the best becomes the best before the
+    test rollouts (trainer.py:2282-2298), so the best's test rollout is of it
+    and the run's winner is it. Fails when the promotion is reverted."""
+    from refactory_dsh.outerloop import Run
+
+    original = Run.evaluate
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        # Every val item passes once training is over: the final skill's val check.
+        trained = bool(self._loop._custom_strategy._train_stop)  # noqa: SLF001
+        if part == "val" and trained:
+            monkeypatch.setenv("_SKILLOPT_PASS_ALL", "1")
+        try:
+            return original(self, candidate, part=part, items=items, seed=seed)
+        finally:
+            monkeypatch.delenv("_SKILLOPT_PASS_ALL", raising=False)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    calls = _spy_part_evaluations(monkeypatch)
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path),
+        skillopt_options={"max_epochs": 1},
+    )
+    assert strategy._best_skill == strategy._current_skill
+    assert strategy._best_score == pytest.approx(1.0)
+    test_calls = [c for c in calls if c[0] == "test"]
+    assert len(test_calls) == 2, "the final skill is the best now: its test score is reused"
+    assert test_calls[1][1] == strategy._best_candidate_id
+    assert test_calls[1][3] == strategy._current_skill
+    assert report["best"]["id"] == strategy._best_candidate_id
+    assert report["strategy_report"]["final_selection_hard"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("option, manifest_test, reason", [
+    (False, True, "the eval_test strategy option is false"),
+    (None, False, "the parts manifest has no 'test' part"),
+])
+def test_post_training_evaluation_off_says_why(tmp_path, monkeypatch, option, manifest_test, reason):
+    """``eval_test=false``, or no test part, skips the post-training evaluation
+    and the report says why. Fails when either is reverted (it runs anyway, or
+    the reason is lost)."""
+    calls = _spy_part_evaluations(monkeypatch)
+    options: dict[str, Any] = {"max_epochs": 1}
+    if option is not None:
+        options["eval_test"] = option
+    _, report = _run_loop(
+        tmp_path, config_overrides=_with_test_part(tmp_path) if manifest_test else None,
+        skillopt_options=options,
+    )
+    assert not [c for c in calls if c[0] == "test"]
+    assert len([c for c in calls if c[0] == "val"]) == 2, "no final-skill val check either"
+    assert report["strategy_report"]["test_eval"] == "skipped"
+    assert report["strategy_report"]["test_eval_reason"] == reason
+    assert report["strategy_report"]["test_hard"] is None
+
+
+def test_eval_test_true_without_a_test_part_is_refused_before_spending(tmp_path, monkeypatch):
+    calls = _spy_part_evaluations(monkeypatch)
+    with pytest.raises(ValueError, match="eval_test=true needs a parts manifest with a 'test' part"):
+        _run_loop(tmp_path, skillopt_options={"max_epochs": 1, "eval_test": True})
+    assert calls == []
+    with pytest.raises(TypeError, match="eval_test must be true or false"):
+        SkillOptLoop().configure(model=FakeClient(), eval_test="yes")
+
+
+def test_no_post_training_evaluation_after_a_stopped_run(tmp_path, monkeypatch):
+    """A run a person stopped did not finish training: no test rollouts, and the
+    report says training ended on the stop. Fails when the gate is reverted."""
+    calls = _spy_part_evaluations(monkeypatch)
+    from refactory_dsh.outerloop import Run
+
+    monkeypatch.setattr(Run, "check_control", lambda self: "stop")
+    _, report = _run_loop(
+        tmp_path, config_overrides=_with_test_part(tmp_path), skillopt_options={"max_epochs": 2},
+    )
+    assert not [c for c in calls if c[0] == "test"]
+    assert report["strategy_report"]["test_eval"] == "skipped"
+    assert "control_stop" in report["strategy_report"]["test_eval_reason"]
+
+
+def test_a_stopped_run_resumed_to_the_end_reports_a_clean_evaluation(tmp_path, monkeypatch):
+    """Stopped by a person, then resumed and finished: the evaluation runs and the
+    report carries no stale skip reason from the stop. Fails when the earlier
+    outcome is carried over."""
+    from refactory_dsh.outerloop import Run
+
+    overrides = _with_test_part(tmp_path)
+    original = Run.check_control
+    monkeypatch.setattr(Run, "check_control", lambda self: "stop")
+    _, stopped = _run_loop(tmp_path, config_overrides=overrides, skillopt_options={"max_epochs": 1})
+    assert stopped["strategy_report"]["test_eval"] == "skipped"
+    monkeypatch.setattr(Run, "check_control", original)
+    cfg = _config(tmp_path, resume=True, **overrides)
+    with _patch_mode(SkillProbe):
+        loop = strategies.create("skillopt", MODE_ID, cfg, strategy_options={"max_epochs": 1},
+                                 project=Path("."), model=FakeClient())
+        report = loop.run()
+    assert report["strategy_report"]["test_eval"] == "done"
+    assert "test_eval_reason" not in report["strategy_report"]
+    assert report["strategy_report"]["test_hard"] is not None
+
+
+def _fail_best_test(monkeypatch, error):  # type: ignore[no-untyped-def]
+    """Make the best skill's test rollout raise ``error`` while ``armed`` holds.
+
+    Chosen by candidate (the strategy's best), not by call count, so the phase
+    that fails does not depend on which concurrent rollout starts first.
+    Returns the arming dict.
+    """
+    from refactory_dsh.loop import Loop
+
+    original_evaluate_part = Loop._evaluate_part
+    state = {"armed": True}
+
+    def _evaluate_part_spy(self, candidate, part, items, seed, *, item_gate=None, **kw):  # type: ignore[no-untyped-def]
+        strategy = self._custom_strategy
+        if (state["armed"] and part == "test"
+                and candidate.id == strategy._best_candidate_id
+                and candidate.id != self.population[0].id):
+            raise error
+        return original_evaluate_part(self, candidate, part, items, seed, item_gate=item_gate, **kw)
+
+    monkeypatch.setattr(Loop, "_evaluate_part", _evaluate_part_spy)
+    _three_test_candidates(monkeypatch)
+    return state
+
+
+def _three_test_candidates(monkeypatch):  # type: ignore[no-untyped-def]
+    """Val scores that make the seed, the best and the final skill three
+    distinct test candidates (with _THREE_TEST_CANDIDATES)."""
+    # Epoch 1 accepts its patch (the best skill is not the seed's). Epoch 2's
+    # slow update puts guidance in the current skill, which scores lower, so
+    # epoch 2's patch is rejected and the final skill is not the best's. The
+    # scores sit above the toy task's real val score, so the final selection
+    # promotes nothing. Three distinct test candidates.
+    def _val_score(run, cand):  # type: ignore[no-untyped-def]
+        skill = SkillOptLoop._get_skill(cand)
+        return 1.0 + 0.1 * skill.count("Always check.") - 0.2 * ("Updated guidance text." in skill)
+
+    monkeypatch.setattr(SkillOptLoop, "_val_score", staticmethod(_val_score))
+
+
+_THREE_TEST_CANDIDATES = {"max_epochs": 2, "seed": 7}
+
+
+def test_a_refused_test_rollout_leaves_the_evaluation_incomplete(tmp_path, monkeypatch):
+    """A test rollout the harness refuses (a spent rollout budget) ends the
+    evaluation with the scores it has and the reason. Fails when reverted
+    (the refusal crashes the run)."""
+    from refactory_dsh.outerloop import OuterLoopError
+
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    _fail_best_test(monkeypatch, OuterLoopError("the rollout budget is spent (9 of 9)"))
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path),
+        skillopt_options=_THREE_TEST_CANDIDATES,
+    )
+    assert strategy._best_candidate_id != infra.population[0].id
+    assert strategy._current_skill != strategy._best_skill
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "incomplete"
+    assert "rollout budget is spent" in strategy_report["test_eval_reason"]
+    # The refused phase has no score; the two that ran keep theirs.
+    assert strategy_report["test_hard"] is None
+    assert strategy_report["baseline_test_hard"] is not None
+    assert strategy_report["final_test_hard"] is not None
+    # Traced in A's order up to the refused phase, then the refusal.
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
+    assert actions == ["baseline_test", "incomplete"]
+
+
+def test_a_stop_during_the_post_training_test_rollouts_records_none_of_them(tmp_path, monkeypatch):
+    """A stop (SIGTERM, as SystemExit) while the three test rollouts run in
+    evaluate_many: each walker evaluation starts no new item, raises instead
+    of returning a result, and no phase is marked finished. The resumed run
+    rolls all three out again and reports their scores. Fails when a stopped
+    evaluation returns its partial result (the phases are kept with partial
+    scores and not rerun)."""
+    import concurrent.futures
+    import threading
+
+    from refactory_dsh import dsh_runtime
+    from refactory_dsh.outerloop import Run
+
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    _three_test_candidates(monkeypatch)
+    armed = {"on": True, "test_batch": False}
+    test_started = threading.Event()
+    stopping = threading.Event()
+    graded: list[str] = []
+
+    original_verify = SkillTask.verify
+
+    def verify(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+        if armed["on"] and part == "test":
+            graded.append(instance.id)
+            test_started.set()
+            # In flight when the stop comes: finishes after it.
+            stopping.wait(10)
+        return original_verify(self, instance, workspace, part=part, seed=seed)
+
+    monkeypatch.setattr(SkillTask, "verify", verify)
+
+    original_many = Run.evaluate_many
+
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        armed["test_batch"] = any(r.part == "test" for r in requests)
+        return original_many(self, requests, on_result=on_result)
+
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    original_as_completed = concurrent.futures.as_completed
+
+    def as_completed(futures, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if armed["on"] and armed["test_batch"]:
+            test_started.wait(10)
+            raise SystemExit(143)
+        return original_as_completed(futures, *args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "as_completed", as_completed)
+    original_shutdown = dsh_runtime.shutdown_tracked_runs
+
+    def shutdown_tracked_runs():  # type: ignore[no-untyped-def]
+        # evaluate_many sets its stop event first; then the items in flight finish.
+        stopping.set()
+        return original_shutdown()
+
+    monkeypatch.setattr(dsh_runtime, "shutdown_tracked_runs", shutdown_tracked_runs)
+    overrides = _with_test_part(tmp_path)
+    options = dict(_THREE_TEST_CANDIDATES)
+    with pytest.raises(SystemExit):
+        _run_loop(tmp_path, config_overrides=overrides, skillopt_options=options)
+    assert not _decisions(_read_trace(tmp_path), "test_eval")
+    # Each of the three evaluations had one item in flight; none started another.
+    assert len(graded) == 3, graded
+    journal = [json.loads(line) for line in (tmp_path / "run" / "journal.jsonl").read_text().splitlines()]
+    assert not [e for e in journal if e["event"] == "part_result" and e.get("part") == "test"]
+
+    armed["on"] = False
+    calls = _spy_part_evaluations(monkeypatch)
+    cfg = _config(tmp_path, resume=True, **overrides)
+    with _patch_mode(SkillProbe):
+        loop = strategies.create("skillopt", MODE_ID, cfg, strategy_options=options,
+                                 project=Path("."), model=FakeClient())
+        report = loop.run()
+    strategy = loop._custom_strategy
+    resumed = sorted(cid for part, cid, _, _ in calls if part == "test")
+    assert len(resumed) == 3 and len(set(resumed)) == 3, resumed
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "done"
+    for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
+        assert strategy_report[key] is not None, key
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
+    assert actions == ["baseline_test", "best_test", "final_test"]
+
+
+def test_resume_from_a_state_saved_before_test_phases_were_kept(tmp_path):
+    """A state saved by the code before this change has a phase, no
+    test_phases and no traced_phases; that code traced each test phase as it
+    finished. Resumed after best_test, only final_test is evaluated and
+    traced, and the earlier phases are not traced again. Fails when the old
+    phases count as untraced (the trace stops at baseline_test, so final_test
+    is never traced)."""
+    strategy, report = _run_loop(tmp_path / "first", skillopt_options={"max_epochs": 1},
+                                 config_overrides=_with_test_part(tmp_path / "first"))
+    first = report["strategy_report"]
+    old = dict(strategy.strategy_state_dict())
+    old.pop("completed_phases", None)
+    old.pop("traced_phases", None)
+    old["phase"] = "best_test"
+    old["final_eval"] = {
+        "status": "running",
+        "final_selection_hard": first["final_selection_hard"],
+        "baseline_test_hard": first["baseline_test_hard"],
+        "test_hard": first["test_hard"],
+    }
+    _, resumed = _run_loop(tmp_path / "second", skillopt_options={"max_epochs": 1},
+                           config_overrides=_with_test_part(tmp_path / "second"),
+                           preload_state=old)
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path / "second"), "test_eval")]
+    assert len(actions) == 1 and actions[0] in ("final_test", "final_test_reused"), actions
+    resumed_report = resumed["strategy_report"]
+    assert resumed_report["test_eval"] == "done"
+    assert resumed_report["baseline_test_hard"] == first["baseline_test_hard"]
+    assert resumed_report["final_test_hard"] is not None
+
+
+def test_post_training_evaluation_resumes_where_it_stopped(tmp_path, monkeypatch):
+    """A run killed during the best skill's test rollout, after the baseline and
+    final rollouts finished, resumes with only that rollout: the finished
+    phases' scores survive in the strategy state, and the trace holds all
+    three test decisions in A's order (the baseline's written when the run
+    stopped, best and final once best finished). Fails when the finished
+    phases are not kept, or their decisions are written only after a clean
+    return (the kill drops the baseline's and final's)."""
+    monkeypatch.setenv(PASS_IDS_ENV, "x1,x2")
+    crash = _fail_best_test(monkeypatch, ProcessKilled("killed during a test rollout"))
+    overrides = _with_test_part(tmp_path)
+    options = dict(_THREE_TEST_CANDIDATES)
+    with pytest.raises(ProcessKilled):
+        _run_loop(tmp_path, config_overrides=overrides, skillopt_options=options)
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
+    assert actions == ["baseline_test"]
+
+    crash["armed"] = False
+    calls = _spy_part_evaluations(monkeypatch)
+    cfg = _config(tmp_path, resume=True, **overrides)
+    with _patch_mode(SkillProbe):
+        loop = strategies.create("skillopt", MODE_ID, cfg, strategy_options=options,
+                                 project=Path("."), model=FakeClient())
+        report = loop.run()
+    strategy = loop._custom_strategy
+    assert strategy._best_candidate_id != loop.population[0].id
+    resumed_tests = [(part, cid) for part, cid, _, _ in calls if part == "test"]
+    assert resumed_tests == [("test", strategy._best_candidate_id)]
+    strategy_report = report["strategy_report"]
+    assert strategy_report["test_eval"] == "done"
+    for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
+        assert strategy_report[key] is not None, key
+    final_eval = strategy.strategy_state_dict()["final_eval"]
+    assert final_eval["baseline_test_hard"] == strategy_report["baseline_test_hard"]
+    assert list(k for k in final_eval if k.endswith("_hard") and "delta" not in k) == [
+        "final_selection_hard", "baseline_test_hard", "test_hard", "final_test_hard"]
+    assert strategy.strategy_state_dict()["phase"] == "final_done"
+    actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
+    assert actions == ["baseline_test", "best_test", "final_test"]
+    assert report["bound"] == "max_epochs"
+
+
+def test_run_header_names_the_custom_strategy(tmp_path):
+    """G33: the run header (the ``init`` progress event and the line printed from
+    it) names the custom strategy, not the infrastructure optimizer. Fails when
+    reverted ('optimizer random')."""
+    from refactory_dsh import events
+
+    _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
+    progress = [json.loads(line) for line in (tmp_path / "run" / "progress.jsonl").read_text().splitlines()]
+    init = next(record for record in progress if record["step"] == "init")
+    assert init["optimizer"] == "skillopt"
+    assert events.render(init).startswith("run · optimizer skillopt · ")
+
+
+def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
+    """``refactory optimize --setting-sources user,project`` reaches the run's
+    client, as ``--effort`` does; the flag did not exist and the project file's
+    run-level field was refused ("unknown search settings: setting_sources")."""
+    from refactory_dsh import cli
+    from refactory_dsh import loop as loop_module
+    from refactory_dsh import model as model_module
+
+    parsed = cli.build_parser().parse_args(
+        ["optimize", MODE_ID, "--setting-sources", "user,project", "--effort", "medium"])
+    assert (parsed.setting_sources, parsed.effort) == ("user,project", "medium")
+
+    client = FakeClient()
+    built: list[dict[str, Any]] = []
+
+    class ScriptedRoute:
+        def __new__(cls, **kwargs: Any) -> Any:
+            built.append(kwargs)
+            return client
+
+    monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
+    parts = _write_parts(tmp_path)
+    with _patch_mode(SkillProbe):
+        code = loop_module.main([
+            MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
+            "--optimizer", "random", "--seed", "42", "--worker-backend", "claude_code",
+            "--effort", "medium", "--setting-sources", "user,project",
+            "--runs-root", str(tmp_path / "run"), "--project", ".", "--parts", str(parts),
+        ])
+    assert code == 0
+    assert built and all(kwargs["setting_sources"] == "user,project" for kwargs in built)
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    assert config["setting_sources"] == "user,project"
+
+
+def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeypatch):
+    """When the epoch's candidate is rejected, the previous skill and the
+    current skill are one candidate. SkillOpt still rolls it out twice
+    (trainer.py:1866-1867) and compares the two rollouts. Train records are
+    kept per candidate, so the second rollout must not overwrite the first
+    before it is read: the comparison pairs must come from two record sets.
+
+    The toy task alternates pass/fail on every grading of an item, so two
+    rollouts of one item always differ. Mutation check: rolling both out in
+    one ``evaluate_many`` call (refused now) or reading both records after
+    both rollouts makes every pair stable (identical records).
+    """
+    from refactory_dsh.outerloop import Run
+
+    gradings: dict[str, int] = {}
+
+    def alternating(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+        n = gradings.get(instance.id, 0)
+        gradings[instance.id] = n + 1
+        passed = n % 2 == 0
+        return task_module.VerifyResult(passed=passed, score=1.0 if passed else 0.5)
+
+    monkeypatch.setattr(SkillTask, "verify", alternating)
+    # No patch ever beats the current skill on val, so every epoch is rejected.
+    monkeypatch.setattr(SkillOptLoop, "_val_score", staticmethod(lambda run, cand: 0.5))
+
+    sampled: list[str] = []
+    original = Run.evaluate
+    original_many = Run.evaluate_many
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        if part == "train" and items:
+            sampled.append(candidate.id)
+        return original(self, candidate, part=part, items=items, seed=seed)
+
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        sampled.extend(r.candidate.id for r in requests if r.part == "train" and r.items)
+        return original_many(self, requests, on_result=on_result)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+
+    loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 2})
+    trace = _read_trace(tmp_path)
+    assert not _decisions(trace, "val_gate_accept")
+    assert _decisions(trace, "slow_update_sample")
+    # Both slow-update rollouts are of one candidate.
+    assert len(sampled) == 2 and sampled[0] == sampled[1], sampled
+    pairs = loop._comparison_pairs
+    assert pairs
+    categories = [p["category"] for p in pairs]
+    assert set(categories) <= {"improved", "regressed"}, categories

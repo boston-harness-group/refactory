@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
@@ -53,6 +55,52 @@ class DshRun:
     best_score: float | None = None
 
 
+#: Spine runs in flight in this process, so a stop that reaches the main thread
+#: while pool threads run them (``Run.evaluate_many``) can shut them down: they
+#: start in their own session, and only a main-thread run installs the SIGTERM
+#: handler that would unwind them.
+_TRACKED_RUNS: set[subprocess.Popen] = set()
+_TRACKED_LOCK = threading.Lock()
+
+
+def track_run(process: subprocess.Popen) -> None:
+    """Track ``process`` as an in-flight spine run (see ``shutdown_tracked_runs``)."""
+    with _TRACKED_LOCK:
+        _TRACKED_RUNS.add(process)
+
+
+def untrack_run(process: subprocess.Popen) -> None:
+    with _TRACKED_LOCK:
+        _TRACKED_RUNS.discard(process)
+
+
+def shutdown_tracked_runs() -> int:
+    """Ask every tracked spine run to shut down and wait for it; return how many.
+
+    Each gets SIGTERM (its own disposal path), then the shutdown grace; one
+    still running after it is killed.
+    """
+    from refactory_dsh.owned_process import SHUTDOWN_GRACE_S
+    with _TRACKED_LOCK:
+        running = [proc for proc in _TRACKED_RUNS if proc.poll() is None]
+    for proc in running:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + SHUTDOWN_GRACE_S
+    for proc in running:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+    return len(running)
+
+
 def run_on_dsh(
     state: dict[str, Any],
     workdir: Path,
@@ -62,6 +110,9 @@ def run_on_dsh(
     repo_root: Path | None = None,
     on_output: Callable[[str], None] | None = None,
     model: Any = None,
+    item_slots_dir: str | None = None,
+    item_slots: int | None = None,
+    stop_event: threading.Event | None = None,
 ) -> DshRun:
     """Lower ``state``, run it on DSH, and read back the facts it produced.
 
@@ -69,8 +120,20 @@ def run_on_dsh(
     It is not a replacement for capturing: the same lines are still collected, and
     the runner's final JSON object is still parsed out of them, because
     ``best_score`` comes from there.
+
+    ``stop_event`` (``Run.evaluate_many``'s): once it is set the run does not
+    start, and a run in flight is shut down and raises ``EvaluationStopped``
+    rather than returning a result.
     """
     import time
+
+    from refactory_dsh.owned_process import EvaluationStopped
+
+    def _stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
+    if _stopped():
+        raise EvaluationStopped("the spine run was not started: the evaluation was stopped")
 
     from refactory_dsh import dsh_profile
 
@@ -142,6 +205,9 @@ def run_on_dsh(
     ]
     env = {**os.environ, "DSH_HOME": str(selected_home),
            "REFACTORY_MODEL_DSH_HOME": str(selected_home)}
+    if item_slots_dir is not None and item_slots is not None:
+        env["REFACTORY_ITEM_SLOTS_DIR"] = str(item_slots_dir)
+        env["REFACTORY_ITEM_SLOTS"] = str(item_slots)
     env.update(workers.environment(context))
     telemetry = workers.GraphTelemetry(workdir, context, budget) if context else None
     if telemetry is not None:
@@ -167,6 +233,7 @@ def run_on_dsh(
         process = subprocess.Popen(command, cwd=str(repo_root or REPO_ROOT), env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, start_new_session=os.name == "posix")
+        track_run(process)
         out_lines: list[str] = []
         err_lines: list[str] = []
 
@@ -189,6 +256,8 @@ def run_on_dsh(
                     budget.checkpoint()
                 if callable(getattr(model, "_raise_if_cancelled", None)):
                     model._raise_if_cancelled()
+                if _stopped():
+                    raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout_s)
@@ -197,8 +266,14 @@ def run_on_dsh(
                     break
                 except subprocess.TimeoutExpired:
                     continue
+            # Ended by the stop's shutdown (or just as it came): not a result.
+            if _stopped():
+                raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
         except BaseException as error:
-            shutdown(process)
+            try:
+                shutdown(process)
+            finally:
+                untrack_run(process)
             for reader in readers:
                 reader.join(timeout=5)
             if telemetry is not None:
@@ -209,6 +284,7 @@ def run_on_dsh(
                               stderr=f"dsh timed out after {timeout_s}s; owned runtime shutdown requested",
                               duration_s=time.time() - started)
             raise
+        untrack_run(process)
         for reader in readers:
             reader.join()
         stdout, stderr = "".join(out_lines), "".join(err_lines)
@@ -264,6 +340,9 @@ def evaluate_on_dsh(
     mode: Any, state: dict[str, Any], workdir: Path, *, timeout_s: int = DEFAULT_TIMEOUT_S,
     on_output: Callable[[str], None] | None = None,
     model: Any = None,
+    item_slots_dir: str | None = None,
+    item_slots: int | None = None,
+    stop_event: threading.Event | None = None,
 ) -> RunResult:
     """One forward pass on DSH, scored by the mode's own `score()`.
 
@@ -274,7 +353,10 @@ def evaluate_on_dsh(
     """
     name = f"{type(mode).__module__.split('.')[-2]}-{mode.name}"
     run = run_on_dsh(state, workdir, name=name, timeout_s=timeout_s, on_output=on_output,
-                     **({"model": model} if model is not None else {}))
+                     **({"model": model} if model is not None else {}),
+                     **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
+                        if item_slots_dir is not None else {}),
+                     **({"stop_event": stop_event} if stop_event is not None else {}))
     # The DSH evaluator's run end (a spine run it launched and waited for): the
     # same cleanups the walker runs when its own run ends.
     from refactory_dsh.nn.executor import _run_end_cleanup

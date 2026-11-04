@@ -2078,8 +2078,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "max_concurrent_evaluations": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_items_in_flight": null,
     "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
@@ -2097,6 +2099,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "role_routes": {},
     "seed": 0,
     "seed_results": null,
+    "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
     "validation_reserve_s": 0,
@@ -2281,6 +2284,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "max_concurrent_evaluations": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_elapsed_s": {
       "default": null,
       "description": "",
@@ -2297,6 +2311,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_items_in_flight": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-items-in-flight"
       ],
       "nargs": null,
       "positional": false,
@@ -2544,6 +2569,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "settings_json": {
       "default": null,
       "description": "",
@@ -2601,7 +2637,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "2dca14be7125bca1d5b537419da854eecc79da6312e07a8710d3977232ce2226"
+  "reviewed_schema": "5a406ef1c14fc971c4d6020a201071bfb90125c2570bce3e7d57974f032d0671"
 }
 ```
 
@@ -3438,8 +3474,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "max_concurrent_evaluations": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_items_in_flight": null,
     "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
@@ -3457,6 +3495,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "role_routes": {},
     "seed": 0,
     "seed_results": null,
+    "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
     "validation_reserve_s": 0,
@@ -3644,6 +3683,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "max_concurrent_evaluations": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_elapsed_s": {
       "default": null,
       "description": "",
@@ -3660,6 +3710,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_items_in_flight": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-items-in-flight"
       ],
       "nargs": null,
       "positional": false,
@@ -3918,6 +3979,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "settings_json": {
       "default": null,
       "description": "",
@@ -3975,7 +4047,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "d0322377404efa55f8aea17113e2f8d6e757a36aad726f40db382b9ad3b45967"
+  "reviewed_schema": "b6eb0e63ea61953055fcd5c3ea20d1e42c4b36c5440a69ca5abfed43abe7ae93"
 }
 ```
 
@@ -5048,6 +5120,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "object"
     },
+    "setting_sources": {
+      "default": "",
+      "description": "claude_code workers only: the Claude Code settings they load, none or a comma list of user, project and local",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "setup": {
       "default": "",
       "description": "design and design_fast: a command run in the worktree before each check, such as a build",
@@ -5224,7 +5307,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "fefb28cd8b637915329c68d8d817790f72a76862b6ead493cfec65e539b6ad81"
+  "reviewed_schema": "8de41bdaa3e1e0f5561b3b6537bd24da2e41f76aa98a559543ab971801489968"
 }
 ```
 
@@ -5426,8 +5509,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "max_concurrent_evaluations": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
+    "max_items_in_flight": null,
     "max_rollouts": null,
     "max_steps": 2000,
     "max_tokens": null,
@@ -5445,6 +5530,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "role_routes": {},
     "seed": 0,
     "seed_results": null,
+    "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
     "validation_reserve_s": 0,
@@ -5631,6 +5717,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "max_concurrent_evaluations": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "max_elapsed_s": {
       "default": null,
       "description": "",
@@ -5647,6 +5744,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_items_in_flight": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-items-in-flight"
       ],
       "nargs": null,
       "positional": false,
@@ -5883,6 +5991,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "strategy": {
       "default": null,
       "description": "",
@@ -5954,7 +6073,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "3f75588c93f7ca87be3480d6b6b5a7d4c9e43e8965d61a0f13bbf075fb706b7b"
+  "reviewed_schema": "489bb36b574b0b381a65d6c1251a0b2ee55c70b604fd35427a6e53e7014178db"
 }
 ```
 
@@ -11281,7 +11400,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -11357,7 +11476,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "values": []
     },
     "max_completion_tokens": {
-      "default": 16384,
+      "default": 0,
       "description": "output-token cap on each solve-node model call; 0 = no cap",
       "frozen": true,
       "kind": "int",
@@ -11365,7 +11484,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
         0,
         null
       ],
-      "value": 16384,
+      "value": 0,
       "values": []
     },
     "skill": {
@@ -11414,7 +11533,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
         "explanation": "Solve LiveMathematicianBench items with an empty skill prompt and SkillOpt's defaults (no theorem or proof sketch in the prompt); set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
           "data_parallelism": 1,
-          "max_completion_tokens": 16384,
+          "max_completion_tokens": 0,
           "skill": "",
           "use_sketch": false,
           "use_theorem": false
@@ -11426,8 +11545,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 16384, as in SkillOpt; 0 = no cap; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "bf884d6f690b8027c9b35706ccf229e32436ee87c0a3782ae682ad3bdc979a8d"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "df67447ca311658d6b5ea8783d137ca9bf9dde44d995391aaf3b347cd6bf6576"
   }
 }
 ```

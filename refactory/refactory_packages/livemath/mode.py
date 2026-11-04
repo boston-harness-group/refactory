@@ -11,13 +11,46 @@ SkillOpt solver defaults:
     with ``--cfg-options env.exec_timeout=1800`` (SkillOpt's run-train.sh:14 and
     run-train-seed.sh:20, recorded in each run's out/config.json ``exec_timeout``),
     and the outer-loop protocol has arm B match arm A.
-  max_completion_tokens = 16384 (livemathematicianbench/default.yaml:16) -- the
-    ``max_completion_tokens`` knob (``0`` = no cap), applied to the solve node's
-    route only (``Solver.run``).
+  max_completion_tokens = 0 (no cap) -- the ``max_completion_tokens`` knob,
+    applied to the solve node's route only (``Solver.run``). SkillOpt's LiveMath
+    config says 16384 (livemathematicianbench/default.yaml:16), but arm A's
+    ``claude_chat`` backend drops it: ``_call_messages`` starts with
+    ``del max_completion_tokens`` (skillopt/model/claude_backend.py:310), so A's
+    solver output is never capped -- 73 of the 1,280 calls in A's seed-42 run
+    (runs/skillopt-train-20261023-e10-s42) produced more than 16,384 output
+    tokens, the largest 103,088. ``--knob max_completion_tokens=N`` sets a cap.
   reasoning_effort = medium (_base_/default.yaml:10) -- an agent node carries no
     per-node effort; it is a run setting (``--effort medium``, or ``node_routes``
     for ``solve``), not part of this graph.
-  model = gpt-5.5 (_base_/default.yaml:7) -- likewise a run setting.
+  model = gpt-5.5 (_base_/default.yaml:7) -- likewise a run setting; arm A ran
+    claude-opus-4-6 (its out/config.json ``target_model``).
+
+Arm-A parity. Arm A's solver is ``claude -p`` (claude_backend.py ``_run_claude_print``)
+with only Claude Code's project settings loaded, effort medium and 24 workers.
+SkillOpt's own default is ``user,project`` (claude_backend.py:19), but arm A's runs
+set ``CLAUDE_SETTING_SOURCES=project`` (SkillOpt's run-train-seed.sh:17): every solver
+and optimizer call in A's runs/skillopt-train-20261023-e10-s<seed>/calls.jsonl
+records ``setting_sources`` ``project``. Loading ``user`` as well puts the host
+account's own CLAUDE.md and settings into every call. One known difference remains:
+A's solver carries Claude Code's default tools (the ``dontAsk`` mode refuses them;
+2-4% of A's solves spend a turn on a refused call), while this solve node runs with
+no tools. The scores below were measured with ``user,project``; the ``project``-only
+route has not been measured yet. The invocation that matches A::
+
+    refactory optimize livemath/solver --strategy skillopt \
+        --worker-backend claude_code --permission-mode dontAsk \
+        --model claude-opus-4-6 --effort medium --setting-sources project \
+        --knob data_parallelism=24 --parts <parts.json> --holdout 0 \
+        --strategy-option max_epochs=10 --strategy-option early_stop_patience=3 \
+        --strategy-option early_stop_at_full_val=true --strategy-option seed=<seed>
+
+(the strategy options are A's out/config.json ``num_epochs``,
+``early_stop_patience``, ``early_stop_at_full_val`` and ``seed``; the SkillOpt
+strategy evaluates on the manifest's test part after training, as A does). The
+route matters: with A's best seed-42 skill on the 125 test items, this solver
+scored 57.6% on the plain DSH API route and 69.6% on ``claude_code`` with
+``user,project`` settings, against A's 72.8%; A's four best skills (seeds 42-45)
+averaged 72.0% on ``claude_code`` with ``user,project`` against A's 73.2%.
 """
 from __future__ import annotations
 
@@ -51,8 +84,10 @@ SYSTEM_PROMPT = (
 # Arm A's exec_timeout (run-train.sh:14, run-train-seed.sh:20); SkillOpt's own
 # configs/livemathematicianbench/default.yaml:17 default is 300.
 SOLVE_TIMEOUT_S = 1800
-# Arm A's solver output cap (configs/livemathematicianbench/default.yaml:16).
-MAX_COMPLETION_TOKENS = 16384
+# Arm A's solver output cap: none. SkillOpt's LiveMath config sets 16384
+# (configs/livemathematicianbench/default.yaml:16), but the claude_chat backend arm
+# A runs on discards it (skillopt/model/claude_backend.py:310). 0 = no cap.
+MAX_COMPLETION_TOKENS = 0
 
 
 class Solver(nn.Mode):
@@ -73,7 +108,7 @@ class Solver(nn.Mode):
                                    description="include the item's theorem as a ## Theorem section"),
             "use_sketch": nn.Knob(False, "bool",
                                   description="include the item's proof sketch as a ## Proof Sketch section"),
-            # SkillOpt configs/livemathematicianbench/default.yaml:16. A run
+            # Uncapped, as arm A's solver is (``MAX_COMPLETION_TOKENS``). A run
             # setting, not a search target: frozen against the optimizer, set
             # with ``--knob max_completion_tokens=N``.
             "max_completion_tokens": nn.Knob(

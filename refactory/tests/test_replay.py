@@ -821,12 +821,25 @@ def test_config_mapping(tmp_path):
     assert len(mapped) == 10  # exactly the options SkillOptLoop.configure takes
 
 
+def test_config_mapping_carries_eval_test_when_a_recorded_it(tmp_path):
+    """A's ``eval_test`` (trainer.py:2241) drives B's post-training evaluation."""
+    base = {"num_epochs": 10, "early_stop_patience": 3, "early_stop_at_full_val": True,
+            "edit_budget": 4, "min_edit_budget": 2, "seed": 42, "slow_update_samples": 20,
+            "minibatch_size": 8, "merge_batch_size": 8}
+    for value in (True, False):
+        a_out = tmp_path / str(value)
+        a_out.mkdir()
+        (a_out / "config.json").write_text(json.dumps({**base, "eval_test": value}))
+        assert load_a_config(a_out)["eval_test"] is value
+
+
 def test_config_mapping_covers_every_configure_option():
     """Every option SkillOptLoop.configure reads is driven from A's config."""
     import inspect
 
     from refactory_packages.skillopt.loop import SkillOptLoop
     from refactory_packages.skillopt.replay_runner import (
+        A_CONFIG_OPTIONAL,
         A_CONFIG_TO_STRATEGY_OPTION,
     )
 
@@ -838,7 +851,7 @@ def test_config_mapping_covers_every_configure_option():
     }
     # ``rollout_order`` is not a setting of A's: the runner passes the order A's
     # rollout completed in, read from A's step results (RecordedRolloutOrder).
-    mapped = set(A_CONFIG_TO_STRATEGY_OPTION.values()) | {
+    mapped = set(A_CONFIG_TO_STRATEGY_OPTION.values()) | set(A_CONFIG_OPTIONAL.values()) | {
         "analyst_edit_budget", "rollout_order", "patch_order",
     }
     assert read == mapped, (
@@ -2163,6 +2176,30 @@ def test_verdict_completed_when_b_reproduces_a(tmp_path):
     assert "divergence" not in report
 
 
+def test_verdict_diverged_when_a_post_training_score_differs(tmp_path):
+    """B's post-training scores (its strategy report) must equal A's summary.json
+    (trainer.py:2480-2515); one that differs makes the replay diverge, naming it."""
+    from refactory_packages.skillopt.replay_runner import (
+        apply_verdict, b_history_from_trace, compare_test_eval,
+    )
+
+    history = b_history_from_trace(_known_trace())
+    a_out = _a_out_from_b_history(tmp_path, history, num_epochs=3)
+    (a_out / "summary.json").write_text(json.dumps({
+        "final_selection_hard": 0.5, "baseline_test_hard": 0.25, "test_hard": 0.75,
+        "final_test_hard": 0.5}))
+    same = {"test_eval": "done", "final_selection_hard": 0.5, "baseline_test_hard": 0.25,
+            "test_hard": 0.75, "final_test_hard": 0.5}
+    for b, status in ((same, "completed"), ({**same, "test_hard": 0.7}, "diverged"),
+                      ({**same, "final_test_hard": None}, "diverged")):
+        report = {"replay_status": "completed", "comparison": compare_runs(a_out, history),
+                  "test_eval": compare_test_eval(a_out, b)}
+        apply_verdict(report, [])
+        assert report["replay_status"] == status, b
+    assert report["divergence"] == {"phase": "test_eval", "field": "final_test_hard",
+                                    "a_value": 0.5, "b_value": None}
+
+
 def test_verdict_diverged_when_a_decision_differs(tmp_path):
     """The reviewer's plant: the no-op patch rule reverted, so B refuses where A
     gated and rejected. Every call can still match; the decisions do not."""
@@ -2374,6 +2411,11 @@ def test_run_replay_diverges_when_b_stops_early(tmp_path, monkeypatch, _arm_b_re
         replay_runner.main()
     assert exit_info.value.code == 1
     report = json.loads((out / "replay_report.json").read_text())
-    assert report["replay_status"] == "diverged"
-    assert report["divergence"]["field"] in ("early_stop", "epoch_reached")
+    # B, stopped early, goes on to its post-training evaluation of skills A never
+    # tested, so its first unmatched solver call may end the replay before the
+    # step comparison does; either way the replay fails and the comparison names
+    # the epochs B never reached.
+    assert report["replay_status"] in ("diverged", "mismatch")
+    if report["replay_status"] == "diverged":
+        assert report["divergence"]["field"] in ("early_stop", "epoch_reached")
     assert report["comparison"]["summary"]["diverged_epochs"] >= 1

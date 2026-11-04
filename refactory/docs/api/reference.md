@@ -227,11 +227,13 @@ The two extension points: what proposes, and what runs the search.
 
 | kind | name | signature |
 |---|---|---|
+| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None) -> None` |
 | class | `OuterLoop` | `()` |
 | class | `OuterLoopError` | `` |
 | class | `Run` | `(_loop: 'Any', log_lines: 'list[str]' = <factory>, stopped: 'str \| None' = None) -> None` |
 | function | `run_strategy` | `(loop: 'Any') -> 'dict[str, Any]'` |
 
+- **`EvalRequest`** — One evaluation request for :meth:`Run.evaluate_many`.
 - **`OuterLoop`** — Base class for a custom strategy — the **custom strategy seam**.
 - **`OuterLoopError`** — A search cannot proceed. Always names what is wrong.
 - **`Run`** — Everything a search strategy is built from.
@@ -365,7 +367,7 @@ The optimizer loop, named like one.
 |---|---|---|
 | class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>) -> None` |
+| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>) -> None` |
 | class | `LoopError` | `` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |

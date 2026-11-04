@@ -827,6 +827,8 @@ class Executor:
     #: The completed nodes, gate verdicts and reloop feedback, kept by the spine's rules.
     record: RunRecord = field(default_factory=RunRecord)
     _reserve_step: Callable[[], bool] | None = field(default=None, repr=False)
+    #: Run-wide item-in-flight limiter passed from evaluate_many.
+    item_gate: Any = field(default=None, repr=False)
 
     _gate_iterations: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _outcome: str = field(default="pending", init=False, repr=False)
@@ -1018,13 +1020,18 @@ class Executor:
                 # the budget's remaining time, defaulting to 3600 s.
                 _item_deadline_s = self._data_item_deadline()
 
-                # Ask 4: SIGALRM can only be armed on the main thread.
-                # Off the main thread, skip arming and emit a run_warning
-                # event so the unarmed deadline is recorded in the run's
-                # events (the same channel the spine uses for warnings).
+                # Ask 4: the sequential loop's SIGALRM can only be armed on the
+                # main thread. The concurrent path's deadline is thread-based
+                # and holds on any thread, so only the sequential loop below
+                # disarms it off the main thread, with a run_warning event so
+                # the unarmed deadline is recorded (the spine's warning channel).
                 _on_main_thread = threading.current_thread() is threading.main_thread()
-                if _item_deadline_s is not None and not _on_main_thread:
-                    _item_deadline_s = None  # disable deadline
+
+                def _disarm_serial_deadline() -> None:
+                    nonlocal _item_deadline_s
+                    if _item_deadline_s is None or _on_main_thread:
+                        return
+                    _item_deadline_s = None
                     try:
                         from refactory_dsh import live
                         live.emit(
@@ -1103,6 +1110,7 @@ class Executor:
                             setup_kwargs=_setup_kwargs,
                             verify_kwargs=_verify_kwargs,
                             item_deadline_s=_item_deadline_s,
+                            item_gate=self.item_gate,
                         )
                         scores = _par.scores
                         _failed_item_step_indices.update(
@@ -1130,7 +1138,12 @@ class Executor:
                         current = out[0].target if out else None
                         continue
 
+                _disarm_serial_deadline()
+                _stop_check = getattr(self.item_gate, "check", None)
                 for index, item in enumerate(items):
+                    # A stop under evaluate_many: no new item starts.
+                    if callable(_stop_check):
+                        _stop_check()
                     # Resume: an item whose pass finished is not run again; its
                     # record -- kept with the pass when it finished -- is.
                     if _resuming:
@@ -2198,6 +2211,7 @@ def execute(
     shared_budget: Any = None,
     omit_steering: bool | None = None,
     enable_recovery: bool = False,
+    item_gate: Any = None,
 ) -> RunResult:
     """Build a context and run the graph once.
 
@@ -2257,7 +2271,7 @@ def execute(
             pass
     try:
         executor = Executor(graph, ctx, max_steps=max_steps, enable_recovery=enable_recovery,
-                            record=record)
+                            record=record, item_gate=item_gate)
         if gate_iterations:
             executor._gate_iterations.update(gate_iterations)
         result = executor.run(start=start)

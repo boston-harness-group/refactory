@@ -841,15 +841,21 @@ def _solver_model(monkeypatch, knob_text=None):
 
 
 def test_max_completion_tokens_knob_caps_the_solve_node_only(monkeypatch):
-    """G31: the declared knob (default 16384, arm A's) reaches the solve node's
-    route and no other node's; ``--knob max_completion_tokens=0`` adds no cap."""
+    """G31: the declared knob defaults to 0 -- no cap, as arm A's claude_chat
+    backend drops SkillOpt's 16384 (claude_backend.py:310) -- and a cap set with
+    ``--knob max_completion_tokens=N`` reaches the solve node's route and no other
+    node's."""
     from refactory_packages.livemath.mode import Solver
 
     knob = Solver.declare()["max_completion_tokens"]
-    assert (knob.default, knob.kind, knob.frozen) == (16384, "int", True)
+    assert (knob.default, knob.kind, knob.frozen) == (0, "int", True)
     assert "max_completion_tokens" in Solver().graph().nodes["solve"].knobs
 
-    model = _solver_model(monkeypatch)
+    default = _solver_model(monkeypatch)
+    assert "max_completion_tokens" not in default.for_node("solve", role="solver").route(), (
+        "the default solve route is uncapped, as arm A's solver is")
+
+    model = _solver_model(monkeypatch, "16384")
     solve = model.for_node("solve", role="solver").route()
     assert solve["max_completion_tokens"] == "16384"
     assert solve["effort"] == "high", "an existing solve route entry is kept"

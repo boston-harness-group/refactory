@@ -219,6 +219,7 @@ def run_data_concurrent(
     setup_kwargs: dict[str, Any] | None = None,
     verify_kwargs: dict[str, Any] | None = None,
     item_deadline_s: float | None = None,
+    item_gate: threading.BoundedSemaphore | None = None,
 ) -> ConcurrentOutcome:
     """Run data-node items concurrently, with the sequential loop's semantics.
 
@@ -276,115 +277,129 @@ def run_data_concurrent(
             result.cancelled = True
             return result
 
-        instance = instance_of(item)
-        pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads)
-        child = clone_child_executor(executor, item_model(), reserve_step=reserve, gate_iterations={})
-        # The item works through an alias of its pass folder, removed when the item
-        # ends -- at once when a setup or verify outlives its deadline, so the
-        # abandoned phase's later writes *through that path* fail. A subprocess it
-        # started in the folder, or a path it resolved, is not stopped (see the
-        # module docstring); the sequential loop's alarm interrupts the phase instead.
-        live = _live_alias(run_workdir, node.id, pass_dir) if item_deadline_s is not None else None
-        child.ctx.workdir = live or pass_dir
-        phase = "setup"
-        child._run_workdir = run_workdir  # noqa: SLF001
-        result.child = child
-        item_task = copy.deepcopy(task) if task is not None else None
-        fields = _metadata_fields(item, instance)
-        record: dict[str, Any] | None = None
-        finished = False
-
+        # Acquire run-wide item gate (cross-evaluation limiter).
+        # The acquire is immediately before the try/finally so that any
+        # exception in setup code (instance_of, prepare_pass_dir,
+        # clone_child_executor, etc.) still releases the permit, preventing
+        # deadlock under disk-full or memory pressure.
+        _has_gate = item_gate is not None
+        if _has_gate:
+            item_gate.acquire()
         try:
-            if item_task is not None:
-                phase = "setup"
-                _within_deadline(
-                    lambda: item_task.setup(instance, child.ctx.workdir, **setup_kwargs),
-                    item_deadline_s, node.id, item_id,
+
+            instance = instance_of(item)
+            pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads)
+            child = clone_child_executor(executor, item_model(), reserve_step=reserve, gate_iterations={})
+            # The item works through an alias of its pass folder, removed when the item
+            # ends -- at once when a setup or verify outlives its deadline, so the
+            # abandoned phase's later writes *through that path* fail. A subprocess it
+            # started in the folder, or a path it resolved, is not stopped (see the
+            # module docstring); the sequential loop's alarm interrupts the phase instead.
+            live = _live_alias(run_workdir, node.id, pass_dir) if item_deadline_s is not None else None
+            child.ctx.workdir = live or pass_dir
+            phase = "setup"
+            child._run_workdir = run_workdir  # noqa: SLF001
+            result.child = child
+            item_task = copy.deepcopy(task) if task is not None else None
+            fields = _metadata_fields(item, instance)
+            record: dict[str, Any] | None = None
+            finished = False
+
+            try:
+                if item_task is not None:
+                    phase = "setup"
+                    _within_deadline(
+                        lambda: item_task.setup(instance, child.ctx.workdir, **setup_kwargs),
+                        item_deadline_s, node.id, item_id,
+                    )
+                child.ctx.node_id = node.id
+                child.ctx._declared = node.writes  # noqa: SLF001
+                child.ctx._declared_reads = node.reads  # noqa: SLF001
+                child.ctx._declared_facts = node.produces  # noqa: SLF001
+                child.ctx._produced = set()  # noqa: SLF001
+                child.ctx.write_json(CURRENT_ITEM, item)
+                child._item_exchanges = []  # noqa: SLF001
+                branch_error = child._walk_branch(  # noqa: SLF001
+                    node.subgraph_entry, node.subgraph_exit,
+                    include_barrier=True, iterations={},
                 )
-            child.ctx.node_id = node.id
-            child.ctx._declared = node.writes  # noqa: SLF001
-            child.ctx._declared_reads = node.reads  # noqa: SLF001
-            child.ctx._declared_facts = node.produces  # noqa: SLF001
-            child.ctx._produced = set()  # noqa: SLF001
-            child.ctx.write_json(CURRENT_ITEM, item)
-            child._item_exchanges = []  # noqa: SLF001
-            branch_error = child._walk_branch(  # noqa: SLF001
-                node.subgraph_entry, node.subgraph_exit,
-                include_barrier=True, iterations={},
-            )
-            if branch_error is not None:
-                raise _BranchFailed(branch_error)
-            phase = "verify"
-            verdict = (
-                _within_deadline(
-                    lambda: item_task.verify(instance, child.ctx.workdir, **verify_kwargs),
-                    item_deadline_s, node.id, item_id,
+                if branch_error is not None:
+                    raise _BranchFailed(branch_error)
+                phase = "verify"
+                verdict = (
+                    _within_deadline(
+                        lambda: item_task.verify(instance, child.ctx.workdir, **verify_kwargs),
+                        item_deadline_s, node.id, item_id,
+                    )
+                    if item_task is not None else None
                 )
-                if item_task is not None else None
-            )
-        except passthrough:
-            cancelled.set()
-            raise
-        except HaltStop as exc:
-            result.stop, result.error = "halted", str(exc)
-            cancelled.set()
-            return result
-        except GateStop as exc:
-            result.stop, result.error = "refused", str(exc)
-            cancelled.set()
-            return result
-        except CancelledError:
-            result.cancelled = True
-            return result
-        except _ItemDeadlineError as exc:
-            if live is not None:
-                live.unlink(missing_ok=True)
-            (pass_dir / TIMED_OUT).write_text(phase)
-            record = make_item_record(item_id, None, error=exc,
-                                      exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
-            if record is not None:
-                record["error_kind"] = "timeout"
-            finished = True
-        except _BranchFailed as exc:
-            if cancelled.is_set():
-                # Stopped by another item's halt, gate or budget stop, not failed.
+            except passthrough:
+                cancelled.set()
+                raise
+            except HaltStop as exc:
+                result.stop, result.error = "halted", str(exc)
+                cancelled.set()
+                return result
+            except GateStop as exc:
+                result.stop, result.error = "refused", str(exc)
+                cancelled.set()
+                return result
+            except CancelledError:
                 result.cancelled = True
                 return result
-            record = make_item_record(item_id, None, error=RuntimeError(str(exc)),
-                                      exchanges=list(child._item_exchanges),  # noqa: SLF001
-                                      fail_reason=str(exc), **fields)
-            finished = True
-        except Exception as exc:  # noqa: BLE001 - a failed item, as in the sequential loop
-            if cancelled.is_set():
-                result.cancelled = True
-                return result
-            record = make_item_record(item_id, None, error=exc,
-                                      exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
-            finished = True
-        else:
-            prediction: str | None = None
-            if verdict is not None:
-                if verdict.prediction:
-                    prediction = verdict.prediction
-                elif verdict.passed:
-                    prediction = verdict.details
-                else:
-                    prediction = ""
-            record = make_item_record(
-                item_id, verdict,
-                exchanges=list(child._item_exchanges),  # noqa: SLF001
-                prediction=prediction,
-                fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
-                **fields,
-            )
-            finished = True
+            except _ItemDeadlineError as exc:
+                if live is not None:
+                    live.unlink(missing_ok=True)
+                (pass_dir / TIMED_OUT).write_text(phase)
+                record = make_item_record(item_id, None, error=exc,
+                                          exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
+                if record is not None:
+                    record["error_kind"] = "timeout"
+                finished = True
+            except _BranchFailed as exc:
+                if cancelled.is_set():
+                    # Stopped by another item's halt, gate or budget stop, not failed.
+                    result.cancelled = True
+                    return result
+                record = make_item_record(item_id, None, error=RuntimeError(str(exc)),
+                                          exchanges=list(child._item_exchanges),  # noqa: SLF001
+                                          fail_reason=str(exc), **fields)
+                finished = True
+            except Exception as exc:  # noqa: BLE001 - a failed item, as in the sequential loop
+                if cancelled.is_set():
+                    result.cancelled = True
+                    return result
+                record = make_item_record(item_id, None, error=exc,
+                                          exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
+                finished = True
+            else:
+                prediction: str | None = None
+                if verdict is not None:
+                    if verdict.prediction:
+                        prediction = verdict.prediction
+                    elif verdict.passed:
+                        prediction = verdict.details
+                    else:
+                        prediction = ""
+                record = make_item_record(
+                    item_id, verdict,
+                    exchanges=list(child._item_exchanges),  # noqa: SLF001
+                    prediction=prediction,
+                    fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
+                    **fields,
+                )
+                finished = True
+            finally:
+                if live is not None:
+                    live.unlink(missing_ok=True)
+                if finished:
+                    mark_pass_complete(pass_dir, record)
+            result.record = record
+            return result
+
         finally:
-            if live is not None:
-                live.unlink(missing_ok=True)
-            if finished:
-                mark_pass_complete(pass_dir, record)
-        result.record = record
-        return result
+            if _has_gate:
+                item_gate.release()
 
     results: list[_ItemResult] = [_ItemResult(index=i) for i in range(len(items))]
     raised: BaseException | None = None

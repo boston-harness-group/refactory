@@ -441,6 +441,13 @@ def test_overfit_like_with_like(tmp_path):
     assert report["exit_ok"] is False, (
         "an overfit winner (val vs test) must produce exit_ok=False"
     )
+    # The error and the printed line say what the audit found, with both scores;
+    # they read "the required held-out audit is unavailable" and "no holdout score".
+    from refactory_dsh.loop import _holdout_line
+    line = _holdout_line(audit)
+    assert line == ("holdout: val 0.8500, test 0.4000, gap 0.4500 against threshold 0.15 "
+                    "— overfit (val and test parts)")
+    assert report["error"] == f"the winner overfit ({line})"
 
 
 # ── test_overfit_backward_compat ──────────────────────────────────────────

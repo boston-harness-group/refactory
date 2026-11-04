@@ -47,6 +47,7 @@ variants). The refusal names which argument was empty.
 | `--review-comments` | Design, with `--refine`: add the pull request's reviews and comments to the run's steering. |
 | `--worker-backend dsh\|codex\|claude_code` | the explicit coding-worker runtime; DSH is the default. |
 | `--effort <value>` | DSH reasoning-effort override; external workers use native product settings. |
+| `--setting-sources <list>` | claude_code workers only: the Claude Code settings they load, `none` or a comma list of `user`, `project` and `local` (as `claude --setting-sources`); a node or role route still overrides it. |
 | `--permission-mode <value>` | New workers default to `skip` (full native permission bypass). Choose `default` for native checks, or a supported backend-specific policy. Saved runs/profiles retain their policies; see [worker permissions](models.md#model-provider-versus-coding-agent). |
 | `--model-timeout <seconds>` | seconds one model completion may take before it is called hung; default 1800 (30 min). Sets the per-completion limit for every agent step of the run. Each step's spine limit is `attempts × model-timeout + 600`. Not the same as `--timeout` (seconds to wait at a gate) or `--max-elapsed-s` (wall-clock cap on the entire run). |
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | the shared resource allocation, including nested work and validation. |
@@ -156,6 +157,8 @@ installed copy.
 | `--elite <n>` | how many parents each round proposes against | 3 |
 | `--max-evaluations <n>` | a hard ceiling on evaluated candidates | 64 |
 | `--max-rollouts <n>` | per-item budget: how many item-level evaluations the run may perform | unlimited |
+| `--max-concurrent-evaluations <n>` | how many evaluations run at once in evaluate_many | 4 |
+| `--max-items-in-flight <n>` | run-wide cap on items evaluated concurrently across all concurrent evaluations; when unset, uses the mode's data_parallelism | the mode's data_parallelism |
 | `--holdout <fraction>` | the share of a Task's items kept out of the search and used to audit the winner afterwards; one item cannot be split, which the audit records | 0.3 |
 | `--parsimony <cost>` | what each node of a candidate's graph costs its score: the search compares `raw_score − parsimony × nodes` | 0.01 |
 | `--attempts <n>` | retries per batch after a refusal | 3 |
@@ -164,11 +167,12 @@ installed copy.
 | `--model <name>` | model for proposals and evaluated agent nodes; both evaluators carry the same routing context | the configured route |
 | `--provider <route>` | the provider route that model is on | your settings default |
 | `--worker-backend dsh\|codex\|claude_code` | worker runtime, independent of provider choice | `dsh` |
+| `--effort <value>` / `--setting-sources <list>` | the workers' reasoning effort; claude_code workers' Claude Code settings sources (`none` or a comma list of `user`, `project`, `local`) | the backend's default |
 | `--role-routes <JSON>` / `--node-routes <JSON>` | route overrides; node takes precedence over role, then run | empty |
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | shared limits for proposals, trials, nested work and final validation | unlimited |
 | `--validation-reserve-s <n>` / `--validation-reserve-tokens <n>` | part of the shared allocation reserved for validation | 0 |
 | `--resume` | continue a compatible saved search and retain consumed resources | off |
-| `--strategy-option KEY=VALUE` | strategy-specific option passed to the strategy's `configure()`; may be repeated | none |
+| `--strategy-option KEY=VALUE` | strategy-specific option passed to the strategy's `configure()`; may be repeated. `--strategy skillopt` takes SkillOpt's settings (`max_epochs`, `early_stop_patience`, `seed`, …) and `eval_test`: after training it evaluates the initial, best and final skills on the parts manifest's test part, as SkillOpt does, when the manifest has one; `eval_test=false` skips that. The scores are in the report's `strategy_report` | none |
 | `--max-steps <n>` | step ceiling for one inner run, enforced by the executor | 2000 |
 | `--history-limit <n>` | how many evaluated candidates the optimizer is shown; bounded so a prompt cannot grow without limit | 200 |
 | `--prior-runs <n>` | how many previous runs are summarised as a prior for this one | 3 |
@@ -246,7 +250,7 @@ python -m refactory_dsh.edit --mode <pkg>/<mode> --name <n>
 
 The walker's mains take `refactory ceo`'s run flags, spelled and parsed the same way
 (`run_flags`): `--name`, `--check`, `--knob`, `--workdir`, `--target` and the other
-worktree and delivery flags, `--worker-backend`, `--effort`, `--permission-mode`,
+worktree and delivery flags, `--worker-backend`, `--effort`, `--setting-sources`, `--permission-mode`,
 `--role-routes`, `--node-routes`, `--model-timeout`, the resource limits, `--provider`,
 `--model` and `--approve`. A run started either way gets the same knobs and route.
 
