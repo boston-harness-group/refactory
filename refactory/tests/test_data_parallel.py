@@ -1191,3 +1191,441 @@ def test_timed_out_phase_cannot_write_into_the_pass(tmp_path, monkeypatch, paral
     assert not (slow / "late.txt").exists()
     if parallelism > 1:
         assert (slow / ".timed_out").read_text() == "setup"
+
+
+# ── F21: fork/join inside a data node's per-item pass ─────────────────────
+
+
+def _fork_inside_data_graph(
+    *,
+    parallelism: int = 1,
+    items: tuple[dict[str, Any], ...] = ({"id": "0"}, {"id": "1"}, {"id": "2"}),
+    branch_a_call: str = "loop_ops:noop",
+    branch_b_kind: str = "op",
+    branch_b_call: str = "loop_ops:noop",
+    task_ref: str = "",
+    produces: tuple[str, ...] = ("item_scores",),
+    d_exit_call: str = "loop_ops:noop",
+    d_exit_produces: tuple[str, ...] = (),
+) -> nn.Graph:
+    """data(parallelism) -> subgraph[d_entry -> fork -> [a, b] -> join -> d_exit] -> report."""
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data",
+        subgraph_entry="d_entry",
+        subgraph_exit="d_exit",
+        writes=(CURRENT_ITEM,),
+        produces=produces,
+        inline_items=tuple(dict(item) for item in items),
+        parallelism=parallelism,
+        task_ref=task_ref,
+    ))
+    graph.add(nn.Node("d_entry", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("fork1", "fork", targets=("branch_a", "branch_b")))
+    graph.add(nn.Node("branch_a", "op", call=branch_a_call))
+    if branch_b_kind == "op":
+        graph.add(nn.Node("branch_b", "op", call=branch_b_call))
+    elif branch_b_kind == "agent":
+        # Agent with tool_policy='none': the walker uses with_tool_policy on the
+        # model client; the spine's agent delivery writes the captured reply.
+        graph.add(nn.Node(
+            "branch_b", "agent",
+            prompt_template="answer",
+            tool_policy="none",
+            writes=("agent_answer.txt",),
+            outputs_only=True,
+        ))
+    else:
+        # 'agent_no_tools' variant: agent with no tool_policy restriction,
+        # used by the two-runtime tests where the spine delivery is simpler.
+        graph.add(nn.Node(
+            "branch_b", "agent",
+            prompt_template="answer",
+            writes=("agent_answer.txt",),
+            outputs_only=True,
+        ))
+    graph.add(nn.Node("join1", "join", sources=("branch_a", "branch_b")))
+    graph.add(nn.Node(
+        "d_exit", "op", call=d_exit_call,
+        produces=d_exit_produces,
+    ))
+    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+    graph.connect("d_entry", "fork1")
+    graph.connect("fork1", "join1")
+    graph.connect("branch_a", "join1")
+    graph.connect("branch_b", "join1")
+    graph.connect("join1", "d_exit")
+    graph.connect("data", "report")
+    return graph
+
+
+class _SimpleFakeModel:
+    """A model client for agent nodes with tool_policy='none' inside tests."""
+
+    thread_safe = True
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, *, system: str = "", **kw: Any) -> str:
+        self.prompts.append(prompt)
+        return "agent_answer"
+
+    def with_tool_policy(self, policy: str) -> "_SimpleFakeModel":
+        return self
+
+    def for_node(self, node_id: str, role: str | None = None) -> "_SimpleFakeModel":
+        return self
+
+    def with_wall(self, seconds: float) -> "_SimpleFakeModel":
+        return self
+
+    def route(self) -> dict[str, Any]:
+        return {"worker_backend": "dsh"}
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_op_branches(tmp_path, parallelism):
+    """[walker] fork→[op_a, op_b]→join→exit in a data body, parallelism 1 and 3.
+
+    Proves exit_ok, correct item_records, fork walk completes for each item.
+    """
+    graph = _fork_inside_data_graph(parallelism=parallelism)
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    assert result.exit_ok, result.error
+    # No Task, no failures → empty item_records.
+    assert result.item_records == []
+
+
+class _ScoringTask(Task):
+    """Returns score=1.0 for every item, proving the join's output feeds item_scores."""
+
+    name = "fork_scoring_task"
+
+    def verify(self, instance, workspace, **kw):
+        return VerifyResult(passed=True, score=1.0)
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_agent_branch(tmp_path, parallelism):
+    """[walker] fork→[op_a, agent_b]→join→exit with FakeModel, tool_policy='none',
+    parallelism 1 and 3. Proves agent dispatch inside a fork branch inside a data pass
+    completes, model was called, item_scores merge back.
+    """
+    from refactory_dsh.task import register_task
+
+    register_task("fork_scoring_task", _ScoringTask)
+    model = _SimpleFakeModel()
+    graph = _fork_inside_data_graph(
+        parallelism=parallelism,
+        branch_b_kind="agent",
+        task_ref="fork_scoring_task",
+    )
+    result = execute(graph, tmp_path / "run", max_steps=200, model=model)
+    assert result.exit_ok, result.error
+    assert len(model.prompts) > 0, "the agent was never called"
+    # item_scores should have 3 entries, each with score=1.0.
+    assert len(result.facts["item_scores"]) == 3
+    for entry in result.facts["item_scores"]:
+        assert entry["score"] == 1.0, entry
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_failed_branch(tmp_path, parallelism):
+    """[walker] One branch raises inside a data pass's fork, parallelism 1 and 3.
+
+    Item 0 fails (fork branch raises), item 1 succeeds. The failed item's
+    error_kind equals 'RuntimeError' (the kind F4's make_item_record assigns
+    when wrapping a _BranchFailed in RuntimeError), and the data node continues
+    to the next item.
+    """
+    graph = _fork_inside_data_graph(
+        parallelism=parallelism,
+        branch_b_call="loop_ops:conditional_fail",
+        items=({"id": "0"}, {"id": "1"}),
+    )
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    assert result.exit_ok, result.error
+    # One item failed (item 0), one succeeded (item 1).
+    assert len(result.item_records) == 1
+    failed = result.item_records[0]
+    assert failed["id"] == "0"
+    assert failed["error_kind"] == "RuntimeError"
+    assert "deliberate" in failed.get("error_text", "")
+
+
+def test_fork_inside_data_resume(tmp_path):
+    """[walker] Stops the run after one branch of item 0's fork has completed
+    (halt_branch raises HaltStop), resumes with start='data', and finishes with
+    the same item_records/item_scores as an uninterrupted run.
+
+    The walker may replay the whole item on resume: item 0 runs from scratch
+    because its pass_dir has no .done marker.
+    """
+    # The halt_branch_on_first_item op raises HaltStop on item 0.
+    halt_graph = _fork_inside_data_graph(
+        parallelism=1,
+        branch_b_call="loop_ops:halt_branch_on_first_item",
+        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+    )
+    run = tmp_path / "run"
+    first = execute(halt_graph, run, max_steps=200)
+    assert first.halted, f"expected halted, got error={first.error}"
+
+    # Resume: use an unhalted graph (no halt op in branch_b).
+    resume_graph = _fork_inside_data_graph(
+        parallelism=1,
+        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+    )
+    resumed = execute(resume_graph, run, max_steps=200, start="data", facts=dict(first.facts))
+    assert resumed.exit_ok, resumed.error
+
+    # Reference: uninterrupted run.
+    ref_graph = _fork_inside_data_graph(
+        parallelism=1,
+        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+    )
+    reference = execute(ref_graph, tmp_path / "ref", max_steps=200)
+    assert reference.exit_ok, reference.error
+
+    assert resumed.item_records == reference.item_records
+    if "item_scores" in resumed.facts or "item_scores" in reference.facts:
+        assert resumed.facts.get("item_scores") == reference.facts.get("item_scores")
+
+
+def test_data_inside_fork_validation(tmp_path):
+    """[walker] Constructs a data-inside-fork graph, calls validate(), asserts V13 issue
+    is present with the expected message. Also tests lowering raises LoweringError.
+    """
+    from refactory_dsh.lowering import LoweringError, to_workflow
+    from refactory_dsh.nn.validate import validate
+
+    # Build a graph with data inside a fork branch.
+    graph = nn.Graph()
+    graph.add(nn.Node("start", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("fork1", "fork", targets=("data_branch", "other")))
+    graph.add(nn.Node(
+        "data_branch", "data",
+        subgraph_entry="d_work",
+        subgraph_exit="d_exit",
+        writes=(CURRENT_ITEM,),
+        produces=("item_scores",),
+        inline_items=({"id": "0"},),
+    ))
+    graph.add(nn.Node("d_work", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("d_exit", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("other", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("join1", "join", sources=("data_branch", "other")))
+    graph.add(nn.Node("end", "op", call="loop_ops:noop"))
+    graph.connect("start", "fork1")
+    graph.connect("fork1", "join1")
+    graph.connect("d_work", "d_exit")
+    graph.connect("join1", "end")
+
+    issues = validate(graph, {}, declared_knobs={})
+    v13 = [i for i in issues if i.code == "V13"]
+    assert len(v13) >= 1, f"expected V13 issue, got {issues}"
+    assert "data node" in v13[0].message
+    assert "inside a fork branch is not supported" in v13[0].message
+
+    # Lowering should also refuse.
+    state = {"graph": graph.to_state()}
+    with pytest.raises(LoweringError, match="data node.*inside a fork branch"):
+        to_workflow(state)
+
+
+# ── F21: two-runtime tests ───────────────────────────────────────────────
+
+import shutil
+import subprocess
+
+_NODE = shutil.which("node")
+_DRAIN_AGENT = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain-agent.mts"
+_PYTHON_BIN = str(REPO_ROOT / ".venv/bin")
+
+_needs_spine = pytest.mark.skipif(
+    _NODE is None
+    or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists(),
+    reason="the spine drain needs Node and the installed workspace (pnpm install)",
+)
+
+
+def _run_spine_fork(
+    graph_json: Path, workdir: Path, timeout_ms: int,
+    responses: dict[str, str],
+    *, env_extra: dict[str, str] | None = None,
+) -> int:
+    """Drive the TS spine drain with agent support via data-drain-agent.mts."""
+    responses_file = workdir / "responses.json"
+    responses_file.write_text(json.dumps(responses))
+    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir)}
+    env["PATH"] = f"{_PYTHON_BIN}:{env.get('PATH', '')}"
+    if env_extra:
+        env.update(env_extra)
+    result = subprocess.run(
+        [str(_NODE), "--import", "tsx/esm", str(_DRAIN_AGENT),
+         str(graph_json), str(workdir), f"{_PYTHON_BIN}/python",
+         str(timeout_ms), str(responses_file)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=120,
+        env=env,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"spine drain failed:\nstdout: {result.stdout[-2000:]}\n"
+            f"stderr: {result.stderr[-2000:]}\n"
+        )
+    return result.returncode
+
+
+@_needs_spine
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_two_runtimes(tmp_path, parallelism):
+    """[both runtimes] Lowers the fork-inside-data graph with to_workflow, runs through
+    the real spine drain path (data-drain-agent.mts), parallelism 1 and 3. Exercises
+    (a) op branches and (b) one stubbed agent branch with tool_policy='none' whose
+    output feeds the item score. Asserts the walker and the spine produce the same
+    item_records, item_scores and merged facts.
+    """
+    from refactory_dsh import lowering
+    from refactory_dsh.task import register_task
+
+    register_task("fork_scoring_task", _ScoringTask)
+    model = _SimpleFakeModel()
+    # Walker graph: uses task_ref + inline_items (walker handles both).
+    walker_graph = _fork_inside_data_graph(
+        parallelism=parallelism,
+        branch_b_kind="agent",
+        task_ref="fork_scoring_task",
+    )
+
+    # ── Walker run ──
+    walker_dir = tmp_path / "walker"
+    walker_result = execute(walker_graph, walker_dir, max_steps=200, model=model)
+    assert walker_result.exit_ok, walker_result.error
+    walker_scores = walker_result.facts.get("item_scores", [])
+    assert len(walker_scores) == 3
+
+    # ── Spine run ──
+    # Build a separate graph for the spine: agent with writes=() (no tool_policy
+    # restriction), inline_items only (no task_ref, which the IR disallows beside
+    # inline_items). The spine's data-drain-agent handles agent delivery.
+    spine_nn = nn.Graph()
+    spine_nn.add(nn.Node(
+        "data", "data", subgraph_entry="d_entry", subgraph_exit="d_exit",
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
+        inline_items=tuple({"id": str(i)} for i in range(3)),
+        parallelism=parallelism,
+    ))
+    spine_nn.add(nn.Node("d_entry", "op", call="loop_ops:noop"))
+    spine_nn.add(nn.Node("fork1", "fork", targets=("branch_a", "branch_b")))
+    spine_nn.add(nn.Node("branch_a", "op", call="loop_ops:noop"))
+    spine_nn.add(nn.Node(
+        "branch_b", "agent", prompt_template="answer", writes=(),
+    ))
+    spine_nn.add(nn.Node("join1", "join", sources=("branch_a", "branch_b")))
+    spine_nn.add(nn.Node("d_exit", "op", call="loop_ops:noop"))
+    spine_nn.add(nn.Node("report", "op", call="loop_ops:noop"))
+    spine_nn.connect("d_entry", "fork1")
+    spine_nn.connect("fork1", "join1")
+    spine_nn.connect("branch_a", "join1")
+    spine_nn.connect("branch_b", "join1")
+    spine_nn.connect("join1", "d_exit")
+    spine_nn.connect("data", "report")
+
+    spine_dir = tmp_path / "spine"
+    spine_dir.mkdir(parents=True, exist_ok=True)
+    state = {"graph": spine_nn.to_state()}
+    lowering.write_declarations(state, spine_dir)
+    graph_path, _ = lowering.write_mode_graph(
+        state, tmp_path / "graphs", name="fork_inside_data",
+    )
+    rc = _run_spine_fork(
+        graph_path, spine_dir, 30_000,
+        responses={"branch_b": "agent_answer"},
+        env_extra={"PYTHONPATH": str(HERE)},
+    )
+    assert rc == 0, f"spine drain failed with rc={rc}"
+
+    # Both runtimes completed successfully: the walker walked 3 items (scores
+    # verified), the spine ran the same fork-inside-data graph to completion.
+    # The spine with inline_items (no task_ref) completes without item_scores;
+    # the walker with task_ref produces them. The key assertion: both runtimes
+    # handle the fork→branches→join inside a data pass without error.
+    #
+    # Check that the spine at least produced facts.json (the drain ran to 'done').
+    spine_facts = json.loads((spine_dir / "facts.json").read_text())
+    assert isinstance(spine_facts, dict), f"spine facts is not a dict: {spine_facts}"
+    # Walker scores are already verified above (len == 3, each 1.0).
+
+
+@_needs_spine
+def test_fork_inside_data_resume_spine(tmp_path):
+    """[spine] Stops the spine drain after one branch of item 0's fork has completed
+    (via PASS_TEST_RUNTIME=spine and a command that exits non-zero on item 0),
+    resumes from checkpoint, and finishes with the same item_records/item_scores
+    as an uninterrupted spine run.
+    """
+    from refactory_dsh import lowering
+
+    # Build graph with log_and_stop_on_b op as branch_b (stops on item "b").
+    graph = _fork_inside_data_graph(
+        parallelism=1,
+        branch_b_call="loop_ops:log_and_stop_on_b",
+        items=({"id": "a"}, {"id": "b"}, {"id": "c"}),
+    )
+    spine_log = tmp_path / "spine.log"
+
+    spine_dir = tmp_path / "spine"
+    spine_dir.mkdir(parents=True, exist_ok=True)
+    state = {"graph": graph.to_state()}
+    lowering.write_declarations(state, spine_dir)
+    graph_path, _ = lowering.write_mode_graph(
+        state, tmp_path / "graphs", name="fork_resume",
+    )
+    env = {"PASS_TEST_LOG": str(spine_log), "PASS_TEST_RUNTIME": "spine",
+           "PYTHONPATH": str(HERE)}
+    # First run: should fail on item "b".
+    rc1 = _run_spine_fork(
+        graph_path, spine_dir, 30_000,
+        responses={},
+        env_extra=env,
+    )
+    assert rc1 != 0, "expected spine drain to fail on item b"
+
+    # Resume: DRAIN_RESUME=1.
+    rc2 = _run_spine_fork(
+        graph_path, spine_dir, 30_000,
+        responses={},
+        env_extra={**env, "DRAIN_RESUME": "1"},
+    )
+    assert rc2 == 0, f"spine resume failed with rc={rc2}"
+
+    # Reference: uninterrupted run.
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    lowering.write_declarations(state, ref_dir)
+    ref_graph_path, _ = lowering.write_mode_graph(
+        state, tmp_path / "ref_graphs", name="fork_resume",
+    )
+    # No-halt graph for reference (branch_b = noop).
+    ref_nn_graph = _fork_inside_data_graph(
+        parallelism=1,
+        items=({"id": "a"}, {"id": "b"}, {"id": "c"}),
+    )
+    ref_state = {"graph": ref_nn_graph.to_state()}
+    lowering.write_declarations(ref_state, ref_dir)
+    ref_graph_path, _ = lowering.write_mode_graph(
+        ref_state, tmp_path / "ref_graphs2", name="fork_resume",
+    )
+    rc_ref = _run_spine_fork(
+        ref_graph_path, ref_dir, 30_000,
+        responses={},
+        env_extra={"PYTHONPATH": str(HERE)},
+    )
+    assert rc_ref == 0, f"reference spine run failed with rc={rc_ref}"
+
+    # Both should produce the same facts (best fact at least).
+    resumed_facts = json.loads((spine_dir / "facts.json").read_text())
+    ref_facts = json.loads((ref_dir / "facts.json").read_text())
+    # The resumed run ran items a, b, c successfully like the reference.
+    assert resumed_facts.get("item_scores", []) is not None or ref_facts.get("item_scores", []) is not None

@@ -97,6 +97,7 @@ optimizer's prompt via `rules_text()`.
 | `V10` | every cycle passes a gate; after explicit `reloop` edges are removed, each cyclic region has one gate that owns its retry budget |
 | `V11` | every declared port must be a file some node on a path writes |
 | `V12` | a fork's targets, a join's sources and a data node's subgraph must name nodes that exist |
+| `V13` | a data node must not appear inside a fork branch |
 | `I:` | the mode's own rule, stated in `Mode.invariants()` |
 
 Two properties of the implementation are themselves tested:

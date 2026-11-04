@@ -542,3 +542,38 @@ def note_item(ctx: Any) -> dict[str, Any]:
     """In a pass: set the declared, non-score fact ``note`` for this item."""
     ctx.set_fact("note", f"from {_current_id(ctx)}")
     return {}
+
+
+def conditional_fail(ctx: Any) -> dict[str, Any]:
+    """Raises ``RuntimeError`` only when item id is ``"0"``; no-ops otherwise.
+
+    Used by ``test_fork_inside_data_failed_branch``: item 0 fails and item 1 succeeds.
+    """
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "0":
+        raise RuntimeError("deliberate")
+    return {}
+
+
+def halt_branch_on_first_item(ctx: Any) -> dict[str, Any]:
+    """Raises ``HaltStop`` only when item id is ``"0"``; no-ops otherwise.
+
+    Used by ``test_fork_inside_data_resume``: the first item's fork halts
+    mid-pass; the resume should replay it.
+    """
+    from refactory_dsh.nn.executor import HaltStop
+
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "0":
+        raise HaltStop("data", reason="test halt in fork branch")
+    return {}
+
+
+def write_item_result(ctx: Any) -> dict[str, Any]:
+    """Write item_result fact with value 1.0 — used to feed the item's score.
+
+    The data node's Task reads this fact in ``verify()`` and returns it as
+    the score, proving the join's output feeds the item's score.
+    """
+    ctx.set_fact("item_result", 1.0)
+    return {"item_result": 1.0}

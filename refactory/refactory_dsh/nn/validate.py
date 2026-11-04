@@ -47,6 +47,7 @@ RULES: dict[str, str] = {
     "V11": "every declared port must be a file some node on a path writes",
     "V12": "a fork's targets, a join's sources and a data node's subgraph must name "
            "nodes that exist",
+    "V13": "a data node must not appear inside a fork branch",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -215,6 +216,36 @@ def validate(
                             node=node_id,
                         )
                     )
+
+    # V13 data-inside-fork.
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind != "fork":
+            continue
+        fork_edges = graph.out_edges(node_id)
+        barrier = fork_edges[0].target if fork_edges else None
+        for target in node.targets:
+            seen: set[str] = set()
+            pending = [target]
+            while pending:
+                current = pending.pop()
+                if current == barrier or current in seen:
+                    continue
+                if current not in graph.nodes:
+                    continue
+                seen.add(current)
+                member = graph.nodes[current]
+                if member.kind == "data":
+                    issues.append(Issue(
+                        "V13",
+                        f"fork {node_id!r}: data node {current!r} inside a fork branch "
+                        "is not supported; move the data node outside the fork or "
+                        "place the fork inside the data body",
+                        node=node_id,
+                    ))
+                pending.extend(e.target for e in graph.out_edges(current))
+                if member.kind == "fork" and member.targets:
+                    pending.extend(member.targets)
 
     # V6 every read is produced by a node on a path the run can take.
     produced = produced_on_path(graph)

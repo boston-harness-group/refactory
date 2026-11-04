@@ -316,6 +316,12 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 if current not in graph.nodes:
                     continue
                 seen.add(current)
+                if graph.nodes[current].kind == "data":
+                    raise LoweringError(
+                        f"fork {fork_id!r}: data node {current!r} inside a fork branch "
+                        "is not supported; move the data node outside the fork or "
+                        "place the fork inside the data body"
+                    )
                 pending.extend(e.target for e in graph.out_edges(current))
                 # A nested fork's branches belong to this branch too (nn/fork.py).
                 if graph.nodes[current].kind == "fork":

@@ -199,6 +199,25 @@ export function validateGraph(graph: WorkflowGraph): GraphIssue[] {
       for (const target of node.targets ?? []) {
         if (!ids.has(target)) issues.push({ node: id, message: `fork target '${target}' is not a node` })
       }
+      // Refuse data nodes inside fork branches (parity with walker fork.py:80).
+      const joinEdge = (outgoing.get(id) ?? []).find(e => e.condition == null)
+      if (joinEdge !== undefined) {
+        const body = forwardWalk(id, joinEdge.target, {
+          outgoing: fId => outgoing.get(fId) ?? [],
+          node: fId => graph.nodes[fId],
+        })
+        body.delete(id)
+        body.delete(joinEdge.target)
+        for (const memberId of body) {
+          if (graph.nodes[memberId]?._type === 'DataNode') {
+            issues.push({
+              node: id,
+              message: `data node '${memberId}' inside a fork branch is not supported; `
+                + `move the data node outside the fork or place the fork inside the data body`,
+            })
+          }
+        }
+      }
     }
     if (node._type === 'JoinNode') {
       for (const source of node.sources ?? []) {
