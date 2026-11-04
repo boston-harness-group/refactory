@@ -172,16 +172,35 @@ class SkillOptLoop(OuterLoop):
         """Take the run's role-routed optimizer client, without tools (see :func:`_text_only`)."""
         self.model = _text_only(model)
 
-    def _out_of_budget(self, run: Run) -> bool:
-        """Stop the run, saving where it stood, when no rollout is left.
+    def _val_cost(self) -> int:
+        """Rollouts one val pass takes, as last measured; 1 until one has run.
 
-        Asked before every evaluation: ``Run.evaluate`` refuses one once the
-        budget is spent, so a run whose budget runs out before ``max_epochs``
-        would otherwise end on that error, with no report, instead of
-        stopping on its bound. The phase is set after this check, so a run
-        resumed with more budget starts at the evaluation it skipped.
+        An optimizer may not see val ids (``Run.part_ids``), so the size is
+        learned from the rollout counter the first time a val pass is paid for
+        (a pass served from the seed cache costs nothing and teaches nothing).
         """
-        if run.budget_left() > 0:
+        return max(1, int(getattr(self, "_measured_val_cost", 0) or 0))
+
+    def _evaluate_val(self, run: Run, candidate: Candidate) -> Candidate:
+        before = run.budget_left()
+        candidate = run.evaluate(candidate, part="val", seed=self.base_seed)
+        spent = before - run.budget_left()
+        if spent > 0:
+            self._measured_val_cost = spent
+        return candidate
+
+    def _out_of_budget(self, run: Run, cost: int = 1) -> bool:
+        """Stop the run, saving where it stood, when the next evaluation does not fit.
+
+        Asked before every evaluation with its cost in rollouts (its item count):
+        ``Run.evaluate`` refuses one once the budget is spent, so a run whose
+        budget runs out before ``max_epochs`` would otherwise end on that error,
+        with no report, instead of stopping on its bound; and an evaluation that
+        would take the run past ``max_rollouts`` does not start, as in the
+        default loop. The phase is set after this check, so a run resumed with
+        more budget starts at the evaluation it skipped.
+        """
+        if run.budget_left() >= max(1, int(cost)):
             return False
         self._trace.record_decision("budget_spent", phase=self._phase, epoch=self._epoch)
         run.save_strategy_state()
@@ -249,12 +268,12 @@ class SkillOptLoop(OuterLoop):
 
         # ① Initial val score — mechanism 1 (skip on resume if progressed)
         if not self._past_phase(resume_epoch, resume_phase, 0, "initial_val"):
-            if self._out_of_budget(run):
+            if self._out_of_budget(run, self._val_cost()):
                 return
             self._phase = "initial_val"
             # SkillOpt evaluates the selection set with the base seed
             # (trainer.py:1133-1136; dataloader.py:291-301 shuffles with it).
-            seed_candidate = run.evaluate(seed_candidate, part="val", seed=self.base_seed)
+            seed_candidate = self._evaluate_val(run, seed_candidate)
             current = seed_candidate
             self._current_score = self._val_score(run, seed_candidate)
             skill_hash = self._skill_hash(self._current_skill)
@@ -299,7 +318,7 @@ class SkillOptLoop(OuterLoop):
             # with one batch per epoch (batch_idx=0).
             epoch_seed = batch_seed(self.base_seed, epoch)
             if not self._past_phase(resume_epoch, resume_phase, epoch, "train"):
-                if self._out_of_budget(run):
+                if self._out_of_budget(run, len(run.part_ids("train"))):
                     return
                 self._phase = "train"
                 current = run.evaluate(current, part="train", seed=epoch_seed)
@@ -508,7 +527,9 @@ class SkillOptLoop(OuterLoop):
 
             # ⑦ Val gate — mechanism 7
             if not self._past_phase(resume_epoch, resume_phase, epoch, "val_gate"):
-                if cand_hash not in self._val_cache and self._out_of_budget(run):
+                if cand_hash not in self._val_cache and self._out_of_budget(
+                    run, self._val_cost(),
+                ):
                     return
                 self._phase = "val_gate"
                 if cand_hash in self._val_cache:
@@ -517,7 +538,7 @@ class SkillOptLoop(OuterLoop):
                         "val_cache_hit", skill_hash=cand_hash, score=cand_score,
                     )
                 else:
-                    candidate = run.evaluate(candidate, part="val", seed=self.base_seed)
+                    candidate = self._evaluate_val(run, candidate)
                     cand_score = self._val_score(run, candidate)
                     self._val_cache[cand_hash] = cand_score
                     self._trace.record_decision(
@@ -796,7 +817,7 @@ class SkillOptLoop(OuterLoop):
                 )
                 return current
             prev_candidate = prev_outcome
-        if self._out_of_budget(run):
+        if self._out_of_budget(run, len(sample_ids)):
             return current
         prev_candidate = run.evaluate(
             prev_candidate, part="train", items=sample_ids, seed=slow_seed,
@@ -804,7 +825,7 @@ class SkillOptLoop(OuterLoop):
         prev_records = run.item_records(prev_candidate)
 
         # Evaluate current skill on sample
-        if self._out_of_budget(run):
+        if self._out_of_budget(run, len(sample_ids)):
             return current
         curr_candidate = run.evaluate(
             current, part="train", items=sample_ids, seed=slow_seed,

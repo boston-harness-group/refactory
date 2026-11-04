@@ -3191,3 +3191,26 @@ def test_a_spent_rollout_budget_stops_the_run_on_its_bound(tmp_path, monkeypatch
     assert report["bound"] == "rollouts"
     spent = _decisions(_read_trace(tmp_path), "budget_spent")
     assert len(spent) == 1
+
+
+@pytest.mark.parametrize("budget, last_parts", [
+    # One short of the train pass after the initial val: train does not start.
+    (len(VAL_IDS) + len(TRAIN_IDS) - 1, ["val"]),
+    # One short of the val gate after train: the gate does not start, its cost
+    # learned from the initial val pass.
+    (2 * len(VAL_IDS) + len(TRAIN_IDS) - 1, ["val", "train"]),
+])
+def test_an_evaluation_that_would_overrun_the_budget_does_not_start(
+    tmp_path, monkeypatch, budget, last_parts,
+):
+    """SkillOpt stops on the rollouts bound before a pass that would take the
+    run past max_rollouts, as the default loop does, so two strategies given
+    the same budget spend at most that budget."""
+    calls = _spy_evaluations(monkeypatch)
+    strategy, report = _run_loop(
+        tmp_path, config_overrides={"max_rollouts": budget},
+        skillopt_options={"max_epochs": 3},
+    )
+    assert [part for part, _ in calls] == last_parts
+    assert report["bound"] == "rollouts"
+    assert len(_decisions(_read_trace(tmp_path), "budget_spent")) == 1
