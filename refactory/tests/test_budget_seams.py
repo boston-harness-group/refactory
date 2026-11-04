@@ -154,8 +154,8 @@ def test_budget_finished_trial_preserved(tmp_path):
 def test_budget_counts_rollouts(tmp_path):
     """The loop counts per-item rollouts, and max_rollouts binds the run.
 
-    The batch holds three candidates; the cap admits two evaluations' worth of
-    items, so the forward pass must stop at the cap with the third unevaluated,
+    The batch holds three candidates; the cap admits fewer whole evaluations than
+    the batch needs, so the forward pass must stop without overrunning the cap,
     and the run must report that the rollout cap is what bound it.
     """
     with _patch_mode(BudgetProbe):
@@ -184,13 +184,16 @@ def test_budget_counts_rollouts(tmp_path):
     assert len(loop.population) >= 3, "the batch must outlast the cap"
     per_eval = len(loop._train_item_records[seed.id])
     assert per_eval > 0, "rollouts should be counted per item"
-    expected_evals = -(-10 // per_eval)  # evaluations until the cap is reached
+    # A pass that would overrun the cap is not started, so the run stops at the
+    # last whole pass that fits (10 // per_eval) rather than overshooting it.
+    expected_evals = 10 // per_eval
+    assert 10 % per_eval, "the cap must not be a multiple of the pass size"
     assert loop.evaluations == expected_evals, (
         f"the batch loop must stop at the rollout cap: {loop.evaluations} evaluations, "
         f"expected {expected_evals} at {per_eval} items each"
     )
     assert loop.rollouts == expected_evals * per_eval
-    assert loop.rollouts >= 10
+    assert loop.rollouts <= 10 < loop.rollouts + per_eval
     assert report["bound"] == "rollouts"
 
 

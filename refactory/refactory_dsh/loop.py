@@ -724,6 +724,30 @@ class Loop(OuterLoop):
             edits.append({"op": "set_knob", "name": name, "value": value})
         return edits
 
+    # ── the rollout budget ─────────────────────────────────────────────────
+    def _train_pass_rollouts(self) -> int:
+        """Item evaluations one candidate's train pass adds to ``rollouts``.
+
+        Its train items times ``repeats`` (``_evaluate`` counts every trial's
+        records), or 1 when the mode declares no items, as ``_evaluate`` counts it.
+        """
+        seed_state = self.population[0].state if self.population else {}
+        try:
+            ids, _ = self._expected_item_ids(seed_state, "train")
+        except Exception:  # noqa: BLE001 - a mode that cannot say costs one rollout
+            ids = set()
+        return max(1, len(ids)) * max(1, int(self.config.repeats or 1))
+
+    def _rollouts_short_of(self, cost: int) -> bool:
+        """Whether ``max_rollouts`` leaves too little for an evaluation costing ``cost``.
+
+        ``max_rollouts`` is how many item evaluations the run may perform, so an
+        evaluation that would take it past the bound does not start: with 35 train
+        items and 180 rollouts a run evaluates five candidates (175), not six (210).
+        """
+        limit = self.config.max_rollouts
+        return limit is not None and self.rollouts + cost > limit
+
     # ── forward ────────────────────────────────────────────────────────────
     def forward(self) -> int:
         """Evaluate every candidate in the batch that has not run yet."""
@@ -731,7 +755,7 @@ class Loop(OuterLoop):
         for index, candidate in enumerate(batch):
             if self.evaluations >= self.config.max_evaluations:
                 break
-            if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+            if self._rollouts_short_of(self._train_pass_rollouts()):
                 break
             self._evaluate(candidate)
             self._progress(
@@ -1628,7 +1652,7 @@ class Loop(OuterLoop):
             self.bound = "epochs"
         elif self.evaluations >= self.config.max_evaluations:
             self.bound = "evaluations"
-        elif self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+        elif self._rollouts_short_of(self._train_pass_rollouts()):
             self.bound = "rollouts"
         if self.bound:
             # Journaled, not derived: the report states what bound the run, and a
