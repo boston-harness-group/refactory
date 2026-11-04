@@ -297,7 +297,11 @@ class Run:
 
         results: list[Candidate | None] = [None] * len(requests)
         errors: list[BaseException | None] = [None] * len(requests)
+        # on_result errors are tracked separately: they must not release
+        # the evaluation's budget because the evaluation itself succeeded.
+        on_result_errors: list[BaseException | None] = [None] * len(requests)
         failed_train_count = 0
+        skipped_train_count = 0
         failed_train_lock = threading.Lock()
 
         def _run_one(index: int) -> None:
@@ -315,27 +319,36 @@ class Run:
                         item_gate=getattr(loop, '_item_gate', None),
                     )
                 results[index] = req.candidate
-                if on_result is not None:
-                    on_result(index, req.candidate)
             except BaseException as exc:
                 errors[index] = exc
                 if req.part == "train":
                     with failed_train_lock:
                         nonlocal failed_train_count
                         failed_train_count += 1
+                return
+
+            # on_result is called only after a successful evaluation.
+            # An exception here must NOT release the evaluation's budget
+            # (it ran and was paid for).  Record it and re-raise after
+            # all evaluations settle.
+            if on_result is not None:
+                try:
+                    on_result(index, req.candidate)
+                except BaseException as exc:
+                    on_result_errors[index] = exc
 
         def _run_group(indices: list[int]) -> None:
             """Run a group of requests for the same candidate sequentially."""
             for i, idx in enumerate(indices):
                 _run_one(idx)
                 if errors[idx] is not None:
-                    # Count skipped train requests as failed so their
-                    # pre-reserved budget is un-reserved below.
+                    # Count skipped train requests so their pre-reserved
+                    # budget is un-reserved below.
                     for skipped_idx in indices[i + 1:]:
                         if requests[skipped_idx].part == "train":
                             with failed_train_lock:
-                                nonlocal failed_train_count
-                                failed_train_count += 1
+                                nonlocal skipped_train_count
+                                skipped_train_count += 1
                     break
 
         max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
@@ -354,15 +367,19 @@ class Run:
                     except BaseException:
                         pass  # errors recorded in errors[]
 
-        # ── un-reserve budget for failed train evals ──────────────────────
-        if failed_train_count > 0:
+        # ── un-reserve budget for failed and skipped train evals ──────────
+        unreserve = failed_train_count + skipped_train_count
+        if unreserve > 0:
             with loop._state_lock:
-                loop.evaluations -= failed_train_count
+                loop.evaluations -= unreserve
 
         # ── re-raise the first error ──────────────────────────────────────
+        # Evaluation errors take priority over on_result errors.
         first_error = next((e for e in errors if e is not None), None)
-        if first_error is not None:
-            raise first_error
+        first_on_result_error = next((e for e in on_result_errors if e is not None), None)
+        error_to_raise = first_error or first_on_result_error
+        if error_to_raise is not None:
+            raise error_to_raise
 
         return [r for r in results if r is not None]  # type: ignore[misc]
 

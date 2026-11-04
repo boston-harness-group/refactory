@@ -190,29 +190,6 @@ def test_concurrent_evaluations_overlap_mutation(tmp_path):
 
 # ── helpers for item-gate tests (data-parallel graph) ────────────────────
 
-def _peak_inflight_from_timestamps(timing_dir: Path) -> int:
-    """Compute peak concurrent in-flight items from start/end timestamp files.
-
-    Each item writes ``start_<id>`` and ``end_<id>`` files containing
-    ``time.time()`` values.  We sort all events chronologically and
-    sweep to find the maximum number of items that were in-flight at
-    any instant.
-    """
-    events: list[tuple[float, int]] = []  # (time, +1/-1)
-    for p in timing_dir.glob("start_*"):
-        events.append((float(p.read_text()), +1))
-    for p in timing_dir.glob("end_*"):
-        events.append((float(p.read_text()), -1))
-    events.sort(key=lambda e: (e[0], e[1]))  # ties: end before start
-    current = 0
-    peak = 0
-    for _, delta in events:
-        current += delta
-        if current > peak:
-            peak = current
-    return peak
-
-
 def _item_gate_data_graph(n_items: int, parallelism: int):
     """Build a data graph with *n_items* items that sleep briefly.
 
@@ -222,7 +199,7 @@ def _item_gate_data_graph(n_items: int, parallelism: int):
     from refactory_dsh.nn import Graph, Node
     from refactory_dsh.nn.executor import CURRENT_ITEM
 
-    items = tuple({"id": str(i), "delay": "0.12"} for i in range(n_items))
+    items = tuple({"id": str(i), "delay": "0.2"} for i in range(n_items))
     graph = Graph()
     graph.add(Node(
         "data", "data",
@@ -289,41 +266,131 @@ def _install_parallel_ops():
         ops_path.unlink(missing_ok=True)
 
 
+def _peak_inflight_from_timestamps(timing_dir: Path) -> int:
+    """Compute peak concurrent in-flight items from start/end timestamp files."""
+    events: list[tuple[float, int]] = []
+    for p in timing_dir.glob("start_*"):
+        events.append((float(p.read_text()), +1))
+    for p in timing_dir.glob("end_*"):
+        events.append((float(p.read_text()), -1))
+    events.sort(key=lambda e: (e[0], e[1]))
+    current = peak = 0
+    for _, delta in events:
+        current += delta
+        if current > peak:
+            peak = current
+    return peak
+
+
 # ── test_item_limit_not_exceeded ─────────────────────────────────────────
 
 def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
-    """The run-wide item-in-flight limit is respected (walker runtime).
+    """The run-wide item-in-flight limit is respected through evaluate_many.
 
-    Drives ``execute()`` with a data graph (parallelism=8, 12 items each
-    sleeping 0.12 s) and ``item_gate=BoundedSemaphore(3)``.  A thread-safe
-    (counter, peak) tracker built from the start/end timestamp files written
-    by each item asserts **peak <= 3** and **peak > 1**.
+    The fake solver (item work under ``run_data_concurrent``) increments a
+    thread-safe counter on entry, records the peak, sleeps ~0.2 s, and
+    decrements in ``finally``.  Config: ``max_items_in_flight=6``,
+    ``data_parallelism=24``, three concurrent evaluations of 8 items each.
+    Asserts **peak <= 6** and **peak > 3**.
 
-    Mutation check (separate test below): removing ``item_gate.acquire()``
-    in ``data_parallel.py`` lets peak reach min(parallelism, n_items) = 8,
-    failing ``peak <= 3``.
+    Mutation check: removing ``item_gate.acquire()`` / ``release()`` in
+    ``nn/data_parallel.py`` lets peak reach min(24, 8) = 8, failing
+    ``peak <= 6``.
     """
     from refactory_dsh.nn.executor import execute
 
-    GATE_LIMIT = 3
-    PARALLELISM = 8
-    N_ITEMS = 12
+    GATE_LIMIT = 6
+    DATA_PARALLELISM = 24
+    N_ITEMS = 8
+    N_EVALS = 3
 
-    timing_dir = tmp_path / "timing"
-    timing_dir.mkdir()
-    monkeypatch.setenv("BARRIER_DIR", str(timing_dir))
+    # Shared barrier directory for timestamp files.
+    barrier_dir = tmp_path / "barrier"
+    barrier_dir.mkdir()
+    monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
 
-    gate = threading.BoundedSemaphore(GATE_LIMIT)
-    graph = _item_gate_data_graph(N_ITEMS, PARALLELISM)
-    result = execute(graph, tmp_path / "run", max_steps=500, item_gate=gate)
-    assert result.exit_ok, result.error
+    # Build the data graph each evaluation will run.
+    graph = _item_gate_data_graph(N_ITEMS, DATA_PARALLELISM)
 
-    peak = _peak_inflight_from_timestamps(timing_dir)
-    assert peak <= GATE_LIMIT, (
-        f"peak in-flight {peak} exceeded gate limit {GATE_LIMIT}"
+    loop, seed, run = _make_loop_and_seed(
+        tmp_path, max_evaluations=64,
+        max_concurrent_evaluations=4,
+        max_items_in_flight=GATE_LIMIT,
     )
-    assert peak > 1, (
-        f"peak in-flight {peak} should be > 1 to prove concurrency"
+
+    candidates = _distinct_candidates(seed, N_EVALS)
+
+    # Patch _evaluate: each eval runs execute() with the data graph,
+    # forwarding the item_gate from evaluate_many.  The sleep_op writes
+    # start/end timestamp files per item; unique candidate ids prevent
+    # filename collisions across concurrent evaluations.
+    def _patched_evaluate(
+        cand, *, seed=None, items=None, _budget_reserved=False,
+        item_gate=None,
+    ):
+        # Use a per-candidate workdir so each eval's data-pass directories
+        # are separate and the item-id filenames don't collide.
+        workdir = loop.root / "runs" / cand.id
+        workdir.mkdir(parents=True, exist_ok=True)
+        # Build a per-evaluation graph with unique item ids so the
+        # start_<id>/end_<id> timestamp files don't collide.
+        from refactory_dsh.nn import Graph, Node
+        from refactory_dsh.nn.executor import CURRENT_ITEM
+        prefix = cand.id[:8]
+        items_list = tuple(
+            {"id": f"{prefix}_{i}", "delay": "0.2"} for i in range(N_ITEMS)
+        )
+        eval_graph = Graph()
+        eval_graph.add(Node(
+            "data", "data",
+            subgraph_entry="body", subgraph_exit="body",
+            writes=(CURRENT_ITEM,),
+            produces=("item_scores",),
+            inline_items=items_list,
+            parallelism=DATA_PARALLELISM,
+        ))
+        eval_graph.add(Node(
+            "body", "op",
+            call="test_ops_parallel:sleep_op",
+            reads=(CURRENT_ITEM,),
+            produces=("counted",),
+        ))
+        eval_graph.add(Node(
+            "report", "op",
+            call="loop_ops:write_best",
+            writes=("best.json",),
+            produces=("best",),
+        ))
+        eval_graph.connect("data", "report")
+        result = execute(eval_graph, workdir, max_steps=500, item_gate=item_gate)
+        assert result.exit_ok, result.error
+        cand.score = 0.5
+        cand.raw_score = 0.5
+        cand.exit_ok = True
+        cand.evaluated = True
+        with loop._state_lock:
+            loop._train_item_records[cand.id] = list(result.item_records)
+            if not _budget_reserved:
+                loop.evaluations += 1
+            loop.rollouts += len(result.item_records) or 1
+
+    loop._evaluate = _patched_evaluate
+
+    requests = [EvalRequest(candidate=c, part="train") for c in candidates]
+    results = run.evaluate_many(requests)
+
+    assert len(results) == N_EVALS
+
+    # Compute peak concurrency from the timestamp files written by the
+    # sleep_op across all evaluations.
+    peak = _peak_inflight_from_timestamps(barrier_dir)
+
+    assert peak <= GATE_LIMIT, (
+        f"peak in-flight {peak} exceeded limit {GATE_LIMIT}"
+    )
+    assert peak > 3, (
+        f"peak in-flight {peak} should exceed 3 to prove "
+        f"cross-evaluation sharing (3 evals × 8 items, limit {GATE_LIMIT})"
     )
 
 
@@ -1112,3 +1179,80 @@ def test_resume_skips_completed_phases():
     assert not pending("baseline_test")
     assert pending("best_test")
     assert pending("final_test")
+
+
+# ── test_skipped_train_budget_released (correction 2) ────────────────────
+
+def test_skipped_train_budget_released(tmp_path):
+    """When _run_group stops on an error, skipped train requests have their
+    reserved budget released.
+
+    Three requests for the same candidate (sequential group).  The first
+    succeeds, the second raises, the third is skipped.  Budget afterwards
+    equals 1 (only the completed one).
+    """
+    loop, seed, run = _make_loop_and_seed(
+        tmp_path, max_evaluations=10, max_concurrent_evaluations=4)
+
+    candidate = Candidate.from_state(seed.state, parent=seed.id, edits=())
+
+    call_count = 0
+    original = loop._evaluate
+
+    def failing_on_second(cand, *, seed=None, items=None, _budget_reserved=False,
+                          item_gate=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("deliberate failure on second eval")
+        return original(cand, seed=seed, items=items,
+                        _budget_reserved=_budget_reserved,
+                        item_gate=item_gate)
+
+    loop._evaluate = failing_on_second
+
+    requests = [
+        EvalRequest(candidate=candidate, part="train"),
+        EvalRequest(candidate=candidate, part="train"),
+        EvalRequest(candidate=candidate, part="train"),
+    ]
+
+    with pytest.raises(RuntimeError, match="deliberate failure on second eval"):
+        run.evaluate_many(requests)
+
+    # 3 were reserved.  1 succeeded, 1 failed, 1 skipped.
+    # Failed + skipped = 2 un-reserved.  Net = 1.
+    assert loop.evaluations == 1, (
+        f"expected evaluations=1 (only the completed one), got {loop.evaluations}"
+    )
+
+
+# ── test_on_result_exception_does_not_release_budget (correction 3) ──────
+
+def test_on_result_exception_does_not_release_budget(tmp_path):
+    """An exception raised by on_result after a successful evaluation must
+    not release that evaluation's budget (it ran and was paid).
+
+    Three train requests.  on_result raises for one of them.  All three
+    evaluations complete successfully, so budget must remain 3.
+    """
+    loop, seed, run = _make_loop_and_seed(
+        tmp_path, max_evaluations=10, max_concurrent_evaluations=4)
+
+    candidates = _distinct_candidates(seed, 3)
+    fail_index = 1  # on_result will raise for this request
+
+    def bad_on_result(index: int, candidate: Candidate) -> None:
+        if index == fail_index:
+            raise ValueError("on_result deliberate error")
+
+    requests = [EvalRequest(candidate=c, part="train") for c in candidates]
+
+    with pytest.raises(ValueError, match="on_result deliberate error"):
+        run.evaluate_many(requests, on_result=bad_on_result)
+
+    # All 3 evaluations ran successfully — budget must be 3
+    assert loop.evaluations == 3, (
+        f"expected evaluations=3 (all ran), got {loop.evaluations}; "
+        "on_result error must not release budget"
+    )
