@@ -380,7 +380,62 @@ export const designGraphApproachReloop: ShapeEntry = {
   fixedVerdicts: { ...designGraphRefineLight.fixedVerdicts, scope_reloop: 'approach' },
 }
 
-// ─── Shape 13: crossContainerReloop (constructor-refused) ────────
+// ─── Shape 13: forkInsideData ────────────────────────────────────
+
+export const forkInsideData: ShapeEntry = {
+  name: 'forkInsideData',
+  graph: {
+    name: 'forkInsideData', start_node: 'data',
+    nodes: {
+      data:     { _type: 'DataNode', id: 'data', subgraph_entry: 'd_entry', subgraph_exit: 'd_exit', reads: [], writes: [] },
+      d_entry:  { _type: 'FnNode', id: 'd_entry', command: 'true', reads: [], writes: [] },
+      fork:     { _type: 'ForkNode', id: 'fork', targets: ['branch_a', 'branch_b'] },
+      branch_a: { _type: 'FnNode', id: 'branch_a', command: 'true', reads: [], writes: [] },
+      branch_b: { _type: 'AgentNode', id: 'branch_b', role: 'r', prompt_template: '', reads: [], writes: [] },
+      join:     { _type: 'JoinNode', id: 'join', sources: ['branch_a', 'branch_b'] },
+      d_exit:   { _type: 'FnNode', id: 'd_exit', command: 'true', reads: [], writes: [] },
+      after:    { _type: 'FnNode', id: 'after', command: 'true', reads: [], writes: [] },
+    },
+    edges: [
+      { source: 'data', target: 'after' },
+      { source: 'd_entry', target: 'fork' },
+      { source: 'fork', target: 'join' },
+      { source: 'branch_a', target: 'join' },
+      { source: 'branch_b', target: 'join' },
+      { source: 'join', target: 'd_exit' },
+    ],
+  },
+  directors: {}, dataPasses: { data: 2 }, gatesWithReloop: [], fixedVerdicts: {}, large: false,
+}
+
+// ─── Shape 14: dataInsideFork (validation-refused graph) ─────────
+
+/**
+ * A graph with a data node inside a fork branch. validateGraph now flags this
+ * as an issue (parity with the walker's runtime refusal at fork.py:80).
+ * NOT included in the invariant shapes array.
+ */
+export const dataInsideForkGraph: WorkflowGraph = {
+  name: 'dataInsideFork', start_node: 'start',
+  nodes: {
+    start:       { _type: 'FnNode', id: 'start', command: 'true', reads: [], writes: [] },
+    fork:        { _type: 'ForkNode', id: 'fork', targets: ['data_branch', 'other'] },
+    data_branch: { _type: 'DataNode', id: 'data_branch', subgraph_entry: 'd_work', subgraph_exit: 'd_exit', reads: [], writes: [] },
+    d_work:      { _type: 'FnNode', id: 'd_work', command: 'true', reads: [], writes: [] },
+    d_exit:      { _type: 'FnNode', id: 'd_exit', command: 'true', reads: [], writes: [] },
+    other:       { _type: 'FnNode', id: 'other', command: 'true', reads: [], writes: [] },
+    join:        { _type: 'JoinNode', id: 'join', sources: ['data_branch', 'other'] },
+    end:         { _type: 'FnNode', id: 'end', command: 'true', reads: [], writes: [] },
+  },
+  edges: [
+    { source: 'start', target: 'fork' },
+    { source: 'fork', target: 'join' },
+    { source: 'd_work', target: 'd_exit' },
+    { source: 'join', target: 'end' },
+  ],
+}
+
+// ─── Shape 15: crossContainerReloop (constructor-refused) ────────
 
 /**
  * A graph whose gate inside a fork branch has a reloop edge to a node outside
@@ -420,7 +475,7 @@ export const shapes: ShapeEntry[] = [
   directorTopLevel,
   directorInsideBranch,
   dataTopLevel,
-  dataInsideBranch,
+  forkInsideData,
   reloopBackEdge,
   alternativeEnds_proceed,
   alternativeEnds_draft,

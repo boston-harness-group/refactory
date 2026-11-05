@@ -128,6 +128,11 @@ export function containerContinuation(
           queue.push(e.target)
         }
       }
+      // Follow fork targets so a fork's branches are part of the body.
+      const nd = graph.nodes[n]
+      if (nd?._type === 'ForkNode') {
+        for (const t of nd.targets ?? []) queue.push(t)
+      }
     }
     if (body.has(nodeId)) {
       // Data node's unconditional edge target is the continuation
@@ -178,6 +183,11 @@ export function forwardClosure(
         if (e.source === n && !retrySet.has(retryKey(e.source, e.target, e.condition))) {
           queue.push(e.target)
         }
+      }
+      // Follow fork targets so a fork's branches are part of the body.
+      const nd = graph.nodes[n]
+      if (nd?._type === 'ForkNode') {
+        for (const t of nd.targets ?? []) queue.push(t)
       }
     }
     if (body.has(nodeId)) {

@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Spine, validateGraph } from '../src/spine.ts'
 import type { WorkflowGraph } from '../src/types.ts'
+import { forkInsideData } from './graph-shapes.ts'
 
 function ids(spine: Spine): string[] {
   const next = spine.next()
@@ -1668,5 +1669,57 @@ describe('a fork whose branches differ in length (nested fork, optional node)', 
     expect(ids(spine)).toContain('opt2')
     expect(spine.state().log).toContain('failed opt')
     expect(spine.state().log).not.toContain('completed opt')
+  })
+})
+
+describe('fork inside a data pass', () => {
+  it('walks fork→branches→join inside each item pass', () => {
+    const spine = new Spine(forkInsideData.graph)
+    // Data node is due.
+    expect(spine.next().nodes?.[0]).toMatchObject({ id: 'data', _type: 'DataNode' })
+    // Start pass with 2 items.
+    const afterStart = spine.startPass('data', 2)
+    expect(afterStart.nodes?.[0]).toMatchObject({ id: 'd_entry' })
+    // Item 0: walk through the fork.
+    spine.complete('d_entry')  // → fork
+    spine.complete('fork')     // fans out to branch_a, branch_b
+    spine.complete('branch_a')
+    spine.complete('branch_b') // join fires
+    spine.complete('join')     // → d_exit
+    expect(spine.complete('d_exit')).toMatchObject({ pass: { index: 0, finished: true } })
+    // endPass → item 1 starts.
+    expect(spine.endPass().nodes?.[0]).toMatchObject({ id: 'd_entry' })
+    // Item 1: same walk.
+    spine.complete('d_entry')
+    spine.complete('fork')
+    spine.complete('branch_a')
+    spine.complete('branch_b')
+    spine.complete('join')
+    expect(spine.complete('d_exit')).toMatchObject({ pass: { index: 1, finished: true } })
+    // endPass → data node completes, after is due.
+    expect(spine.endPass().nodes?.[0]).toMatchObject({ id: 'after' })
+    spine.complete('after')
+    expect(spine.next().status).toBe('done')
+  })
+
+  it('a failed branch abandons its item without leaving the join pending for the next', () => {
+    const spine = new Spine(forkInsideData.graph)
+    spine.startPass('data', 2)
+    spine.complete('d_entry')
+    spine.complete('fork')
+    spine.complete('branch_a')
+    // branch_b fails: the runner abandons the item and grades it as failed.
+    spine.abandonPass()
+    expect(spine.endPass().nodes?.map(n => n.id)).toEqual(['d_entry'])
+    spine.complete('d_entry')
+    // The fork, alone: not the abandoned item's join with it.
+    expect(spine.next().nodes?.map(n => n.id)).toEqual(['fork'])
+    spine.complete('fork')
+    expect(spine.next().nodes?.map(n => n.id).sort()).toEqual(['branch_a', 'branch_b'])
+    spine.complete('branch_a')
+    spine.complete('branch_b')
+    spine.complete('join')
+    expect(spine.complete('d_exit')).toMatchObject({ pass: { index: 1, finished: true } })
+    expect(spine.endPass().nodes?.map(n => n.id)).toEqual(['after'])
   })
 })

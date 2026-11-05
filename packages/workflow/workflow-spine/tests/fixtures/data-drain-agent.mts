@@ -7,9 +7,12 @@
  * <responses.json> (a map from node-id to response text) and calls wf_done
  * with the scripted response.  The agent delivery bridge (agentCommand)
  * records the exchange in the sidecar, just as the real spine path does.
+ * An agent node that declares outputs gets the response written to each, in
+ * the item's pass directory when one is running, as a worker would write them.
  */
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -95,7 +98,10 @@ async function call(name: string, input: unknown = {}) {
 
 let status = 'unknown'
 for (let step = 0; step < 1000; step += 1) {
-  const next = await call('wf_next') as { status?: string; nodes?: Array<{ id: string; _type: string }>; error?: string }
+  const next = await call('wf_next') as {
+    status?: string; nodes?: Array<{ id: string; _type: string; writes?: string[] }>; error?: string
+    item?: { pass_dir?: unknown }
+  }
   status = next.status ?? 'unknown'
   if (status === 'done') break
   if (status === 'failed') {
@@ -109,6 +115,11 @@ for (let step = 0; step < 1000; step += 1) {
     if (node._type === 'AgentNode' || node._type === 'LLMNode') {
       // Provide the scripted response for agent nodes.
       const response = responses[node.id] ?? `scripted response for ${node.id}`
+      const base = typeof next.item?.pass_dir === 'string' ? next.item.pass_dir : workdir!
+      for (const name of node.writes ?? []) {
+        mkdirSync(dirname(join(base, name)), { recursive: true })
+        writeFileSync(join(base, name), response)
+      }
       await call('wf_done', { node: node.id, output: response })
     } else {
       await call('wf_done', { node: node.id })
