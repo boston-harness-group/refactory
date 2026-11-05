@@ -887,3 +887,121 @@ def test_skillopt_view_an_errored_record_with_exchanges_is_an_error():
     result = rollout_result(errored, {"skill": "S"})
     assert result["conversation"] is None and result["n_turns"] == 0
     assert result["fail_reason"] == "error: could not write result.json"
+
+
+# ── arm A's Claude backend framing of the solver prompt ──────────────────
+# Arm A's solver is SkillOpt's Claude backend, whose _build_prompt_from_messages
+# (skillopt/model/claude_backend.py:83-138) frames the user message before
+# `claude -p` receives it. The fixture holds three real items (multi-line
+# questions, theorem and sketch off, seed-42 shuffle) and the exact prompt arm A
+# recorded for each (calls.jsonl field ``prompt``).
+
+_ARM_A_PROMPTS = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "livemath_arm_a_solver_prompts.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def _arm_a_item(entry):
+    return {"question": entry["question"], "choices": entry["choices"]}
+
+
+def test_arm_a_fixture_items_are_multi_line():
+    assert len(_ARM_A_PROMPTS) == 3
+    assert all("\n" in entry["question"] for entry in _ARM_A_PROMPTS)
+
+
+def test_solver_prompt_is_arm_a_recorded_prompt_byte_for_byte():
+    """format_prompt's solver_prompt is what arm A's `claude -p` received; its
+    user_prompt stays SkillOpt's bare _build_user message."""
+    from refactory_packages.livemath.ops import (
+        build_user_prompt, format_prompt, unwrap_claude_backend_prompt,
+    )
+
+    class Ctx(_GatingCtx):
+        def __init__(self, item):
+            super().__init__({})
+            self._item = item
+
+        def read_json(self, path, default=None):
+            return dict(self._item)
+
+    for entry in _ARM_A_PROMPTS:
+        facts = format_prompt(Ctx(_arm_a_item(entry)))
+        assert facts["solver_prompt"] == entry["a_prompt"], entry["id"]
+        assert facts["user_prompt"] == build_user_prompt(_arm_a_item(entry))
+        assert unwrap_claude_backend_prompt(entry["a_prompt"]) == facts["user_prompt"]
+
+
+def test_claude_backend_prompt_edges():
+    """Stripped, continuation lines indented two spaces, `- User:` alone when empty
+    (claude_backend.py:89-94); an unframed prompt unwraps to itself."""
+    from refactory_packages.livemath.ops import (
+        claude_backend_prompt, unwrap_claude_backend_prompt,
+    )
+
+    assert claude_backend_prompt("") == "History:\n- User:\n\nAnswer the latest user request."
+    assert claude_backend_prompt("  \n ") == "History:\n- User:\n\nAnswer the latest user request."
+    assert claude_backend_prompt("\n a\n  b\n") == (
+        "History:\n- User: a\n    b\n\nAnswer the latest user request."
+    )
+    assert unwrap_claude_backend_prompt(claude_backend_prompt("a\n  b")) == "a\n  b"
+    assert unwrap_claude_backend_prompt(claude_backend_prompt("")) == ""
+    assert unwrap_claude_backend_prompt("## Question\nQ?") == "## Question\nQ?"
+
+
+def test_solve_node_sends_the_arm_a_prompt_on_the_walker(tmp_path, monkeypatch):
+    """The walker renders the solve node's prompt from solver_prompt: each real item's
+    model call carries arm A's recorded prompt, and its record keeps it."""
+    from refactory_dsh.task import TaskInstance
+    from refactory_packages.livemath.mode import Solver
+    import refactory_packages.livemath.tasks as tasks_mod
+    from tests_support import FakeModel
+
+    def instances(self, *args, **kwargs):
+        return [TaskInstance(id=entry["id"], metadata={
+            "label": entry["correct_choice"]["label"],
+            "label_text": entry["correct_choice"]["text"],
+            "question": entry["question"], "choices": entry["choices"],
+            "correct_choice": entry["correct_choice"],
+            "theorem": "", "sketch": "", "theorem_type": [],
+        }) for entry in _ARM_A_PROMPTS]
+
+    monkeypatch.setattr(tasks_mod.LiveMathTask, "instances", instances)
+    model = FakeModel(["<answer>C</answer>"] * len(_ARM_A_PROMPTS))
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    result = Solver().run(workdir, model=model)
+    assert result.exit_ok, result.error
+    assert sorted(model.prompts) == sorted(entry["a_prompt"] for entry in _ARM_A_PROMPTS)
+    by_id = {record["id"]: record for record in result.item_records}
+    for entry in _ARM_A_PROMPTS:
+        assert by_id[entry["id"]]["exchanges"][0]["prompt"] == entry["a_prompt"]
+
+
+def test_solve_node_template_reads_solver_prompt_on_both_runtimes():
+    """The spine runs the lowered graph: its solve node reads solver_prompt too."""
+    from refactory_packages.livemath.mode import Solver
+
+    graph = Solver().build()
+    assert graph.nodes["solve"].prompt_template == "{{solver_prompt}}"
+    assert "solver_prompt" in graph.nodes["format_prompt"].produces
+    workflow = lowering.to_workflow(Solver().state_dict(), name="livemath-solver")
+    assert workflow.nodes["solve"].prompt_template == "{{solver_prompt}}"
+
+
+def test_skillopt_view_target_user_prompt_is_the_bare_message():
+    """SkillOpt's analysts read target_user_prompt.txt, the bare user message
+    (rollout.py:254-257): a framed exchange prompt renders exactly as a bare one."""
+    from refactory_packages.livemath.ops import claude_backend_prompt
+    from refactory_packages.livemath.skillopt_view import rollout_result
+    from refactory_packages.skillopt.prompts import fmt_minibatch_trajectories
+
+    bare = _VIEW_RECORD["exchanges"][0]["prompt"]
+    framed = dict(_VIEW_RECORD, exchanges=[
+        dict(_VIEW_RECORD["exchanges"][0], prompt=claude_backend_prompt(bare)),
+    ])
+    result = rollout_result(framed, {"skill": "S"})
+    assert result["target_user_prompt"] == bare
+    assert fmt_minibatch_trajectories([result]) == fmt_minibatch_trajectories(
+        [rollout_result(_VIEW_RECORD, {"skill": "S"})])
