@@ -589,6 +589,28 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--model", default="", help="the verifier's model id")
     replay.add_argument("--effort", default="", help="the verifier's reasoning effort")
 
+    # ── structure-ablation grid ──
+    grid = sub.add_parser(
+        "grid",
+        help="run a structure-ablation grid over solver blocks",
+    )
+    grid.add_argument("mode", help="the mode family, e.g. livemath/solver")
+    grid.add_argument("--skill", default="", help="path to a skill file")
+    grid.add_argument("--part", default="val", choices=["val", "test"])
+    grid.add_argument("--seed", type=int, default=42)
+    grid.add_argument("--blocks", nargs="+", default=None, help="which blocks (default: all)")
+    grid.add_argument("--output", default="grid_results.json")
+    grid.add_argument("--parts", required=True, help="path to parts.json manifest")
+    grid.add_argument("--data-path", default="", help="override LIVEMATH_DATA_PATH")
+    grid.add_argument("--worker-backend", default=None)
+    grid.add_argument("--model", default=None)
+    grid.add_argument("--effort", default=None)
+    grid.add_argument("--permission-mode", default=None)
+    grid.add_argument("--setting-sources", default=None)
+    grid.add_argument("--provider", default=None)
+    grid.add_argument("--data-parallelism", type=int, default=None)
+    grid.add_argument("--max-completion-tokens", type=int, default=None)
+
     return parser
 
 
@@ -680,6 +702,18 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_pin(args)
     if args.verb == "replay-verifier":
         return _cmd_replay_verifier(args)
+    if args.verb == "grid":
+        forwarded = [args.mode]
+        for flag in ("skill", "part", "seed", "output", "parts", "data_path",
+                     "worker_backend", "model", "effort", "permission_mode",
+                     "setting_sources", "provider", "data_parallelism",
+                     "max_completion_tokens"):
+            value = getattr(args, flag, None)
+            if value is not None and value != "":
+                forwarded.extend([f"--{flag.replace('_', '-')}", str(value)])
+        if args.blocks:
+            forwarded.extend(["--blocks"] + args.blocks)
+        return _forward("refactory_packages.livemath.grid", forwarded)
     if args.verb == "package":  # handled before argparse; kept for completeness
         return _forward("refactory_dsh.registry", [])
     parser.error(f"unknown verb {args.verb!r}")  # pragma: no cover - argparse rejects first

@@ -307,3 +307,9 @@ entry and survives a resume.
 | Command | Description |
 |---|---|
 | `refactory replay-verifier --run-dir <path> [--commit <hash>] [--provider <p> --model <m>] [--effort <e>]` | Replay the verifier on an existing run directory and a commit. Reads `brief.json` from the run directory and invokes the verifier's model session. When `--commit` is given, a temporary worktree of that commit is checked out, used, and removed. The model route resolves as for `refactory ceo`: the flags, then the environment, the project file and the stored choice; half a route is refused. |
+
+## Structure-ablation grid
+
+| Command | Description |
+|---|---|
+| `refactory grid livemath/solver --parts <parts.json> --skill <skill.txt> [--blocks baseline solve_then_verify ...] [--seed N] [--part val\|test] [--output path.json] [route flags]` | Run a structure-ablation grid over solver blocks. Evaluates each named block on the same items with the same choice shuffling using the existing testeval evaluation path. Writes a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls, and wall time. Route flags (`--worker-backend`, `--model`, `--effort`, `--permission-mode`, `--setting-sources`, `--provider`, `--data-parallelism`, `--max-completion-tokens`) are forwarded to the evaluator. |
