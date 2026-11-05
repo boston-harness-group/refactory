@@ -97,13 +97,39 @@ MAX_COMPLETION_TOKENS = 0
 
 
 class Solver(nn.Mode):
-    """One-agent-node solver for LiveMathematicianBench items."""
+    """One-agent-node solver for LiveMathematicianBench items.
+
+    The ``block`` constructor parameter selects the solver structure:
+
+    * ``"baseline"`` (default) — the current single ``solve`` node; its lowered
+      graph is pinned by the lowering snapshot.
+    * ``"solve_then_verify"`` — solve, read draft, verify.
+    * ``"two_attempts_then_judge"`` — fork into two solves, join, judge.
+    * ``"solve_then_self_check"`` — solve, read draft, self-check.
+
+    ``block`` is a construction-time choice, not a knob — the optimizer cannot
+    search over it.
+    """
 
     name = "solver"
     description = "solve a LiveMathematicianBench item with a single agent call"
     #: The solve node's wall limit; a subclass (or a graph edit of ``timeout_s``)
     #: changes it.
     solve_timeout_s: ClassVar[int] = SOLVE_TIMEOUT_S
+
+    def __init__(
+        self,
+        block: str = "baseline",
+        state: dict[str, Any] | None = None,
+    ) -> None:
+        from .blocks import BLOCK_NAMES
+
+        if block not in BLOCK_NAMES:
+            raise ValueError(
+                f"unknown block {block!r}; known: {list(BLOCK_NAMES)}"
+            )
+        self._block = block
+        super().__init__(state=state)
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
@@ -113,7 +139,7 @@ class Solver(nn.Mode):
             "use_theorem": nn.Knob(False, "bool",
                                    description="include the item's theorem as a ## Theorem section"),
             "use_sketch": nn.Knob(False, "bool",
-                                  description="include the item's proof sketch as a ## Proof Sketch section"),
+                                   description="include the item's proof sketch as a ## Proof Sketch section"),
             # Uncapped, as arm A's solver is (``MAX_COMPLETION_TOKENS``). A run
             # setting, not a search target: frozen against the optimizer, set
             # with ``--knob max_completion_tokens=N``.
@@ -126,53 +152,50 @@ class Solver(nn.Mode):
             "data_parallelism": nn.Knob(
                 1, "int", lo=1, hi=64, frozen=True,
                 description="concurrent data-node items"),
-            # F14: freeze the auto-declared system-prompt knob so the optimizer
-            # cannot change the solve node's system prompt.  The optimizable text
-            # stays the ``skill`` knob.
-            "solve__system_prompt": nn.Knob(
-                SYSTEM_PROMPT, "str", frozen=True,
-                description="system prompt for solve (frozen; use the skill knob)"),
         }
 
+    def _declared_entries(self) -> dict[str, dict[str, Any]]:
+        """The mode's knobs plus the selected block's frozen system-prompt knobs."""
+        from .blocks import BLOCKS
+
+        entries = super()._declared_entries()
+        block = BLOCKS[getattr(self, "_block", "baseline")](self.solve_timeout_s)
+        for name, knob in block.knobs.items():
+            entries[name] = {"value": knob.default, "spec": knob.spec()}
+        return entries
+
     def build(self) -> nn.Graph:
+        """The data pass over the selected block, then ``finish``.
+
+        Every block, the baseline included, comes from ``blocks.BLOCKS``; the
+        baseline's lowered graph is pinned by its lowering snapshot
+        (tests/lowering_snapshots/livemath-solver.graph.json). Every agent node
+        gets ``solve_timeout_s``.
+        """
+        from .blocks import BLOCKS
+
+        result = BLOCKS[getattr(self, "_block", "baseline")](self.solve_timeout_s)
         graph = nn.Graph()
         graph.add(nn.Node(
             "data", "data",
-            subgraph_entry="format_prompt",
-            subgraph_exit="solve",
+            subgraph_entry=result.entry,
+            subgraph_exit=result.exit,
             task_ref=TASK,
             writes=("current_item.json",),
             produces=("item_scores",),
             parallelism_knob="data_parallelism",
             knobs=("data_parallelism",),
         ))
-        graph.add(nn.Node(
-            "format_prompt", "op",
-            call=f"{OPS}:format_prompt",
-            reads=("current_item.json",),
-            knobs=("skill", "use_theorem", "use_sketch"),
-            produces=("user_prompt", "solver_prompt", "skill_section"),
-        ))
-        graph.add(nn.Node(
-            "solve", "agent",
-            # The question framed as arm A's Claude backend sends it
-            # (``ops.claude_backend_prompt``); ``user_prompt`` stays the bare question.
-            prompt_template="{{solver_prompt}}",
-            system_prompt_template=SYSTEM_PROMPT,
-            writes=("answer.txt",),
-            tool_policy="none",
-            role="solver",
-            timeout_s=self.solve_timeout_s,
-            knobs=("max_completion_tokens", "solve__system_prompt"),
-            field_bindings=(("system_prompt_template", "solve__system_prompt"),),
-        ))
+        for node in result.nodes:
+            graph.add(node)
+        for source, target in result.edges:
+            graph.connect(source, target)
         graph.add(nn.Node(
             "finish", "op",
             call=f"{OPS}:finish",
             writes=("result.json",),
             produces=("finished",),
         ))
-        graph.connect("format_prompt", "solve")
         graph.connect("data", "finish")
         return graph
 
@@ -185,20 +208,24 @@ class Solver(nn.Mode):
         memory: Any = None,
         **kwargs: Any,
     ) -> nn.RunResult:
-        """Put the ``max_completion_tokens`` knob on the solve node's route.
+        """Put the ``max_completion_tokens`` knob on every agent node's route.
 
         The graph has no per-node route field, so the cap travels the way any
-        per-node route setting does: as the ``solve`` entry of the model's
-        ``node_routes``. ``for_node("solve")`` then carries it in the worker's
-        requested route, and the worker observer (``worker_observer.mjs``) sets
-        it as ``maxTokens`` on the DSH ``agent/request`` config, which DSH passes
-        to ``llm.prepareCall``. Other nodes' routes are untouched; ``0`` adds no
-        cap.
+        per-node route setting does: as entries in the model's ``node_routes``.
+        ``for_node(id)`` then carries it in the worker's requested route, and
+        the worker observer sets it as ``maxTokens`` on the DSH config.
         """
         cap = int(self.values().get("max_completion_tokens") or 0)
+        # Every agent node of the graph this mode holds, so a clone
+        # (``type(self)(state=...)``, which does not know the block name) caps them too.
+        agent_ids = [node.id for node in self.graph().nodes.values() if node.kind == "agent"]
         if cap > 0 and model is not None and callable(getattr(model, "for_node", None)):
             routes = dict(getattr(model, "_node_routes", None) or {})
-            routes["solve"] = {**routes.get("solve", {}), "max_completion_tokens": str(cap)}
+            for node_id in agent_ids:
+                routes[node_id] = {
+                    **routes.get(node_id, {}),
+                    "max_completion_tokens": str(cap),
+                }
             model = copy.copy(model)
             model._node_routes = routes
         return super().run(workdir, model=model, task=task, memory=memory, **kwargs)
@@ -206,3 +233,33 @@ class Solver(nn.Mode):
     def score(self, run: nn.RunResult) -> float:
         scores = [entry["score"] for entry in run.facts.get("item_scores", [])]
         return sum(scores) / len(scores) if scores else 0.0
+
+
+class SolverVerify(Solver):
+    """Solve-then-verify block as its own mode for the structure grid."""
+
+    name = "solver_verify"
+    description = "solve then verify with a second agent"
+
+    def __init__(self, state: dict[str, Any] | None = None) -> None:
+        super().__init__(block="solve_then_verify", state=state)
+
+
+class SolverJudge(Solver):
+    """Two-attempts-then-judge block as its own mode for the structure grid."""
+
+    name = "solver_judge"
+    description = "fork two solve attempts then judge with a third agent"
+
+    def __init__(self, state: dict[str, Any] | None = None) -> None:
+        super().__init__(block="two_attempts_then_judge", state=state)
+
+
+class SolverSelfCheck(Solver):
+    """Solve-then-self-check block as its own mode for the structure grid."""
+
+    name = "solver_self_check"
+    description = "solve then self-check with SkillOpt-style refinement"
+
+    def __init__(self, state: dict[str, Any] | None = None) -> None:
+        super().__init__(block="solve_then_self_check", state=state)

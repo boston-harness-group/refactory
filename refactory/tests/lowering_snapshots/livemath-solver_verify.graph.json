@@ -1,0 +1,210 @@
+{
+  "name": "livemath-solver_verify",
+  "nodes": {
+    "data": {
+      "id": "data",
+      "reads": [],
+      "writes": [
+        "current_item.json"
+      ],
+      "blocking": true,
+      "task_ref": "refactory_packages.livemath.tasks:LiveMathTask",
+      "source_path": null,
+      "source_format": null,
+      "inline_items": [],
+      "subgraph_entry": "format_prompt",
+      "subgraph_exit": "verify",
+      "parallelism": 1,
+      "split": "all",
+      "shuffle": false,
+      "shuffle_seed": null,
+      "limit": null,
+      "max_items": 500,
+      "_type": "DataNode"
+    },
+    "finish": {
+      "id": "finish",
+      "reads": [],
+      "writes": [
+        "result.json"
+      ],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.ops:finish",
+      "callable_name": "refactory_packages.livemath.ops:finish",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "format_prompt": {
+      "id": "format_prompt",
+      "reads": [
+        "current_item.json"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.ops:format_prompt",
+      "callable_name": "refactory_packages.livemath.ops:format_prompt",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "read_draft": {
+      "id": "read_draft",
+      "reads": [
+        "draft_answer.txt"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.block_ops:verify_prompt",
+      "callable_name": "refactory_packages.livemath.block_ops:verify_prompt",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "solve_draft": {
+      "id": "solve_draft",
+      "reads": [],
+      "writes": [
+        "draft_answer.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{solver_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "verify": {
+      "id": "verify",
+      "reads": [],
+      "writes": [
+        "answer.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{verify_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    }
+  },
+  "edges": [
+    {
+      "source": "data",
+      "target": "finish",
+      "condition": null
+    },
+    {
+      "source": "format_prompt",
+      "target": "solve_draft",
+      "condition": null
+    },
+    {
+      "source": "read_draft",
+      "target": "verify",
+      "condition": null
+    },
+    {
+      "source": "solve_draft",
+      "target": "read_draft",
+      "condition": null
+    }
+  ],
+  "start_node": "data",
+  "terminal": true,
+  "knob_values": {
+    "skill": "",
+    "use_theorem": 0.0,
+    "use_sketch": 0.0,
+    "max_completion_tokens": 0.0,
+    "data_parallelism": 1.0,
+    "solve_draft__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+    "verify__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n"
+  },
+  "knob_specs": {
+    "skill": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "skill prompt injected into the system message",
+      "required": false
+    },
+    "use_theorem": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "required": false
+    },
+    "use_sketch": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "required": false
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "kind": "int",
+      "lo": 0,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "required": false
+    },
+    "data_parallelism": {
+      "default": 1,
+      "kind": "int",
+      "lo": 1,
+      "hi": 64,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "concurrent data-node items",
+      "required": false
+    },
+    "solve_draft__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "required": false
+    },
+    "verify__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for verify (frozen; use the skill knob)",
+      "required": false
+    }
+  }
+}

@@ -268,6 +268,10 @@ def run_fork(executor: Executor, node: Node) -> str | None:
     # An optional node that failed is missing, and its branch went on past it
     # (`Executor._missing_optional`), so a branch's error is a real failure.
     merge_children_into_parent(executor, children)
+    # Inside a data pass each branch call is one of the item's exchanges, as the
+    # spine records it (`items.record_exchange`), in branch order.
+    for child in children:
+        executor._item_exchanges.extend(child._item_exchanges)  # noqa: SLF001
     error = next((e for e in errors if e), None)
     visited = {step.node for child in children for step in child.steps}
     missing = set(join.sources) - visited

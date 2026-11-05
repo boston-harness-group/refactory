@@ -5378,6 +5378,227 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 }
 ```
 
+## cli:grid
+
+Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.
+
+Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
+
+```json
+{
+  "description": "run a structure-ablation grid over solver blocks",
+  "doc": "refactory/docs/cli.md",
+  "examples": [
+    {
+      "arguments": {
+        "mode": "livemath/solver",
+        "parts": "parts.json"
+      },
+      "explanation": "Run a structure-ablation grid over solver blocks using the existing testeval evaluation path. Evaluates each named block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same items with the same choice shuffling. Route flags are forwarded to the evaluator."
+    }
+  ],
+  "interfaces": {
+    "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
+    "cli": "refactory grid livemath/solver --parts <parts.json> [--skill <path>] [--blocks ...] [--seed N] [--part val|test] [route flags]",
+    "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
+  },
+  "parameters": {
+    "blocks": {
+      "default": null,
+      "description": "which blocks (default: all)",
+      "flags": [
+        "--blocks"
+      ],
+      "nargs": "+",
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "data_parallelism": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--data-parallelism"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "data_path": {
+      "default": "",
+      "description": "override LIVEMATH_DATA_PATH",
+      "flags": [
+        "--data-path"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "effort": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--effort"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "evaluator": {
+      "default": null,
+      "description": "which evaluator: walker (default) or dsh (spine)",
+      "flags": [
+        "--evaluator"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "max_completion_tokens": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-completion-tokens"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "mode": {
+      "default": null,
+      "description": "the mode family, e.g. livemath/solver",
+      "flags": [],
+      "nargs": null,
+      "position": 0,
+      "positional": true,
+      "required": true,
+      "type": "string"
+    },
+    "model": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--model"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "output": {
+      "default": "grid_results.json",
+      "description": "",
+      "flags": [
+        "--output"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "part": {
+      "default": "val",
+      "description": "",
+      "enum": [
+        "val",
+        "test"
+      ],
+      "flags": [
+        "--part"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "parts": {
+      "default": null,
+      "description": "path to parts.json manifest",
+      "flags": [
+        "--parts"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": true,
+      "type": "string"
+    },
+    "permission_mode": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--permission-mode"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "provider": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--provider"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "seed": {
+      "default": 42,
+      "description": "",
+      "flags": [
+        "--seed"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "setting_sources": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--setting-sources"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "skill": {
+      "default": "",
+      "description": "path to a skill file",
+      "flags": [
+        "--skill"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "worker_backend": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--worker-backend"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    }
+  },
+  "purpose": "Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.",
+  "reviewed_schema": "f1adf6f22a998dc94134af50fde674c670b16d8299210a2ecdcd366a35b61f61"
+}
+```
+
 ## cli:list
 
 List installed modes or packages in the terminal; JSON preserves the same catalogue consumed by chat and panel.
@@ -12202,6 +12423,681 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
     },
     "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
     "reviewed_schema": "8caca9bf6e4ba0a45ba91cd20a0838c8f3ed174276736da502987c4d54198c73"
+  }
+}
+```
+
+## livemath/solver_judge
+
+fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).
+
+```json
+{
+  "description": "fork two solve attempts then judge with a third agent",
+  "edges": [
+    {
+      "condition": null,
+      "source": "attempt_fork",
+      "target": "attempt_join"
+    },
+    {
+      "condition": null,
+      "source": "attempt_join",
+      "target": "merge_attempts"
+    },
+    {
+      "condition": null,
+      "source": "data",
+      "target": "finish"
+    },
+    {
+      "condition": null,
+      "source": "format_prompt",
+      "target": "attempt_fork"
+    },
+    {
+      "condition": null,
+      "source": "merge_attempts",
+      "target": "judge"
+    },
+    {
+      "condition": null,
+      "source": "solve_a",
+      "target": "attempt_join"
+    },
+    {
+      "condition": null,
+      "source": "solve_b",
+      "target": "attempt_join"
+    }
+  ],
+  "gates": [],
+  "guidance": "",
+  "id": "livemath/solver_judge",
+  "nodes": [
+    {
+      "call": "",
+      "id": "attempt_fork",
+      "kind": "fork",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "attempt_join",
+      "kind": "join",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:finish",
+      "id": "finish",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:format_prompt",
+      "id": "format_prompt",
+      "kind": "op",
+      "knobs": [
+        "skill",
+        "use_theorem",
+        "use_sketch"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "judge",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "judge__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    },
+    {
+      "call": "refactory_packages.livemath.block_ops:judge_prompt",
+      "id": "merge_attempts",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve_a",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "solve_a__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "solve_b",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "solve_b__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 1,
+      "description": "concurrent data-node items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 1,
+      "values": []
+    },
+    "judge__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for judge (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        0,
+        null
+      ],
+      "value": 0,
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "skill prompt injected into the system message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "solve_a__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_a (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "solve_b__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_b (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "use_sketch": {
+      "default": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "use_theorem": {
+      "default": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/outer-loop.md",
+    "examples": [
+      {
+        "explanation": "Fork two independent solve attempts for each LiveMathematicianBench item, join them, and let a judge agent pick the best answer; used by the structure-ablation grid (refactory grid). Same knobs as livemath/solver. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "knobs": {
+          "data_parallelism": 1,
+          "max_completion_tokens": 0,
+          "skill": "",
+          "use_sketch": false,
+          "use_theorem": false
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=livemath/solver_judge; use refactory help topic=livemath/solver_judge first",
+      "cli": "refactory ceo livemath/solver_judge",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
+    "reviewed_schema": "bf6ee17d64eb0c4a563359726bc65e7b492149098f78d77040893c1ec048f170"
+  }
+}
+```
+
+## livemath/solver_self_check
+
+solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).
+
+```json
+{
+  "description": "solve then self-check with SkillOpt-style refinement",
+  "edges": [
+    {
+      "condition": null,
+      "source": "data",
+      "target": "finish"
+    },
+    {
+      "condition": null,
+      "source": "format_prompt",
+      "target": "solve_draft"
+    },
+    {
+      "condition": null,
+      "source": "read_draft",
+      "target": "self_check"
+    },
+    {
+      "condition": null,
+      "source": "solve_draft",
+      "target": "read_draft"
+    }
+  ],
+  "gates": [],
+  "guidance": "",
+  "id": "livemath/solver_self_check",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:finish",
+      "id": "finish",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:format_prompt",
+      "id": "format_prompt",
+      "kind": "op",
+      "knobs": [
+        "skill",
+        "use_theorem",
+        "use_sketch"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.block_ops:self_check_prompt",
+      "id": "read_draft",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "self_check",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "self_check__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "solve_draft",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "solve_draft__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 1,
+      "description": "concurrent data-node items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 1,
+      "values": []
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        0,
+        null
+      ],
+      "value": 0,
+      "values": []
+    },
+    "self_check__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for self_check (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "skill prompt injected into the system message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "solve_draft__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "use_sketch": {
+      "default": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "use_theorem": {
+      "default": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/outer-loop.md",
+    "examples": [
+      {
+        "explanation": "Solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer (SkillOpt-style self-check); used by the structure-ablation grid (refactory grid). Same knobs as livemath/solver. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "knobs": {
+          "data_parallelism": 1,
+          "max_completion_tokens": 0,
+          "skill": "",
+          "use_sketch": false,
+          "use_theorem": false
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=livemath/solver_self_check; use refactory help topic=livemath/solver_self_check first",
+      "cli": "refactory ceo livemath/solver_self_check",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
+    "reviewed_schema": "9e18507767ff1d03fe4039cd9594fad68078a1569915c54fecddd99de2fdfbe0"
+  }
+}
+```
+
+## livemath/solver_verify
+
+solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).
+
+```json
+{
+  "description": "solve then verify with a second agent",
+  "edges": [
+    {
+      "condition": null,
+      "source": "data",
+      "target": "finish"
+    },
+    {
+      "condition": null,
+      "source": "format_prompt",
+      "target": "solve_draft"
+    },
+    {
+      "condition": null,
+      "source": "read_draft",
+      "target": "verify"
+    },
+    {
+      "condition": null,
+      "source": "solve_draft",
+      "target": "read_draft"
+    }
+  ],
+  "gates": [],
+  "guidance": "",
+  "id": "livemath/solver_verify",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:finish",
+      "id": "finish",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.ops:format_prompt",
+      "id": "format_prompt",
+      "kind": "op",
+      "knobs": [
+        "skill",
+        "use_theorem",
+        "use_sketch"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.livemath.block_ops:verify_prompt",
+      "id": "read_draft",
+      "kind": "op",
+      "knobs": [],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve_draft",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "solve_draft__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "verify",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "verify__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 1,
+      "description": "concurrent data-node items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 1,
+      "values": []
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        0,
+        null
+      ],
+      "value": 0,
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "skill prompt injected into the system message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "solve_draft__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "use_sketch": {
+      "default": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "use_theorem": {
+      "default": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "frozen": false,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "verify__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for verify (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/outer-loop.md",
+    "examples": [
+      {
+        "explanation": "Solve each LiveMathematicianBench item then verify the answer with a second agent; used by the structure-ablation grid (refactory grid). Same knobs as livemath/solver. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "knobs": {
+          "data_parallelism": 1,
+          "max_completion_tokens": 0,
+          "skill": "",
+          "use_sketch": false,
+          "use_theorem": false
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=livemath/solver_verify; use refactory help topic=livemath/solver_verify first",
+      "cli": "refactory ceo livemath/solver_verify",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
+    "reviewed_schema": "9cff6810c3bf9528eac9f63e641f7335fc53d9da2eec4fb6d8174a5fc5e2520b"
   }
 }
 ```

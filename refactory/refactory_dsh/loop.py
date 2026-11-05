@@ -3327,8 +3327,13 @@ def _coerce_strategy_value(raw: str) -> Any:
     return raw
 
 
-def main(argv: list[str] | None = None) -> int:
-    """``python -m refactory_dsh.loop <package>/<mode> [options]``."""
+def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
+    """``python -m refactory_dsh.loop <package>/<mode> [options]``.
+
+    ``_client_factory`` replaces ``DshModelClient`` when given: it receives the
+    same keyword arguments, so a caller (``refactory grid``) or a test can see the
+    resolved route and answer with a stub.
+    """
     import argparse
     import sys
 
@@ -3374,7 +3379,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def client(snapshot: dict[str, Any]) -> DshModelClient:
         settings = snapshot["settings"]
-        return DshModelClient(routes_resolved=True, routing_provenance=(snapshot.get("worker_configuration") or {}).get("provenance"), **{key: settings[key] for key in
+        return (_client_factory or DshModelClient)(routes_resolved=True, routing_provenance=(snapshot.get("worker_configuration") or {}).get("provenance"), **{key: settings[key] for key in
             ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources", "role_routes", "node_routes", "provider_config")
             })
 

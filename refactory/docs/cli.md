@@ -307,3 +307,9 @@ entry and survives a resume.
 | Command | Description |
 |---|---|
 | `refactory replay-verifier --run-dir <path> [--commit <hash>] [--provider <p> --model <m>] [--effort <e>]` | Replay the verifier on an existing run directory and a commit. Reads `brief.json` from the run directory and invokes the verifier's model session. When `--commit` is given, a temporary worktree of that commit is checked out, used, and removed. The model route resolves as for `refactory ceo`: the flags, then the environment, the project file and the stored choice; half a route is refused. |
+
+## Structure-ablation grid
+
+| Command | Description |
+|---|---|
+| `refactory grid livemath/solver --parts <parts.json> [--skill <skill.txt>] [--blocks baseline solve_then_verify ...] [--seed N] [--part val\|test] [--output path.json] [--data-path <dir>] [--evaluator walker\|dsh] [route flags]` | Run a structure-ablation grid over solver blocks. Each named block (default: all four) is evaluated once on the same items, with the same choice shuffling, through `refactory optimize`'s own entry point, so route resolution and the model-choice question are optimize's. Each block's run directory is kept in `<output>.runs/<block>/`. The JSON results file (per-block accuracy, shortcut-item split, errors, timeouts, model calls, wall time) is rewritten after every block, with `complete` false until the last one, then the table is printed. Route flags (`--worker-backend`, `--model`, `--effort`, `--permission-mode`, `--setting-sources`, `--provider`) are forwarded as optimize's flags, and `--data-parallelism`, `--max-completion-tokens` and the skill text as knobs. `--evaluator` picks the runtime: `walker` (default) or `dsh` (the spine). `--data-path` sets `LIVEMATH_DATA_PATH`. A Ctrl-C stops the running block's model calls and exits 130; finished blocks stay in the results file. |
