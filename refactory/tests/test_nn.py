@@ -1037,6 +1037,25 @@ def test_presets_are_closed():
         nn.edits.enabled("nonsense")
 
 
+def test_catalogue_excludes_removed_free_form_ops():
+    """F14 guard: replace_node and set_node_field must never reappear in the
+    edit catalogue.  Without this test, re-adding their ``_primitive()``
+    registrations would silently pass ``test_presets_are_closed`` and
+    ``test_random_edit_streams_are_never_repaired``.
+    """
+    all_names = set(nn.edits.names())
+    assert "replace_node" not in all_names, (
+        "replace_node must not be in the edit catalogue (removed in F14)"
+    )
+    assert "set_node_field" not in all_names, (
+        "set_node_field must not be in the edit catalogue (removed in F14)"
+    )
+    # Also verify they are absent from every preset
+    for preset_name, ops in nn.edits.PRESETS.items():
+        assert "replace_node" not in ops, f"replace_node in preset {preset_name!r}"
+        assert "set_node_field" not in ops, f"set_node_field in preset {preset_name!r}"
+
+
 def test_random_edit_streams_are_never_repaired():
     """Phase 2 gate.
 
