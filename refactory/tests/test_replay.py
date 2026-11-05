@@ -20,6 +20,7 @@ import json
 import os
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -851,8 +852,9 @@ def test_config_mapping_covers_every_configure_option():
     }
     # ``rollout_order`` is not a setting of A's: the runner passes the order A's
     # rollout completed in, read from A's step results (RecordedRolloutOrder).
+    # ``claude_backend_wrapper`` is the runner's --claude-backend-wrapper flag.
     mapped = set(A_CONFIG_TO_STRATEGY_OPTION.values()) | set(A_CONFIG_OPTIONAL.values()) | {
-        "analyst_edit_budget", "rollout_order", "patch_order",
+        "analyst_edit_budget", "rollout_order", "patch_order", "claude_backend_wrapper",
     }
     assert read == mapped, (
         f"configure reads {sorted(read)} but the replay drives {sorted(mapped)}"
@@ -1596,16 +1598,18 @@ class _RecordingClient:
 
     def __init__(self) -> None:
         self.recorded: list[tuple[str, str, str]] = []
+        #: (step type, prompt) exactly as arm B sent each call.
+        self.sent: list[tuple[str, str]] = []
 
     def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):  # noqa: ANN001
         call_key = current_call_key()
         step_type = str(call_key[0]) if call_key else ""
         result = self._reply(step_type)
-        if not call_key:
-            # A's backend frames the bare user message (_make_calls_jsonl does it
-            # again), so record the solve node's prompt without its framing.
-            from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
-            prompt = unwrap_claude_backend_prompt(prompt)
+        self.sent.append((step_type, prompt))
+        # A's backend frames the bare user message (_make_calls_jsonl does it
+        # again), so record the solve node's prompt -- and an optimizer prompt
+        # arm B framed (claude_backend_wrapper) -- without its framing.
+        prompt = normalize_recorded_prompt(prompt) if prompt.startswith("History:\n") else prompt
         self.recorded.append((system, prompt, result))
         return result
 
@@ -1673,7 +1677,9 @@ def _b_config(runs_root: Path, parts_path: Path, max_epochs: int):
     )
 
 
-def _record_arm_b(tmp_path: Path) -> tuple[list[tuple[str, str, str]], list[dict]]:
+def _record_arm_b(
+    tmp_path: Path, *, claude_backend_wrapper: bool = False, client: Any = None,
+) -> tuple[list[tuple[str, str, str]], list[dict]]:
     """Run arm B once with a canned client and return (recordings, b history).
 
     The recording pass goes through the same public path the replay does, so
@@ -1689,10 +1695,12 @@ def _record_arm_b(tmp_path: Path) -> tuple[list[tuple[str, str, str]], list[dict
     a_out.mkdir()
     (a_out / "config.json").write_text(json.dumps(RECORDING_A_CONFIG))
     options = load_a_config(a_out)
+    if claude_backend_wrapper:
+        options["claude_backend_wrapper"] = True
 
     parts_path = build_parts_manifest(LIVEMATH_SPLIT, tmp_path / "record")
     runs_root = tmp_path / "record" / "run"
-    client = _RecordingClient()
+    client = client if client is not None else _RecordingClient()
     previous = os.environ.get("LIVEMATH_DATA_PATH")
     os.environ["LIVEMATH_DATA_PATH"] = str(LIVEMATH_FIXTURES)
     try:
@@ -2441,3 +2449,77 @@ def test_client_takes_the_claude_backend_framing_off_solver_prompts_only(tmp_pat
     assert client.complete(claude_backend_prompt(question), system="solver_sys") == "<answer>A</answer>"
     with pytest.raises(ReplayMismatch), optimizer_call(("rank", 1, 0, 0)):
         client.complete(claude_backend_prompt(question), system="opt_sys")
+
+
+# ── claude_backend_wrapper: arm A's framing of optimizer calls ────────────
+
+#: The optimizer steps arm A sends through chat_optimizer (claude_backend.py:327-329).
+_OPTIMIZER_STEPS = ("analyst_failure", "analyst_success", "merge_failure", "merge_success",
+                    "merge_final", "rank", "slow_update", "meta_skill")
+
+
+class _RankingRecordingClient(_RecordingClient):
+    """Merges return more edits than the budget, so the epoch also ranks them."""
+
+    @staticmethod
+    def _reply(step_type: str) -> str:
+        if step_type.startswith("merge_"):
+            return json.dumps({"reasoning": "merged", "edits": [
+                {"op": "append", "content": f"## Merged {n}\nCombined."} for n in range(3)
+            ]})
+        return _RecordingClient._reply(step_type)
+
+
+@pytest.fixture(scope="module")
+def _arm_b_framed(tmp_path_factory):
+    """Arm B recorded with claude_backend_wrapper off and on."""
+    off, on = _RankingRecordingClient(), _RankingRecordingClient()
+    _record_arm_b(tmp_path_factory.mktemp("off"), client=off)
+    recordings, b_history = _record_arm_b(
+        tmp_path_factory.mktemp("on"), claude_backend_wrapper=True, client=on)
+    return off, on, recordings, b_history
+
+
+def test_claude_backend_wrapper_frames_every_optimizer_call(_arm_b_framed):
+    """On, every optimizer call is the bare message framed by claude_backend_prompt;
+    off (the default), every optimizer prompt is the bare message, as before.
+    Solver calls are the same either way."""
+    from refactory_packages.skillopt.claude_backend import claude_backend_prompt
+
+    off, on, _, _ = _arm_b_framed
+    off_opt = sorted((step, prompt) for step, prompt in off.sent if step)
+    on_opt = sorted((step, prompt) for step, prompt in on.sent if step)
+    steps = {step.rsplit("_", 1)[0] if step.startswith("analyst_") else step for step, _ in off_opt}
+    assert {"analyst", "merge_final", "rank", "slow_update", "meta_skill"} <= steps, steps
+    assert len(off_opt) == len(on_opt) > 0
+    assert not any(prompt.startswith("History:") for _, prompt in off_opt)
+    assert on_opt == sorted((step, claude_backend_prompt(prompt)) for step, prompt in off_opt)
+    assert sorted(p for s, p in off.sent if not s) == sorted(p for s, p in on.sent if not s)
+
+
+def test_run_replay_matches_with_claude_backend_wrapper(tmp_path, monkeypatch, _arm_b_framed):
+    """With the option on, the replay takes the framing off optimizer prompts too and
+    matches every recorded call; the option is passed to arm B."""
+    from refactory_packages.skillopt.replay_runner import run_replay
+
+    monkeypatch.setenv("LIVEMATH_DATA_PATH", str(LIVEMATH_FIXTURES))
+    _, _, recordings, b_history = _arm_b_framed
+    recording_dir = _recording_dir(tmp_path, recordings, b_history)
+    report = run_replay(recording_dir, tmp_path / "out", split_dir=LIVEMATH_SPLIT,
+                        data_path=LIVEMATH_FIXTURES, claude_backend_wrapper=True)
+    assert report["replay_status"] == "completed", report["mismatch"]
+    assert report["strategy_options"]["claude_backend_wrapper"] is True
+    assert report["calls_matched"] == report["calls_total"] > 0
+    assert report["comparison"]["first_divergence"] is None
+
+
+def test_replay_client_unframes_optimizer_prompts_only_when_asked(tmp_path):
+    from refactory_packages.skillopt.claude_backend import claude_backend_prompt
+
+    calls = _make_calls_jsonl(tmp_path, [("opt", "patch me\n  please", "r")])
+    with optimizer_call(("rank", 1, 0, 0)):
+        framed = claude_backend_prompt("patch me\n  please")
+        assert ReplayClient(CallMatcher(calls), unframe_optimizer=True).complete(
+            framed, system="opt") == "r"
+        with pytest.raises(ReplayMismatch):
+            ReplayClient(CallMatcher(calls)).complete(framed, system="opt")

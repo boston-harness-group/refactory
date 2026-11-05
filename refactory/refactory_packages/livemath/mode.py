@@ -42,10 +42,16 @@ route has not been measured yet. The invocation that matches A::
         --model claude-opus-4-6 --effort medium --setting-sources project \
         --knob data_parallelism=24 --parts <parts.json> --holdout 0 \
         --strategy-option max_epochs=10 --strategy-option early_stop_patience=3 \
-        --strategy-option early_stop_at_full_val=true --strategy-option seed=<seed>
+        --strategy-option early_stop_at_full_val=true --strategy-option seed=<seed> \
+        --strategy-option claude_backend_wrapper=true
 
 (the strategy options are A's out/config.json ``num_epochs``,
-``early_stop_patience``, ``early_stop_at_full_val`` and ``seed``; the SkillOpt
+``early_stop_patience``, ``early_stop_at_full_val`` and ``seed``, and
+``claude_backend_wrapper``, which frames every optimizer call's user message as A's
+Claude backend does -- ``History:\n- User: ...`` then ``Answer the latest user
+request.`` (skillopt/claude_backend.py); off by default, ``=false`` or omitting it
+sends the bare message. The solve node always sends its question framed that way
+(``ops.claude_backend_prompt``). The SkillOpt
 strategy evaluates on the manifest's test part after training, as A does). The
 route matters: with A's best seed-42 skill on the 125 test items, this solver
 scored 57.6% on the plain DSH API route and 69.6% on ``claude_code`` with
