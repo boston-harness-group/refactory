@@ -58,7 +58,7 @@ STRATEGY = "skillopt"
 DATA_PATH_ENV = "LIVEMATH_DATA_PATH"
 
 #: The ops arm B's SkillOpt search needs (``SkillOptLoop.required_ops``).
-ALLOWED_OPS = ("set_knob", "text_patch")
+ALLOWED_OPS = ("set_knob",)
 #: The LiveMath solver knob the skill text lives in (livemath/mode.py `knobs`).
 SKILL_KNOB = "skill"
 

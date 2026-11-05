@@ -729,8 +729,8 @@ def test_configure_frozen_field_binding_succeeds():
     assert new_state["knobs"]["fk"]["value"] == "new value"
 
 
-def test_text_patch_on_system_prompt_knob():
-    """text_patch works on the auto system-prompt knob. Python runtime."""
+def test_patch_on_system_prompt_knob():
+    """set_knob's patch works on the auto system-prompt knob. Python runtime."""
     class PatchMode(nn.Mode):
         name = "patch_test"
         def build(self):
@@ -741,14 +741,67 @@ def test_text_patch_on_system_prompt_knob():
 
     state = PatchMode().state_dict()
     assert "a__system_prompt" in state["knobs"]
-    new_state = nn.edits.apply({"op": "text_patch", "name": "a__system_prompt",
-                                "edits": [{"kind": "replace", "target": "Be helpful",
+    new_state = nn.edits.apply({"op": "set_knob", "name": "a__system_prompt",
+                                "patch": [{"kind": "replace", "target": "Be helpful",
                                            "content": "Be concise"}]}, state)
     assert new_state["knobs"]["a__system_prompt"]["value"] == "Be concise"
 
 
-def test_text_patch_slot_preservation():
-    """text_patch on a template-bound knob refuses if slots are removed. Python runtime."""
+def test_patch_and_value_reach_both_runtimes_alike():
+    """A system prompt moved by set_knob's patch is the same state as the same text
+    set by value, so the walker sends it and lowering hands it to the spine. Both runtimes."""
+    from refactory_dsh import lowering
+    from refactory_dsh.nn.executor import execute
+
+    class PatchMode(nn.Mode):
+        name = "patch_two_runtime"
+        def build(self):
+            g = nn.Graph()
+            g.add(nn.Node("a", "agent", prompt_template="Do it", writes=("out.txt",),
+                          system_prompt_template="Be helpful"))
+            return g
+
+    state = PatchMode().state_dict()
+    patched = nn.edits.apply({"op": "set_knob", "name": "a__system_prompt",
+                              "patch": [{"kind": "append", "content": "Be brief."}]}, state)
+    text = patched["knobs"]["a__system_prompt"]["value"]
+    assert text == "Be helpful\n\nBe brief.\n"
+    valued = nn.edits.apply({"op": "set_knob", "name": "a__system_prompt", "value": text}, state)
+    assert patched == valued
+    # Spine: the lowered node carries the patched prompt.
+    assert lowering.to_workflow(patched).nodes["a"].system_prompt == text
+    # Walker: the model receives it.
+    captured = {}
+
+    class Client:
+        def complete(self, prompt, *, system="", workdir=None, **kw):
+            captured["system"] = system
+            return "reply"
+        def for_node(self, n, role=""):
+            return self
+        def with_wall(self, t):
+            return self
+        def with_budget(self, b):
+            return self
+        def with_tool_policy(self, p):
+            return self
+        def context(self):
+            return {}
+        def route(self):
+            return {"worker_backend": "dsh"}
+
+    import tempfile
+    graph = nn.Graph.from_state(patched["graph"])
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "out.txt").write_text("")
+        result = execute(graph, Path(tmp), model=Client(),
+                         knobs={k: v["value"] for k, v in patched["knobs"].items()})
+    assert result.exit_ok, result.error
+    assert captured["system"] == text
+
+
+def test_patch_slot_preservation():
+    """A patch on a template-bound knob refuses if slots are removed. Python runtime."""
     graph = nn.Graph()
     graph.add(nn.Node("a", "agent",
                       prompt_template="Do it",
@@ -764,11 +817,11 @@ def test_text_patch_slot_preservation():
     }}
     # Replacing a slot with empty should fail
     with pytest.raises(nn.edits.EditError, match="template slot"):
-        nn.edits.apply({"op": "text_patch", "name": "sp",
-                        "edits": [{"kind": "replace", "target": " and {{context}}", "content": ""}]}, state)
+        nn.edits.apply({"op": "set_knob", "name": "sp",
+                        "patch": [{"kind": "replace", "target": " and {{context}}", "content": ""}]}, state)
     # Keeping both slots should succeed
-    nn.edits.apply({"op": "text_patch", "name": "sp",
-                    "edits": [{"kind": "replace", "target": "Use", "content": "Apply"}]}, state)
+    nn.edits.apply({"op": "set_knob", "name": "sp",
+                    "patch": [{"kind": "replace", "target": "Use", "content": "Apply"}]}, state)
 
 
 def test_is_structural_after_removal():
@@ -1040,14 +1093,43 @@ def test_replay_refuses_removed_ops(tmp_path):
         loop._replay_if_asked()
 
 
+def test_replay_refuses_text_patch_journal(tmp_path):
+    """A journal recorded with the old text_patch op cannot be resumed; the refusal
+    names set_knob's patch form. A set_knob patch in the journal resumes. Python runtime."""
+    from refactory_dsh.loop import Loop, LoopConfig, LoopError, JOURNAL
+    from refactory_dsh.optim.base import Candidate
+
+    seed_state = Fixture().state_dict()
+    parent = Candidate.from_state(seed_state)
+
+    def _loop(root, op_edit):
+        loop = Loop("circle_packing/adaptive", LoopConfig(
+            runs_root=root, resume=True, optimizer="random", batch_size=1,
+        ), project=Path("."))
+        loop.root.mkdir(parents=True, exist_ok=True)
+        (loop.root / JOURNAL).write_text("\n".join(json.dumps(r) for r in [
+            {"event": "original_seed", "state": seed_state},
+            {"event": "candidate", "state": parent.state, "edits": [op_edit]},
+        ]) + "\n")
+        return loop
+
+    old = _loop(tmp_path / "old", {"op": "text_patch", "name": "skill",
+                                   "edits": [{"kind": "append", "content": "x"}]})
+    with pytest.raises(LoopError, match="cannot resume: journal contains edit op "
+                                        "'text_patch'.*folded into set_knob"):
+        old._replay_if_asked()
+    new = _loop(tmp_path / "new", {"op": "set_knob", "name": "skill",
+                                   "patch": [{"kind": "append", "content": "x"}]})
+    assert new._replay_if_asked() is True
+
+
 def test_presets_are_closed():
-    # text_patch is deliberately excluded from every preset that random search
-    # samples from (including broad) so seeded runs stay unchanged — correction 3.
+    # broad is the whole catalogue; the patch form is part of set_knob, which
+    # random search samples only with a value (test_set_knob_patch.py).
     all_names = nn.edits.names()
     broad = sorted(nn.edits.PRESETS["broad"])
-    assert "text_patch" in all_names, "text_patch must be a registered edit"
-    assert "text_patch" not in broad, "text_patch must not be in 'broad' preset"
-    assert sorted(set(all_names) - {"text_patch"}) == broad
+    assert "text_patch" not in all_names, "text_patch was folded into set_knob"
+    assert sorted(all_names) == broad
     for name in nn.edits.PRESETS["knob_only"]:
         assert nn.edits._specs()[name].kind == "knob"  # noqa: SLF001
     with pytest.raises(nn.edits.EditError):

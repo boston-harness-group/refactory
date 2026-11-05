@@ -116,14 +116,21 @@ hides the edit that caused the problem.
 
 `refactory_dsh/nn/edits.py`. Edits are typed data, applied to a state:
 
-- **16 operations**: `add_node`, `remove_node`,
-  `add_edge`, `remove_edge`, `set_knob`, `add_knob`, `remove_knob`, `text_patch`,
+- **15 operations**: `add_node`, `remove_node`,
+  `add_edge`, `remove_edge`, `set_knob`, `add_knob`, `remove_knob`,
   `insert_after`, `insert_before`, `wrap`, `bypass`, `duplicate`, `split`,
   `reorder`, `loop`.
-- The first eight are primitives; the rest are **macros** — literal compositions of
+- The first seven are primitives; the rest are **macros** — literal compositions of
   primitives, so a macro cannot express anything a sequence of primitives could not.
 - **4 presets** declare which operations a run may use: `broad` (15),
   `structure` (15), `conservative` (4), `knob_only` (3).
+- **`set_knob` is the one edit that moves a knob**, in exactly one of two forms:
+  `value` replaces the whole value; `patch` is an ordered list of text edits
+  (`replace`, `delete`, `insert_after`, `insert_before`, `append`, with
+  `config` for the matching and protected-region policies) applied to a `str`
+  knob as one patch. Both or neither is refused, and so is a patch on any other
+  kind. A frozen knob refuses both forms. Random search samples only the `value`
+  form, so seeded random runs are unchanged by the patch form.
 - **Field bindings**: a node may declare that a knob sets one of its fields via
   `field_bindings`. Only fields in the `BINDABLE_FIELDS` allowlist
   (`system_prompt_template`, `prompt_template`, `max_iterations`, `parallelism`)
@@ -132,9 +139,9 @@ hides the edit that caused the problem.
   sees the knob's value wherever it would have seen the field.
 - **Every agent node's system prompt is a knob.** `Mode` declares an open `str`
   knob `{node_id}__system_prompt` for each agent node, defaulting to its
-  `system_prompt_template` (or `""`), and binds it to that field, so `set_knob` and
-  `text_patch` can change it; a `{{slot}}` in the original template must stay in
-  every new value. The user prompt (`prompt_template`) is not a knob unless the
+  `system_prompt_template` (or `""`), and binds it to that field, so `set_knob`
+  can change it; a `{{slot}}` in the original template must stay in every new
+  value. The user prompt (`prompt_template`) is not a knob unless the
   author binds one. To keep a system prompt fixed, declare the knob yourself with
   `frozen=True` and bind it on the node, which stops the automatic one:
 
