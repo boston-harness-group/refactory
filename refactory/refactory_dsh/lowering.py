@@ -219,9 +219,17 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
             # spine, which presents a user gate to the person. Emitting a command for
             # those would give the gate two answerers, and which one won would depend
             # on the runtime.
+            # Resolve field bindings for gate nodes (max_iterations).
+            _gate_mi = node.max_iterations
+            _gate_knob_values = {name: entry.get("value") for name, entry in (state.get("knobs") or {}).items()}
+            for _fb_field, _fb_knob in getattr(node, "field_bindings", ()):
+                if _fb_field == "max_iterations":
+                    _fb_val = _gate_knob_values.get(_fb_knob)
+                    if _fb_val is not None:
+                        _gate_mi = int(_fb_val)
             gate: dict[str, Any] = {
                 "evaluator_type": node.gate_kind,
-                "max_iterations": node.max_iterations,
+                "max_iterations": _gate_mi,
             }
             # The author's note is the gate's question: for a `user` gate it is what
             # the person is shown, and an empty prompt would ask them to choose
