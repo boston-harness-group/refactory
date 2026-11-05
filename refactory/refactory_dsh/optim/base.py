@@ -198,8 +198,7 @@ class Candidate:
 
     def is_structural(self) -> bool:
         return any(nn_edits.is_macro(edit.get("op", "")) or edit.get("op") in (
-            "add_node", "remove_node", "replace_node", "add_edge", "remove_edge",
-            "set_node_field",
+            "add_node", "remove_node", "add_edge", "remove_edge",
         ) for edit in self.edits)
 
     def describe(self, *, include_reports: bool = False) -> dict[str, Any]:

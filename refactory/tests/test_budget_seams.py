@@ -161,7 +161,10 @@ def test_budget_counts_rollouts(tmp_path):
     with _patch_mode(BudgetProbe):
         loop = Loop(
             MODE, LoopConfig(
-                epochs=4, batch_size=3, optimizer="random", seed=1,
+                # epochs=8 so the loop has enough budget to hit the rollout cap
+                # before epochs run out; F14 removed ops so the random sampler
+                # produces fewer distinct candidates per batch.
+                epochs=8, batch_size=3, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 max_rollouts=10,
             ),

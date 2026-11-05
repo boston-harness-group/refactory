@@ -2014,8 +2014,16 @@ class Executor:
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 
-        prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
-        system = render(node.system_prompt_template, self.ctx) if node.system_prompt_template else ""
+        # Resolve field bindings for template fields before rendering.
+        _spt = node.system_prompt_template
+        _pt = node.prompt_template
+        for _fb_field, _fb_knob in getattr(node, "field_bindings", ()):
+            if _fb_field == "system_prompt_template" and _fb_knob in self.ctx.knobs:
+                _spt = str(self.ctx.knobs[_fb_knob])
+            elif _fb_field == "prompt_template" and _fb_knob in self.ctx.knobs:
+                _pt = str(self.ctx.knobs[_fb_knob])
+        prompt = with_feedback(render(_pt, self.ctx), self.record.feedback.get(node.id, ""))
+        system = render(_spt, self.ctx) if _spt else ""
         # Gap 20 / correction C: detect unresolved template keys and emit
         # run_warning events, matching the spine (index.ts:1800-1811).
         # Strip the steering block before scanning (agent_delivery.py:838-845).

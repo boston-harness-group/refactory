@@ -273,13 +273,27 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                     f"{len(node.writes)} write(s); a no-tools node must declare exactly "
                     "one output for its captured reply"
                 )
+            # Resolve field bindings for agent nodes.
+            _knob_values = {name: entry.get("value") for name, entry in (state.get("knobs") or {}).items()}
+            _resolved_spt = node.system_prompt_template
+            _resolved_pt = node.prompt_template
+            _resolved_mi = node.max_iterations
+            for _fb_field, _fb_knob in getattr(node, "field_bindings", ()):
+                _fb_val = _knob_values.get(_fb_knob)
+                if _fb_val is not None:
+                    if _fb_field == "system_prompt_template":
+                        _resolved_spt = str(_fb_val)
+                    elif _fb_field == "prompt_template":
+                        _resolved_pt = str(_fb_val)
+                    elif _fb_field == "max_iterations":
+                        _resolved_mi = int(_fb_val)
             nodes[node_id] = AgentNode(
                 **common,
                 role=role,
-                prompt_template=node.prompt_template,
-                **({"system_prompt": node.system_prompt_template} if node.system_prompt_template else {}),
+                prompt_template=_resolved_pt,
+                **({"system_prompt": _resolved_spt} if _resolved_spt else {}),
                 tools=list(node.tools),
-                max_iterations=node.max_iterations,
+                max_iterations=_resolved_mi,
                 # The node's model-session wall: `workers.lower_workflow` gives the
                 # dispatched session this bound and the command it plus the dispatch
                 # overhead; the walker gives its model client the same bound.

@@ -114,13 +114,18 @@ hides the edit that caused the problem.
 
 `refactory_dsh/nn/edits.py`. Edits are typed data, applied to a state:
 
-- **17 operations**: `add_node`, `remove_node`, `replace_node`, `set_node_field`,
-  `add_edge`, `remove_edge`, `set_knob`, `add_knob`, `remove_knob`, `insert_after`,
-  `insert_before`, `wrap`, `bypass`, `duplicate`, `split`, `reorder`, `loop`.
-- The first nine are primitives; the rest are **macros** — literal compositions of
+- **16 operations**: `add_node`, `remove_node`,
+  `add_edge`, `remove_edge`, `set_knob`, `add_knob`, `remove_knob`, `text_patch`,
+  `insert_after`, `insert_before`, `wrap`, `bypass`, `duplicate`, `split`,
+  `reorder`, `loop`.
+- The first eight are primitives; the rest are **macros** — literal compositions of
   primitives, so a macro cannot express anything a sequence of primitives could not.
-- **4 presets** declare which operations a run may use: `broad` (17),
-  `structure` (17), `conservative` (4), `knob_only` (3).
+- **4 presets** declare which operations a run may use: `broad` (15),
+  `structure` (15), `conservative` (4), `knob_only` (3).
+- **Field bindings**: a node may declare that a knob sets one of its fields via
+  `field_bindings`. Only fields in the `BINDABLE_FIELDS` allowlist
+  (`system_prompt_template`, `prompt_template`, `max_iterations`, `parallelism`)
+  may be bound; V13 refuses everything else.
 
 ```bash
 python -c "from refactory_dsh.nn import edits as E; print(E.names())"

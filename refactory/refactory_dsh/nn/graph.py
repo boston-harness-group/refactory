@@ -167,8 +167,19 @@ _NODE_FIELDS = frozenset(
         "tool_policy",
         "parallelism",
         "parallelism_knob",
+        "field_bindings",
     }
 )
+
+#: Fields a knob may be bound to via ``field_bindings``.  An explicit allowlist:
+#: everything not listed here is refused by V13 on both runtimes.  A new ``Node``
+#: field is unbindable until it is added here.
+BINDABLE_FIELDS = frozenset({
+    "system_prompt_template",
+    "prompt_template",
+    "max_iterations",
+    "parallelism",       # data nodes only; checked in V13
+})
 
 
 class GraphError(ValueError):
@@ -280,6 +291,10 @@ class Node:
     #: tools and the runtime captures its text reply as the node's single declared
     #: output. ``None`` (the default) preserves existing tool-enabled behavior.
     tool_policy: str | None = None
+    #: Typed knob-to-field bindings: each pair ``(field_name, knob_name)`` says
+    #: the knob's value replaces this node's field when the graph runs.  Only
+    #: fields in ``BINDABLE_FIELDS`` may be bound.  Generalises ``parallelism_knob``.
+    field_bindings: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.tool_policy is not None and self.tool_policy != "none":
@@ -376,6 +391,26 @@ class Node:
                 raise GraphError(f"node {self.id!r} collects its workspace's diff, which is written "
                                  "into its first declared write, and it declares none")
 
+        # field_bindings: structural validation only (pair shape, knob membership).
+        # Domain rules (bindable fields, parallelism on data nodes) are checked
+        # by V13 in validate.py, so a state with invalid bindings can be parsed
+        # and inspected before running.
+        for pair in self.field_bindings:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise GraphError(
+                    f"node {self.id!r}: each field_binding must be a (field_name, knob_name) pair"
+                )
+            field_name, knob_name = pair
+            if not isinstance(field_name, str) or not isinstance(knob_name, str):
+                raise GraphError(
+                    f"node {self.id!r}: field_binding entries must be strings"
+                )
+            if knob_name and knob_name not in self.knobs:
+                raise GraphError(
+                    f"node {self.id!r}: field_binding knob {knob_name!r} must be "
+                    "one of the node's knobs"
+                )
+
         if self.retry is not None:
             if self.kind != "agent":
                 raise GraphError(f"node {self.id!r} is not an agent but declares a retry")
@@ -452,6 +487,7 @@ class Node:
             **({"outputs_only": True} if self.outputs_only else {}),
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
             **({"tool_policy": self.tool_policy} if self.tool_policy is not None else {}),
+            **({"field_bindings": [list(pair) for pair in self.field_bindings]} if self.field_bindings else {}),
         }
 
     @classmethod
@@ -500,6 +536,9 @@ class Node:
             workspace=(dict(state["workspace"]) if isinstance(state.get("workspace"), dict)
                        else state.get("workspace")),
             tool_policy=state.get("tool_policy"),
+            field_bindings=tuple(
+                tuple(pair) for pair in (state.get("field_bindings") or ())
+            ),
         )
 
     def effective_parallelism(self, knobs: Mapping[str, Any]) -> int:
@@ -531,7 +570,8 @@ class Node:
         if field_name not in _NODE_FIELDS:
             raise GraphError(f"node {self.id!r} has no field {field_name!r}")
         if field_name in ("knobs", "reads", "writes", "produces", "tools", "targets",
-                          "optional_targets", "sources", "inline_items", "feedback_keys") and isinstance(value, list) and field_name != "tool_policy":
+                          "optional_targets", "sources", "inline_items", "feedback_keys",
+                          "field_bindings") and isinstance(value, list) and field_name != "tool_policy":
             value = tuple(value)
         return replace(self, **{field_name: value})
 

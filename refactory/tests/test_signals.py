@@ -199,9 +199,13 @@ def test_a_dominant_refusal_is_reported_as_a_finding_about_the_catalogue(tmp_pat
 
 def test_no_dominant_refusal_when_nothing_was_refused(tmp_path):
     """A clean run should not invent a finding."""
+    # Use the knob_only preset so the random optimizer only picks knob edits
+    # that succeed, avoiding structural E-shape refusals.  F14 removed
+    # set_node_field/replace_node which shifted the old seed's refusal rate.
     loop = Loop(
         MODE,
-        _config(tmp_path / "run", optimizer="random"),
+        _config(tmp_path / "run", optimizer="random",
+                edit_preset="knob_only"),
         project=Path("."),
     )
     loop.run()

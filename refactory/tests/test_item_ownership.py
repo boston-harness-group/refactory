@@ -58,12 +58,14 @@ def _loop_with_seed(tmp_path: Path) -> tuple[loop_module.Loop, dict[str, Any]]:
 
 
 def test_limit_change_triggers_exam_moved(tmp_path):
-    """Changing limit on a data node is caught as E-exam."""
+    """Changing limit on a data node is caught as E-exam. Python runtime."""
     run, state = _loop_with_seed(tmp_path)
-    changed = edit_module.apply(
-        {"op": "set_node_field", "id": "data", "field": "limit", "value": 5},
-        state,
-    )
+    # Directly mutate limit in a copied state dict
+    changed = copy.deepcopy(state)
+    from refactory_dsh.nn.graph import Graph, Node
+    graph = Graph.from_state(changed["graph"])
+    graph.nodes["data"] = graph.nodes["data"].with_field("limit", 5)
+    changed["graph"] = graph.to_state()
     candidate = Candidate.from_state(changed)
     reason = run._exam_moved(candidate)
     assert reason is not None and reason.startswith("E-exam"), reason
@@ -77,12 +79,13 @@ def test_unchanged_limit_passes_exam_moved(tmp_path):
 
 
 def test_limit_change_rejected_by_step(tmp_path):
-    """A limit change flows through step() and appears in rejections."""
+    """A limit change flows through step() and appears in rejections. Python runtime."""
     run, state = _loop_with_seed(tmp_path)
-    changed = edit_module.apply(
-        {"op": "set_node_field", "id": "data", "field": "limit", "value": 5},
-        state,
-    )
+    changed = copy.deepcopy(state)
+    from refactory_dsh.nn.graph import Graph
+    graph = Graph.from_state(changed["graph"])
+    graph.nodes["data"] = graph.nodes["data"].with_field("limit", 5)
+    changed["graph"] = graph.to_state()
     candidate = Candidate.from_state(changed)
     run.step([candidate])
     assert any("E-exam" in r.reasons[0] for r in run.rejections), run.rejections
@@ -104,31 +107,34 @@ def _find_data_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_produces_edit_removing_item_scores_triggers_exam_moved(tmp_path):
-    """Removing item_scores from produces is caught as E-exam."""
+    """Removing item_scores from produces is caught as E-exam. Python runtime."""
     run, state = _loop_with_seed(tmp_path)
     data_node = _find_data_node(state)
     assert "item_scores" in (data_node.get("produces") or [])
 
-    # Remove item_scores from produces
-    new_produces = [p for p in data_node.get("produces", []) if p != "item_scores"]
-    changed = edit_module.apply(
-        {"op": "set_node_field", "id": "data", "field": "produces", "value": new_produces},
-        state,
-    )
+    # Direct state mutation removing item_scores from produces
+    changed = copy.deepcopy(state)
+    from refactory_dsh.nn.graph import Graph
+    graph = Graph.from_state(changed["graph"])
+    old_produces = list(graph.nodes["data"].produces)
+    new_produces = [p for p in old_produces if p != "item_scores"]
+    graph.nodes["data"] = graph.nodes["data"].with_field("produces", new_produces)
+    changed["graph"] = graph.to_state()
     candidate = Candidate.from_state(changed)
     reason = run._exam_moved(candidate)
     assert reason is not None and reason.startswith("E-exam"), reason
 
 
 def test_produces_edit_rejected_by_step(tmp_path):
-    """Removing item_scores from produces flows through step() as E-exam."""
+    """Removing item_scores from produces flows through step() as E-exam. Python runtime."""
     run, state = _loop_with_seed(tmp_path)
-    data_node = _find_data_node(state)
-    new_produces = [p for p in data_node.get("produces", []) if p != "item_scores"]
-    changed = edit_module.apply(
-        {"op": "set_node_field", "id": "data", "field": "produces", "value": new_produces},
-        state,
-    )
+    changed = copy.deepcopy(state)
+    from refactory_dsh.nn.graph import Graph
+    graph = Graph.from_state(changed["graph"])
+    old_produces = list(graph.nodes["data"].produces)
+    new_produces = [p for p in old_produces if p != "item_scores"]
+    graph.nodes["data"] = graph.nodes["data"].with_field("produces", new_produces)
+    changed["graph"] = graph.to_state()
     candidate = Candidate.from_state(changed)
     run.step([candidate])
     assert any("E-exam" in r.reasons[0] for r in run.rejections), run.rejections
@@ -418,3 +424,21 @@ def test_post_trial_accepts_index_ids_from_csv(tmp_path, evaluator_name):
 
     result = _measure_with_evaluator(tmp_path, evaluator_name, scores)
     assert result.exit_ok
+
+
+def test_add_node_with_exam_field_triggers_guard(tmp_path):
+    """add_node with a node containing inline_items triggers E-items. Python runtime."""
+    from refactory_dsh.nn.edits import EditError
+
+    _, klass = registry.resolve(project_root(), MODE_ID)
+    state = klass().state_dict()
+    new_node = {
+        "id": "baked", "kind": "data",
+        "subgraph_entry": "work", "subgraph_exit": "work",
+        "inline_items": [{"id": "alpha"}, {"id": "beta"}],
+        "writes": ["baked_item.json"], "produces": ["baked_scores"],
+    }
+    edit = {"op": "add_node", "node": new_node, "position": {"after": "data"}}
+    with pytest.raises(EditError) as caught:
+        edit_module.apply(edit, state)
+    assert caught.value.code == "E-items"

@@ -120,6 +120,12 @@ class Solver(nn.Mode):
             "data_parallelism": nn.Knob(
                 1, "int", lo=1, hi=64, frozen=True,
                 description="concurrent data-node items"),
+            # F14: freeze the auto-declared system-prompt knob so the optimizer
+            # cannot change the solve node's system prompt.  The optimizable text
+            # stays the ``skill`` knob.
+            "solve__system_prompt": nn.Knob(
+                SYSTEM_PROMPT, "str", frozen=True,
+                description="system prompt for solve (frozen; use the skill knob)"),
         }
 
     def build(self) -> nn.Graph:
@@ -149,7 +155,8 @@ class Solver(nn.Mode):
             tool_policy="none",
             role="solver",
             timeout_s=self.solve_timeout_s,
-            knobs=("max_completion_tokens",),
+            knobs=("max_completion_tokens", "solve__system_prompt"),
+            field_bindings=(("system_prompt_template", "solve__system_prompt"),),
         ))
         graph.add(nn.Node(
             "finish", "op",

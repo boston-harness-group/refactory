@@ -159,8 +159,7 @@ from refactory_dsh import nn, registry
 from refactory_dsh.nn import edits
 mode = registry.resolve(Path('.'), 'counter/counter')[1]()
 state = mode.state_dict()
-broken = edits.apply({'op': 'set_node_field', 'id': 'count',
-                      'field': 'reads', 'value': ['nowhere.json']}, state)
+broken = edits.apply({'op': 'remove_node', 'id': 'count'}, state)
 for issue in nn.validate_state(broken):
     print(issue)
 "

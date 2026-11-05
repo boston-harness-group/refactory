@@ -84,7 +84,8 @@
   "start_node": "items",
   "terminal": true,
   "knob_values": {
-    "source_release": 17.0
+    "source_release": 17.0,
+    "write_build__system_prompt": ""
   },
   "knob_specs": {
     "source_release": {
@@ -96,6 +97,17 @@
       "values": [],
       "frozen": false,
       "description": "the Java release javac targets; the build agent writes it into the `--release` flag of the script it produces",
+      "required": false
+    },
+    "write_build__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for write_build",
       "required": false
     }
   }

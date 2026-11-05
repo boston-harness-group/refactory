@@ -2982,6 +2982,14 @@ class Loop(OuterLoop):
                 break
             event = record.get("event")
             if event == "candidate":
+                # F14: refuse journal entries that contain removed edit ops.
+                _removed_ops = {"set_node_field", "replace_node"}
+                for _e in (record.get("edits") or ()):
+                    if isinstance(_e, dict) and _e.get("op") in _removed_ops:
+                        raise LoopError(
+                            f"cannot resume: journal contains edit op {_e['op']!r} "
+                            "which was removed in F14; start a new optimization run"
+                        )
                 candidate = Candidate.from_state(
                     record["state"],
                     parent=record.get("parent"),
