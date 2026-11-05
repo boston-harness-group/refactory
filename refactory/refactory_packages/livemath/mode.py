@@ -122,16 +122,13 @@ class Solver(nn.Mode):
         block: str = "baseline",
         state: dict[str, Any] | None = None,
     ) -> None:
-        from .blocks import BLOCK_NAMES, BLOCKS
+        from .blocks import BLOCK_NAMES
 
         if block not in BLOCK_NAMES:
             raise ValueError(
                 f"unknown block {block!r}; known: {list(BLOCK_NAMES)}"
             )
         self._block = block
-        # The block's agent nodes, so run() can apply max_completion_tokens to
-        # every agent node, not just "solve".
-        self._agent_node_ids: list[str] = list(BLOCKS[block]().agent_node_ids)
         super().__init__(state=state)
 
     @classmethod
@@ -209,7 +206,9 @@ class Solver(nn.Mode):
         the worker observer sets it as ``maxTokens`` on the DSH config.
         """
         cap = int(self.values().get("max_completion_tokens") or 0)
-        agent_ids = getattr(self, "_agent_node_ids", ["solve"])
+        # Every agent node of the graph this mode holds, so a clone
+        # (``type(self)(state=...)``, which does not know the block name) caps them too.
+        agent_ids = [node.id for node in self.graph().nodes.values() if node.kind == "agent"]
         if cap > 0 and model is not None and callable(getattr(model, "for_node", None)):
             routes = dict(getattr(model, "_node_routes", None) or {})
             for node_id in agent_ids:

@@ -405,7 +405,7 @@ def test_every_agent_node_uses_solve_timeout_s(block_name):
 
 def test_max_completion_tokens_applies_to_all_agent_nodes(monkeypatch):
     """The max_completion_tokens knob is applied to every agent node via Solver.run()."""
-    from refactory_packages.livemath.blocks import BLOCK_NAMES
+    from refactory_packages.livemath.blocks import BLOCK_NAMES, BLOCKS
     from refactory_packages.livemath.mode import Solver
 
     for name in BLOCK_NAMES:
@@ -433,12 +433,33 @@ def test_max_completion_tokens_applies_to_all_agent_nodes(monkeypatch):
         assert captured, f"{name}: no model captured"
         result_model = captured[0]
         routes = getattr(result_model, "_node_routes", {})
-        expected_ids = mode._agent_node_ids
+        expected_ids = [n.id for n in mode.graph().nodes.values() if n.kind == "agent"]
+        assert sorted(expected_ids) == sorted(BLOCKS[name]().agent_node_ids)
         for node_id in expected_ids:
             assert node_id in routes, f"{name}: {node_id} not in routes"
             assert routes[node_id].get("max_completion_tokens") == "8192", (
                 f"{name}: {node_id} cap not set")
         captured.clear()
+
+
+@pytest.mark.parametrize("make", ["Solver", "SolverVerify"])
+def test_max_completion_tokens_caps_every_agent_of_a_clone(make, monkeypatch):
+    """A clone (``type(self)(state=...)``, as ``Mode.clone`` and the loop make it) of a
+    verify block caps solve_draft and verify, though it never saw the block name."""
+    from refactory_dsh.nn import edits
+    from refactory_packages.livemath import mode as mode_mod
+
+    mode = (mode_mod.Solver(block="solve_then_verify") if make == "Solver"
+            else mode_mod.SolverVerify())
+    mode.load_state_dict(edits.configure(mode.state_dict(), "max_completion_tokens", "512"))
+    clone = type(mode)(state=mode.state_dict())
+    captured = []
+    monkeypatch.setattr(nn.Mode, "run", lambda self, workdir, *, model=None, **kw: (
+        captured.append(model) or nn.RunResult(exit_ok=True, facts={}, workdir=workdir)))
+    clone.run(Path("/tmp/unused"), model=_make_route_client())
+    routes = captured[0]._node_routes
+    for node_id in ("solve_draft", "verify"):
+        assert routes[node_id]["max_completion_tokens"] == "512", (node_id, routes)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -705,7 +726,7 @@ def _walker_and_spine_same(block_name, tmp_path, monkeypatch, *, parallelism=1):
     assert len(walker_scores) == 5
     assert walker_scores == sorted((i, 1.0 if i in label_b else 0.0) for i, _ in walker_scores)
     # Every agent call is one recorded exchange on both runtimes (the grid's model calls).
-    agents = len(mode._agent_node_ids)
+    agents = sum(1 for n in mode.graph().nodes.values() if n.kind == "agent")
     spine_records = json.loads((spine_dir / "item_records.json").read_text())
     for records in (walker_result.item_records, spine_records):
         assert sorted(len(r.get("exchanges") or ()) for r in records) == [agents] * 5
@@ -1039,6 +1060,43 @@ def test_grid_route_flags_reach_every_block(args, tmp_path, monkeypatch):
                 assert config["knobs"][flag] == value, (block, flag)
             else:
                 assert config[flag] == value, (block, flag)
+
+
+def test_grid_through_cli_forwards_skill_route_and_evaluator(tmp_path, monkeypatch):
+    """`refactory grid` through cli.main: the skill file's text reaches the block's
+    knobs, --setting-sources and --evaluator reach its config, and a failed model call
+    shows in the row's errors."""
+    from refactory_dsh import cli
+    import refactory_dsh.model as model_mod
+
+    _patch_task(monkeypatch)
+    factory = _Factory(model=_FailOnceModel(RuntimeError("model exploded")))
+    monkeypatch.setattr(model_mod, "DshModelClient", factory)
+    import refactory_dsh.loop as loop_mod
+
+    seen: list[list[str]] = []
+    real_main = loop_mod.main
+    monkeypatch.setattr(loop_mod, "main", lambda argv, **kw: seen.append(argv) or real_main(argv, **kw))
+    skill = tmp_path / "skill.txt"
+    skill.write_text("Read every option twice.")
+    output = tmp_path / "grid_results.json"
+    rc = cli.main([
+        "grid", "livemath/solver", "--parts", str(_parts(tmp_path)), "--output", str(output),
+        "--blocks", "baseline", "--skill", str(skill),
+        "--worker-backend", "claude_code", "--model", "claude-opus-4-6",
+        "--setting-sources", "project", "--evaluator", "walker",
+    ])
+    assert rc == 0
+    assert factory.routes and factory.routes[0]["setting_sources"] == "project"
+    config = json.loads((tmp_path / "grid_results.runs" / "baseline" / "config.json").read_text())
+    assert config["knobs"]["skill"] == "Read every option twice."
+    assert config["setting_sources"] == "project"
+    assert config["evaluator"] == "walker"
+    # walker is also the default, so check the flag itself reached optimize's argv.
+    assert len(seen) == 1 and "--evaluator" in seen[0], seen
+    assert seen[0][seen[0].index("--evaluator") + 1] == "walker"
+    row = json.loads(output.read_text())["blocks"][0]
+    assert row["errors"] == 1, row["errors"]
 
 
 @pytest.mark.parametrize("extra", [[], _CLAUDE_ARGS, _DSH_ARGS],
