@@ -162,7 +162,10 @@ def test_a_rejected_candidate_leaves_the_leaderboard(tmp_path):
 
 def test_a_keep_survives_elite_selection(tmp_path):
     """What keep is for: a good point that a newer batch outscored still gets followed."""
-    loop = Loop(MODE, _config(tmp_path), project=Path("."))
+    # batch_size=4 so enough distinct candidates survive; F14 removed ops that
+    # the random sampler used to waste attempts on, so fewer proposals are
+    # refused and more produce duplicate states at small batch sizes.
+    loop = Loop(MODE, _config(tmp_path, batch_size=4), project=Path("."))
     loop.run()
     board = loop.leaderboard()
     assert len(board) > 2

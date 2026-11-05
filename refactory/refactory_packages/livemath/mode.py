@@ -154,6 +154,16 @@ class Solver(nn.Mode):
                 description="concurrent data-node items"),
         }
 
+    def _declared_entries(self) -> dict[str, dict[str, Any]]:
+        """The mode's knobs plus the selected block's frozen system-prompt knobs."""
+        from .blocks import BLOCKS
+
+        entries = super()._declared_entries()
+        block = BLOCKS[getattr(self, "_block", "baseline")](self.solve_timeout_s)
+        for name, knob in block.knobs.items():
+            entries[name] = {"value": knob.default, "spec": knob.spec()}
+        return entries
+
     def build(self) -> nn.Graph:
         """The data pass over the selected block, then ``finish``.
 

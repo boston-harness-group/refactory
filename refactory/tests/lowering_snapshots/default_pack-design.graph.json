@@ -1140,7 +1140,23 @@
     "repo_owner": "",
     "repo_visibility": "private",
     "refine": "",
-    "review_comments": 0.0
+    "review_comments": 0.0,
+    "apply_corrections__system_prompt": "",
+    "classify_reloop__system_prompt": "",
+    "code_reviewer__system_prompt": "",
+    "design_doc__system_prompt": "",
+    "early_asks_check__system_prompt": "",
+    "emit__system_prompt": "",
+    "health_checker__system_prompt": "",
+    "overwatch__system_prompt": "",
+    "pitfalls_researcher__system_prompt": "",
+    "qa_director__system_prompt": "",
+    "qa_director_rerun__system_prompt": "",
+    "qa_judge__system_prompt": "",
+    "research_director__system_prompt": "",
+    "strategy_director__system_prompt": "",
+    "synthesize_strategy__system_prompt": "",
+    "verifier__system_prompt": ""
   },
   "knob_specs": {
     "check_attempts": {
@@ -1423,6 +1439,182 @@
       "values": [],
       "frozen": true,
       "description": "with refine: add the pull request's reviews and comments to the run's steering",
+      "required": false
+    },
+    "apply_corrections__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for apply_corrections",
+      "required": false
+    },
+    "classify_reloop__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for classify_reloop",
+      "required": false
+    },
+    "code_reviewer__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for code_reviewer",
+      "required": false
+    },
+    "design_doc__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for design_doc",
+      "required": false
+    },
+    "early_asks_check__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for early_asks_check",
+      "required": false
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for emit",
+      "required": false
+    },
+    "health_checker__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for health_checker",
+      "required": false
+    },
+    "overwatch__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for overwatch",
+      "required": false
+    },
+    "pitfalls_researcher__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for pitfalls_researcher",
+      "required": false
+    },
+    "qa_director__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for qa_director",
+      "required": false
+    },
+    "qa_director_rerun__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for qa_director_rerun",
+      "required": false
+    },
+    "qa_judge__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for qa_judge",
+      "required": false
+    },
+    "research_director__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for research_director",
+      "required": false
+    },
+    "strategy_director__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for strategy_director",
+      "required": false
+    },
+    "synthesize_strategy__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for synthesize_strategy",
+      "required": false
+    },
+    "verifier__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for verifier",
       "required": false
     }
   }

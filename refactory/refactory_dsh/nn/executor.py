@@ -1370,7 +1370,8 @@ class Executor:
                 self._visits = visits
                 current, verdict = self._try_visit(node, step_started)
                 self.ctx._check_produces()  # noqa: SLF001
-                self._count_retry(node, current, verdict, retries, visits)
+                self._count_retry(node, current, verdict, retries, visits,
+                                  max_iterations=self._effective_max_iterations(node))
             except GateStop as exc:
                 error = str(exc)
                 self._record(exc.gate, error=error, outcome="refused")
@@ -1523,7 +1524,8 @@ class Executor:
                 self._visits = visits
                 current, verdict = self._try_visit(node, started)
                 self.ctx._check_produces()  # noqa: SLF001
-                self._count_retry(node, current, verdict, retries, visits)
+                self._count_retry(node, current, verdict, retries, visits,
+                                  max_iterations=self._effective_max_iterations(node))
             except (GateStop, HaltStop):
                 raise
             except Exception as exc:  # a failing branch ends the run, visibly
@@ -1548,21 +1550,27 @@ class Executor:
             )
         return None
 
+    def _effective_max_iterations(self, node: Node) -> int:
+        """The node's max_iterations: its bound knob's value, else its own (`Node.bound`)."""
+        return node.bound("max_iterations", self.ctx.knobs)
+
     @staticmethod
     def _count_retry(
         node: Node, target: str | None, verdict: str | None,
         retries: set[tuple[str, str, str]], visits: dict[str, int],
+        *, max_iterations: int | None = None,
     ) -> None:
         if (node.id, target, verdict or "") not in retries:
             return
         count = visits.get(node.id, 0) + 1
         visits[node.id] = count
-        if count > node.max_iterations:
+        _mi = max_iterations if max_iterations is not None else node.max_iterations
+        if count > _mi:
             # SWEEP-8: record as halted, not failed, matching the spine
             # (spine.ts:972-980, 1003-1006).
             raise HaltStop(
                 node.id,
-                reason=f"max_iterations of {node.max_iterations}; "
+                reason=f"max_iterations of {_mi}; "
                 f"retry {verdict!r} was refused before dispatching {target!r}",
             )
 
@@ -2014,14 +2022,18 @@ class Executor:
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 
-        prompt = with_feedback(render(node.prompt_template, self.ctx), self.record.feedback.get(node.id, ""))
-        system = render(node.system_prompt_template, self.ctx) if node.system_prompt_template else ""
+        # Bound template fields carry their knob's value, as lowering gives the spine.
+        _spt = node.bound("system_prompt_template", self.ctx.knobs)
+        _pt = node.bound("prompt_template", self.ctx.knobs)
+        prompt = with_feedback(render(_pt, self.ctx), self.record.feedback.get(node.id, ""))
+        system = render(_spt, self.ctx) if _spt else ""
         # Gap 20 / correction C: detect unresolved template keys and emit
         # run_warning events, matching the spine (index.ts:1800-1811).
         # Strip the steering block before scanning (agent_delivery.py:838-845).
         import re as _re_tmpl
         from refactory_dsh.steering import STEERING_START, STEERING_END
-        _scan = node.prompt_template
+        # The template this node sends (its bound one), as the spine scans it.
+        _scan = _pt
         _st_s = _scan.find(STEERING_START)
         _st_e = _scan.find(STEERING_END, _st_s) if _st_s >= 0 else -1
         if _st_s >= 0 and _st_e >= _st_s:
@@ -2184,7 +2196,8 @@ class Executor:
 
         retry = self._is_retry(node.id, selected.target, selected.condition or "")
         visits = self._gate_iterations if self._visits is None else self._visits
-        if retry and visits.get(node.id, 0) + 1 > node.max_iterations:
+        _eff_mi = self._effective_max_iterations(node)
+        if retry and visits.get(node.id, 0) + 1 > _eff_mi:
             # Out of reloops: the spine records the gate halted and goes back over nothing
             # (`Spine.verdict`); the retry itself is refused below (`_count_retry`).
             self.record.gate(self.graph, node.id, "halt", target=None, retry=False)

@@ -30,8 +30,38 @@ from .mode import OPS, SOLVE_TIMEOUT_S, SYSTEM_PROMPT
 BLOCK_OPS = "refactory_packages.livemath.block_ops"
 
 BlockResult = namedtuple(
-    "BlockResult", ["nodes", "edges", "entry", "exit", "agent_node_ids"],
+    "BlockResult", ["nodes", "edges", "entry", "exit", "agent_node_ids", "knobs"],
 )
+
+
+def system_prompt_knob(node_id: str) -> str:
+    """The name of an agent node's system-prompt knob (``Mode`` auto-declares it)."""
+    return f"{node_id}__system_prompt"
+
+
+def frozen_system_prompt_knobs(agent_node_ids) -> dict[str, nn.Knob]:
+    """One frozen system-prompt knob per agent node of a block.
+
+    Every agent node's system prompt is a knob by default (F14). LiveMath freezes
+    each one, so grid cells differ only in structure and the optimizer edits only
+    the ``skill`` knob. A block declares exactly its own agent nodes' knobs, so
+    none is declared without a consumer.
+    """
+    return {
+        system_prompt_knob(node_id): nn.Knob(
+            SYSTEM_PROMPT, "str", frozen=True,
+            description=f"system prompt for {node_id} (frozen; use the skill knob)")
+        for node_id in agent_node_ids
+    }
+
+
+def _bound_system_prompt(node_id: str) -> dict:
+    """The knobs and field binding that tie an agent node's system prompt to its knob."""
+    name = system_prompt_knob(node_id)
+    return {
+        "knobs": ("max_completion_tokens", name),
+        "field_bindings": (("system_prompt_template", name),),
+    }
 
 
 # ── node helpers ──────────────────────────────────────────────────────────
@@ -60,7 +90,7 @@ def _agent(node_id: str, prompt_template: str, writes: str, timeout_s: int,
         tool_policy="none",
         role="solver",
         timeout_s=timeout_s,
-        knobs=("max_completion_tokens",),
+        **_bound_system_prompt(node_id),
     )
 
 
@@ -90,7 +120,7 @@ def build_baseline(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
         tool_policy="none",
         role="solver",
         timeout_s=timeout_s,
-        knobs=("max_completion_tokens",),
+        **_bound_system_prompt("solve"),
     )
     return BlockResult(
         nodes=[fmt, solve],
@@ -98,6 +128,7 @@ def build_baseline(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
         entry="format_prompt",
         exit="solve",
         agent_node_ids=["solve"],
+        knobs=frozen_system_prompt_knobs(["solve"]),
     )
 
 
@@ -118,6 +149,7 @@ def build_solve_then_verify(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
         entry="format_prompt",
         exit="verify",
         agent_node_ids=["solve_draft", "verify"],
+        knobs=frozen_system_prompt_knobs(["solve_draft", "verify"]),
     )
 
 
@@ -147,6 +179,7 @@ def build_two_attempts_then_judge(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResu
         entry="format_prompt",
         exit="judge",
         agent_node_ids=["solve_a", "solve_b", "judge"],
+        knobs=frozen_system_prompt_knobs(["solve_a", "solve_b", "judge"]),
     )
 
 
@@ -168,6 +201,7 @@ def build_solve_then_self_check(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult
         entry="format_prompt",
         exit="self_check",
         agent_node_ids=["solve_draft", "self_check"],
+        knobs=frozen_system_prompt_knobs(["solve_draft", "self_check"]),
     )
 
 

@@ -321,19 +321,23 @@ def test_a_candidate_cannot_move_its_own_exam(tmp_path):
     graded on items it chose. The seed's binding is the one that stands, and a person's
     route to other items is a run's `--source`.
     """
+    import copy
+
     from refactory_dsh import loop as loop_module
     from refactory_dsh import registry
     from refactory_dsh.paths import project_root
 
     _, klass = registry.resolve(project_root(), "dataset_probe/dataset")
     state = klass().state_dict()
-    rebinding = {
-        "op": "set_node_field", "id": "data", "field": "task_ref",
-        "value": "refactory_packages.java_build_pack.tasks:JavaBuildTask",
-    }
-    from refactory_dsh.nn import edits as edit_module
+    # Direct state mutation of task_ref via graph manipulation
+    moved = copy.deepcopy(state)
+    from refactory_dsh.nn.graph import Graph
 
-    moved = edit_module.apply(rebinding, state)
+    graph = Graph.from_state(moved["graph"])
+    graph.nodes["data"] = graph.nodes["data"].with_field(
+        "task_ref", "refactory_packages.java_build_pack.tasks:JavaBuildTask"
+    )
+    moved["graph"] = graph.to_state()
 
     from refactory_dsh import optim as optim_module
 
@@ -352,11 +356,11 @@ def test_a_candidate_cannot_move_its_own_exam(tmp_path):
 
 
 def test_an_edit_cannot_bake_the_items_into_the_graph(tmp_path):
-    """The rule create's validation enforces on a produced package holds for an edit.
+    """add_node with inline_items triggers E-items.
 
     `inline_items` is read before the Task or the source, so a state that carries it is
     a harness for exactly those items. Every primitive returns through the same
-    finisher, so this holds for the ops that set a field and the ones that add a node.
+    finisher, so this holds for the ops that add a node.
     """
     import pytest as pytest_module
 
@@ -367,10 +371,13 @@ def test_an_edit_cannot_bake_the_items_into_the_graph(tmp_path):
 
     _, klass = registry.resolve(project_root(), "dataset_probe/dataset")
     state = klass().state_dict()
-    edit = {
-        "op": "set_node_field", "id": "data", "field": "inline_items",
-        "value": [{"id": "alpha"}, {"id": "beta"}],
+    new_node = {
+        "id": "baked", "kind": "data",
+        "subgraph_entry": "work", "subgraph_exit": "work",
+        "inline_items": [{"id": "alpha"}, {"id": "beta"}],
+        "writes": ["baked_item.json"], "produces": ["baked_scores"],
     }
+    edit = {"op": "add_node", "node": new_node, "position": {"after": "data"}}
     with pytest_module.raises(EditError) as caught:
         edit_module.apply(edit, state)
     assert caught.value.code == "E-items"

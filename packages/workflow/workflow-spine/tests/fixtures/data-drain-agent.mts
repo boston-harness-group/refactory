@@ -9,9 +9,13 @@
  * records the exchange in the sidecar, just as the real spine path does.
  * An agent node that declares outputs gets the response written to each, in
  * the item's pass directory when one is running, as a worker would write them.
+ *
+ * With DRAIN_RECORD set to a file path, each agent delivery appends one JSON line
+ * {node, prompt, system_prompt}: the prompt the spine rendered for the worker and
+ * the system prompt it handed over, so a test can check what reached the worker.
  */
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -99,7 +103,8 @@ async function call(name: string, input: unknown = {}) {
 let status = 'unknown'
 for (let step = 0; step < 1000; step += 1) {
   const next = await call('wf_next') as {
-    status?: string; nodes?: Array<{ id: string; _type: string; writes?: string[] }>; error?: string
+    status?: string; error?: string
+    nodes?: Array<{ id: string; _type: string; writes?: string[]; prompt_template?: string; system_prompt?: string }>
     item?: { pass_dir?: unknown }
   }
   status = next.status ?? 'unknown'
@@ -115,6 +120,11 @@ for (let step = 0; step < 1000; step += 1) {
     if (node._type === 'AgentNode' || node._type === 'LLMNode') {
       // Provide the scripted response for agent nodes.
       const response = responses[node.id] ?? `scripted response for ${node.id}`
+      if (process.env.DRAIN_RECORD) {
+        appendFileSync(process.env.DRAIN_RECORD, JSON.stringify({
+          node: node.id, prompt: node.prompt_template ?? '', system_prompt: node.system_prompt ?? '',
+        }) + '\n')
+      }
       const base = typeof next.item?.pass_dir === 'string' ? next.item.pass_dir : workdir!
       for (const name of node.writes ?? []) {
         mkdirSync(dirname(join(base, name)), { recursive: true })

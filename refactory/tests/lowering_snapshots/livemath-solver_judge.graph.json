@@ -181,7 +181,10 @@
     "use_theorem": 0.0,
     "use_sketch": 0.0,
     "max_completion_tokens": 0.0,
-    "data_parallelism": 1.0
+    "data_parallelism": 1.0,
+    "solve_a__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+    "solve_b__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+    "judge__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n"
   },
   "knob_specs": {
     "skill": {
@@ -237,6 +240,39 @@
       "values": [],
       "frozen": true,
       "description": "concurrent data-node items",
+      "required": false
+    },
+    "solve_a__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for solve_a (frozen; use the skill knob)",
+      "required": false
+    },
+    "solve_b__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for solve_b (frozen; use the skill knob)",
+      "required": false
+    },
+    "judge__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for judge (frozen; use the skill knob)",
       "required": false
     }
   }

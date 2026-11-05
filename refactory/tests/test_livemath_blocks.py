@@ -244,9 +244,11 @@ def _make_route_client():
 # ══════════════════════════════════════════════════════════════════════════
 
 
-#: sha256 of tests/lowering_snapshots/livemath-solver.graph.json on main before the
-#: block library: the baseline must lower to exactly these bytes.
-BASELINE_SNAPSHOT_SHA256 = "c148d36b76daf979b3129679c3bf0e8a3a85b0a10c8a177ecb1e1037fed0ce13"
+#: sha256 of tests/lowering_snapshots/livemath-solver.graph.json: the baseline must
+#: lower to exactly these bytes. F14 changed it once: the lowered graph lists every
+#: knob, and the solve node's system prompt is now a (frozen) knob, so the knob
+#: table gains ``solve__system_prompt``. The solve node's prompts are unchanged.
+BASELINE_SNAPSHOT_SHA256 = "1fce5bc9865b18560d198b68d50230f5a0628d6a6d4fb15b304ccafc2c7e32bc"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -262,6 +264,35 @@ def test_baseline_block_lowers_to_the_frozen_snapshot(explicit):
     assert hashlib.sha256(snapshot).hexdigest() == BASELINE_SNAPSHOT_SHA256
     mode_cls = (lambda: Solver(block="baseline")) if explicit else Solver
     assert _lower_mode_bytes(mode_cls, name="livemath-solver") == snapshot
+
+
+@pytest.mark.parametrize("block", ["baseline", "solve_then_verify",
+                                   "two_attempts_then_judge", "solve_then_self_check"])
+def test_every_agent_system_prompt_is_frozen_per_block(block):
+    """F14 in LiveMath: each block declares a frozen system-prompt knob for exactly
+    its own agent nodes and binds it there, so grid cells differ only in structure and
+    the optimizer can move only the skill (and the theorem/sketch switches)."""
+    from refactory_dsh import nn
+    from refactory_packages.livemath.blocks import BLOCKS, SYSTEM_PROMPT
+    from refactory_packages.livemath.mode import Solver
+
+    state = Solver(block=block).state_dict()
+    graph = nn.Graph.from_state(state["graph"])
+    agents = sorted(node_id for node_id, node in graph.nodes.items() if node.kind == "agent")
+    assert agents == sorted(BLOCKS[block]().agent_node_ids)
+    prompt_knobs = sorted(name for name in state["knobs"] if name.endswith("__system_prompt"))
+    assert prompt_knobs == [f"{node_id}__system_prompt" for node_id in agents]
+    for node_id in agents:
+        name = f"{node_id}__system_prompt"
+        assert state["knobs"][name]["spec"]["frozen"] is True, name
+        assert state["knobs"][name]["value"] == SYSTEM_PROMPT
+        assert graph.nodes[node_id].field_bindings == (("system_prompt_template", name),)
+        # The user prompt is not a knob.
+        assert graph.nodes[node_id].bound_knob("prompt_template") == ""
+    open_knobs = sorted(n for n, e in state["knobs"].items() if not e["spec"]["frozen"])
+    assert open_knobs == ["skill", "use_sketch", "use_theorem"]
+    issues = nn.validate_state(state, resolve_calls=False)
+    assert not [i for i in issues if i.code in ("V7", "V14")], issues
 
 
 def test_each_block_builds_valid_graph():

@@ -242,35 +242,6 @@ def _remove_node(state: State, edit: dict) -> State:
     return _finish(state, graph)
 
 
-def _replace_node(state: State, edit: dict) -> State:
-    node_state = edit.get("node")
-    if not isinstance(node_state, dict):
-        raise EditError("replace_node needs a 'node' object")
-    graph = _graph(state)
-    target = _require(graph, edit.get("id"))
-    try:
-        replacement = Node.from_state(node_state)
-    except GraphError as exc:
-        raise EditError(str(exc)) from exc
-    if replacement.id != target.id:
-        raise EditError(
-            f"replace_node keeps the node id; got {replacement.id!r} for {target.id!r}"
-        )
-    graph.nodes[target.id] = replacement
-    return _finish(state, graph)
-
-
-def _set_node_field(state: State, edit: dict) -> State:
-    graph = _graph(state)
-    target = _require(graph, edit.get("id"))
-    field_name = edit.get("field")
-    try:
-        graph.nodes[target.id] = target.with_field(field_name, edit.get("value"))
-    except GraphError as exc:
-        raise EditError(str(exc)) from exc
-    return _finish(state, graph)
-
-
 def _add_edge(state: State, edit: dict) -> State:
     graph = _graph(state)
     source = _require(graph, edit.get("source"))
@@ -316,7 +287,25 @@ def _set_knob(state: State, edit: dict) -> State:
         value = knob.coerce(edit.get("value"))
     except KnobError as exc:
         raise EditError(f"knob {name!r}: {exc}", code="E-knob") from exc
-    out = _finish(state, _graph(state))
+    # Data-slot preservation check for template bindings.
+    import re as _re_slots
+    graph = _graph(state)
+    for node in graph.nodes.values():
+        for field_name, knob_name in getattr(node, "field_bindings", ()):
+            if knob_name == name and field_name in ("prompt_template", "system_prompt_template"):
+                current_tpl = getattr(node, field_name, "")
+                required = set(_re_slots.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', current_tpl))
+                if not required:
+                    continue
+                present = set(_re_slots.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', str(value)))
+                missing = required - present
+                if missing:
+                    raise EditError(
+                        f"knob {name!r}: template slot(s) {sorted(missing)} required by "
+                        f"node {node.id!r}'s {field_name} are missing from the new value",
+                        code="E-knob",
+                    )
+    out = _finish(state, graph)
     out["knobs"][name]["value"] = value
     return out
 
@@ -737,7 +726,26 @@ def _text_patch(state: State, edit: dict) -> State:
     except KnobError as exc:
         raise EditError(f"knob {name!r}: {exc}", code="E-knob") from exc
 
-    out = _finish(state, _graph(state))
+    # Data-slot preservation check for template bindings (same as _set_knob).
+    import re as _re_slots_tp
+    graph = _graph(state)
+    for _tp_node in graph.nodes.values():
+        for _tp_field, _tp_knob in getattr(_tp_node, "field_bindings", ()):
+            if _tp_knob == name and _tp_field in ("prompt_template", "system_prompt_template"):
+                _tp_current_tpl = getattr(_tp_node, _tp_field, "")
+                _tp_required = set(_re_slots_tp.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', _tp_current_tpl))
+                if not _tp_required:
+                    continue
+                _tp_present = set(_re_slots_tp.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', str(value)))
+                _tp_missing = _tp_required - _tp_present
+                if _tp_missing:
+                    raise EditError(
+                        f"knob {name!r}: template slot(s) {sorted(_tp_missing)} required by "
+                        f"node {_tp_node.id!r}'s {_tp_field} are missing from the new value",
+                        code="E-knob",
+                    )
+
+    out = _finish(state, graph)
     out["knobs"][name]["value"] = value
 
     # Return the report alongside the state.  The caller (apply()) places it
@@ -758,16 +766,6 @@ _primitive(
     "remove_node", "node",
     "Delete a node and every edge touching it. Leaves the hole for the validator to report.",
     ("id",), _remove_node,
-)
-_primitive(
-    "replace_node", "node",
-    "Replace a node's whole definition, keeping its id and its edges.",
-    ("id", "node"), _replace_node,
-)
-_primitive(
-    "set_node_field", "node",
-    "Set one field of a node, e.g. 'call', 'notes', 'max_iterations', 'knobs'.",
-    ("id", "field", "value"), _set_node_field,
 )
 _primitive(
     "add_edge", "edge",
@@ -1332,18 +1330,6 @@ def random_edit(
             edge = rng.choice(graph.edges)
             edit = {"op": op, "source": edge.source, "target": edge.target,
                     "condition": edge.condition}
-        elif op == "set_node_field":
-            if not node_ids:
-                continue
-            edit = {"op": "set_node_field", "id": rng.choice(node_ids),
-                    "field": "max_iterations", "value": rng.choice([2, 3, 5])}
-        elif op == "replace_node":
-            if not templates or not node_ids:
-                continue
-            target = rng.choice(node_ids)
-            node = dict(rng.choice(templates))
-            node["id"] = target
-            edit = {"op": "replace_node", "id": target, "node": node}
         else:  # pragma: no cover - the catalogue is closed
             continue
 

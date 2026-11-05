@@ -323,7 +323,10 @@
     "allow_regression": 0.0,
     "repair_attempts": 1.0,
     "check": "",
-    "check_timeout_s": 60.0
+    "check_timeout_s": 60.0,
+    "emit__system_prompt": "",
+    "focused_qa__system_prompt": "",
+    "strategy__system_prompt": ""
   },
   "knob_specs": {
     "refusal_attempts": {
@@ -489,6 +492,39 @@
       "values": [],
       "frozen": false,
       "description": "seconds allowed for the explicit focused check",
+      "required": false
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for emit",
+      "required": false
+    },
+    "focused_qa__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for focused_qa",
+      "required": false
+    },
+    "strategy__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for strategy",
       "required": false
     }
   }

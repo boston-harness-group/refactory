@@ -150,7 +150,10 @@ def test_the_merge_takes_a_value_from_a_different_branch(tmp_path):
 
 # ── the switch-inside-an-iteration shapes ──────────────────────────────────
 def test_reflective_takes_a_merge_branch_and_a_mutate_branch(tmp_path):
-    loop = _loop("reflective", tmp_path / "run", epochs=4)
+    # seed=2 so the merge branch fires at least once; F14 changed the random
+    # sampler pool (removed set_node_field/replace_node) which shifted the
+    # old seed=1 stream.
+    loop = _loop("reflective", tmp_path / "run", epochs=4, seed=2)
     loop.run()
     assert loop.merges >= 1, "the merge branch was never taken"
     assert loop.mutations >= 1, "the mutate branch was never taken"
@@ -158,7 +161,8 @@ def test_reflective_takes_a_merge_branch_and_a_mutate_branch(tmp_path):
 
 
 def test_adaptive_meta_fires_its_meta_branch_and_records_it(tmp_path):
-    loop = _loop("adaptive_meta", tmp_path / "run", epochs=5)
+    # seed=2 so the meta branch fires; F14 changed the random sampler pool.
+    loop = _loop("adaptive_meta", tmp_path / "run", epochs=5, seed=2)
     loop.run()
     assert loop.meta_taken >= 1, "the meta branch never fired"
     log = (loop.root / "strategy.log").read_text()

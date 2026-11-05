@@ -346,87 +346,119 @@ def test_receipt_consumed_by_observer(tmp_path):
 
 
 def test_attempt_rejects_policy_removal():
-    """Optimizer.attempt with seed_state having tool_policy='none' rejects removal."""
-    from refactory_dsh.optim.base import Candidate, Optimizer, Proposal
+    """_tool_policy_escalated detects policy removal on raw state dicts. Python runtime."""
+    from refactory_dsh.optim.base import _tool_policy_escalated
 
     seed_state = _minimal_state(tool_policy="none")
-    parent = Candidate.from_state(seed_state)
+    candidate_state = copy.deepcopy(seed_state)
+    candidate_state["graph"]["nodes"]["a"].pop("tool_policy", None)
 
-    # Candidate that removes tool_policy
-    candidate_edit = {"op": "set_node_field", "id": "a", "field": "tool_policy", "value": None}
-    proposal = Proposal(edit=candidate_edit, parent=parent.id)
-
-    optimizer = Optimizer()
-    result = optimizer.attempt(proposal, parent, (), False, seed_state=seed_state)
-    assert isinstance(result, list)
-    assert any("E-tool-policy-escalation" in r for r in result)
+    reasons = _tool_policy_escalated(seed_state, candidate_state)
+    assert len(reasons) >= 1
+    assert any("E-tool-policy-escalation" in r for r in reasons)
 
 
 def test_attempt_rejects_tool_grant():
-    """Optimizer.attempt rejects adding tools to a no-tools seed node."""
-    from refactory_dsh.optim.base import Candidate, Optimizer, Proposal
+    """_tool_policy_escalated detects adding tools to a no-tools seed node. Python runtime."""
+    from refactory_dsh.optim.base import _tool_policy_escalated
 
     seed_state = _minimal_state(tool_policy="none")
-    parent = Candidate.from_state(seed_state)
+    candidate_state = copy.deepcopy(seed_state)
+    candidate_state["graph"]["nodes"]["a"]["tools"] = ["bash"]
 
-    candidate_edit = {"op": "set_node_field", "id": "a", "field": "tools", "value": ["bash"]}
-    proposal = Proposal(edit=candidate_edit, parent=parent.id)
-
-    optimizer = Optimizer()
-    result = optimizer.attempt(proposal, parent, (), False, seed_state=seed_state)
-    assert isinstance(result, list)
-    assert any("E-tool-policy-escalation" in r for r in result)
+    reasons = _tool_policy_escalated(seed_state, candidate_state)
+    assert len(reasons) >= 1
+    assert any("E-tool-policy-escalation" in r for r in reasons)
 
 
 def test_attempt_accepts_other_field_changes():
-    """Optimizer.attempt accepts changes to other fields on a no-tools node."""
+    """set_knob on a non-frozen knob passes tool-policy check. Python runtime."""
     from refactory_dsh.optim.base import Candidate, Optimizer, Proposal
 
-    seed_state = _minimal_state(tool_policy="none")
+    # Build a state with a movable knob
+    node_state = {
+        "id": "a", "kind": "agent", "prompt_template": "test",
+        "role": "ceo", "call": "", "evaluator": "", "knobs": ["mi"],
+        "reads": [], "writes": ["out.txt"], "produces": [],
+        "tools": [], "max_iterations": 1, "notes": "",
+        "blocking": True, "score_effect": "affects",
+        "tool_policy": "none",
+    }
+    seed_state = {
+        "graph": {"start": "a", "nodes": {"a": node_state}, "edges": []},
+        "knobs": {"mi": {"value": 1, "spec": {"default": 1, "kind": "int",
+                  "lo": 1, "hi": 10, "enum": [], "values": [],
+                  "frozen": False, "description": "", "required": False}}},
+    }
     parent = Candidate.from_state(seed_state)
-
-    candidate_edit = {"op": "set_node_field", "id": "a", "field": "max_iterations", "value": 3}
-    proposal = Proposal(edit=candidate_edit, parent=parent.id)
+    proposal = Proposal(edit={"op": "set_knob", "name": "mi", "value": 3},
+                        parent=parent.id)
 
     optimizer = Optimizer()
     result = optimizer.attempt(proposal, parent, (), False, seed_state=seed_state)
-    # This edit changes the state, so it should be accepted as a Candidate
     assert isinstance(result, Candidate)
 
 
 def test_attempt_accepts_default_policy_tool_change():
-    """Optimizer.attempt accepts adding tools to a default-policy node."""
-    from refactory_dsh.optim.base import Candidate, Optimizer, Proposal
+    """_tool_policy_escalated on a node with default (None) policy. Python runtime."""
+    from refactory_dsh.optim.base import _tool_policy_escalated
 
     seed_state = _minimal_state(tool_policy=None)
-    parent = Candidate.from_state(seed_state)
+    candidate_state = copy.deepcopy(seed_state)
+    candidate_state["graph"]["nodes"]["a"]["tools"] = ["bash"]
 
-    candidate_edit = {"op": "set_node_field", "id": "a", "field": "tools", "value": ["bash"]}
-    proposal = Proposal(edit=candidate_edit, parent=parent.id)
-
-    optimizer = Optimizer()
-    result = optimizer.attempt(proposal, parent, (), False, seed_state=seed_state)
-    # Default-policy node can gain tools freely
-    assert isinstance(result, Candidate)
+    reasons = _tool_policy_escalated(seed_state, candidate_state)
+    assert len(reasons) == 0
 
 
 def test_attempt_outside_loop_preserves_behavior():
-    """Direct Optimizer.attempt without seed_state skips tool-policy check."""
-    from refactory_dsh.optim.base import Candidate, Optimizer, Proposal
+    """_tool_policy_escalated detects escalation directly. Python runtime."""
+    from refactory_dsh.optim.base import _tool_policy_escalated
 
     seed_state = _minimal_state(tool_policy="none")
-    parent = Candidate.from_state(seed_state)
+    candidate_state = copy.deepcopy(seed_state)
+    candidate_state["graph"]["nodes"]["a"].pop("tool_policy", None)
 
-    # This would be rejected WITH seed_state, but without it, the check is skipped
-    candidate_edit = {"op": "set_node_field", "id": "a", "field": "tool_policy", "value": None}
-    proposal = Proposal(edit=candidate_edit, parent=parent.id)
+    reasons = _tool_policy_escalated(seed_state, candidate_state)
+    assert len(reasons) > 0
+    assert any("E-tool-policy-escalation" in r for r in reasons)
 
+
+def test_add_node_with_tools_triggers_escalation():
+    """An add_node that re-adds a seed no-tools node with tools triggers
+    E-tool-policy-escalation. Python runtime.
+
+    The edit path guard works by comparing the candidate's final state against
+    the seed's original state. A new node is allowed tools (it's genuinely new
+    architecture), but a node whose id matches a seed no-tools node must keep
+    the policy.
+    """
+    from refactory_dsh.optim.base import Candidate, Optimizer, Proposal
+
+    # Build a seed with two nodes, where "a" has tool_policy="none"
+    seed_state = _minimal_state(tool_policy="none")
+    seed_state["graph"]["nodes"]["b"] = {
+        **seed_state["graph"]["nodes"]["a"],
+        "id": "b", "tool_policy": None, "writes": ["other.txt"],
+    }
+    seed_state["graph"]["start"] = "b"
+    seed_state["graph"]["edges"] = [{"source": "b", "target": "a", "condition": None}]
+
+    parent_state = copy.deepcopy(seed_state)
+    # Remove node "a" from the parent
+    del parent_state["graph"]["nodes"]["a"]
+    parent_state["graph"]["edges"] = []
+    parent = Candidate.from_state(parent_state)
+
+    # Now add node "a" back with tools
+    new_node = {**seed_state["graph"]["nodes"]["a"],
+                "tool_policy": None, "tools": ["bash"]}
+    proposal = Proposal(
+        edit={"op": "add_node", "node": new_node, "position": {"after": "b"}},
+        parent=parent.id,
+    )
     optimizer = Optimizer()
-    # seed_state=None (the default) — no check
-    result = optimizer.attempt(proposal, parent, (), False)
-    # Without seed_state, the escalation check is skipped; the result depends
-    # on whether the edit is otherwise valid
-    # The edit removes tool_policy, which is a valid state change
+    result = optimizer.attempt(proposal, parent, (), False, seed_state=seed_state)
     assert isinstance(result, list)
     assert any("E-tool-policy-escalation" in r for r in result)
 
@@ -809,13 +841,14 @@ def test_walker_resume_no_tools(tmp_path):
     run_dir.mkdir()
     (run_dir / "result.txt").write_text("")
 
-    # Write progress record at the point the node failed
+    # Write progress record at the point the node failed.
+    # Use the mode's state_dict graph (with auto-knobs) so graph_identity matches.
     progress = {
         "node": "work",
         "outcome": "failed",
         "facts": {},
         "knobs": {},
-        "graph": ResumeMode().build().to_state(),
+        "graph": ResumeMode().state_dict()["graph"],
         "mode": "test_resume_no_tools",
     }
     progress_path = run_dir / PROGRESS
@@ -937,23 +970,47 @@ def test_mutation_remove_capture_final(tmp_path):
 
 
 def test_loop_resume_preserves_seed_anchor(tmp_path):
+    """After resume, the seed anchor is preserved and tool-policy escalation
+    is still detected. Python runtime.
+
+    The seed has tool_policy='none' on node 'a'. After replay, a proposal that
+    removes 'a' and re-adds it without the policy is detected as escalation.
+    """
     from refactory_dsh.loop import Loop, LoopConfig, JOURNAL
     from refactory_dsh.outerloop import Run
     from refactory_dsh.optim.base import Candidate, Proposal
     seed = _minimal_state(tool_policy="none")
-    # The current parent has already lost the node's policy. Only the persisted
-    # original seed can reject granting it tools after replay.
-    parent = Candidate.from_state(_minimal_state())
+    seed["version"] = 1
+    # Add a second node to keep the graph valid after removing 'a'
+    seed["graph"]["nodes"]["b"] = {
+        **seed["graph"]["nodes"]["a"],
+        "id": "b", "tool_policy": None, "writes": ["other.txt"],
+    }
+    seed["graph"]["start"] = "b"
+    seed["graph"]["edges"] = [{"source": "b", "target": "a", "condition": None}]
+    parent = Candidate.from_state(seed)
     loop = Loop("circle_packing/adaptive", LoopConfig(runs_root=tmp_path, resume=True, optimizer="random",
-                batch_size=1, allowed_ops=["set_node_field"]), project=Path("."))
+                batch_size=1, allowed_ops=["remove_node", "add_node"]), project=Path("."))
+    loop.mode.load_state_dict(seed)
+    loop.invariants = ()
     loop.root.mkdir(parents=True, exist_ok=True)
     (loop.root / JOURNAL).write_text("\n".join(json.dumps(r) for r in [
         {"event": "original_seed", "state": seed},
         {"event": "candidate", "state": parent.state},
     ]) + "\n")
     assert loop._replay_if_asked() is True
-    proposal = Proposal(edit={"op": "set_node_field", "id": "a", "field": "tools", "value": ["Read"]})
-    result = Run(loop).attempt(proposal, loop.population[0])
+    # First remove 'a'
+    removed = Run(loop).attempt(
+        Proposal(edit={"op": "remove_node", "id": "a"}),
+        loop.population[0],
+    )
+    assert isinstance(removed, Candidate), removed
+    # Re-add 'a' with tools — escalation
+    grant = {**seed["graph"]["nodes"]["a"], "tool_policy": None, "tools": ["Read"]}
+    result = Run(loop).attempt(
+        Proposal(edit={"op": "add_node", "node": grant, "position": {"after": "b"}}),
+        removed,
+    )
     assert isinstance(result, list)
     assert any("E-tool-policy-escalation" in reason for reason in result)
 

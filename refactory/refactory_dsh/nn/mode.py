@@ -121,12 +121,50 @@ class Mode:
             self._ports = [port.to_state() for port in self.ports()]
             self._memory = [declared.to_state() for declared in self.memory()]
             self._graph_state = self.build().to_state()
+            # F14: Auto-declare a system-prompt knob on every agent node.
+            self._auto_system_prompt_knobs()
         else:
             self._knobs: dict[str, dict[str, Any]] = {}
             self._ports: list[dict[str, Any]] = []
             self._memory: list[dict[str, Any]] = []
             self._graph_state: dict[str, Any] = {}
             self.load_state_dict(state)
+
+    def _auto_system_prompt_knobs(self) -> None:
+        """Auto-declare a system-prompt knob on every agent node (F14).
+
+        The knob is named ``{node_id}__system_prompt``, is an open ``str`` knob
+        whose default is the node's current ``system_prompt_template`` (or ``""``
+        for empty templates), and a ``field_bindings`` entry ties it to the
+        ``system_prompt_template`` field.  Skipped when the name collides with a
+        user-declared knob.
+        """
+        from dataclasses import replace as _replace
+
+        graph = Graph.from_state(self._graph_state)
+        changed = False
+        for node_id in sorted(graph.nodes):
+            node = graph.nodes[node_id]
+            if node.kind != "agent":
+                continue
+            auto_name = f"{node_id}__system_prompt"
+            if auto_name in self._knobs:
+                continue  # collision with a user-declared knob
+            # Skip if the node already has a binding for system_prompt_template
+            if any(f == "system_prompt_template" for f, _ in node.field_bindings):
+                continue
+            default_value = node.system_prompt_template or ""
+            knob = Knob(default_value, "str",
+                        description=f"system prompt for {node_id}")
+            self._knobs[auto_name] = {"value": knob.default, "spec": knob.spec()}
+            graph.nodes[node_id] = _replace(
+                node,
+                knobs=(*node.knobs, auto_name),
+                field_bindings=(*node.field_bindings, ("system_prompt_template", auto_name)),
+            )
+            changed = True
+        if changed:
+            self._graph_state = graph.to_state()
 
     # ── the author's surface ───────────────────────────────────────────────
     @classmethod

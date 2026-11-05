@@ -187,6 +187,9 @@ class LoweringError(ValueError):
 def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "") -> Workflow:
     """The refactory `Workflow` for a mode state."""
     graph = Graph.from_state(state.get("graph") or {})
+    # The run's knob values, as the state carries them: a bound field reads its knob
+    # from here (`Node.bound`), as the walker reads it from the run's knobs.
+    knob_values = {name: entry.get("value") for name, entry in (state.get("knobs") or {}).items()}
     nodes: dict[str, Any] = {}
     for node_id in sorted(graph.nodes):
         node = graph.nodes[node_id]
@@ -221,7 +224,8 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
             # on the runtime.
             gate: dict[str, Any] = {
                 "evaluator_type": node.gate_kind,
-                "max_iterations": node.max_iterations,
+                # A bound knob's value, as the walker reads it (`Node.bound`).
+                "max_iterations": node.bound("max_iterations", knob_values),
             }
             # The author's note is the gate's question: for a `user` gate it is what
             # the person is shown, and an empty prompt would ask them to choose
@@ -255,8 +259,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 inline_items=[dict(item) for item in node.inline_items],
                 limit=node.limit or None,
                 # A bound knob's value, as the state carries it (Node.effective_parallelism).
-                parallelism=node.effective_parallelism(
-                    {name: entry.get("value") for name, entry in (state.get("knobs") or {}).items()}),
+                parallelism=node.effective_parallelism(knob_values),
             )
         else:
             try:
@@ -273,13 +276,17 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                     f"{len(node.writes)} write(s); a no-tools node must declare exactly "
                     "one output for its captured reply"
                 )
+            # Bound fields carry their knob's value, as the walker reads them (`Node.bound`).
+            _resolved_spt = node.bound("system_prompt_template", knob_values)
+            _resolved_pt = node.bound("prompt_template", knob_values)
+            _resolved_mi = node.bound("max_iterations", knob_values)
             nodes[node_id] = AgentNode(
                 **common,
                 role=role,
-                prompt_template=node.prompt_template,
-                **({"system_prompt": node.system_prompt_template} if node.system_prompt_template else {}),
+                prompt_template=_resolved_pt,
+                **({"system_prompt": _resolved_spt} if _resolved_spt else {}),
                 tools=list(node.tools),
-                max_iterations=node.max_iterations,
+                max_iterations=_resolved_mi,
                 # The node's model-session wall: `workers.lower_workflow` gives the
                 # dispatched session this bound and the command it plus the dispatch
                 # overhead; the walker gives its model client the same bound.
@@ -327,8 +334,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                     pending.extend(graph.nodes[current].targets)
             _branch_lists.append([graph.nodes[n] for n in sorted(seen)])
         _branch_facts = [{name for n in branch for name in n.produces} for branch in _branch_lists]
+        # The prompt each branch node sends: its bound template (fork.py does the same).
         _branch_consumed = [{match for n in branch for match in _re.findall(
-            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", n.prompt_template)}
+            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", n.bound("prompt_template", knob_values))}
             for branch in _branch_lists]
         # Per-branch write and read sets for the file-overlap check (fork.py:120-122).
         # Use directory-containment overlap matching the walker (fork.py:24-27).

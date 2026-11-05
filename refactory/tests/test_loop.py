@@ -388,7 +388,10 @@ def test_a_bounded_numeric_knob_reports_the_values_nobody_ran(tmp_path):
     that a value it never tried has already been ruled out.
     """
     with _patch_mode(_BoundedInt):
-        loop = Loop(MODE, _config(tmp_path), project=Path("."))
+        # batch_size=2 so the sweep cannot cover all 4 values in one batch,
+        # even when set_knob is picked every time (F14 removed set_node_field
+        # and replace_node, making set_knob more likely).
+        loop = Loop(MODE, _config(tmp_path, batch_size=2), project=Path("."))
         loop.init()
         loop.forward()
         loop.loss_step()

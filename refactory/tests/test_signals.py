@@ -199,9 +199,12 @@ def test_a_dominant_refusal_is_reported_as_a_finding_about_the_catalogue(tmp_pat
 
 def test_no_dominant_refusal_when_nothing_was_refused(tmp_path):
     """A clean run should not invent a finding."""
+    # The broad catalogue (the default), as on main. seed=1: F14 removed
+    # set_node_field and replace_node, which changed the random stream, and seed 5
+    # now draws structural edits that are refused often enough to count as a finding.
     loop = Loop(
         MODE,
-        _config(tmp_path / "run", optimizer="random"),
+        _config(tmp_path / "run", optimizer="random", seed=1),
         project=Path("."),
     )
     loop.run()

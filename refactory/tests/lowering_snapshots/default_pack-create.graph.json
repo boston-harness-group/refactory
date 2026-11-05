@@ -626,7 +626,16 @@
     "name": "",
     "brief": "",
     "revision_of": "",
-    "allow_regression": 0.0
+    "allow_regression": 0.0,
+    "code_reviewer__system_prompt": "",
+    "design__system_prompt": "",
+    "emit__system_prompt": "",
+    "health_checker__system_prompt": "",
+    "overwatch__system_prompt": "",
+    "qa_director__system_prompt": "",
+    "research_director__system_prompt": "",
+    "strategy_director__system_prompt": "",
+    "synthesize_strategy__system_prompt": ""
   },
   "knob_specs": {
     "attempts": {
@@ -803,6 +812,105 @@
       "values": [],
       "frozen": false,
       "description": "for an edit: skip original-mode execution and score comparison; still validate the revised mode (default false)",
+      "required": false
+    },
+    "code_reviewer__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for code_reviewer",
+      "required": false
+    },
+    "design__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for design",
+      "required": false
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for emit",
+      "required": false
+    },
+    "health_checker__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for health_checker",
+      "required": false
+    },
+    "overwatch__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for overwatch",
+      "required": false
+    },
+    "qa_director__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for qa_director",
+      "required": false
+    },
+    "research_director__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for research_director",
+      "required": false
+    },
+    "strategy_director__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for strategy_director",
+      "required": false
+    },
+    "synthesize_strategy__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for synthesize_strategy",
       "required": false
     }
   }

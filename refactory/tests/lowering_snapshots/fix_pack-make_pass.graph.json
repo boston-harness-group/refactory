@@ -171,7 +171,9 @@
     "worktree": 1.0,
     "setup": "",
     "generate": "",
-    "include_uncommitted": 0.0
+    "include_uncommitted": 0.0,
+    "emit__system_prompt": "",
+    "verifier__system_prompt": ""
   },
   "knob_specs": {
     "name": {
@@ -293,6 +295,28 @@
       "values": [],
       "frozen": true,
       "description": "start from the target's uncommitted changes instead of only committed HEAD; copies modified, staged, untracked and deleted files into the worktree and commits them as the run's base",
+      "required": false
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for emit",
+      "required": false
+    },
+    "verifier__system_prompt": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "system prompt for verifier",
       "required": false
     }
   }

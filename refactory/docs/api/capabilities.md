@@ -7547,7 +7547,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "code_reviewer",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "code_reviewer__system_prompt"
+      ],
       "notes": "review the emitted source against the design",
       "role": "ceo"
     },
@@ -7555,7 +7557,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "design",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "design__system_prompt"
+      ],
       "notes": "plan the package before any code is written",
       "role": "ceo"
     },
@@ -7563,7 +7567,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "emit",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "emit__system_prompt"
+      ],
       "notes": "write the package's source files",
       "role": "ceo"
     },
@@ -7621,7 +7627,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "health_checker",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "health_checker__system_prompt"
+      ],
       "notes": "run the package and record what happened, command by command",
       "role": "ceo"
     },
@@ -7647,7 +7655,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "overwatch",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "overwatch__system_prompt"
+      ],
       "notes": "audit the evidence behind the reviews, not the work again",
       "role": "ceo"
     },
@@ -7672,7 +7682,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "qa_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "qa_director__system_prompt"
+      ],
       "notes": "attack the package against its acceptance criteria",
       "role": "ceo"
     },
@@ -7704,7 +7716,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "research_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "research_director__system_prompt"
+      ],
       "notes": "choose the research directions and have a subagent answer each one",
       "role": "ceo"
     },
@@ -7738,7 +7752,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "strategy_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "strategy_director__system_prompt"
+      ],
       "notes": "choose the strategy perspectives and their intent coverage",
       "role": "ceo"
     },
@@ -7762,7 +7778,9 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "call": "",
       "id": "synthesize_strategy",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "synthesize_strategy__system_prompt"
+      ],
       "notes": "compile the perspectives into one intent-faithful strategy",
       "role": "ceo"
     },
@@ -7827,6 +7845,18 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": 8,
       "values": []
     },
+    "code_reviewer__system_prompt": {
+      "default": "",
+      "description": "system prompt for code_reviewer",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "data_node": {
       "default": false,
       "description": "build the package as a DataNode that runs its subgraph once per data item; naming a Task implies this, so the knob is only for a caller that wants to be explicit",
@@ -7837,6 +7867,18 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         null
       ],
       "value": false,
+      "values": []
+    },
+    "design__system_prompt": {
+      "default": "",
+      "description": "system prompt for design",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "design_attempts": {
@@ -7851,9 +7893,57 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": 2,
       "values": []
     },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "health_checker__system_prompt": {
+      "default": "",
+      "description": "system prompt for health_checker",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "overwatch__system_prompt": {
+      "default": "",
+      "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "qa_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for qa_director",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -7897,6 +7987,18 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         8
       ],
       "value": 3,
+      "values": []
+    },
+    "research_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for research_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "review_attempts": {
@@ -7959,6 +8061,30 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": 3600,
       "values": []
     },
+    "strategy_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for strategy_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "synthesize_strategy__system_prompt": {
+      "default": "",
+      "description": "system prompt for synthesize_strategy",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "task_ref": {
       "default": "",
       "description": "a Task class the produced mode must satisfy, as `module:Class` or a registered name (empty for none)",
@@ -7992,7 +8118,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "7f902b2c8268b003072d8a8d526c5ac4533b921f1a55b2623200cd49cde0c27e"
+    "reviewed_schema": "3fddccba946f8bf6d63e2d7b4c59d50a346a8193a3a79a547be985dc1159ffd3"
   }
 }
 ```
@@ -8097,7 +8223,9 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "call": "",
       "id": "emit",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "emit__system_prompt"
+      ],
       "notes": "implement directly from the brief and current source",
       "role": "builder"
     },
@@ -8117,7 +8245,9 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "call": "",
       "id": "focused_qa",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "focused_qa__system_prompt"
+      ],
       "notes": "one light focused QA stage; no reviewer fan-out",
       "role": "code_reviewer"
     },
@@ -8195,7 +8325,9 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "call": "",
       "id": "strategy",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "strategy__system_prompt"
+      ],
       "notes": "one concise strategy, followed by one coder and one QA agent; no parallel workers",
       "role": "strategist"
     },
@@ -8290,6 +8422,30 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         null
       ],
       "value": false,
+      "values": []
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "focused_qa__system_prompt": {
+      "default": "",
+      "description": "system prompt for focused_qa",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "name": {
@@ -8388,6 +8544,18 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "value": 3600,
       "values": []
     },
+    "strategy__system_prompt": {
+      "default": "",
+      "description": "system prompt for strategy",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "task_ref": {
       "default": "",
       "description": "a Task class the produced mode must satisfy, as `module:Class` or a registered name (empty for none)",
@@ -8421,7 +8589,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "597bb892bb75e2126e711a103a20bb8071366592e9875fbbb6f6be9067017c7a"
+    "reviewed_schema": "41233acd1cc77eefeb003544de07d703ade12656f4505144a24ba543eb0efaa6"
   }
 }
 ```
@@ -8766,7 +8934,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "apply_corrections",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "apply_corrections__system_prompt"
+      ],
       "notes": "revise design.md with the person's corrections before the builder runs",
       "role": "ceo"
     },
@@ -8802,7 +8972,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "classify_reloop",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "classify_reloop__system_prompt"
+      ],
       "notes": "classify the person's strategy-gate feedback as document or approach",
       "role": "ceo"
     },
@@ -8818,7 +8990,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "code_reviewer",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "code_reviewer__system_prompt"
+      ],
       "notes": "review the emitted files against the design",
       "role": "ceo"
     },
@@ -8847,7 +9021,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "design_doc",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "design_doc__system_prompt"
+      ],
       "notes": "write the design document the code is written from",
       "role": "ceo"
     },
@@ -8863,7 +9039,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "early_asks_check",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "early_asks_check__system_prompt"
+      ],
       "notes": "judge whether the attempt builds each ask and correction",
       "role": "ceo"
     },
@@ -8872,7 +9050,8 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "emit",
       "kind": "agent",
       "knobs": [
-        "builder_timeout_s"
+        "builder_timeout_s",
+        "emit__system_prompt"
       ],
       "notes": "make the change in a clone of the last attempt; its diff is the emission",
       "role": "ceo"
@@ -8964,7 +9143,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "health_checker",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "health_checker__system_prompt"
+      ],
       "notes": "run the artifact and record what happened, command by command",
       "role": "ceo"
     },
@@ -8990,7 +9171,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "overwatch",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "overwatch__system_prompt"
+      ],
       "notes": "verify acceptance, with the correction audit as evidence, and judge",
       "role": "ceo"
     },
@@ -9007,7 +9190,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "pitfalls_researcher",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "pitfalls_researcher__system_prompt"
+      ],
       "notes": "identify risk-ranked pitfalls before strategy, independent of any design",
       "role": "ceo"
     },
@@ -9053,7 +9238,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "qa_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "qa_director__system_prompt"
+      ],
       "notes": "attack the artifact against the brief",
       "role": "ceo"
     },
@@ -9061,7 +9248,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "qa_director_rerun",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "qa_director_rerun__system_prompt"
+      ],
       "notes": "coverage re-run: probe only the unverified requirements",
       "role": "ceo"
     },
@@ -9069,7 +9258,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "qa_judge",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "qa_judge__system_prompt"
+      ],
       "notes": "decide from the reviews whether the change goes on or back to the builder",
       "role": "ceo"
     },
@@ -9101,7 +9292,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "research_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "research_director__system_prompt"
+      ],
       "notes": "choose the research directions and have a subagent answer each one",
       "role": "ceo"
     },
@@ -9138,7 +9331,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "strategy_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "strategy_director__system_prompt"
+      ],
       "notes": "choose the perspectives and record what each one covers",
       "role": "ceo"
     },
@@ -9154,7 +9349,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "synthesize_strategy",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "synthesize_strategy__system_prompt"
+      ],
       "notes": "compile the perspectives into one plan",
       "role": "ceo"
     },
@@ -9162,12 +9359,26 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "call": "",
       "id": "verifier",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "verifier__system_prompt"
+      ],
       "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo; for each behaviour-changing requirement, revert the implementing hunk in the workspace clone, run the specific test, and report caught/not caught",
       "role": "code_reviewer"
     }
   ],
   "parameters": {
+    "apply_corrections__system_prompt": {
+      "default": "",
+      "description": "system prompt for apply_corrections",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "base": {
       "default": "",
       "description": "the commit, branch or tag the run starts from (default: the target's HEAD, or a new project's main)",
@@ -9252,6 +9463,42 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": 180,
       "values": []
     },
+    "classify_reloop__system_prompt": {
+      "default": "",
+      "description": "system prompt for classify_reloop",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "code_reviewer__system_prompt": {
+      "default": "",
+      "description": "system prompt for code_reviewer",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "design_doc__system_prompt": {
+      "default": "",
+      "description": "system prompt for design_doc",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "design_review_attempts": {
       "default": 1,
       "description": "how many times a design whose ## Changes section is missing or empty is sent back for a rewrite before it goes to the approval gate as it is; every other finding is advisory and never sends it back",
@@ -9264,10 +9511,46 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": 1,
       "values": []
     },
+    "early_asks_check__system_prompt": {
+      "default": "",
+      "description": "system prompt for early_asks_check",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "generate": {
       "default": "",
       "description": "a command run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command",
       "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "health_checker__system_prompt": {
+      "default": "",
+      "description": "system prompt for health_checker",
+      "frozen": false,
       "kind": "str",
       "range": [
         null,
@@ -9312,6 +9595,30 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": "",
       "values": []
     },
+    "overwatch__system_prompt": {
+      "default": "",
+      "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "pitfalls_researcher__system_prompt": {
+      "default": "",
+      "description": "system prompt for pitfalls_researcher",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "pr": {
       "default": true,
       "description": "open a pull request once the reviews pass: into the target's default branch, or a new project's own GitHub repository; off keeps the work on the run's local branch, with its pull request text in pull-request.md and finishing commands in delivery.json",
@@ -9322,6 +9629,42 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         null
       ],
       "value": true,
+      "values": []
+    },
+    "qa_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for qa_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "qa_director_rerun__system_prompt": {
+      "default": "",
+      "description": "system prompt for qa_director_rerun",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "qa_judge__system_prompt": {
+      "default": "",
+      "description": "system prompt for qa_judge",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "refine": {
@@ -9391,6 +9734,18 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "public"
       ]
     },
+    "research_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for research_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "review_attempts": {
       "default": 3,
       "description": "how many times the review gates may reloop before stopping; defaults to the same as check_attempts",
@@ -9451,10 +9806,46 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": "",
       "values": []
     },
+    "strategy_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for strategy_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "synthesize_strategy__system_prompt": {
+      "default": "",
+      "description": "system prompt for synthesize_strategy",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "target": {
       "default": "",
       "description": "the git repository to change; empty starts a new project in the projects folder",
       "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "verifier__system_prompt": {
+      "default": "",
+      "description": "system prompt for verifier",
+      "frozen": false,
       "kind": "str",
       "range": [
         null,
@@ -9514,7 +9905,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "a89a70fe616e8dbaa4db03cb3f90e4b1f9da4bf398727714afd386e08255e796"
+    "reviewed_schema": "700d79f80297fa26002bfa8195ecccde072da6b5653c89f26e97fb8fa264f96b"
   }
 }
 ```
@@ -9619,7 +10010,9 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "call": "",
       "id": "emit",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "emit__system_prompt"
+      ],
       "notes": "make the change in a clone of the last attempt; its diff is the emission",
       "role": "builder"
     },
@@ -9639,7 +10032,9 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "call": "",
       "id": "focused_qa",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "focused_qa__system_prompt"
+      ],
       "notes": "one light focused QA stage; no reviewer fan-out",
       "role": "code_reviewer"
     },
@@ -9735,7 +10130,9 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "call": "",
       "id": "strategy",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "strategy__system_prompt"
+      ],
       "notes": "one concise strategy, followed by one coder and one QA agent; no parallel workers",
       "role": "strategist"
     },
@@ -9743,7 +10140,9 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "call": "",
       "id": "verifier",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "verifier__system_prompt"
+      ],
       "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo",
       "role": "code_reviewer"
     }
@@ -9807,6 +10206,30 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
         1800
       ],
       "value": 180,
+      "values": []
+    },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "focused_qa__system_prompt": {
+      "default": "",
+      "description": "system prompt for focused_qa",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "generate": {
@@ -9893,10 +10316,34 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "value": "",
       "values": []
     },
+    "strategy__system_prompt": {
+      "default": "",
+      "description": "system prompt for strategy",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "target": {
       "default": "",
       "description": "the git repository to change; empty starts a new project in the projects folder",
       "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "verifier__system_prompt": {
+      "default": "",
+      "description": "system prompt for verifier",
+      "frozen": false,
       "kind": "str",
       "range": [
         null,
@@ -9947,7 +10394,7 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small artifact with one sequential strategist, coder and QA agent, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none (`worktree=0` writes .factory/artifacts instead; `source_project` copies a directory there). The check runs in that worktree before focused QA. It has no approval gate, so it opens no pull request: the branch is left for you to push. The coder works in a prepared clone of the last attempt, whose diff becomes the attempt.",
-    "reviewed_schema": "5cf531ee4f16c72c81714341da874ea34e912b54f6e0f76369f97ce5c77a9447"
+    "reviewed_schema": "1a5a7378cb3c8c73e814a7a537c8c023c9c2d1b884a90a5e0a9217dca05c58a3"
   }
 }
 ```
@@ -10143,7 +10590,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "code_reviewer",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "code_reviewer__system_prompt"
+      ],
       "notes": "review the emitted source against the design",
       "role": "ceo"
     },
@@ -10151,7 +10600,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "design",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "design__system_prompt"
+      ],
       "notes": "plan the package before any code is written",
       "role": "ceo"
     },
@@ -10159,7 +10610,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "emit",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "emit__system_prompt"
+      ],
       "notes": "write the package's source files",
       "role": "ceo"
     },
@@ -10217,7 +10670,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "health_checker",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "health_checker__system_prompt"
+      ],
       "notes": "run the package and record what happened, command by command",
       "role": "ceo"
     },
@@ -10243,7 +10698,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "overwatch",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "overwatch__system_prompt"
+      ],
       "notes": "audit the evidence behind the reviews, not the work again",
       "role": "ceo"
     },
@@ -10268,7 +10725,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "qa_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "qa_director__system_prompt"
+      ],
       "notes": "attack the package against its acceptance criteria",
       "role": "ceo"
     },
@@ -10300,7 +10759,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "research_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "research_director__system_prompt"
+      ],
       "notes": "choose the research directions and have a subagent answer each one",
       "role": "ceo"
     },
@@ -10334,7 +10795,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "strategy_director",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "strategy_director__system_prompt"
+      ],
       "notes": "choose the strategy perspectives and their intent coverage",
       "role": "ceo"
     },
@@ -10358,7 +10821,9 @@ Revise an existing mode package and validate the revision before separate QA and
       "call": "",
       "id": "synthesize_strategy",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "synthesize_strategy__system_prompt"
+      ],
       "notes": "compile the perspectives into one intent-faithful strategy",
       "role": "ceo"
     },
@@ -10423,6 +10888,18 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": 8,
       "values": []
     },
+    "code_reviewer__system_prompt": {
+      "default": "",
+      "description": "system prompt for code_reviewer",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "data_node": {
       "default": false,
       "description": "build the package as a DataNode that runs its subgraph once per data item; naming a Task implies this, so the knob is only for a caller that wants to be explicit",
@@ -10433,6 +10910,18 @@ Revise an existing mode package and validate the revision before separate QA and
         null
       ],
       "value": false,
+      "values": []
+    },
+    "design__system_prompt": {
+      "default": "",
+      "description": "system prompt for design",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "design_attempts": {
@@ -10447,9 +10936,57 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": 2,
       "values": []
     },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "health_checker__system_prompt": {
+      "default": "",
+      "description": "system prompt for health_checker",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "overwatch__system_prompt": {
+      "default": "",
+      "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "qa_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for qa_director",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -10493,6 +11030,18 @@ Revise an existing mode package and validate the revision before separate QA and
         8
       ],
       "value": 3,
+      "values": []
+    },
+    "research_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for research_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     },
     "review_attempts": {
@@ -10555,6 +11104,30 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": 3600,
       "values": []
     },
+    "strategy_director__system_prompt": {
+      "default": "",
+      "description": "system prompt for strategy_director",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "synthesize_strategy__system_prompt": {
+      "default": "",
+      "description": "system prompt for synthesize_strategy",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "task_ref": {
       "default": "",
       "description": "a Task class the produced mode must satisfy, as `module:Class` or a registered name (empty for none)",
@@ -10588,7 +11161,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "d57819a0481854889d756243dbf7c9de9536daf57aae1e4d5d3a90f4c35c00b4"
+    "reviewed_schema": "184ce0afc0773fd7318dab012f721a9160cd84b03834893eb6622d0090ef279d"
   }
 }
 ```
@@ -10688,7 +11261,9 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "call": "",
       "id": "emit",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "emit__system_prompt"
+      ],
       "notes": "implement directly from the brief and current source",
       "role": "builder"
     },
@@ -10708,7 +11283,9 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "call": "",
       "id": "focused_qa",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "focused_qa__system_prompt"
+      ],
       "notes": "one light focused QA stage; no reviewer fan-out",
       "role": "code_reviewer"
     },
@@ -10875,6 +11452,30 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "value": false,
       "values": []
     },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "focused_qa__system_prompt": {
+      "default": "",
+      "description": "system prompt for focused_qa",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
@@ -11004,7 +11605,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "9d59b441e6fa38451138ba1e008e03c9df5b27f33c053b945a96e3bae59d62d9"
+    "reviewed_schema": "ee4d0aff2ca3f3d22a1c20d530b705c406de516b4bd39fcb55a0114d0c067179"
   }
 }
 ```
@@ -11087,7 +11688,9 @@ Change a repository until a failing check passes, on a branch of its own, throug
       "call": "",
       "id": "emit",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "emit__system_prompt"
+      ],
       "notes": "write the fix as blocks in emit.txt",
       "role": "ceo"
     },
@@ -11138,7 +11741,9 @@ Change a repository until a failing check passes, on a branch of its own, throug
       "call": "",
       "id": "verifier",
       "kind": "agent",
-      "knobs": [],
+      "knobs": [
+        "verifier__system_prompt"
+      ],
       "notes": "design-blind verification: apply the evidence log's methods to the brief, diff and repo",
       "role": "code_reviewer"
     }
@@ -11204,6 +11809,18 @@ Change a repository until a failing check passes, on a branch of its own, throug
       "value": 300,
       "values": []
     },
+    "emit__system_prompt": {
+      "default": "",
+      "description": "system prompt for emit",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "generate": {
       "default": "",
       "description": "a command run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command",
@@ -11264,6 +11881,18 @@ Change a repository until a failing check passes, on a branch of its own, throug
       "value": "",
       "values": []
     },
+    "verifier__system_prompt": {
+      "default": "",
+      "description": "system prompt for verifier",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
     "worktree": {
       "default": true,
       "description": "work in a worktree of the target on the run's own branch; off writes the artifact under .factory/artifacts instead",
@@ -11297,7 +11926,7 @@ Change a repository until a failing check passes, on a branch of its own, throug
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Change a repository until a failing check passes, on a branch of its own, through the steps any mode that changes a repository attaches (`repo_change`): the example mode authors copy. It opens no pull request; unscored, so not an optimization target.",
-    "reviewed_schema": "846b01c46427c1ed6b3e321c2a1e96c79a39e379ece20de5ade7802a47a3a05d"
+    "reviewed_schema": "7e2300aca926fbfcc175946ecf3d1ea42c9834c5a2e1293d09f8ba8ab32a44e3"
   }
 }
 ```
@@ -11354,7 +11983,8 @@ write a build script that compiles and runs any small Java tree. Inspect declare
       "id": "write_build",
       "kind": "agent",
       "knobs": [
-        "source_release"
+        "source_release",
+        "write_build__system_prompt"
       ],
       "notes": "write the javac/java build script for this item",
       "role": "ceo"
@@ -11371,6 +12001,18 @@ write a build script that compiles and runs any small Java tree. Inspect declare
         24
       ],
       "value": 17,
+      "values": []
+    },
+    "write_build__system_prompt": {
+      "default": "",
+      "description": "system prompt for write_build",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
       "values": []
     }
   },
@@ -11399,7 +12041,7 @@ write a build script that compiles and runs any small Java tree. Inspect declare
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "write a build script that compiles and runs any small Java tree. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.",
-    "reviewed_schema": "807476be36a5ee933220bc9e03ed580dfb230544df75da326c20f9d56ec3d7e2"
+    "reviewed_schema": "deb5e1edf7573768c1689da8ee619cc3e86a050220d082c6dc68ac144bfa8107"
   }
 }
 ```
@@ -11677,7 +12319,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "id": "solve",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "solve__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -11718,6 +12361,18 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
         null
       ],
       "value": "",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
     },
     "use_sketch": {
@@ -11767,7 +12422,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "df67447ca311658d6b5ea8783d137ca9bf9dde44d995391aaf3b347cd6bf6576"
+    "reviewed_schema": "8caca9bf6e4ba0a45ba91cd20a0838c8f3ed174276736da502987c4d54198c73"
   }
 }
 ```
@@ -11871,7 +12526,8 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "id": "judge",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "judge__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -11889,7 +12545,8 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "id": "solve_a",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "solve_a__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -11899,7 +12556,8 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "id": "solve_b",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "solve_b__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -11916,6 +12574,18 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
         64
       ],
       "value": 1,
+      "values": []
+    },
+    "judge__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for judge (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
     },
     "max_completion_tokens": {
@@ -11940,6 +12610,30 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
         null
       ],
       "value": "",
+      "values": []
+    },
+    "solve_a__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_a (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "solve_b__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_b (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
     },
     "use_sketch": {
@@ -11989,7 +12683,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "a9a514ab5fb0220cb107e1e6d3670e876ad85e8177680acecff24ef59ad947ec"
+    "reviewed_schema": "bf6ee17d64eb0c4a563359726bc65e7b492149098f78d77040893c1ec048f170"
   }
 }
 ```
@@ -12070,7 +12764,8 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "id": "self_check",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "self_check__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -12080,7 +12775,8 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "id": "solve_draft",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "solve_draft__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -12111,6 +12807,18 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "value": 0,
       "values": []
     },
+    "self_check__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for self_check (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
     "skill": {
       "default": "",
       "description": "skill prompt injected into the system message",
@@ -12121,6 +12829,18 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
         null
       ],
       "value": "",
+      "values": []
+    },
+    "solve_draft__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
     },
     "use_sketch": {
@@ -12170,7 +12890,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "0809dc65570feeb898f5b29f5a29cb1ab015b90013d632530e6dfd74296d5b87"
+    "reviewed_schema": "9e18507767ff1d03fe4039cd9594fad68078a1569915c54fecddd99de2fdfbe0"
   }
 }
 ```
@@ -12251,7 +12971,8 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "id": "solve_draft",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "solve_draft__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -12261,7 +12982,8 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "id": "verify",
       "kind": "agent",
       "knobs": [
-        "max_completion_tokens"
+        "max_completion_tokens",
+        "verify__system_prompt"
       ],
       "notes": "",
       "role": "solver"
@@ -12304,6 +13026,18 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "value": "",
       "values": []
     },
+    "solve_draft__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for solve_draft (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
     "use_sketch": {
       "default": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
@@ -12326,6 +13060,18 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
         null
       ],
       "value": false,
+      "values": []
+    },
+    "verify__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for verify (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
     }
   },
@@ -12351,7 +13097,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "0638d1f3ceac8d900dc5a0ecf0635427f49980c251fec3d5b96e26acbe8ac81a"
+    "reviewed_schema": "9cff6810c3bf9528eac9f63e641f7335fc53d9da2eec4fb6d8174a5fc5e2520b"
   }
 }
 ```

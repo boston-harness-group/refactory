@@ -110,8 +110,9 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
     # A sibling's newly produced fact is no more available than its file. A fact
     # from before the fork can be read by all branches, but not concurrently reset.
     import re
+    # The prompt each branch node sends: its bound template (lowering does the same).
     consumed = [{match for node in nodes for match in re.findall(
-        r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", node.prompt_template)}
+        r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", node.bound("prompt_template", ctx.knobs))}
         for nodes in branches]
     for index, branch_writes in enumerate(writes):
         if any(_overlap(path, ctx.workdir.resolve() / ".refactory") for path in branch_writes):
