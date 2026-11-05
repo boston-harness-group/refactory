@@ -1480,12 +1480,18 @@ def test_fork_inside_data_resume(tmp_path):
 
     The walker may replay the whole item on resume: item 0 runs from scratch
     because its pass_dir has no .done marker.
+
+    Uses a task_ref so item_scores are non-empty and the comparison is meaningful.
     """
+    from refactory_dsh.task import register_task
+
+    register_task("fork_scoring_task", _ScoringTask)
     # The halt_branch_on_first_item op raises HaltStop on item 0.
     halt_graph = _fork_inside_data_graph(
         parallelism=1,
         branch_b_call="loop_ops:halt_branch_on_first_item",
-        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+        task_ref="fork_scoring_task",
+        **_scoring_graph_kwargs(),
     )
     run = tmp_path / "run"
     first = execute(halt_graph, run, max_steps=200)
@@ -1494,7 +1500,8 @@ def test_fork_inside_data_resume(tmp_path):
     # Resume: use an unhalted graph (no halt op in branch_b).
     resume_graph = _fork_inside_data_graph(
         parallelism=1,
-        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+        task_ref="fork_scoring_task",
+        **_scoring_graph_kwargs(),
     )
     resumed = execute(resume_graph, run, max_steps=200, start="data", facts=dict(first.facts))
     assert resumed.exit_ok, resumed.error
@@ -1502,14 +1509,19 @@ def test_fork_inside_data_resume(tmp_path):
     # Reference: uninterrupted run.
     ref_graph = _fork_inside_data_graph(
         parallelism=1,
-        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+        task_ref="fork_scoring_task",
+        **_scoring_graph_kwargs(),
     )
     reference = execute(ref_graph, tmp_path / "ref", max_steps=200)
     assert reference.exit_ok, reference.error
 
-    assert resumed.item_records == reference.item_records
-    if "item_scores" in resumed.facts or "item_scores" in reference.facts:
-        assert resumed.facts.get("item_scores") == reference.facts.get("item_scores")
+    # item_scores must be non-empty and match between resumed and reference runs.
+    resumed_scores = resumed.facts.get("item_scores", [])
+    ref_scores = reference.facts.get("item_scores", [])
+    assert len(resumed_scores) == 3, f"expected 3 item_scores, got {len(resumed_scores)}"
+    assert _score_tuples(resumed_scores) == _score_tuples(ref_scores), (
+        f"item_scores differ:\n  resumed: {_score_tuples(resumed_scores)}\n  ref: {_score_tuples(ref_scores)}"
+    )
 
 
 def test_data_inside_fork_validation(tmp_path):
@@ -1551,6 +1563,140 @@ def test_data_inside_fork_validation(tmp_path):
     state = {"graph": graph.to_state()}
     with pytest.raises(LoweringError, match="data node.*inside a fork branch"):
         to_workflow(state)
+
+
+# ── F21: per-item deadline with fork inside data pass ─────────────────
+
+
+class _ForkDeadlineTask(Task):
+    """Task with a slow verify phase for deadline testing with fork-inside-data."""
+
+    name = "fork_deadline_task"
+
+    def instances(self, **kw):
+        from refactory_dsh.task import TaskInstance
+        return [
+            TaskInstance(id="ok", metadata={}),
+            TaskInstance(id="slow_verify", metadata={"phase": "verify"}),
+        ]
+
+    def setup(self, instance, workspace, **kw):
+        pass
+
+    def verify(self, instance, workspace, **kw):
+        if instance.metadata.get("phase") == "verify":
+            time.sleep(4)
+        return VerifyResult(passed=True, score=1.0)
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_deadline(tmp_path, monkeypatch, parallelism):
+    """[walker] Per-item deadline with a fork inside the data pass.
+
+    The walk phase (including the fork) runs WITHOUT the deadline (the executor
+    disarms SIGALRM before _walk_branch). Setup and verify run WITH the deadline.
+    An item whose verify exceeds the deadline times out; an item whose fork walk
+    takes time does NOT time out. This is the same behaviour as the sequential
+    loop (test_per_item_deadline_covers_setup_and_verify) but with a fork shape.
+    """
+    from refactory_dsh.nn.executor import Executor
+    from refactory_dsh.task import register_task
+
+    register_task("fork_deadline_task", _ForkDeadlineTask)
+    monkeypatch.setattr(Executor, "_data_item_deadline", lambda self: 1.0)
+
+    graph = _fork_inside_data_graph(
+        parallelism=parallelism,
+        task_ref="fork_deadline_task",
+        items=({"id": "ok"}, {"id": "slow_verify"}),
+        **_scoring_graph_kwargs(),
+    )
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    assert result.exit_ok, result.error
+    scores = result.facts.get("item_scores", [])
+    assert len(scores) == 2, f"expected 2 item_scores, got {len(scores)}: {scores}"
+    outcomes = {s["id"]: s.get("error_kind") for s in scores}
+    assert outcomes["ok"] is None, f"ok item should not have error_kind: {outcomes}"
+    assert outcomes["slow_verify"] == "timeout", (
+        f"slow_verify should have error_kind=timeout: {outcomes}"
+    )
+
+
+# ── F21: step cap with fork inside data pass ─────────────────────────
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_step_cap(tmp_path, monkeypatch, parallelism):
+    """[walker] The shared step cap covers fork branches inside a data pass.
+
+    The fork body has 5 nodes (fork, a, b, join, d_exit). With 3 items and
+    max_steps=3, the budget scales to data_step + 3*5 = 16 body steps total.
+    Actually, d_entry adds 1 per item, so it is data_step + 3*(1+5) = 19.
+    With max_steps=2, it is data_step + 3*(1+5) = ... too few. We set
+    max_steps low enough that one item exhausts the cap.
+
+    Concretely: each item walks d_entry → fork → a → b → join → d_exit = 6 nodes.
+    3 items × 6 = 18 body nodes + 1 data node + 1 report = 20 total. With
+    max_steps=3 the budget is 3*number_of_items_touched = 3*3 = 9 body steps +
+    the data node = 10. We have 18 body steps → some items fail with 'exceeded'.
+
+    This is the same test shape as test_nested_fork_in_item_shares_the_step_cap
+    but proves the fork inside a data pass body exhausts the same cap.
+    """
+    graph = _fork_inside_data_graph(
+        parallelism=parallelism,
+        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+    )
+    result = execute(graph, tmp_path / "run", max_steps=2)
+    # With max_steps=2, some items should exceed the cap.
+    assert len(result.item_records) >= 1, (
+        f"expected at least one failed item, got {result.item_records}"
+    )
+    exceeded_items = [r for r in result.item_records if "exceeded" in r.get("error_text", "")]
+    assert len(exceeded_items) >= 1, (
+        f"expected at least one item to exceed step cap: {result.item_records}"
+    )
+
+
+# ── F21: stop/pause with fork inside data pass ──────────────────────
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_fork_inside_data_stop(tmp_path, parallelism):
+    """[walker] A HaltStop raised inside a fork branch in a data pass stops the
+    run. This covers 'stop' behavior with fork inside pass on the walker.
+
+    The data node's error handling catches the HaltStop and records the run as
+    halted. The run can later be resumed (test_fork_inside_data_resume covers
+    the resume path). Item 1 is never started because the halt fires on item 0.
+    """
+    graph = _fork_inside_data_graph(
+        parallelism=parallelism,
+        branch_b_call="loop_ops:halt_branch_on_first_item",
+        items=({"id": "0"}, {"id": "1"}),
+    )
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    assert result.halted, f"expected halted, got exit_ok={result.exit_ok}, error={result.error}"
+    # The run stopped on item 0; item 1 was never started.
+
+
+def test_fork_inside_data_pause(tmp_path):
+    """[walker] A HaltStop from a fn_gate inside the data body (after the
+    fork/join) pauses the run — the data node's error handler catches HaltStop
+    and records outcome='halted'. This is the same path GateStop follows
+    (outcome='refused') but uses a fn_gate that returns 'halt' for simplicity.
+
+    Covers 'pause' behavior with fork inside pass on the walker.
+    """
+    graph = _fork_inside_data_graph(
+        parallelism=1,
+        d_exit_call="loop_ops:halt_gate_on_first_item",
+        items=({"id": "0"}, {"id": "1"}),
+    )
+    result = execute(graph, tmp_path / "run", max_steps=200)
+    assert result.halted, (
+        f"expected halted, got exit_ok={result.exit_ok}, error={result.error}"
+    )
 
 
 # ── F21: two-runtime tests ───────────────────────────────────────────────
@@ -1703,22 +1849,26 @@ def test_fork_inside_data_two_runtimes(tmp_path, parallelism, fork_scoring_task)
 
 
 @_needs_spine
-def test_fork_inside_data_resume_spine(tmp_path):
+def test_fork_inside_data_resume_spine(tmp_path, fork_scoring_task):
     """[spine] Stops the spine drain after one branch of item 0's fork has completed
     (halt_branch_on_first_item_spine kills the drain on item 0), resumes from
     checkpoint, and finishes with the same item_records/item_scores as an
     uninterrupted spine run.
+
+    Uses a task_ref so item_scores are non-empty and the comparison is meaningful.
     """
     from refactory_dsh import lowering
 
+    project, _, spine_task_ref = fork_scoring_task
     flag = tmp_path / "stopped_flag"
     spine_log = tmp_path / "spine.log"
 
-    # Graph with halt on item 0.
+    # Graph with halt on item 0 and a task_ref for scoring.
     halt_graph = _fork_inside_data_graph(
         parallelism=1,
         branch_b_call="loop_ops:halt_branch_on_first_item_spine",
-        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+        task_ref=spine_task_ref,
+        **_scoring_graph_kwargs(),
     )
 
     spine_dir = tmp_path / "spine"
@@ -1728,8 +1878,13 @@ def test_fork_inside_data_resume_spine(tmp_path):
     graph_path, _ = lowering.write_mode_graph(
         state, tmp_path / "graphs", name="fork_resume",
     )
+    extra_path = os.pathsep.join([
+        str(project / ".factory" / "packages"),
+        str(HERE),
+    ])
     env = {"PASS_TEST_LOG": str(spine_log), "PASS_TEST_RUNTIME": "spine",
-           "PASS_TEST_FLAG": str(flag), "PYTHONPATH": str(HERE)}
+           "PASS_TEST_FLAG": str(flag), "PYTHONPATH": extra_path,
+           "REFACTORY_PROJECT": str(project)}
     # First run: should fail on item 0.
     rc1 = _run_spine_drain(
         _DRAIN, graph_path, spine_dir, 30_000,
@@ -1744,10 +1899,11 @@ def test_fork_inside_data_resume_spine(tmp_path):
     )
     assert rc2 == 0, f"spine resume failed with rc={rc2}"
 
-    # Reference: uninterrupted run (no halt op).
+    # Reference: uninterrupted run (no halt op) with same task_ref.
     ref_graph = _fork_inside_data_graph(
         parallelism=1,
-        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
+        task_ref=spine_task_ref,
+        **_scoring_graph_kwargs(),
     )
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir(parents=True, exist_ok=True)
@@ -1758,20 +1914,17 @@ def test_fork_inside_data_resume_spine(tmp_path):
     )
     rc_ref = _run_spine_drain(
         _DRAIN, ref_graph_path, ref_dir, 30_000,
-        env_extra={"PYTHONPATH": str(HERE)},
+        env_extra={"PYTHONPATH": extra_path, "REFACTORY_PROJECT": str(project)},
     )
     assert rc_ref == 0, f"reference spine run failed with rc={rc_ref}"
 
     # Compare: resumed run's facts must match the reference.
     resumed_facts = json.loads((spine_dir / "facts.json").read_text())
     ref_facts = json.loads((ref_dir / "facts.json").read_text())
-    # Both runs have no task_ref → no item_scores. Assert structural equality
-    # on the facts that both produce (at minimum, the drain completed all items).
-    assert isinstance(resumed_facts, dict), f"resumed facts is not a dict: {resumed_facts}"
-    assert isinstance(ref_facts, dict), f"ref facts is not a dict: {ref_facts}"
-    # If either has item_scores, they must match.
+    # item_scores must be non-empty and match.
     resumed_scores = resumed_facts.get("item_scores", [])
     ref_scores = ref_facts.get("item_scores", [])
+    assert len(resumed_scores) == 3, f"expected 3 item_scores, got {len(resumed_scores)}: {resumed_scores}"
     assert _score_tuples(resumed_scores) == _score_tuples(ref_scores), (
         f"item_scores differ:\n  resumed: {_score_tuples(resumed_scores)}\n  ref: {_score_tuples(ref_scores)}"
     )

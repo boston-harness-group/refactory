@@ -581,6 +581,20 @@ def write_item_result(ctx: Any) -> dict[str, Any]:
     return {}
 
 
+def halt_gate_on_first_item(ctx: Any) -> dict[str, Any]:
+    """Raises ``HaltStop`` only when item id is ``"0"``; no-ops otherwise.
+
+    Used by ``test_fork_inside_data_pause``: simulates a gate-like halt inside
+    the data body after the fork/join to test the pause path.
+    """
+    from refactory_dsh.nn.executor import HaltStop
+
+    item = ctx.read_json("current_item.json", {}) or {}
+    if str(item.get("id")) == "0":
+        raise HaltStop("data", reason="test halt gate in fork body")
+    return {}
+
+
 def halt_branch_on_first_item_spine(ctx: Any) -> dict[str, Any]:
     """Raises stop / kills drain on item 0; no-ops otherwise.
 
