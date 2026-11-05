@@ -24,6 +24,9 @@ Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
   - analyst_edit_budget = 4 (envs/base.py:265 — the analysts' L is the adapter's
                              constant ``edit_budget``, not the schedule)
   - seed = 42               (_base_/default.yaml:84, ``seed: 42``)
+  - claude_backend_wrapper = False (not a SkillOpt setting: True frames every
+                optimizer call's user message as SkillOpt's Claude backend does,
+                claude_backend.py; SkillOpt's other backends send it bare)
   - eval_test = on when the parts manifest has a test part (_base_/default.yaml:111
                 ``eval_test: true``; trainer.py:2241). After training: the final
                 skill's val check and promotion, then the initial, best and final
@@ -48,6 +51,7 @@ from refactory_dsh.outerloop import EvalRequest, OuterLoop, OuterLoopError, Run
 from refactory_packages.skillopt import analysts, merge, prompts, schedule, state
 from refactory_packages.skillopt.env import SkillOptEnv
 from refactory_packages.skillopt.json_utils import extract_json
+from refactory_packages.skillopt.claude_backend import ClaudeBackendFraming
 from refactory_packages.skillopt.trace import TraceRecorder, ask
 
 
@@ -147,6 +151,16 @@ class SkillOptLoop(OuterLoop):
                 f"patches or None, not {type(patch_order).__name__}"
             )
         self.patch_order = patch_order
+        # Frame every optimizer call's user message as arm A's Claude backend does
+        # (``claude_backend.claude_backend_prompt``). Off by default: SkillOpt frames
+        # only on that backend, so a mode or backend compared with anything else
+        # keeps the bare message.
+        wrapper = options.get("claude_backend_wrapper", False)
+        if not isinstance(wrapper, bool):
+            raise TypeError(
+                f"skillopt: claude_backend_wrapper must be true or false, not {wrapper!r}"
+            )
+        self.claude_backend_wrapper = wrapper
         # Initialise mutable state
         self._current_skill: str = ""
         self._current_score: float = 0.0
@@ -192,6 +206,13 @@ class SkillOptLoop(OuterLoop):
         self._completed_phases: set[str] = set()
         # Test phases whose test_eval decision is in the trace.
         self._traced_phases: set[str] = set()
+
+    def _optimizer_client(self) -> Any:
+        """The client every optimizer call goes through: ``self.model``, framed as arm
+        A's Claude backend frames it when ``claude_backend_wrapper`` is on."""
+        if self.claude_backend_wrapper and self.model is not None:
+            return ClaudeBackendFraming(self.model)
+        return self.model
 
     # ── strategy (overrides OuterLoop.strategy) ─────────────────────────────
 
@@ -361,7 +382,7 @@ class SkillOptLoop(OuterLoop):
                 # (trainer.py:1242, :1283 pass batch.seed as random_seed).
                 analyst_seed = epoch_seed
                 failure_patches, success_patches = analysts.reflect(
-                    client=self.model,
+                    client=self._optimizer_client(),
                     records=self._analyst_records(epoch, records),
                     skill_text=self._current_skill,
                     edit_budget=self.analyst_edit_budget,
@@ -406,7 +427,7 @@ class SkillOptLoop(OuterLoop):
             if not self._past_phase(resume_epoch, resume_phase, epoch, "merge"):
                 self._phase = "merge"
                 merged = merge.hierarchical_merge(
-                    client=self.model,
+                    client=self._optimizer_client(),
                     skill_text=self._current_skill,
                     failure_patches=failure_patches,
                     success_patches=success_patches,
@@ -442,7 +463,7 @@ class SkillOptLoop(OuterLoop):
                 )
                 self._edit_budget_step = self._edit_budget_step + 1
                 ranked = merge.rank(
-                    client=self.model,
+                    client=self._optimizer_client(),
                     skill_text=self._current_skill,
                     merged_edits=merge.patch_edits(merged),
                     budget=budget,
@@ -1102,7 +1123,7 @@ class SkillOptLoop(OuterLoop):
             self._prev_epoch_skill, self._current_skill, prev_guidance, comparison_text,
         )
         output = ask(
-            self.model, self._trace, "slow_update", user,
+            self._optimizer_client(), self._trace, "slow_update", user,
             system=prompts.SLOW_UPDATE_SYSTEM, call_key=call_key,
         )
 
@@ -1185,7 +1206,7 @@ class SkillOptLoop(OuterLoop):
             comparison_text,
         )
         output = ask(
-            self.model, self._trace, "meta_skill", user,
+            self._optimizer_client(), self._trace, "meta_skill", user,
             system=prompts.META_SKILL_SYSTEM, call_key=call_key,
         )
 
