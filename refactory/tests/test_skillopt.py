@@ -3646,3 +3646,62 @@ def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeyp
     assert pairs
     categories = [p["category"] for p in pairs]
     assert set(categories) <= {"improved", "regressed"}, categories
+
+
+# ── claude_backend_wrapper ────────────────────────────────────────────────
+
+_ARM_A_OPTIMIZER_PROMPTS = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "skillopt_arm_a_optimizer_prompts.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def test_claude_backend_framing_reproduces_arm_a_optimizer_prompts():
+    """For one recorded call of each optimizer role (A's calls.jsonl, field
+    ``prompt``, kept as its sha256 and length), the framed client sends exactly the
+    bytes A's ``claude -p`` received; the system prompt passes through unchanged."""
+    import hashlib
+
+    from refactory_packages.skillopt.claude_backend import ClaudeBackendFraming
+
+    class Sink:
+        def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):
+            self.sent = (prompt, system)
+            return "ok"
+
+    roles = {entry["role"] for entry in _ARM_A_OPTIMIZER_PROMPTS}
+    assert roles == {
+        "analyst_error (livemath)", "analyst_success (livemath)", "MERGE_FAILURE_SYSTEM",
+        "MERGE_SUCCESS_SYSTEM", "MERGE_FINAL_SYSTEM", "RANK_SYSTEM",
+        "SLOW_UPDATE_SYSTEM", "META_SKILL_SYSTEM",
+    }
+    for entry in _ARM_A_OPTIMIZER_PROMPTS:
+        sink = Sink()
+        assert ClaudeBackendFraming(sink).complete(entry["message"], system="S") == "ok"
+        prompt, system = sink.sent
+        assert system == "S"
+        assert len(prompt) == entry["a_prompt_chars"], entry["role"]
+        assert hashlib.sha256(prompt.encode()).hexdigest() == entry["a_prompt_sha256"], entry["role"]
+
+
+def test_claude_backend_prompt_edges_in_the_strategy_package():
+    from refactory_packages.skillopt.claude_backend import claude_backend_prompt
+
+    assert claude_backend_prompt(" \n") == "History:\n- User:\n\nAnswer the latest user request."
+    assert claude_backend_prompt("\na\n b\n") == (
+        "History:\n- User: a\n   b\n\nAnswer the latest user request.")
+
+
+def test_claude_backend_wrapper_option_is_off_by_default_and_a_boolean():
+    from refactory_packages.skillopt.claude_backend import ClaudeBackendFraming
+    from refactory_packages.skillopt.loop import SkillOptLoop
+
+    model = object()
+    loop = SkillOptLoop.__new__(SkillOptLoop)
+    loop.configure(model=model)
+    assert loop.claude_backend_wrapper is False and loop._optimizer_client() is model
+    loop.configure(model=model, claude_backend_wrapper=True)
+    framed = loop._optimizer_client()
+    assert isinstance(framed, ClaudeBackendFraming) and framed.client is model
+    with pytest.raises(TypeError, match="claude_backend_wrapper"):
+        loop.configure(model=model, claude_backend_wrapper="true")

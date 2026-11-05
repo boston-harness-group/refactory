@@ -103,7 +103,7 @@ def test_livemath_solver_end_to_end(tmp_path):
             call=f"{OPS}:format_prompt",
             reads=(CURRENT_ITEM,),
             knobs=("skill", "use_theorem", "use_sketch"),
-            produces=("user_prompt", "skill_section"),
+            produces=("user_prompt", "solver_prompt", "skill_section"),
         ))
         # Deterministic op replacing the agent node — writes the same response
         # FakeModel would give so the LiveMathTask's verify produces matching scores.

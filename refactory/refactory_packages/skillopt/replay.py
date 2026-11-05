@@ -251,8 +251,8 @@ class CallMatcher:
     def lookup(self, system: str, prompt: str, *, attempts: int | None = None) -> str:
         """Look up the next recorded output for this (system, prompt) pair.
 
-        B sends raw prompts (no wrapping), so no normalisation at lookup time.
-        A's prompts are normalised at index time, producing the same raw form.
+        ``prompt`` is unframed: A's prompts are normalised at index time, and
+        :class:`ReplayClient` takes the framing off B's solver prompts before asking.
         ``attempts`` is how many tries A's client made per call; ``None``
         allows any number of failed attempts before a success.
         """
@@ -627,11 +627,16 @@ class ReplayClient:
     ``confine``, nothing else), so a call the live client would refuse fails
     here too (#493 G30).
 
-    Every prompt is matched exactly as B wrote it.
+    A solver prompt is matched after taking off the Claude backend framing, as A's
+    recordings are indexed; an optimizer prompt too with ``unframe_optimizer``
+    (arm B's ``claude_backend_wrapper``), and otherwise exactly as B wrote it.
     """
 
-    def __init__(self, matcher: CallMatcher) -> None:
+    def __init__(self, matcher: CallMatcher, *, unframe_optimizer: bool = False) -> None:
         self.matcher = matcher
+        #: Take the Claude backend framing off optimizer prompts too: arm B runs with
+        #: ``claude_backend_wrapper`` on.
+        self.unframe_optimizer = unframe_optimizer
         self.match_log: list[dict[str, Any]] = []
         #: The first fault of the replay itself (not a divergence, not A's event).
         self.harness_error: str | None = None
@@ -647,10 +652,16 @@ class ReplayClient:
         confine: bool = False,
     ) -> str:
         """Answer a request from A's recordings."""
-        idx = self.matcher.consumed_for(system, prompt)
         # Every strategy call is an optimizer call, made inside trace.ask (which
         # exposes its key); a solver call (the walker's) had the rollout's attempts.
         call_key = current_call_key()
+        if call_key is None or self.unframe_optimizer:
+            # The solve node sends the question framed as A's Claude backend framed it
+            # (livemath ``ops.claude_backend_prompt``), and so does every optimizer call
+            # with ``claude_backend_wrapper`` on; A's recordings are indexed with that
+            # framing taken off, so take it off B's prompt the same way.
+            prompt = normalize_recorded_prompt(prompt)
+        idx = self.matcher.consumed_for(system, prompt)
         attempts = OPTIMIZER_ATTEMPTS if call_key else SOLVER_ATTEMPTS
         entry = {
             "key": (system[:80], prompt[:80]),

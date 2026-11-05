@@ -27,7 +27,7 @@ from typing import Any
 
 from .grading import evaluate
 from .mode import SYSTEM_PROMPT, Solver
-from .ops import skill_section
+from .ops import skill_section, unwrap_claude_backend_prompt
 
 
 def build_system(skill: Any) -> str:
@@ -114,7 +114,9 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
 
     # rollout.py:254-257: the first turn's system and user prompts.
     result["target_system_prompt"] = build_system(knobs.get("skill", ""))
-    result["target_user_prompt"] = str(exchanges[0].get("prompt") or "")
+    # SkillOpt saves the user message (rollout.py:254-257), not the Claude
+    # backend's framing of it that the solve node sends.
+    result["target_user_prompt"] = unwrap_claude_backend_prompt(str(exchanges[0].get("prompt") or ""))
 
     eval_result = evaluate(response, meta.get("correct_choice") or {}, meta.get("choices") or [])
     result["soft"] = eval_result["f1"]  # rollout.py:261
