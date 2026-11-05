@@ -251,8 +251,8 @@ class CallMatcher:
     def lookup(self, system: str, prompt: str, *, attempts: int | None = None) -> str:
         """Look up the next recorded output for this (system, prompt) pair.
 
-        B sends raw prompts (no wrapping), so no normalisation at lookup time.
-        A's prompts are normalised at index time, producing the same raw form.
+        ``prompt`` is unframed: A's prompts are normalised at index time, and
+        :class:`ReplayClient` takes the framing off B's solver prompts before asking.
         ``attempts`` is how many tries A's client made per call; ``None``
         allows any number of failed attempts before a success.
         """
@@ -627,7 +627,8 @@ class ReplayClient:
     ``confine``, nothing else), so a call the live client would refuse fails
     here too (#493 G30).
 
-    Every prompt is matched exactly as B wrote it.
+    Every optimizer prompt is matched exactly as B wrote it; a solver prompt after
+    taking off the Claude backend framing, as A's recordings are indexed.
     """
 
     def __init__(self, matcher: CallMatcher) -> None:
@@ -647,10 +648,15 @@ class ReplayClient:
         confine: bool = False,
     ) -> str:
         """Answer a request from A's recordings."""
-        idx = self.matcher.consumed_for(system, prompt)
         # Every strategy call is an optimizer call, made inside trace.ask (which
         # exposes its key); a solver call (the walker's) had the rollout's attempts.
         call_key = current_call_key()
+        if call_key is None:
+            # The solve node sends the question framed as A's Claude backend framed it
+            # (livemath ``ops.claude_backend_prompt``); A's recordings are indexed with
+            # that framing taken off, so take it off B's prompt the same way.
+            prompt = normalize_recorded_prompt(prompt)
+        idx = self.matcher.consumed_for(system, prompt)
         attempts = OPTIMIZER_ATTEMPTS if call_key else SOLVER_ATTEMPTS
         entry = {
             "key": (system[:80], prompt[:80]),

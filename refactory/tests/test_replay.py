@@ -1601,6 +1601,11 @@ class _RecordingClient:
         call_key = current_call_key()
         step_type = str(call_key[0]) if call_key else ""
         result = self._reply(step_type)
+        if not call_key:
+            # A's backend frames the bare user message (_make_calls_jsonl does it
+            # again), so record the solve node's prompt without its framing.
+            from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
+            prompt = unwrap_claude_backend_prompt(prompt)
         self.recorded.append((system, prompt, result))
         return result
 
@@ -2419,3 +2424,20 @@ def test_run_replay_diverges_when_b_stops_early(tmp_path, monkeypatch, _arm_b_re
     if report["replay_status"] == "diverged":
         assert report["divergence"]["field"] in ("early_stop", "epoch_reached")
     assert report["comparison"]["summary"]["diverged_epochs"] >= 1
+
+
+def test_client_takes_the_claude_backend_framing_off_solver_prompts_only(tmp_path):
+    """The solve node sends the question framed as A's Claude backend framed it
+    (livemath ops.claude_backend_prompt); A's recording of that exact prompt is
+    indexed unframed, so the solver call matches it. An optimizer call is matched
+    exactly as B wrote it."""
+    from refactory_packages.livemath.ops import claude_backend_prompt
+
+    question = "## Question\nQ?\n  indented\n\n## Choices\nA. x\nB. y"
+    client = ReplayClient(CallMatcher(_make_calls_jsonl(tmp_path, [
+        ("solver_sys", question, "<answer>A</answer>"),
+        ("opt_sys", question, "patch"),
+    ])))
+    assert client.complete(claude_backend_prompt(question), system="solver_sys") == "<answer>A</answer>"
+    with pytest.raises(ReplayMismatch), optimizer_call(("rank", 1, 0, 0)):
+        client.complete(claude_backend_prompt(question), system="opt_sys")

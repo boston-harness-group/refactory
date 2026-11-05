@@ -139,11 +139,13 @@ class Solver(nn.Mode):
             call=f"{OPS}:format_prompt",
             reads=("current_item.json",),
             knobs=("skill", "use_theorem", "use_sketch"),
-            produces=("user_prompt", "skill_section"),
+            produces=("user_prompt", "solver_prompt", "skill_section"),
         ))
         graph.add(nn.Node(
             "solve", "agent",
-            prompt_template="{{user_prompt}}",
+            # The question framed as arm A's Claude backend sends it
+            # (``ops.claude_backend_prompt``); ``user_prompt`` stays the bare question.
+            prompt_template="{{solver_prompt}}",
             system_prompt_template=SYSTEM_PROMPT,
             writes=("answer.txt",),
             tool_policy="none",
