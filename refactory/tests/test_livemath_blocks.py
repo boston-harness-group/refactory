@@ -255,7 +255,7 @@ def test_baseline_block_lowers_to_the_frozen_snapshot(explicit):
     committed livemath-solver snapshot, and that snapshot is main's. Proves PIT-003."""
     import hashlib
 
-    from tests.test_lowering_smoke import SNAPSHOT_DIR, _lower_mode_bytes
+    from test_lowering_smoke import SNAPSHOT_DIR, _lower_mode_bytes
     from refactory_packages.livemath.mode import Solver
 
     snapshot = (SNAPSHOT_DIR / "livemath-solver.graph.json").read_bytes()
@@ -1047,7 +1047,8 @@ def test_grid_route_matches_refactory_optimize(extra, tmp_path, monkeypatch):
     """A block's resolved route is the one `refactory optimize` resolves from the same
     flags -- with no flags, the route optimize would pick."""
     from refactory_dsh import loop
-    from refactory_packages.livemath.grid import _register_grid_strategy
+    from refactory_dsh import strategies
+    from refactory_packages.livemath.grid import grid_strategy
 
     rc, _, grid_factory = _grid(tmp_path / "g", monkeypatch, extra=extra, blocks=["baseline"])
     assert rc == 0
@@ -1060,12 +1061,17 @@ def test_grid_route_matches_refactory_optimize(extra, tmp_path, monkeypatch):
             del route_extra[at:at + 2]
     optimize_factory = _Factory()
     (tmp_path / "o").mkdir()
-    rc = loop.main([
-        "livemath/solver", "--strategy", _register_grid_strategy("val", 42),
-        "--runs-root", str(tmp_path / "o" / "loop"), "--parts", str(_parts(tmp_path / "o")),
-        "--holdout", "0", "--epochs", "1", "--max-evaluations", "1", "--seed", "42",
-        *route_extra, *knobs,
-    ], _client_factory=optimize_factory)
+    before = strategies.names()
+    with grid_strategy("val", 42) as name:
+        rc = loop.main([
+            "livemath/solver", "--strategy", name,
+            "--runs-root", str(tmp_path / "o" / "loop"), "--parts", str(_parts(tmp_path / "o")),
+            "--holdout", "0", "--epochs", "1", "--max-evaluations", "1", "--seed", "42",
+            *route_extra, *knobs,
+        ], _client_factory=optimize_factory)
+    # The grid (above) and the context manager leave the registry as they found it.
+    assert strategies.names() == before
+    assert "_grid_eval_val_42" not in before
     # An evaluate-only strategy has no trained winner, so optimize exits 1 after
     # evaluating; the grid reads the evaluation either way.
     assert rc in (0, 1)

@@ -23,11 +23,12 @@ agent calls (one recorded exchange each).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 # Block name → registered mode name.
@@ -97,18 +98,21 @@ def _shortcut_split(
     return shortcut_acc, other_acc, shortcut_total, other_total
 
 
-def _register_grid_strategy(part: str, seed: int) -> str:
+@contextlib.contextmanager
+def grid_strategy(part: str, seed: int) -> Iterator[str]:
     """Register a one-shot strategy that evaluates the seed on the given part.
 
-    Returns the strategy name to use in the loop config.  Each (part, seed) pair
-    gets a unique name so registrations do not collide.
+    Yields the strategy name to use in the loop config, and removes it from the
+    strategy registry on exit, so the grid leaves ``strategies.names()`` as it
+    found it.  Each (part, seed) pair gets its own name.
     """
     from refactory_dsh import strategies
     from refactory_dsh.outerloop import OuterLoop, Run
 
     name = f"_grid_eval_{part}_{seed}"
     if name in strategies.STRATEGIES:
-        return name
+        yield name
+        return
 
     class _GridEval(OuterLoop):
         """Evaluate the seed on one part with one seed, then stop."""
@@ -119,7 +123,10 @@ def _register_grid_strategy(part: str, seed: int) -> str:
 
     _GridEval.name = name
     strategies.register(name, _GridEval)
-    return name
+    try:
+        yield name
+    finally:
+        strategies.STRATEGIES.pop(name, None)
 
 
 #: Route flags, forwarded to ``refactory optimize``'s own parser unchanged.
@@ -216,7 +223,6 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
     is rewritten after every block (``complete`` false until the last one).
     ``_client_factory`` is passed through to ``loop.main`` (tests answer with a stub).
     """
-    import contextlib
     import io
     import os
 
@@ -265,53 +271,53 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
         os.environ["LIVEMATH_DATA_PATH"] = args.data_path
 
     flags = {flag: getattr(args, flag) for flag in ROUTE_FLAGS + KNOB_FLAGS + ("evaluator",)}
-    strategy = _register_grid_strategy(args.part, args.seed)
-    results: list[dict[str, Any]] = []
+    with grid_strategy(args.part, args.seed) as strategy:
+        results: list[dict[str, Any]] = []
 
-    def payload(complete: bool) -> dict[str, Any]:
-        return {"seed": args.seed, "part": args.part, "complete": complete,
-                "runs_dir": str(runs_dir), "blocks": results}
+        def payload(complete: bool) -> dict[str, Any]:
+            return {"seed": args.seed, "part": args.part, "complete": complete,
+                    "runs_dir": str(runs_dir), "blocks": results}
 
-    for block_name in block_names:
-        runs_root = runs_dir / block_name
-        t0 = time.time()
-        printed = io.StringIO()
-        try:
-            # A Ctrl-C reaches the loop as it reaches `refactory optimize`: the data
-            # pass cancels its items and each model client shuts its call down.
-            with contextlib.redirect_stdout(printed):
-                rc = loop.main(loop_argv(
-                    _BLOCK_TO_MODE[block_name], strategy=strategy, runs_root=runs_root,
-                    parts=str(parts_path.resolve()), seed=args.seed, flags=flags,
-                    skill_text=skill_text,
-                ), _client_factory=_client_factory)
-        except KeyboardInterrupt:
-            print(f"refactory grid: interrupted during {block_name}; "
-                  f"finished blocks are in {output_path}", file=sys.stderr)
-            return 130
-        finally:
-            if runs_root.is_dir():
-                (runs_root / "optimize.json").write_text(printed.getvalue())
-        row = block_row(block_name, runs_root, args.part)
-        if row is None:
+        for block_name in block_names:
+            runs_root = runs_dir / block_name
+            t0 = time.time()
+            printed = io.StringIO()
+            try:
+                # A Ctrl-C reaches the loop as it reaches `refactory optimize`: the data
+                # pass cancels its items and each model client shuts its call down.
+                with contextlib.redirect_stdout(printed):
+                    rc = loop.main(loop_argv(
+                        _BLOCK_TO_MODE[block_name], strategy=strategy, runs_root=runs_root,
+                        parts=str(parts_path.resolve()), seed=args.seed, flags=flags,
+                        skill_text=skill_text,
+                    ), _client_factory=_client_factory)
+            except KeyboardInterrupt:
+                print(f"refactory grid: interrupted during {block_name}; "
+                      f"finished blocks are in {output_path}", file=sys.stderr)
+                return 130
+            finally:
+                if runs_root.is_dir():
+                    (runs_root / "optimize.json").write_text(printed.getvalue())
+            row = block_row(block_name, runs_root, args.part)
+            if row is None:
+                _write(output_path, payload(False))
+                print(f"refactory grid: {block_name} evaluated nothing (exit {rc}); "
+                      f"see {runs_root}", file=sys.stderr)
+                return rc or 1
+            row["wall_time_s"] = round(time.time() - t0, 2)
+            results.append(row)
             _write(output_path, payload(False))
-            print(f"refactory grid: {block_name} evaluated nothing (exit {rc}); "
-                  f"see {runs_root}", file=sys.stderr)
-            return rc or 1
-        row["wall_time_s"] = round(time.time() - t0, 2)
-        results.append(row)
-        _write(output_path, payload(False))
 
-    _write(output_path, payload(True))
-    print(f"Grid results written to {output_path}")
+        _write(output_path, payload(True))
+        print(f"Grid results written to {output_path}")
 
-    print(f"\n{'Block':<30} {'Acc':>6} {'Shortcut':>8} {'Other':>6} "
-          f"{'Calls':>6} {'Err':>4} {'Time':>7}")
-    print("-" * 75)
-    for row in results:
-        print(f"{row['block']:<30} {row['accuracy']:>6.3f} "
-              f"{row['shortcut_accuracy']:>8.3f} {row['other_accuracy']:>6.3f} "
-              f"{row['model_calls']:>6} {row['errors']:>4} "
-              f"{row['wall_time_s']:>6.1f}s")
+        print(f"\n{'Block':<30} {'Acc':>6} {'Shortcut':>8} {'Other':>6} "
+              f"{'Calls':>6} {'Err':>4} {'Time':>7}")
+        print("-" * 75)
+        for row in results:
+            print(f"{row['block']:<30} {row['accuracy']:>6.3f} "
+                  f"{row['shortcut_accuracy']:>8.3f} {row['other_accuracy']:>6.3f} "
+                  f"{row['model_calls']:>6} {row['errors']:>4} "
+                  f"{row['wall_time_s']:>6.1f}s")
 
-    return 0
+        return 0
