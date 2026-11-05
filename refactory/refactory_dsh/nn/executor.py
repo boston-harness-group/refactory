@@ -1551,14 +1551,8 @@ class Executor:
         return None
 
     def _effective_max_iterations(self, node: Node) -> int:
-        """Resolve max_iterations from field_bindings, falling back to the node's own value."""
-        for _fb_field, _fb_knob in getattr(node, "field_bindings", ()):
-            if _fb_field == "max_iterations" and _fb_knob in self.ctx.knobs:
-                try:
-                    return int(self.ctx.knobs[_fb_knob])
-                except (TypeError, ValueError):
-                    pass
-        return node.max_iterations
+        """The node's max_iterations: its bound knob's value, else its own (`Node.bound`)."""
+        return node.bound("max_iterations", self.ctx.knobs)
 
     @staticmethod
     def _count_retry(
@@ -2028,14 +2022,9 @@ class Executor:
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 
-        # Resolve field bindings for template fields before rendering.
-        _spt = node.system_prompt_template
-        _pt = node.prompt_template
-        for _fb_field, _fb_knob in getattr(node, "field_bindings", ()):
-            if _fb_field == "system_prompt_template" and _fb_knob in self.ctx.knobs:
-                _spt = str(self.ctx.knobs[_fb_knob])
-            elif _fb_field == "prompt_template" and _fb_knob in self.ctx.knobs:
-                _pt = str(self.ctx.knobs[_fb_knob])
+        # Bound template fields carry their knob's value, as lowering gives the spine.
+        _spt = node.bound("system_prompt_template", self.ctx.knobs)
+        _pt = node.bound("prompt_template", self.ctx.knobs)
         prompt = with_feedback(render(_pt, self.ctx), self.record.feedback.get(node.id, ""))
         system = render(_spt, self.ctx) if _spt else ""
         # Gap 20 / correction C: detect unresolved template keys and emit
@@ -2043,7 +2032,8 @@ class Executor:
         # Strip the steering block before scanning (agent_delivery.py:838-845).
         import re as _re_tmpl
         from refactory_dsh.steering import STEERING_START, STEERING_END
-        _scan = node.prompt_template
+        # The template this node sends (its bound one), as the spine scans it.
+        _scan = _pt
         _st_s = _scan.find(STEERING_START)
         _st_e = _scan.find(STEERING_END, _st_s) if _st_s >= 0 else -1
         if _st_s >= 0 and _st_e >= _st_s:

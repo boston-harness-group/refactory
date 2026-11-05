@@ -688,3 +688,33 @@ class ForkBranchTask(Task):
             return VerifyResult(passed=False, score=0.0, details="item_result.json missing")
         score = float(json.loads(result.read_text())["score"])
         return VerifyResult(passed=score >= 1.0, score=score)
+
+
+def count_visit(ctx: Any) -> dict[str, Any]:
+    """Count this node's visits in visits.json, for checking a gate's reloop cap."""
+    visits = int(ctx.read_json("visits.json", 0) or 0) + 1
+    ctx.write_json("visits.json", visits)
+    return {"visits": visits}
+
+
+def barrier_item(ctx: Any) -> dict[str, Any]:
+    """Wait until ``BARRIER_K`` items are in flight at once; time out otherwise.
+
+    Passes only when the data node runs that many items concurrently, so it shows a
+    node's effective parallelism on either runtime.
+    """
+    import os
+    import time
+    from pathlib import Path
+
+    item_id = str((ctx.read_json("current_item.json", {}) or {}).get("id", "?"))
+    barrier = Path(os.environ["BARRIER_DIR"])
+    want = int(os.environ["BARRIER_K"])
+    (barrier / f"ready_{item_id}").write_text("1")
+    deadline = time.monotonic() + float(os.environ.get("BARRIER_TIMEOUT_S", "10"))
+    while len(list(barrier.glob("ready_*"))) < want:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"only {len(list(barrier.glob('ready_*')))} of {want} items in flight")
+        time.sleep(0.02)
+    (barrier / f"through_{item_id}").write_text("1")
+    return {"counted": item_id}

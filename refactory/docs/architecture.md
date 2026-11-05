@@ -98,7 +98,7 @@ optimizer's prompt via `rules_text()`.
 | `V11` | every declared port must be a file some node on a path writes |
 | `V12` | a fork's targets, a join's sources and a data node's subgraph must name nodes that exist |
 | `V13` | a data node must not appear inside a fork branch |
-| `V14` | every field binding must reference a declared knob consumed by the node, and the field must be in the bindable allowlist |
+| `V14` | every field binding must name a declared knob of the field's kind (`str` for the two templates, `int` for `max_iterations` and `parallelism`), once per field; the field must be in the bindable allowlist, and `parallelism` only on a data node (the node must also list the knob in its `knobs`, checked when the node is built) |
 | `I:` | the mode's own rule, stated in `Mode.invariants()` |
 
 Two properties of the implementation are themselves tested:
@@ -127,7 +127,30 @@ hides the edit that caused the problem.
 - **Field bindings**: a node may declare that a knob sets one of its fields via
   `field_bindings`. Only fields in the `BINDABLE_FIELDS` allowlist
   (`system_prompt_template`, `prompt_template`, `max_iterations`, `parallelism`)
-  may be bound; V14 refuses everything else.
+  may be bound; V14 refuses everything else. Both runtimes read a bound field
+  through `Node.bound` (the walker at run time, lowering for the spine), so a run
+  sees the knob's value wherever it would have seen the field.
+- **Every agent node's system prompt is a knob.** `Mode` declares an open `str`
+  knob `{node_id}__system_prompt` for each agent node, defaulting to its
+  `system_prompt_template` (or `""`), and binds it to that field, so `set_knob` and
+  `text_patch` can change it; a `{{slot}}` in the original template must stay in
+  every new value. The user prompt (`prompt_template`) is not a knob unless the
+  author binds one. To keep a system prompt fixed, declare the knob yourself with
+  `frozen=True` and bind it on the node, which stops the automatic one:
+
+  ```python
+  @classmethod
+  def declare(cls):
+      return {"solve__system_prompt": nn.Knob(SYSTEM_PROMPT, "str", frozen=True)}
+
+  # in build():
+  nn.Node("solve", "agent", ..., system_prompt_template=SYSTEM_PROMPT,
+          knobs=("solve__system_prompt",),
+          field_bindings=(("system_prompt_template", "solve__system_prompt"),))
+  ```
+
+  LiveMath freezes every agent node's system prompt this way, block by block
+  (`livemath/blocks.py`), so the optimizer edits only the `skill` knob.
 
 ```bash
 python -c "from refactory_dsh.nn import edits as E; print(E.names())"

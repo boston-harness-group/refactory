@@ -541,27 +541,58 @@ class Node:
             ),
         )
 
+    def bound_knob(self, field_name: str) -> str:
+        """The knob a field binding ties ``field_name`` to, or ``""`` when none does."""
+        for bound_field, knob_name in self.field_bindings:
+            if bound_field == field_name:
+                return knob_name
+        return ""
+
+    def bound(self, field_name: str, knobs: Mapping[str, Any]) -> Any:
+        """``field_name``'s value in a run with these knob values.
+
+        The bound knob's value when a field binding names ``field_name`` and the run
+        carries a value for it, else the node's own field. Both runtimes read a bound
+        field through here: the walker's executor, and lowering for the spine.
+        ``parallelism`` goes through ``effective_parallelism``, which also bounds it.
+        A bound integer field whose value is not an integer is a ``GraphError``; V14
+        already refuses a knob of the wrong kind, so this only guards an unvalidated
+        state, and it fails the same way on both runtimes.
+        """
+        knob_name = self.bound_knob(field_name)
+        if not knob_name or knobs.get(knob_name) is None:
+            return getattr(self, field_name)
+        value = knobs[knob_name]
+        if field_name in ("system_prompt_template", "prompt_template"):
+            return str(value)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise GraphError(
+                f"node {self.id!r}: {knob_name} is bound to {field_name} and must be an "
+                f"integer, got {value!r}")
+        return value
+
     def effective_parallelism(self, knobs: Mapping[str, Any]) -> int:
         """How many items this data node runs at once, given the run's knob values.
 
-        The bound knob's value when ``parallelism_knob`` names one, else ``parallelism``.
-        A bound value that is missing, not an integer, or outside 1..``MAX_PARALLELISM``
-        is a ``GraphError``.
+        The bound knob's value when ``parallelism_knob`` or a ``parallelism`` field
+        binding names one, else ``parallelism``. A bound value that is missing, not an
+        integer, or outside 1..``MAX_PARALLELISM`` is a ``GraphError``.
         """
-        if not self.parallelism_knob:
+        knob_name = self.parallelism_knob or self.bound_knob("parallelism")
+        if not knob_name:
             return self.parallelism
-        if self.parallelism_knob not in knobs:
+        if knob_name not in knobs:
             raise GraphError(
-                f"node {self.id!r}: parallelism_knob {self.parallelism_knob!r} has no value "
+                f"node {self.id!r}: parallelism knob {knob_name!r} has no value "
                 "in this run's knobs"
             )
-        value = knobs[self.parallelism_knob]
+        value = knobs[knob_name]
         if isinstance(value, bool) or not isinstance(value, int):
             raise GraphError(
-                f"node {self.id!r}: {self.parallelism_knob} must be an integer, got {value!r}")
+                f"node {self.id!r}: {knob_name} must be an integer, got {value!r}")
         if not 1 <= value <= MAX_PARALLELISM:
             raise GraphError(
-                f"node {self.id!r}: {self.parallelism_knob} must be between 1 and "
+                f"node {self.id!r}: {knob_name} must be between 1 and "
                 f"{MAX_PARALLELISM}, got {value}")
         return value
 

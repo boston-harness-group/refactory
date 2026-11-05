@@ -48,8 +48,8 @@ RULES: dict[str, str] = {
     "V12": "a fork's targets, a join's sources and a data node's subgraph must name "
            "nodes that exist",
     "V13": "a data node must not appear inside a fork branch",
-    "V14": "every field binding must reference a declared knob consumed by the node, "
-           "and the field must be in the bindable allowlist",
+    "V14": "every field binding must name a declared knob of the field's kind, once per "
+           "field, and the field must be in the bindable allowlist",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -248,8 +248,17 @@ def validate(
                 if member.kind == "fork" and member.targets:
                     pending.extend(member.targets)
 
-    # V14 field bindings — allowlist enforcement.
+    # V14 field bindings — allowlist, knob kind, one binding per field.
     from .graph import BINDABLE_FIELDS
+
+    #: The knob kind each bindable field takes, so both runtimes refuse a mismatch
+    #: here rather than one failing at lowering and the other at run time.
+    _BINDING_KINDS = {
+        "system_prompt_template": "str",
+        "prompt_template": "str",
+        "max_iterations": "int",
+        "parallelism": "int",
+    }
 
     for node_id in sorted(graph.nodes):
         node = graph.nodes[node_id]
@@ -274,13 +283,41 @@ def validate(
                         node=node_id,
                     )
                 )
-            if knob_name and knob_name not in declared_knobs:
+            if not knob_name:
+                issues.append(
+                    Issue(
+                        "V14",
+                        f"field {field_name!r} is bound to no knob (empty name)",
+                        node=node_id,
+                    )
+                )
+            elif knob_name not in declared_knobs:
                 issues.append(
                     Issue(
                         "V14",
                         f"field binding references undeclared knob {knob_name!r}",
                         node=node_id,
                         knob=knob_name,
+                    )
+                )
+            elif field_name in _BINDING_KINDS:
+                kind = declared_knobs[knob_name].kind
+                if kind != _BINDING_KINDS[field_name]:
+                    issues.append(
+                        Issue(
+                            "V14",
+                            f"field {field_name!r} takes a {_BINDING_KINDS[field_name]!r} "
+                            f"knob, but {knob_name!r} is {kind!r}",
+                            node=node_id,
+                            knob=knob_name,
+                        )
+                    )
+            if field_name == "parallelism" and node.parallelism_knob:
+                issues.append(
+                    Issue(
+                        "V14",
+                        "parallelism is bound by both parallelism_knob and a field binding",
+                        node=node_id,
                     )
                 )
             if field_name in seen_fields:

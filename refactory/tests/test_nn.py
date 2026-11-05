@@ -435,7 +435,7 @@ def test_field_bindings_sparse_serialization():
     assert "field_bindings" not in state
 
 
-def _v14_state(field_name, kind="op"):
+def _v14_state(field_name, kind="op", knob_kind="str"):
     """A minimal state with a field_binding for V14 testing."""
     graph = nn.Graph()
     if kind == "agent":
@@ -444,8 +444,9 @@ def _v14_state(field_name, kind="op"):
     else:
         graph.add(nn.Node("n", "op", call="json:dumps", knobs=("k",),
                           field_bindings=((field_name, "k"),)))
+    value = "x" if knob_kind == "str" else 2
     state = {"version": nn.STATE_VERSION, "graph": graph.to_state(), "knobs": {
-        "k": {"value": "x", "spec": {"default": "x", "kind": "str",
+        "k": {"value": value, "spec": {"default": value, "kind": knob_kind,
               "lo": None, "hi": None, "enum": [], "values": [],
               "frozen": False, "description": "", "required": False}},
     }}
@@ -489,9 +490,10 @@ def test_v14_unbindable_limit():
 
 def test_v14_parallelism_only_data_nodes():
     """parallelism binding on a non-data node is refused. Python runtime."""
-    state = _v14_state("parallelism")
+    state = _v14_state("parallelism", knob_kind="int")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V14" for i in issues)
+    assert [i.message for i in issues if i.code == "V14"] == [
+        "parallelism binding is only for data nodes"]
 
 
 def test_v14_valid_binding():
@@ -860,7 +862,7 @@ def test_executor_resolves_field_bindings(tmp_path):
             / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists(),
     reason="the spine drain needs Node and the installed workspace (pnpm install)",
 )
-def test_two_runtime_system_prompt_knob(tmp_path):
+def test_two_runtime_system_prompt_knob(tmp_path, monkeypatch):
     """Both runtimes resolve a system-prompt knob (non-default, with {{slot}}) identically.
 
     Correction 3: runs the same graph with a bound system-prompt knob on the walker
@@ -969,7 +971,8 @@ def test_two_runtime_system_prompt_knob(tmp_path):
     responses_file = spine_dir / "responses.json"
     responses_file.write_text(json.dumps(responses))
 
-    env = {**os.environ, "REFACTORY_WORKDIR": str(spine_dir)}
+    record = tmp_path / "spine-record.jsonl"
+    env = {**os.environ, "REFACTORY_WORKDIR": str(spine_dir), "DRAIN_RECORD": str(record)}
     env["PATH"] = f"{python_bin}:{env.get('PATH', '')}"
     spine_result = subprocess.run(
         [str(NODE_BIN), "--import", "tsx/esm", str(DRAIN_AGENT),
@@ -999,6 +1002,20 @@ def test_two_runtime_system_prompt_knob(tmp_path):
     assert knobs_json.get("topic") == "physics", (
         f"knob environment must carry topic: {knobs_json}")
     assert walker_system == "You are an expert on physics"
+
+    # What the spine handed the worker for node a (the drain records it): the bound
+    # knob's text, not the node's own template.
+    sent = [json.loads(line) for line in record.read_text().splitlines()]
+    assert [entry["node"] for entry in sent] == ["a"]
+    assert sent[0]["system_prompt"] == "You are an expert on {{topic}}", sent[0]
+    # Rendered as the dispatched worker renders it (worker_node.py: run._knobs from
+    # REFACTORY_KNOBS, run._read_facts from the run folder), it is the walker's text.
+    from refactory_dsh.nn.executor import RunContext, render
+    from refactory_dsh.run import _knobs, _read_facts
+    monkeypatch.setenv("REFACTORY_KNOBS", knob_env["REFACTORY_KNOBS"])
+    worker_system = render(sent[0]["system_prompt"],
+                           RunContext(spine_dir, knobs=_knobs(), facts=_read_facts(spine_dir)))
+    assert worker_system == walker_system
 
 
 def test_replay_refuses_removed_ops(tmp_path):

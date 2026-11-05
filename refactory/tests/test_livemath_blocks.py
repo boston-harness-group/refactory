@@ -266,6 +266,35 @@ def test_baseline_block_lowers_to_the_frozen_snapshot(explicit):
     assert _lower_mode_bytes(mode_cls, name="livemath-solver") == snapshot
 
 
+@pytest.mark.parametrize("block", ["baseline", "solve_then_verify",
+                                   "two_attempts_then_judge", "solve_then_self_check"])
+def test_every_agent_system_prompt_is_frozen_per_block(block):
+    """F14 in LiveMath: each block declares a frozen system-prompt knob for exactly
+    its own agent nodes and binds it there, so grid cells differ only in structure and
+    the optimizer can move only the skill (and the theorem/sketch switches)."""
+    from refactory_dsh import nn
+    from refactory_packages.livemath.blocks import BLOCKS, SYSTEM_PROMPT
+    from refactory_packages.livemath.mode import Solver
+
+    state = Solver(block=block).state_dict()
+    graph = nn.Graph.from_state(state["graph"])
+    agents = sorted(node_id for node_id, node in graph.nodes.items() if node.kind == "agent")
+    assert agents == sorted(BLOCKS[block]().agent_node_ids)
+    prompt_knobs = sorted(name for name in state["knobs"] if name.endswith("__system_prompt"))
+    assert prompt_knobs == [f"{node_id}__system_prompt" for node_id in agents]
+    for node_id in agents:
+        name = f"{node_id}__system_prompt"
+        assert state["knobs"][name]["spec"]["frozen"] is True, name
+        assert state["knobs"][name]["value"] == SYSTEM_PROMPT
+        assert graph.nodes[node_id].field_bindings == (("system_prompt_template", name),)
+        # The user prompt is not a knob.
+        assert graph.nodes[node_id].bound_knob("prompt_template") == ""
+    open_knobs = sorted(n for n, e in state["knobs"].items() if not e["spec"]["frozen"])
+    assert open_knobs == ["skill", "use_sketch", "use_theorem"]
+    issues = nn.validate_state(state, resolve_calls=False)
+    assert not [i for i in issues if i.code in ("V7", "V14")], issues
+
+
 def test_each_block_builds_valid_graph():
     """Every block name produces a valid graph with data, format_prompt, and finish."""
     from refactory_packages.livemath.blocks import BLOCK_NAMES
