@@ -199,6 +199,25 @@ export function validateGraph(graph: WorkflowGraph): GraphIssue[] {
       for (const target of node.targets ?? []) {
         if (!ids.has(target)) issues.push({ node: id, message: `fork target '${target}' is not a node` })
       }
+      // Refuse data nodes inside fork branches (parity with walker fork.py:80).
+      const joinEdge = (outgoing.get(id) ?? []).find(e => e.condition == null)
+      if (joinEdge !== undefined) {
+        const body = forwardWalk(id, joinEdge.target, {
+          outgoing: fId => outgoing.get(fId) ?? [],
+          node: fId => graph.nodes[fId],
+        })
+        body.delete(id)
+        body.delete(joinEdge.target)
+        for (const memberId of body) {
+          if (graph.nodes[memberId]?._type === 'DataNode') {
+            issues.push({
+              node: id,
+              message: `data node '${memberId}' inside a fork branch is not supported; `
+                + `move the data node outside the fork or place the fork inside the data body`,
+            })
+          }
+        }
+      }
     }
     if (node._type === 'JoinNode') {
       for (const source of node.sources ?? []) {
@@ -874,6 +893,12 @@ export class Spine {
     // Remove any pass-body cursor positions so endPass's "has not finished"
     // guard does not fire.
     this.cursor = this.cursor.filter(pos => !body.has(pos))
+    // A fork in the body that was still waiting for its join (a branch failed)
+    // leaves the join pending; drop it with the pass, or the next item's fork
+    // finds its join already due, and the join leaks past the data node.
+    for (const container of [...this.afters.keys()]) {
+      if (body.has(container)) this.afters.delete(container)
+    }
     this.pass.finished = true
     this.log.push(`data ${this.pass.node}: item ${this.pass.index} abandoned`)
   }

@@ -47,7 +47,8 @@ RULES: dict[str, str] = {
     "V11": "every declared port must be a file some node on a path writes",
     "V12": "a fork's targets, a join's sources and a data node's subgraph must name "
            "nodes that exist",
-    "V13": "every field binding must reference a declared knob consumed by the node, "
+    "V13": "a data node must not appear inside a fork branch",
+    "V14": "every field binding must reference a declared knob consumed by the node, "
            "and the field must be in the bindable allowlist",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
@@ -218,7 +219,36 @@ def validate(
                         )
                     )
 
-    # V13 field bindings — allowlist enforcement.
+    # V13 data-inside-fork.
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind != "fork":
+            continue
+        barrier = graph.fork_join(node_id)
+        for target in node.targets:
+            seen: set[str] = set()
+            pending = [target]
+            while pending:
+                current = pending.pop()
+                if current == barrier or current in seen:
+                    continue
+                if current not in graph.nodes:
+                    continue
+                seen.add(current)
+                member = graph.nodes[current]
+                if member.kind == "data":
+                    issues.append(Issue(
+                        "V13",
+                        f"fork {node_id!r}: data node {current!r} inside a fork branch "
+                        "is not supported; move the data node outside the fork or "
+                        "place the fork inside the data body",
+                        node=node_id,
+                    ))
+                pending.extend(e.target for e in graph.out_edges(current))
+                if member.kind == "fork" and member.targets:
+                    pending.extend(member.targets)
+
+    # V14 field bindings — allowlist enforcement.
     from .graph import BINDABLE_FIELDS
 
     for node_id in sorted(graph.nodes):
@@ -230,7 +260,7 @@ def validate(
             if field_name not in BINDABLE_FIELDS:
                 issues.append(
                     Issue(
-                        "V13",
+                        "V14",
                         f"field {field_name!r} is not bindable; "
                         f"allowed: {sorted(BINDABLE_FIELDS)}",
                         node=node_id,
@@ -239,7 +269,7 @@ def validate(
             elif field_name == "parallelism" and node.kind != "data":
                 issues.append(
                     Issue(
-                        "V13",
+                        "V14",
                         f"parallelism binding is only for data nodes",
                         node=node_id,
                     )
@@ -247,7 +277,7 @@ def validate(
             if knob_name and knob_name not in declared_knobs:
                 issues.append(
                     Issue(
-                        "V13",
+                        "V14",
                         f"field binding references undeclared knob {knob_name!r}",
                         node=node_id,
                         knob=knob_name,
@@ -256,7 +286,7 @@ def validate(
             if field_name in seen_fields:
                 issues.append(
                     Issue(
-                        "V13",
+                        "V14",
                         f"field {field_name!r} is bound twice on this node",
                         node=node_id,
                     )

@@ -542,3 +542,149 @@ def note_item(ctx: Any) -> dict[str, Any]:
     """In a pass: set the declared, non-score fact ``note`` for this item."""
     ctx.set_fact("note", f"from {_current_id(ctx)}")
     return {}
+
+
+
+# ── F21: a fork inside a data node's per-item pass, on both runtimes ────────
+#
+# One graph runs on the walker and, lowered, on the spine: branch_a and branch_b
+# each write a file, and the pass's exit scores the item from both, so an item
+# whose branch did not run (or ran wrongly) scores differently.
+
+
+def _log_visit(ctx: Any, branch: str) -> str:
+    """Append ``<item>:<branch>`` to ``$PASS_TEST_LOG`` when it is set; return the item id."""
+    import os
+    from pathlib import Path
+
+    item_id = _current_id(ctx)
+    if os.environ.get("PASS_TEST_LOG"):
+        with Path(os.environ["PASS_TEST_LOG"]).open("a") as handle:
+            handle.write(f"{item_id}:{branch}\n")
+    return item_id
+
+
+def fork_branch_a(ctx: Any) -> dict[str, Any]:
+    """Branch a: write ``a_out.txt``, 0.25 for item ``1`` and 0.5 for any other item."""
+    item_id = _log_visit(ctx, "a")
+    ctx.write_text("a_out.txt", "0.25" if item_id == "1" else "0.5")
+    return {}
+
+
+def fork_branch_b(ctx: Any) -> dict[str, Any]:
+    """Branch b as an op: write ``b_out.txt`` with the text the agent branch replies."""
+    _log_visit(ctx, "b")
+    ctx.write_text("b_out.txt", "agent_answer")
+    return {}
+
+
+def fork_branch_b_fail_on_0(ctx: Any) -> dict[str, Any]:
+    """Branch b that raises ``ValueError`` on item ``0`` and is :func:`fork_branch_b` otherwise."""
+    if _current_id(ctx) == "0":
+        _log_visit(ctx, "b-failed")
+        raise ValueError("deliberate branch failure")
+    return fork_branch_b(ctx)
+
+
+def fork_branch_b_stop_on_1(ctx: Any) -> dict[str, Any]:
+    """Branch b that stops the run once, on item ``1``, before writing its output.
+
+    The walker stops on a halt; the spine's op runs as a command, so it stops the
+    way a killed run does -- the drain dies mid-command (``PASS_TEST_RUNTIME=spine``),
+    as :func:`log_and_stop_on_b` does. The flag beside the log makes it stop once.
+    """
+    import os
+    import signal
+    from pathlib import Path
+
+    item_id = _log_visit(ctx, "b")
+    flag = Path(os.environ["PASS_TEST_LOG"]).with_suffix(".stopped")
+    if item_id == "1" and not flag.exists():
+        flag.write_text("stopped")
+        if os.environ.get("PASS_TEST_RUNTIME") == "spine":
+            os.kill(os.getppid(), signal.SIGKILL)
+            raise SystemExit(1)
+        from refactory_dsh.nn.executor import HaltStop
+
+        raise HaltStop("data", reason="test stop in item 1's fork")
+    ctx.write_text("b_out.txt", "agent_answer")
+    return {}
+
+
+def fork_branch_b_control_on_1(ctx: Any) -> dict[str, Any]:
+    """Branch b that, on item ``1``, files a person's graph control for the spine.
+
+    Writes ``$FORK_TEST_CONTROL`` (``stop`` or ``pause``) as a request in the run's
+    ``.refactory/graph-controls`` (the run directory is ``$FORK_TEST_RUN``, since this
+    runs inside the item's pass directory), the way ``refactory graph-control`` does,
+    then writes its output: the spine applies the control at its next boundary.
+    """
+    import json
+    import os
+    from pathlib import Path
+
+    fork_branch_b(ctx)
+    if _current_id(ctx) == "1":
+        run = Path(os.environ["FORK_TEST_RUN"])
+        invocation_file = run / ".refactory" / "invocation.json"
+        invocation = (json.loads(invocation_file.read_text()).get("id")
+                      if invocation_file.exists() else None)
+        controls = run / ".refactory" / "graph-controls"
+        controls.mkdir(parents=True, exist_ok=True)
+        (controls / "001.json").write_text(json.dumps({
+            "run_id": str(run), "invocation": invocation,
+            "action": os.environ["FORK_TEST_CONTROL"],
+        }))
+    return {}
+
+
+def score_from_branches(ctx: Any) -> dict[str, Any]:
+    """After the join: score the item from both branches' files into ``item_result.json``.
+
+    The score is ``a_out.txt``'s number plus 0.5 when ``b_out.txt`` says
+    ``agent_answer``; a missing file adds nothing.
+    """
+    try:
+        a = float(ctx.read_text("a_out.txt"))
+    except FileNotFoundError:
+        a = 0.0
+    try:
+        b = 0.5 if ctx.read_text("b_out.txt").strip() == "agent_answer" else 0.0
+    except FileNotFoundError:
+        b = 0.0
+    ctx.write_json("item_result.json", {"score": a + b})
+    return {}
+
+
+from refactory_dsh.task import Task, TaskInstance, VerifyResult  # noqa: E402
+
+
+class ForkBranchTask(Task):
+    """Items ``0``, ``1``, ``2``, each scored from its pass's ``item_result.json``.
+
+    Both runtimes load it as ``loop_ops:ForkBranchTask``. ``$FORK_TEST_SLOW_ITEM``
+    names an item whose verify first sleeps ``$FORK_TEST_SLOW_SECONDS`` (the
+    per-item deadline tests).
+    """
+
+    name = "fork_branch_task"
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        return [TaskInstance(id=str(i), metadata={}) for i in range(3)]
+
+    def setup(self, instance: TaskInstance, workspace: Any, **kw: Any) -> None:
+        pass
+
+    def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
+        import json
+        import os
+        import time
+        from pathlib import Path
+
+        if instance.id == os.environ.get("FORK_TEST_SLOW_ITEM"):
+            time.sleep(float(os.environ.get("FORK_TEST_SLOW_SECONDS", "0")))
+        result = Path(workspace) / "item_result.json"
+        if not result.exists():
+            return VerifyResult(passed=False, score=0.0, details="item_result.json missing")
+        score = float(json.loads(result.read_text())["score"])
+        return VerifyResult(passed=score >= 1.0, score=score)

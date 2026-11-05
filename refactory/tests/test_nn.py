@@ -435,8 +435,8 @@ def test_field_bindings_sparse_serialization():
     assert "field_bindings" not in state
 
 
-def _v13_state(field_name, kind="op"):
-    """A minimal state with a field_binding for V13 testing."""
+def _v14_state(field_name, kind="op"):
+    """A minimal state with a field_binding for V14 testing."""
     graph = nn.Graph()
     if kind == "agent":
         graph.add(nn.Node("n", "agent", prompt_template="t", knobs=("k",),
@@ -452,50 +452,50 @@ def _v13_state(field_name, kind="op"):
     return state
 
 
-def test_v13_unbindable_field():
+def test_v14_unbindable_field():
     """role is not in BINDABLE_FIELDS and is refused. Python runtime."""
-    state = _v13_state("role")
+    state = _v14_state("role")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V13" for i in issues)
+    assert any(i.code == "V14" for i in issues)
 
 
-def test_v13_unbindable_tools():
+def test_v14_unbindable_tools():
     """tools is not in BINDABLE_FIELDS. Python runtime."""
-    state = _v13_state("tools", kind="agent")
+    state = _v14_state("tools", kind="agent")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V13" for i in issues)
+    assert any(i.code == "V14" for i in issues)
 
 
-def test_v13_unbindable_tool_policy():
+def test_v14_unbindable_tool_policy():
     """tool_policy is not in BINDABLE_FIELDS. Python runtime."""
-    state = _v13_state("tool_policy", kind="agent")
+    state = _v14_state("tool_policy", kind="agent")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V13" for i in issues)
+    assert any(i.code == "V14" for i in issues)
 
 
-def test_v13_unbindable_notes():
+def test_v14_unbindable_notes():
     """notes is not in BINDABLE_FIELDS. Python runtime."""
-    state = _v13_state("notes")
+    state = _v14_state("notes")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V13" for i in issues)
+    assert any(i.code == "V14" for i in issues)
 
 
-def test_v13_unbindable_limit():
+def test_v14_unbindable_limit():
     """limit is not in BINDABLE_FIELDS. Python runtime."""
-    state = _v13_state("limit")
+    state = _v14_state("limit")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V13" for i in issues)
+    assert any(i.code == "V14" for i in issues)
 
 
-def test_v13_parallelism_only_data_nodes():
+def test_v14_parallelism_only_data_nodes():
     """parallelism binding on a non-data node is refused. Python runtime."""
-    state = _v13_state("parallelism")
+    state = _v14_state("parallelism")
     issues = nn.validate_state(state, resolve_calls=False)
-    assert any(i.code == "V13" for i in issues)
+    assert any(i.code == "V14" for i in issues)
 
 
-def test_v13_valid_binding():
-    """A valid system_prompt_template binding passes V13. Python runtime."""
+def test_v14_valid_binding():
+    """A valid system_prompt_template binding passes V14. Python runtime."""
     graph = nn.Graph()
     graph.add(nn.Node("a", "agent", prompt_template="t",
                       knobs=("my_knob",),
@@ -506,16 +506,16 @@ def test_v13_valid_binding():
                     "frozen": False, "description": "", "required": False}},
     }}
     issues = nn.validate_state(state, resolve_calls=False)
-    v13 = [i for i in issues if i.code == "V13"]
-    assert not v13, v13
+    v14 = [i for i in issues if i.code == "V14"]
+    assert not v14, v14
 
 
-def test_v13_nonexistent_knob():
+def test_v14_nonexistent_knob():
     """Binding to an undeclared knob is refused. Python runtime."""
     state = _state()
     state["graph"]["nodes"]["start"]["knobs"] = ["rounds", "ghost"]
     state["graph"]["nodes"]["start"]["field_bindings"] = [["system_prompt_template", "ghost"]]
-    assert "V13" in _codes(state)
+    assert "V14" in _codes(state)
 
 
 def test_auto_system_prompt_knob_static_template():

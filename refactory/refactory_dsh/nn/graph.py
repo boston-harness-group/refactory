@@ -172,13 +172,13 @@ _NODE_FIELDS = frozenset(
 )
 
 #: Fields a knob may be bound to via ``field_bindings``.  An explicit allowlist:
-#: everything not listed here is refused by V13 on both runtimes.  A new ``Node``
+#: everything not listed here is refused by V14 on both runtimes.  A new ``Node``
 #: field is unbindable until it is added here.
 BINDABLE_FIELDS = frozenset({
     "system_prompt_template",
     "prompt_template",
     "max_iterations",
-    "parallelism",       # data nodes only; checked in V13
+    "parallelism",       # data nodes only; checked in V14
 })
 
 
@@ -393,7 +393,7 @@ class Node:
 
         # field_bindings: structural validation only (pair shape, knob membership).
         # Domain rules (bindable fields, parallelism on data nodes) are checked
-        # by V13 in validate.py, so a state with invalid bindings can be parsed
+        # by V14 in validate.py, so a state with invalid bindings can be parsed
         # and inspected before running.
         for pair in self.field_bindings:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -648,6 +648,15 @@ class Graph:
 
     def in_edges(self, node_id: str) -> list[Edge]:
         return [e for e in self.edges if e.target == node_id]
+
+    def fork_join(self, fork_id: str) -> str | None:
+        """The node a fork's branches stop at: the target of its unconditional out-edge.
+
+        The walker runs a fork only with exactly that one edge (``nn/fork.py``) and the
+        spine takes the same edge (``validateGraph``); a checker walking a fork's
+        branches stops here, whatever order the edges were connected in.
+        """
+        return next((e.target for e in self.out_edges(fork_id) if e.condition is None), None)
 
     def terminals(self) -> list[str]:
         return sorted(n for n in self.nodes if not self.out_edges(n))

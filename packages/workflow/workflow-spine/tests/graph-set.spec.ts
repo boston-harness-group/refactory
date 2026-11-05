@@ -5,7 +5,7 @@
  * nodes due together, checking five invariants on each run.
  */
 import { describe, expect, it } from 'vitest'
-import { shapes, crossContainerReloopGraph, designGraphRefineLightRelooped } from './graph-shapes.ts'
+import { shapes, crossContainerReloopGraph, dataInsideForkGraph, dataInsideBranch, designGraphRefineLightRelooped } from './graph-shapes.ts'
 import { allOrders, seededOrders, driveToEnd } from './shape-driver.ts'
 import {
   checkCompletedOncePerVisit, checkJoinAfterBranches, checkNoDueDrop,
@@ -267,12 +267,31 @@ describe('v1 checkpoint migration', () => {
   })
 })
 
+// ─── Data-inside-fork validation refusal ────────────────────────
+
+describe('data-inside-fork refusal', () => {
+  it('validateGraph reports data-inside-fork issue', () => {
+    const issues = validateGraph(dataInsideForkGraph)
+    const msg = issues.map(i => i.message).join('; ')
+    expect(msg).toMatch(/data node.*inside a fork branch is not supported/)
+  })
+
+  it('Spine constructor does not throw for data-inside-fork (spine can walk it)', () => {
+    expect(() => new Spine(dataInsideForkGraph)).not.toThrow()
+  })
+
+  it('validateGraph also reports data-inside-fork for dataInsideBranch shape', () => {
+    const issues = validateGraph(dataInsideBranch.graph)
+    const msg = issues.map(i => i.message).join('; ')
+    expect(msg).toMatch(/data node.*inside a fork branch is not supported/)
+  })
+})
+
 // ─── Data pass inside branch scoping ────────────────────────────
 
 describe('data pass inside branch', () => {
   it('endPass scoping: pass finishes while sibling remains in cursor', () => {
-    const shape = shapes.find(s => s.name === 'dataInsideBranch')!
-    const spine = new Spine(shape.graph)
+    const spine = new Spine(dataInsideBranch.graph)
     spine.complete('start')
     spine.complete('fork')
     // cursor: [data_branch, other_branch]
