@@ -9,6 +9,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -17,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from refactory_dsh import nn
+from refactory_dsh import lowering, nn
 from refactory_dsh.nn.executor import CURRENT_ITEM, execute
 from refactory_dsh.task import Task, VerifyResult
 
@@ -1194,9 +1196,12 @@ def test_timed_out_phase_cannot_write_into_the_pass(tmp_path, monkeypatch, paral
 
 
 # ── F21: fork/join inside a data node's per-item pass ─────────────────────
-
-import shutil
-import subprocess
+#
+# One graph (_fork_graph) runs on the walker and, lowered with to_workflow, on the
+# spine through the real drain. Its branches each write a file and the pass's exit
+# scores the item from both (loop_ops.score_from_branches), so a runtime that
+# skips or mis-runs a branch scores differently. The Task (loop_ops:ForkBranchTask)
+# is one reference both runtimes import.
 
 _NODE = shutil.which("node")
 _DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain.mts"
@@ -1209,67 +1214,64 @@ _needs_spine = pytest.mark.skipif(
     reason="the spine drain needs Node and the installed workspace (pnpm install)",
 )
 
+_FORK_TASK = "loop_ops:ForkBranchTask"
 
-def _fork_inside_data_graph(
+#: Item scores when both branches run: a gives 0.5 (0.25 for item 1), b adds 0.5.
+_BOTH_BRANCHES = [("0", 1.0), ("1", 0.75), ("2", 1.0)]
+
+#: Merged facts only one runtime writes, left out of the two-runtime comparison:
+#: the spine records the parallelism its drain used; the walker does not.
+_RUNTIME_ONLY_FACTS = frozenset({"data_parallelism_effective"})
+
+
+def _fork_graph(
     *,
     parallelism: int = 1,
-    items: tuple[dict[str, Any], ...] = ({"id": "0"}, {"id": "1"}, {"id": "2"}),
-    branch_a_call: str = "loop_ops:noop",
-    branch_b_kind: str = "op",
-    branch_b_call: str = "loop_ops:noop",
-    task_ref: str = "",
-    produces: tuple[str, ...] = ("item_scores",),
-    d_exit_call: str = "loop_ops:noop",
-    d_exit_writes: tuple[str, ...] = (),
+    branch_b: str = "loop_ops:fork_branch_b",
+    after_join: nn.Node | None = None,
 ) -> nn.Graph:
-    """data(parallelism) -> subgraph[d_entry -> fork -> [a, b] -> join -> d_exit] -> report."""
+    """data -> [d_entry -> fork1 -> (branch_a, branch_b) -> join1 -> d_exit] -> report.
+
+    ``branch_b`` is an op's call, or ``"agent"`` for an agent whose answer lands in
+    ``b_out.txt``: the walker captures its model's reply there, and the spine's
+    agent drain writes its scripted reply there as a worker would. ``after_join`` goes between ``join1`` and ``d_exit``.
+    """
     graph = nn.Graph()
-    # When task_ref is set, items come from the Task's instances(); the IR forbids
-    # setting both task_ref and inline_items simultaneously.
-    data_kwargs: dict[str, Any] = dict(
-        subgraph_entry="d_entry",
-        subgraph_exit="d_exit",
-        writes=(CURRENT_ITEM,),
-        produces=produces,
-        parallelism=parallelism,
-    )
-    if task_ref:
-        data_kwargs["task_ref"] = task_ref
-    else:
-        data_kwargs["inline_items"] = tuple(dict(item) for item in items)
-    graph.add(nn.Node("data", "data", **data_kwargs))
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="d_entry", subgraph_exit="d_exit",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), parallelism=parallelism,
+        task_ref=_FORK_TASK,
+    ))
     graph.add(nn.Node("d_entry", "op", call="loop_ops:noop"))
     graph.add(nn.Node("fork1", "fork", targets=("branch_a", "branch_b")))
-    graph.add(nn.Node("branch_a", "op", call=branch_a_call))
-    if branch_b_kind == "agent":
-        # Agent with tool_policy='none': the walker uses with_tool_policy on the
-        # model client; the spine's agent delivery writes the captured reply.
-        graph.add(nn.Node(
-            "branch_b", "agent",
-            prompt_template="answer",
-            tool_policy="none",
-            writes=("agent_answer.txt",),
-            outputs_only=True,
-        ))
+    graph.add(nn.Node("branch_a", "op", call="loop_ops:fork_branch_a",
+                      reads=(CURRENT_ITEM,), writes=("a_out.txt",)))
+    if branch_b == "agent":
+        graph.add(nn.Node("branch_b", "agent", prompt_template="answer", writes=("b_out.txt",)))
     else:
-        graph.add(nn.Node("branch_b", "op", call=branch_b_call))
+        graph.add(nn.Node("branch_b", "op", call=branch_b,
+                          reads=(CURRENT_ITEM,), writes=("b_out.txt",)))
     graph.add(nn.Node("join1", "join", sources=("branch_a", "branch_b")))
-    graph.add(nn.Node(
-        "d_exit", "op", call=d_exit_call,
-        writes=d_exit_writes,
-    ))
+    graph.add(nn.Node("d_exit", "op", call="loop_ops:score_from_branches",
+                      reads=("a_out.txt", "b_out.txt"), writes=("item_result.json",)))
     graph.add(nn.Node("report", "op", call="loop_ops:noop"))
     graph.connect("d_entry", "fork1")
     graph.connect("fork1", "join1")
     graph.connect("branch_a", "join1")
     graph.connect("branch_b", "join1")
-    graph.connect("join1", "d_exit")
+    if after_join is None:
+        graph.connect("join1", "d_exit")
+    else:
+        graph.add(after_join)
+        graph.connect("join1", after_join.id)
+        graph.connect(after_join.id, "d_exit",
+                      condition="proceed" if after_join.kind == "gate" else None)
     graph.connect("data", "report")
     return graph
 
 
 class _SimpleFakeModel:
-    """A model client for agent nodes with tool_policy='none' inside tests."""
+    """A model client that answers every agent prompt with ``agent_answer``."""
 
     thread_safe = True
 
@@ -1279,9 +1281,6 @@ class _SimpleFakeModel:
     def complete(self, prompt: str, *, system: str = "", **kw: Any) -> str:
         self.prompts.append(prompt)
         return "agent_answer"
-
-    def with_tool_policy(self, policy: str) -> "_SimpleFakeModel":
-        return self
 
     def for_node(self, node_id: str, role: str | None = None) -> "_SimpleFakeModel":
         return self
@@ -1293,258 +1292,132 @@ class _SimpleFakeModel:
         return {"worker_backend": "dsh"}
 
 
-# ── Scoring Task that reads d_exit's output file ──
-
-_SCORING_TASK_SOURCE = '''\
-"""Task whose verify reads item_result.json written by d_exit."""
-import json
-from pathlib import Path
-from refactory_dsh.task import Task, TaskInstance, VerifyResult
-
-class ForkScoringTask(Task):
-    name = "fork_scoring_task"
-
-    def instances(self, **kw):
-        return [TaskInstance(id=str(i), metadata={}) for i in range(3)]
-
-    def verify(self, instance, workspace, **kw):
-        result_file = Path(workspace) / "item_result.json"
-        if not result_file.exists():
-            return VerifyResult(passed=False, score=0.0, details="item_result.json missing")
-        data = json.loads(result_file.read_text())
-        score = float(data.get("score", 0.0))
-        return VerifyResult(passed=score > 0, score=score)
-'''
+def _walker(graph: nn.Graph, run: Path, **kw: Any) -> Any:
+    return execute(graph, run, max_steps=200, **kw)
 
 
-class _ScoringTask(Task):
-    """Reads item_result.json written by d_exit after the join, proving
-    the fork/join's output feeds the item's score."""
+def _spine(graph: nn.Graph, run: Path, tmp_path: Path, *, timeout_ms: int = 30_000,
+           env: dict[str, str] | None = None, drain: Path = _DRAIN_AGENT) -> tuple[int, str]:
+    """Lower ``graph`` into ``run`` and drive it through the real spine drain.
 
-    name = "fork_scoring_task"
-
-    def instances(self, **kw):
-        from refactory_dsh.task import TaskInstance
-        return [TaskInstance(id=str(i), metadata={}) for i in range(3)]
-
-    def verify(self, instance, workspace, **kw):
-        result_file = Path(workspace) / "item_result.json"
-        if not result_file.exists():
-            return VerifyResult(passed=False, score=0.0, details="item_result.json missing")
-        data = json.loads(result_file.read_text())
-        score = float(data.get("score", 0.0))
-        return VerifyResult(passed=score > 0, score=score)
-
-
-def _scoring_graph_kwargs() -> dict[str, Any]:
-    """Common kwargs for a fork-inside-data graph whose d_exit writes the score file."""
-    return dict(
-        d_exit_call="loop_ops:write_item_result",
-        d_exit_writes=("item_result.json",),
-    )
-
-
-@pytest.fixture
-def fork_scoring_task(tmp_path):
-    """Register the scoring task for walker, write it as a package for the spine.
-
-    Yields (project_dir, walker_task_name, spine_task_ref).
+    Returns the drain's exit code and the status it ended on. The agent drain
+    answers ``branch_b`` with ``agent_answer``, as the walker's model does; the
+    plain drain (``_DRAIN``) is the one that resumes a run (``DRAIN_RESUME=1``).
     """
-    from refactory_dsh.task import register_task
-
-    register_task("fork_scoring_task", _ScoringTask)
-    project = tmp_path / "project"
-    pkg = project / ".factory" / "packages" / "fork_scoring_pkg"
-    pkg.mkdir(parents=True)
-    (pkg / "__init__.py").write_text("")
-    (pkg / "task.py").write_text(_SCORING_TASK_SOURCE)
-    sys.path.insert(0, str(project / ".factory" / "packages"))
-    try:
-        yield project, "fork_scoring_task", "refactory_packages.fork_scoring_pkg.task:ForkScoringTask"
-    finally:
-        sys.path.remove(str(project / ".factory" / "packages"))
-        sys.modules.pop("fork_scoring_pkg.task", None)
-        sys.modules.pop("fork_scoring_pkg", None)
-
-
-# ── Spine helper ──
-
-def _run_spine_drain(
-    drain: Path,
-    graph_json: Path, workdir: Path, timeout_ms: int,
-    *, responses: dict[str, str] | None = None,
-    env_extra: dict[str, str] | None = None,
-) -> int:
-    """Drive the TS spine drain (with or without agent support)."""
-    env = {**os.environ, "REFACTORY_WORKDIR": str(workdir)}
-    env["PATH"] = f"{_PYTHON_BIN}:{env.get('PATH', '')}"
-    if env_extra:
-        env.update(env_extra)
-    argv = [str(_NODE), "--import", "tsx/esm", str(drain),
-            str(graph_json), str(workdir), f"{_PYTHON_BIN}/python",
-            str(timeout_ms)]
-    if responses is not None:
-        responses_file = workdir / "responses.json"
-        responses_file.write_text(json.dumps(responses))
-        argv.append(str(responses_file))
-    result = subprocess.run(
-        argv,
-        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=120,
-        env=env,
+    run.mkdir(parents=True, exist_ok=True)
+    state = {"graph": graph.to_state()}
+    if not (run / ".refactory" / "declarations.json").exists():
+        lowering.write_declarations(state, run)
+    graph_path, _ = lowering.write_mode_graph(state, tmp_path / f"graphs-{run.name}", name="fork_in_data")
+    responses = tmp_path / f"responses-{run.name}.json"
+    responses.write_text(json.dumps({"branch_b": "agent_answer"}))
+    run_env = {**os.environ, "REFACTORY_WORKDIR": str(run), "PYTHONPATH": str(HERE), **(env or {})}
+    run_env["PATH"] = f"{_PYTHON_BIN}:{run_env.get('PATH', '')}"
+    done = subprocess.run(
+        [str(_NODE), "--import", "tsx/esm", str(drain), str(graph_path), str(run),
+         f"{_PYTHON_BIN}/python", str(timeout_ms), str(responses)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=180, env=run_env,
     )
-    if result.returncode != 0:
-        sys.stderr.write(
-            f"spine drain failed:\nstdout: {result.stdout[-2000:]}\n"
-            f"stderr: {result.stderr[-2000:]}\n"
-        )
-    return result.returncode
+    if done.returncode != 0:
+        sys.stderr.write(f"spine drain: rc={done.returncode}\nstdout: {done.stdout[-2000:]}\n"
+                         f"stderr: {done.stderr[-3000:]}\n")
+    lines = done.stdout.strip().splitlines()
+    status = json.loads(lines[-1]).get("status", "") if lines and lines[-1].startswith("{") else ""
+    return done.returncode, status
+
+
+def _spine_facts(run: Path) -> dict[str, Any]:
+    return json.loads((run / "facts.json").read_text())
 
 
 def _score_tuples(records: list[dict[str, Any]]) -> list[tuple[str, float]]:
-    """Extract (id, score) tuples for cross-runtime comparison."""
-    return sorted((str(r["id"]), r.get("score")) for r in records)
+    return sorted((str(r["id"]), float(r.get("score") or 0)) for r in records)
 
 
-# ── Walker tests ──
+def _record_keys(records: list[dict[str, Any]]) -> list[tuple[str, bool, float, Any]]:
+    return sorted((str(r["id"]), bool(r["passed"]), float(r.get("score") or 0), r.get("error_kind"))
+                  for r in records)
+
+
+def _visits(log: Path) -> list[str]:
+    return log.read_text().split() if log.exists() else []
+
+
+# ── walker ──
+
 
 @pytest.mark.parametrize("parallelism", [1, 3])
 def test_fork_inside_data_op_branches(tmp_path, parallelism):
-    """[walker] fork→[op_a, op_b]→join→exit in a data body, parallelism 1 and 3.
-
-    Proves exit_ok, correct item_records, fork walk completes for each item.
-    """
-    graph = _fork_inside_data_graph(parallelism=parallelism)
-    result = execute(graph, tmp_path / "run", max_steps=200)
+    """[walker] Both op branches run for every item and their outputs score it."""
+    result = _walker(_fork_graph(parallelism=parallelism), tmp_path / "run")
     assert result.exit_ok, result.error
-    # No Task, no failures → empty item_records.
-    assert result.item_records == []
+    assert _score_tuples(result.facts["item_scores"]) == _BOTH_BRANCHES
+    assert result.item_records == [] or all(r.get("error_kind") is None for r in result.item_records)
 
 
 @pytest.mark.parametrize("parallelism", [1, 3])
 def test_fork_inside_data_agent_branch(tmp_path, parallelism):
-    """[walker] fork→[op_a, agent_b]→join→exit with FakeModel, tool_policy='none',
-    parallelism 1 and 3. Proves agent dispatch inside a fork branch inside a data pass
-    completes, model was called, item_scores merge back.
-
-    The d_exit op writes item_result.json after the join; the Task's verify()
-    reads it and returns the score, proving the join's output feeds the item's
-    score (brief requirement 1c).
-    """
-    from refactory_dsh.task import register_task
-
-    register_task("fork_scoring_task", _ScoringTask)
+    """[walker] An agent branch's reply is captured into b_out.txt and scores the item."""
     model = _SimpleFakeModel()
-    graph = _fork_inside_data_graph(
-        parallelism=parallelism,
-        branch_b_kind="agent",
-        task_ref="fork_scoring_task",
-        **_scoring_graph_kwargs(),
-    )
-    result = execute(graph, tmp_path / "run", max_steps=200, model=model)
+    result = _walker(_fork_graph(parallelism=parallelism, branch_b="agent"), tmp_path / "run", model=model)
     assert result.exit_ok, result.error
-    assert len(model.prompts) > 0, "the agent was never called"
-    # item_scores should have 3 entries, each with score=1.0.
-    assert len(result.facts["item_scores"]) == 3
-    for entry in result.facts["item_scores"]:
-        assert entry["score"] == 1.0, entry
+    assert len(model.prompts) == 3, "the agent branch did not run once per item"
+    assert _score_tuples(result.facts["item_scores"]) == _BOTH_BRANCHES
 
 
 @pytest.mark.parametrize("parallelism", [1, 3])
 def test_fork_inside_data_failed_branch(tmp_path, parallelism):
-    """[walker] One branch raises inside a data pass's fork, parallelism 1 and 3.
+    """[walker] A branch raising ValueError fails its item only; the pass goes on.
 
-    Item 0 fails (fork branch raises), item 1 succeeds. The failed item's
-    error_kind equals 'RuntimeError' (the kind F4's make_item_record assigns
-    when wrapping a _BranchFailed in RuntimeError), and the data node continues
-    to the next item.
+    Item 0's branch_b raises ``ValueError``. The fork reports it as a failed branch
+    and the data node records the item with ``error_kind == "RuntimeError"``, not
+    ``ValueError``: the walker wraps a failed branch in ``RuntimeError``
+    (executor.py, the ``_BranchFailed`` handler; data_parallel.py likewise) so the
+    kind matches the spine's for a failed pass. The original message is kept in
+    ``error_text``. Items 1 and 2 score from both branches as usual.
     """
-    graph = _fork_inside_data_graph(
-        parallelism=parallelism,
-        branch_b_call="loop_ops:conditional_fail",
-        items=({"id": "0"}, {"id": "1"}),
-    )
-    result = execute(graph, tmp_path / "run", max_steps=200)
+    result = _walker(_fork_graph(parallelism=parallelism, branch_b="loop_ops:fork_branch_b_fail_on_0"),
+                     tmp_path / "run")
     assert result.exit_ok, result.error
-    # One item failed (item 0), one succeeded (item 1).
-    assert len(result.item_records) == 1
-    failed = result.item_records[0]
-    assert failed["id"] == "0"
-    assert failed["error_kind"] == "RuntimeError"
-    assert "deliberate" in failed.get("error_text", "")
+    assert _score_tuples(result.facts["item_scores"]) == [("0", 0.0), ("1", 0.75), ("2", 1.0)]
+    failed = [r for r in result.item_records if r.get("error_kind")]
+    assert [(r["id"], r["error_kind"]) for r in failed] == [("0", "RuntimeError")]
+    assert "deliberate branch failure" in failed[0]["error_text"]
 
 
-def test_fork_inside_data_resume(tmp_path):
-    """[walker] Stops the run after one branch of item 0's fork has completed
-    (halt_branch raises HaltStop), resumes with start='data', and finishes with
-    the same item_records/item_scores as an uninterrupted run.
+def test_fork_inside_data_resume(tmp_path, monkeypatch):
+    """[walker] Stop inside item 1's fork, resume at the data node: item 0 is not re-run.
 
-    The walker may replay the whole item on resume: item 0 runs from scratch
-    because its pass_dir has no .done marker.
-
-    Uses a task_ref so item_scores are non-empty and the comparison is meaningful.
+    branch_b halts the run once, on item 1, after item 0 has finished. The resume
+    keeps item 0's score from its finished pass, replays the interrupted item 1
+    (its pass has no ``.done``) and runs item 2.
     """
-    from refactory_dsh.task import register_task
-
-    register_task("fork_scoring_task", _ScoringTask)
-    # The halt_branch_on_first_item op raises HaltStop on item 0.
-    halt_graph = _fork_inside_data_graph(
-        parallelism=1,
-        branch_b_call="loop_ops:halt_branch_on_first_item",
-        task_ref="fork_scoring_task",
-        **_scoring_graph_kwargs(),
-    )
+    log = tmp_path / "walker.log"
+    monkeypatch.setenv("PASS_TEST_LOG", str(log))
+    graph = _fork_graph(branch_b="loop_ops:fork_branch_b_stop_on_1")
     run = tmp_path / "run"
-    first = execute(halt_graph, run, max_steps=200)
-    assert first.halted, f"expected halted, got error={first.error}"
-
-    # Resume: use an unhalted graph (no halt op in branch_b).
-    resume_graph = _fork_inside_data_graph(
-        parallelism=1,
-        task_ref="fork_scoring_task",
-        **_scoring_graph_kwargs(),
-    )
-    resumed = execute(resume_graph, run, max_steps=200, start="data", facts=dict(first.facts))
+    first = _walker(graph, run)
+    assert first.halted, first.error
+    stopped = _visits(log)
+    assert sorted(stopped) == ["0:a", "0:b", "1:a", "1:b"], stopped
+    resumed = _walker(graph, run, start="data", facts=dict(first.facts))
     assert resumed.exit_ok, resumed.error
-
-    # Reference: uninterrupted run.
-    ref_graph = _fork_inside_data_graph(
-        parallelism=1,
-        task_ref="fork_scoring_task",
-        **_scoring_graph_kwargs(),
-    )
-    reference = execute(ref_graph, tmp_path / "ref", max_steps=200)
-    assert reference.exit_ok, reference.error
-
-    # item_scores must be non-empty and match between resumed and reference runs.
-    resumed_scores = resumed.facts.get("item_scores", [])
-    ref_scores = reference.facts.get("item_scores", [])
-    assert len(resumed_scores) == 3, f"expected 3 item_scores, got {len(resumed_scores)}"
-    assert _score_tuples(resumed_scores) == _score_tuples(ref_scores), (
-        f"item_scores differ:\n  resumed: {_score_tuples(resumed_scores)}\n  ref: {_score_tuples(ref_scores)}"
-    )
-    # Verify absolute score values: each item should score 1.0 via d_exit → Task.verify.
-    for entry in resumed_scores:
-        assert entry["score"] == 1.0, f"expected score=1.0 for {entry}"
+    after = _visits(log)[len(stopped):]
+    assert sorted(after) == ["1:a", "1:b", "2:a", "2:b"], f"re-ran after the stop: {after}"
+    assert _score_tuples(resumed.facts["item_scores"]) == _BOTH_BRANCHES
 
 
 def test_data_inside_fork_validation(tmp_path):
-    """[walker] Constructs a data-inside-fork graph, calls validate(), asserts V13 issue
-    is present with the expected message. Also tests lowering raises LoweringError.
-    """
+    """[walker] A data node inside a fork branch is refused by validate (V13) and lowering."""
     from refactory_dsh.lowering import LoweringError, to_workflow
     from refactory_dsh.nn.validate import validate
 
-    # Build a graph with data inside a fork branch.
     graph = nn.Graph()
     graph.add(nn.Node("start", "op", call="loop_ops:noop"))
     graph.add(nn.Node("fork1", "fork", targets=("data_branch", "other")))
     graph.add(nn.Node(
-        "data_branch", "data",
-        subgraph_entry="d_work",
-        subgraph_exit="d_exit",
-        writes=(CURRENT_ITEM,),
-        produces=("item_scores",),
-        inline_items=({"id": "0"},),
+        "data_branch", "data", subgraph_entry="d_work", subgraph_exit="d_exit",
+        writes=(CURRENT_ITEM,), produces=("item_scores",), inline_items=({"id": "0"},),
     ))
     graph.add(nn.Node("d_work", "op", call="loop_ops:noop"))
     graph.add(nn.Node("d_exit", "op", call="loop_ops:noop"))
@@ -1556,381 +1429,256 @@ def test_data_inside_fork_validation(tmp_path):
     graph.connect("d_work", "d_exit")
     graph.connect("join1", "end")
 
-    issues = validate(graph, {}, declared_knobs={})
-    v13 = [i for i in issues if i.code == "V13"]
-    assert len(v13) >= 1, f"expected V13 issue, got {issues}"
-    assert "data node" in v13[0].message
-    assert "inside a fork branch is not supported" in v13[0].message
-
-    # Lowering should also refuse.
-    state = {"graph": graph.to_state()}
-    with pytest.raises(LoweringError, match="data node.*inside a fork branch"):
-        to_workflow(state)
+    v13 = [i for i in validate(graph, {}, declared_knobs={}) if i.code == "V13"]
+    assert [i.node for i in v13] == ["fork1"]
+    assert "data node 'data_branch' inside a fork branch is not supported" in v13[0].message
+    with pytest.raises(LoweringError, match="data node 'data_branch' inside a fork branch"):
+        to_workflow({"graph": graph.to_state()})
 
 
-# ── F21: per-item deadline with fork inside data pass ─────────────────
+def _fork_with_conditional_edge_first(*, data_in_branch: bool) -> nn.Graph:
+    """fork1's first out-edge is a conditional one to ``side``; its join edge comes second.
+
+    With ``data_in_branch`` the data node is branch ``x``; otherwise it follows the join.
+    """
+    graph = nn.Graph()
+    graph.add(nn.Node("fork1", "fork", targets=("x", "y")))
+    graph.add(nn.Node("side", "op", call="loop_ops:noop"))
+    if data_in_branch:
+        graph.add(nn.Node("x", "data", subgraph_entry="d_work", subgraph_exit="d_work",
+                          writes=(CURRENT_ITEM,), produces=("item_scores",), inline_items=({"id": "0"},)))
+        graph.add(nn.Node("d_work", "op", call="loop_ops:noop"))
+        after = nn.Node("end", "op", call="loop_ops:noop")
+    else:
+        graph.add(nn.Node("x", "op", call="loop_ops:noop"))
+        after = nn.Node("end", "data", subgraph_entry="d_work", subgraph_exit="d_work",
+                        writes=(CURRENT_ITEM,), produces=("item_scores",), inline_items=({"id": "0"},))
+        graph.add(nn.Node("d_work", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("y", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("join1", "join", sources=("x", "y")))
+    graph.add(after)
+    graph.connect("fork1", "side", condition="other")
+    graph.connect("fork1", "join1")
+    graph.connect("x", "join1")
+    graph.connect("y", "join1")
+    graph.connect("join1", "end")
+    return graph
 
 
-class _ForkDeadlineTask(Task):
-    """Task with a slow verify phase for deadline testing with fork-inside-data."""
+def test_v13_takes_the_join_from_the_unconditional_edge():
+    """V13 and lowering stop a branch walk at the fork's join, the target of its
+    unconditional out-edge, even when a conditional edge is listed first.
 
-    name = "fork_deadline_task"
+    Taking the first out-edge instead walks past the join and flags a data node
+    that follows it; and still flags one inside a branch.
+    """
+    from refactory_dsh.lowering import LoweringError, to_workflow
+    from refactory_dsh.nn.validate import validate
 
-    def instances(self, **kw):
-        from refactory_dsh.task import TaskInstance
-        return [
-            TaskInstance(id="ok", metadata={}),
-            TaskInstance(id="slow_verify", metadata={"phase": "verify"}),
-        ]
+    after = _fork_with_conditional_edge_first(data_in_branch=False)
+    assert [i for i in validate(after, {}, declared_knobs={}) if i.code == "V13"] == []
+    try:
+        to_workflow({"graph": after.to_state()})
+    except LoweringError as exc:
+        assert "inside a fork branch" not in str(exc), exc
 
-    def setup(self, instance, workspace, **kw):
-        pass
-
-    def verify(self, instance, workspace, **kw):
-        if instance.metadata.get("phase") == "verify":
-            time.sleep(4)
-        return VerifyResult(passed=True, score=1.0)
+    inside = _fork_with_conditional_edge_first(data_in_branch=True)
+    assert [i.node for i in validate(inside, {}, declared_knobs={}) if i.code == "V13"] == ["fork1"]
+    with pytest.raises(LoweringError, match="data node 'x' inside a fork branch"):
+        to_workflow({"graph": inside.to_state()})
 
 
 @pytest.mark.parametrize("parallelism", [1, 3])
 def test_fork_inside_data_deadline(tmp_path, monkeypatch, parallelism):
-    """[walker] Per-item deadline with a fork inside the data pass.
+    """[walker] The per-item deadline covers a pass with a fork in it.
 
-    The walk phase (including the fork) runs WITHOUT the deadline (the executor
-    disarms SIGALRM before _walk_branch). Setup and verify run WITH the deadline.
-    An item whose verify exceeds the deadline times out; an item whose fork walk
-    takes time does NOT time out. This is the same behaviour as the sequential
-    loop (test_per_item_deadline_covers_setup_and_verify) but with a fork shape.
+    Item 1's verify outlives the 1 s deadline and is recorded as a timeout; items 0
+    and 2, whose fork walks finish well inside it, score from both branches.
     """
     from refactory_dsh.nn.executor import Executor
-    from refactory_dsh.task import register_task
 
-    register_task("fork_deadline_task", _ForkDeadlineTask)
     monkeypatch.setattr(Executor, "_data_item_deadline", lambda self: 1.0)
-
-    graph = _fork_inside_data_graph(
-        parallelism=parallelism,
-        task_ref="fork_deadline_task",
-        items=({"id": "ok"}, {"id": "slow_verify"}),
-        **_scoring_graph_kwargs(),
-    )
-    result = execute(graph, tmp_path / "run", max_steps=200)
+    monkeypatch.setenv("FORK_TEST_SLOW_ITEM", "1")
+    monkeypatch.setenv("FORK_TEST_SLOW_SECONDS", "4")
+    result = _walker(_fork_graph(parallelism=parallelism), tmp_path / "run")
     assert result.exit_ok, result.error
-    scores = result.facts.get("item_scores", [])
-    assert len(scores) == 2, f"expected 2 item_scores, got {len(scores)}: {scores}"
-    outcomes = {s["id"]: s.get("error_kind") for s in scores}
-    assert outcomes["ok"] is None, f"ok item should not have error_kind: {outcomes}"
-    assert outcomes["slow_verify"] == "timeout", (
-        f"slow_verify should have error_kind=timeout: {outcomes}"
-    )
-
-
-# ── F21: step cap with fork inside data pass ─────────────────────────
+    scores = {s["id"]: (s.get("error_kind"), s.get("score")) for s in result.facts["item_scores"]}
+    assert scores == {"0": (None, 1.0), "1": ("timeout", 0.0), "2": (None, 1.0)}, scores
 
 
 @pytest.mark.parametrize("parallelism", [1, 3])
-def test_fork_inside_data_step_cap(tmp_path, monkeypatch, parallelism):
-    """[walker] The shared step cap covers fork branches inside a data pass.
+def test_fork_inside_data_step_cap(tmp_path, parallelism):
+    """[walker] The shared step cap counts the nodes a fork runs inside a pass.
 
-    The fork body has 5 nodes (fork, a, b, join, d_exit). With 3 items and
-    max_steps=3, the budget scales to data_step + 3*5 = 16 body steps total.
-    Actually, d_entry adds 1 per item, so it is data_step + 3*(1+5) = 19.
-    With max_steps=2, it is data_step + 3*(1+5) = ... too few. We set
-    max_steps low enough that one item exhausts the cap.
-
-    Concretely: each item walks d_entry → fork → a → b → join → d_exit = 6 nodes.
-    3 items × 6 = 18 body nodes + 1 data node + 1 report = 20 total. With
-    max_steps=3 the budget is 3*number_of_items_touched = 3*3 = 9 body steps +
-    the data node = 10. We have 18 body steps → some items fail with 'exceeded'.
-
-    This is the same test shape as test_nested_fork_in_item_shares_the_step_cap
-    but proves the fork inside a data pass body exhausts the same cap.
+    ``max_steps=2`` grows by (items - 1) x the body's node count for the data node,
+    to 16. Each item walks six nodes (d_entry, fork1, branch_a, branch_b, join1,
+    d_exit), so the data step and two items fit and the third does not: run one at
+    a time, item 2 is the one that fails. Run concurrently, the items draw on the
+    same 15 steps at once, so which items run short (one or two) depends on how
+    they interleave. Either way every capped item carries the step-cap error and
+    every other item scores from both branches.
     """
-    graph = _fork_inside_data_graph(
-        parallelism=parallelism,
-        items=({"id": "0"}, {"id": "1"}, {"id": "2"}),
-    )
-    result = execute(graph, tmp_path / "run", max_steps=2)
-    # With max_steps=2, some items should exceed the cap.
-    assert len(result.item_records) >= 1, (
-        f"expected at least one failed item, got {result.item_records}"
-    )
-    exceeded_items = [r for r in result.item_records if "exceeded" in r.get("error_text", "")]
-    assert len(exceeded_items) >= 1, (
-        f"expected at least one item to exceed step cap: {result.item_records}"
-    )
-
-
-# ── F21: stop/pause with fork inside data pass ──────────────────────
+    result = execute(_fork_graph(parallelism=parallelism), tmp_path / "run", max_steps=2)
+    capped = {r["id"]: r["error_text"] for r in result.item_records if r.get("error_kind")}
+    if parallelism == 1:
+        assert capped == {"2": "the run exceeded 16 steps"}, result.item_records
+    else:
+        assert capped and set(capped.values()) == {"the run exceeded 16 steps"}, result.item_records
+    scored = [t for t in _score_tuples(result.facts["item_scores"]) if t[0] not in capped]
+    assert scored == [t for t in _BOTH_BRANCHES if t[0] not in capped]
 
 
 @pytest.mark.parametrize("parallelism", [1, 3])
-def test_fork_inside_data_stop(tmp_path, parallelism):
-    """[walker] A HaltStop raised inside a fork branch in a data pass stops the
-    run. This covers 'stop' behavior with fork inside pass on the walker.
+def test_fork_inside_data_stop(tmp_path, monkeypatch, parallelism):
+    """[walker] A halt raised inside item 1's fork stops the run there.
 
-    The data node's error handling catches the HaltStop and records the run as
-    halted. The run can later be resumed (test_fork_inside_data_resume covers
-    the resume path). Item 1 is never started because the halt fires on item 0.
+    The walker has no graph control; a halt is how it stops (the spine's stop
+    control is test_fork_inside_data_stop_and_pause_spine). Item 0 finished before
+    the stop; sequentially, item 2 never starts.
     """
-    graph = _fork_inside_data_graph(
-        parallelism=parallelism,
-        branch_b_call="loop_ops:halt_branch_on_first_item",
-        items=({"id": "0"}, {"id": "1"}),
-    )
-    result = execute(graph, tmp_path / "run", max_steps=200)
+    log = tmp_path / "walker.log"
+    monkeypatch.setenv("PASS_TEST_LOG", str(log))
+    result = _walker(_fork_graph(parallelism=parallelism, branch_b="loop_ops:fork_branch_b_stop_on_1"),
+                     tmp_path / "run")
     assert result.halted, f"expected halted, got exit_ok={result.exit_ok}, error={result.error}"
-    # The run stopped on item 0; item 1 was never started.
+    assert {"0:a", "0:b", "1:b"} <= set(_visits(log))
+    if parallelism == 1:
+        assert not any(v.startswith("2:") for v in _visits(log)), _visits(log)
 
 
-def test_fork_inside_data_pause(tmp_path):
-    """[walker] A HaltStop from a fn_gate inside the data body (after the
-    fork/join) pauses the run — the data node's error handler catches HaltStop
-    and records outcome='halted'. This is the same path GateStop follows
-    (outcome='refused') but uses a fn_gate that returns 'halt' for simplicity.
+def test_fork_inside_data_pauses_at_a_user_gate(tmp_path, monkeypatch):
+    """[walker] A user gate after the join pauses the run in the first item's pass.
 
-    Covers 'pause' behavior with fork inside pass on the walker.
+    The walker's pause is a user gate with nobody to answer it (GateStop): the run
+    stops with the gate waiting, after item 0's fork ran both branches and before
+    its d_exit or any later item.
     """
-    graph = _fork_inside_data_graph(
-        parallelism=1,
-        d_exit_call="loop_ops:halt_gate_on_first_item",
-        items=({"id": "0"}, {"id": "1"}),
-    )
-    result = execute(graph, tmp_path / "run", max_steps=200)
-    assert result.halted, (
-        f"expected halted, got exit_ok={result.exit_ok}, error={result.error}"
-    )
+    log = tmp_path / "walker.log"
+    monkeypatch.setenv("PASS_TEST_LOG", str(log))
+    gate = nn.Node("ask", "gate", gate_kind="user", notes="Go on?")
+    run = tmp_path / "run"
+    result = _walker(_fork_graph(after_join=gate), run)
+    assert not result.exit_ok
+    assert "gate 'ask' is waiting for a person" in str(result.error), result.error
+    assert sorted(_visits(log)) == ["0:a", "0:b"]
+    assert list(run.glob("passes/data/*/item_result.json")) == []
 
 
-# ── F21: two-runtime tests ───────────────────────────────────────────────
+
+# ── both runtimes ──
 
 
-def _spine_fork_data_graph(
-    *,
-    parallelism: int = 1,
-    task_ref: str = "",
-    d_exit_call: str = "loop_ops:noop",
-    d_exit_writes: tuple[str, ...] = (),
-) -> nn.Graph:
-    """Spine-friendly fork-inside-data graph with an agent branch (writes=(), no tool_policy).
+#: Item scores per branch_b: both branches run, or item 0's branch_b fails.
+_TWO_RUNTIME_CASES = {
+    "agent": _BOTH_BRANCHES,
+    "loop_ops:fork_branch_b": _BOTH_BRANCHES,
+    "loop_ops:fork_branch_b_fail_on_0": [("0", 0.0), ("1", 0.75), ("2", 1.0)],
+}
 
-    Same shape as _fork_inside_data_graph with branch_b_kind="agent", but the
-    agent uses writes=() (the spine's delivery bridge handles the response text
-    without requiring declared output files). The walker graph uses tool_policy="none"
-    with writes=("agent_answer.txt",); the spine does not need this because
-    agent delivery on the spine side runs as a command bridge.
+
+def _assert_same_merged_facts(walker: dict[str, Any], spine: dict[str, Any]) -> None:
+    """The facts both runtimes merge are the same; only _RUNTIME_ONLY_FACTS may differ.
+
+    ``item_scores`` entries are compared on id, passed, score and error_kind: the
+    records' other fields (exchanges, timings) are each runtime's own bookkeeping.
     """
-    graph = nn.Graph()
-    data_kwargs: dict[str, Any] = dict(
-        subgraph_entry="d_entry",
-        subgraph_exit="d_exit",
-        writes=(CURRENT_ITEM,),
-        produces=("item_scores",),
-        parallelism=parallelism,
-    )
-    if task_ref:
-        data_kwargs["task_ref"] = task_ref
-    else:
-        data_kwargs["inline_items"] = tuple({"id": str(i)} for i in range(3))
-    graph.add(nn.Node("data", "data", **data_kwargs))
-    graph.add(nn.Node("d_entry", "op", call="loop_ops:noop"))
-    graph.add(nn.Node("fork1", "fork", targets=("branch_a", "branch_b")))
-    graph.add(nn.Node("branch_a", "op", call="loop_ops:noop"))
-    graph.add(nn.Node("branch_b", "agent", prompt_template="answer", writes=()))
-    graph.add(nn.Node("join1", "join", sources=("branch_a", "branch_b")))
-    graph.add(nn.Node("d_exit", "op", call=d_exit_call, writes=d_exit_writes))
-    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
-    graph.connect("d_entry", "fork1")
-    graph.connect("fork1", "join1")
-    graph.connect("branch_a", "join1")
-    graph.connect("branch_b", "join1")
-    graph.connect("join1", "d_exit")
-    graph.connect("data", "report")
-    return graph
+    assert set(walker) ^ set(spine) <= _RUNTIME_ONLY_FACTS, set(walker) ^ set(spine)
+    for key in sorted((set(walker) & set(spine)) - _RUNTIME_ONLY_FACTS):
+        if key == "item_scores":
+            assert _record_keys(walker[key]) == _record_keys(spine[key])
+        else:
+            assert walker[key] == spine[key], key
 
 
 @_needs_spine
+@pytest.mark.parametrize("branch_b", sorted(_TWO_RUNTIME_CASES))
 @pytest.mark.parametrize("parallelism", [1, 3])
-def test_fork_inside_data_two_runtimes(tmp_path, parallelism, fork_scoring_task):
-    """[both runtimes] Lowers the fork-inside-data graph with to_workflow, runs through
-    the real spine drain path (data-drain-agent.mts), parallelism 1 and 3. Exercises
-    (a) op branches and (b) one stubbed agent branch with tool_policy='none' (walker)
-    / writes=() (spine) whose output feeds the item score via d_exit → Task.verify.
-    Asserts the walker and the spine produce the same item_records, item_scores and
-    merged facts.
+def test_fork_inside_data_two_runtimes(tmp_path, parallelism, branch_b):
+    """[both runtimes] One graph, run by the walker and lowered onto the spine's drain.
+
+    Each item's score comes from both fork branches' files, and item 1 scores
+    differently from the others, so a runtime that skips a branch (or runs one item's
+    branch for another) fails the comparison. Cases: an agent branch, an op-only
+    fork, and a branch that raises on item 0 (the item scores 0 with its error kind
+    kept, and the pass goes on to items 1 and 2).
     """
-    from refactory_dsh import lowering
+    graph = _fork_graph(parallelism=parallelism, branch_b=branch_b)
+    expected = _TWO_RUNTIME_CASES[branch_b]
 
-    project, walker_task_name, spine_task_ref = fork_scoring_task
     model = _SimpleFakeModel()
+    walker = _walker(graph, tmp_path / "walker", model=model)
+    assert walker.exit_ok, walker.error
+    assert len(model.prompts) == (3 if branch_b == "agent" else 0)
 
-    # ── Walker run ──
-    # Walker graph: agent with tool_policy="none", writes=("agent_answer.txt",)
-    walker_graph = _fork_inside_data_graph(
-        parallelism=parallelism,
-        branch_b_kind="agent",
-        task_ref=walker_task_name,
-        **_scoring_graph_kwargs(),
-    )
-    walker_dir = tmp_path / "walker"
-    walker_result = execute(walker_graph, walker_dir, max_steps=200, model=model)
-    assert walker_result.exit_ok, walker_result.error
-    walker_scores = walker_result.facts.get("item_scores", [])
-    assert len(walker_scores) == 3
+    spine_run = tmp_path / "spine"
+    rc, status = _spine(graph, spine_run, tmp_path)
+    assert (rc, status) == (0, "done")
+    spine = _spine_facts(spine_run)
 
-    # ── Spine run ──
-    # Spine graph: same shape, agent with writes=() (spine delivery does not
-    # require declared output files). Uses module-qualified task_ref so the
-    # spine subprocess can import the Task class.
-    spine_graph = _spine_fork_data_graph(
-        parallelism=parallelism,
-        task_ref=spine_task_ref,
-        **_scoring_graph_kwargs(),
-    )
-    spine_dir = tmp_path / "spine"
-    spine_dir.mkdir(parents=True, exist_ok=True)
-    state = {"graph": spine_graph.to_state()}
-    lowering.write_declarations(state, spine_dir)
-    graph_path, _ = lowering.write_mode_graph(
-        state, tmp_path / "graphs", name="fork_inside_data",
-    )
-    extra_path = os.pathsep.join([
-        str(project / ".factory" / "packages"),
-        str(HERE),
-    ])
-    old_env = {}
-    env_patch = {"REFACTORY_PROJECT": str(project), "PYTHONPATH": extra_path}
-    for key, value in env_patch.items():
-        old_env[key] = os.environ.get(key)
-        os.environ[key] = value
-    try:
-        rc = _run_spine_drain(
-            _DRAIN_AGENT, graph_path, spine_dir, 30_000,
-            responses={"branch_b": "agent_answer"},
-            env_extra=env_patch,
-        )
-    finally:
-        for key, value in old_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-    assert rc == 0, f"spine drain failed with rc={rc}"
-
-    # ── Cross-runtime comparison ──
-    spine_facts = json.loads((spine_dir / "facts.json").read_text())
-    spine_scores = spine_facts.get("item_scores", [])
-
-    # item_scores: both runtimes must produce 3 entries with the same ids and scores.
-    assert _score_tuples(walker_scores) == _score_tuples(spine_scores), (
-        f"item_scores differ:\n  walker: {_score_tuples(walker_scores)}\n  spine: {_score_tuples(spine_scores)}"
-    )
-    # Each score must be 1.0 (the d_exit → Task.verify causal chain).
-    for entry in walker_scores:
-        assert entry["score"] == 1.0, entry
-    for entry in spine_scores:
-        assert entry["score"] == 1.0, entry
-
-    # item_records: compare id, passed, score, error_kind on both runtimes.
-    # The walker uses tool_policy='none' (no exchanges recorded) while the spine
-    # records exchanges; formatting differences also exist (score float vs int).
-    # Compare the semantically equivalent fields.
-    spine_records_file = spine_dir / "item_records.json"
-    if spine_records_file.exists():
-        spine_records = json.loads(spine_records_file.read_text())
-    else:
-        spine_records = spine_facts.get("item_records", [])
-
-    def _record_key(r: dict[str, Any]) -> tuple[str, bool, float, Any]:
-        return (str(r["id"]), r["passed"], float(r.get("score", 0)), r.get("error_kind"))
-
-    walker_keys = sorted(_record_key(r) for r in walker_result.item_records)
-    spine_keys = sorted(_record_key(r) for r in spine_records)
-    assert walker_keys == spine_keys, (
-        f"item_records differ:\n  walker: {walker_keys}\n  spine: {spine_keys}"
-    )
+    assert _score_tuples(walker.facts["item_scores"]) == expected
+    assert _score_tuples(spine["item_scores"]) == expected
+    _assert_same_merged_facts(walker.facts, spine)
+    failed = [(r["id"], r["error_kind"]) for r in spine["item_scores"] if r.get("error_kind")]
+    assert failed == ([("0", "RuntimeError")] if expected[0][1] == 0.0 else [])
 
 
 @_needs_spine
-def test_fork_inside_data_resume_spine(tmp_path, fork_scoring_task):
-    """[spine] Stops the spine drain after one branch of item 0's fork has completed
-    (halt_branch_on_first_item_spine kills the drain on item 0), resumes from
-    checkpoint, and finishes with the same item_records/item_scores as an
-    uninterrupted spine run.
+def test_fork_inside_data_resume_spine(tmp_path):
+    """[spine] Killed inside item 1's fork, resumed from the checkpoint: item 0 is not re-run.
 
-    Uses a task_ref so item_scores are non-empty and the comparison is meaningful.
+    branch_b kills the drain once, mid-command, in item 1's fork, after item 0
+    has finished; the drain resumes the run (DRAIN_RESUME). The log shows item 0
+    ran once, the interrupted item 1 ran again and item 2 ran, and the scores
+    are the uninterrupted run's.
     """
-    from refactory_dsh import lowering
+    log = tmp_path / "spine.log"
+    env = {"PASS_TEST_LOG": str(log), "PASS_TEST_RUNTIME": "spine"}
+    graph = _fork_graph(branch_b="loop_ops:fork_branch_b_stop_on_1")
+    run = tmp_path / "spine"
+    rc, _ = _spine(graph, run, tmp_path, env=env, drain=_DRAIN)
+    assert rc != 0
+    stopped = _visits(log)
+    assert {"0:a", "0:b", "1:b"} <= set(stopped) and not any(v.startswith("2:") for v in stopped), stopped
+    rc, status = _spine(graph, run, tmp_path, env={**env, "DRAIN_RESUME": "1"}, drain=_DRAIN)
+    assert (rc, status) == (0, "done")
+    after = _visits(log)[len(stopped):]
+    assert not any(v.startswith("0:") for v in after), f"finished item 0 re-ran: {after}"
+    assert "1:b" in after and sorted(v for v in after if v.startswith("2:")) == ["2:a", "2:b"], after
+    assert _score_tuples(_spine_facts(run)["item_scores"]) == _BOTH_BRANCHES
 
-    project, _, spine_task_ref = fork_scoring_task
-    flag = tmp_path / "stopped_flag"
-    spine_log = tmp_path / "spine.log"
 
-    # Graph with halt on item 0 and a task_ref for scoring.
-    halt_graph = _fork_inside_data_graph(
-        parallelism=1,
-        branch_b_call="loop_ops:halt_branch_on_first_item_spine",
-        task_ref=spine_task_ref,
-        **_scoring_graph_kwargs(),
-    )
+@_needs_spine
+@pytest.mark.parametrize("control", ["stop", "pause"])
+def test_fork_inside_data_stop_and_pause_spine(tmp_path, control):
+    """[spine] A person's stop or pause filed during item 1's fork holds the run there.
 
-    spine_dir = tmp_path / "spine"
-    spine_dir.mkdir(parents=True, exist_ok=True)
-    state = {"graph": halt_graph.to_state()}
-    lowering.write_declarations(state, spine_dir)
-    graph_path, _ = lowering.write_mode_graph(
-        state, tmp_path / "graphs", name="fork_resume",
-    )
-    extra_path = os.pathsep.join([
-        str(project / ".factory" / "packages"),
-        str(HERE),
-    ])
-    env = {"PASS_TEST_LOG": str(spine_log), "PASS_TEST_RUNTIME": "spine",
-           "PASS_TEST_FLAG": str(flag), "PYTHONPATH": extra_path,
-           "REFACTORY_PROJECT": str(project)}
-    # First run: should fail on item 0.
-    rc1 = _run_spine_drain(
-        _DRAIN, graph_path, spine_dir, 30_000,
-        env_extra=env,
-    )
-    assert rc1 != 0, "expected spine drain to fail on item 0"
+    branch_b files the graph control in item 1's pass; the spine applies it at its
+    next boundary inside the pass, so item 1's d_exit and item 2 never run.
+    """
+    log = tmp_path / "spine.log"
+    run = tmp_path / "spine"
+    env = {"PASS_TEST_LOG": str(log), "FORK_TEST_RUN": str(run), "FORK_TEST_CONTROL": control}
+    rc, status = _spine(_fork_graph(branch_b="loop_ops:fork_branch_b_control_on_1"), run, tmp_path, env=env)
+    recorded = json.loads((run / ".refactory/spine-status.json").read_text())["status"]
+    assert recorded == {"stop": "halted", "pause": "paused"}[control], (rc, status, recorded)
+    receipt = json.loads((run / ".refactory/graph-control-receipt.json").read_text())
+    assert (receipt["action"], receipt["status"]) == (control, "applied")
+    assert {"0:a", "0:b", "1:a", "1:b"} == set(_visits(log)), _visits(log)
+    finished = sorted(p.parent.name for p in run.glob("passes/data/*/item_result.json"))
+    assert finished == ["0_0"], finished
 
-    # Resume: DRAIN_RESUME=1.
-    rc2 = _run_spine_drain(
-        _DRAIN, graph_path, spine_dir, 30_000,
-        env_extra={**env, "DRAIN_RESUME": "1"},
-    )
-    assert rc2 == 0, f"spine resume failed with rc={rc2}"
 
-    # Reference: uninterrupted run (no halt op) with same task_ref.
-    ref_graph = _fork_inside_data_graph(
-        parallelism=1,
-        task_ref=spine_task_ref,
-        **_scoring_graph_kwargs(),
-    )
-    ref_dir = tmp_path / "ref"
-    ref_dir.mkdir(parents=True, exist_ok=True)
-    ref_state = {"graph": ref_graph.to_state()}
-    lowering.write_declarations(ref_state, ref_dir)
-    ref_graph_path, _ = lowering.write_mode_graph(
-        ref_state, tmp_path / "ref_graphs", name="fork_resume",
-    )
-    rc_ref = _run_spine_drain(
-        _DRAIN, ref_graph_path, ref_dir, 30_000,
-        env_extra={"PYTHONPATH": extra_path, "REFACTORY_PROJECT": str(project)},
-    )
-    assert rc_ref == 0, f"reference spine run failed with rc={rc_ref}"
+@_needs_spine
+def test_fork_inside_data_deadline_spine(tmp_path):
+    """[spine] The per-item deadline covers a pass with a fork in it.
 
-    # Compare: resumed run's facts must match the reference.
-    resumed_facts = json.loads((spine_dir / "facts.json").read_text())
-    ref_facts = json.loads((ref_dir / "facts.json").read_text())
-    # item_scores must be non-empty and match.
-    resumed_scores = resumed_facts.get("item_scores", [])
-    ref_scores = ref_facts.get("item_scores", [])
-    assert len(resumed_scores) == 3, f"expected 3 item_scores, got {len(resumed_scores)}: {resumed_scores}"
-    assert _score_tuples(resumed_scores) == _score_tuples(ref_scores), (
-        f"item_scores differ:\n  resumed: {_score_tuples(resumed_scores)}\n  ref: {_score_tuples(ref_scores)}"
-    )
-    # Verify absolute score values: each item should score 1.0 via d_exit → Task.verify.
-    for entry in resumed_scores:
-        assert entry["score"] == 1.0, f"expected score=1.0 for {entry}"
+    The spine bounds each loader command by the command timeout (runDataCommand);
+    item 1's verify outlives it and the item is recorded as a timeout, while items
+    0 and 2 score from both branches.
+    """
+    run = tmp_path / "spine"
+    env = {"FORK_TEST_SLOW_ITEM": "1", "FORK_TEST_SLOW_SECONDS": "12"}
+    rc, status = _spine(_fork_graph(), run, tmp_path, timeout_ms=6_000, env=env)
+    assert (rc, status) == (0, "done")
+    scores = {s["id"]: (s.get("error_kind"), s.get("score")) for s in _spine_facts(run)["item_scores"]}
+    assert scores == {"0": (None, 1.0), "1": ("timeout", 0.0), "2": (None, 1.0)}, scores

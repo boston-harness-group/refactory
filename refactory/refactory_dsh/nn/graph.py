@@ -609,6 +609,15 @@ class Graph:
     def in_edges(self, node_id: str) -> list[Edge]:
         return [e for e in self.edges if e.target == node_id]
 
+    def fork_join(self, fork_id: str) -> str | None:
+        """The node a fork's branches stop at: the target of its unconditional out-edge.
+
+        The walker runs a fork only with exactly that one edge (``nn/fork.py``) and the
+        spine takes the same edge (``validateGraph``); a checker walking a fork's
+        branches stops here, whatever order the edges were connected in.
+        """
+        return next((e.target for e in self.out_edges(fork_id) if e.condition is None), None)
+
     def terminals(self) -> list[str]:
         return sorted(n for n in self.nodes if not self.out_edges(n))
 

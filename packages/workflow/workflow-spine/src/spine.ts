@@ -893,6 +893,12 @@ export class Spine {
     // Remove any pass-body cursor positions so endPass's "has not finished"
     // guard does not fire.
     this.cursor = this.cursor.filter(pos => !body.has(pos))
+    // A fork in the body that was still waiting for its join (a branch failed)
+    // leaves the join pending; drop it with the pass, or the next item's fork
+    // finds its join already due, and the join leaks past the data node.
+    for (const container of [...this.afters.keys()]) {
+      if (body.has(container)) this.afters.delete(container)
+    }
     this.pass.finished = true
     this.log.push(`data ${this.pass.node}: item ${this.pass.index} abandoned`)
   }

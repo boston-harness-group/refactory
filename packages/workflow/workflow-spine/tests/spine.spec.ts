@@ -1701,4 +1701,25 @@ describe('fork inside a data pass', () => {
     spine.complete('after')
     expect(spine.next().status).toBe('done')
   })
+
+  it('a failed branch abandons its item without leaving the join pending for the next', () => {
+    const spine = new Spine(forkInsideData.graph)
+    spine.startPass('data', 2)
+    spine.complete('d_entry')
+    spine.complete('fork')
+    spine.complete('branch_a')
+    // branch_b fails: the runner abandons the item and grades it as failed.
+    spine.abandonPass()
+    expect(spine.endPass().nodes?.map(n => n.id)).toEqual(['d_entry'])
+    spine.complete('d_entry')
+    // The fork, alone: not the abandoned item's join with it.
+    expect(spine.next().nodes?.map(n => n.id)).toEqual(['fork'])
+    spine.complete('fork')
+    expect(spine.next().nodes?.map(n => n.id).sort()).toEqual(['branch_a', 'branch_b'])
+    spine.complete('branch_a')
+    spine.complete('branch_b')
+    spine.complete('join')
+    expect(spine.complete('d_exit')).toMatchObject({ pass: { index: 1, finished: true } })
+    expect(spine.endPass().nodes?.map(n => n.id)).toEqual(['after'])
+  })
 })

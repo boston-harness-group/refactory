@@ -303,8 +303,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
         if fork_node.kind != "fork":
             continue
         # Collect each branch's members.
-        fork_edges = graph.out_edges(fork_id)
-        barrier = fork_edges[0].target if fork_edges else None
+        barrier = graph.fork_join(fork_id)
         _branch_lists: list[list[Any]] = []
         for target in fork_node.targets:
             seen: set[str] = set()

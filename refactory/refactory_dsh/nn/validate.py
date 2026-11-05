@@ -222,8 +222,7 @@ def validate(
         node = graph.nodes[node_id]
         if node.kind != "fork":
             continue
-        fork_edges = graph.out_edges(node_id)
-        barrier = fork_edges[0].target if fork_edges else None
+        barrier = graph.fork_join(node_id)
         for target in node.targets:
             seen: set[str] = set()
             pending = [target]
