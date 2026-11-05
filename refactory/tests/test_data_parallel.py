@@ -1522,6 +1522,9 @@ def test_fork_inside_data_resume(tmp_path):
     assert _score_tuples(resumed_scores) == _score_tuples(ref_scores), (
         f"item_scores differ:\n  resumed: {_score_tuples(resumed_scores)}\n  ref: {_score_tuples(ref_scores)}"
     )
+    # Verify absolute score values: each item should score 1.0 via d_exit → Task.verify.
+    for entry in resumed_scores:
+        assert entry["score"] == 1.0, f"expected score=1.0 for {entry}"
 
 
 def test_data_inside_fork_validation(tmp_path):
@@ -1928,3 +1931,6 @@ def test_fork_inside_data_resume_spine(tmp_path, fork_scoring_task):
     assert _score_tuples(resumed_scores) == _score_tuples(ref_scores), (
         f"item_scores differ:\n  resumed: {_score_tuples(resumed_scores)}\n  ref: {_score_tuples(ref_scores)}"
     )
+    # Verify absolute score values: each item should score 1.0 via d_exit → Task.verify.
+    for entry in resumed_scores:
+        assert entry["score"] == 1.0, f"expected score=1.0 for {entry}"

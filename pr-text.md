@@ -42,11 +42,19 @@ pnpm test && .venv/bin/python -m pytest -q -n 4 refactory/tests
 
 ## Follow-ups
 
-- Per-item deadline covering the fork walk phase (currently the deadline is disarmed for the walk, covering setup/verify only; the fork runs under the step cap and budget).
+- Per-item deadline covering the fork walk phase (currently the deadline is disarmed for the walk, covering setup/verify only; the fork runs under the step cap and budget). Per-item deadlines are a walker concept; the spine is a stateless state machine that does not enforce time limits.
 - Finer-grained walker resume mid-fork (currently replays the whole item).
 - Cross-data-body reloop validation in `crossContainerReloopIssues`.
 - Spine single-pass field → stack refactor for nested data-inside-fork-inside-data.
-- The spine does not enforce step caps — it is a stateless state machine; step caps are a walker concept. The spine graph-set invariants test the fork-inside-data shape through all completion orderings.
+
+## Spine vs walker coverage
+
+The spine is a stateless state machine: it tracks node scheduling and pass boundaries but does not enforce step caps, per-item deadlines, or pause semantics. These are walker-side execution concerns. Therefore:
+
+- **Step cap**: tested on walker only (`test_fork_inside_data_step_cap`). The spine's graph-set invariants test all completion orderings for the `forkInsideData` shape, which is the analogous guarantee.
+- **Per-item deadline**: tested on walker only (`test_fork_inside_data_deadline`). The spine does not implement deadline enforcement.
+- **Stop/pause**: tested on walker (`test_fork_inside_data_stop`, `test_fork_inside_data_pause`). The spine resume test (`test_fork_inside_data_resume_spine`) covers stop-and-resume via checkpoint.
+- **Two-runtime equivalence**: `test_fork_inside_data_two_runtimes[1,3]` asserts walker and spine produce the same item_records, item_scores, and merged facts.
 
 ## Behaviour changes
 
