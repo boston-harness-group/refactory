@@ -1,0 +1,386 @@
+{
+  "name": "livemath-skill_graph",
+  "nodes": {
+    "compare": {
+      "id": "compare",
+      "reads": [],
+      "writes": [
+        "compare_notes.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{compare_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{compare_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "data": {
+      "id": "data",
+      "reads": [],
+      "writes": [
+        "current_item.json"
+      ],
+      "blocking": true,
+      "task_ref": "refactory_packages.livemath.tasks:LiveMathTask",
+      "source_path": null,
+      "source_format": null,
+      "inline_items": [],
+      "subgraph_entry": "prepare",
+      "subgraph_exit": "extract_answer",
+      "parallelism": 1,
+      "split": "all",
+      "shuffle": false,
+      "shuffle_seed": null,
+      "limit": null,
+      "max_items": 500,
+      "_type": "DataNode"
+    },
+    "decide": {
+      "id": "decide",
+      "reads": [],
+      "writes": [
+        "answer.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{decide_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{decide_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "decide_prompt": {
+      "id": "decide_prompt",
+      "reads": [
+        "compare_notes.txt",
+        "hypotheses_notes.txt",
+        "precision_notes.txt"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.skill_graph:decide_prompt",
+      "callable_name": "refactory_packages.livemath.skill_graph:decide_prompt",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "extract_answer": {
+      "id": "extract_answer",
+      "reads": [
+        "answer.txt",
+        "current_item.json"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.skill_graph:extract_answer",
+      "callable_name": "refactory_packages.livemath.skill_graph:extract_answer",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "finish": {
+      "id": "finish",
+      "reads": [],
+      "writes": [
+        "result.json"
+      ],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.ops:finish",
+      "callable_name": "refactory_packages.livemath.ops:finish",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "hypotheses": {
+      "id": "hypotheses",
+      "reads": [],
+      "writes": [
+        "hypotheses_notes.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{hypotheses_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{hypotheses_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "notes_prompts": {
+      "id": "notes_prompts",
+      "reads": [
+        "compare_notes.txt"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.skill_graph:notes_prompts",
+      "callable_name": "refactory_packages.livemath.skill_graph:notes_prompts",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "precision": {
+      "id": "precision",
+      "reads": [],
+      "writes": [
+        "precision_notes.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{precision_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{precision_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "prepare": {
+      "id": "prepare",
+      "reads": [
+        "current_item.json"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.skill_graph:prepare",
+      "callable_name": "refactory_packages.livemath.skill_graph:prepare",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "step_fork": {
+      "id": "step_fork",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "targets": [
+        "precision",
+        "hypotheses"
+      ],
+      "optional_targets": [],
+      "_type": "ForkNode"
+    },
+    "step_join": {
+      "id": "step_join",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "sources": [
+        "precision",
+        "hypotheses"
+      ],
+      "_type": "JoinNode"
+    }
+  },
+  "edges": [
+    {
+      "source": "compare",
+      "target": "notes_prompts",
+      "condition": null
+    },
+    {
+      "source": "data",
+      "target": "finish",
+      "condition": null
+    },
+    {
+      "source": "decide",
+      "target": "extract_answer",
+      "condition": null
+    },
+    {
+      "source": "decide_prompt",
+      "target": "decide",
+      "condition": null
+    },
+    {
+      "source": "hypotheses",
+      "target": "step_join",
+      "condition": null
+    },
+    {
+      "source": "notes_prompts",
+      "target": "step_fork",
+      "condition": null
+    },
+    {
+      "source": "precision",
+      "target": "step_join",
+      "condition": null
+    },
+    {
+      "source": "prepare",
+      "target": "compare",
+      "condition": null
+    },
+    {
+      "source": "step_fork",
+      "target": "step_join",
+      "condition": null
+    },
+    {
+      "source": "step_join",
+      "target": "decide_prompt",
+      "condition": null
+    }
+  ],
+  "start_node": "data",
+  "terminal": true,
+  "knob_values": {
+    "compare_skill": "## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".",
+    "precision_skill": "## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.",
+    "hypotheses_skill": "## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.",
+    "decide_skill": "## Final Answer\n- Output the final answer as the single option label only.",
+    "use_theorem": 0.0,
+    "use_sketch": 0.0,
+    "max_completion_tokens": 0.0,
+    "data_parallelism": 1.0,
+    "compare__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{compare_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+    "precision__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{precision_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+    "hypotheses__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{hypotheses_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+    "decide__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{decide_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n"
+  },
+  "knob_specs": {
+    "compare_skill": {
+      "default": "## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "skill section in the compare step's system message",
+      "required": false
+    },
+    "precision_skill": {
+      "default": "## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "skill section in the precision step's system message",
+      "required": false
+    },
+    "hypotheses_skill": {
+      "default": "## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "skill section in the hypotheses step's system message",
+      "required": false
+    },
+    "decide_skill": {
+      "default": "## Final Answer\n- Output the final answer as the single option label only.",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "skill section in the decide step's system message",
+      "required": false
+    },
+    "use_theorem": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "required": false
+    },
+    "use_sketch": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "required": false
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "kind": "int",
+      "lo": 0,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "output-token cap on each agent call; 0 = no cap",
+      "required": false
+    },
+    "data_parallelism": {
+      "default": 1,
+      "kind": "int",
+      "lo": 1,
+      "hi": 64,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "concurrent data-node items",
+      "required": false
+    },
+    "compare__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{compare_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for compare (frozen; use compare_skill)",
+      "required": false
+    },
+    "precision__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{precision_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for precision (frozen; use precision_skill)",
+      "required": false
+    },
+    "hypotheses__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{hypotheses_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for hypotheses (frozen; use hypotheses_skill)",
+      "required": false
+    },
+    "decide__system_prompt": {
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{decide_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "system prompt for decide (frozen; use decide_skill)",
+      "required": false
+    }
+  }
+}
