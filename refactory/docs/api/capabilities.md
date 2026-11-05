@@ -5447,6 +5447,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "evaluator": {
+      "default": null,
+      "description": "which evaluator: walker (default) or dsh (spine)",
+      "flags": [
+        "--evaluator"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "max_completion_tokens": {
       "default": null,
       "description": "",
@@ -5584,7 +5595,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.",
-  "reviewed_schema": "37d67f559ba8d693fde4b609e906c92825b24f111fd75a4e012ba3ff67712bca"
+  "reviewed_schema": "f1adf6f22a998dc94134af50fde674c670b16d8299210a2ecdcd366a35b61f61"
 }
 ```
 

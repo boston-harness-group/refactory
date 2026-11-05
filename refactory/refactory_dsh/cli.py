@@ -610,6 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
     grid.add_argument("--provider", default=None)
     grid.add_argument("--data-parallelism", type=int, default=None)
     grid.add_argument("--max-completion-tokens", type=int, default=None)
+    grid.add_argument("--evaluator", default=None,
+                      help="which evaluator: walker (default) or dsh (spine)")
 
     return parser
 
@@ -707,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
         for flag in ("skill", "part", "seed", "output", "parts", "data_path",
                      "worker_backend", "model", "effort", "permission_mode",
                      "setting_sources", "provider", "data_parallelism",
-                     "max_completion_tokens"):
+                     "max_completion_tokens", "evaluator"):
             value = getattr(args, flag, None)
             if value is not None and value != "":
                 forwarded.extend([f"--{flag.replace('_', '-')}", str(value)])

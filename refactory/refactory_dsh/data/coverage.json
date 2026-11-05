@@ -679,7 +679,7 @@
         "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
       },
       "purpose": "Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.",
-      "reviewed_schema": "37d67f559ba8d693fde4b609e906c92825b24f111fd75a4e012ba3ff67712bca"
+      "reviewed_schema": "f1adf6f22a998dc94134af50fde674c670b16d8299210a2ecdcd366a35b61f61"
     },
     "cli:list": {
       "doc": "refactory/docs/cli.md",
