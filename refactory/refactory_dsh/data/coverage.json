@@ -327,6 +327,72 @@
       "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
       "reviewed_schema": "df67447ca311658d6b5ea8783d137ca9bf9dde44d995391aaf3b347cd6bf6576"
     },
+    "livemath/solver_judge": {
+      "doc": "refactory/docs/outer-loop.md",
+      "examples": [
+        {
+          "explanation": "Fork two independent solve attempts for each LiveMathematicianBench item, join them, and let a judge agent pick the best answer; used by the structure-ablation grid (refactory grid). Same knobs as livemath/solver. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+          "knobs": {
+            "data_parallelism": 1,
+            "max_completion_tokens": 0,
+            "skill": "",
+            "use_sketch": false,
+            "use_theorem": false
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=livemath/solver_judge; use refactory help topic=livemath/solver_judge first",
+        "cli": "refactory ceo livemath/solver_judge",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
+      "reviewed_schema": "6b6fe440a2dc4cdeab14a7b41a354d58bd27f3dd90a2699fed3b529b78eca1bb"
+    },
+    "livemath/solver_self_check": {
+      "doc": "refactory/docs/outer-loop.md",
+      "examples": [
+        {
+          "explanation": "Solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer (SkillOpt-style self-check); used by the structure-ablation grid (refactory grid). Same knobs as livemath/solver. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+          "knobs": {
+            "data_parallelism": 1,
+            "max_completion_tokens": 0,
+            "skill": "",
+            "use_sketch": false,
+            "use_theorem": false
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=livemath/solver_self_check; use refactory help topic=livemath/solver_self_check first",
+        "cli": "refactory ceo livemath/solver_self_check",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
+      "reviewed_schema": "01c004ed182f8c03d28778d81761cb37aca4a2201623eb8b2ff7bda81737dddf"
+    },
+    "livemath/solver_verify": {
+      "doc": "refactory/docs/outer-loop.md",
+      "examples": [
+        {
+          "explanation": "Solve each LiveMathematicianBench item then verify the answer with a second agent; used by the structure-ablation grid (refactory grid). Same knobs as livemath/solver. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+          "knobs": {
+            "data_parallelism": 1,
+            "max_completion_tokens": 0,
+            "skill": "",
+            "use_sketch": false,
+            "use_theorem": false
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=livemath/solver_verify; use refactory help topic=livemath/solver_verify first",
+        "cli": "refactory ceo livemath/solver_verify",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
+      "reviewed_schema": "d2674f3596d5be754eae2ab4d78df448149b03de5e4f2f77e187eb3143865099"
+    },
     "loop_mode/loop": {
       "doc": "refactory/docs/optimization-profiles.md",
       "examples": [
@@ -595,6 +661,25 @@
       },
       "purpose": "Inspect prerequisites, the run model and the chosen provider's configured credential (never the headless profile's default) without a model call; with --run, also report a run's driver pin state. Configured does not mean authenticated.",
       "reviewed_schema": "70ed865990a4b3979383d83aa6cae6fa005f787dea18cc94e4f389a5e317e469"
+    },
+    "cli:grid": {
+      "doc": "refactory/docs/cli.md",
+      "examples": [
+        {
+          "arguments": {
+            "mode": "livemath/solver",
+            "parts": "parts.json"
+          },
+          "explanation": "Run a structure-ablation grid over solver blocks using the existing testeval evaluation path. Evaluates each named block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same items with the same choice shuffling. Route flags are forwarded to the evaluator."
+        }
+      ],
+      "interfaces": {
+        "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
+        "cli": "refactory grid livemath/solver --parts <parts.json> [--skill <path>] [--blocks ...] [--seed N] [--part val|test] [route flags]",
+        "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
+      },
+      "purpose": "Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.",
+      "reviewed_schema": "37d67f559ba8d693fde4b609e906c92825b24f111fd75a4e012ba3ff67712bca"
     },
     "cli:list": {
       "doc": "refactory/docs/cli.md",

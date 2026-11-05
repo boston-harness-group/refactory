@@ -1,0 +1,243 @@
+{
+  "name": "livemath-solver_judge",
+  "nodes": {
+    "attempt_fork": {
+      "id": "attempt_fork",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "targets": [
+        "solve_a",
+        "solve_b"
+      ],
+      "optional_targets": [],
+      "_type": "ForkNode"
+    },
+    "attempt_join": {
+      "id": "attempt_join",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "sources": [
+        "solve_a",
+        "solve_b"
+      ],
+      "_type": "JoinNode"
+    },
+    "data": {
+      "id": "data",
+      "reads": [],
+      "writes": [
+        "current_item.json"
+      ],
+      "blocking": true,
+      "task_ref": "refactory_packages.livemath.tasks:LiveMathTask",
+      "source_path": null,
+      "source_format": null,
+      "inline_items": [],
+      "subgraph_entry": "format_prompt",
+      "subgraph_exit": "judge",
+      "parallelism": 1,
+      "split": "all",
+      "shuffle": false,
+      "shuffle_seed": null,
+      "limit": null,
+      "max_items": 500,
+      "_type": "DataNode"
+    },
+    "finish": {
+      "id": "finish",
+      "reads": [],
+      "writes": [
+        "result.json"
+      ],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.ops:finish",
+      "callable_name": "refactory_packages.livemath.ops:finish",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "format_prompt": {
+      "id": "format_prompt",
+      "reads": [
+        "current_item.json"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.ops:format_prompt",
+      "callable_name": "refactory_packages.livemath.ops:format_prompt",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "judge": {
+      "id": "judge",
+      "reads": [],
+      "writes": [
+        "answer.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "Two independent solvers answered the following question. Read both attempts and pick the best final answer.\n\n{{user_prompt}}\n\n## Attempt A\n{{attempt_a_text}}\n\n## Attempt B\n{{attempt_b_text}}\n\n## Your Task\nCompare both attempts. Pick the answer with the strongest reasoning. Output only the final choice label inside <answer>...</answer> tags.",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "merge_attempts": {
+      "id": "merge_attempts",
+      "reads": [
+        "attempt_a.txt",
+        "attempt_b.txt"
+      ],
+      "writes": [],
+      "blocking": true,
+      "command": "python -m refactory_dsh.run refactory_packages.livemath.block_ops:merge_attempts",
+      "callable_name": "refactory_packages.livemath.block_ops:merge_attempts",
+      "notes": "",
+      "_type": "FnNode"
+    },
+    "solve_a": {
+      "id": "solve_a",
+      "reads": [],
+      "writes": [
+        "attempt_a.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{user_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    },
+    "solve_b": {
+      "id": "solve_b",
+      "reads": [],
+      "writes": [
+        "attempt_b.txt"
+      ],
+      "blocking": true,
+      "role": "solver",
+      "model": "",
+      "prompt_template": "{{user_prompt}}",
+      "system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "tools": [],
+      "timeout": 1800,
+      "max_iterations": 1,
+      "post_checks": [],
+      "tool_policy": "none",
+      "_type": "AgentNode"
+    }
+  },
+  "edges": [
+    {
+      "source": "attempt_fork",
+      "target": "attempt_join",
+      "condition": null
+    },
+    {
+      "source": "attempt_join",
+      "target": "merge_attempts",
+      "condition": null
+    },
+    {
+      "source": "data",
+      "target": "finish",
+      "condition": null
+    },
+    {
+      "source": "format_prompt",
+      "target": "attempt_fork",
+      "condition": null
+    },
+    {
+      "source": "merge_attempts",
+      "target": "judge",
+      "condition": null
+    },
+    {
+      "source": "solve_a",
+      "target": "attempt_join",
+      "condition": null
+    },
+    {
+      "source": "solve_b",
+      "target": "attempt_join",
+      "condition": null
+    }
+  ],
+  "start_node": "data",
+  "terminal": true,
+  "knob_values": {
+    "skill": "",
+    "use_theorem": 0.0,
+    "use_sketch": 0.0,
+    "max_completion_tokens": 0.0,
+    "data_parallelism": 1.0
+  },
+  "knob_specs": {
+    "skill": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "skill prompt injected into the system message",
+      "required": false
+    },
+    "use_theorem": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's theorem as a ## Theorem section",
+      "required": false
+    },
+    "use_sketch": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "include the item's proof sketch as a ## Proof Sketch section",
+      "required": false
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "kind": "int",
+      "lo": 0,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "output-token cap on each solve-node model call; 0 = no cap",
+      "required": false
+    },
+    "data_parallelism": {
+      "default": 1,
+      "kind": "int",
+      "lo": 1,
+      "hi": 64,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "concurrent data-node items",
+      "required": false
+    }
+  }
+}
