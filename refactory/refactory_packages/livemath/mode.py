@@ -35,7 +35,10 @@ account's own CLAUDE.md and settings into every call. One known difference remai
 A's solver carries Claude Code's default tools (the ``dontAsk`` mode refuses them;
 2-4% of A's solves spend a turn on a refused call), while this solve node runs with
 no tools. The arm-B parity command, as the 2026-11-05 v2 seeds ran it (from
-main after #583; A's ``skills/skill_v0000.md`` is the starting skill)::
+main after #583; A's ``skills/skill_v0000.md`` is the starting skill). The run needs
+``LIVEMATH_DATA_PATH`` set to the LiveMath raw data, and ``<parts.json>`` is built with
+``refactory_dsh.task.make_manifest`` over the train/val/test ids of SkillOpt's
+``livemathematicianbench_split``::
 
     refactory optimize livemath/solver \
         --strategy skillopt --runs-root <runs> \
