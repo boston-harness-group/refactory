@@ -5,8 +5,17 @@ LiveMath's single ``solve`` node inside the per-item data pass.  Every block
 shares ``format_prompt`` as its entry and writes ``answer.txt`` from its exit
 node, graded by the unchanged grader.
 
+Every agent node is one ``claude -p`` call in arm A's backend, so every agent
+node sends its whole user message framed as that backend frames it
+(``ops.claude_backend_prompt``: ``History:\\n- User: ...`` then ``Answer the
+latest user request.``).  The solving calls send ``{{solver_prompt}}`` --
+``format_prompt``'s framed question, byte for byte the baseline's solve prompt.
+The verifier, judge and self-check send a prompt an op builds from the bare
+question (``user_prompt``) and the earlier answers, then frames
+(``block_ops``).
+
 All agent nodes use the same ``SYSTEM_PROMPT`` (with ``{{skill_section}}``),
-``tool_policy="none"``, and ``timeout_s=SOLVE_TIMEOUT_S``, so the skill, tool
+``tool_policy="none"`` and the mode's ``solve_timeout_s``, so the skill, tool
 policy and route settings reach every solving / judging / verifying agent
 identically.
 """
@@ -24,51 +33,8 @@ BlockResult = namedtuple(
     "BlockResult", ["nodes", "edges", "entry", "exit", "agent_node_ids"],
 )
 
-# ── prompt constants ──────────────────────────────────────────────────────
 
-VERIFY_PROMPT_TEMPLATE = (
-    "The following question was answered by a solver. Review the answer and "
-    "provide the correct final choice.\n"
-    "\n"
-    "{{user_prompt}}\n"
-    "\n"
-    "## Solver's Answer\n"
-    "{{draft_response}}\n"
-    "\n"
-    "## Your Task\n"
-    "Carefully verify the solver's reasoning. If the answer is correct, "
-    "confirm it. If not, provide the correct answer. Output only the final "
-    "choice label inside <answer>...</answer> tags."
-)
-
-JUDGE_PROMPT_TEMPLATE = (
-    "Two independent solvers answered the following question. Read both "
-    "attempts and pick the best final answer.\n"
-    "\n"
-    "{{user_prompt}}\n"
-    "\n"
-    "## Attempt A\n"
-    "{{attempt_a_text}}\n"
-    "\n"
-    "## Attempt B\n"
-    "{{attempt_b_text}}\n"
-    "\n"
-    "## Your Task\n"
-    "Compare both attempts. Pick the answer with the strongest reasoning. "
-    "Output only the final choice label inside <answer>...</answer> tags."
-)
-
-# Mirrors SkillOpt's chat-backend refinement text (multi-turn, max_turns 2).
-SELF_CHECK_PROMPT = (
-    "Your previous answer was:\n"
-    "{{draft_response}}\n"
-    "\n"
-    "Re-evaluate the exact option wording. If needed, correct it. "
-    "Output only the final choice label inside <answer>...</answer>."
-)
-
-
-# ── block builders ────────────────────────────────────────────────────────
+# ── node helpers ──────────────────────────────────────────────────────────
 
 
 def _format_prompt_node() -> nn.Node:
@@ -82,8 +48,37 @@ def _format_prompt_node() -> nn.Node:
     )
 
 
-def build_baseline() -> BlockResult:
-    """Block (a): the current single solve — no structural change."""
+def _agent(node_id: str, prompt_template: str, writes: str, timeout_s: int,
+           produces: tuple[str, ...] = ()) -> nn.Node:
+    """One solving / verifying / judging call, configured as the baseline solve."""
+    return nn.Node(
+        node_id, "agent",
+        prompt_template=prompt_template,
+        system_prompt_template=SYSTEM_PROMPT,
+        writes=(writes,),
+        **({"produces": produces} if produces else {}),
+        tool_policy="none",
+        role="solver",
+        timeout_s=timeout_s,
+        knobs=("max_completion_tokens",),
+    )
+
+
+def _prompt_op(node_id: str, fn: str, reads: tuple[str, ...], produces: str) -> nn.Node:
+    """An op that builds the next agent's framed prompt from the earlier answers."""
+    return nn.Node(
+        node_id, "op",
+        call=f"{BLOCK_OPS}:{fn}",
+        reads=reads,
+        produces=(produces,),
+    )
+
+
+# ── block builders ────────────────────────────────────────────────────────
+
+
+def build_baseline(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+    """Block (a): the current single solve -- no structural change."""
     fmt = _format_prompt_node()
     solve = nn.Node(
         "solve", "agent",
@@ -94,7 +89,7 @@ def build_baseline() -> BlockResult:
         writes=("answer.txt",),
         tool_policy="none",
         role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
+        timeout_s=timeout_s,
         knobs=("max_completion_tokens",),
     )
     return BlockResult(
@@ -106,37 +101,15 @@ def build_baseline() -> BlockResult:
     )
 
 
-def build_solve_then_verify() -> BlockResult:
-    """Block (b): solve → read draft → verify."""
-    fmt = _format_prompt_node()
-    solve_draft = nn.Node(
-        "solve_draft", "agent",
-        prompt_template="{{user_prompt}}",
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("draft_answer.txt",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
-    read_draft = nn.Node(
-        "read_draft", "op",
-        call=f"{BLOCK_OPS}:read_draft",
-        reads=("draft_answer.txt",),
-        produces=("draft_response",),
-    )
-    verify = nn.Node(
-        "verify", "agent",
-        prompt_template=VERIFY_PROMPT_TEMPLATE,
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("answer.txt",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
+def build_solve_then_verify(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+    """Block (b): solve → build the verify prompt → verify."""
     return BlockResult(
-        nodes=[fmt, solve_draft, read_draft, verify],
+        nodes=[
+            _format_prompt_node(),
+            _agent("solve_draft", "{{solver_prompt}}", "draft_answer.txt", timeout_s),
+            _prompt_op("read_draft", "verify_prompt", ("draft_answer.txt",), "verify_prompt"),
+            _agent("verify", "{{verify_prompt}}", "answer.txt", timeout_s),
+        ],
         edges=[
             ("format_prompt", "solve_draft"),
             ("solve_draft", "read_draft"),
@@ -148,57 +121,21 @@ def build_solve_then_verify() -> BlockResult:
     )
 
 
-def build_two_attempts_then_judge() -> BlockResult:
-    """Block (c): fork → [solve_a | solve_b] → join → merge → judge."""
-    fmt = _format_prompt_node()
-    attempt_fork = nn.Node(
-        "attempt_fork", "fork",
-        targets=("solve_a", "solve_b"),
-    )
-    solve_a = nn.Node(
-        "solve_a", "agent",
-        prompt_template="{{user_prompt}}",
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("attempt_a.txt",),
-        produces=("answer_a",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
-    solve_b = nn.Node(
-        "solve_b", "agent",
-        prompt_template="{{user_prompt}}",
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("attempt_b.txt",),
-        produces=("answer_b",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
-    attempt_join = nn.Node(
-        "attempt_join", "join",
-        sources=("solve_a", "solve_b"),
-    )
-    merge = nn.Node(
-        "merge_attempts", "op",
-        call=f"{BLOCK_OPS}:merge_attempts",
-        reads=("attempt_a.txt", "attempt_b.txt"),
-        produces=("attempt_a_text", "attempt_b_text"),
-    )
-    judge = nn.Node(
-        "judge", "agent",
-        prompt_template=JUDGE_PROMPT_TEMPLATE,
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("answer.txt",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
+def build_two_attempts_then_judge(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+    """Block (c): fork → [solve_a | solve_b] → join → build the judge prompt → judge."""
     return BlockResult(
-        nodes=[fmt, attempt_fork, solve_a, solve_b, attempt_join, merge, judge],
+        nodes=[
+            _format_prompt_node(),
+            nn.Node("attempt_fork", "fork", targets=("solve_a", "solve_b")),
+            _agent("solve_a", "{{solver_prompt}}", "attempt_a.txt", timeout_s,
+                   produces=("answer_a",)),
+            _agent("solve_b", "{{solver_prompt}}", "attempt_b.txt", timeout_s,
+                   produces=("answer_b",)),
+            nn.Node("attempt_join", "join", sources=("solve_a", "solve_b")),
+            _prompt_op("merge_attempts", "judge_prompt",
+                       ("attempt_a.txt", "attempt_b.txt"), "judge_prompt"),
+            _agent("judge", "{{judge_prompt}}", "answer.txt", timeout_s),
+        ],
         edges=[
             ("format_prompt", "attempt_fork"),
             ("attempt_fork", "attempt_join"),
@@ -213,37 +150,16 @@ def build_two_attempts_then_judge() -> BlockResult:
     )
 
 
-def build_solve_then_self_check() -> BlockResult:
-    """Block (d): solve → read draft → self-check."""
-    fmt = _format_prompt_node()
-    solve_draft = nn.Node(
-        "solve_draft", "agent",
-        prompt_template="{{user_prompt}}",
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("draft_answer.txt",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
-    read_draft = nn.Node(
-        "read_draft", "op",
-        call=f"{BLOCK_OPS}:read_draft",
-        reads=("draft_answer.txt",),
-        produces=("draft_response",),
-    )
-    self_check = nn.Node(
-        "self_check", "agent",
-        prompt_template=SELF_CHECK_PROMPT,
-        system_prompt_template=SYSTEM_PROMPT,
-        writes=("answer.txt",),
-        tool_policy="none",
-        role="solver",
-        timeout_s=SOLVE_TIMEOUT_S,
-        knobs=("max_completion_tokens",),
-    )
+def build_solve_then_self_check(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+    """Block (d): solve → build the refinement prompt → self-check."""
     return BlockResult(
-        nodes=[fmt, solve_draft, read_draft, self_check],
+        nodes=[
+            _format_prompt_node(),
+            _agent("solve_draft", "{{solver_prompt}}", "draft_answer.txt", timeout_s),
+            _prompt_op("read_draft", "self_check_prompt", ("draft_answer.txt",),
+                       "self_check_prompt"),
+            _agent("self_check", "{{self_check_prompt}}", "answer.txt", timeout_s),
+        ],
         edges=[
             ("format_prompt", "solve_draft"),
             ("solve_draft", "read_draft"),

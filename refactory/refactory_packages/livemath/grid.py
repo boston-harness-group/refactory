@@ -1,9 +1,11 @@
 """Structure ablation grid: evaluate solver blocks via the existing loop path.
 
-A thin loop that, for each requested block/mode, runs the existing
-``Run.evaluate`` machinery (the same path ``refactory optimize livemath/solver
---strategy testeval`` uses) with forwarded route flags, then writes a JSON
-results table.
+A thin loop that, for each requested block/mode, runs ``refactory optimize``'s
+own entry point (``refactory_dsh.loop.main``) with a one-shot strategy that calls
+``Run.evaluate`` on the seed, so route resolution, the model-choice gate, the
+evaluator and the run directory are optimize's. Each block's run directory is
+``<output>.runs/<block>/``, and the JSON results table is rewritten after every
+block.
 
 Usage::
 
@@ -14,7 +16,9 @@ Usage::
 Every route flag works exactly as in a live run: ``--worker-backend``,
 ``--model``, ``--effort``, ``--permission-mode``, ``--setting-sources``,
 ``--provider``, ``data_parallelism``, ``max_completion_tokens``, and the spine
-runtime (``--evaluator dsh``).
+runtime (``--evaluator dsh``). With no route flag a block runs on the route
+optimize would pick (the stored model choice). ``model_calls`` counts completed
+agent calls (one recorded exchange each).
 """
 from __future__ import annotations
 
@@ -118,150 +122,105 @@ def _register_grid_strategy(part: str, seed: int) -> str:
     return name
 
 
-def _run_one_block(
-    mode_name: str,
-    *,
-    part: str,
-    seed: int,
-    parts_manifest: str,
-    skill_text: str,
-    runs_root: Path,
-    route_flags: dict[str, Any],
-    knobs: dict[str, str],
-    evaluator: str | None,
-    model: Any = None,
-) -> dict[str, Any]:
-    """Evaluate one mode through the loop machinery and return the result.
+#: Route flags, forwarded to ``refactory optimize``'s own parser unchanged.
+ROUTE_FLAGS = ("worker_backend", "model", "effort", "permission_mode",
+               "setting_sources", "provider")
+#: Knob flags, forwarded as ``--knob NAME=VALUE``.
+KNOB_FLAGS = ("data_parallelism", "max_completion_tokens")
 
-    This is the same path ``refactory optimize <mode> --strategy testeval``
-    uses: ``strategies.create()`` → ``loop.run()`` → ``Run.evaluate()``.
 
-    ``model`` may be passed by a caller (or test) that already has a client;
-    when omitted, one is built from *route_flags*, matching what
-    ``loop.main()`` does.
+def runs_dir_for(output: Path) -> Path:
+    """Where the grid keeps its block run directories: ``<output>.runs/`` beside it."""
+    return output.with_name(output.stem + ".runs")
+
+
+def loop_argv(mode_name: str, *, strategy: str, runs_root: Path, parts: str,
+              seed: int, flags: dict[str, Any], skill_text: str) -> list[str]:
+    """The ``refactory optimize`` (``refactory_dsh.loop``) arguments for one block.
+
+    Route flags travel as optimize's own flags and the knob flags as ``--knob``,
+    so the block's route goes through optimize's resolution (``profiles.resolve``,
+    ``require_model_choice``); a flag nobody gave is left out, as optimize leaves it.
     """
-    from refactory_dsh.loop import LoopConfig
-    from refactory_dsh import strategies
-
-    strategy_name = _register_grid_strategy(part, seed)
-
-    # Build LoopConfig from flags — same fields ``loop.main()`` sets.
-    config_dict: dict[str, Any] = {
-        "runs_root": str(runs_root),
-        "strategy": strategy_name,
-        "epochs": 1,
-        "max_evaluations": 1,
-        "holdout": 0,
-        "seed": seed,
-        "parts_manifest": parts_manifest,
-        "print_events": False,
-        "verbose": False,
-        "knobs": {},
-    }
-    for flag in ("worker_backend", "model", "effort", "permission_mode",
-                 "setting_sources", "provider"):
-        value = route_flags.get(flag)
+    argv = [mode_name, "--strategy", strategy, "--runs-root", str(runs_root),
+            "--parts", parts, "--holdout", "0", "--epochs", "1",
+            "--max-evaluations", "1", "--seed", str(seed)]
+    for flag in ROUTE_FLAGS + ("evaluator",):
+        value = flags.get(flag)
         if value is not None:
-            config_dict[flag] = value
-    if evaluator is not None:
-        config_dict["evaluator"] = evaluator
+            argv += [f"--{flag.replace('_', '-')}", str(value)]
+    if skill_text:
+        argv += ["--knob", f"skill={skill_text}"]
+    for flag in KNOB_FLAGS:
+        value = flags.get(flag)
+        if value is not None:
+            argv += ["--knob", f"{flag}={value}"]
+    return argv
 
-    # Set knobs
-    for name, value in knobs.items():
-        config_dict["knobs"][name] = value
 
-    config = LoopConfig.from_dict(config_dict)
+def model_calls(item_records: list[dict[str, Any]]) -> int:
+    """Completed model calls: one recorded exchange per agent call (both runtimes)."""
+    return sum(len(rec.get("exchanges") or ()) for rec in item_records)
 
-    # Build the model client when one is not already provided.
-    if model is None:
-        has_route = any(
-            route_flags.get(f) is not None
-            for f in ("worker_backend", "model", "effort", "permission_mode",
-                       "setting_sources", "provider")
-        )
-        if has_route:
-            from refactory_dsh.model import DshModelClient
-            model = DshModelClient(
-                worker_backend=route_flags.get("worker_backend", "dsh"),
-                model=route_flags.get("model", ""),
-                effort=route_flags.get("effort", ""),
-                permission_mode=route_flags.get("permission_mode", ""),
-                setting_sources=route_flags.get("setting_sources", ""),
-                provider=route_flags.get("provider", ""),
-            )
 
-    loop = strategies.create(
-        strategy_name, mode_name, config,
-        project=Path("."), model=model,
-    )
-    report = loop.run()
+def _occasion_dir(runs_root: Path, part: str) -> Path | None:
+    found = sorted(runs_root.glob(f"runs/*/occasions/{part}_0"))
+    return found[0] if found else None
 
-    # Extract results from the loop.
-    seed_candidate = loop.population[0] if loop.population else None
-    item_records: list[dict[str, Any]] = []
-    item_scores: list[dict[str, Any]] = []
-    model_calls = 0
-    duration_s = 0.0
-    accuracy = 0.0
-    errors = 0
-    timeouts = 0
 
-    if seed_candidate is not None:
-        # Read part results from the loop's occasion directory.
-        part_results = loop._part_results.get(seed_candidate.id, {}).get(part, [])
-        if part_results:
-            occasion = part_results[0]
-            # Read item records from the occasion directory.
-            occasion_num = 0
-            occasion_dir = runs_root / "runs" / seed_candidate.id / "occasions" / f"{part}_{occasion_num}"
-            records_path = occasion_dir / "item_records.json"
-            if records_path.exists():
-                item_records = json.loads(records_path.read_text())
-            facts_path = occasion_dir / "facts.json"
-            if facts_path.exists():
-                facts = json.loads(facts_path.read_text())
-                item_scores = facts.get("item_scores", [])
-            duration_s = occasion.get("duration_s") or 0.0
-        # Model calls come from the seed candidate evaluation.
-        model_calls = seed_candidate.model_calls or 0
-        # Compute accuracy from item_scores.
-        if item_scores:
-            accuracy = sum(s.get("score", 0) for s in item_scores) / len(item_scores)
+def block_row(block: str, runs_root: Path, part: str) -> dict[str, Any] | None:
+    """One block's table row, read from its run directory; None if nothing was evaluated."""
+    occasion = _occasion_dir(runs_root, part)
+    if occasion is None:
+        return None
 
-    # Count errors and timeouts from item_records.
-    for rec in item_records:
-        if rec.get("error_kind"):
-            errors += 1
-            if rec.get("error_kind") == "timeout":
-                timeouts += 1
+    def load(name: str, default: Any) -> Any:
+        path = occasion / name
+        return json.loads(path.read_text()) if path.exists() else default
 
-    # Shortcut split.
-    shortcut_acc, other_acc, shortcut_count, other_count = _shortcut_split(
-        item_records)
-
+    item_records = load("item_records.json", [])
+    item_scores = load("facts.json", {}).get("item_scores", [])
+    trials = load("measurements.json", {}).get("trials") or []
+    accuracy = (sum(s.get("score", 0) for s in item_scores) / len(item_scores)
+                if item_scores else 0.0)
+    errors = sum(1 for rec in item_records if rec.get("error_kind"))
+    timeouts = sum(1 for rec in item_records if rec.get("error_kind") == "timeout")
+    shortcut_acc, other_acc, shortcut_count, other_count = _shortcut_split(item_records)
     return {
-        "block": None,  # set by caller
+        "block": block,
         "accuracy": round(accuracy, 4),
         "shortcut_accuracy": round(shortcut_acc, 4),
         "other_accuracy": round(other_acc, 4),
         "shortcut_count": shortcut_count,
         "other_count": other_count,
-        "model_calls": model_calls,
+        "model_calls": model_calls(item_records),
         "errors": errors,
         "timeouts": timeouts,
-        "wall_time_s": round(duration_s, 2),
+        "eval_duration_s": round(sum(t.get("duration_s") or 0 for t in trials), 2),
+        "run_dir": str(runs_root),
         "item_records": item_records,
     }
 
 
-def main(argv: list[str] | None = None, *, _model: Any = None) -> int:
+def _write(output_path: Path, payload: dict[str, Any]) -> None:
+    temporary = output_path.with_name(output_path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, default=str))
+    temporary.replace(output_path)
+
+
+def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
     """Entry point for ``refactory grid``.
 
-    ``_model`` is an internal hook for tests: when provided it is passed to the
-    loop instead of building a ``DshModelClient`` from the route flags.
+    Each block runs as ``refactory optimize <block mode>`` would, in this process
+    (``refactory_dsh.loop.main``), in ``<output>.runs/<block>/``; the results file
+    is rewritten after every block (``complete`` false until the last one).
+    ``_client_factory`` is passed through to ``loop.main`` (tests answer with a stub).
     """
+    import contextlib
+    import io
     import os
-    import tempfile
+
+    from refactory_dsh import loop
 
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -280,7 +239,6 @@ def main(argv: list[str] | None = None, *, _model: Any = None) -> int:
                   file=sys.stderr)
             return 2
 
-    # Read skill text.
     skill_text = ""
     if args.skill:
         skill_path = Path(args.skill)
@@ -289,69 +247,64 @@ def main(argv: list[str] | None = None, *, _model: Any = None) -> int:
             return 1
         skill_text = skill_path.read_text()
 
-    # Read parts manifest.
     parts_path = Path(args.parts)
     if not parts_path.exists():
         print(f"refactory grid: parts manifest not found: {args.parts}", file=sys.stderr)
         return 1
 
+    output_path = Path(args.output)
+    runs_dir = runs_dir_for(output_path)
+    taken = [name for name in block_names if (runs_dir / name).exists()]
+    if taken:
+        print(f"refactory grid: {runs_dir} already holds runs for {taken}; "
+              "choose another --output or remove them", file=sys.stderr)
+        return 2
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
     if args.data_path:
         os.environ["LIVEMATH_DATA_PATH"] = args.data_path
 
-    # Collect route flags.
-    route_flags: dict[str, Any] = {}
-    for flag in ("worker_backend", "model", "effort", "permission_mode",
-                 "setting_sources", "provider"):
-        value = getattr(args, flag, None)
-        if value is not None:
-            route_flags[flag] = value
-
-    # Build knobs dict.
-    knobs: dict[str, str] = {}
-    if skill_text:
-        knobs["skill"] = skill_text
-    if args.data_parallelism is not None:
-        knobs["data_parallelism"] = str(args.data_parallelism)
-    if args.max_completion_tokens is not None:
-        knobs["max_completion_tokens"] = str(args.max_completion_tokens)
-
+    flags = {flag: getattr(args, flag) for flag in ROUTE_FLAGS + KNOB_FLAGS + ("evaluator",)}
+    strategy = _register_grid_strategy(args.part, args.seed)
     results: list[dict[str, Any]] = []
 
+    def payload(complete: bool) -> dict[str, Any]:
+        return {"seed": args.seed, "part": args.part, "complete": complete,
+                "runs_dir": str(runs_dir), "blocks": results}
+
     for block_name in block_names:
-        mode_name = _BLOCK_TO_MODE[block_name]
+        runs_root = runs_dir / block_name
+        t0 = time.time()
+        printed = io.StringIO()
+        try:
+            # A Ctrl-C reaches the loop as it reaches `refactory optimize`: the data
+            # pass cancels its items and each model client shuts its call down.
+            with contextlib.redirect_stdout(printed):
+                rc = loop.main(loop_argv(
+                    _BLOCK_TO_MODE[block_name], strategy=strategy, runs_root=runs_root,
+                    parts=str(parts_path.resolve()), seed=args.seed, flags=flags,
+                    skill_text=skill_text,
+                ), _client_factory=_client_factory)
+        except KeyboardInterrupt:
+            print(f"refactory grid: interrupted during {block_name}; "
+                  f"finished blocks are in {output_path}", file=sys.stderr)
+            return 130
+        finally:
+            if runs_root.is_dir():
+                (runs_root / "optimize.json").write_text(printed.getvalue())
+        row = block_row(block_name, runs_root, args.part)
+        if row is None:
+            _write(output_path, payload(False))
+            print(f"refactory grid: {block_name} evaluated nothing (exit {rc}); "
+                  f"see {runs_root}", file=sys.stderr)
+            return rc or 1
+        row["wall_time_s"] = round(time.time() - t0, 2)
+        results.append(row)
+        _write(output_path, payload(False))
 
-        with tempfile.TemporaryDirectory(prefix=f"grid-{block_name}-") as tmpdir:
-            runs_root = Path(tmpdir) / "loop"
-
-            t0 = time.time()
-            result = _run_one_block(
-                mode_name,
-                part=args.part,
-                seed=args.seed,
-                parts_manifest=str(parts_path),
-                skill_text=skill_text,
-                runs_root=runs_root,
-                route_flags=route_flags,
-                knobs=knobs,
-                evaluator=args.evaluator,
-                model=_model,
-            )
-            wall_time = round(time.time() - t0, 2)
-
-        result["block"] = block_name
-        result["wall_time_s"] = wall_time
-        results.append(result)
-
-    output = {
-        "seed": args.seed,
-        "part": args.part,
-        "blocks": results,
-    }
-    output_path = Path(args.output)
-    output_path.write_text(json.dumps(output, indent=2, default=str))
+    _write(output_path, payload(True))
     print(f"Grid results written to {output_path}")
 
-    # Print summary table.
     print(f"\n{'Block':<30} {'Acc':>6} {'Shortcut':>8} {'Other':>6} "
           f"{'Calls':>6} {'Err':>4} {'Time':>7}")
     print("-" * 75)

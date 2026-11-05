@@ -11877,7 +11877,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "role": "solver"
     },
     {
-      "call": "refactory_packages.livemath.block_ops:merge_attempts",
+      "call": "refactory_packages.livemath.block_ops:judge_prompt",
       "id": "merge_attempts",
       "kind": "op",
       "knobs": [],
@@ -11989,7 +11989,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "6b6fe440a2dc4cdeab14a7b41a354d58bd27f3dd90a2699fed3b529b78eca1bb"
+    "reviewed_schema": "a9a514ab5fb0220cb107e1e6d3670e876ad85e8177680acecff24ef59ad947ec"
   }
 }
 ```
@@ -12058,7 +12058,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "role": "ceo"
     },
     {
-      "call": "refactory_packages.livemath.block_ops:read_draft",
+      "call": "refactory_packages.livemath.block_ops:self_check_prompt",
       "id": "read_draft",
       "kind": "op",
       "knobs": [],
@@ -12170,7 +12170,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "01c004ed182f8c03d28778d81761cb37aca4a2201623eb8b2ff7bda81737dddf"
+    "reviewed_schema": "0809dc65570feeb898f5b29f5a29cb1ab015b90013d632530e6dfd74296d5b87"
   }
 }
 ```
@@ -12239,7 +12239,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "role": "ceo"
     },
     {
-      "call": "refactory_packages.livemath.block_ops:read_draft",
+      "call": "refactory_packages.livemath.block_ops:verify_prompt",
       "id": "read_draft",
       "kind": "op",
       "knobs": [],
@@ -12351,7 +12351,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "d2674f3596d5be754eae2ab4d78df448149b03de5e4f2f77e187eb3143865099"
+    "reviewed_schema": "0638d1f3ceac8d900dc5a0ecf0635427f49980c251fec3d5b96e26acbe8ac81a"
   }
 }
 ```

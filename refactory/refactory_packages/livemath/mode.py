@@ -101,8 +101,8 @@ class Solver(nn.Mode):
 
     The ``block`` constructor parameter selects the solver structure:
 
-    * ``"baseline"`` (default) — the current single ``solve`` node; byte-identical
-      with the pre-block graph.
+    * ``"baseline"`` (default) — the current single ``solve`` node; its lowered
+      graph is pinned by the lowering snapshot.
     * ``"solve_then_verify"`` — solve, read draft, verify.
     * ``"two_attempts_then_judge"`` — fork into two solves, join, judge.
     * ``"solve_then_self_check"`` — solve, read draft, self-check.
@@ -129,12 +129,9 @@ class Solver(nn.Mode):
                 f"unknown block {block!r}; known: {list(BLOCK_NAMES)}"
             )
         self._block = block
-        # Compute agent_node_ids from the block builder so run() can apply
-        # max_completion_tokens to every agent node, not just "solve".
-        if block == "baseline":
-            self._agent_node_ids: list[str] = ["solve"]
-        else:
-            self._agent_node_ids = list(BLOCKS[block]().agent_node_ids)
+        # The block's agent nodes, so run() can apply max_completion_tokens to
+        # every agent node, not just "solve".
+        self._agent_node_ids: list[str] = list(BLOCKS[block]().agent_node_ids)
         super().__init__(state=state)
 
     @classmethod
@@ -161,54 +158,16 @@ class Solver(nn.Mode):
         }
 
     def build(self) -> nn.Graph:
-        block_name = getattr(self, "_block", "baseline")
-        if block_name == "baseline":
-            # --- existing code unchanged, byte for byte ---
-            graph = nn.Graph()
-            graph.add(nn.Node(
-                "data", "data",
-                subgraph_entry="format_prompt",
-                subgraph_exit="solve",
-                task_ref=TASK,
-                writes=("current_item.json",),
-                produces=("item_scores",),
-                parallelism_knob="data_parallelism",
-                knobs=("data_parallelism",),
-            ))
-            graph.add(nn.Node(
-                "format_prompt", "op",
-                call=f"{OPS}:format_prompt",
-                reads=("current_item.json",),
-                knobs=("skill", "use_theorem", "use_sketch"),
-                produces=("user_prompt", "solver_prompt", "skill_section"),
-            ))
-            graph.add(nn.Node(
-                "solve", "agent",
-                # The question framed as arm A's Claude backend sends it
-                # (``ops.claude_backend_prompt``); ``user_prompt`` stays the bare question.
-                prompt_template="{{solver_prompt}}",
-                system_prompt_template=SYSTEM_PROMPT,
-                writes=("answer.txt",),
-                tool_policy="none",
-                role="solver",
-                timeout_s=self.solve_timeout_s,
-                knobs=("max_completion_tokens",),
-            ))
-            graph.add(nn.Node(
-                "finish", "op",
-                call=f"{OPS}:finish",
-                writes=("result.json",),
-                produces=("finished",),
-            ))
-            graph.connect("format_prompt", "solve")
-            graph.connect("data", "finish")
-            return graph
+        """The data pass over the selected block, then ``finish``.
 
-        # --- non-baseline blocks ---
+        Every block, the baseline included, comes from ``blocks.BLOCKS``; the
+        baseline's lowered graph is pinned by its lowering snapshot
+        (tests/lowering_snapshots/livemath-solver.graph.json). Every agent node
+        gets ``solve_timeout_s``.
+        """
         from .blocks import BLOCKS
 
-        builder = BLOCKS[block_name]
-        result = builder()
+        result = BLOCKS[getattr(self, "_block", "baseline")](self.solve_timeout_s)
         graph = nn.Graph()
         graph.add(nn.Node(
             "data", "data",
