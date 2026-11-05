@@ -726,7 +726,26 @@ def _text_patch(state: State, edit: dict) -> State:
     except KnobError as exc:
         raise EditError(f"knob {name!r}: {exc}", code="E-knob") from exc
 
-    out = _finish(state, _graph(state))
+    # Data-slot preservation check for template bindings (same as _set_knob).
+    import re as _re_slots_tp
+    graph = _graph(state)
+    for _tp_node in graph.nodes.values():
+        for _tp_field, _tp_knob in getattr(_tp_node, "field_bindings", ()):
+            if _tp_knob == name and _tp_field in ("prompt_template", "system_prompt_template"):
+                _tp_current_tpl = getattr(_tp_node, _tp_field, "")
+                _tp_required = set(_re_slots_tp.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', _tp_current_tpl))
+                if not _tp_required:
+                    continue
+                _tp_present = set(_re_slots_tp.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', str(value)))
+                _tp_missing = _tp_required - _tp_present
+                if _tp_missing:
+                    raise EditError(
+                        f"knob {name!r}: template slot(s) {sorted(_tp_missing)} required by "
+                        f"node {_tp_node.id!r}'s {_tp_field} are missing from the new value",
+                        code="E-knob",
+                    )
+
+    out = _finish(state, graph)
     out["knobs"][name]["value"] = value
 
     # Return the report alongside the state.  The caller (apply()) places it

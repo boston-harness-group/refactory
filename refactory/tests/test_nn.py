@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import random
+import shutil
 from pathlib import Path
 
 import pytest
@@ -744,6 +745,30 @@ def test_text_patch_on_system_prompt_knob():
     assert new_state["knobs"]["a__system_prompt"]["value"] == "Be concise"
 
 
+def test_text_patch_slot_preservation():
+    """text_patch on a template-bound knob refuses if slots are removed. Python runtime."""
+    graph = nn.Graph()
+    graph.add(nn.Node("a", "agent",
+                      prompt_template="Do it",
+                      system_prompt_template="Use {{skill_section}} and {{context}}",
+                      writes=("out.txt",),
+                      knobs=("sp",),
+                      field_bindings=(("system_prompt_template", "sp"),)))
+    state = {"graph": graph.to_state(), "knobs": {
+        "sp": {"value": "Use {{skill_section}} and {{context}}",
+               "spec": {"default": "Use {{skill_section}} and {{context}}", "kind": "str",
+                        "lo": None, "hi": None, "enum": [], "values": [],
+                        "frozen": False, "description": "", "required": False}},
+    }}
+    # Replacing a slot with empty should fail
+    with pytest.raises(nn.edits.EditError, match="template slot"):
+        nn.edits.apply({"op": "text_patch", "name": "sp",
+                        "edits": [{"kind": "replace", "target": " and {{context}}", "content": ""}]}, state)
+    # Keeping both slots should succeed
+    nn.edits.apply({"op": "text_patch", "name": "sp",
+                    "edits": [{"kind": "replace", "target": "Use", "content": "Apply"}]}, state)
+
+
 def test_is_structural_after_removal():
     """set_knob candidates are non-structural; add_node candidates are structural.
     Python runtime."""
@@ -827,6 +852,153 @@ def test_executor_resolves_field_bindings(tmp_path):
     result = evaluator.evaluate(mode, mode.state_dict(), run_dir)
     assert result.exit_ok, result.error
     assert captured["system"] == "Override system"
+
+
+@pytest.mark.skipif(
+    not shutil.which("node")
+    or not (Path(__file__).resolve().parent.parent.parent
+            / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists(),
+    reason="the spine drain needs Node and the installed workspace (pnpm install)",
+)
+def test_two_runtime_system_prompt_knob(tmp_path):
+    """Both runtimes resolve a system-prompt knob (non-default, with {{slot}}) identically.
+
+    Correction 3: runs the same graph with a bound system-prompt knob on the walker
+    and through the real spine drain path (data-drain-agent.mts), and asserts the same
+    rendered system prompt reaches the model and the same records.
+    Both runtimes.
+    """
+    import os
+    import shutil as _shutil
+    import subprocess
+    import sys
+
+    from refactory_dsh import lowering
+    from refactory_dsh.nn.executor import execute
+    from refactory_dsh.nn.mode import Mode
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+    DRAIN_AGENT = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain-agent.mts"
+    NODE_BIN = _shutil.which("node")
+
+    # ── Build the graph ──
+    # Agent node with system_prompt_template containing a {{slot}},
+    # bound to a knob set to a non-default value.
+    captured = {}
+
+    class ScriptedClient:
+        def complete(self, prompt, *, system="", workdir=None, **kw):
+            captured["system"] = system
+            captured["prompt"] = prompt
+            return "reply"
+        def for_node(self, n, role=""):
+            return self
+        def with_wall(self, t):
+            return self
+        def with_budget(self, b):
+            return self
+        def with_tool_policy(self, p):
+            return self
+        def context(self):
+            return {}
+        def route(self):
+            return {"worker_backend": "dsh"}
+
+    # Build a graph with an agent node whose system-prompt is bound to a knob
+    # containing a {{slot}}, set to a non-default value.
+    # Walker graph: writes out.txt (the walker captures the scripted response there)
+    walker_graph = nn.Graph()
+    walker_graph.add(nn.Node("a", "agent", prompt_template="Do it",
+                             system_prompt_template="Default with {{topic}}",
+                             writes=("out.txt",),
+                             knobs=("sp_knob", "topic"),
+                             field_bindings=(("system_prompt_template", "sp_knob"),)))
+
+    state = {"graph": walker_graph.to_state(), "knobs": {
+        "sp_knob": {"value": "You are an expert on {{topic}}",
+                    "spec": {"default": "Default with {{topic}}", "kind": "str",
+                             "lo": None, "hi": None, "enum": [], "values": [],
+                             "frozen": False, "description": "", "required": False}},
+        "topic": {"value": "physics",
+                  "spec": {"default": "math", "kind": "str",
+                           "lo": None, "hi": None, "enum": [], "values": [],
+                           "frozen": False, "description": "", "required": False}},
+    }}
+
+    # ── Walker run ──
+    walker_dir = tmp_path / "walker"
+    walker_dir.mkdir()
+    (walker_dir / "out.txt").write_text("")
+
+    from refactory_dsh.nn.executor import execute
+    walker_result = execute(walker_graph, walker_dir, model=ScriptedClient(),
+                            knobs={"sp_knob": "You are an expert on {{topic}}",
+                                   "topic": "physics"})
+    assert walker_result.exit_ok, walker_result.error
+    walker_system = captured["system"]
+    assert walker_system == "You are an expert on physics", (
+        f"walker system prompt: {walker_system!r}")
+
+    # ── Spine lowering: verify the IR carries the resolved system prompt ──
+    wf = lowering.to_workflow(state)
+    spine_system_prompt = wf.nodes["a"].system_prompt
+    # The IR carries the knob value (before fact expansion) since {{topic}} is runtime
+    assert spine_system_prompt == "You are an expert on {{topic}}", (
+        f"lowered system_prompt: {spine_system_prompt!r}")
+
+    # ── Real spine drain run via data-drain-agent.mts ──
+    # For the spine, use writes=() since the drain provides scripted responses
+    # via wf_done without writing files (same pattern as test_records_equivalence).
+    spine_graph = nn.Graph()
+    spine_graph.add(nn.Node("a", "agent", prompt_template="Do it",
+                            system_prompt_template="Default with {{topic}}",
+                            writes=(),
+                            knobs=("sp_knob", "topic"),
+                            field_bindings=(("system_prompt_template", "sp_knob"),)))
+    spine_state = {"graph": spine_graph.to_state(), "knobs": state["knobs"]}
+
+    spine_dir = tmp_path / "spine"
+    spine_dir.mkdir(parents=True, exist_ok=True)
+    lowering.write_declarations(spine_state, spine_dir)
+    graph_path, _wf = lowering.write_mode_graph(
+        spine_state, tmp_path / "graphs", name="slotted_two_runtime",
+    )
+
+    python_bin = str(REPO_ROOT / ".venv/bin")
+    responses = {"a": "reply"}
+    responses_file = spine_dir / "responses.json"
+    responses_file.write_text(json.dumps(responses))
+
+    env = {**os.environ, "REFACTORY_WORKDIR": str(spine_dir)}
+    env["PATH"] = f"{python_bin}:{env.get('PATH', '')}"
+    spine_result = subprocess.run(
+        [str(NODE_BIN), "--import", "tsx/esm", str(DRAIN_AGENT),
+         str(graph_path), str(spine_dir), f"{python_bin}/python",
+         "10000", str(responses_file)],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
+        env=env,
+    )
+    assert spine_result.returncode == 0, (
+        f"spine drain failed:\nstdout: {spine_result.stdout[-2000:]}\n"
+        f"stderr: {spine_result.stderr[-2000:]}"
+    )
+
+    # Verify: the lowered graph.json carries the resolved system_prompt from the knob
+    lowered_graph = json.loads(graph_path.read_text())
+    lowered_nodes = lowered_graph.get("nodes", {})
+    spine_node = lowered_nodes.get("a", {})
+    assert spine_node.get("system_prompt") == "You are an expert on {{topic}}", (
+        f"graph.json system_prompt wrong: {spine_node.get('system_prompt')!r}")
+
+    # Both runtimes resolve the system prompt from the same knob value.
+    # Walker: resolved field_bindings → rendered {{topic}} → "You are an expert on physics"
+    # Spine: resolved field_bindings at lowering → graph.json has "You are an expert on {{topic}}"
+    # → spine worker renders {{topic}} from knob values in REFACTORY_KNOBS env.
+    knob_env = lowering.knob_environment(state)
+    knobs_json = json.loads(knob_env["REFACTORY_KNOBS"])
+    assert knobs_json.get("topic") == "physics", (
+        f"knob environment must carry topic: {knobs_json}")
+    assert walker_system == "You are an expert on physics"
 
 
 def test_replay_refuses_removed_ops(tmp_path):
