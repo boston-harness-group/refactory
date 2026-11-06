@@ -4,8 +4,10 @@ Coverage:
 - one knob (the default) is seen, routed and patched exactly as before
 - the composite: a header naming the graph's agent steps, then each knob's text
   verbatim under its SECTION line, the last knob ending the document
-- routing: an edit goes to the first knob holding its target; an append or an
-  unfound target to the last knob; a target across a section boundary, in the
+- routing: an edit goes to the one knob holding its target; an append or an
+  unfound target to the last knob; a target in several knobs is refused unless the
+  edit names its section, and a named section takes the edit alone (refused when
+  its target is elsewhere, an append or unfound target landing there); a target across a section boundary, in the
   header or in a SECTION line, and content carrying a SECTION line, are refused
   per edit while the rest of the patch applies; later edits route against what
   earlier ones wrote
@@ -32,7 +34,8 @@ from refactory_dsh.outerloop import ValidationGate
 from refactory_packages.skillopt import prompts
 from refactory_packages.skillopt.loop import SkillOptLoop
 from refactory_packages.skillopt.proposer import (
-    CROSS_SECTION, SECTION_LINE_IN_CONTENT, SkillOptProposer, composite,
+    AMBIGUOUS_SECTION, CROSS_SECTION, SECTION_LINE_IN_CONTENT, TARGET_NOT_IN_SECTION,
+    UNKNOWN_SECTION, SkillOptProposer, composite,
 )
 from refactory_packages.skillopt.trace import current_call_key
 
@@ -170,15 +173,105 @@ def test_cross_section_targets_are_refused_and_the_rest_applies():
         assert out[knob] == state["knobs"][knob]
 
 
-def test_a_target_in_several_sections_goes_to_the_first_knob():
-    """"equality" is in compare's, precision's and hypotheses' text: the edit goes to
-    compare, the composite's first occurrence. Fails when a later knob wins."""
+def test_an_unnamed_target_in_several_sections_is_refused_naming_them():
+    """"## Answer Format" is in every step's system prompt: an edit that does not name
+    its section is refused, its outcome naming all four candidate sections, and the
+    rest of the patch applies. Fails on a silent first match."""
     state = _seed_state()
-    for knob in KNOBS[:3]:
-        assert "equality" in state["knobs"][knob]["value"], knob
-    ranked = [{"op": "replace", "target": "equality", "content": "EQUALITY_EDIT"}]
+    for knob in KNOBS:
+        assert "## Answer Format" in state["knobs"][knob]["value"], knob
+    ranked = [
+        {"op": "replace", "target": "## Answer Format", "content": "## Reply Format"},
+        {"op": "replace", "target": "## Final Answer", "content": "## Final Answer (OK_EDIT)"},
+    ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
-    assert refused == [] and per_knob == [("compare__system_prompt", [0])]
+    assert per_knob == [("decide__system_prompt", [1])]
+    assert [(r["index"], r["status"], r["sections"]) for r in refused] == [
+        (0, AMBIGUOUS_SECTION, list(KNOBS))]
+    assert all(knob in refused[0]["message"] for knob in KNOBS)
+    assert '"section"' in refused[0]["message"]
+    run = _AttemptRun()
+    outcome, report = _proposer().attempt_patch(run, ranked, _candidate(state), "r")
+    assert report["outcomes"][0]["status"] == AMBIGUOUS_SECTION
+    knobs = outcome.state["knobs"]
+    assert "OK_EDIT" in knobs["decide__system_prompt"]["value"]
+    assert all("## Reply Format" not in knobs[k]["value"] for k in KNOBS)
+
+
+def test_a_named_section_takes_a_shared_target_alone():
+    """The same shared target named to decide's section changes decide's copy only,
+    and the section field never reaches the knob's patch. Fails when a named edit
+    goes to the first knob holding the target."""
+    state = _seed_state()
+    ranked = [{"op": "replace", "target": "## Answer Format", "content": "## Reply Format",
+               "section": "decide__system_prompt"}]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert refused == [] and per_knob == [("decide__system_prompt", [0])]
+    patch = _proposer().patch(ranked, _candidate(state), "", knob="decide__system_prompt").edit
+    assert all("section" not in item for item in patch["patch"])
+    out = _apply(per_knob, ranked, state)["knobs"]
+    assert "## Reply Format" in out["decide__system_prompt"]["value"]
+    for knob in KNOBS[:3]:
+        assert out[knob] == state["knobs"][knob]
+
+
+def test_a_named_section_refuses_a_target_found_only_elsewhere():
+    """A named edit whose target is in another section (or only in the structure) is
+    refused, naming where the target is. Fails when it falls back to that section."""
+    state = _seed_state()
+    ranked = [
+        {"op": "replace", "target": "Compare all options before committing.",
+         "content": "X", "section": "decide__system_prompt"},
+        {"op": "insert_after", "target": "# Skill sections", "content": "- Y",
+         "section": "precision__system_prompt"},
+    ]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert per_knob == []
+    assert [(r["index"], r["status"], r["sections"]) for r in refused] == [
+        (0, TARGET_NOT_IN_SECTION, ["compare__system_prompt"]),
+        (1, TARGET_NOT_IN_SECTION, []),
+    ]
+    assert "decide__system_prompt" in refused[0]["message"]
+    assert "compare__system_prompt" in refused[0]["message"]
+
+
+def test_a_named_append_or_unfound_target_lands_at_the_end_of_that_section():
+    """An append and an insert_after whose target is nowhere, both naming precision's
+    section, end precision's text (SkillOpt's missing-target rule there), not the
+    last knob's. Fails when a named append still goes to the last knob."""
+    state = _seed_state()
+    ranked = [
+        {"op": "append", "content": "- NAMED_APPEND", "section": "precision__system_prompt"},
+        {"op": "insert_after", "target": "nowhere at all", "content": "- NAMED_FALLBACK",
+         "section": "precision__system_prompt"},
+        {"op": "append", "content": "- UNNAMED_APPEND"},
+    ]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert refused == []
+    assert per_knob == [("precision__system_prompt", [0, 1]), ("decide__system_prompt", [2])]
+    out = _apply(per_knob, ranked, state)["knobs"]
+    assert out["precision__system_prompt"]["value"].rstrip().endswith(
+        "- NAMED_APPEND\n\n- NAMED_FALLBACK")
+    assert out["decide__system_prompt"]["value"].rstrip().endswith("- UNNAMED_APPEND")
+
+
+@pytest.mark.parametrize("section", ["nope__system_prompt", "data_parallelism", 3])
+def test_a_section_naming_no_knob_is_refused(section):
+    state = _seed_state()
+    ranked = [{"op": "append", "content": "- Z", "section": section}]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert per_knob == []
+    assert [(r["status"], r["sections"]) for r in refused] == [(UNKNOWN_SECTION, list(KNOBS))]
+
+
+def test_the_header_asks_for_a_section_on_shared_targets():
+    from refactory_packages.skillopt.proposer import composite_header
+
+    state = _seed_state()
+    header = composite_header(state)
+    assert _proposer().text(_candidate(state)).startswith(header + "\n\n")
+    assert '"section": "<knob>"' in header
+    assert "appears in more than one section must name its section" in header
 
 
 def test_an_insert_after_aimed_at_the_structure_appends_to_the_last_knob():
@@ -367,6 +460,30 @@ def test_livemath_view_labels_each_step_and_shows_the_first_steps_system_prompt(
     one = rollout_result(solver, {"skill": "S"})
     assert one["target_system_prompt"] == build_system("S")
     assert "role" not in one["conversation"][0]
+
+
+# ── one knob (arm B): the optimizer's prompts are unchanged ───────────────
+
+#: sha256 of every optimizer call (call key, system, prompt) of a two-epoch scripted
+#: single-knob run (``test_skillopt._run_loop``), recorded on main before the
+#: section field existed. Fails when anything multi-knob leaks into arm B's prompts.
+ARM_B_PROMPTS_SHA256 = "351dfe56211ecf59bcb0dc8f7627fc8c3274eff161b1a55b3f954e5ac9f634d4"
+
+
+def test_single_knob_optimizer_prompts_are_byte_identical(tmp_path):
+    import hashlib
+
+    from test_skillopt import _run_loop
+
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, config_overrides={"batch_size": 8},
+              skillopt_options={"max_epochs": 2, "group_size": 2})
+    calls = [[list(c["call_key"] or ()), c["system"], c["prompt"]] for c in client.calls]
+    assert {k[0] for k, _, _ in calls} >= {
+        "analyst_failure", "merge_failure", "slow_update", "meta_skill"}, calls
+    assert not any("SECTION" in p for _, _, p in calls)
+    digest = hashlib.sha256(json.dumps(calls).encode()).hexdigest()
+    assert digest == ARM_B_PROMPTS_SHA256, digest
 
 
 # ── knobs the proposer cannot edit ────────────────────────────────────────
