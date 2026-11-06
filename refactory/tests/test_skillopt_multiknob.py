@@ -154,7 +154,7 @@ def test_cross_section_targets_are_refused_and_the_rest_applies():
         {"op": "replace", "target": f"{compare_tail}\n\n<!-- SECTION precision_skill",
          "content": "X"},
         {"op": "delete", "target": "<!-- SECTION hypotheses_skill: skill section"},
-        {"op": "insert_after", "target": "# Skill sections", "content": "- HEADER_EDIT"},
+        {"op": "replace", "target": "# Skill sections", "content": "# HEADER_EDIT"},
         {"op": "append", "content": "<!-- SECTION forged: knob -->\n- FORGED"},
         {"op": "replace", "target": "## Final Answer", "content": "## Final Answer (OK_EDIT)"},
     ]
@@ -168,6 +168,41 @@ def test_cross_section_targets_are_refused_and_the_rest_applies():
     assert "OK_EDIT" in out["decide_skill"]["value"]
     for knob in KNOBS[:3]:
         assert out[knob] == state["knobs"][knob]
+
+
+def test_a_target_in_several_sections_goes_to_the_first_knob():
+    """"equality" is in compare's, precision's and hypotheses' text: the edit goes to
+    compare, the composite's first occurrence. Fails when a later knob wins."""
+    state = _seed_state()
+    for knob in KNOBS[:3]:
+        assert "equality" in state["knobs"][knob]["value"], knob
+    ranked = [{"op": "replace", "target": "equality", "content": "EQUALITY_EDIT"}]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert refused == [] and per_knob == [("compare_skill", [0])]
+
+
+def test_an_insert_after_aimed_at_the_structure_appends_to_the_last_knob():
+    """An insert_after whose target is only in the header or a SECTION line follows
+    SkillOpt's missing-target rule (append), in the last knob; one whose target
+    crosses a section boundary is still refused. Fails when the structure-only
+    insert_after is refused or lands elsewhere."""
+    state = _seed_state()
+    ranked = [
+        {"op": "insert_after", "target": "# Skill sections", "content": "- HEADER_RULE"},
+        {"op": "insert_after", "target": "<!-- SECTION precision_skill", "content": "- LINE_RULE"},
+        {"op": "insert_after", "target": 'and "exactly when".\n\n<!-- SECTION', "content": "- X"},
+    ]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert per_knob == [("decide_skill", [0, 1])]
+    assert [(r["index"], r["status"]) for r in refused] == [(2, CROSS_SECTION)]
+    run = _AttemptRun()
+    outcome, report = _proposer().attempt_patch(run, ranked, _candidate(state), "r")
+    decide = outcome.state["knobs"]["decide_skill"]["value"]
+    assert decide.endswith("- HEADER_RULE\n\n- LINE_RULE\n")
+    assert [o["status"] for o in report["outcomes"]][:2] == [
+        "applied_insert_after_fallback_append"] * 2
+    for knob in KNOBS[:3]:
+        assert outcome.state["knobs"][knob] == state["knobs"][knob]
 
 
 def test_later_edits_route_against_what_earlier_edits_wrote():
@@ -190,6 +225,8 @@ class _AttemptRun:
     def __init__(self, held: tuple[Candidate, ...] = ()) -> None:
         self.held = {c.id: c for c in held}
         self.attempts: list[tuple[str, str]] = []   # (knob, parent id)
+        #: What Run.attempt adds to the loop's rejections: every refusal.
+        self.rejections: list[list[str]] = []
 
     def attempt(self, proposal, parent):  # type: ignore[no-untyped-def]
         from refactory_dsh.nn import edits as nn_edits
@@ -198,8 +235,10 @@ class _AttemptRun:
         self.attempts.append((proposal.edit["name"], parent.id))
         state = nn_edits.apply(proposal.edit, parent.state)
         if candidate_id(state) == parent.id:
+            self.rejections.append(["E-noop: unchanged"])
             return ["E-noop: unchanged"]
         if candidate_id(state) in self.held:
+            self.rejections.append(["E-duplicate: held"])
             return ["E-duplicate: held"]
         return Candidate.from_state(state, parent=parent.id, edits=[*parent.edits, proposal.edit])
 
@@ -217,9 +256,10 @@ def _with_guidance(state: dict[str, Any]) -> dict[str, Any]:
 
 def test_a_knob_whose_edits_change_nothing_is_passed_over():
     """compare's edit applies; decide's only edit targets its protected region and
-    is skipped, so decide's patch is E-noop and passed over: the step still yields
-    the compare change, and the report shows both. Fails when an E-noop knob
-    refuses the whole step."""
+    is skipped, so decide's patch changes nothing and is passed over without an
+    attempt (no refusal recorded): the step still yields the compare change, as a
+    child of the parent, and the report shows both. Fails when an E-noop knob
+    refuses the whole step or adds a refusal."""
     state = _with_guidance(_seed_state())
     parent = _candidate(state)
     ranked = [{"op": "replace", "target": "## Option Comparison", "content": "## Options (CMP)"},
@@ -227,7 +267,9 @@ def test_a_knob_whose_edits_change_nothing_is_passed_over():
     run = _AttemptRun()
     outcome, report = _proposer().attempt_patch(run, ranked, parent, "r")
     assert isinstance(outcome, Candidate)
-    assert [knob for knob, _ in run.attempts] == ["compare_skill", "decide_skill"]
+    assert [knob for knob, _ in run.attempts] == ["compare_skill"]
+    assert run.rejections == []
+    assert outcome.parent == parent.id and len(outcome.edits) == 1
     assert "(CMP)" in outcome.state["knobs"]["compare_skill"]["value"]
     assert outcome.state["knobs"]["decide_skill"] == state["knobs"]["decide_skill"]
     assert [(o["knob"], o["status"]) for o in report["outcomes"]] == [
@@ -240,6 +282,19 @@ def test_a_step_whose_every_edit_is_refused_is_a_noop():
     outcome, report = _proposer().attempt_patch(_AttemptRun(), ranked, parent, "r")
     assert isinstance(outcome, list) and outcome[0].startswith("E-noop")
     assert report["noop"] and report["outcomes"][0]["status"] == CROSS_SECTION
+
+
+def test_a_step_whose_knob_patches_all_change_nothing_records_one_refusal():
+    """Two knobs' patches that change nothing: the step is E-noop with exactly one
+    refusal recorded, as one knob's patch records one. Fails when each knob adds
+    its own refusal."""
+    parent = _candidate(_seed_state())
+    ranked = [{"op": "replace", "target": "## Option Comparison", "content": "## Option Comparison"},
+              {"op": "replace", "target": "## Final Answer", "content": "## Final Answer"}]
+    run = _AttemptRun()
+    outcome, report = _proposer().attempt_patch(run, ranked, parent, "r")
+    assert outcome == ["E-noop: unchanged"] and report["noop"]
+    assert run.rejections == [["E-noop: unchanged"]]
 
 
 def test_a_knob_patch_reaching_a_held_state_continues_from_it():
@@ -257,8 +312,10 @@ def test_a_knob_patch_reaching_a_held_state_continues_from_it():
     run = _AttemptRun((held,))
     outcome, _ = _proposer().attempt_patch(
         run, [compare_edit, {"op": "append", "content": "- END"}], parent, "r")
-    assert isinstance(outcome, Candidate) and outcome.parent == held.id
     assert run.attempts == [("compare_skill", parent.id), ("decide_skill", held.id)]
+    # The step's candidate is rebuilt as the parent's child, carrying both edits.
+    assert isinstance(outcome, Candidate) and outcome.parent == parent.id
+    assert [e["name"] for e in outcome.edits] == ["compare_skill", "decide_skill"]
     refused, _ = _proposer().attempt_patch(_AttemptRun((held,)), [compare_edit], parent, "r")
     assert refused == ["E-duplicate: held"]
 
@@ -537,6 +594,16 @@ def test_skill_graph_runs_skillopt_over_its_four_knobs(tmp_path, graph_run):
     assert {node for node, system in epoch2 if "HYP_EDIT" in system} == {"hypotheses"}
     assert {node for node, system in epoch2 if "APPEND_EDIT" in system} == {"decide"}
     assert strategy.strategy_state_dict()["meta_skill_text"] == "USE CONCISE EDITS"
+
+    # Every candidate the run holds (the accepted patch included) is a child of one
+    # it holds, so the lineage of the best reaches the seed.
+    by_id = {c.id: c for c in population}
+    assert any(e.get("patch") for c in population for e in c.edits[-1:])
+    assert all(c.parent in by_id for c in population[1:])
+    best = by_id[strategy.gate.best_id]
+    lineage = loop._lineage(best)
+    assert lineage[0]["id"] == population[0].id and lineage[-1]["id"] == best.id
+    assert len(lineage) >= 2
 
 
 def test_call_keys_stay_unique_and_replay_with_four_knobs(tmp_path, graph_run):

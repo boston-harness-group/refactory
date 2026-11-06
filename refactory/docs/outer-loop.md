@@ -52,7 +52,9 @@ the strategy optimizes the single `skill` knob exactly as before.
   touches, each applied through `Run.attempt`:
   - An edit goes to the first knob whose text holds its target.
   - An append, or a target found nowhere, goes to the last knob. That knob ends the
-    document, so the edit lands where SkillOpt would put it.
+    document, so the edit lands where SkillOpt would put it. An `insert_after` whose
+    target is only in the header or a SECTION line counts as not found, so SkillOpt's
+    rule appends it.
   - An edit is refused on its own, never split, when its target lies across a section
     boundary, in the header or in a SECTION line, or when its content carries a SECTION
     line. The trace reports it as `skipped_cross_section` or

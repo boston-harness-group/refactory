@@ -28,8 +28,10 @@ knobs (:meth:`SkillOptProposer.route`):
 
 - an edit whose ``target`` occurs in a knob's text goes to the first such knob, in
   ``knobs`` order (the composite's first occurrence inside a section);
-- an edit whose ``target`` occurs in the composite only across a section boundary,
-  in the header or in a SECTION line, or whose ``content`` holds a SECTION line, is
+- an ``insert_after`` whose ``target`` is only in the header or a SECTION line takes
+  SkillOpt's missing-target rule: it is appended to the last knob;
+- any other edit whose ``target`` occurs in the composite only across a section
+  boundary, in the header or in a SECTION line, or whose ``content`` holds a SECTION line, is
   **refused** (never split): it is reported ``skipped_cross_section`` /
   ``skipped_section_line_in_content`` and the rest of the patch still applies, as
   SkillOpt skips an edit aimed at its protected region;
@@ -215,7 +217,8 @@ class SkillOptProposer:
         for index, edit in enumerate(ranked):
             item = _op_to_kind(edit) if isinstance(edit, dict) else edit
             texts = {name: _value(state, name) for name in self.knobs}
-            name, status = _route_one(item, texts, composite(state, self.knobs), self.knobs)
+            name, status = _route_one(item, texts, composite(state, self.knobs), self.knobs,
+                                      _structure(state, self.knobs))
             if status:
                 refused.append(_refusal(index, item, status))
                 continue
@@ -236,10 +239,13 @@ class SkillOptProposer:
         With one knob: one ``set_knob`` patch, as SkillOpt applies one patch. With
         several: one patch per knob that receives edits (:meth:`route`), attempted
         in ``knobs`` order, each on the candidate the last one returned. A knob
-        whose edits change nothing (``E-noop``) is passed over; any other refusal
-        refuses the whole step. Every edit refused or skipped leaves ``E-noop`` for
-        the whole step when no knob changed. The report lists every ranked edit
-        in order, each with the ``knob`` it went to (``None`` when refused).
+        whose edits change nothing is passed over without an attempt (so no
+        refusal is recorded for it); any other refusal refuses the whole step.
+        When no knob changed, the step is ``E-noop`` (one refusal recorded, as
+        for one knob). The candidate returned is rebuilt as a child of ``parent``
+        carrying the knobs' edits (the in-between candidates are never kept), so
+        the run's lineage reaches it. The report lists every ranked edit in
+        order, each with the ``knob`` it went to (``None`` when refused).
 
         Seam: a structural edit (typed blocks) would be attempted here, after the
         text patches and at most one per round (:meth:`structural_proposal`).
@@ -269,20 +275,24 @@ class SkillOptProposer:
         structural = self.structural_proposal(ranked, parent)
         if structural is not None:  # pragma: no cover - nothing returns one yet
             raise NotImplementedError("skillopt: structural edits are not built yet")
+        applied: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
         for name, proposal, indices in proposals:
             knob_reports: list[dict[str, Any]] = []
             try:
-                nn_edits.apply(proposal.edit, current.state, edit_reports=knob_reports)
+                after = nn_edits.apply(proposal.edit, current.state, edit_reports=knob_reports)
             except nn_edits.EditError:
-                pass  # ``run.attempt`` below refuses it and says why
+                after = None  # ``run.attempt`` below refuses it and says why
             rows = knob_reports[0]["outcomes"] if knob_reports else []
             for index, row in zip(indices, rows):
                 outcomes.append({**row, "index": index, "knob": name})
+            if after is not None and candidate_id(after) == current.id:
+                # This knob's edits change nothing: pass it over without an
+                # attempt, so a step that applies records no refusal for it.
+                noop_reasons.append(
+                    f"E-noop: the {name} patch leaves the state identical to its parent")
+                continue
             outcome = run.attempt(proposal, current)
             if isinstance(outcome, list):
-                if only_noop(outcome):
-                    noop_reasons.extend(outcome)
-                    continue
                 # A knob's patch that reaches a state the search holds continues
                 # from that candidate; if no later knob changes it, the step's
                 # result is a duplicate, refused below as with one knob.
@@ -292,6 +302,7 @@ class SkillOptProposer:
                 duplicate_reasons, outcome = outcome, duplicate
             else:
                 duplicate_reasons = None
+            applied.append((proposal.edit, knob_reports[0] if knob_reports else None))
             current = outcome
         if duplicate_reasons is not None:
             # No later knob changed the held candidate: the step's result is a
@@ -303,11 +314,24 @@ class SkillOptProposer:
             "knobs": [name for name, _ in per_knob],
         }
         if current.id == parent.id:
+            if proposals:
+                # One refusal for the step, as one knob's patch records one.
+                first = run.attempt(proposals[0][1], parent)
+                if isinstance(first, list):
+                    noop_reasons = first
             return noop_reasons or [
                 "E-noop: every edit of the patch was refused or skipped, so the "
                 "state is identical to its parent"
             ], report
-        return current, report
+        # The step's candidate is a child of ``parent``: the knobs' in-between
+        # candidates are never kept, so the lineage would otherwise stop at one.
+        parent_reports = list(parent.edit_reports) if parent.edit_reports else [
+            None for _ in parent.edits]
+        return Candidate.from_state(
+            current.state, parent=parent.id,
+            edits=[*parent.edits, *(edit for edit, _ in applied)],
+            edit_reports=[*parent_reports, *(rep for _, rep in applied)],
+        ), report
 
     def structural_proposal(self, ranked: list[dict[str, Any]], parent: Candidate) -> Proposal | None:
         """The round's one structural edit (a typed block), or ``None``.
@@ -781,10 +805,22 @@ def composite(state: dict[str, Any], knobs: tuple[str, ...] | list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _structure(state: dict[str, Any], knobs: tuple[str, ...]) -> list[str]:
+    """The composite's own lines: its header and each SECTION line."""
+    return [composite_header(state), *(
+        SECTION_LINE.format(knob=name, use=section_use(state, name)) for name in knobs)]
+
+
 def _route_one(
     edit: Any, texts: dict[str, str], document: str, knobs: tuple[str, ...],
+    structure: list[str] = (),  # type: ignore[assignment]
 ) -> tuple[str, str]:
-    """The knob one edit goes to, or ``("", status)`` when it is refused."""
+    """The knob one edit goes to, or ``("", status)`` when it is refused.
+
+    An ``insert_after`` whose target is only in the header or a SECTION line changes
+    no structure: it takes SkillOpt's missing-target rule (append), so it goes to the
+    last knob like an unfound target. Any other edit aimed outside the sections is
+    refused."""
     if not isinstance(edit, dict):
         return knobs[-1], ""
     content = edit.get("content", "")
@@ -795,6 +831,8 @@ def _route_one(
         for name in knobs:
             if target in texts[name]:
                 return name, ""
+        if edit.get("kind") == "insert_after" and any(target in part for part in structure):
+            return knobs[-1], ""
         if target in document:
             return "", CROSS_SECTION
     return knobs[-1], ""
