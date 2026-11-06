@@ -33,7 +33,9 @@ Knobs: two open text knobs per step, one way to edit each piece of text.
 * ``<step>__system_prompt`` (``compare__system_prompt``, ...): the step's whole
   system prompt. Its default is LiveMath's solver system prompt with the step's
   seed section as its ``## Skill`` block, so the optimizer can edit the section
-  and every other line (task and answer format included).
+  and every other line (task and output format included). Only ``decide``
+  keeps the solver's answer format; the three analysis steps' prompts ask for
+  notes and no answer (``NOTES_FORMAT``).
 * ``<step>_task`` (``compare_task``, ...): the ``## Your Task`` text ending the
   step's user message; defaults are ``COMPARE_TASK`` ... ``DECIDE_TASK``. The
   question and the earlier steps' notes are data, not knobs.
@@ -137,9 +139,23 @@ def task_knob(step: str) -> str:
     return f"{step}_task"
 
 
+# The three analysis steps write notes, not answers: their system prompt swaps the
+# solver's answer format for this notes format. Only decide answers, so only decide
+# keeps the solver's answer format (its prompt is the solver's, byte for byte).
+ANSWER_FORMAT = SYSTEM_PROMPT[SYSTEM_PROMPT.index("## Answer Format\n"):]
+NOTES_FORMAT = (
+    "## Output Format\n"
+    "Think step by step and write your analysis as notes for the later steps.\n"
+    "Do not choose a final answer and do not write <answer> tags; the final step "
+    "decides.\n"
+)
+
+
 def step_system_prompt(step: str) -> str:
-    """LiveMath's solver system prompt with this step's seed section as its skill block."""
-    return SYSTEM_PROMPT.replace("{{skill_section}}", skill_section(SEED_SECTIONS[step]))
+    """LiveMath's solver system prompt with this step's seed section as its skill block;
+    the analysis steps' answer format is replaced by ``NOTES_FORMAT``."""
+    prompt = SYSTEM_PROMPT.replace("{{skill_section}}", skill_section(SEED_SECTIONS[step]))
+    return prompt if step == "decide" else prompt.replace(ANSWER_FORMAT, NOTES_FORMAT)
 
 
 # ── messages (before framing) ─────────────────────────────────────────────
