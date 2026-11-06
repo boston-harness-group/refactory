@@ -36,3 +36,32 @@ The four section knobs (`compare_skill`, `precision_skill`, `hypotheses_skill`,
 `max_completion_tokens`, `data_parallelism`, `use_theorem` and `use_sketch` are frozen.
 An item's theorem states the correct option, so the last two stay off. Each item takes
 4 model calls.
+
+## SkillOpt over several text knobs
+
+`--strategy skillopt --strategy-option knobs=compare_skill,precision_skill,hypotheses_skill,decide_skill`
+runs SkillOpt's procedure on all four section knobs at once (arm C1). Without `knobs`,
+the strategy optimizes the single `skill` knob exactly as before.
+
+- **One document.** The analysts, the merges, the ranking, the slow update and the meta
+  skill all see one document. A header names the graph's agent steps in run order. Each
+  knob's text then follows, in `knobs` order, under a
+  `<!-- SECTION <knob>: <description> -->` line. Each step runs once per epoch, so call
+  keys and trace entries stay unique.
+- **Back to the knobs.** The ranked patch becomes one `set_knob` patch per knob it
+  touches, each applied through `Run.attempt`:
+  - An edit goes to the first knob whose text holds its target.
+  - An append, or a target found nowhere, goes to the last knob. That knob ends the
+    document, so the edit lands where SkillOpt would put it. An `insert_after` whose
+    target is only in the header or a SECTION line counts as not found, so SkillOpt's
+    rule appends it.
+  - An edit is refused on its own, never split, when its target lies across a section
+    boundary, in the header or in a SECTION line, or when its content carries a SECTION
+    line. The trace reports it as `skipped_cross_section` or
+    `skipped_section_line_in_content`, and the rest of the patch applies.
+- **The slow update.** The SLOW_UPDATE placeholder and guidance live at the end of the
+  last knob (`decide_skill` here), where SkillOpt keeps them: at the end of the document.
+- **Refused knobs.** A knob that is missing, frozen or not a text knob is refused before
+  the run spends anything. A run resumed with different `knobs` is refused too.
+- **Trajectories.** LiveMath's trajectory view labels each message with the step that
+  wrote it (`[compare] …`) when a record has several steps.

@@ -10,7 +10,8 @@ finds it by package discovery. It is not added to the library's own
 
 This is a *strategy* package, not a mode package: it declares no modes,
 only a strategy that drives any mode with a text knob (``skill`` by default, the
-``knob`` option), and ``SkillOptProposer`` (``proposer.py``), its optimizer steps
+``knob`` option) or several (the ``knobs`` option, seen as one document of
+sections), and ``SkillOptProposer`` (``proposer.py``), its optimizer steps
 as a part another strategy can call.
 """
 
