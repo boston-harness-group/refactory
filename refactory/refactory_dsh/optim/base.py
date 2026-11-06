@@ -162,8 +162,8 @@ class Candidate:
     parent: str | None
     state: dict[str, Any]
     edits: list[dict[str, Any]] = field(default_factory=list)
-    #: Per-edit reports, parallel to *edits*.  Only ``text_patch`` produces one
-    #: today; for other edits the corresponding slot is ``None``.  Stored on the
+    #: Per-edit reports, parallel to *edits*.  Only a ``set_knob`` with a
+    #: ``patch`` produces one today; for other edits the corresponding slot is ``None``.  Stored on the
     #: candidate (not on the edit dict) so it is journaled, survives stop+resume,
     #: and does not leak into optimizer prompts.
     edit_reports: list[dict[str, Any] | None] = field(default_factory=list)
@@ -667,9 +667,9 @@ class Optimizer:
         # An operation that is not in the catalogue is not a failed precondition: the
         # two are told apart because they point at different fixes, and calling every
         # refusal a precondition failure hides which one the catalogue is causing.
-        op = proposal.edit.get("op")
-        if op not in nn_edits.names():
-            return [f"E-op: unknown edit {op!r}; known: {nn_edits.names()}"]
+        refused = nn_edits.unknown(proposal.edit.get("op"))
+        if refused is not None:
+            return [refused]
         reason = nn_edits.precheck(proposal.edit, parent.state)
         if reason:
             return [f"E-precondition: {reason}"]

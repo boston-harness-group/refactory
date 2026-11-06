@@ -1,4 +1,6 @@
-"""Tests for the text_patch edit primitive (F7).
+"""Tests for set_knob's ``patch`` form, which applies text edits to a str knob (F7).
+
+It was the ``text_patch`` primitive until it was folded into ``set_knob``.
 
 Each test fails when the feature it tests is reverted.
 """
@@ -41,7 +43,7 @@ def _state(text: str = "hello world", *, frozen: bool = False, kind: str = "str"
 
 
 def _patch(edits_list: list[dict], *, config: dict | None = None, name: str = "prompt") -> dict:
-    edit = {"op": "text_patch", "name": name, "edits": edits_list}
+    edit = {"op": "set_knob", "name": name, "patch": edits_list}
     if config is not None:
         edit["config"] = config
     return edit
@@ -362,7 +364,7 @@ def test_report_survives_stop_resume(tmp_path):
 
 # ── guards and invariants ─────────────────────────────────────────────────
 
-def test_text_patch_never_mutates_input():
+def test_patch_never_mutates_input():
     """input state is unchanged after apply."""
     state = _state("hello world")
     before = copy.deepcopy(state)
@@ -371,22 +373,83 @@ def test_text_patch_never_mutates_input():
     assert state == before
 
 
-def test_text_patch_frozen_knob_refused():
-    """text_patch on a frozen knob raises EditError(code='E-knob')."""
+def test_patch_frozen_knob_refused():
+    """A patch on a frozen knob is refused exactly as a value is (E-knob)."""
     state = _state("hello", frozen=True)
     edit = _patch([{"kind": "append", "content": "more"}])
-    with pytest.raises(EditError) as exc_info:
+    with pytest.raises(EditError, match="frozen") as exc_info:
         _apply(state, edit)
     assert exc_info.value.code == "E-knob"
+    with pytest.raises(EditError, match="frozen") as value_exc:
+        _apply(state, {"op": "set_knob", "name": "prompt", "value": "more"})
+    assert str(value_exc.value) == str(exc_info.value)
 
 
-def test_text_patch_non_str_knob_refused():
-    """text_patch on an int knob raises EditError(code='E-knob')."""
+def test_patch_on_run_frozen_knob_refused():
+    """A knob frozen for the run (``--frozen``) refuses a patch as it refuses a value."""
+    from refactory_dsh.optim.base import Optimizer
+
+    parent = Candidate.from_state(_state("hello"))
+    for edit in (_patch([{"kind": "append", "content": "more"}]),
+                 {"op": "set_knob", "name": "prompt", "value": "hello more"}):
+        result = Optimizer().attempt(
+            Proposal(edit=edit, parent=parent.id), parent, (), False, frozen=["prompt"],
+        )
+        assert result == ["E-frozen: knob 'prompt' is frozen for this run"]
+
+
+def test_patch_non_str_knob_refused():
+    """A patch on an int knob raises EditError(code='E-knob')."""
     state = _state("irrelevant", kind="int")
     edit = _patch([{"kind": "append", "content": "text"}])
-    with pytest.raises(EditError) as exc_info:
+    with pytest.raises(EditError, match="'patch' needs a str knob") as exc_info:
         _apply(state, edit)
     assert exc_info.value.code == "E-knob"
+
+
+@pytest.mark.parametrize("fields", [
+    {"value": "hello", "patch": [{"kind": "append", "content": "x"}]},
+    {},
+])
+def test_set_knob_needs_exactly_one_of_value_and_patch(fields):
+    """Both forms at once, or neither, is refused rather than guessed between."""
+    edit = {"op": "set_knob", "name": "prompt", **fields}
+    with pytest.raises(EditError, match="exactly one of 'value'") as exc_info:
+        _apply(_state("hello"), edit)
+    assert exc_info.value.code == "E-knob"
+
+
+def test_set_knob_config_needs_a_patch():
+    """``config`` configures a patch; with a value it is refused, not ignored."""
+    edit = {"op": "set_knob", "name": "prompt", "value": "hi", "config": {"match": "exact"}}
+    with pytest.raises(EditError, match="'config' configures a 'patch'"):
+        _apply(_state("hello"), edit)
+
+
+def test_set_knob_patch_must_be_a_list():
+    with pytest.raises(EditError, match="'patch' must be a list") as exc_info:
+        _apply(_state("hello"), {"op": "set_knob", "name": "prompt", "patch": "append x"})
+    assert exc_info.value.code == "E-patch"
+
+
+def test_text_patch_is_gone_and_says_where_it_went():
+    """The old op is not in the catalogue; every refusal of it names set_knob's patch."""
+    old = {"op": "text_patch", "name": "prompt",
+           "edits": [{"kind": "append", "content": "x"}]}
+    assert "text_patch" not in edits.names()
+    assert all(op["op"] != "text_patch" for op in edits.catalogue())
+    with pytest.raises(EditError, match="folded into set_knob") as exc_info:
+        _apply(_state("hello"), old)
+    assert exc_info.value.code == "E-op"
+    assert "folded into set_knob" in edits.precheck(old, _state("hello"))
+    assert edits.unknown("text_patch").startswith("E-op: unknown edit 'text_patch': ")
+    assert "'patch'" in edits.unknown("text_patch")
+    # Any other unknown op keeps the plain message.
+    assert edits.unknown("nonsense") == f"E-op: unknown edit 'nonsense'; known: {edits.names()}"
+    from refactory_dsh.optim.base import Optimizer
+    parent = Candidate.from_state(_state("hello"))
+    result = Optimizer().attempt(Proposal(edit=old, parent=parent.id), parent, (), False)
+    assert isinstance(result, list) and "folded into set_knob" in result[0]
 
 
 def test_empty_target_skipped():
@@ -497,8 +560,8 @@ def test_skillopt_default_protected_markers():
     ]
 
 
-def test_attempt_stores_text_patch_report_on_candidate():
-    """Optimizer.attempt keeps the text_patch report on candidate.edit_reports."""
+def test_attempt_stores_patch_report_on_candidate():
+    """Optimizer.attempt keeps the patch report on candidate.edit_reports."""
     from refactory_dsh.optim.base import Optimizer
 
     parent = Candidate.from_state(_state("a\nb"))
@@ -536,23 +599,37 @@ def test_general_insert_after_single_newline():
     assert _value(result) == "a\nX\nb"
 
 
-# ── random optimizer exclusion (brief fix 3) ──────────────────────────────
+# ── random search never samples the patch form (brief fix 3) ─────────────
+
+#: ``broad`` as it was before the patch form existed: the catalogue random search
+#: draws its op from, so a seeded run draws the same op sequence.
+_BROAD_BEFORE_PATCH = [
+    "add_edge", "add_knob", "add_node", "bypass", "duplicate", "insert_after",
+    "insert_before", "loop", "remove_edge", "remove_knob", "remove_node", "reorder",
+    "set_knob", "split", "wrap",
+]
+
 
 def test_seeded_random_search_draws_same_ops_as_main():
-    """With a fixed seed, random search draws exactly the same operations as
-    main (text_patch is excluded from every preset, including 'broad').
-    Fails if any preset includes text_patch.
+    """Seeded random search is unchanged by the patch form: it draws from the same
+    op list as before, and the only knob edit it builds is a ``value``.
     """
     import random as stdlib_random
 
-    for preset in edits.PRESETS:
-        ops = edits.enabled(preset)
-        assert "text_patch" not in ops, f"text_patch found in preset {preset!r}"
+    assert sorted(edits.PRESETS["broad"]) == _BROAD_BEFORE_PATCH
+    assert sorted(edits.PRESETS["structure"]) == _BROAD_BEFORE_PATCH
 
-    # Verify seeded random search produces deterministic results without text_patch
-    rng1 = stdlib_random.Random(42)
-    rng2 = stdlib_random.Random(42)
     state = _state("hello world")
-    edit1 = edits.random_edit(state, preset="broad", rng=rng1)
-    edit2 = edits.random_edit(state, preset="broad", rng=rng2)
-    assert edit1 == edit2, "seeded random search is not deterministic"
+    state["knobs"]["n"] = {"value": 3, "spec": {"kind": "int", "default": 3, "lo": 0, "hi": 9}}
+    drawn = []
+    for seed in range(200):
+        edit = edits.random_edit(state, preset="broad", rng=stdlib_random.Random(seed))
+        if edit is not None:
+            drawn.append(edit)
+    knob_edits = [e for e in drawn if e["op"] == "set_knob"]
+    assert {e["name"] for e in knob_edits} == {"prompt", "n"}
+    assert all(set(e) == {"op", "name", "value"} for e in knob_edits), knob_edits
+
+    # Deterministic for a fixed seed.
+    assert edits.random_edit(state, rng=stdlib_random.Random(42)) == edits.random_edit(
+        state, rng=stdlib_random.Random(42))
