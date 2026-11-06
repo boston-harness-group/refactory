@@ -2807,7 +2807,7 @@ class Loop(OuterLoop):
     # ── context ────────────────────────────────────────────────────────────
     def _context(self) -> ProposalContext:
         board = self.leaderboard(8)
-        described = self._describe_parent(board)
+        described, graph_note = self._describe_parent(board)
         return ProposalContext(
             epoch=self.epoch,
             generation=self.generation,
@@ -2847,28 +2847,34 @@ class Loop(OuterLoop):
             steering=self._steering_block(),
             item_records=self._parent_train_records(board),
             parent_item_records=self._parent_train_records(board),
+            graph_note=graph_note,
         )
 
-    def _describe_parent(self, board: list[Candidate]) -> dict[str, Any]:
-        """The graph and knobs of the candidate this step edits, for the prompt.
+    def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
+        """The graph and knobs of the candidate this step edits, and a note when not.
 
         The parent is chosen as for its records (``_parent_train_records``): the
         strategy's, else the one ``optimizer_step`` selected, else the leader. The
         seed's description would show a graph the edits no longer apply to once a
-        structural candidate is the parent. The seed is described when no parent
-        is known or the parent's state cannot be built.
+        structural candidate is the parent. The seed is described only when no
+        parent is known, or when the parent's state cannot be built -- and then the
+        note says so, in the prompt and in the run's progress, rather than passing
+        the seed's graph off as the parent's.
         """
         by_id = {c.id: c for c in self.population}
         parent_id = self.strategy_decision.get("parent") or self._editing_parent
         parent = by_id.get(str(parent_id)) if parent_id else None
         if parent is None and board:
             parent = board[0]
-        if parent is not None:
-            try:
-                return self.mode_class(state=parent.state).describe()
-            except Exception:  # an unbuildable parent cannot be bred from anyway
-                pass
-        return self.mode.describe()
+        if parent is None:
+            return self.mode.describe(), ""
+        try:
+            return self.mode_class(state=parent.state).describe(), ""
+        except Exception as exc:
+            note = (f"the parent candidate {parent.id} could not be built "
+                    f"({type(exc).__name__}: {exc}); the seed's pipeline is shown instead")
+            self._progress("warning", candidate=parent.id, warning=note)
+            return self.mode.describe(), note
 
     def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """Train records for the parent the strategy selected for editing.

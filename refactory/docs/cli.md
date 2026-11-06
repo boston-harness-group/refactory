@@ -153,7 +153,7 @@ installed copy.
 | `--frozen <name>` | additional knob protected from edits; repeat for multiple names | mode-declared frozen knobs |
 | `--profile <name>` / `--profile-version <n>` | load an immutable saved configuration; explicit overrides remain visible in the snapshot | none / latest |
 | `--repeats <n>` | independent trials per candidate and winner audit, from 1 to 10 | 1 |
-| `--seed <n>` | seed the search RNG, and the seed every evaluation passes its Task (LiveMath shuffles each item's choices by item and seed, as SkillOpt does); model outputs can still vary | 0 |
+| `--seed <n>` | seed the search RNG, and the seed every evaluation passes its Task (LiveMath shuffles each item's choices by item and seed, as SkillOpt does). The same seed shuffles the order of every data node's items within their part (which items are train or holdout, and `limit`, are unchanged), so items run and are recorded in a seeded order; model outputs can still vary | 0 |
 | `--elite <n>` | how many parents each round proposes against | 3 |
 | `--max-evaluations <n>` | a hard ceiling on evaluated candidates | 64 |
 | `--max-rollouts <n>` | per-item budget: how many item-level evaluations the run may perform | unlimited |

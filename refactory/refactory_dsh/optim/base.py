@@ -285,6 +285,8 @@ class ProposalContext:
     item_records: list[dict[str, Any]] = field(default_factory=list)
     #: Alias for the parent candidate's train records.
     parent_item_records: list[dict[str, Any]] = field(default_factory=list)
+    #: Why the pipeline shown is not the parent's, when it is not (empty when it is).
+    graph_note: str = ""
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -303,6 +305,7 @@ class ProposalContext:
                     for k in self.knobs]),
             "",
             "## The pipeline you may edit",
+            *([f"Note: {self.graph_note}"] if self.graph_note else []),
             "Nodes:",
             _table(["id", "kind", "call", "knobs", "notes"],
                    [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),

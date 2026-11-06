@@ -326,6 +326,48 @@ def test_the_proposal_context_describes_the_parent_not_the_seed(tmp_path):
         {"source": e["source"], "target": e["target"]} for e in context.edges]
 
 
+def _probe_loop_with_child(tmp_path: Path) -> tuple[Loop, Candidate, Candidate]:
+    loop = Loop(PARTS_MODE, LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1,
+                                       runs_root=tmp_path / "run"), project=Path("."))
+    loop.init()
+    seed = loop.population[0]
+    edit = {"op": "insert_after", "target": "finish",
+            "node": {"id": "extra", "kind": "op", "call": "loop_ops:noop"}}
+    child = Candidate.from_state(nn_edits.apply(edit, seed.state), parent=seed.id, edits=(edit,))
+    child.evaluated, child.exit_ok, child.score = True, True, 1.0
+    loop.population.append(child)
+    return loop, seed, child
+
+
+def test_the_proposal_context_describes_the_parent_a_strategy_names(tmp_path):
+    with _patch_mode(PartsProbe):
+        loop, seed, child = _probe_loop_with_child(tmp_path)
+        loop._editing_parent = seed.id
+        loop.strategy_decision = {"parent": child.id}
+        context = loop._context()
+    assert "extra" in {node["id"] for node in context.nodes}
+    assert context.graph_note == ""
+
+
+def test_an_unbuildable_parent_is_named_not_passed_off_as_the_seed(tmp_path):
+    """When the parent cannot be built the seed's pipeline is shown, and both the
+    prompt and the run's progress say so."""
+    with _patch_mode(PartsProbe):
+        loop, seed, _child = _probe_loop_with_child(tmp_path)
+        broken = Candidate.from_state({**seed.state, "graph": {"nodes": "not a graph"}},
+                                      parent=seed.id, edits=())
+        broken.evaluated, broken.exit_ok, broken.score = True, True, 1.0
+        loop.population.append(broken)
+        loop._editing_parent = broken.id
+        context = loop._context()
+    assert "extra" not in {node["id"] for node in context.nodes}
+    assert broken.id in context.graph_note and "could not be built" in context.graph_note
+    assert f"Note: {context.graph_note}" in context.render()
+    progress = [json.loads(line) for line in
+                (tmp_path / "run" / "progress.jsonl").read_text().splitlines()]
+    assert any(r.get("step") == "warning" and r.get("candidate") == broken.id for r in progress)
+
+
 # ── 6. smaller fixes ─────────────────────────────────────────────────────
 
 
@@ -359,6 +401,34 @@ def test_a_spine_candidate_reports_its_model_calls(tmp_path, monkeypatch):
     result = dsh_runtime.evaluate_on_dsh(mode, mode.state_dict(), workdir)
     assert result.exit_ok, result.error
     assert result.model_calls == 4
+
+
+@pytest.mark.parametrize("ending", ["dsh_failed", "graph_unfinished"])
+def test_a_failed_spine_candidate_reports_its_model_calls(ending, tmp_path, monkeypatch):
+    """A spine run that failed still spent its calls: both failure paths count them."""
+    from refactory_dsh import dsh_runtime
+    from refactory_packages.livemath.mode import Solver
+
+    workdir = tmp_path / "cand"
+    for index in range(2):
+        _receipt(workdir / f"passes/data/item_{index}/.refactory/workers/w{index}.json", "solve")
+    (workdir / ".refactory").mkdir(parents=True)
+    (workdir / ".refactory" / "spine-status.json").write_text(json.dumps({
+        "status": "ready", "last_failure": {"node": "data", "error": "all 2 items failed"}}))
+
+    def fake_run(state, workdir, **kwargs):  # noqa: ANN001
+        return dsh_runtime.DshRun(facts={"item_scores": []} if ending == "graph_unfinished" else {},
+                                  workdir=workdir, returncode=0 if ending == "graph_unfinished" else 1,
+                                  stderr="boom")
+
+    monkeypatch.setattr(dsh_runtime, "run_on_dsh", fake_run)
+    monkeypatch.setattr("refactory_dsh.nn.executor._run_end_cleanup", lambda workdir: None)
+    mode = Solver()
+    result = dsh_runtime.evaluate_on_dsh(mode, mode.state_dict(), workdir)
+    assert not result.exit_ok
+    assert result.model_calls == 2
+    if ending == "graph_unfinished":
+        assert result.error == "the graph did not finish: all 2 items failed"
 
 
 def test_a_spine_candidate_whose_items_all_failed_keeps_its_records(tmp_path, monkeypatch):
@@ -406,6 +476,30 @@ def test_structural_wins_are_only_structural_candidates_that_beat_their_parent(t
         loop.population.extend([better, worse, same])
         wins = loop._structural_wins([better, worse, same, seed])
     assert [row["id"] for row in wins] == [better.id]
+
+
+def test_recovered_selection_reports_structural_wins_against_parents(tmp_path):
+    """A Keep recovered after the search rewrites the report's structural_wins with
+    the same rule: the running example's structural candidates lose to their
+    parents, so it has none."""
+    from refactory_dsh.control import Control
+    from refactory_dsh.finished_control import recover_selection
+
+    root = tmp_path / "run"
+    loop = Loop("circle_packing/adaptive", LoopConfig(epochs=2, batch_size=4, optimizer="random",
+                                                      seed=5, runs_root=root), project=Path("."))
+    report = loop.run()
+    structural = [row for row in report["leaderboard"]
+                  if any(e.get("op") in ("add_node", "duplicate") for e in row.get("edits") or ())]
+    assert structural
+    # A legacy request left queued when the search finished (``request`` now refuses
+    # a keep on a finished search, so it is written as the old runs left it).
+    Control(root).path.write_text(json.dumps(
+        {"action": "keep", "target": report["leaderboard"][0]["id"], "at": 1.0}))
+    assert recover_selection(root, project=Path(".")) is not None
+    recovered = json.loads((root / "report.json").read_text())
+    assert recovered["selection_recovery"]["status"] == "applied"
+    assert recovered["structural_wins"] == []
 
 
 def test_a_node_timeout_is_recorded_as_a_timeout_on_both_runtimes():
