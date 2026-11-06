@@ -853,8 +853,9 @@ def test_config_mapping_covers_every_configure_option():
     # ``rollout_order`` is not a setting of A's: the runner passes the order A's
     # rollout completed in, read from A's step results (RecordedRolloutOrder).
     # ``claude_backend_wrapper`` is the runner's --claude-backend-wrapper flag.
+    # ``knob`` is the runner's SKILL_KNOB, the LiveMath knob A's skill lives in.
     mapped = set(A_CONFIG_TO_STRATEGY_OPTION.values()) | set(A_CONFIG_OPTIONAL.values()) | {
-        "analyst_edit_budget", "rollout_order", "patch_order", "claude_backend_wrapper",
+        "analyst_edit_budget", "rollout_order", "patch_order", "claude_backend_wrapper", "knob",
     }
     assert read == mapped, (
         f"configure reads {sorted(read)} but the replay drives {sorted(mapped)}"

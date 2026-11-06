@@ -729,17 +729,17 @@ def test_report_fields_unchanged(tmp_path):
     strategy.configure()
 
     # Simulate a completed post-training evaluation with known scores
-    strategy._final_eval = {
+    strategy.final.result = {
         "status": "done",
-        "final_selection_hard": 0.882,
-        "baseline_test_hard": 0.448,
-        "test_hard": 0.728,
-        "final_test_hard": 0.656,
-        "test_delta_hard": 0.728 - 0.448,
-        "final_test_delta_hard": 0.656 - 0.448,
+        "final_selection": 0.882,
+        "baseline_test": 0.448,
+        "best_test": 0.728,
+        "final_test": 0.656,
+        "best_test_delta": 0.728 - 0.448,
+        "final_test_delta": 0.656 - 0.448,
     }
-    strategy._best_score = 0.882
-    strategy._best_candidate_id = "best_id"
+    strategy.gate.best_score = 0.882
+    strategy.gate.best_id = "best_id"
 
     class MockRun:
         def __init__(self):
@@ -760,15 +760,14 @@ def test_report_fields_unchanged(tmp_path):
     # The test_eval status should be "done"
     assert report["test_eval"] == "done"
 
-    # The report includes the final_eval data which has the score keys
-    final_eval = strategy._final_eval
-    score_keys = [
-        "final_selection_hard", "baseline_test_hard", "test_hard",
-        "final_test_hard", "test_delta_hard", "final_test_delta_hard",
-    ]
-    for key in score_keys:
-        assert key in final_eval, f"final_eval key {key!r} missing"
-        assert final_eval[key] is not None, f"final_eval[{key!r}] is None"
+    # The report names the scores as A's summary.json does
+    assert report["best_selection_hard"] == 0.882
+    assert {key: report[key] for key in (
+        "final_selection_hard", "baseline_test_hard", "test_hard", "final_test_hard",
+    )} == {"final_selection_hard": 0.882, "baseline_test_hard": 0.448,
+           "test_hard": 0.728, "final_test_hard": 0.656}
+    assert report["test_delta_hard"] == pytest.approx(0.728 - 0.448)
+    assert report["final_test_delta_hard"] == pytest.approx(0.656 - 0.448)
 
 
 # ── the item limit's default and the spine's slot directory ─────────────
@@ -1129,13 +1128,13 @@ def test_an_item_gate_error_returns_the_reserved_budget(tmp_path):
 # ── test_completed_phases_roundtrip ──────────────────────────────────────
 
 def test_completed_phases_roundtrip():
-    """_completed_phases serializes/deserializes deterministically."""
+    """The post-training block's completed phases serialize deterministically."""
     from refactory_packages.skillopt.loop import SkillOptLoop
 
     strategy = SkillOptLoop()
     strategy.configure()
 
-    strategy._completed_phases = {"baseline_test", "final_selection"}
+    strategy.final.completed = {"baseline_test", "final_selection"}
     state = strategy.strategy_state_dict()
 
     # Must be sorted for deterministic serialization
@@ -1146,32 +1145,9 @@ def test_completed_phases_roundtrip():
     strategy2.configure()
     strategy2.load_strategy_state(state)
 
-    assert strategy2._completed_phases == {"baseline_test", "final_selection"}
-    assert "baseline_test" in strategy2._completed_phases
-    assert "best_test" not in strategy2._completed_phases
-
-
-# ── test_completed_phases_backward_compat ────────────────────────────────
-
-def test_completed_phases_backward_compat():
-    """When completed_phases is empty and _phase is a final phase, backward compat populates the set."""
-    from refactory_packages.skillopt.loop import SkillOptLoop
-
-    strategy = SkillOptLoop()
-    strategy.configure()
-
-    # Simulate old state without completed_phases
-    old_state = strategy.strategy_state_dict()
-    old_state["phase"] = "baseline_test"
-    old_state.pop("completed_phases", None)
-
-    strategy2 = SkillOptLoop()
-    strategy2.configure()
-    strategy2.load_strategy_state(old_state)
-
-    assert "final_selection" in strategy2._completed_phases
-    assert "baseline_test" in strategy2._completed_phases
-    assert "best_test" not in strategy2._completed_phases
+    assert strategy2.final.completed == {"baseline_test", "final_selection"}
+    assert "baseline_test" in strategy2.final.completed
+    assert "best_test" not in strategy2.final.completed
 
 
 # ── Unit tests for config, validation, etc. ──────────────────────────────
@@ -1297,7 +1273,7 @@ def test_resume_skips_completed_phases():
     strategy.configure()
 
     # Simulate: final_selection and baseline_test done
-    strategy._completed_phases = {"final_selection", "baseline_test"}
+    strategy.final.completed = {"final_selection", "baseline_test"}
     state = strategy.strategy_state_dict()
 
     # Restore into a fresh strategy
@@ -1305,14 +1281,14 @@ def test_resume_skips_completed_phases():
     strategy2.configure()
     strategy2.load_strategy_state(state)
 
-    assert "final_selection" in strategy2._completed_phases
-    assert "baseline_test" in strategy2._completed_phases
-    assert "best_test" not in strategy2._completed_phases
-    assert "final_test" not in strategy2._completed_phases
+    assert "final_selection" in strategy2.final.completed
+    assert "baseline_test" in strategy2.final.completed
+    assert "best_test" not in strategy2.final.completed
+    assert "final_test" not in strategy2.final.completed
 
     # The pending() function should reflect this
     def pending(phase: str) -> bool:
-        return phase not in strategy2._completed_phases
+        return phase not in strategy2.final.completed
 
     assert not pending("final_selection")
     assert not pending("baseline_test")

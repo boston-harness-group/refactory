@@ -628,6 +628,8 @@ def run_replay(
                 **strategy_options,
                 "rollout_order": rollout_order,
                 "patch_order": patch_order,
+                # The text knob A's skill lives in, which the proposer edits.
+                "knob": SKILL_KNOB,
             },
             project=Path("."), model=client,
         )

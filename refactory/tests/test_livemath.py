@@ -782,9 +782,9 @@ def test_skillopt_view_slow_update_trajectory():
     """slow_update.py:116-168 ``_read_trajectory`` over the same conversation."""
     from refactory_packages.livemath.skillopt_view import rollout_result
     from refactory_packages.skillopt.env import SkillOptEnv
-    from refactory_packages.skillopt.loop import SkillOptLoop
+    from refactory_packages.skillopt.proposer import comparison_pairs
 
-    pairs = SkillOptLoop._build_comparison_pairs(
+    pairs = comparison_pairs(
         [_VIEW_RECORD], [_VIEW_RECORD], ["202601:41"],
         env=SkillOptEnv("livemath"),
         prev_knobs={"skill": "P"}, curr_knobs={"skill": "C"},
