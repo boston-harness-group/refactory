@@ -12299,7 +12299,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/skill_graph
 
-solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.
+solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.
 
 ```json
 {
@@ -12482,7 +12482,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
   ],
   "parameters": {
     "compare__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Output Format\nThink step by step and write your analysis as notes for the later steps.\nDo not choose a final answer and do not write <answer> tags; the final step decides.\n",
       "description": "system prompt for the compare step",
       "frozen": false,
       "kind": "str",
@@ -12490,7 +12490,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
         null,
         null
       ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Output Format\nThink step by step and write your analysis as notes for the later steps.\nDo not choose a final answer and do not write <answer> tags; the final step decides.\n",
       "values": []
     },
     "compare_task": {
@@ -12542,7 +12542,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "values": []
     },
     "hypotheses__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Output Format\nThink step by step and write your analysis as notes for the later steps.\nDo not choose a final answer and do not write <answer> tags; the final step decides.\n",
       "description": "system prompt for the hypotheses step",
       "frozen": false,
       "kind": "str",
@@ -12550,7 +12550,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
         null,
         null
       ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Output Format\nThink step by step and write your analysis as notes for the later steps.\nDo not choose a final answer and do not write <answer> tags; the final step decides.\n",
       "values": []
     },
     "hypotheses_task": {
@@ -12578,7 +12578,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "values": []
     },
     "precision__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Output Format\nThink step by step and write your analysis as notes for the later steps.\nDo not choose a final answer and do not write <answer> tags; the final step decides.\n",
       "description": "system prompt for the precision step",
       "frozen": false,
       "kind": "str",
@@ -12586,7 +12586,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
         null,
         null
       ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Output Format\nThink step by step and write your analysis as notes for the later steps.\nDo not choose a final answer and do not write <answer> tags; the final step decides.\n",
       "values": []
     },
     "precision_task": {
@@ -12646,8 +12646,8 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "cli": "refactory ceo livemath/skill_graph",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
-    "reviewed_schema": "a37453b57c3b91143eb1a27f1ba039c269e5b5bf9a389e11ec95faa9f6933821"
+    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
+    "reviewed_schema": "012e42d17c24afa13a17867ef4e24aba2e510db5d89c919571d75d85d9c63579"
   }
 }
 ```

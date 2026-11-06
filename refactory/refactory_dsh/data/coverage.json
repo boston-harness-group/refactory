@@ -323,8 +323,8 @@
         "cli": "refactory ceo livemath/skill_graph",
         "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
       },
-      "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
-      "reviewed_schema": "a37453b57c3b91143eb1a27f1ba039c269e5b5bf9a389e11ec95faa9f6933821"
+      "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
+      "reviewed_schema": "012e42d17c24afa13a17867ef4e24aba2e510db5d89c919571d75d85d9c63579"
     },
     "livemath/solver": {
       "doc": "refactory/docs/outer-loop.md",

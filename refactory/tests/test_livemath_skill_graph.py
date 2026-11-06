@@ -273,7 +273,7 @@ def _calls(tmp_path, monkeypatch, answers=None, **knobs):
 def test_each_step_has_only_its_own_section_and_the_earlier_notes(tmp_path, monkeypatch):
     from refactory_packages.livemath.mode import SYSTEM_PROMPT
     from refactory_packages.livemath.ops import skill_section
-    from refactory_packages.livemath.skill_graph import SEED_SECTIONS
+    from refactory_packages.livemath.skill_graph import ANSWER_FORMAT, NOTES_FORMAT, SEED_SECTIONS
     from refactory_packages.livemath.tasks import load_items
 
     notes = {"compare": "CMP-NOTES-1a7", "precision": "PREC-NOTES-2b8",
@@ -283,9 +283,13 @@ def test_each_step_has_only_its_own_section_and_the_earlier_notes(tmp_path, monk
     assert {n: len(c) for n, c in by_node.items()} == {s: len(items) for s in AGENTS}
     for step in AGENTS:
         for message, system in by_node[step]:
-            # LiveMath's solver system prompt with this step's section as its skill.
-            assert system == SYSTEM_PROMPT.replace(
-                "{{skill_section}}", skill_section(SEED_SECTIONS[step])), step
+            # LiveMath's solver system prompt with this step's section as its skill
+            # (the analysis steps' answer format swapped for the notes format).
+            expected = SYSTEM_PROMPT.replace(
+                "{{skill_section}}", skill_section(SEED_SECTIONS[step]))
+            if step != "decide":
+                expected = expected.replace(ANSWER_FORMAT, NOTES_FORMAT)
+            assert system == expected, step
             # The question and every choice, as the baseline formats them.
             matching = [d for d in items if d["question"] in message]
             assert len(matching) == 1, (step, message[:80])
@@ -331,7 +335,8 @@ _OLD_TASKS["hypotheses"] = _OLD_TASKS["precision"]
 def _old_calls(questions: list[str], notes: dict[str, str]) -> dict[str, list[tuple[str, str]]]:
     """Every (framed user prompt, system prompt) the section-knob graph sent per step,
     built independently: SYSTEM_PROMPT with the step's seed section as its ``## Skill``
-    block, and the question, the earlier notes under their headings and the old task."""
+    block (the analysis steps' answer format swapped for the notes format), and the
+    question, the earlier notes under their headings and the old task."""
     from refactory_packages.livemath.mode import SYSTEM_PROMPT
     from refactory_packages.livemath.ops import claude_backend_prompt
     from refactory_packages.livemath.skill_graph import SEED_SECTIONS
@@ -341,9 +346,16 @@ def _old_calls(questions: list[str], notes: dict[str, str]) -> dict[str, list[tu
     earlier = {"compare": (), "precision": ("compare",), "hypotheses": ("compare",),
                "decide": ("compare", "precision", "hypotheses")}
     out: dict[str, list[tuple[str, str]]] = {}
+    answer_format = SYSTEM_PROMPT[SYSTEM_PROMPT.index("## Answer Format\n"):]
+    notes_format = ("## Output Format\n"
+                    "Think step by step and write your analysis as notes for the later steps.\n"
+                    "Do not choose a final answer and do not write <answer> tags; the final "
+                    "step decides.\n")
     for step in AGENTS:
         system = SYSTEM_PROMPT.replace("{{skill_section}}",
                                        "## Skill\n" + SEED_SECTIONS[step].strip() + "\n\n")
+        if step != "decide":
+            system = system.replace(answer_format, notes_format)
         for question in questions:
             blocks = [question, *(f"{heads[o]}\n{notes[o].strip()}" for o in earlier[step]),
                       _OLD_TASKS[step]]
@@ -354,8 +366,9 @@ def _old_calls(questions: list[str], notes: dict[str, str]) -> dict[str, list[tu
 
 def test_default_knobs_send_byte_identical_prompts(tmp_path, monkeypatch):
     """With default knobs every agent call's system prompt and framed user prompt is
-    byte-identical to the section-knob graph's, for every fixture item and all four
-    steps. Fails when a system-prompt or task default drifts by one byte."""
+    byte-identical to the expected one (decide's system prompt is the solver's own),
+    for every fixture item and all four steps. Fails when a system-prompt or task
+    default drifts by one byte."""
     from refactory_packages.livemath.mode import Solver
     from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
 
@@ -370,6 +383,22 @@ def test_default_knobs_send_byte_identical_prompts(tmp_path, monkeypatch):
     for node, prompt, system in model.log:
         sent.setdefault(node, []).append((prompt, system))
     assert {k: sorted(v) for k, v in sent.items()} == _old_calls(questions, notes)
+
+
+def test_only_decide_is_asked_for_an_answer():
+    """The analysis steps' default system prompts ask for notes and carry no answer
+    format; decide's is the solver's prompt with its seed section.
+    Fails when an analysis step is told to answer again."""
+    from refactory_packages.livemath.mode import SYSTEM_PROMPT
+    from refactory_packages.livemath.skill_graph import NOTES_FORMAT, step_system_prompt
+
+    for step in ("compare", "precision", "hypotheses"):
+        prompt = step_system_prompt(step)
+        assert "## Answer Format" not in prompt and "<answer>B</answer>" not in prompt, step
+        assert "provide your final answer" not in prompt, step
+        assert prompt.endswith(NOTES_FORMAT), step
+    decide = step_system_prompt("decide")
+    assert "## Answer Format" in decide and decide.endswith(SYSTEM_PROMPT.split("{{skill_section}}")[1])
 
 
 def test_a_system_prompt_or_task_knob_reaches_only_its_step(tmp_path, monkeypatch):

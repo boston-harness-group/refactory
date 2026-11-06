@@ -174,14 +174,14 @@ def test_cross_section_targets_are_refused_and_the_rest_applies():
 
 
 def test_an_unnamed_target_in_several_sections_is_refused_naming_them():
-    """"## Answer Format" is in every step's system prompt: an edit that does not name
+    """"## Task Format" is in every step's system prompt: an edit that does not name
     its section is refused, its outcome naming all four candidate sections, and the
     rest of the patch applies. Fails on a silent first match."""
     state = _seed_state()
     for knob in KNOBS:
-        assert "## Answer Format" in state["knobs"][knob]["value"], knob
+        assert "## Task Format" in state["knobs"][knob]["value"], knob
     ranked = [
-        {"op": "replace", "target": "## Answer Format", "content": "## Reply Format"},
+        {"op": "replace", "target": "## Task Format", "content": "## Input Format"},
         {"op": "replace", "target": "## Final Answer", "content": "## Final Answer (OK_EDIT)"},
     ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
@@ -195,7 +195,7 @@ def test_an_unnamed_target_in_several_sections_is_refused_naming_them():
     assert report["outcomes"][0]["status"] == AMBIGUOUS_SECTION
     knobs = outcome.state["knobs"]
     assert "OK_EDIT" in knobs["decide__system_prompt"]["value"]
-    assert all("## Reply Format" not in knobs[k]["value"] for k in KNOBS)
+    assert all("## Input Format" not in knobs[k]["value"] for k in KNOBS)
 
 
 def test_a_named_section_takes_a_shared_target_alone():
@@ -203,14 +203,14 @@ def test_a_named_section_takes_a_shared_target_alone():
     and the section field never reaches the knob's patch. Fails when a named edit
     goes to the first knob holding the target."""
     state = _seed_state()
-    ranked = [{"op": "replace", "target": "## Answer Format", "content": "## Reply Format",
+    ranked = [{"op": "replace", "target": "## Task Format", "content": "## Input Format",
                "section": "decide__system_prompt"}]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
     assert refused == [] and per_knob == [("decide__system_prompt", [0])]
     patch = _proposer().patch(ranked, _candidate(state), "", knob="decide__system_prompt").edit
     assert all("section" not in item for item in patch["patch"])
     out = _apply(per_knob, ranked, state)["knobs"]
-    assert "## Reply Format" in out["decide__system_prompt"]["value"]
+    assert "## Input Format" in out["decide__system_prompt"]["value"]
     for knob in KNOBS[:3]:
         assert out[knob] == state["knobs"][knob]
 
@@ -298,7 +298,7 @@ def test_an_insert_after_aimed_at_the_structure_appends_to_the_last_knob():
     ranked = [
         {"op": "insert_after", "target": "# Skill sections", "content": "- HEADER_RULE"},
         {"op": "insert_after", "target": "<!-- SECTION precision__system_prompt", "content": "- LINE_RULE"},
-        {"op": "insert_after", "target": "<answer>B</answer>\n\n\n<!-- SECTION", "content": "- X"},
+        {"op": "insert_after", "target": "step decides.\n\n\n<!-- SECTION", "content": "- X"},
     ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
     assert per_knob == [("decide__system_prompt", [0, 1])]
@@ -551,8 +551,8 @@ def test_a_resume_with_other_knobs_is_refused():
 
 #: An analyst's edit to text every step's system prompt shares, named to precision's
 #: section; it must survive the merge and the rank and land in precision alone.
-NAMED_EDIT = {"op": "replace", "target": "## Answer Format",
-              "content": "## Answer Format (NAMED_EDIT)", "section": "precision__system_prompt",
+NAMED_EDIT = {"op": "replace", "target": "## Task Format",
+              "content": "## Task Format (NAMED_EDIT)", "section": "precision__system_prompt",
               "source_type": "failure", "support_count": 1}
 
 #: Epoch 1's merged patch: one edit per kind of destination, the named edit, two
@@ -564,7 +564,7 @@ EPOCH1_EDITS = [
     {"op": "insert_after", "target": "## Hypotheses", "content": "- HYP_EDIT check every assumption.",
      "source_type": "failure", "support_count": 1},
     # compare's last words, the blank line and precision's SECTION line: refused.
-    {"op": "replace", "target": "<answer>B</answer>\n\n\n<!-- SECTION precision__system_prompt",
+    {"op": "replace", "target": "step decides.\n\n\n<!-- SECTION precision__system_prompt",
      "content": "SPLIT", "source_type": "failure", "support_count": 1},
     {"op": "append", "content": "- APPEND_EDIT end with the label.", "source_type": "success",
      "support_count": 1},
@@ -747,7 +747,7 @@ def test_skill_graph_runs_skillopt_over_its_four_knobs(tmp_path, graph_run):
     knobs = current.state["knobs"]
     assert "CMP_EDIT" in knobs["compare__system_prompt"]["value"]
     assert "HYP_EDIT" in knobs["hypotheses__system_prompt"]["value"]
-    assert "## Answer Format (NAMED_EDIT)" in knobs["precision__system_prompt"]["value"]
+    assert "## Task Format (NAMED_EDIT)" in knobs["precision__system_prompt"]["value"]
     assert "PREC_DROPPED" not in knobs["precision__system_prompt"]["value"]
     for knob in ("compare__system_prompt", "hypotheses__system_prompt", "decide__system_prompt"):
         assert "NAMED_EDIT" not in knobs[knob]["value"], knob

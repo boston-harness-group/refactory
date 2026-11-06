@@ -29,14 +29,17 @@ explicit graph. Inside LiveMath's per-item data pass, `compare` analyses every o
 `precision` and `hypotheses` then run in parallel on compare's notes; `decide` reads all
 three sets of notes and answers in the baseline solver's format. LiveMath's unchanged
 grader scores decide's answer. Each agent runs the solver's system prompt with only its
-own seed-skill section, and the step task texts carry no method guidance.
+own seed-skill section, and the step task texts carry no method guidance. Only `decide`
+answers: in the three analysis steps the solver's answer format is replaced by an output
+format asking for notes and no answer, so no analysis step commits to an option that
+decide then follows.
 
 Each step has two open text knobs, one per piece of text it sends:
 `<step>__system_prompt` (`compare__system_prompt`, ...) is the step's whole system prompt,
 seeded with the solver's system prompt and that step's section, and `<step>_task`
 (`compare_task`, ...) is the task text ending its user message. The question and the
-earlier steps' notes are data, not knobs. With the defaults every call is byte-identical
-to the earlier section-knob graph's. `max_completion_tokens`, `data_parallelism`,
+earlier steps' notes are data, not knobs. With the defaults decide's system prompt is
+the solver's, byte for byte. `max_completion_tokens`, `data_parallelism`,
 `use_theorem` and `use_sketch` are frozen. An item's theorem states the correct option,
 so the last two stay off. Each item takes 4 model calls.
 
