@@ -76,24 +76,27 @@ def error_fail_reason(record: dict[str, Any]) -> str:
     return f"error: {message or 'no response'}"
 
 
-def _step_skill(knobs: dict[str, Any], node: str) -> Any:
-    """The skill text in ``node``'s system prompt: its own section knob
-    (``skill_graph.skill_knob``) when the record's knobs have one, else ``skill``."""
-    from .skill_graph import skill_knob
+def _target_system_prompt(knobs: dict[str, Any], node: str) -> str:
+    """``node``'s system prompt: a ``skill_graph`` step's own whole-prompt knob
+    (``<step>__system_prompt``) when the record's knobs have one, else the solver's
+    system prompt built from the ``skill`` knob."""
+    from .skill_graph import STEPS, system_prompt_knob
 
-    own = skill_knob(node) if node else ""
-    return knobs[own] if own and own in knobs else knobs.get("skill", "")
+    own = system_prompt_knob(node) if node in STEPS else ""
+    if own and own in knobs:
+        return str(knobs[own])
+    return build_system(knobs.get("skill", ""))
 
 
 def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
     """One F6 record (``refactory_dsh/items.py:make_item_record``) as SkillOpt's result.
 
     ``knobs`` are the solver knobs the record was rolled out with; ``skill``
-    gives the target system prompt. A record of a graph whose steps each have a
-    section knob (``skill_graph``: ``<step>_skill``) takes the first step's
-    section instead, and when its exchanges come from more than one node each
-    message is labelled with its node (``[compare] ...``), so the analysts can
-    tell which step wrote what. A one-node record (the solver's) is unchanged.
+    gives the target system prompt. A ``skill_graph`` record takes its first
+    step's system-prompt knob (``<step>__system_prompt``) instead, and when its
+    exchanges come from more than one node each message is labelled with its
+    node (``[compare] ...``), so the analysts can tell which step wrote what.
+    A one-node record (the solver's) is unchanged.
 
     A record that ended in an error has no conversation and ``n_turns`` 0
     (rollout.py:286-289, :359-376): the failed or timed-out ``process_one``
@@ -128,7 +131,7 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
     result["n_turns"] = len(conversation)
 
     # rollout.py:254-257: the first turn's system and user prompts.
-    result["target_system_prompt"] = build_system(_step_skill(knobs, str(exchanges[0].get("node") or "")))
+    result["target_system_prompt"] = _target_system_prompt(knobs, str(exchanges[0].get("node") or ""))
     # SkillOpt saves the user message (rollout.py:254-257), not the Claude
     # backend's framing of it that the solve node sends.
     result["target_user_prompt"] = unwrap_claude_backend_prompt(str(exchanges[0].get("prompt") or ""))

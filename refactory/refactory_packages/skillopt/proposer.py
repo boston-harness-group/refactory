@@ -26,8 +26,18 @@ update and one meta skill per epoch, so call keys, trace entries and the
 proposer's state stay single and unique -- and the patch is mapped back to the
 knobs (:meth:`SkillOptProposer.route`):
 
-- an edit whose ``target`` occurs in a knob's text goes to the first such knob, in
-  ``knobs`` order (the composite's first occurrence inside a section);
+- an edit may name its section: ``"section": "<knob>"``, the knob of a SECTION
+  line (the composite's header asks for it when a target occurs in several
+  sections). A named edit goes to that knob alone: an edit whose ``target`` is in
+  that knob's text applies there; one whose ``target`` is elsewhere in the
+  composite (another section, the structure, across a boundary) is **refused**
+  ``skipped_target_not_in_section``; an ``append``, or a target found nowhere,
+  goes to the named knob, where SkillOpt's missing-target rule applies. A section
+  that names no knob is refused ``skipped_unknown_section``;
+- an unnamed edit whose ``target`` occurs in exactly one knob's text goes to that
+  knob; one whose ``target`` occurs in several is **refused**
+  ``skipped_ambiguous_section``, its outcome naming the candidate sections (never
+  a silent first match);
 - an ``insert_after`` whose ``target`` is only in the header or a SECTION line takes
   SkillOpt's missing-target rule: it is appended to the last knob;
 - any other edit whose ``target`` occurs in the composite only across a section
@@ -74,6 +84,14 @@ SECTION_PREFIX = "<!-- SECTION "
 CROSS_SECTION = "skipped_cross_section"
 #: Status of an edit whose content would add a SECTION line.
 SECTION_LINE_IN_CONTENT = "skipped_section_line_in_content"
+#: An edit's optional field naming the knob (section) it applies to.
+SECTION_FIELD = "section"
+#: Status of an edit whose section names no knob of the composite.
+UNKNOWN_SECTION = "skipped_unknown_section"
+#: Status of an edit whose target is not in the section it names.
+TARGET_NOT_IN_SECTION = "skipped_target_not_in_section"
+#: Status of an unnamed edit whose target occurs in several sections.
+AMBIGUOUS_SECTION = "skipped_ambiguous_section"
 #: The edit kinds that address text by a target (``nn.edits`` set_knob patches).
 TARGET_KINDS = ("replace", "delete", "insert_after", "insert_before")
 
@@ -187,11 +205,17 @@ class SkillOptProposer:
               *, knob: str | None = None) -> Proposal:
         """The patch step: the ranked edits as a ``set_knob`` patch (trainer.py:1507)
         of ``knob`` (the last knob when not given)."""
+        items = [_op_to_kind(edit) for edit in ranked]
+        if self.multi:
+            # The section only routes the edit (:meth:`route`); the knob's patch
+            # carries SkillOpt's own fields.
+            items = [{k: v for k, v in item.items() if k != SECTION_FIELD}
+                     if isinstance(item, dict) else item for item in items]
         return Proposal(
             edit={
                 "op": "set_knob",
                 "name": knob or self.knob,
-                "patch": [_op_to_kind(edit) for edit in ranked],
+                "patch": items,
                 "config": dict(SKILLOPT_PATCH_CONFIG),
             },
             rationale=rationale, parent=parent.id,
@@ -217,10 +241,10 @@ class SkillOptProposer:
         for index, edit in enumerate(ranked):
             item = _op_to_kind(edit) if isinstance(edit, dict) else edit
             texts = {name: _value(state, name) for name in self.knobs}
-            name, status = _route_one(item, texts, composite(state, self.knobs), self.knobs,
-                                      _structure(state, self.knobs))
+            name, status, sections = _route_one(item, texts, composite(state, self.knobs),
+                                                self.knobs, _structure(state, self.knobs))
             if status:
-                refused.append(_refusal(index, item, status))
+                refused.append(_refusal(index, item, status, sections))
                 continue
             routed[name].append(index)
             try:
@@ -400,6 +424,7 @@ class SkillOptProposer:
             trace=self.trace,
             env=self.env,
             knobs=knob_values(candidate),
+            sections=self.multi,
         )
         return self._merge_order(epoch, "failure", failure), self._merge_order(epoch, "success", success)
 
@@ -414,6 +439,7 @@ class SkillOptProposer:
             epoch=epoch,
             trace=self.trace,
             merge_batch_size=self.merge_batch_size,
+            sections=self.multi,
         )
         # SkillOpt writes the merged patch to steps/step_NNNN/merged_patch.json
         # (trainer.py:1376); recording the dict here lets the F20 replay compare it
@@ -423,8 +449,17 @@ class SkillOptProposer:
         )
         return merged
 
-    def rank(self, epoch: int, text: str, merged: dict) -> list[dict]:
-        """The ranked edits within this step's edit budget (the cosine schedule)."""
+    def rank(self, epoch: int, text: str, merged: dict,
+             parent: Candidate | None = None) -> list[dict]:
+        """The ranked edits within this step's edit budget (the cosine schedule).
+
+        With several knobs and the ``parent`` they apply to, the edits :meth:`route`
+        refuses are dropped first (recorded as ``section_refused``), so a refused
+        edit never takes a budget slot. With one knob every merged edit is ranked,
+        as SkillOpt ranks them."""
+        edits = merge.patch_edits(merged)
+        if self.multi and parent is not None:
+            edits = self._routable(edits, parent)
         budget = schedule.edit_budget(
             self.budget_step + 1, self.max_epochs, self.edit_budget_max, self.edit_budget_min,
         )
@@ -432,11 +467,12 @@ class SkillOptProposer:
         ranked = merge.rank(
             client=self.client(),
             skill_text=text,
-            merged_edits=merge.patch_edits(merged),
+            merged_edits=edits,
             budget=budget,
             meta_skill=self.meta_skill,
             epoch=epoch,
             trace=self.trace,
+            sections=self.multi,
         )
         # ``edits`` mirrors SkillOpt's steps/step_NNNN/ranked_edits.json
         # (trainer.py:1396, :1427), so the F20 replay compares the selected edits
@@ -446,6 +482,16 @@ class SkillOptProposer:
             n_edits=len(ranked), edits=ranked,
         )
         return ranked
+
+    def _routable(self, edits: list[dict], parent: Candidate) -> list[dict]:
+        """``edits`` without the ones :meth:`route` refuses on ``parent``."""
+        _per_knob, refused = self.route(edits, parent)
+        if not refused:
+            return edits
+        dropped = {row["index"] for row in refused}
+        if self.trace is not None:
+            self.trace.record_decision("section_refused", n_edits=len(edits), outcomes=refused)
+        return [edit for index, edit in enumerate(edits) if index not in dropped]
 
     # ── end of epoch: slow update and meta skill ───────────────────────────
 
@@ -790,7 +836,11 @@ def composite_header(state: dict[str, Any]) -> str:
         "<!-- SECTION <knob>: <where it is used> --> line and is the text of that knob; "
         "only the step it names reads it. Keep every edit inside one section, and never "
         "edit this header or a SECTION line; an edit with no target (append) goes at "
-        "the end of the last section."
+        "the end of the last section. An edit may name its section by adding "
+        "\"section\": \"<knob>\" (the knob of that section's SECTION line); it then "
+        "applies only there, and an append with a section goes at the end of that "
+        "section. An edit whose target text appears in more than one section must "
+        "name its section, or it is not applied."
     )
 
 
@@ -814,34 +864,49 @@ def _structure(state: dict[str, Any], knobs: tuple[str, ...]) -> list[str]:
 def _route_one(
     edit: Any, texts: dict[str, str], document: str, knobs: tuple[str, ...],
     structure: list[str] = (),  # type: ignore[assignment]
-) -> tuple[str, str]:
-    """The knob one edit goes to, or ``("", status)`` when it is refused.
+) -> tuple[str, str, list[str]]:
+    """The knob one edit goes to, or ``("", status, sections)`` when it is refused;
+    ``sections`` are the knobs the refusal names (where the target is, or the
+    knobs a section may name).
 
-    An ``insert_after`` whose target is only in the header or a SECTION line changes
-    no structure: it takes SkillOpt's missing-target rule (append), so it goes to the
-    last knob like an unfound target. Any other edit aimed outside the sections is
-    refused."""
+    A named section (``SECTION_FIELD``) is the only knob the edit may go to. An
+    unnamed edit goes to the one knob holding its target, and is refused when
+    several do. An unnamed ``insert_after`` whose target is only in the header or a
+    SECTION line changes no structure: it takes SkillOpt's missing-target rule
+    (append), so it goes to the last knob like an unfound target. Any other edit
+    aimed outside the sections is refused."""
     if not isinstance(edit, dict):
-        return knobs[-1], ""
+        return knobs[-1], "", []
     content = edit.get("content", "")
     if isinstance(content, str) and SECTION_PREFIX in content:
-        return "", SECTION_LINE_IN_CONTENT
+        return "", SECTION_LINE_IN_CONTENT, []
     target = edit.get("target", "")
-    if edit.get("kind") in TARGET_KINDS and isinstance(target, str) and target:
-        for name in knobs:
-            if target in texts[name]:
-                return name, ""
+    targeted = edit.get("kind") in TARGET_KINDS and isinstance(target, str) and bool(target)
+    holders = [name for name in knobs if targeted and target in texts[name]]
+    section = edit.get(SECTION_FIELD)
+    if section is not None and section != "":
+        if not isinstance(section, str) or section not in knobs:
+            return "", UNKNOWN_SECTION, list(knobs)
+        if targeted and section not in holders and target in document:
+            return "", TARGET_NOT_IN_SECTION, holders
+        return section, "", []
+    if len(holders) == 1:
+        return holders[0], "", []
+    if len(holders) > 1:
+        return "", AMBIGUOUS_SECTION, holders
+    if targeted:
         if edit.get("kind") == "insert_after" and any(target in part for part in structure):
-            return knobs[-1], ""
+            return knobs[-1], "", []
         if target in document:
-            return "", CROSS_SECTION
-    return knobs[-1], ""
+            return "", CROSS_SECTION, []
+    return knobs[-1], "", []
 
 
-def _refusal(index: int, edit: Any, status: str) -> dict[str, Any]:
+def _refusal(index: int, edit: Any, status: str,
+             sections: list[str] = ()) -> dict[str, Any]:  # type: ignore[assignment]
     edit = edit if isinstance(edit, dict) else {}
     target = edit.get("target", "")
-    return {
+    out = {
         "index": index,
         "kind": edit.get("kind"),
         "target": str(target)[:200] if target else "",
@@ -849,6 +914,29 @@ def _refusal(index: int, edit: Any, status: str) -> dict[str, Any]:
         "status": status,
         "knob": None,
     }
+    message = _REFUSAL_MESSAGES.get(status)
+    if status == TARGET_NOT_IN_SECTION and not sections:
+        message = _OUTSIDE_SECTIONS
+    if message:
+        out["sections"] = list(sections)
+        out["message"] = message.format(section=edit.get(SECTION_FIELD),
+                                        sections=", ".join(sections) or "none")
+    return out
+
+
+#: Why a section-routing refusal happened, for the edit report.
+_REFUSAL_MESSAGES = {
+    AMBIGUOUS_SECTION: ("the target occurs in several sections ({sections}); name one "
+                        "with \"section\" to apply the edit"),
+    TARGET_NOT_IN_SECTION: ("the target is not in section {section!r}; it occurs in: "
+                            "{sections}"),
+    UNKNOWN_SECTION: "section {section!r} is not one of the sections: {sections}",
+}
+#: A named edit whose target is in no section's text: across a section boundary,
+#: in the header or in a SECTION line.
+_OUTSIDE_SECTIONS = ("the target is not in section {section!r}: it is in no section's "
+                     "text, but across a section boundary, in the header or in a "
+                     "SECTION line")
 
 
 def only_noop(reasons: list[str]) -> bool:

@@ -4,13 +4,15 @@ Coverage:
 - one knob (the default) is seen, routed and patched exactly as before
 - the composite: a header naming the graph's agent steps, then each knob's text
   verbatim under its SECTION line, the last knob ending the document
-- routing: an edit goes to the first knob holding its target; an append or an
-  unfound target to the last knob; a target across a section boundary, in the
+- routing: an edit goes to the one knob holding its target; an append or an
+  unfound target to the last knob; a target in several knobs is refused unless the
+  edit names its section, and a named section takes the edit alone (refused when
+  its target is elsewhere, an append or unfound target landing there); a target across a section boundary, in the
   header or in a SECTION line, and content carrying a SECTION line, are refused
   per edit while the rest of the patch applies; later edits route against what
   earlier ones wrote
 - knobs that are missing, frozen or not text are refused before anything is spent
-- livemath/skill_graph with its four section knobs and a scripted model (no paid
+- livemath/skill_graph with its four system-prompt knobs and a scripted model (no paid
   calls): analysts -> merge -> patch -> val gate -> slow update -> meta skill, the
   edits landing on the right knobs and reaching the step that reads each; unique,
   replayable call keys; resume from a mid-epoch kill
@@ -32,7 +34,8 @@ from refactory_dsh.outerloop import ValidationGate
 from refactory_packages.skillopt import prompts
 from refactory_packages.skillopt.loop import SkillOptLoop
 from refactory_packages.skillopt.proposer import (
-    CROSS_SECTION, SECTION_LINE_IN_CONTENT, SkillOptProposer, composite,
+    AMBIGUOUS_SECTION, CROSS_SECTION, SECTION_LINE_IN_CONTENT, TARGET_NOT_IN_SECTION,
+    UNKNOWN_SECTION, SkillOptProposer, composite,
 )
 from refactory_packages.skillopt.trace import current_call_key
 
@@ -40,7 +43,7 @@ from test_livemath_blocks import _patch_task
 from test_skillopt import FakeClient, ProcessKilled
 
 MODE = "livemath/skill_graph"
-KNOBS = ("compare_skill", "precision_skill", "hypotheses_skill", "decide_skill")
+KNOBS = ("compare__system_prompt", "precision__system_prompt", "hypotheses__system_prompt", "decide__system_prompt")
 TRAIN = ["202501:1", "202501:2"]   # 202501:1 is B (passes), 202501:2 is not (fails)
 VAL = ["202503:1"]
 
@@ -98,7 +101,7 @@ def test_one_knob_is_seen_and_patched_exactly_as_before():
 
 
 def test_composite_lists_each_knob_under_its_section_line():
-    from refactory_packages.livemath.skill_graph import SEED_SECTIONS
+    from refactory_packages.livemath.skill_graph import step_system_prompt
 
     state = _seed_state()
     text = _proposer().text(_candidate(state))
@@ -107,11 +110,11 @@ def test_composite_lists_each_knob_under_its_section_line():
             "compare -> hypotheses | precision -> decide.") in text
     positions = []
     for knob, step in zip(KNOBS, ("compare", "precision", "hypotheses", "decide")):
-        line = f"<!-- SECTION {knob}: skill section in the {step} step's system message -->"
-        assert f"{line}\n{SEED_SECTIONS[step]}" in text
+        line = f"<!-- SECTION {knob}: system prompt for the {step} step -->"
+        assert f"{line}\n{step_system_prompt(step)}" in text
         positions.append(text.index(line))
     assert positions == sorted(positions)
-    assert text.endswith(SEED_SECTIONS["decide"])
+    assert text.endswith(step_system_prompt("decide"))
 
 
 # ── routing ───────────────────────────────────────────────────────────────
@@ -131,29 +134,29 @@ def test_edits_route_to_the_section_holding_their_target():
     ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
     assert refused == []
-    assert per_knob == [("compare_skill", [0]), ("hypotheses_skill", [1]),
-                        ("decide_skill", [2, 3, 4])]
+    assert per_knob == [("compare__system_prompt", [0]), ("hypotheses__system_prompt", [1]),
+                        ("decide__system_prompt", [2, 3, 4])]
     out = _apply(per_knob, ranked, state)["knobs"]
-    assert "CMP_EDIT" in out["compare_skill"]["value"]
-    assert out["hypotheses_skill"]["value"].startswith("## Hypotheses\n\n- HYP_EDIT")
-    decide = out["decide_skill"]["value"]
+    assert "CMP_EDIT" in out["compare__system_prompt"]["value"]
+    assert "## Hypotheses\n\n- HYP_EDIT" in out["hypotheses__system_prompt"]["value"]
+    decide = out["decide__system_prompt"]["value"]
     assert "APPEND_EDIT" in decide and "FALLBACK_EDIT" in decide and "LOST" not in decide
-    assert out["precision_skill"] == state["knobs"]["precision_skill"]
+    assert out["precision__system_prompt"] == state["knobs"]["precision__system_prompt"]
 
 
 def test_cross_section_targets_are_refused_and_the_rest_applies():
     """A target across a section boundary, in the header or in a SECTION line, and
     content carrying a SECTION line, are refused one by one; the other edits still
     route. Fails when a cross-section edit is routed (or splits) instead."""
-    from refactory_packages.livemath.skill_graph import SEED_SECTIONS
+    from refactory_packages.livemath.skill_graph import step_system_prompt
 
     state = _seed_state()
-    compare_tail = SEED_SECTIONS["compare"].splitlines()[-1]
+    compare_tail = step_system_prompt("compare")[-30:]
     ranked = [
         # The end of compare's text, the blank line and precision's SECTION line.
-        {"op": "replace", "target": f"{compare_tail}\n\n<!-- SECTION precision_skill",
+        {"op": "replace", "target": f"{compare_tail}\n\n<!-- SECTION precision__system_prompt",
          "content": "X"},
-        {"op": "delete", "target": "<!-- SECTION hypotheses_skill: skill section"},
+        {"op": "delete", "target": "<!-- SECTION hypotheses__system_prompt: system prompt"},
         {"op": "replace", "target": "# Skill sections", "content": "# HEADER_EDIT"},
         {"op": "append", "content": "<!-- SECTION forged: knob -->\n- FORGED"},
         {"op": "replace", "target": "## Final Answer", "content": "## Final Answer (OK_EDIT)"},
@@ -163,22 +166,127 @@ def test_cross_section_targets_are_refused_and_the_rest_applies():
         (0, CROSS_SECTION, None), (1, CROSS_SECTION, None), (2, CROSS_SECTION, None),
         (3, SECTION_LINE_IN_CONTENT, None),
     ]
-    assert per_knob == [("decide_skill", [4])]
+    assert per_knob == [("decide__system_prompt", [4])]
     out = _apply(per_knob, ranked, state)["knobs"]
-    assert "OK_EDIT" in out["decide_skill"]["value"]
+    assert "OK_EDIT" in out["decide__system_prompt"]["value"]
     for knob in KNOBS[:3]:
         assert out[knob] == state["knobs"][knob]
 
 
-def test_a_target_in_several_sections_goes_to_the_first_knob():
-    """"equality" is in compare's, precision's and hypotheses' text: the edit goes to
-    compare, the composite's first occurrence. Fails when a later knob wins."""
+def test_an_unnamed_target_in_several_sections_is_refused_naming_them():
+    """"## Answer Format" is in every step's system prompt: an edit that does not name
+    its section is refused, its outcome naming all four candidate sections, and the
+    rest of the patch applies. Fails on a silent first match."""
     state = _seed_state()
-    for knob in KNOBS[:3]:
-        assert "equality" in state["knobs"][knob]["value"], knob
-    ranked = [{"op": "replace", "target": "equality", "content": "EQUALITY_EDIT"}]
+    for knob in KNOBS:
+        assert "## Answer Format" in state["knobs"][knob]["value"], knob
+    ranked = [
+        {"op": "replace", "target": "## Answer Format", "content": "## Reply Format"},
+        {"op": "replace", "target": "## Final Answer", "content": "## Final Answer (OK_EDIT)"},
+    ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
-    assert refused == [] and per_knob == [("compare_skill", [0])]
+    assert per_knob == [("decide__system_prompt", [1])]
+    assert [(r["index"], r["status"], r["sections"]) for r in refused] == [
+        (0, AMBIGUOUS_SECTION, list(KNOBS))]
+    assert all(knob in refused[0]["message"] for knob in KNOBS)
+    assert '"section"' in refused[0]["message"]
+    run = _AttemptRun()
+    outcome, report = _proposer().attempt_patch(run, ranked, _candidate(state), "r")
+    assert report["outcomes"][0]["status"] == AMBIGUOUS_SECTION
+    knobs = outcome.state["knobs"]
+    assert "OK_EDIT" in knobs["decide__system_prompt"]["value"]
+    assert all("## Reply Format" not in knobs[k]["value"] for k in KNOBS)
+
+
+def test_a_named_section_takes_a_shared_target_alone():
+    """The same shared target named to decide's section changes decide's copy only,
+    and the section field never reaches the knob's patch. Fails when a named edit
+    goes to the first knob holding the target."""
+    state = _seed_state()
+    ranked = [{"op": "replace", "target": "## Answer Format", "content": "## Reply Format",
+               "section": "decide__system_prompt"}]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert refused == [] and per_knob == [("decide__system_prompt", [0])]
+    patch = _proposer().patch(ranked, _candidate(state), "", knob="decide__system_prompt").edit
+    assert all("section" not in item for item in patch["patch"])
+    out = _apply(per_knob, ranked, state)["knobs"]
+    assert "## Reply Format" in out["decide__system_prompt"]["value"]
+    for knob in KNOBS[:3]:
+        assert out[knob] == state["knobs"][knob]
+
+
+def test_a_named_section_refuses_a_target_found_only_elsewhere():
+    """A named edit whose target is in another section (or only in the structure) is
+    refused, naming where the target is. Fails when it falls back to that section."""
+    state = _seed_state()
+    ranked = [
+        {"op": "replace", "target": "Compare all options before committing.",
+         "content": "X", "section": "decide__system_prompt"},
+        {"op": "insert_after", "target": "# Skill sections", "content": "- Y",
+         "section": "precision__system_prompt"},
+    ]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert per_knob == []
+    assert [(r["index"], r["status"], r["sections"]) for r in refused] == [
+        (0, TARGET_NOT_IN_SECTION, ["compare__system_prompt"]),
+        (1, TARGET_NOT_IN_SECTION, []),
+    ]
+    assert "decide__system_prompt" in refused[0]["message"]
+    assert "compare__system_prompt" in refused[0]["message"]
+    # A target in no section's text says where it is, not "it occurs in: none".
+    assert "across a section boundary" in refused[1]["message"]
+    assert "none" not in refused[1]["message"]
+
+
+def test_a_named_append_or_unfound_target_lands_at_the_end_of_that_section():
+    """An append and an insert_after whose target is nowhere, both naming precision's
+    section, end precision's text (SkillOpt's missing-target rule there), not the
+    last knob's. Fails when a named append still goes to the last knob."""
+    state = _seed_state()
+    ranked = [
+        {"op": "append", "content": "- NAMED_APPEND", "section": "precision__system_prompt"},
+        {"op": "insert_after", "target": "nowhere at all", "content": "- NAMED_FALLBACK",
+         "section": "precision__system_prompt"},
+        {"op": "append", "content": "- UNNAMED_APPEND"},
+    ]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert refused == []
+    assert per_knob == [("precision__system_prompt", [0, 1]), ("decide__system_prompt", [2])]
+    out = _apply(per_knob, ranked, state)["knobs"]
+    assert out["precision__system_prompt"]["value"].rstrip().endswith(
+        "- NAMED_APPEND\n\n- NAMED_FALLBACK")
+    assert out["decide__system_prompt"]["value"].rstrip().endswith("- UNNAMED_APPEND")
+
+
+@pytest.mark.parametrize("section", ["nope__system_prompt", "data_parallelism", 3])
+def test_a_section_naming_no_knob_is_refused(section):
+    state = _seed_state()
+    ranked = [{"op": "append", "content": "- Z", "section": section}]
+    per_knob, refused = _proposer().route(ranked, _candidate(state))
+    assert per_knob == []
+    assert [(r["status"], r["sections"]) for r in refused] == [(UNKNOWN_SECTION, list(KNOBS))]
+
+
+def test_one_knob_prompts_never_carry_the_section_field():
+    """The section note and the ranker's section column are multi-knob only: with
+    one knob a system prompt is unchanged and an edit's section is not shown."""
+    edit = {"op": "append", "content": "x", "support_count": 1, "section": "s"}
+    plain = {k: v for k, v in edit.items() if k != "section"}
+    assert prompts.describe_edit(edit) == prompts.describe_edit(plain)
+    assert "section='s'" in prompts.describe_edit(edit, sections=True)
+    assert prompts.with_sections(prompts.RANK_SYSTEM, False) == prompts.RANK_SYSTEM
+    assert prompts.with_sections(prompts.RANK_SYSTEM, True).endswith(prompts.SECTION_EDIT_NOTE)
+    assert prompts.format_rank_user("S", [edit], 1) == prompts.format_rank_user("S", [plain], 1)
+
+
+def test_the_header_asks_for_a_section_on_shared_targets():
+    from refactory_packages.skillopt.proposer import composite_header
+
+    state = _seed_state()
+    header = composite_header(state)
+    assert _proposer().text(_candidate(state)).startswith(header + "\n\n")
+    assert '"section": "<knob>"' in header
+    assert "appears in more than one section must name its section" in header
 
 
 def test_an_insert_after_aimed_at_the_structure_appends_to_the_last_knob():
@@ -189,15 +297,15 @@ def test_an_insert_after_aimed_at_the_structure_appends_to_the_last_knob():
     state = _seed_state()
     ranked = [
         {"op": "insert_after", "target": "# Skill sections", "content": "- HEADER_RULE"},
-        {"op": "insert_after", "target": "<!-- SECTION precision_skill", "content": "- LINE_RULE"},
-        {"op": "insert_after", "target": 'and "exactly when".\n\n<!-- SECTION', "content": "- X"},
+        {"op": "insert_after", "target": "<!-- SECTION precision__system_prompt", "content": "- LINE_RULE"},
+        {"op": "insert_after", "target": "<answer>B</answer>\n\n\n<!-- SECTION", "content": "- X"},
     ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
-    assert per_knob == [("decide_skill", [0, 1])]
+    assert per_knob == [("decide__system_prompt", [0, 1])]
     assert [(r["index"], r["status"]) for r in refused] == [(2, CROSS_SECTION)]
     run = _AttemptRun()
     outcome, report = _proposer().attempt_patch(run, ranked, _candidate(state), "r")
-    decide = outcome.state["knobs"]["decide_skill"]["value"]
+    decide = outcome.state["knobs"]["decide__system_prompt"]["value"]
     assert decide.endswith("- HEADER_RULE\n\n- LINE_RULE\n")
     assert [o["status"] for o in report["outcomes"]][:2] == [
         "applied_insert_after_fallback_append"] * 2
@@ -214,8 +322,8 @@ def test_later_edits_route_against_what_earlier_edits_wrote():
         {"op": "replace", "target": "- NEW_RULE one.", "content": "- NEW_RULE two."},
     ]
     per_knob, refused = _proposer().route(ranked, _candidate(state))
-    assert refused == [] and per_knob == [("precision_skill", [0, 1])]
-    assert "NEW_RULE two." in _apply(per_knob, ranked, state)["knobs"]["precision_skill"]["value"]
+    assert refused == [] and per_knob == [("precision__system_prompt", [0, 1])]
+    assert "NEW_RULE two." in _apply(per_knob, ranked, state)["knobs"]["precision__system_prompt"]["value"]
 
 
 class _AttemptRun:
@@ -267,18 +375,18 @@ def test_a_knob_whose_edits_change_nothing_is_passed_over():
     run = _AttemptRun()
     outcome, report = _proposer().attempt_patch(run, ranked, parent, "r")
     assert isinstance(outcome, Candidate)
-    assert [knob for knob, _ in run.attempts] == ["compare_skill"]
+    assert [knob for knob, _ in run.attempts] == ["compare__system_prompt"]
     assert run.rejections == []
     assert outcome.parent == parent.id and len(outcome.edits) == 1
-    assert "(CMP)" in outcome.state["knobs"]["compare_skill"]["value"]
-    assert outcome.state["knobs"]["decide_skill"] == state["knobs"]["decide_skill"]
+    assert "(CMP)" in outcome.state["knobs"]["compare__system_prompt"]["value"]
+    assert outcome.state["knobs"]["decide__system_prompt"] == state["knobs"]["decide__system_prompt"]
     assert [(o["knob"], o["status"]) for o in report["outcomes"]] == [
-        ("compare_skill", "applied_replace"), ("decide_skill", "skipped_protected_region")]
+        ("compare__system_prompt", "applied_replace"), ("decide__system_prompt", "skipped_protected_region")]
 
 
 def test_a_step_whose_every_edit_is_refused_is_a_noop():
     parent = _candidate(_seed_state())
-    ranked = [{"op": "delete", "target": "<!-- SECTION decide_skill"}]
+    ranked = [{"op": "delete", "target": "<!-- SECTION decide__system_prompt"}]
     outcome, report = _proposer().attempt_patch(_AttemptRun(), ranked, parent, "r")
     assert isinstance(outcome, list) and outcome[0].startswith("E-noop")
     assert report["noop"] and report["outcomes"][0]["status"] == CROSS_SECTION
@@ -306,16 +414,16 @@ def test_a_knob_patch_reaching_a_held_state_continues_from_it():
 
     parent = _candidate(_seed_state())
     compare_edit = {"op": "replace", "target": "## Option Comparison", "content": "## Options (CMP)"}
-    held_state = nn_edits.apply(_proposer().patch([compare_edit], parent, "", knob="compare_skill").edit,
+    held_state = nn_edits.apply(_proposer().patch([compare_edit], parent, "", knob="compare__system_prompt").edit,
                                 parent.state)
     held = Candidate.from_state(held_state, parent=parent.id, edits=[])
     run = _AttemptRun((held,))
     outcome, _ = _proposer().attempt_patch(
         run, [compare_edit, {"op": "append", "content": "- END"}], parent, "r")
-    assert run.attempts == [("compare_skill", parent.id), ("decide_skill", held.id)]
+    assert run.attempts == [("compare__system_prompt", parent.id), ("decide__system_prompt", held.id)]
     # The step's candidate is rebuilt as the parent's child, carrying both edits.
     assert isinstance(outcome, Candidate) and outcome.parent == parent.id
-    assert [e["name"] for e in outcome.edits] == ["compare_skill", "decide_skill"]
+    assert [e["name"] for e in outcome.edits] == ["compare__system_prompt", "decide__system_prompt"]
     refused, _ = _proposer().attempt_patch(_AttemptRun((held,)), [compare_edit], parent, "r")
     assert refused == ["E-duplicate: held"]
 
@@ -329,13 +437,13 @@ def test_the_slow_update_lives_at_the_end_of_the_last_knob():
     state = _seed_state()
     proposer = _proposer()
     placeholder = proposer.placeholder(_candidate(state)).edit
-    assert placeholder["name"] == "decide_skill" and "value" in placeholder
+    assert placeholder["name"] == "decide__system_prompt" and "value" in placeholder
     state = nn_edits.apply(placeholder, state)
     proposal, text = proposer.slow_update_proposal("GUIDE well.", _candidate(state))
-    assert proposal.edit["name"] == "decide_skill"
+    assert proposal.edit["name"] == "decide__system_prompt"
     after = nn_edits.apply(proposal.edit, state)
-    assert after["knobs"]["decide_skill"]["value"] == prompts.replace_slow_update_field(
-        state["knobs"]["decide_skill"]["value"], "GUIDE well.")
+    assert after["knobs"]["decide__system_prompt"]["value"] == prompts.replace_slow_update_field(
+        state["knobs"]["decide__system_prompt"]["value"], "GUIDE well.")
     assert text == composite(after, KNOBS)
     assert text.endswith(f"{prompts.SLOW_UPDATE_START}\nGUIDE well.\n{prompts.SLOW_UPDATE_END}\n")
     assert prompts.extract_slow_update_field(text) == "GUIDE well."
@@ -343,24 +451,24 @@ def test_the_slow_update_lives_at_the_end_of_the_last_knob():
         assert after["knobs"][knob] == state["knobs"][knob]
 
 
-def test_livemath_view_labels_each_step_and_shows_the_first_steps_section():
+def test_livemath_view_labels_each_step_and_shows_the_first_steps_system_prompt():
     """A skill_graph record's messages carry the step that wrote them, and the target
-    system prompt holds compare's section; a one-node (solver) record is unlabelled.
-    Fails when the view drops the node or reads the absent ``skill`` knob."""
-    from refactory_packages.livemath.skill_graph import SEED_SECTIONS
+    system prompt is compare's system-prompt knob; a one-node (solver) record is
+    unlabelled. Fails when the view drops the node or reads the absent ``skill`` knob."""
+    from refactory_packages.livemath.skill_graph import STEPS
     from refactory_packages.livemath.skillopt_view import build_system, rollout_result
     from refactory_packages.skillopt.prompts import fmt_trajectory
 
     meta = {"question": "Q?", "choices": [{"label": "A", "text": "a"}, {"label": "B", "text": "b"}],
             "correct_choice": {"label": "B", "text": "b"}}
-    knobs = {f"{s}_skill": SEED_SECTIONS[s] for s in SEED_SECTIONS}
+    knobs = {f"{s}__system_prompt": f"SYSTEM-{s}" for s in STEPS}
     record = {"id": "x", "passed": True, "metadata": meta, "exchanges": [
         {"node": "compare", "prompt": "P", "response": "cmp"},
         {"node": "precision", "prompt": "P2", "response": "prc"},
         {"node": "decide", "prompt": "P3", "response": "<answer>B</answer>"},
     ]}
     result = rollout_result(record, knobs)
-    assert result["target_system_prompt"] == build_system(SEED_SECTIONS["compare"])
+    assert result["target_system_prompt"] == "SYSTEM-compare"
     assert fmt_trajectory(result["conversation"]).startswith(
         "[compare] cmp\n[precision] prc\n[decide] <answer>B</answer>\n[verification]")
     solver = {**record, "exchanges": [{"node": "solve", "prompt": "P", "response": "<answer>B</answer>"}]}
@@ -369,11 +477,35 @@ def test_livemath_view_labels_each_step_and_shows_the_first_steps_section():
     assert "role" not in one["conversation"][0]
 
 
+# ── one knob (arm B): the optimizer's prompts are unchanged ───────────────
+
+#: sha256 of every optimizer call (call key, system, prompt) of a two-epoch scripted
+#: single-knob run (``test_skillopt._run_loop``), recorded on main before the
+#: section field existed. Fails when anything multi-knob leaks into arm B's prompts.
+ARM_B_PROMPTS_SHA256 = "351dfe56211ecf59bcb0dc8f7627fc8c3274eff161b1a55b3f954e5ac9f634d4"
+
+
+def test_single_knob_optimizer_prompts_are_byte_identical(tmp_path):
+    import hashlib
+
+    from test_skillopt import _run_loop
+
+    client = FakeClient()
+    _run_loop(tmp_path, client=client, config_overrides={"batch_size": 8},
+              skillopt_options={"max_epochs": 2, "group_size": 2})
+    calls = [[list(c["call_key"] or ()), c["system"], c["prompt"]] for c in client.calls]
+    assert {k[0] for k, _, _ in calls} >= {
+        "analyst_failure", "merge_failure", "slow_update", "meta_skill"}, calls
+    assert not any("SECTION" in p for _, _, p in calls)
+    digest = hashlib.sha256(json.dumps(calls).encode()).hexdigest()
+    assert digest == ARM_B_PROMPTS_SHA256, digest
+
+
 # ── knobs the proposer cannot edit ────────────────────────────────────────
 
 
 @pytest.mark.parametrize("bad, message", [
-    ("compare__system_prompt", "is frozen"),
+    ("max_completion_tokens", "is frozen"),
     ("use_theorem", "is frozen"),
     ("missing_skill", "no 'missing_skill'"),
 ])
@@ -388,22 +520,22 @@ def test_an_open_non_text_knob_is_refused():
     state["knobs"]["data_parallelism"]["spec"] = {
         **state["knobs"]["data_parallelism"]["spec"], "frozen": False}
     with pytest.raises(ValueError, match="has kind 'int'"):
-        _proposer(("compare_skill", "data_parallelism")).check_knobs(state)
+        _proposer(("compare__system_prompt", "data_parallelism")).check_knobs(state)
     _proposer(KNOBS).check_knobs(state)
 
 
 def test_the_knobs_option_parses_and_refuses_bad_values():
     loop = SkillOptLoop.__new__(SkillOptLoop)
-    loop.configure(knobs="compare_skill, decide_skill")
-    assert loop.proposer.knobs == ("compare_skill", "decide_skill")
-    assert loop.proposer.knob == "decide_skill"
+    loop.configure(knobs="compare__system_prompt, decide__system_prompt")
+    assert loop.proposer.knobs == ("compare__system_prompt", "decide__system_prompt")
+    assert loop.proposer.knob == "decide__system_prompt"
     loop.configure()
     assert loop.proposer.knobs == ("skill",)
     for bad in ("a,,b", "a,a", 3):
         with pytest.raises(TypeError):
             loop.configure(knobs=bad)
     with pytest.raises(TypeError, match="not both"):
-        loop.configure(knob="skill", knobs="compare_skill,decide_skill")
+        loop.configure(knob="skill", knobs="compare__system_prompt,decide__system_prompt")
 
 
 def test_a_resume_with_other_knobs_is_refused():
@@ -417,7 +549,14 @@ def test_a_resume_with_other_knobs_is_refused():
 
 # ── livemath/skill_graph end to end, scripted ─────────────────────────────
 
-#: Epoch 1's merged patch: one edit per kind of destination, and one refused.
+#: An analyst's edit to text every step's system prompt shares, named to precision's
+#: section; it must survive the merge and the rank and land in precision alone.
+NAMED_EDIT = {"op": "replace", "target": "## Answer Format",
+              "content": "## Answer Format (NAMED_EDIT)", "section": "precision__system_prompt",
+              "source_type": "failure", "support_count": 1}
+
+#: Epoch 1's merged patch: one edit per kind of destination, the named edit, two
+#: refused before ranking (cross-section, unnamed shared target) and one ranked out.
 EPOCH1_EDITS = [
     {"op": "replace", "target": "Compare all options before committing.",
      "content": "CMP_EDIT Compare all options before committing.",
@@ -425,11 +564,15 @@ EPOCH1_EDITS = [
     {"op": "insert_after", "target": "## Hypotheses", "content": "- HYP_EDIT check every assumption.",
      "source_type": "failure", "support_count": 1},
     # compare's last words, the blank line and precision's SECTION line: refused.
-    {"op": "replace", "target": 'and "exactly when".\n\n<!-- SECTION precision_skill',
+    {"op": "replace", "target": "<answer>B</answer>\n\n\n<!-- SECTION precision__system_prompt",
      "content": "SPLIT", "source_type": "failure", "support_count": 1},
     {"op": "append", "content": "- APPEND_EDIT end with the label.", "source_type": "success",
      "support_count": 1},
-    # Ranked out (the edit budget is 4): precision_skill never moves.
+    NAMED_EDIT,
+    # In all four system prompts and unnamed: refused, so it takes no rank slot.
+    {"op": "replace", "target": "## Task Format", "content": "AMBIGUOUS",
+     "source_type": "failure", "support_count": 1},
+    # Ranked out (the edit budget is 4) once the two refused edits are dropped.
     {"op": "insert_after", "target": "## Theorem-Level Precision", "content": "- PREC_DROPPED",
      "source_type": "success", "support_count": 1},
 ]
@@ -479,6 +622,9 @@ class GraphClient(FakeClient):
 
 def _responses() -> dict[tuple, str]:
     return {
+        ("analyst_failure", 1, 0, 0): json.dumps({"batch_size": 1, "failure_summary": [], "patch": {
+            "reasoning": "a", "edits": [{k: v for k, v in NAMED_EDIT.items()
+                                         if k not in ("source_type", "support_count")}]}}),
         ("merge_final", 1, 0, 0): json.dumps({"reasoning": "m", "edits": EPOCH1_EDITS}),
         ("rank", 1, 0, 0): json.dumps({"reasoning": "r", "selected_indices": [0, 1, 2, 3]}),
     }
@@ -533,10 +679,12 @@ def _steps(trace: list[dict[str, Any]]) -> list[str]:
 
 
 def test_skill_graph_runs_skillopt_over_its_four_knobs(tmp_path, graph_run):
-    """One SkillOpt run over the four section knobs: every phase runs once per
+    """One SkillOpt run over the four system-prompt knobs: every phase runs once per
     epoch on the composite, the patch becomes set_knob patches on the right knobs
-    (the cross-section edit refused), each edit reaches the step that reads its
-    knob, the slow update lands at the end of decide_skill, and no frozen knob
+    (the cross-section and the unnamed shared-target edits refused before ranking,
+    an analyst's named edit carried through merge and rank to its section alone),
+    each edit reaches the step that reads its
+    knob, the slow update lands at the end of decide__system_prompt, and no frozen knob
     moves. Fails when edits go to the wrong knob or the phases see one knob."""
     client = GraphClient(_responses())
     loop = graph_run(tmp_path, client)
@@ -551,20 +699,39 @@ def test_skill_graph_runs_skillopt_over_its_four_knobs(tmp_path, graph_run):
     # Every optimizer call saw the composite.
     analyst = next(c for c in client.calls if c["call_key"][0] == "analyst_failure")
     assert "## Current Skill\n# Skill sections\n" in analyst["prompt"]
-    assert "<!-- SECTION hypotheses_skill:" in analyst["prompt"]
+    assert "<!-- SECTION hypotheses__system_prompt:" in analyst["prompt"]
     # The trajectories show which step wrote what.
     assert "[compare] compare notes" in analyst["prompt"]
     assert "[decide] <answer>B</answer>" in analyst["prompt"]
 
+    # The section field is part of every step's edit format, and the named edit
+    # carries its section from the analyst through the merge to the rank.
+    for kind in ("analyst_failure", "analyst_success", "merge_final", "rank"):
+        call = next(c for c in client.calls if c["call_key"][0] == kind)
+        assert call["system"].endswith(prompts.SECTION_EDIT_NOTE), kind
+    merge_call = next(c for c in client.calls if c["call_key"] == ("merge_final", 1, 0, 0))
+    assert '"section": "precision__system_prompt"' in merge_call["prompt"]
+    rank_call = next(c for c in client.calls if c["call_key"] == ("rank", 1, 0, 0))
+    assert "section='precision__system_prompt'" in rank_call["prompt"]
+    # The two refused edits were dropped before ranking: the ranker saw five.
+    assert "[4] " in rank_call["prompt"] and "[5] " not in rank_call["prompt"]
+    assert "content='SPLIT'" not in rank_call["prompt"]
+    assert "content='AMBIGUOUS'" not in rank_call["prompt"]
+    refused = next(e for e in trace if e["step_type"] == "section_refused" and e["epoch"] == 1)
+    assert [(o["index"], o["status"]) for o in refused["outcomes"]] == [
+        (2, CROSS_SECTION), (5, AMBIGUOUS_SECTION)]
+
     patch = next(e for e in trace if e["step_type"] == "patch_applied" and e["epoch"] == 1)
     outcomes = {o["index"]: (o["knob"], o["status"]) for o in patch["edit_report"]["outcomes"]}
     assert outcomes == {
-        0: ("compare_skill", "applied_replace"),
-        1: ("hypotheses_skill", "applied_insert_after"),
-        2: (None, CROSS_SECTION),
-        3: ("decide_skill", "applied_append"),
+        0: ("compare__system_prompt", "applied_replace"),
+        1: ("hypotheses__system_prompt", "applied_insert_after"),
+        2: ("decide__system_prompt", "applied_append"),
+        3: ("precision__system_prompt", "applied_replace"),
     }
-    assert patch["edit_report"]["knobs"] == ["compare_skill", "hypotheses_skill", "decide_skill"]
+    assert patch["edit_report"]["knobs"] == [
+        "compare__system_prompt", "precision__system_prompt", "hypotheses__system_prompt",
+        "decide__system_prompt"]
 
     population = loop.population
     edits = [e for c in population for e in c.edits]
@@ -578,10 +745,14 @@ def test_skill_graph_runs_skillopt_over_its_four_knobs(tmp_path, graph_run):
 
     current = next(c for c in population if c.id == strategy.gate.current_id)
     knobs = current.state["knobs"]
-    assert "CMP_EDIT" in knobs["compare_skill"]["value"]
-    assert "HYP_EDIT" in knobs["hypotheses_skill"]["value"]
-    assert knobs["precision_skill"] == seed["precision_skill"]
-    decide = knobs["decide_skill"]["value"]
+    assert "CMP_EDIT" in knobs["compare__system_prompt"]["value"]
+    assert "HYP_EDIT" in knobs["hypotheses__system_prompt"]["value"]
+    assert "## Answer Format (NAMED_EDIT)" in knobs["precision__system_prompt"]["value"]
+    assert "PREC_DROPPED" not in knobs["precision__system_prompt"]["value"]
+    for knob in ("compare__system_prompt", "hypotheses__system_prompt", "decide__system_prompt"):
+        assert "NAMED_EDIT" not in knobs[knob]["value"], knob
+    assert "AMBIGUOUS" not in _knob_texts(current)
+    decide = knobs["decide__system_prompt"]["value"]
     assert "APPEND_EDIT" in decide
     assert decide.rstrip().endswith(
         f"{prompts.SLOW_UPDATE_START}\nUpdated guidance text.\n{prompts.SLOW_UPDATE_END}")
@@ -593,6 +764,7 @@ def test_skill_graph_runs_skillopt_over_its_four_knobs(tmp_path, graph_run):
     assert {node for node, system in epoch2 if "CMP_EDIT" in system} == {"compare"}
     assert {node for node, system in epoch2 if "HYP_EDIT" in system} == {"hypotheses"}
     assert {node for node, system in epoch2 if "APPEND_EDIT" in system} == {"decide"}
+    assert {node for node, system in client.steps if "NAMED_EDIT" in system} == {"precision"}
     assert strategy.strategy_state_dict()["meta_skill_text"] == "USE CONCISE EDITS"
 
     # Every candidate the run holds (the accepted patch included) is a child of one

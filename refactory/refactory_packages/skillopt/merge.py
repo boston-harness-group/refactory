@@ -23,8 +23,13 @@ def hierarchical_merge(
     epoch: int,
     trace: TraceRecorder,
     merge_batch_size: int = 8,
+    *,
+    sections: bool = False,
 ) -> dict[str, Any]:
     """Failure-first hierarchical merge of analyst patches — aggregate.py:156-275.
+
+    ``sections`` (several knobs) appends ``prompts.SECTION_EDIT_NOTE`` to every
+    merge system prompt; with one knob the prompts are SkillOpt's.
 
     Phase 1: merge the failure patches hierarchically (aggregate.py:195-199).
     Phase 2: merge the success patches hierarchically (aggregate.py:201-205).
@@ -34,11 +39,13 @@ def hierarchical_merge(
     Returns the merged patch dict (``reasoning`` + ``edits``).
     """
     failure_merged = _merge_group(
-        client, skill_text, failure_patches, prompts.MERGE_FAILURE_SYSTEM,
+        client, skill_text, failure_patches,
+        prompts.with_sections(prompts.MERGE_FAILURE_SYSTEM, sections),
         "merge_failure", meta_skill, epoch, trace, merge_batch_size,
     )
     success_merged = _merge_group(
-        client, skill_text, success_patches, prompts.MERGE_SUCCESS_SYSTEM,
+        client, skill_text, success_patches,
+        prompts.with_sections(prompts.MERGE_SUCCESS_SYSTEM, sections),
         "merge_success", meta_skill, epoch, trace, merge_batch_size,
     )
 
@@ -57,7 +64,8 @@ def hierarchical_merge(
     user = prompts.format_merge_final_user(
         skill_text, failure_merged, success_merged, len(f_edits), len(s_edits), meta_skill,
     )
-    output = ask(client, trace, "merge_final", user, system=prompts.MERGE_FINAL_SYSTEM, call_key=key)
+    output = ask(client, trace, "merge_final", user,
+                 system=prompts.with_sections(prompts.MERGE_FINAL_SYSTEM, sections), call_key=key)
     final = _parse_merge(output)
     if final is not None:
         trace.record_decision("merge_final", fallback=False, n_edits=len(final["edits"]))
@@ -151,8 +159,13 @@ def rank(
     meta_skill: str,
     epoch: int,
     trace: TraceRecorder,
+    *,
+    sections: bool = False,
 ) -> list[dict[str, Any]]:
     """Rank and select top edits up to the budget — clip.py:25-109.
+
+    ``sections`` (several knobs) shows each edit's section and appends
+    ``prompts.SECTION_EDIT_NOTE`` to the system prompt.
 
     Short-circuits if ``len(edits) <= budget`` (clip.py:54-55).
     Fallback: truncation ``edits[:budget]`` (clip.py:104-109).
@@ -161,8 +174,10 @@ def rank(
         return merged_edits
 
     call_key = ("rank", epoch, 0, 0)
-    user = prompts.format_rank_user(skill_text, merged_edits, budget, meta_skill)
-    output = ask(client, trace, "rank", user, system=prompts.RANK_SYSTEM, call_key=call_key)
+    user = prompts.format_rank_user(skill_text, merged_edits, budget, meta_skill,
+                                    sections=sections)
+    output = ask(client, trace, "rank", user,
+                 system=prompts.with_sections(prompts.RANK_SYSTEM, sections), call_key=call_key)
 
     selected = _parse_ranking(output, merged_edits, budget)
     trace.record_decision("rank", edit_budget=budget, selected_count=len(selected))

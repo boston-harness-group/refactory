@@ -423,7 +423,8 @@ class SkillOptLoop(OuterLoop):
             # Rank
             if not self._past_phase(resume_epoch, resume_phase, epoch, "rank"):
                 self._phase = "rank"
-                ranked = self.proposer.rank(epoch, self.proposer.text(current), merged)
+                ranked = self.proposer.rank(epoch, self.proposer.text(current), merged,
+                                            parent=current)
                 self._cached_ranked = ranked
                 run.save_strategy_state()
             else:

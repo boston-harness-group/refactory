@@ -11,7 +11,7 @@ own agent step inside LiveMath's per-item data pass::
 
 * ``prepare`` (op) formats the item exactly as ``livemath/solver``'s
   ``format_prompt`` does (the task shuffles the choices per item and seed) and
-  turns each step's section knob into that step's ``## Skill`` block.
+  adds compare's task text to make compare's message.
 * ``compare`` (agent) analyses every option and writes notes.
 * ``precision`` and ``hypotheses`` (agents) run in parallel on the question and
   compare's notes, each writing notes.
@@ -22,19 +22,26 @@ own agent step inside LiveMath's per-item data pass::
   reply (``grading.parse_choice_label``) and whether it is a valid choice.
 
 Every agent node is configured as the baseline ``solve`` node: LiveMath's solver
-system prompt (its skill block holding only that step's section), ``tool_policy``
+system prompt (its skill block holding only that step's seed section), ``tool_policy``
 none, ``role`` solver, ``timeout_s`` = ``solve_timeout_s``, the
 ``max_completion_tokens`` cap (none by default) on its route, and its whole user
 message framed as arm A's Claude backend frames every call
 (``ops.claude_backend_prompt``). The prompt builders between steps are ops.
 
-Knobs: one open section knob per step (``compare_skill``, ``precision_skill``,
-``hypotheses_skill``, ``decide_skill``; defaults are the seed skill's sections).
-Frozen: each agent's ``<node>__system_prompt`` knob and the
-``max_completion_tokens`` / ``data_parallelism`` run settings, as the baseline
-freezes them, and ``use_theorem`` / ``use_sketch`` (off; an item's theorem states
-the correct option, so an optimizer edit would leak the answer). There is no
-``skill`` knob.
+Knobs: two open text knobs per step, one way to edit each piece of text.
+
+* ``<step>__system_prompt`` (``compare__system_prompt``, ...): the step's whole
+  system prompt. Its default is LiveMath's solver system prompt with the step's
+  seed section as its ``## Skill`` block, so the optimizer can edit the section
+  and every other line (task and answer format included).
+* ``<step>_task`` (``compare_task``, ...): the ``## Your Task`` text ending the
+  step's user message; defaults are ``COMPARE_TASK`` ... ``DECIDE_TASK``. The
+  question and the earlier steps' notes are data, not knobs.
+
+Frozen: the ``max_completion_tokens`` / ``data_parallelism``
+run settings, as the baseline freezes them, and ``use_theorem`` / ``use_sketch``
+(off; an item's theorem states the correct option, so an optimizer edit would
+leak the answer). There is no ``skill`` knob, and no model or timeout knob.
 """
 from __future__ import annotations
 
@@ -93,8 +100,8 @@ NOTES = {
     "hypotheses": ("hypotheses_notes.txt", "## Hypotheses Notes"),
 }
 
-# The step task texts are neutral: every piece of method guidance lives in the four
-# section knobs, so the optimizer can move all of it (no seed guidance is frozen here).
+# The step task texts' defaults (the ``<step>_task`` knobs) are neutral: every piece of
+# seed method guidance starts in the system-prompt knobs.
 COMPARE_TASK = (
     "## Your Task\n"
     "This is the first of several analysis steps. Apply the skill in your "
@@ -115,14 +122,9 @@ DECIDE_TASK = (
 )
 
 
-def skill_knob(step: str) -> str:
-    """The name of a step's section knob."""
-    return f"{step}_skill"
-
-
-def skill_section_fact(step: str) -> str:
-    """The fact ``prepare`` writes a step's ``## Skill`` block to."""
-    return f"{step}_skill_section"
+#: Each step's default task text.
+TASKS = {"compare": COMPARE_TASK, "precision": PRECISION_TASK,
+         "hypotheses": HYPOTHESES_TASK, "decide": DECIDE_TASK}
 
 
 def system_prompt_knob(node_id: str) -> str:
@@ -130,9 +132,14 @@ def system_prompt_knob(node_id: str) -> str:
     return f"{node_id}__system_prompt"
 
 
+def task_knob(step: str) -> str:
+    """The knob holding a step's task text."""
+    return f"{step}_task"
+
+
 def step_system_prompt(step: str) -> str:
-    """LiveMath's solver system prompt with this step's skill block in it."""
-    return SYSTEM_PROMPT.replace("{{skill_section}}", "{{" + skill_section_fact(step) + "}}")
+    """LiveMath's solver system prompt with this step's seed section as its skill block."""
+    return SYSTEM_PROMPT.replace("{{skill_section}}", skill_section(SEED_SECTIONS[step]))
 
 
 # ── messages (before framing) ─────────────────────────────────────────────
@@ -142,30 +149,35 @@ def _notes_block(step: str, notes: str) -> str:
     return f"{NOTES[step][1]}\n{notes.strip()}"
 
 
-def compare_message(question: str) -> str:
-    return f"{question}\n\n{COMPARE_TASK}"
+def compare_message(question: str, task: str = COMPARE_TASK) -> str:
+    return f"{question}\n\n{task}"
 
 
-def precision_message(question: str, compare_notes: str) -> str:
-    return f"{question}\n\n{_notes_block('compare', compare_notes)}\n\n{PRECISION_TASK}"
+def precision_message(question: str, compare_notes: str, task: str = PRECISION_TASK) -> str:
+    return f"{question}\n\n{_notes_block('compare', compare_notes)}\n\n{task}"
 
 
-def hypotheses_message(question: str, compare_notes: str) -> str:
-    return f"{question}\n\n{_notes_block('compare', compare_notes)}\n\n{HYPOTHESES_TASK}"
+def hypotheses_message(question: str, compare_notes: str, task: str = HYPOTHESES_TASK) -> str:
+    return f"{question}\n\n{_notes_block('compare', compare_notes)}\n\n{task}"
 
 
 def decide_message(question: str, compare_notes: str, precision_notes: str,
-                   hypotheses_notes: str) -> str:
+                   hypotheses_notes: str, task: str = DECIDE_TASK) -> str:
     return (f"{question}\n\n{_notes_block('compare', compare_notes)}\n\n"
             f"{_notes_block('precision', precision_notes)}\n\n"
-            f"{_notes_block('hypotheses', hypotheses_notes)}\n\n{DECIDE_TASK}")
+            f"{_notes_block('hypotheses', hypotheses_notes)}\n\n{task}")
+
+
+def _task(ctx: Any, step: str) -> str:
+    """The step's task text: its ``<step>_task`` knob."""
+    return str(ctx.knob(task_knob(step), TASKS[step]))
 
 
 # ── ops ───────────────────────────────────────────────────────────────────
 
 
 def prepare(ctx: Any) -> dict[str, Any]:
-    """The item's question and choices, compare's framed prompt, every step's skill block.
+    """The item's question and choices, and compare's framed prompt.
 
     ``user_prompt`` is ``livemath/solver``'s ``format_prompt`` message for the same
     item and knobs, byte for byte (``ops.build_user_prompt``).
@@ -176,13 +188,11 @@ def prepare(ctx: Any) -> dict[str, Any]:
         use_theorem=bool(ctx.knob("use_theorem", False)),
         use_sketch=bool(ctx.knob("use_sketch", False)),
     )
-    facts = {
+    return {
         "user_prompt": user_prompt,
-        "compare_prompt": claude_backend_prompt(compare_message(user_prompt)),
+        "compare_prompt": claude_backend_prompt(
+            compare_message(user_prompt, _task(ctx, "compare"))),
     }
-    for step in STEPS:
-        facts[skill_section_fact(step)] = skill_section(ctx.knob(skill_knob(step), ""))
-    return facts
 
 
 def _question(ctx: Any) -> str:
@@ -193,15 +203,18 @@ def notes_prompts(ctx: Any) -> dict[str, Any]:
     """precision's and hypotheses' framed prompts: the question and compare's notes."""
     notes = ctx.read_text(NOTES["compare"][0])
     return {
-        "precision_prompt": claude_backend_prompt(precision_message(_question(ctx), notes)),
-        "hypotheses_prompt": claude_backend_prompt(hypotheses_message(_question(ctx), notes)),
+        "precision_prompt": claude_backend_prompt(
+            precision_message(_question(ctx), notes, _task(ctx, "precision"))),
+        "hypotheses_prompt": claude_backend_prompt(
+            hypotheses_message(_question(ctx), notes, _task(ctx, "hypotheses"))),
     }
 
 
 def decide_prompt(ctx: Any) -> dict[str, Any]:
     """decide's framed prompt: the question and all three steps' notes."""
     message = decide_message(_question(ctx), *(ctx.read_text(NOTES[s][0]) for s in
-                                               ("compare", "precision", "hypotheses")))
+                                               ("compare", "precision", "hypotheses")),
+                             task=_task(ctx, "decide"))
     return {"decide_prompt": claude_backend_prompt(message)}
 
 
@@ -255,12 +268,14 @@ class SkillGraph(nn.Mode):
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
-        knobs: dict[str, nn.Knob] = {
-            skill_knob(step): nn.Knob(
-                SEED_SECTIONS[step], "str",
-                description=f"skill section in the {step} step's system message")
-            for step in STEPS
-        }
+        knobs: dict[str, nn.Knob] = {}
+        for step in STEPS:
+            knobs[system_prompt_knob(step)] = nn.Knob(
+                step_system_prompt(step), "str",
+                description=f"system prompt for the {step} step")
+            knobs[task_knob(step)] = nn.Knob(
+                TASKS[step], "str",
+                description=f"task text ending the {step} step's user message")
         knobs.update({
             # Frozen: an item's theorem text states the correct option, so an open
             # use_theorem lets the optimizer leak the answer (arm B never edits either).
@@ -277,12 +292,6 @@ class SkillGraph(nn.Mode):
                 1, "int", lo=1, hi=64, frozen=True,
                 description="concurrent data-node items"),
         })
-        # Frozen as the baseline freezes ``solve__system_prompt``: the steps' section
-        # knobs are what the optimizer edits.
-        for step in STEPS:
-            knobs[system_prompt_knob(step)] = nn.Knob(
-                step_system_prompt(step), "str", frozen=True,
-                description=f"system prompt for {step} (frozen; use {skill_knob(step)})")
         return knobs
 
     def build(self) -> nn.Graph:
@@ -301,19 +310,19 @@ class SkillGraph(nn.Mode):
                 knobs=("data_parallelism",),
             ),
             _op("prepare", "prepare", reads=("current_item.json",),
-                produces=("user_prompt", "compare_prompt",
-                          *(skill_section_fact(s) for s in STEPS)),
-                knobs=(*(skill_knob(s) for s in STEPS), "use_theorem", "use_sketch")),
+                produces=("user_prompt", "compare_prompt"),
+                knobs=(task_knob("compare"), "use_theorem", "use_sketch")),
             _agent("compare", compare_notes, t),
             _op("notes_prompts", "notes_prompts", reads=(compare_notes,),
-                produces=("precision_prompt", "hypotheses_prompt")),
+                produces=("precision_prompt", "hypotheses_prompt"),
+                knobs=(task_knob("precision"), task_knob("hypotheses"))),
             nn.Node("step_fork", "fork", targets=("precision", "hypotheses")),
             _agent("precision", precision_notes, t),
             _agent("hypotheses", hypotheses_notes, t),
             nn.Node("step_join", "join", sources=("precision", "hypotheses")),
             _op("decide_prompt", "decide_prompt",
                 reads=(compare_notes, precision_notes, hypotheses_notes),
-                produces=("decide_prompt",)),
+                produces=("decide_prompt",), knobs=(task_knob("decide"),)),
             _agent("decide", "answer.txt", t),
             _op("extract_answer", "extract_answer", reads=("answer.txt", "current_item.json"),
                 produces=("answer_label", "answer_valid")),

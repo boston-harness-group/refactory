@@ -32,6 +32,7 @@ def reflect(
     *,
     env: SkillOptEnv | None = None,
     knobs: dict[str, Any] | None = None,
+    sections: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run failure and success analysts over train records.
 
@@ -43,7 +44,9 @@ def reflect(
     ``env`` is the mode's package as SkillOpt's environment: its
     ``analyst_error``/``analyst_success`` prompts (envs/base.py:304-330 load
     them with the env override) and its rendering of each record as a rollout
-    result, given the ``knobs`` the records were rolled out with.
+    result, given the ``knobs`` the records were rolled out with. ``sections``
+    (several knobs) appends ``prompts.SECTION_EDIT_NOTE`` to both analysts'
+    system prompts; with one knob they are the env's prompts unchanged.
     """
     env = env if env is not None else SkillOptEnv()
     knobs = dict(knobs or {})
@@ -62,7 +65,8 @@ def reflect(
         ("success", successes, success_patches),
     ):
         step_type = f"analyst_{kind}"
-        system = env.prompt("analyst_error" if kind == "failure" else "analyst_success")
+        system = prompts.with_sections(
+            env.prompt("analyst_error" if kind == "failure" else "analyst_success"), sections)
         for gi, group in enumerate(_chunk(items, group_size)):
             call_key = (step_type, epoch, gi, 0)
             user = prompts.format_analyst_user(
