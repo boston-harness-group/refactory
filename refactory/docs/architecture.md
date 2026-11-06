@@ -252,8 +252,8 @@ uv run refactory optimize circle_packing/adaptive \
   --epochs 2 --batch-size 4 --optimizer random --seed 5 --runs-root /tmp/walk
 ```
 
-seed `0.795` → best `0.875` (`raw_best_score` `0.955`: the compared score is the raw one minus `0.01` per node), bound `epochs`, 8 inner runs, 1 structural win
-(`set_knob grid=18` + `duplicate accept`), and refusals across
+seed `0.795` → best `0.875` (`raw_best_score` `0.955`: the compared score is the raw one minus `0.01` per node), bound `epochs`, 8 inner runs, no structural win (the structural candidates, such as
+`set_knob grid=18` + `duplicate accept`, score `0.01` below their parents: one more node), and refusals across
 `V2 V3 V4 V5 V6 V7 V10`, `I:fact_produced`, `E-shape` — none of which cost a run.
 
 ## 8. Durability, and what a run leaves

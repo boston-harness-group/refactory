@@ -37,7 +37,7 @@ import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 class TaskError(ValueError):
@@ -241,6 +241,22 @@ def split_to_manifest(
     return make_manifest(workdir, train_ids=train_ids, val_ids=val_ids, test_ids=test_ids or None)
 
 
+def manifest_part_ids(manifest: Mapping[str, Any], part: str) -> list[str] | None:
+    """The ids a parts manifest gives ``part``, or ``None`` when it gives it none.
+
+    The holdout audit's part is the manifest's ``val`` part (empty when it has
+    none): those items are not train, so the search never scored them, and they
+    are not test, which nothing but a strategy's own final evaluation may touch.
+    Splitting off a fraction instead would draw the holdout from every item the
+    Task has, test items included.
+    """
+    if part in manifest:
+        return [str(x) for x in manifest[part]]
+    if part == HOLDOUT:
+        return [str(x) for x in manifest.get(VAL, [])]
+    return None
+
+
 def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None) -> Path:
     """Record which part of a Task's items a run directory evaluates.
 
@@ -320,8 +336,9 @@ def select_subset(
     if manifest_path.exists() and part:
         try:
             manifest = json.loads(manifest_path.read_text())
-            if isinstance(manifest, dict) and part in manifest:
-                allowed_ids = set(str(x) for x in manifest[part])
+            ids = manifest_part_ids(manifest, part) if isinstance(manifest, dict) else None
+            if ids is not None:
+                allowed_ids = set(ids)
                 selected = [
                     item for i, item in enumerate(items)
                     if str(item.get("id") or i) in allowed_ids

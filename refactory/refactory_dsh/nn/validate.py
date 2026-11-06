@@ -46,7 +46,7 @@ RULES: dict[str, str] = {
            "removed, each remaining cyclic region must have exactly one gate",
     "V11": "every declared port must be a file some node on a path writes",
     "V12": "a fork's targets, a join's sources and a data node's subgraph must name "
-           "nodes that exist",
+           "nodes that exist, and a data node's exit has no out-edge: its pass ends there",
     "V13": "a data node must not appear inside a fork branch",
     "V14": "every field binding must name a declared knob of the field's kind, once per "
            "field, and the field must be in the bindable allowlist",
@@ -218,6 +218,19 @@ def validate(
                             node=node_id,
                         )
                     )
+        # Both runtimes end an item's pass once its exit has run, so a node wired
+        # after the exit would never run as part of it.
+        if node.kind == "data" and node.subgraph_exit in graph.nodes:
+            after = sorted(e.target for e in graph.out_edges(node.subgraph_exit))
+            if after:
+                issues.append(
+                    Issue(
+                        "V12",
+                        f"data subgraph exit {node.subgraph_exit!r} has an out-edge to "
+                        f"{after}; a pass ends at its exit, so nothing after it runs",
+                        node=node_id,
+                    )
+                )
 
     # V13 data-inside-fork.
     for node_id in sorted(graph.nodes):

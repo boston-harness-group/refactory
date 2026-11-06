@@ -312,12 +312,12 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
         print(f"Grid results written to {output_path}")
 
         print(f"\n{'Block':<30} {'Acc':>6} {'Shortcut':>8} {'Other':>6} "
-              f"{'Calls':>6} {'Err':>4} {'Time':>7}")
-        print("-" * 75)
+              f"{'Calls':>6} {'Err':>4} {'T/O':>4} {'Time':>7}")
+        print("-" * 80)
         for row in results:
             print(f"{row['block']:<30} {row['accuracy']:>6.3f} "
                   f"{row['shortcut_accuracy']:>8.3f} {row['other_accuracy']:>6.3f} "
-                  f"{row['model_calls']:>6} {row['errors']:>4} "
+                  f"{row['model_calls']:>6} {row['errors']:>4} {row['timeouts']:>4} "
                   f"{row['wall_time_s']:>6.1f}s")
 
         return 0

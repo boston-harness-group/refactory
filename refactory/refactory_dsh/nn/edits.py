@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import copy
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .graph import Edge, Graph, GraphError, Node
@@ -203,7 +203,11 @@ def _add_node(state: State, edit: dict) -> State:
         # rewrite expressible without the operator inventing a temporary edge.
         graph.add(node)
     elif kind == "terminal":
-        terminals = graph.terminals()
+        # The run's terminals, not a data pass's exit: an exit has no out-edge
+        # because its pass ends there, and a node wired after it would run once
+        # per item inside the pass rather than once at the end of the run.
+        in_passes = _data_pass_nodes(graph)
+        terminals = [terminal for terminal in graph.terminals() if terminal not in in_passes]
         graph.add(node)
         for terminal in terminals:
             graph.connect(terminal, node.id)
@@ -217,6 +221,10 @@ def _add_node(state: State, edit: dict) -> State:
             graph.connect(node.id, edge.target, edge.condition)
         else:
             graph.connect(target.id, node.id)
+        # A node added after a data pass's exit is the pass's new last node, so
+        # the exit moves to it: both runtimes end a pass at its exit, and a node
+        # left after it would never run on the spine.
+        _move_exits(graph, target.id, node.id)
     else:  # before
         target = _require(graph, value)
         incoming = list(graph.in_edges(target.id))
@@ -227,7 +235,27 @@ def _add_node(state: State, edit: dict) -> State:
         graph.connect(node.id, target.id)
         if graph.start == target.id:
             graph.start = node.id
+        # Likewise a node added before a data pass's entry is its new first node.
+        for data_id, data in list(graph.nodes.items()):
+            if data.kind == "data" and data.subgraph_entry == target.id:
+                graph.nodes[data_id] = replace(data, subgraph_entry=node.id)
     return _finish(state, graph)
+
+
+def _data_pass_nodes(graph: Graph) -> set[str]:
+    """Every node some data node runs once per item (``Graph.data_body``)."""
+    nodes: set[str] = set()
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            nodes |= graph.data_body(node.id)
+    return nodes
+
+
+def _move_exits(graph: Graph, old_exit: str, new_exit: str) -> None:
+    """Make ``new_exit`` the exit of every data pass that ended at ``old_exit``."""
+    for data_id, node in list(graph.nodes.items()):
+        if node.kind == "data" and node.subgraph_exit == old_exit:
+            graph.nodes[data_id] = replace(node, subgraph_exit=new_exit)
 
 
 def _remove_node(state: State, edit: dict) -> State:
