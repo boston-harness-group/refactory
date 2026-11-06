@@ -137,9 +137,10 @@ def test_knobs_open_sections_frozen_system_prompts_and_no_skill_knob():
     assert "skill" not in knobs
     open_knobs = sorted(n for n, e in knobs.items() if not e["spec"]["frozen"])
     assert open_knobs == ["compare_skill", "decide_skill", "hypotheses_skill",
-                          "precision_skill", "use_sketch", "use_theorem"]
+                          "precision_skill"]
     frozen = sorted(n for n, e in knobs.items() if e["spec"]["frozen"])
     assert frozen == sorted(["data_parallelism", "max_completion_tokens",
+                             "use_sketch", "use_theorem",
                              *(f"{s}__system_prompt" for s in AGENTS)])
     graph = nn.Graph.from_state(state["graph"])
     for step in AGENTS:
@@ -149,6 +150,21 @@ def test_knobs_open_sections_frozen_system_prompts_and_no_skill_knob():
         assert graph.nodes[step].bound_knob("prompt_template") == ""
     issues = nn.validate_state(state, resolve_calls=False)
     assert not [i for i in issues if i.code in ("V7", "V14")], issues
+
+
+@pytest.mark.parametrize("name", ["use_theorem", "use_sketch"])
+def test_an_optimizer_edit_to_the_theorem_or_sketch_switch_is_refused(name):
+    """An item's theorem states the correct option: the optimizer's set_knob on either
+    switch is refused, and the state keeps it off. A section knob still moves."""
+    from refactory_dsh.nn import edits
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    state = SkillGraph().state_dict()
+    with pytest.raises(edits.EditError, match="is frozen and cannot be moved"):
+        edits.apply({"op": "set_knob", "name": name, "value": True}, state)
+    assert state["knobs"][name]["value"] is False
+    moved = edits.apply({"op": "set_knob", "name": "compare_skill", "value": "X"}, state)
+    assert moved["knobs"]["compare_skill"]["value"] == "X"
 
 
 def test_seed_sections_are_arm_a_seed_skill():

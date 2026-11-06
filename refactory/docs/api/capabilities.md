@@ -12263,7 +12263,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/skill_graph
 
-solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); 4 model calls per item. There is no skill knob.
+solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.
 
 ```json
 {
@@ -12566,7 +12566,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
     "use_sketch": {
       "default": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12578,7 +12578,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
     "use_theorem": {
       "default": false,
       "description": "include the item's theorem as a ## Theorem section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12608,8 +12608,8 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "cli": "refactory ceo livemath/skill_graph",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); 4 model calls per item. There is no skill knob.",
-    "reviewed_schema": "f47306fe1293624afee1d769b5e5b3aa6071454a75a45ca8cc03ed78c0f8ecc3"
+    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
+    "reviewed_schema": "80fefbd675296334f66d59bd3535dde20a4fa0401247749ce9b1566028a9a0b1"
   }
 }
 ```

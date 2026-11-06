@@ -301,7 +301,7 @@
       "hi": null,
       "enum": [],
       "values": [],
-      "frozen": false,
+      "frozen": true,
       "description": "include the item's theorem as a ## Theorem section",
       "required": false
     },
@@ -312,7 +312,7 @@
       "hi": null,
       "enum": [],
       "values": [],
-      "frozen": false,
+      "frozen": true,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
       "required": false
     },

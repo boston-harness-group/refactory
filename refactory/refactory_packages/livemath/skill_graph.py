@@ -29,10 +29,11 @@ message framed as arm A's Claude backend frames every call
 (``ops.claude_backend_prompt``). The prompt builders between steps are ops.
 
 Knobs: one open section knob per step (``compare_skill``, ``precision_skill``,
-``hypotheses_skill``, ``decide_skill``; defaults are the seed skill's sections),
-plus ``use_theorem`` / ``use_sketch`` as in the baseline. Frozen, as the baseline
-freezes them: each agent's ``<node>__system_prompt`` knob and the
-``max_completion_tokens`` / ``data_parallelism`` run settings. There is no
+``hypotheses_skill``, ``decide_skill``; defaults are the seed skill's sections).
+Frozen: each agent's ``<node>__system_prompt`` knob and the
+``max_completion_tokens`` / ``data_parallelism`` run settings, as the baseline
+freezes them, and ``use_theorem`` / ``use_sketch`` (off; an item's theorem states
+the correct option, so an optimizer edit would leak the answer). There is no
 ``skill`` knob.
 """
 from __future__ import annotations
@@ -266,9 +267,12 @@ class SkillGraph(nn.Mode):
             for step in STEPS
         }
         knobs.update({
-            "use_theorem": nn.Knob(False, "bool",
+            # Frozen: an item's theorem text states the correct option, so an open
+            # use_theorem lets the optimizer leak the answer (arm B never edits either).
+            # Set with ``--knob use_theorem=true``.
+            "use_theorem": nn.Knob(False, "bool", frozen=True,
                                    description="include the item's theorem as a ## Theorem section"),
-            "use_sketch": nn.Knob(False, "bool",
+            "use_sketch": nn.Knob(False, "bool", frozen=True,
                                   description="include the item's proof sketch as a ## Proof Sketch section"),
             # Run settings, frozen as in ``Solver``.
             "max_completion_tokens": nn.Knob(
