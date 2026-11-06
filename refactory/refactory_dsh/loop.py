@@ -2990,6 +2990,13 @@ class Loop(OuterLoop):
                             f"cannot resume: journal contains edit op {_e['op']!r} "
                             "which was removed in F14; start a new optimization run"
                         )
+                    folded = nn_edits.removed(_e.get("op")) if isinstance(_e, dict) else None
+                    if folded is not None:
+                        raise LoopError(
+                            f"cannot resume: journal contains edit op {_e['op']!r}, "
+                            f"which no longer exists ({folded}); start a new "
+                            "optimization run"
+                        )
                 candidate = Candidate.from_state(
                     record["state"],
                     parent=record.get("parent"),

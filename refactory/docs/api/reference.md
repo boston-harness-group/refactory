@@ -138,6 +138,7 @@ The edit algebra: every structural change is typed data.
 | function | `names` | `() -> 'list[str]'` |
 | function | `precheck` | `(edit: 'dict', state: 'Mapping[str, Any]') -> 'str \| None'` |
 | function | `random_edit` | `(state: 'Mapping[str, Any]', *, preset: 'str' = 'broad', insertable: 'Sequence[Any]' = (), rng: 'random.Random \| None' = None) -> 'dict \| None'` |
+| function | `removed` | `(op: 'object') -> 'str \| None'` |
 | function | `unknown` | `(op: 'object') -> 'str \| None'` |
 
 - **`EditError`** — An edit cannot be applied to this state. The state is left untouched.
@@ -148,6 +149,7 @@ The edit algebra: every structural change is typed data.
 - **`enabled`** — The operations a preset allows. An unknown preset is an error.
 - **`precheck`** — The reason ``edit`` cannot be applied, for the checks that need no state.
 - **`random_edit`** — A random edit from the enabled set, or ``None`` if none can be built.
+- **`removed`** — Where a folded-away operation went, or None for any other name.
 - **`unknown`** — The refusal for an op the catalogue does not have, or None when it does.
 
 

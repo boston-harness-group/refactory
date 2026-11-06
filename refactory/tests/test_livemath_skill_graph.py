@@ -167,6 +167,31 @@ def test_an_optimizer_edit_to_the_theorem_or_sketch_switch_is_refused(name):
     assert moved["knobs"]["compare_skill"]["value"] == "X"
 
 
+#: Method terms of the seed skill's sections: none may appear outside the section knobs.
+_SEED_TERMS = ("strongest", "quantifier", "there exists", "for every", "if and only if",
+               "exactly when", "distractor", "weaken", "overstat", "characteriz",
+               "equivalence", "regularity", "existential", "universal", "hypothes",
+               "domain", "assumption", "equality", "extremal", "subfamily", "precision",
+               "theorem")
+
+
+def test_no_seed_guidance_in_the_frozen_step_task_texts():
+    """Every step's task text carries no seed guidance: no seed method term and no
+    four-word run of any seed section, so all method guidance lives in the section knobs."""
+    import re
+
+    from refactory_packages.livemath import skill_graph as sg
+
+    words = lambda text: re.findall(r"[a-z]+", text.lower())
+    runs = {tuple(w[i:i + 4]) for section in sg.SEED_SECTIONS.values()
+            for w in [words(section)] for i in range(len(w) - 3)}
+    for name in ("COMPARE_TASK", "PRECISION_TASK", "HYPOTHESES_TASK", "DECIDE_TASK"):
+        text = getattr(sg, name)
+        assert not [t for t in _SEED_TERMS if t in text.lower()], name
+        w = words(text)
+        assert not {tuple(w[i:i + 4]) for i in range(len(w) - 3)} & runs, name
+
+
 def test_seed_sections_are_arm_a_seed_skill():
     """Title + the four sections, joined as the seed file joins them, is arm A's seed
     skill as its first optimizer call quotes it (calls.jsonl line 55)."""

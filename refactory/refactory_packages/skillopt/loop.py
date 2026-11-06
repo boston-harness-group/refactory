@@ -76,9 +76,9 @@ class SkillOptLoop(OuterLoop):
 
     name = "skillopt"
     requires_model = True
-    #: The patch step is a ``text_patch``; the slow update and the previous
-    #: skill's rollout are ``set_knob``.
-    required_ops = ("text_patch", "set_knob")
+    #: The patch step is a ``set_knob`` with a ``patch``; the slow update and the
+    #: previous skill's rollout are a ``set_knob`` with a ``value``.
+    required_ops = ("set_knob",)
 
     # ── configure (overrides OuterLoop.configure) ─────────────────────────
 
@@ -497,9 +497,9 @@ class SkillOptLoop(OuterLoop):
                 text_edits = [_op_to_kind(e) for e in ranked]
                 proposal = Proposal(
                     edit={
-                        "op": "text_patch",
+                        "op": "set_knob",
                         "name": "skill",
-                        "edits": text_edits,
+                        "patch": text_edits,
                         "config": dict(SKILLOPT_PATCH_CONFIG),
                     },
                     rationale="skillopt epoch {} patch".format(epoch),
@@ -1138,7 +1138,7 @@ class SkillOptLoop(OuterLoop):
             run.save_strategy_state()
             return current
 
-        # Force-accept (trainer.py:2042-2055). Not via text_patch:
+        # Force-accept (trainer.py:2042-2055). Not via a patch:
         # SKILLOPT_PATCH_CONFIG honours the protected region, which blocks it.
         pre_update_score = self._current_score
         new_skill = prompts.replace_slow_update_field(self._current_skill, guidance)
@@ -1531,10 +1531,10 @@ def _read_trajectory(result: dict) -> str:
 
 
 def _op_to_kind(edit: dict[str, Any]) -> dict[str, Any]:
-    """Convert SkillOpt's ``"op"`` key to text_patch's ``"kind"`` key.
+    """Convert SkillOpt's ``"op"`` key to a set_knob patch's ``"kind"`` key.
 
-    SkillOpt prompts produce edits with ``"op": "append"``; refactory's
-    text_patch reads ``"kind": "append"``.
+    SkillOpt prompts produce edits with ``"op": "append"``; a refactory
+    ``set_knob`` patch reads ``"kind": "append"``.
     """
     out = dict(edit)
     if "op" in out and "kind" not in out:

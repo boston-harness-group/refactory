@@ -4,7 +4,7 @@ An edit is a JSON object naming an operation, and applying it produces a new
 state. Two properties make this the write surface the outer loop can be trusted
 with:
 
-**Closed and enumerable.** Nine primitives are the algebra. Every macro is a
+**Closed and enumerable.** Seven primitives are the algebra. Every macro is a
 literal composition of them, so a macro cannot express anything the primitives
 cannot, and the set of reachable edits is enumerable and reviewable.
 
@@ -283,6 +283,24 @@ def _set_knob(state: State, edit: dict) -> State:
     knob = Knob.from_spec(entries[name]["spec"])
     if knob.frozen:
         raise EditError(f"knob {name!r} is frozen and cannot be moved", code="E-knob")
+    # One edit moves a knob, in one of two forms: the whole new value, or a patch
+    # (an ordered list of text edits) to a str knob's current text.
+    has_value, has_patch = "value" in edit, "patch" in edit
+    if has_value == has_patch:
+        raise EditError(
+            f"set_knob on knob {name!r} needs exactly one of 'value' (the whole new "
+            "value) or 'patch' (a list of text edits to a str knob); got "
+            + ("both" if has_value else "neither"),
+            code="E-knob",
+        )
+    if has_patch:
+        return _patch_knob(state, edit, name, knob, entries)
+    if "config" in edit:
+        raise EditError(
+            f"set_knob on knob {name!r}: 'config' configures a 'patch' and means "
+            "nothing with 'value'",
+            code="E-knob",
+        )
     try:
         value = knob.coerce(edit.get("value"))
     except KnobError as exc:
@@ -423,20 +441,18 @@ def _resolve_on_missing(config_on_missing: str | dict, edit_kind: str) -> str:
     return "skip"
 
 
-def _text_patch(state: State, edit: dict) -> State:
-    from .knob import Knob, KnobError
+def _patch_knob(state: State, edit: dict, name: str, knob: Any,
+                entries: dict[str, Any]) -> State:
+    """``set_knob`` with a ``patch``: apply its text edits to a str knob as one patch.
 
-    name = edit.get("name")
-    entries = dict(state.get("knobs") or {})
-    if not isinstance(name, str) or name not in entries:
-        known = ", ".join(sorted(entries)) or "none"
-        raise EditError(f"no knob {name!r}; declared knobs: {known}", code="E-knob")
-    knob = Knob.from_spec(entries[name]["spec"])
-    if knob.frozen:
-        raise EditError(f"knob {name!r} is frozen and cannot be moved", code="E-knob")
+    The caller has already checked the name and the freeze, as for a ``value``.
+    """
+    from .knob import KnobError
+
     if knob.kind != "str":
         raise EditError(
-            f"knob {name!r} has kind {knob.kind!r}; text_patch requires kind 'str'",
+            f"knob {name!r} has kind {knob.kind!r}; set_knob's 'patch' needs a str "
+            "knob, so give the new 'value' instead",
             code="E-knob",
         )
     text = str(entries[name]["value"])
@@ -498,9 +514,9 @@ def _text_patch(state: State, edit: dict) -> State:
     for pair in protected_regions:
         all_markers.extend(pair)
 
-    edits_list = edit.get("edits")
+    edits_list = edit.get("patch")
     if not isinstance(edits_list, list):
-        raise EditError("text_patch needs an 'edits' list", code="E-patch")
+        raise EditError("set_knob's 'patch' must be a list of text edits", code="E-patch")
 
     report: list[dict[str, Any]] = []
 
@@ -751,7 +767,7 @@ def _text_patch(state: State, edit: dict) -> State:
     # Return the report alongside the state.  The caller (apply()) places it
     # in the _edit_reports collector when one is provided, rather than mutating
     # the edit dict — see brief fix 1.
-    out["_text_patch_report"] = {"outcomes": report, "noop": original_text == text}
+    out["_patch_report"] = {"outcomes": report, "noop": original_text == text}
 
     return out
 
@@ -779,8 +795,11 @@ _primitive(
 )
 _primitive(
     "set_knob", "knob",
-    "Set a parameter value. Refused for a frozen knob or a value outside its bounds.",
-    ("name", "value"), _set_knob,
+    "Set a parameter: exactly one of 'value' (the whole new value) or 'patch' (an "
+    "ordered list of text edits -- replace, delete, insert_after, insert_before, "
+    "append -- applied to a str knob as one patch, configured by 'config'). Refused "
+    "for a frozen knob or a value outside its bounds.",
+    ("name", "value", "patch", "config"), _set_knob,
 )
 _primitive(
     "add_knob", "knob",
@@ -791,12 +810,6 @@ _primitive(
     "remove_knob", "knob",
     "Remove a parameter. Any node still consuming it becomes a validation failure.",
     ("name",), _remove_knob,
-)
-_primitive(
-    "text_patch", "knob",
-    "Apply an ordered list of text edits (replace, delete, insert_after, "
-    "insert_before, append) to a str knob as one patch.",
-    ("name", "edits", "config"), _text_patch,
 )
 
 
@@ -1036,14 +1049,18 @@ _macro("loop", "Wrap a step in a gate that can send control back to it, so the s
        ("target", "gate"), _pre_loop, _expand_loop)
 
 
-#: text_patch is excluded from every preset that random search samples from so that
-#: seeded random-optimizer runs are unchanged.  Use it via explicit ``text_patch``
-#: edits, not via random sampling.
-_RANDOM_EXCLUDED = {"text_patch"}
-PRESETS["broad"] = tuple(sorted(
-    n for n in list(_PRIMITIVES) + list(_MACROS) if n not in _RANDOM_EXCLUDED
-))
+PRESETS["broad"] = tuple(sorted(list(_PRIMITIVES) + list(_MACROS)))
 PRESETS["structure"] = PRESETS["broad"]
+
+#: Operations that were folded into another one. They are not in the catalogue, so
+#: an edit naming one is refused as unknown, with where its form went.
+_REMOVED: dict[str, str] = {
+    "text_patch": (
+        "text_patch was folded into set_knob: write {\"op\": \"set_knob\", "
+        "\"name\": <knob>, \"patch\": [<text edits>], \"config\": {...}} (the old "
+        "'edits' list is set_knob's 'patch')"
+    ),
+}
 
 
 # ── public surface ─────────────────────────────────────────────────────────
@@ -1065,7 +1082,19 @@ def unknown(op: object) -> str | None:
     """
     if op in _specs():
         return None
-    return f"E-op: unknown edit {op!r}; known: {names()}"
+    return f"E-op: {_unknown_message(op)}"
+
+
+def _unknown_message(op: object) -> str:
+    removed = _REMOVED.get(op) if isinstance(op, str) else None
+    if removed is not None:
+        return f"unknown edit {op!r}: {removed}"
+    return f"unknown edit {op!r}; known: {names()}"
+
+
+def removed(op: object) -> str | None:
+    """Where a folded-away operation went, or None for any other name."""
+    return _REMOVED.get(op) if isinstance(op, str) else None
 
 
 def enabled(preset: str = "broad") -> list[str]:
@@ -1114,7 +1143,7 @@ def precheck(edit: dict, state: Mapping[str, Any]) -> str | None:
     name = edit.get("op")
     spec = _specs().get(name)
     if spec is None:
-        return f"unknown edit {name!r}; known: {names()}"
+        return _unknown_message(name)
     if spec.macro and spec.precondition is not None:
         try:
             return spec.precondition(edit, dict(state))
@@ -1132,7 +1161,7 @@ def apply(
     """Apply ``edit`` and return a new state, leaving ``state`` untouched.
 
     If *edit_reports* is given it collects per-edit reports (currently only
-    ``text_patch`` produces one).  Reports are **not** mutated onto the edit
+    ``set_knob`` with a ``patch`` produces one).  Reports are **not** mutated onto the edit
     dict.
     """
     if not isinstance(edit, dict):
@@ -1140,7 +1169,7 @@ def apply(
     name = edit.get("op")
     spec = _specs().get(name)
     if spec is None:
-        raise EditError(f"unknown edit {name!r}; known: {names()}", code="E-op")
+        raise EditError(_unknown_message(name), code="E-op")
     if spec.macro:
         reason = precheck(edit, state)
         if reason:
@@ -1152,10 +1181,10 @@ def apply(
         return out
     assert spec.apply is not None
     out = spec.apply(dict(state), edit)
-    # text_patch stashes its report on the returned state dict under a private
-    # key.  Pull it out so the state stays clean and the caller sees the report
-    # in the collector, not on the edit dict.
-    report = out.pop("_text_patch_report", None)
+    # A patching set_knob stashes its report on the returned state dict under a
+    # private key.  Pull it out so the state stays clean and the caller sees the
+    # report in the collector, not on the edit dict.
+    report = out.pop("_patch_report", None)
     if report is not None and edit_reports is not None:
         edit_reports.append(report)
     return out

@@ -37,7 +37,7 @@ def defaults() -> dict[str, Any]:
 
 def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     from refactory_dsh import optim, strategies
-    from refactory_dsh.nn.edits import PRESETS, catalogue
+    from refactory_dsh.nn.edits import PRESETS, catalogue, removed
 
     settings = dict(settings)
     if "preset" in settings:
@@ -114,10 +114,13 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result[key], (list, tuple)) or any(not isinstance(v, str) for v in result[key]):
             raise ProfileError(f"{key} must be an array of names")
         result[key] = list(result[key])
+    for op in result["allowed_ops"]:
+        if removed(op) is not None:
+            raise ProfileError(f"allowed_ops names {op!r}, which no longer exists: {removed(op)}")
     outside = set(result["allowed_ops"]) - {op["op"] for op in catalogue(result["edit_preset"])}
     if outside:
         # The selected strategy's own required ops are permitted with any preset,
-        # as ``Loop.permitted_ops`` adds them (SkillOpt's text_patch; #493 G34).
+        # as ``Loop.permitted_ops`` adds them (#493 G34).
         outside -= set(getattr(strategies.resolve(result["strategy"]), "required_ops", ()))
     if outside:
         raise ProfileError("allowed_ops must belong to the selected edit preset "

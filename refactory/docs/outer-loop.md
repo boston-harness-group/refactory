@@ -21,3 +21,18 @@ call.  This means:
 `DshEvaluator` runs candidates through the DSH spine, which enforces its own
 `command_timeout_s` on each node's subprocess.  It does not use
 `enable_recovery`.
+
+## LiveMath skill graph (`livemath/skill_graph`)
+
+Arm C of the outer-loop study starts from arm A's seed skill, converted by hand into an
+explicit graph. Inside LiveMath's per-item data pass, `compare` analyses every option;
+`precision` and `hypotheses` then run in parallel on compare's notes; `decide` reads all
+three sets of notes and answers in the baseline solver's format. LiveMath's unchanged
+grader scores decide's answer. Each agent runs the solver's system prompt with only its
+own seed-skill section, and the step task texts carry no method guidance.
+
+The four section knobs (`compare_skill`, `precision_skill`, `hypotheses_skill`,
+`decide_skill`) are the only open knobs. Each step's system prompt,
+`max_completion_tokens`, `data_parallelism`, `use_theorem` and `use_sketch` are frozen.
+An item's theorem states the correct option, so the last two stay off. Each item takes
+4 model calls.

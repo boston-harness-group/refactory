@@ -34,29 +34,40 @@ records ``setting_sources`` ``project``. Loading ``user`` as well puts the host
 account's own CLAUDE.md and settings into every call. One known difference remains:
 A's solver carries Claude Code's default tools (the ``dontAsk`` mode refuses them;
 2-4% of A's solves spend a turn on a refused call), while this solve node runs with
-no tools. The scores below were measured with ``user,project``; the ``project``-only
-route has not been measured yet. The invocation that matches A::
+no tools. The arm-B parity command, as the 2026-11-05 v2 seeds ran it (from
+main after #583; A's ``skills/skill_v0000.md`` is the starting skill). The run needs
+``LIVEMATH_DATA_PATH`` set to the LiveMath raw data, and ``<parts.json>`` is built with
+``refactory_dsh.task.make_manifest`` over the train/val/test ids of SkillOpt's
+``livemathematicianbench_split``::
 
-    refactory optimize livemath/solver --strategy skillopt \
-        --worker-backend claude_code --permission-mode dontAsk \
-        --model claude-opus-4-6 --effort medium --setting-sources project \
-        --knob data_parallelism=24 --parts <parts.json> --holdout 0 \
-        --strategy-option max_epochs=10 --strategy-option early_stop_patience=3 \
-        --strategy-option early_stop_at_full_val=true --strategy-option seed=<seed> \
-        --strategy-option claude_backend_wrapper=true
+    refactory optimize livemath/solver \
+        --strategy skillopt --runs-root <runs> \
+        --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium \
+        --setting-sources project \
+        --knob "skill=$(cat <A out>/skills/skill_v0000.md)" --knob data_parallelism=24 \
+        --allowed-ops set_knob \
+        --parts-manifest <parts.json> --holdout 0 --seed <seed> --epochs 10 \
+        --batch-size 1 --optimizer random --max-elapsed-s 172800 --max-evaluations 500 \
+        --strategy-option max_epochs=10 --strategy-option seed=<seed> \
+        --strategy-option early_stop_patience=3 --strategy-option early_stop_at_full_val=true \
+        --strategy-option edit_budget_max=4 --strategy-option edit_budget_min=2 \
+        --strategy-option analyst_edit_budget=4 --strategy-option claude_backend_wrapper=true \
+        --strategy-option slow_update_samples=20 --strategy-option group_size=8 \
+        --strategy-option merge_batch_size=8 --verbose
 
-(the strategy options are A's out/config.json ``num_epochs``,
-``early_stop_patience``, ``early_stop_at_full_val`` and ``seed``, and
-``claude_backend_wrapper``, which frames every optimizer call's user message as A's
-Claude backend does -- ``History:\n- User: ...`` then ``Answer the latest user
-request.`` (skillopt/claude_backend.py); off by default, ``=false`` or omitting it
-sends the bare message. The solve node always sends its question framed that way
-(``ops.claude_backend_prompt``). The SkillOpt
-strategy evaluates on the manifest's test part after training, as A does). The
-route matters: with A's best seed-42 skill on the 125 test items, this solver
-scored 57.6% on the plain DSH API route and 69.6% on ``claude_code`` with
-``user,project`` settings, against A's 72.8%; A's four best skills (seeds 42-45)
-averaged 72.0% on ``claude_code`` with ``user,project`` against A's 73.2%.
+(the v2 seeds also passed ``--allowed-ops text_patch``, which has since been folded
+into ``set_knob``; the strategy options are A's out/config.json settings, and
+``claude_backend_wrapper`` frames every optimizer call's user message as A's Claude
+backend does -- ``History:\n- User: ...`` then ``Answer the latest user request.``
+(skillopt/claude_backend.py); off by default, ``=false`` or omitting it sends the
+bare message. The solve node always sends its question framed that way
+(``ops.claude_backend_prompt``). The SkillOpt strategy evaluates on the manifest's
+test part after training, as A does). With that command, seeds 42-45, the best
+skills scored on the same solver over the 125 test items: B 88.2/125 (0.705, 3
+scores per seed) against A's best skills 88.3/125 (0.706, 2 scores per seed).
+Earlier, on the ``user,project`` route: with A's best seed-42 skill, this solver
+scored 57.6% on the plain DSH API route and 69.6% on ``claude_code``, against A's
+72.8%; A's four best skills averaged 72.0% on ``claude_code`` against A's 73.2%.
 """
 from __future__ import annotations
 

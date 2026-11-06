@@ -252,7 +252,7 @@ def _config(root: Path, **overrides: Any) -> LoopConfig:
         optimizer="random",
         seed=42,
         runs_root=root / "run",
-        allowed_ops=("set_knob", "text_patch"),
+        allowed_ops=("set_knob",),
         strategy="skillopt",
         parts_manifest=str(parts_path),
         max_evaluations=200,
@@ -770,7 +770,8 @@ def test_budget_advances_when_patch_refused(tmp_path):
     """A refused patch reached ranking too, so it advances the budget."""
     loop, _ = _run_loop(
         tmp_path,
-        config_overrides={"allowed_ops": ("set_knob",)},
+        # Without set_knob, every patch is refused by the run's permitted edits.
+        config_overrides={"allowed_ops": ("add_knob",)},
         skillopt_options={"max_epochs": 4},
     )
     trace = _read_trace(tmp_path)
@@ -2036,11 +2037,11 @@ def test_cli_runs_skillopt_end_to_end(tmp_path, monkeypatch):
 
 
 def test_explicit_allowed_ops_win_over_required_ops(tmp_path):
-    """A person's ``allowed_ops`` is the whole answer: without text_patch in
+    """A person's ``allowed_ops`` is the whole answer: without set_knob in
     it, the patch is refused even though the strategy declares it."""
-    assert SkillOptLoop.required_ops == ("text_patch", "set_knob")
+    assert SkillOptLoop.required_ops == ("set_knob",)
     _run_loop(
-        tmp_path, config_overrides={"allowed_ops": ("set_knob",)},
+        tmp_path, config_overrides={"allowed_ops": ("add_knob",)},
         skillopt_options={"max_epochs": 1},
     )
     trace = _read_trace(tmp_path)

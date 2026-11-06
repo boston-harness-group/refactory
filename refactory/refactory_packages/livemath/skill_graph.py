@@ -93,25 +93,20 @@ NOTES = {
     "hypotheses": ("hypotheses_notes.txt", "## Hypotheses Notes"),
 }
 
+# The step task texts are neutral: every piece of method guidance lives in the four
+# section knobs, so the optimizer can move all of it (no seed guidance is frozen here).
 COMPARE_TASK = (
     "## Your Task\n"
-    "This is the first of several analysis steps. Analyse every option in turn: "
-    "decide which statement is the strongest one the question justifies, and check "
-    "each option's exact quantifiers against it. Write your analysis as notes for "
-    "the next steps. A final answer is not required."
+    "This is the first of several analysis steps. Apply the skill in your "
+    "instructions to every option and write your analysis as notes for the next "
+    "steps. A final answer is not required."
 )
 PRECISION_TASK = (
     "## Your Task\n"
-    "Using the option comparison notes above, check each option's theorem-level "
-    "precision: whether it weakens or overstates what can be proven. Write your "
-    "analysis as notes for the final step. A final answer is not required."
+    "Using the notes above, apply the skill in your instructions to every option and "
+    "write your analysis as notes for the final step. A final answer is not required."
 )
-HYPOTHESES_TASK = (
-    "## Your Task\n"
-    "Using the option comparison notes above, check each option's hypotheses, "
-    "domain, equality cases and scope. Write your analysis as notes for the final "
-    "step. A final answer is not required."
-)
+HYPOTHESES_TASK = PRECISION_TASK
 DECIDE_TASK = (
     "## Your Task\n"
     "Weigh the notes above against the question and its options, and choose the "
