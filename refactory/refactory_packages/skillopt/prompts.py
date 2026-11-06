@@ -97,6 +97,26 @@ these markers.\
 """
 # Source: skillopt/prompts/analyst_success.md (lines 1-36)
 
+# ── Several knobs: the section field (not SkillOpt's; never sent with one knob) ─
+#: Appended to the analyst, merge and rank system prompts when the skill is the
+#: multi-knob composite, so the optional ``section`` field is part of the edit
+#: format every step reads and writes. With one knob nothing is appended.
+SECTION_EDIT_NOTE = """SECTIONS: this skill is split into sections, each opened by a
+<!-- SECTION <knob>: <where it is used> --> line. Every edit object may carry one
+more field, "section": "<knob>", naming the section it applies to:
+- An edit whose target text appears in more than one section MUST name its
+  section; without one it is not applied. An append with a section goes at the
+  end of that section; without one, at the end of the last section.
+- Keep every edit's "section" unchanged when you merge, select or rewrite edits.
+- Edits in different sections are different text regions, even when their
+  target text is the same: never collapse them into one edit without a section."""
+
+
+def with_sections(system: str, sections: bool) -> str:
+    """``system`` with :data:`SECTION_EDIT_NOTE` appended when ``sections``."""
+    return f"{system}\n\n{SECTION_EDIT_NOTE}" if sections else system
+
+
 # ── Merge prompts (prompts/merge_failure.md, merge_success.md, merge_final.md) ─
 MERGE_FAILURE_SYSTEM = """\
 You are a skill-edit coordinator. You receive multiple independently-proposed patches
@@ -561,14 +581,18 @@ def format_merge_final_user(
     return user
 
 
-def describe_edit(edit: dict) -> str:
-    """One edit as the ranker sees it — update_modes.py:100-111 (patch mode)."""
+def describe_edit(edit: dict, *, sections: bool = False) -> str:
+    """One edit as the ranker sees it — update_modes.py:100-111 (patch mode).
+
+    ``sections`` (several knobs only) also shows the section an edit names."""
     if not isinstance(edit, dict):
         return ""
     op = edit.get("op", "?")
     target = edit.get("target", "")
     content = edit.get("content", "")
     parts = [f"op={op}"]
+    if sections and edit.get("section"):
+        parts.append(f"section={edit.get('section')!r}")
     if target:
         parts.append(f"target={target!r}")
     if content:
@@ -583,9 +607,11 @@ def format_rank_user(
     edits: list[dict],
     budget: int,
     meta_skill: str = "",
+    *,
+    sections: bool = False,
 ) -> str:
-    """Rank user message — clip.py:58-71."""
-    edits_desc = [f"[{i}] {describe_edit(edit)}" for i, edit in enumerate(edits)]
+    """Rank user message — clip.py:58-71. ``sections``: see :func:`describe_edit`."""
+    edits_desc = [f"[{i}] {describe_edit(edit, sections=sections)}" for i, edit in enumerate(edits)]
     user = (
         f"## Current Skill\n{skill_text}\n\n"
         f"## Edits Pool ({len(edits)} edits, budget={budget})\n"

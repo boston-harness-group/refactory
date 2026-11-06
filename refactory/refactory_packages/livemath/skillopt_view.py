@@ -95,7 +95,8 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
     gives the target system prompt. A ``skill_graph`` record takes its first
     step's system-prompt knob (``<step>__system_prompt``) instead, and when its
     exchanges come from more than one node each message is labelled with its
-    node (``[compare] ...``), so the analysts can tell which step wrote what. A one-node record (the solver's) is unchanged.
+    node (``[compare] ...``), so the analysts can tell which step wrote what.
+    A one-node record (the solver's) is unchanged.
 
     A record that ended in an error has no conversation and ``n_turns`` 0
     (rollout.py:286-289, :359-376): the failed or timed-out ``process_one``

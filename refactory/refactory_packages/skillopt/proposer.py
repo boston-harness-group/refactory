@@ -424,6 +424,7 @@ class SkillOptProposer:
             trace=self.trace,
             env=self.env,
             knobs=knob_values(candidate),
+            sections=self.multi,
         )
         return self._merge_order(epoch, "failure", failure), self._merge_order(epoch, "success", success)
 
@@ -438,6 +439,7 @@ class SkillOptProposer:
             epoch=epoch,
             trace=self.trace,
             merge_batch_size=self.merge_batch_size,
+            sections=self.multi,
         )
         # SkillOpt writes the merged patch to steps/step_NNNN/merged_patch.json
         # (trainer.py:1376); recording the dict here lets the F20 replay compare it
@@ -447,8 +449,17 @@ class SkillOptProposer:
         )
         return merged
 
-    def rank(self, epoch: int, text: str, merged: dict) -> list[dict]:
-        """The ranked edits within this step's edit budget (the cosine schedule)."""
+    def rank(self, epoch: int, text: str, merged: dict,
+             parent: Candidate | None = None) -> list[dict]:
+        """The ranked edits within this step's edit budget (the cosine schedule).
+
+        With several knobs and the ``parent`` they apply to, the edits :meth:`route`
+        refuses are dropped first (recorded as ``section_refused``), so a refused
+        edit never takes a budget slot. With one knob every merged edit is ranked,
+        as SkillOpt ranks them."""
+        edits = merge.patch_edits(merged)
+        if self.multi and parent is not None:
+            edits = self._routable(edits, parent)
         budget = schedule.edit_budget(
             self.budget_step + 1, self.max_epochs, self.edit_budget_max, self.edit_budget_min,
         )
@@ -456,11 +467,12 @@ class SkillOptProposer:
         ranked = merge.rank(
             client=self.client(),
             skill_text=text,
-            merged_edits=merge.patch_edits(merged),
+            merged_edits=edits,
             budget=budget,
             meta_skill=self.meta_skill,
             epoch=epoch,
             trace=self.trace,
+            sections=self.multi,
         )
         # ``edits`` mirrors SkillOpt's steps/step_NNNN/ranked_edits.json
         # (trainer.py:1396, :1427), so the F20 replay compares the selected edits
@@ -470,6 +482,16 @@ class SkillOptProposer:
             n_edits=len(ranked), edits=ranked,
         )
         return ranked
+
+    def _routable(self, edits: list[dict], parent: Candidate) -> list[dict]:
+        """``edits`` without the ones :meth:`route` refuses on ``parent``."""
+        _per_knob, refused = self.route(edits, parent)
+        if not refused:
+            return edits
+        dropped = {row["index"] for row in refused}
+        if self.trace is not None:
+            self.trace.record_decision("section_refused", n_edits=len(edits), outcomes=refused)
+        return [edit for index, edit in enumerate(edits) if index not in dropped]
 
     # ── end of epoch: slow update and meta skill ───────────────────────────
 
@@ -880,7 +902,8 @@ def _route_one(
     return knobs[-1], "", []
 
 
-def _refusal(index: int, edit: Any, status: str, sections: list[str] = ()) -> dict[str, Any]:  # type: ignore[assignment]
+def _refusal(index: int, edit: Any, status: str,
+             sections: list[str] = ()) -> dict[str, Any]:  # type: ignore[assignment]
     edit = edit if isinstance(edit, dict) else {}
     target = edit.get("target", "")
     out = {
@@ -892,6 +915,8 @@ def _refusal(index: int, edit: Any, status: str, sections: list[str] = ()) -> di
         "knob": None,
     }
     message = _REFUSAL_MESSAGES.get(status)
+    if status == TARGET_NOT_IN_SECTION and not sections:
+        message = _OUTSIDE_SECTIONS
     if message:
         out["sections"] = list(sections)
         out["message"] = message.format(section=edit.get(SECTION_FIELD),
@@ -907,6 +932,11 @@ _REFUSAL_MESSAGES = {
                             "{sections}"),
     UNKNOWN_SECTION: "section {section!r} is not one of the sections: {sections}",
 }
+#: A named edit whose target is in no section's text: across a section boundary,
+#: in the header or in a SECTION line.
+_OUTSIDE_SECTIONS = ("the target is not in section {section!r}: it is in no section's "
+                     "text, but across a section boundary, in the header or in a "
+                     "SECTION line")
 
 
 def only_noop(reasons: list[str]) -> bool:

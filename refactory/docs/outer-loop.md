@@ -54,8 +54,11 @@ the strategy optimizes the single `skill` knob exactly as before.
   keys and trace entries stay unique.
 - **Back to the knobs.** The ranked patch becomes one `set_knob` patch per knob it
   touches, each applied through `Run.attempt`:
-  - An edit may name its section with `"section": "<knob>"`. The header tells the
-    model to do so whenever its target text appears in more than one section. A named
+  - An edit may name its section with `"section": "<knob>"`. The header, and a note
+    added to the analyst, merge and rank system prompts, tell the model to do so
+    whenever its target text appears in more than one section, to keep an edit's
+    section through the merges, and that edits in different sections are different
+    text regions; the ranker sees each edit's section. A named
     edit applies to that knob only: it is refused (`skipped_target_not_in_section`) when
     its target is elsewhere in the document, and an append or a target found nowhere
     lands at the end of that knob. A section that names no knob is refused
@@ -72,8 +75,11 @@ the strategy optimizes the single `skill` knob exactly as before.
     boundary, in the header or in a SECTION line, or when its content carries a SECTION
     line. The trace reports it as `skipped_cross_section` or
     `skipped_section_line_in_content`, and the rest of the patch applies.
-- **One knob is unchanged.** With a single knob there is no header and no section
-  routing: arm B's optimizer prompts are byte-identical to before.
+- **Refused edits take no rank slot.** Before ranking, the merged edits are routed
+  against the current knobs and the refused ones are dropped (trace
+  `section_refused`), so the edit budget goes to edits that can apply.
+- **One knob is unchanged.** With a single knob there is no header, no section
+  note and no section routing: arm B's optimizer prompts are byte-identical to before.
 - **The slow update.** The SLOW_UPDATE placeholder and guidance live at the end of the
   last knob (`decide__system_prompt` here), where SkillOpt keeps them: at the end of the document.
 - **Refused knobs.** A knob that is missing, frozen or not a text knob is refused before
