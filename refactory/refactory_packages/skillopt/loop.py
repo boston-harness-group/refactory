@@ -11,8 +11,9 @@ It is built from three shared parts, and keeps only SkillOpt's control flow (the
 epoch, its resume phases, the early stop):
 
 - ``SkillOptProposer`` (``proposer.py``): the analysts, the merge, the ranked edit
-  budget, the patch step, the slow update and the meta skill, as typed edits to one
-  text knob (the ``knob`` option, ``skill`` by default);
+  budget, the patch step, the slow update and the meta skill, as typed edits to the
+  open text knob(s) it is given (the ``knob`` option, ``skill`` by default, or the
+  ``knobs`` option: several knobs SkillOpt sees as one sectioned document);
 - ``outerloop.ValidationGate``: the val gate (strict improvement over the current
   candidate, val scores cached per whole candidate) and the best on val;
 - ``outerloop.FinalEvaluation``: the post-training block.
@@ -42,6 +43,9 @@ Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
                 reported as A's summary.json names them (trainer.py:2480-2515).
                 ``eval_test=false`` skips it, and the report says so.
   - knob = "skill"          (not a SkillOpt setting: the text knob it optimizes)
+  - knobs = (knob,)         (not a SkillOpt setting: several open text knobs, as a
+                             comma-separated list or a list, that SkillOpt sees as
+                             one document of sections -- see ``proposer.py``)
 """
 
 from __future__ import annotations
@@ -50,16 +54,17 @@ import hashlib
 import warnings
 from typing import Any
 
-from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate
 from refactory_dsh.outerloop import (
     EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate,
 )
 
-from refactory_packages.skillopt import prompts, state
+from refactory_packages.skillopt import state
 from refactory_packages.skillopt.claude_backend import ClaudeBackendFraming
 from refactory_packages.skillopt.env import SkillOptEnv
-from refactory_packages.skillopt.proposer import SkillOptProposer, hard_score, knob_values
+from refactory_packages.skillopt.proposer import (
+    SkillOptProposer, only_noop, hard_score, knob_values,
+)
 from refactory_packages.skillopt.trace import TraceRecorder
 
 #: The report's figures under A's summary.json names (trainer.py:2480-2515), and
@@ -172,10 +177,17 @@ class SkillOptLoop(OuterLoop):
         knob = options.get("knob", "skill")
         if not isinstance(knob, str) or not knob:
             raise TypeError(f"skillopt: knob must name a text knob, not {knob!r}")
+        knobs = _knob_list(options.get("knobs"))
+        if knobs is not None and "knob" in options and knobs != (knob,):
+            raise TypeError(
+                f"skillopt: give the knob option or the knobs option, not both "
+                f"(knob={knob!r}, knobs={list(knobs)!r})"
+            )
 
         # The three shared parts (see the module docstring).
         self.proposer = SkillOptProposer(
             knob=knob,
+            knobs=knobs,
             client=self._optimizer_client,
             seed=self.base_seed,
             max_epochs=self.max_epochs,
@@ -269,11 +281,7 @@ class SkillOptLoop(OuterLoop):
         # holds the run's mode -- its prompt overrides and rollout rendering.
         self.proposer.env = SkillOptEnv.for_mode(str(run.state().get("mode", "")))
         # A run that cannot do what it was told is refused before it spends.
-        if self.proposer.knob not in (run.seed().state.get("knobs") or {}):
-            raise ValueError(
-                f"skillopt: the mode has no {self.proposer.knob!r} knob to optimize; "
-                "name its text knob with the knob option"
-            )
+        self.proposer.check_knobs(run.seed().state)
         if self.eval_test and not run.has_part("test"):
             raise ValueError(
                 "skillopt: eval_test=true needs a parts manifest with a 'test' part; "
@@ -426,21 +434,21 @@ class SkillOptLoop(OuterLoop):
             # ⑤ Patch — mechanism 5
             if not self._past_phase(resume_epoch, resume_phase, epoch, "patch"):
                 self._phase = "patch"
-                proposal = self.proposer.patch(ranked, current, f"skillopt epoch {epoch} patch")
-                outcome = run.attempt(proposal, current)
-                if isinstance(outcome, list) and _only_noop(outcome):
+                outcome, edit_report = self.proposer.attempt_patch(
+                    run, ranked, current, f"skillopt epoch {epoch} patch",
+                )
+                if isinstance(outcome, list) and only_noop(outcome):
                     # The edits changed nothing: SkillOpt still gates the
                     # unchanged skill (trainer.py:1507, :1514), its selection
                     # cache answers with the score it holds for it
                     # (:1567-1572), and the gate does not accept an equal score.
+                    # ``edit_report`` is its per-edit outcomes, as SkillOpt writes
+                    # edit_apply_report.json for it (trainer.py:1510-1512).
+                    # Observability only.
                     candidate = current
-                    # Its per-edit outcomes, as SkillOpt writes edit_apply_report.json
-                    # for it (trainer.py:1510-1512). Observability only.
-                    noop_reports: list[dict[str, Any]] = []
-                    nn_edits.apply(proposal.edit, current.state, edit_reports=noop_reports)
                     self._trace.record_decision(
                         "patch_noop", reasons=outcome, n_edits=len(ranked),
-                        edit_report=noop_reports[0] if noop_reports else None,
+                        edit_report=edit_report,
                     )
                 elif isinstance(outcome, list):
                     self._trace.record_decision(
@@ -455,7 +463,6 @@ class SkillOptLoop(OuterLoop):
                     continue
                 else:
                     candidate = outcome
-                    edit_report = candidate.edit_reports[-1] if candidate.edit_reports else None
                     self._trace.record_decision(
                         "patch_applied",
                         edit_report=edit_report,
@@ -528,7 +535,9 @@ class SkillOptLoop(OuterLoop):
         held = run.candidate(self._patched_id)
         if held is not None:
             return held
-        outcome = run.attempt(self.proposer.patch(ranked, current, f"skillopt epoch {epoch} patch"), current)
+        outcome, _ = self.proposer.attempt_patch(
+            run, ranked, current, f"skillopt epoch {epoch} patch",
+        )
         if isinstance(outcome, list) or outcome.id != self._patched_id:
             raise OuterLoopError(
                 f"skillopt: cannot rebuild the epoch-{epoch} patched candidate "
@@ -764,8 +773,8 @@ class SkillOptLoop(OuterLoop):
         # Force-accept (trainer.py:2042-2055) at the pre-update score, which is
         # cached for the new candidate (:2052-2053). Not via a patch:
         # SKILLOPT_PATCH_CONFIG honours the protected region, which blocks it.
-        new_text = prompts.replace_slow_update_field(current_text, guidance)
-        outcome = run.attempt(self.proposer.set_text(new_text, current, "slow update guidance"), current)
+        proposal, new_text = self.proposer.slow_update_proposal(guidance, current)
+        outcome = run.attempt(proposal, current)
         if not isinstance(outcome, list):
             current = run.keep(outcome)
             self.gate.carry(current, remember=True)
@@ -883,6 +892,19 @@ def _held(run: Run, candidate_id: str | None) -> Candidate:
     return candidate
 
 
-def _only_noop(reasons: list[str]) -> bool:
-    """Whether every refusal reason is ``E-noop`` (the edit changed nothing)."""
-    return bool(reasons) and all(str(reason).startswith("E-noop") for reason in reasons)
+def _knob_list(value: Any) -> tuple[str, ...] | None:
+    """The ``knobs`` option as a tuple of names: a comma-separated string (the
+    command line's ``--strategy-option knobs=a,b``) or a list; ``None`` when unset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        names = [name.strip() for name in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        names = [name.strip() if isinstance(name, str) else name for name in value]
+    else:
+        raise TypeError(f"skillopt: knobs must be a comma-separated list of knob names, not {value!r}")
+    if not names or not all(isinstance(name, str) and name for name in names):
+        raise TypeError(f"skillopt: knobs must be a comma-separated list of knob names, not {value!r}")
+    if len(set(names)) != len(names):
+        raise TypeError(f"skillopt: knobs names a knob twice: {value!r}")
+    return tuple(names)

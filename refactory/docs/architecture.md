@@ -216,9 +216,15 @@ candidate evaluated on train is rolled out on val, stays a parent only when it b
 its parent there, and the best on val is the winner. SkillOpt (`refactory_packages/skillopt`)
 is built from the same pieces plus `SkillOptProposer`, its optimizer steps (analysts,
 failure-first merge, ranked edit budget, patch, slow update, meta skill) as a part
-whose output is `set_knob` edits to one named text knob (`skill` by default, the
-`knob` strategy option), so another strategy or a graph with several text knobs can
-reuse it.
+whose output is `set_knob` edits, so another strategy can reuse it. It edits one text
+knob (`skill` by default, the `knob` strategy option) or several (the `knobs` option).
+With several, SkillOpt still sees one document: a header naming the graph's agent
+steps, then each knob's text under a `<!-- SECTION <knob>: <use> -->` line. Its procedure
+runs on that document unchanged, once per epoch, and the patch is mapped back as one
+`set_knob` patch per knob it touches. An edit goes to the first knob whose text holds
+its target. An append, or a target found nowhere, goes to the last knob, which also
+holds the SLOW_UPDATE region. An edit whose target crosses a section boundary or a
+SECTION line is refused on its own, never split, and the rest of the patch applies.
 
 **SRF's thirteen modes split across both buckets**, and the split is asserted so a
 port cannot go missing or be filed wrongly:
