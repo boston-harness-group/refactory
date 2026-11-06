@@ -64,6 +64,10 @@ jobs:
       # existing before the Node build runs `docs:check`. Pinned by commit: this
       # action publishes version tags, not a moving major one.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          # Pinned: runners moved to 3.14, whose argparse help text differs and
+          # makes the generated docs/tutorial.html stale. 3.12 is what main was green on.
+          python-version: "3.12"
 
       # The path a new checkout takes. On a fresh runner this is the real test of
       # the ordering, and it also creates the DSH profile the bundle needs.
