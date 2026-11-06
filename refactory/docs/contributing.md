@@ -171,7 +171,8 @@ Each of these happened, and the shape of the code is the response.
   that could not run. Hence: macros expand to primitives, the validator refuses
   rather than repairs, and validation happens before budget is spent.
 - **A surface that lied.** Structural wins were counted from failed runs, and
-  duplicates vanished. `structural_wins` requires `exit_ok`; duplicates are refused
+  duplicates vanished. `structural_wins` requires `exit_ok` and a score above the
+  candidate's parent; duplicates are refused
   at the optimizer layer and `attempt == 0` is asserted in the tests.
 - **Steps that deleted their own run.** When the loop became a mode, each node
   rehydrates from the journal — and `resume=False` means "start over", so the

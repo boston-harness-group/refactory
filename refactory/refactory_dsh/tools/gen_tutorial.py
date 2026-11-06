@@ -568,7 +568,7 @@ def render(project: Path | None = None) -> str:
             '  "seed_score": 0.46,\n  "best_score": 0.96,\n  "raw_best_score": 1.0,\n'
             '  "scoring": {"compared": "penalized", "parsimony": 0.01, ...},\n'
             '  "holdout": {"train": 1.0, "holdout": null, "overfit": false, ...},\n'
-            '  "structural_wins": 1,\n'
+            '  "structural_wins": 0,\n'
             '  "rejection_codes": {"E-shape": 3, "V2": 3, "V7": 6, ...},\n'
             '  "report": "/tmp/tour/run/report.md"\n}',
         ),

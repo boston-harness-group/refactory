@@ -147,9 +147,12 @@ class Solver(nn.Mode):
         return {
             "skill": nn.Knob("", "str", description="skill prompt injected into the system message"),
             # SkillOpt configs/livemathematicianbench/default.yaml:21-22
-            "use_theorem": nn.Knob(False, "bool",
+            # Frozen: an item's theorem (and its sketch) states the correct option,
+            # so a search that could turn either on would be reading the answer.
+            # SkillOpt's own runs keep both off (default.yaml:21-22).
+            "use_theorem": nn.Knob(False, "bool", frozen=True,
                                    description="include the item's theorem as a ## Theorem section"),
-            "use_sketch": nn.Knob(False, "bool",
+            "use_sketch": nn.Knob(False, "bool", frozen=True,
                                    description="include the item's proof sketch as a ## Proof Sketch section"),
             # Uncapped, as arm A's solver is (``MAX_COMPLETION_TOKENS``). A run
             # setting, not a search target: frozen against the optimizer, set

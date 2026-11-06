@@ -369,24 +369,51 @@ def evaluate_on_dsh(
             exit_ok=False,
             error=f"dsh run failed (exit {run.returncode}): {detail[:300]}",
             workdir=run.workdir,
+            model_calls=spine_model_calls(Path(run.workdir)),
         )
     status = _spine_status(run.workdir)
     if status.get("status") not in ("", "done"):
-        detail = str(status.get("error") or status.get("status"))
+        failure = status.get("last_failure") if isinstance(status.get("last_failure"), dict) else {}
+        detail = str(status.get("error") or failure.get("error") or status.get("status"))
         return RunResult(
             facts=run.facts,
             duration_s=run.duration_s,
             exit_ok=False,
             error=f"the graph did not finish: {detail[:300]}",
             workdir=run.workdir,
+            model_calls=spine_model_calls(Path(run.workdir)),
         )
-    result = RunResult(facts=run.facts, duration_s=run.duration_s, workdir=run.workdir)
+    result = RunResult(facts=run.facts, duration_s=run.duration_s, workdir=run.workdir,
+                       model_calls=spine_model_calls(Path(run.workdir)))
     try:
         result.score = float(mode.score(result))
     except Exception as exc:
         result.exit_ok = False
         result.error = f"score() raised {type(exc).__name__}: {exc}"
     return result
+
+
+def spine_model_calls(workdir: Path) -> int:
+    """The agent-node model calls a spine run made: one worker receipt per call.
+
+    The walker counts each agent call it makes (``Executor.model_calls``); the
+    spine leaves a receipt per agent worker, in the run directory and in each
+    item's pass directory. The coordinator's own receipt names no node and is
+    not an agent call, and nested ``trials``/``occasions`` directories are other
+    evaluations, so only the run's own and its passes' receipts are counted.
+    """
+    workdir = Path(workdir)
+    receipts = [*workdir.glob(".refactory/workers/*.json"),
+                *workdir.glob("passes/**/.refactory/workers/*.json")]
+    count = 0
+    for path in receipts:
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(receipt, dict) and receipt.get("node_id"):
+            count += 1
+    return count
 
 
 def _spine_status(workdir: Path) -> dict[str, Any]:

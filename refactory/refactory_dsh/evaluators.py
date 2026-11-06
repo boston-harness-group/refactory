@@ -243,6 +243,17 @@ class DshEvaluator(Evaluator):
                 result.item_records = _json.loads(records_path.read_text())
             except (OSError, _json.JSONDecodeError):
                 pass
+        else:
+            # The spine writes item_records.json only when the run is done. A run
+            # that stopped at a failed data node -- every item failed -- still
+            # recorded each item in its status, and the walker keeps the records
+            # of such a run, so they are kept here too.
+            from refactory_dsh.dsh_runtime import _spine_status
+
+            records = _spine_status(workdir).get("item_records")
+            if isinstance(records, list) and records:
+                result.item_records = records
+                records_path.write_text(_json.dumps(records, indent=2, default=str))
         return result
 
 

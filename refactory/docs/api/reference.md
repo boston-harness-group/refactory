@@ -950,6 +950,7 @@ The per-item half of a data node, from the command line.
 | function | `command_reset` | `(workdir: 'Path', request: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `data_node` | `(workdir: 'Path', node_id: 'str') -> 'Node'` |
 | function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
+| function | `error_kind` | `(error: 'BaseException') -> 'str'` |
 | function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `live_dir` | `(workdir: 'Path', node_id: 'str') -> 'Path'` |
@@ -976,6 +977,7 @@ The per-item half of a data node, from the command line.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
+- **`error_kind`** — A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
 - **`live_dir`** — The folder of *node_id*'s per-item aliases (``data_parallel._live_alias``).

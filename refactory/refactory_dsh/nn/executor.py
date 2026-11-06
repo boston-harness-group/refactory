@@ -1467,7 +1467,8 @@ class Executor:
 
         A fork stops *before* its barrier, because the barrier is the node the walk
         continues at. A data node's pass includes its ``subgraph_exit``: that node is
-        the last one of the subgraph, not the one after it.
+        the last one of the subgraph, not the one after it, so the pass ends once the
+        exit has run -- as the spine's does -- even when the exit has an out-edge.
 
         Nested forks and joins within a branch are handled inline: when a fork is
         encountered, ``run_fork`` is called recursively; when a join is encountered,
@@ -1479,9 +1480,11 @@ class Executor:
             retries = loop_edges(self.graph)
         except ValueError as exc:
             return str(exc)
-        while current is not None and (current != barrier or include_barrier):
-            if include_barrier and current == barrier:
-                barrier = None  # the exit is visited once, then the pass ends
+        exit_ran = False
+        while current is not None and not exit_ran and (current != barrier or include_barrier):
+            # The exit is visited once, then the pass ends: whatever it leads to is
+            # not part of the item's pass.
+            exit_ran = include_barrier and current == barrier
             node = self.graph.nodes.get(current)
             if node is None:
                 return f"node {current!r} does not exist"
