@@ -1229,11 +1229,12 @@ def test_grid_refuses_to_reuse_run_dirs(tmp_path, monkeypatch):
 
 
 def test_modes_registered():
-    """All four modes are registered in the livemath package."""
+    """The four block modes (and the skill graph) are registered in the livemath package."""
     from refactory_packages.livemath import PACKAGE
 
     mode_names = {m.name for m in PACKAGE.modes}
-    assert mode_names == {"solver", "solver_verify", "solver_judge", "solver_self_check"}
+    assert mode_names == {"solver", "solver_verify", "solver_judge", "solver_self_check",
+                          "skill_graph"}
 
 
 def test_ops_registered():

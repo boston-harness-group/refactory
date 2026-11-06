@@ -305,6 +305,27 @@
       "purpose": "prove a theorem in Lean and score what the Lean checker accepted. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.",
       "reviewed_schema": "f6d0144cf23fcce624f495f873690711972933fbcf05aa374221ff3fbf542a2c"
     },
+    "livemath/skill_graph": {
+      "doc": "refactory/docs/outer-loop.md",
+      "examples": [
+        {
+          "explanation": "Solve each LiveMathematicianBench item with the seed skill's four sections as four agent steps: compare, then precision and hypotheses in parallel, then decide. Each step's section text is a knob. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+          "knobs": {
+            "data_parallelism": 1,
+            "max_completion_tokens": 0,
+            "use_sketch": false,
+            "use_theorem": false
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=livemath/skill_graph; use refactory help topic=livemath/skill_graph first",
+        "cli": "refactory ceo livemath/skill_graph",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
+      "reviewed_schema": "80fefbd675296334f66d59bd3535dde20a4fa0401247749ce9b1566028a9a0b1"
+    },
     "livemath/solver": {
       "doc": "refactory/docs/outer-loop.md",
       "examples": [
