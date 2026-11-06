@@ -804,7 +804,10 @@ class Loop(OuterLoop):
                 break
             if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
                 break
-            self._evaluate(candidate)
+            # The run's seed, as SkillOpt and testeval pass theirs: a Task that
+            # shuffles per (item, seed) -- LiveMath's answer choices -- shuffles,
+            # and every candidate of the run meets the same shuffle.
+            self._evaluate(candidate, seed=self.config.seed)
             self._progress(
                 "forward",
                 candidate=candidate.id,
@@ -1599,9 +1602,12 @@ class Loop(OuterLoop):
         When a loop-level manifest exists, val/test ids are read from it instead
         of calling ``partition().get(part)`` (which is always empty for val/test).
         """
-        # When a manifest exists, read val/test ids directly from it.
-        if self._parts_manifest is not None and part in self._parts_manifest:
-            manifest_ids = set(self._parts_manifest[part])
+        # When a manifest exists, read the part's ids directly from it (the
+        # holdout audit's are its val ids: ``task.manifest_part_ids``).
+        listed = (task_module.manifest_part_ids(self._parts_manifest, part)
+                  if self._parts_manifest is not None else None)
+        if listed is not None:
+            manifest_ids = set(listed)
             # Still need to determine seed_declares_item_scores
             declares = False
             if state:
@@ -2352,9 +2358,7 @@ class Loop(OuterLoop):
             "rejected": list(self.rejected),
             "adoptions": list(self.adoptions),
             "lineage": self._lineage(best),
-            "structural_wins": [
-                self._row(c) for c in board if c.is_structural() and c.exit_ok
-            ],
+            "structural_wins": self._structural_wins(board),
             "accepted_op_mix": self._op_mix(),
             "structural": self._structural_stats(),
             "rejection_codes": self._rejection_codes(),
@@ -2414,11 +2418,23 @@ class Loop(OuterLoop):
         items, data_nodes = self._audit_items(
             winner.state if winner is not None else {}
         )
-        instances: dict[str, int | None] = (
-            dict(task_module.counts(items, self.config.holdout))
-            if items
-            else {task_module.TRAIN: None, task_module.HOLDOUT: None}
-        )
+        manifest = self._parts_manifest
+        if manifest is not None:
+            # The parts manifest decides the parts: the search ran its train ids,
+            # the audit runs its val ids, and its test ids are never touched here.
+            # The fraction then only says whether to audit: --holdout 0 turns it off.
+            held = (task_module.manifest_part_ids(manifest, task_module.HOLDOUT) or ()
+                    if self.config.holdout > 0 else ())
+            instances: dict[str, int | None] = {
+                task_module.TRAIN: len(task_module.manifest_part_ids(manifest, task_module.TRAIN) or ()),
+                task_module.HOLDOUT: len(held),
+            }
+        else:
+            instances = (
+                dict(task_module.counts(items, self.config.holdout))
+                if items
+                else {task_module.TRAIN: None, task_module.HOLDOUT: None}
+            )
         train = winner.raw_score if winner is not None else None
         holdout: float | None = None
         note = ""
@@ -2431,7 +2447,15 @@ class Loop(OuterLoop):
                 "the mode has no data node, so it iterates no items and there is "
                 "nothing to hold out"
             )
-        elif not items:
+        elif manifest is not None and instances[task_module.HOLDOUT] == 0:
+            status = "not_applicable"
+            note = (
+                "the run's holdout is 0, so no holdout was scored"
+                if self.config.holdout <= 0 else
+                "the parts manifest names no val items, so there is no holdout: the "
+                "audit never runs the manifest's test items"
+            )
+        elif not items and manifest is None:
             note = (
                 "the items this mode iterates could not be read outside a candidate's "
                 "run directory, so no holdout was scored"
@@ -2524,7 +2548,13 @@ class Loop(OuterLoop):
         workdir = self.root / "holdout" / winner.id
         try:
             workdir.mkdir(parents=True, exist_ok=True)
-            result, self.holdout_measurements = self._measure(winner, workdir, task_module.HOLDOUT)
+            # The manifest travels with the audit, so its loader selects the
+            # manifest's holdout ids rather than splitting every item the Task has.
+            manifest = self.root / task_module.MANIFEST
+            if self._parts_manifest is not None and manifest.exists():
+                shutil.copyfile(manifest, workdir / task_module.MANIFEST)
+            result, self.holdout_measurements = self._measure(
+                winner, workdir, task_module.HOLDOUT, seed=self.config.seed)
         except Exception as exc:  # a failed audit is recorded, not raised
             return None, f"the holdout run failed: {type(exc).__name__}: {exc}"
         if not result.exit_ok:
@@ -2560,6 +2590,22 @@ class Loop(OuterLoop):
             if items:
                 return items, len(nodes)
         return [], len(nodes)
+
+    def _structural_wins(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """Structural candidates that scored above the parent they were bred from.
+
+        A structural candidate that merely ran is not a win: counting those made
+        every structural edit that did not crash look like progress.
+        """
+        by_id = {c.id: c for c in self.population}
+        wins: list[dict[str, Any]] = []
+        for candidate in board:
+            parent = by_id.get(candidate.parent or "")
+            if (candidate.is_structural() and candidate.exit_ok and candidate.score is not None
+                    and parent is not None and parent.exit_ok and parent.score is not None
+                    and candidate.score > parent.score):
+                wins.append(self._row(candidate))
+        return wins
 
     def _lineage(self, candidate: Candidate | None) -> list[dict[str, Any]]:
         if candidate is None:
@@ -2647,7 +2693,7 @@ class Loop(OuterLoop):
                 ],
             ),
             "",
-            "## Structural candidates that scored",
+            "## Structural candidates that beat their parent",
             "",
             _md_table(
                 ["id", "score", "raw", "nodes", "edits"],
@@ -2760,8 +2806,8 @@ class Loop(OuterLoop):
 
     # ── context ────────────────────────────────────────────────────────────
     def _context(self) -> ProposalContext:
-        described = self.mode.describe()
         board = self.leaderboard(8)
+        described, graph_note = self._describe_parent(board)
         return ProposalContext(
             epoch=self.epoch,
             generation=self.generation,
@@ -2801,7 +2847,34 @@ class Loop(OuterLoop):
             steering=self._steering_block(),
             item_records=self._parent_train_records(board),
             parent_item_records=self._parent_train_records(board),
+            graph_note=graph_note,
         )
+
+    def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
+        """The graph and knobs of the candidate this step edits, and a note when not.
+
+        The parent is chosen as for its records (``_parent_train_records``): the
+        strategy's, else the one ``optimizer_step`` selected, else the leader. The
+        seed's description would show a graph the edits no longer apply to once a
+        structural candidate is the parent. The seed is described only when no
+        parent is known, or when the parent's state cannot be built -- and then the
+        note says so, in the prompt and in the run's progress, rather than passing
+        the seed's graph off as the parent's.
+        """
+        by_id = {c.id: c for c in self.population}
+        parent_id = self.strategy_decision.get("parent") or self._editing_parent
+        parent = by_id.get(str(parent_id)) if parent_id else None
+        if parent is None and board:
+            parent = board[0]
+        if parent is None:
+            return self.mode.describe(), ""
+        try:
+            return self.mode_class(state=parent.state).describe(), ""
+        except Exception as exc:
+            note = (f"the parent candidate {parent.id} could not be built "
+                    f"({type(exc).__name__}: {exc}); the seed's pipeline is shown instead")
+            self._progress("warning", candidate=parent.id, warning=note)
+            return self.mode.describe(), note
 
     def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """Train records for the parent the strategy selected for editing.

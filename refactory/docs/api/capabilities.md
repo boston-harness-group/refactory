@@ -12263,7 +12263,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt; both are frozen, because the theorem states the correct option, so a search never turns them on (--knob still sets them for a run). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -12378,7 +12378,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
     "use_sketch": {
       "default": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12390,7 +12390,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
     "use_theorem": {
       "default": false,
       "description": "include the item's theorem as a ## Theorem section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12421,8 +12421,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt. max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "8caca9bf6e4ba0a45ba91cd20a0838c8f3ed174276736da502987c4d54198c73"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt; both are frozen, because the theorem states the correct option, so a search never turns them on (--knob still sets them for a run). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "cac62937e1fe877f68556ee754f77339d56e251c38bd32bd6b7cf9175d8c9c6d"
   }
 }
 ```
@@ -12639,7 +12639,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
     "use_sketch": {
       "default": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12651,7 +12651,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
     "use_theorem": {
       "default": false,
       "description": "include the item's theorem as a ## Theorem section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12683,7 +12683,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "bf6ee17d64eb0c4a563359726bc65e7b492149098f78d77040893c1ec048f170"
+    "reviewed_schema": "9a3908d9415fb605048ecd3cfffaf20e1cb296cf3e2926f1dfcd68a0c9592ffd"
   }
 }
 ```
@@ -12846,7 +12846,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
     "use_sketch": {
       "default": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12858,7 +12858,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
     "use_theorem": {
       "default": false,
       "description": "include the item's theorem as a ## Theorem section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -12890,7 +12890,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "9e18507767ff1d03fe4039cd9594fad68078a1569915c54fecddd99de2fdfbe0"
+    "reviewed_schema": "532760b6702119728ddcef20c0280f3a5737b8d790a29649ae763468d70544a4"
   }
 }
 ```
@@ -13041,7 +13041,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
     "use_sketch": {
       "default": false,
       "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -13053,7 +13053,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
     "use_theorem": {
       "default": false,
       "description": "include the item's theorem as a ## Theorem section",
-      "frozen": false,
+      "frozen": true,
       "kind": "bool",
       "range": [
         null,
@@ -13097,7 +13097,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "9cff6810c3bf9528eac9f63e641f7335fc53d9da2eec4fb6d8174a5fc5e2520b"
+    "reviewed_schema": "3e16ff41cf3becf721a0309fad89f9a72dcaf09d5845484ba685fcbb41a18f09"
   }
 }
 ```

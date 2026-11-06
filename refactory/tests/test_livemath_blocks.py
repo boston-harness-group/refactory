@@ -247,8 +247,9 @@ def _make_route_client():
 #: sha256 of tests/lowering_snapshots/livemath-solver.graph.json: the baseline must
 #: lower to exactly these bytes. F14 changed it once: the lowered graph lists every
 #: knob, and the solve node's system prompt is now a (frozen) knob, so the knob
-#: table gains ``solve__system_prompt``. The solve node's prompts are unchanged.
-BASELINE_SNAPSHOT_SHA256 = "1fce5bc9865b18560d198b68d50230f5a0628d6a6d4fb15b304ccafc2c7e32bc"
+#: table gains ``solve__system_prompt``. The solve node's prompts are unchanged. The
+#: shakedown fixes changed it again: ``use_theorem`` and ``use_sketch`` are frozen.
+BASELINE_SNAPSHOT_SHA256 = "af4237ef71f92339d95e1cb71625cabe019b523f68fc2bab7dd4f1b85f3ecf86"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -271,7 +272,8 @@ def test_baseline_block_lowers_to_the_frozen_snapshot(explicit):
 def test_every_agent_system_prompt_is_frozen_per_block(block):
     """F14 in LiveMath: each block declares a frozen system-prompt knob for exactly
     its own agent nodes and binds it there, so grid cells differ only in structure and
-    the optimizer can move only the skill (and the theorem/sketch switches)."""
+    the optimizer can move only the skill: the theorem/sketch switches are frozen, as
+    the theorem states the correct option."""
     from refactory_dsh import nn
     from refactory_packages.livemath.blocks import BLOCKS, SYSTEM_PROMPT
     from refactory_packages.livemath.mode import Solver
@@ -290,7 +292,7 @@ def test_every_agent_system_prompt_is_frozen_per_block(block):
         # The user prompt is not a knob.
         assert graph.nodes[node_id].bound_knob("prompt_template") == ""
     open_knobs = sorted(n for n, e in state["knobs"].items() if not e["spec"]["frozen"])
-    assert open_knobs == ["skill", "use_sketch", "use_theorem"]
+    assert open_knobs == ["skill"]
     issues = nn.validate_state(state, resolve_calls=False)
     assert not [i for i in issues if i.code in ("V7", "V14")], issues
 

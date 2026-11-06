@@ -25,7 +25,7 @@ uv run refactory optimize circle_packing/adaptive \
   "scoring": {"compared": "penalized", "parsimony": 0.01, ...},
   "holdout": {"status": "not_applicable", "train": 0.955, "holdout": null, "overfit": null,
               "note": "the mode has no data node, so it iterates no items and there is nothing to hold out"},
-  "structural_wins": 1,
+  "structural_wins": 0,
   "rejection_codes": {"E-shape": 1, "I:fact_produced": 4, "V10": 2, "V2": 3, ...},
   "report": "/tmp/tour/run/report.md"
 }
@@ -35,7 +35,7 @@ Three things to notice:
 
 - **A bound is always named.** `"bound": "epochs"` — a run never ends for an
   unstated reason. The other bound is `max_evaluations`.
-- **The score improved**: seed `0.795` → best `0.875`, in 8 inner runs. Those are the numbers the search compares: the raw score with `0.01` taken off for each node of the candidate's graph. The unpenalised pair is beside them (`0.875` → `0.955`), so a harness that won on merit can be told from one that won on size. Here every candidate has 8 nodes, and the `duplicate` the search tried next has 9 — which is why it scores `0.865` raw `0.955` and loses to its parent.
+- **The score improved**: seed `0.795` → best `0.875`, in 8 inner runs. Those are the numbers the search compares: the raw score with `0.01` taken off for each node of the candidate's graph. The unpenalised pair is beside them (`0.875` → `0.955`), so a harness that won on merit can be told from one that won on size. Here every candidate has 8 nodes, and the `duplicate` the search tried next has 9 — which is why it scores `0.865` raw `0.955` and loses to its parent. `structural_wins` counts only structural candidates that beat their parent, so it is `0` here.
 - **Nothing is held out when there is nothing to hold out.** `circle_packing/adaptive` has no data node and iterates no items, so the audit records `holdout: null` and says why instead of inventing a number. A mode bound to a Task is audited on the items it was not tuned on.
 - **Refusals cost nothing.** `rejection_codes` lists every proposal the validator
   rejected *before* it could be evaluated.

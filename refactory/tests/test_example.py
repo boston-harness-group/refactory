@@ -124,12 +124,21 @@ def test_the_report_is_markdown_with_its_sections(tmp_path):
         assert section in markdown
 
 
-def test_a_structural_candidate_wins_the_running_example(tmp_path):
-    """The seed pipeline wastes its budget; the fix is a node, not a parameter."""
+def test_structural_candidates_run_in_the_running_example(tmp_path):
+    """The search tries nodes, not only parameters, and they run. None of them beats
+    its parent here (each costs one more node for the same raw score), so the
+    example reports no structural win: a structural candidate that merely ran is
+    not one."""
     report = _optimize(TARGET, tmp_path / "runs")
-    assert report["structural_wins"], "no structural candidate scored"
-    assert all(row["exit_ok"] for row in report["structural_wins"])
+    structural = [row for row in report["leaderboard"]
+                  if any(edit.get("op") in ("add_node", "duplicate") for edit in row.get("edits") or ())]
+    assert structural, "no structural candidate was evaluated"
+    assert all(row["exit_ok"] for row in structural)
     assert report["structural"]["structural_yield"] != "n/a"
+    scores = {row["id"]: row["score"] for row in report["leaderboard"]}
+    assert report["structural_wins"] == [
+        row for row in structural if row["score"] > scores.get(row["parent"], float("inf"))]
+    assert report["structural_wins"] == []
 
 
 def test_every_evaluated_candidate_validated_first(tmp_path):

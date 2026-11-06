@@ -332,6 +332,27 @@ def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
         return []
 
 
+#: What every model-completion timeout's message starts with
+#: (``model.CompletionTimeout``); a failed pass carries it in its text on both runtimes.
+COMPLETION_TIMEOUT_TEXT = "model completion timed out"
+
+
+def error_kind(error: BaseException) -> str:
+    """A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
+
+    A node that timed out reaches the record as text -- the walker's
+    ``"<node>: CompletionTimeout: model completion timed out ..."``, the spine's
+    worker stderr ``"worker: model completion timed out ..."`` -- wrapped in a
+    RuntimeError on both, so the message decides, as ``node_retry.failure_kind``
+    decides a retry.
+    """
+    import subprocess
+
+    if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
+        return "timeout"
+    return type(error).__name__
+
+
 def make_item_record(
     item_id: str,
     verdict: VerifyResult | None,
@@ -371,7 +392,7 @@ def make_item_record(
             "passed": False,
             "score": 0.0,
             "error_text": str(error)[:4096],
-            "error_kind": type(error).__name__,
+            "error_kind": error_kind(error),
             **base,
         }
     if verdict is None:

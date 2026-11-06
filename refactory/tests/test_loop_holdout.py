@@ -218,9 +218,10 @@ def test_the_part_is_written_beside_the_run_and_not_into_the_mode(tmp_path):
     root = tmp_path / "run"
     best = report["best"]["id"]
     train = json.loads((root / "runs" / best / "subset.json").read_text())
-    assert train == {"part": "train", "holdout": 0.3}
+    # The run's seed travels with the part, as SkillOpt's and testeval's do.
+    assert train == {"part": "train", "holdout": 0.3, "seed": 1}
     held = json.loads((root / "holdout" / best / "subset.json").read_text())
-    assert held["part"] == "holdout"
+    assert held["part"] == "holdout" and held["seed"] == 1
 
     state = Probe().state_dict()
     assert "holdout" not in state["knobs"]

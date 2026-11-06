@@ -28,7 +28,10 @@ graph.connect("data", "finish")        # where the run goes after every item
 ```
 
 The subgraph is reached **through the data node**, not by an edge: an edge into it
-would run it once outside the iteration. Each pass writes the item to
+would run it once outside the iteration. A pass ends once its exit has run, on both
+runtimes, so the exit has no out-edge (the validator's V12); an edit that adds a node
+after the exit (`insert_after`, `duplicate`) makes that node the new exit, and one that
+adds a node before the entry makes it the new entry. Each pass writes the item to
 `current_item.json` in the run directory, so an op or an agent node reads the item it
 is working on rather than being told it in a prompt.
 
