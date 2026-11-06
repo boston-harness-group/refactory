@@ -68,6 +68,10 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
+    # val_gate: a switch; the command line passes it as 0 or 1.
+    if result.get("val_gate") not in (True, False, 0, 1):
+        raise ProfileError("val_gate must be true or false (1 or 0 on the command line)")
+    result["val_gate"] = bool(result.get("val_gate"))
     # max_items_in_flight: None or positive int
     mif = result.get("max_items_in_flight")
     if mif is not None:
@@ -246,7 +250,7 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
-        "max_concurrent_evaluations", "max_items_in_flight")}
+        "max_concurrent_evaluations", "max_items_in_flight", "val_gate")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):

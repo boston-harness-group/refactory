@@ -195,6 +195,31 @@ edit to `loop.py`, because that is what a seam is for.
 microseconds, no budget) and `evaluate` (one inner run, one unit of budget). The
 API makes it impossible to blur those two.
 
+**Search pieces any strategy can use** (`outerloop.py`). Selection on held-out parts
+is the library's, not one strategy's:
+
+- `ValidationGate` accepts a candidate only when its val score strictly beats the
+  incumbent's (the current candidate, or a named one such as its parent), and keeps
+  the best on val. Val scores are cached by `Candidate.id`, the id of the whole state
+  (graph and every knob value), so a candidate is rolled out on val once whichever
+  knob or node an edit changed. Its state is plain JSON, journaled with the
+  strategy's.
+- `FinalEvaluation` is the post-training block: the final candidate's val check
+  (promoted to best when it beats it), then the seed, the best and the final
+  candidate on test with the run seed, concurrently through `evaluate_many`, each
+  phase saved so a resumed run continues where it stopped.
+- `Run.keep` journals what it keeps and `Run.candidate(id)` returns it, so a strategy
+  saves candidate ids (not knob values) and gets the candidates back after a resume.
+
+The default loop uses the gate when `--val-gate 1` is set, with any optimizer: each
+candidate evaluated on train is rolled out on val, stays a parent only when it beats
+its parent there, and the best on val is the winner. SkillOpt (`refactory_packages/skillopt`)
+is built from the same pieces plus `SkillOptProposer`, its optimizer steps (analysts,
+failure-first merge, ranked edit budget, patch, slow update, meta skill) as a part
+whose output is `set_knob` edits to one named text knob (`skill` by default, the
+`knob` strategy option), so another strategy or a graph with several text knobs can
+reuse it.
+
 **SRF's thirteen modes split across both buckets**, and the split is asserted so a
 port cannot go missing or be filed wrongly:
 

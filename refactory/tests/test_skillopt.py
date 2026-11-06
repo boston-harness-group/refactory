@@ -21,6 +21,7 @@ from refactory_dsh import strategies
 from refactory_dsh import task as task_module
 from refactory_dsh.loop import Loop, LoopConfig
 from refactory_dsh.optim import Candidate
+from refactory_dsh.outerloop import FinalEvaluation, ValidationGate
 
 from refactory_packages.skillopt.loop import SkillOptLoop
 from refactory_packages.skillopt import schedule as sched_mod
@@ -261,6 +262,30 @@ def _config(root: Path, **overrides: Any) -> LoopConfig:
     return LoopConfig(**base)
 
 
+#: The infrastructure Loop behind each strategy a helper ran, by ``id(strategy)``,
+#: so a test can look the candidates the strategy saved by id up.
+_INFRA: dict[int, Loop] = {}
+
+
+def _skill(candidate: Candidate) -> str:
+    """The candidate's ``skill`` knob value."""
+    return str(candidate.state["knobs"]["skill"]["value"])
+
+
+def _held_skill(strategy: SkillOptLoop, candidate_id: str | None) -> str:
+    loop = _INFRA[id(strategy)]
+    return _skill(next(c for c in loop.population if c.id == candidate_id))
+
+
+def _current_skill(strategy: SkillOptLoop) -> str:
+    """The skill of the candidate the strategy's val gate holds as current."""
+    return _held_skill(strategy, strategy.gate.current_id)
+
+
+def _best_skill(strategy: SkillOptLoop) -> str:
+    return _held_skill(strategy, strategy.gate.best_id)
+
+
 def _run_loop(
     tmp_path: Path,
     client: FakeClient | ReplayClient | None = None,
@@ -285,6 +310,7 @@ def _run_loop(
         )
         strategy = loop._custom_strategy
         assert isinstance(strategy, SkillOptLoop)
+        _INFRA[id(strategy)] = loop
         if preload_state is not None:
             strategy.load_strategy_state(preload_state)
         report = loop.run()
@@ -431,11 +457,11 @@ def test_no_edit_step_skipped(tmp_path, monkeypatch):
     assert state_dict["edit_budget_step"] == 0
 
 
-def test_cached_skill_hash_not_rescored(tmp_path):
-    """Val cache prevents re-evaluation of the same skill hash.
+def test_cached_candidate_not_rescored(tmp_path):
+    """Val cache prevents re-evaluation of the same candidate.
 
-    Run 1: discover the patched-candidate hash that epoch 1 produces.
-    Run 2: pre-populate val_cache with that hash → epoch 1 must find
+    Run 1: discover the patched candidate's id that epoch 1 produces.
+    Run 2: pre-populate val_cache with that id → epoch 1 must find
     a val_cache_hit instead of re-evaluating.
     """
     # Run 1: discover the hash the edit produces
@@ -448,13 +474,15 @@ def test_cached_skill_hash_not_rescored(tmp_path):
     val_evals1 = [e for e in trace1 if e["step_type"] == "val_evaluate"]
     assert len(val_evals1) >= 1, "run 1 must evaluate val"
     target_hash = val_evals1[0]["skill_hash"]
+    # The cache is keyed by the whole candidate's id, not the skill text.
+    target_id = loop1.strategy_state_dict()["patched_candidate_id"]
 
-    # Run 2: pre-populate val_cache with the target hash
+    # Run 2: pre-populate val_cache with the patched candidate's id
     client2 = FakeClient()  # same default responses → same edit
     loop2, _ = _run_loop(
         tmp_path / "run2", client=client2,
         skillopt_options={"max_epochs": 1},
-        preload_state={"val_cache": {target_hash: 0.99}},
+        preload_state={"val_cache": {target_id: 0.99}},
     )
     trace2 = _read_trace(tmp_path / "run2")
     cache_hits = [e for e in trace2 if e["step_type"] == "val_cache_hit"]
@@ -495,21 +523,16 @@ def test_accept_only_if_strictly_better(tmp_path):
     # ── Part B: strictly better → accept ──────────────────────────────────
     # Pre-populate val_cache: give the patched candidate a score higher than
     # the initial val score (0.5).  This proves acceptance on >.
-    # First discover the patched hash (same edit as run 1).
-    trace1_evals = [e for e in trace_eq if e["step_type"] in ("val_evaluate", "val_cache_hit")]
-    patched_hash = None
-    for ev in trace1_evals:
-        if ev.get("skill_hash"):
-            patched_hash = ev["skill_hash"]
-            break
-    assert patched_hash is not None, "must find the patched candidate hash"
+    # First discover the patched candidate's id (same edit as run 1).
+    patched_id = loop_eq.strategy_state_dict()["patched_candidate_id"]
+    assert patched_id is not None, "must find the patched candidate"
 
-    # Run with val_cache assigning the patched hash a score > 0.5
+    # Run with val_cache assigning the patched candidate a score > 0.5
     client_gt = FakeClient()
     loop_gt, _ = _run_loop(
         tmp_path / "better", client=client_gt,
         skillopt_options={"max_epochs": 1},
-        preload_state={"val_cache": {patched_hash: 0.9}},
+        preload_state={"val_cache": {patched_id: 0.9}},
     )
     trace_gt = _read_trace(tmp_path / "better")
     gate_events_gt = [
@@ -546,7 +569,7 @@ def test_slow_update_from_epoch_2(tmp_path):
 
     # Check the skill contains markers after epoch 1
     state_dict = loop.strategy_state_dict()
-    skill = state_dict.get("current_skill", "")
+    skill = _current_skill(loop)
     assert prompts.SLOW_UPDATE_START in skill
     assert prompts.SLOW_UPDATE_END in skill
 
@@ -623,7 +646,7 @@ def test_stop_resume_same_decision(tmp_path):
     state2 = strategy2.strategy_state_dict()
 
     # States must match
-    assert state2["current_skill"] == state1["current_skill"]
+    assert state2["current_candidate_id"] == state1["current_candidate_id"]
     assert state2["current_score"] == state1["current_score"]
     assert state2["val_cache"] == state1["val_cache"]
     assert state2["edit_budget_step"] == state1["edit_budget_step"]
@@ -859,7 +882,7 @@ def test_fmt_trajectory_matches_skillopt():
 def test_slow_update_trajectory_matches_skillopt():
     """slow_update.py:116-168 ``_read_trajectory``: no conversation file,
     an empty one, and non-dict entries skipped (unlike fmt_trajectory)."""
-    from refactory_packages.skillopt.loop import _read_trajectory
+    from refactory_packages.skillopt.proposer import _read_trajectory
 
     assert _read_trajectory({}) == "(trajectory not available)"
     assert _read_trajectory({"conversation": None}) == "(trajectory not available)"
@@ -1046,17 +1069,19 @@ def test_rollout_order_must_be_a_callable_permutation(tmp_path):
     loop.configure(rollout_order=lambda epoch, records: records[:-1])
     records = [{"id": "a"}, {"id": "b"}]
     with pytest.raises(ValueError):
-        loop._analyst_records(1, records)
+        loop.proposer._analyst_records(1, records)
     loop.configure(rollout_order=lambda epoch, records: [{"id": "b", "x": 1}, {"id": "a"}])
     # Only the order is taken: the records themselves stay the Run's.
-    assert loop._analyst_records(1, records) == [{"id": "b"}, {"id": "a"}]
+    assert loop.proposer._analyst_records(1, records) == [{"id": "b"}, {"id": "a"}]
 
 
 def test_comparison_and_slow_update_messages_match_skillopt():
     """slow_update.py:206-269 pairs, :287-349 text, :409-424 message;
     meta_skill.py:44-60 message."""
     prev_ok = dict(RECORD_FAIL, passed=True, score=1.0, prediction="4", fail_reason=None)
-    pairs = SkillOptLoop._build_comparison_pairs([prev_ok], [RECORD_FAIL], ["q7", "q9"])
+    from refactory_packages.skillopt.proposer import comparison_pairs
+
+    pairs = comparison_pairs([prev_ok], [RECORD_FAIL], ["q7", "q9"])
     text = prompts.format_comparison_text(pairs)
     # Trajectories as slow_update.py:116-168 ``_read_trajectory`` renders the
     # generic rollout result (env.default_rollout_result) of each record.
@@ -1134,8 +1159,8 @@ def test_slow_update_rolls_out_a_previous_skill_the_search_already_holds(tmp_pat
     spy = _spy_evaluations(monkeypatch)
     # Every patched skill scores higher on val, so both epochs accept.
     monkeypatch.setattr(
-        SkillOptLoop, "_val_score",
-        staticmethod(lambda run, cand: 0.1 * SkillOptLoop._get_skill(cand).count("Always check.")),
+        ValidationGate, "val_score",
+        staticmethod(lambda run, cand: 0.1 * _skill(cand).count("Always check.")),
     )
     client = FakeClient()
     loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
@@ -1285,7 +1310,7 @@ def test_slow_update_records_skillopt_result_fields(tmp_path):
     assert slow["slow_update_content"] == "Updated guidance text."
     assert slow["reasoning"] == "reflected"
     assert slow["prev_hard"] == slow["curr_hard"] == 2 / 8
-    skill = loop.strategy_state_dict()["current_skill"]
+    skill = _current_skill(loop)
     assert slow["candidate_hash"] == _hashlib.sha256(skill.encode()).hexdigest()[:16]
     meta = _decisions(_read_trace(tmp_path), "meta_skill")[-1]
     assert (meta["meta_skill_content"], meta["reasoning"]) == ("USE CONCISE EDITS", "meta reflected")
@@ -1298,7 +1323,7 @@ def test_resume_at_epoch_done_still_checks_the_early_stop(tmp_path):
         tmp_path,
         skillopt_options={"max_epochs": 4, "early_stop_patience": 2},
         preload_state={
-            "current_skill": INITIAL_SKILL, "epoch": 2, "phase": "epoch_done",
+            "epoch": 2, "phase": "epoch_done",
             "stale_epochs": 2, "early_stop_best": 0.5, "best_score": 0.5,
             "current_score": 0.5,
         },
@@ -1360,10 +1385,10 @@ def test_patch_order_must_be_a_permutation():
     loop.configure(patch_order=lambda epoch, kind, patches: [dict(patches[1]), patches[0]])
     patches = [{"reasoning": "a"}, {"reasoning": "b"}]
     with pytest.raises(ValueError, match="changed which patches"):
-        loop._merge_order(1, "failure", patches)
+        loop.proposer._merge_order(1, "failure", patches)
     loop.configure(patch_order=lambda epoch, kind, patches: patches[:1])
     with pytest.raises(ValueError, match="dropped some"):
-        loop._merge_order(1, "failure", patches)
+        loop.proposer._merge_order(1, "failure", patches)
 
 
 def test_early_stop_counts_every_epoch_without_a_better_best(tmp_path):
@@ -1393,8 +1418,8 @@ def test_early_stop_restarts_the_count_when_the_best_improves(tmp_path, monkeypa
     """An epoch that raises the best score resets the stale count (arm A's
     patch: ``es_stale = 0`` when ``best_score > es_best``)."""
     monkeypatch.setattr(
-        SkillOptLoop, "_val_score",
-        staticmethod(lambda run, cand: 0.1 * SkillOptLoop._get_skill(cand).count("Always check.")),
+        ValidationGate, "val_score",
+        staticmethod(lambda run, cand: 0.1 * _skill(cand).count("Always check.")),
     )
 
     class EditsInEpochOne(FakeClient):
@@ -1491,7 +1516,7 @@ def test_tolerant_json_in_every_parser(tmp_path):
     })
     loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
     state_dict = loop.strategy_state_dict()
-    assert prompts.extract_slow_update_field(state_dict["current_skill"]) == "GUIDE"
+    assert prompts.extract_slow_update_field(_current_skill(loop)) == "GUIDE"
     assert state_dict["meta_skill_text"] == "META2"
 
 
@@ -1645,7 +1670,7 @@ def test_unparseable_slow_update_changes_nothing(tmp_path):
     the skill as it was (no raw output injected)."""
     client = FakeClient({("slow_update", 2, 0, 0): "I have no guidance this time."})
     loop, _ = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 2})
-    skill = loop.strategy_state_dict()["current_skill"]
+    skill = _current_skill(loop)
     assert prompts.extract_slow_update_field(skill) == ""
     assert "no guidance this time" not in skill
     assert _decisions(_read_trace(tmp_path), "slow_update")[0]["action"] == "no_content"
@@ -1696,7 +1721,7 @@ def test_analyst_shuffle_uses_batch_seed(tmp_path, monkeypatch):
     import random
 
     from refactory_packages.skillopt import analysts
-    from refactory_packages.skillopt.loop import batch_seed
+    from refactory_packages.skillopt.proposer import batch_seed
 
     monkeypatch.setenv(PASS_IDS_ENV, "t1,t3,t5,t7")
     seen: list[tuple[list[str], list[str], int]] = []
@@ -1737,20 +1762,15 @@ def test_default_analyst_group_is_eight(tmp_path):
 def test_val_cache_placeholder_and_slow_update_rules(tmp_path):
     """The epoch-1 placeholder is not cached (trainer.py:1809-1824); the slow
     update caches the pre-update score for its skill (trainer.py:2052-2053)."""
-    import hashlib
-
-    def h(text: str) -> str:
-        return hashlib.sha256(text.encode()).hexdigest()
-
     loop1, _ = _run_loop(tmp_path / "one", skillopt_options={"max_epochs": 1})
     state1 = loop1.strategy_state_dict()
-    assert prompts.SLOW_UPDATE_START in state1["current_skill"]
-    assert h(state1["current_skill"]) not in state1["val_cache"]
+    assert prompts.SLOW_UPDATE_START in _current_skill(loop1)
+    assert state1["current_candidate_id"] not in state1["val_cache"]
 
     loop2, _ = _run_loop(tmp_path / "two", skillopt_options={"max_epochs": 2})
     state2 = loop2.strategy_state_dict()
-    assert "Updated guidance text." in state2["current_skill"]
-    assert state2["val_cache"][h(state2["current_skill"])] == 0.5
+    assert "Updated guidance text." in _current_skill(loop2)
+    assert state2["val_cache"][state2["current_candidate_id"]] == 0.5
 
 
 def test_slow_update_sample_seed(tmp_path, monkeypatch):
@@ -2184,7 +2204,7 @@ def test_resume_before_the_val_gate_gates_the_patched_candidate(tmp_path, monkey
             vals = [entry for entry in log if entry[0] == label["run"] and entry[1] == "val"]
             if crash["armed"] and len(vals) == 1:
                 raise RuntimeError("process died at the val gate")
-            log.append((label["run"], part, SkillOptLoop._get_skill(candidate)))
+            log.append((label["run"], part, _skill(candidate)))
         return original(self, candidate, part=part, items=items, seed=seed)
 
     monkeypatch.setattr(Run, "evaluate", evaluate)
@@ -2670,6 +2690,7 @@ def _run_loop_with_infra(
         )
         strategy = loop._custom_strategy
         assert isinstance(strategy, SkillOptLoop)
+        _INFRA[id(strategy)] = loop
         report = loop.run()
     return strategy, loop, report
 
@@ -2680,11 +2701,11 @@ def test_best_candidate_returns_val_gated_winner_by_id(tmp_path):
     strategy, infra_loop, report = _run_loop_with_infra(
         tmp_path, skillopt_options={"max_epochs": 1},
     )
-    assert strategy._best_candidate_id is not None
+    assert strategy.gate.best_id is not None
     # The best_candidate method returns the candidate object from the population
     winner = strategy.best_candidate(infra_loop.population)
     assert winner is not None
-    assert winner.id == strategy._best_candidate_id
+    assert winner.id == strategy.gate.best_id
     assert winner.id == report["holdout"]["winner"]
 
 
@@ -2703,7 +2724,7 @@ def test_strategy_best_candidate_overrides_report_winner(tmp_path):
     assert len(board) >= 1
     seed = board[0]
     # strategy's val-selected best is the seed
-    assert strategy._best_candidate_id == seed.id
+    assert strategy.gate.best_id == seed.id
 
     # Insert a synthetic candidate that outscores the seed on train.
     # This becomes leaderboard[0]; the strategy still prefers the seed.
@@ -2743,7 +2764,7 @@ def test_holdout_audit_uses_strategy_winner(tmp_path):
     board = infra_loop.leaderboard()
     assert len(board) >= 1
     seed = board[0]
-    assert strategy._best_candidate_id == seed.id
+    assert strategy.gate.best_id == seed.id
 
     # Insert a higher-scoring candidate
     fake = Candidate(
@@ -2769,7 +2790,7 @@ def test_best_candidate_id_not_in_population_errors(tmp_path):
         tmp_path, skillopt_options={"max_epochs": 1},
     )
     # Set a bogus best_candidate_id
-    strategy._best_candidate_id = "nonexistent_id_12345"
+    strategy.gate.best_id = "nonexistent_id_12345"
     with pytest.raises(ValueError, match="not in the population"):
         strategy.best_candidate(infra_loop.population)
     # report() catches the ValueError and sets exit_ok=False
@@ -2785,13 +2806,13 @@ def test_best_candidate_id_persisted_across_resume(tmp_path):
     loop, _ = _run_loop(tmp_path, skillopt_options={"max_epochs": 1})
     state = loop.strategy_state_dict()
     assert "best_candidate_id" in state
-    assert state["best_candidate_id"] == loop._best_candidate_id
+    assert state["best_candidate_id"] == loop.gate.best_id
 
     # Restore into a fresh strategy
     fresh = SkillOptLoop()
     fresh.configure(model=FakeClient())
     fresh.load_strategy_state(state)
-    assert fresh._best_candidate_id == loop._best_candidate_id
+    assert fresh.gate.best_id == loop.gate.best_id
 
 
 def test_default_loop_winner_is_leaderboard_first(tmp_path):
@@ -2921,21 +2942,21 @@ def test_budget_bound_model_survives_resume(tmp_path):
     # First run: 1 epoch, completes normally with budget tracking
     client1 = BudgetTrackingClient(max_budget_calls=100)
     strategy1, report1 = _run_loop(
-        tmp_path / "run1", client=client1,
+        tmp_path, client=client1,
         skillopt_options={"max_epochs": 1},
     )
-    state = strategy1.strategy_state_dict()
     calls_after_first = call_counter[0]
     assert calls_after_first > 0, "first run made no budget-tracked optimizer calls"
 
-    # Second run: resume with the saved state, using a fresh budget-tracking client
+    # Second run: resume it through the journal, with a fresh budget-tracking client
     call_counter[0] = 0
     client2 = BudgetTrackingClient(max_budget_calls=100)
     strategy2, report2 = _run_loop(
-        tmp_path / "run2", client=client2,
+        tmp_path, client=client2,
+        config_overrides={"resume": True},
         skillopt_options={"max_epochs": 2},
-        preload_state=state,
     )
+    assert strategy2.strategy_state_dict()["epoch"] == 2
     calls_after_resume = call_counter[0]
     # The resumed run must also have budget-tracked optimizer calls,
     # proving bind_budget ran again and the strategy's model is budget-bound.
@@ -2968,8 +2989,8 @@ def test_report_winner_is_a_later_candidate_that_beat_the_seed_on_val(tmp_path, 
     val score counts the rules, so epoch 2's candidate is the val-gated best.
     The report names that candidate, by the id the val gate recorded."""
     monkeypatch.setattr(
-        SkillOptLoop, "_val_score",
-        staticmethod(lambda run, cand: 0.1 * SkillOptLoop._get_skill(cand).count("Always check.")),
+        ValidationGate, "val_score",
+        staticmethod(lambda run, cand: 0.1 * _skill(cand).count("Always check.")),
     )
     strategy, infra_loop, report = _run_loop_with_infra(
         tmp_path, skillopt_options={"max_epochs": 2},
@@ -2978,8 +2999,8 @@ def test_report_winner_is_a_later_candidate_that_beat_the_seed_on_val(tmp_path, 
     assert len(_decisions(trace, "val_gate_accept")) == 2
     seed = infra_loop.population[0]
     best = [c for c in infra_loop.population
-            if c.evaluated and SkillOptLoop._get_skill(c) == strategy._best_skill]
-    assert best and strategy._best_score > 0.1, "setup: a later candidate beats the seed on val"
+            if c.evaluated and _skill(c) == _best_skill(strategy)]
+    assert best and strategy.gate.best_score > 0.1, "setup: a later candidate beats the seed on val"
     winner = best[0]
     assert winner.id != seed.id
     assert report["best"]["id"] == winner.id
@@ -2987,20 +3008,18 @@ def test_report_winner_is_a_later_candidate_that_beat_the_seed_on_val(tmp_path, 
     assert report["exit_ok"] is True
 
 
-def test_best_recorded_without_its_id_is_an_error_not_a_leaderboard_fallback(tmp_path):
-    """State saved before ``best_candidate_id`` existed has a best skill and val
-    scores but no id: the report fails rather than quietly naming leaderboard[0]."""
+def test_a_state_keyed_by_skill_text_is_refused_on_resume(tmp_path):
+    """A state saved before candidates were keyed by whole-candidate id (it has
+    ``current_skill`` and no ``current_candidate_id``) cannot be resumed: it is
+    refused with a reason, never resumed against the wrong candidates."""
     strategy, infra_loop, _ = _run_loop_with_infra(tmp_path, skillopt_options={"max_epochs": 1})
     state = strategy.strategy_state_dict()
-    del state["best_candidate_id"]
-    strategy.load_strategy_state(state)
-    assert strategy._best_candidate_id is None
-    with pytest.raises(ValueError, match="not its candidate id"):
-        strategy.best_candidate(infra_loop.population)
-    infra_loop.holdout_audit = None
-    report = infra_loop.report()
-    assert report["exit_ok"] is False
-    assert "not its candidate id" in report["error"]
+    legacy = {k: v for k, v in state.items() if k != "current_candidate_id"}
+    legacy["current_skill"] = _current_skill(strategy)
+    old = SkillOptLoop()
+    old.configure(model=FakeClient())
+    with pytest.raises(ValueError, match="start a new run"):
+        old.load_strategy_state(legacy)
 
     # A strategy that never recorded a val score has no best to name.
     fresh = SkillOptLoop()
@@ -3086,13 +3105,13 @@ def _spy_part_evaluations(monkeypatch) -> list[tuple[str, str, int | None, str]]
 
     def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
         if part != "train":
-            calls.append((part, candidate.id, seed, SkillOptLoop._get_skill(candidate)))
+            calls.append((part, candidate.id, seed, _skill(candidate)))
         return original(self, candidate, part=part, items=items, seed=seed)
 
     def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
         for req in requests:
             if req.part != "train":
-                calls.append((req.part, req.candidate.id, req.seed, SkillOptLoop._get_skill(req.candidate)))
+                calls.append((req.part, req.candidate.id, req.seed, _skill(req.candidate)))
         return original_many(self, requests, on_result=on_result)
 
     monkeypatch.setattr(Run, "evaluate", evaluate)
@@ -3114,13 +3133,13 @@ def test_post_training_evaluation_runs_in_skillopts_order(tmp_path, monkeypatch)
         skillopt_options={"max_epochs": 1, "seed": 7},
     )
     seed = infra.population[0]
-    final_skill = strategy._current_skill
-    assert final_skill != strategy._best_skill, "setup: the slow update changed the final skill"
+    final_skill = _current_skill(strategy)
+    assert final_skill != _best_skill(strategy), "setup: the slow update changed the final skill"
     after = calls[calls.index(next(c for c in calls if c[0] == "test")) - 1:]
     assert [(part, s) for part, _, s, _ in after] == [("val", 7), ("test", 7), ("test", 7), ("test", 7)]
     assert after[0][3] == final_skill
     assert after[1][1] == seed.id
-    assert after[2][1] == strategy._best_candidate_id
+    assert after[2][1] == strategy.gate.best_id
     assert after[3][3] == final_skill
 
     # The toy task passes x1 and x2 of the three test items: 1, 1, 0.5.
@@ -3180,7 +3199,7 @@ def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
         tmp_path, config_overrides=_with_test_part(tmp_path),
         skillopt_options={"max_epochs": 1, "seed": 7},
     )
-    assert strategy._current_skill != strategy._best_skill, "setup: slow update changed the final skill"
+    assert _current_skill(strategy) != _best_skill(strategy), "setup: slow update changed the final skill"
 
     decisions = _decisions(_read_trace(tmp_path), "test_eval")
     actions = [d["action"] for d in decisions]
@@ -3206,15 +3225,15 @@ def test_post_training_evaluation_reuses_the_best_when_the_final_skill_is_it(tmp
         tmp_path, config_overrides=_with_test_part(tmp_path),
         skillopt_options={"max_epochs": 1},
     )
-    assert strategy._current_skill == strategy._best_skill
+    assert _current_skill(strategy) == _best_skill(strategy)
     seed = infra.population[0]
-    assert strategy._best_candidate_id == seed.id
+    assert strategy.gate.best_id == seed.id
     # The initial val and epoch 1's val gate; then no final-skill val rollout,
     # the seed (baseline) and the best (the seed again) on test, and no third.
     assert [(part, cid) for part, cid, _, _ in calls][-2:] == [("test", seed.id), ("test", seed.id)]
     assert [part for part, _, _, _ in calls] == ["val", "val", "test", "test"]
     strategy_report = report["strategy_report"]
-    assert strategy_report["final_selection_hard"] == strategy._best_score
+    assert strategy_report["final_selection_hard"] == strategy.gate.best_score
     assert strategy_report["final_test_hard"] == strategy_report["test_hard"]
 
 
@@ -3242,13 +3261,13 @@ def test_post_training_val_check_promotes_a_better_final_skill(tmp_path, monkeyp
         tmp_path, config_overrides=_with_test_part(tmp_path),
         skillopt_options={"max_epochs": 1},
     )
-    assert strategy._best_skill == strategy._current_skill
-    assert strategy._best_score == pytest.approx(1.0)
+    assert _best_skill(strategy) == _current_skill(strategy)
+    assert strategy.gate.best_score == pytest.approx(1.0)
     test_calls = [c for c in calls if c[0] == "test"]
     assert len(test_calls) == 2, "the final skill is the best now: its test score is reused"
-    assert test_calls[1][1] == strategy._best_candidate_id
-    assert test_calls[1][3] == strategy._current_skill
-    assert report["best"]["id"] == strategy._best_candidate_id
+    assert test_calls[1][1] == strategy.gate.best_id
+    assert test_calls[1][3] == _current_skill(strategy)
+    assert report["best"]["id"] == strategy.gate.best_id
     assert report["strategy_report"]["final_selection_hard"] == pytest.approx(1.0)
 
 
@@ -3336,7 +3355,7 @@ def _fail_best_test(monkeypatch, error):  # type: ignore[no-untyped-def]
     def _evaluate_part_spy(self, candidate, part, items, seed, *, item_gate=None, **kw):  # type: ignore[no-untyped-def]
         strategy = self._custom_strategy
         if (state["armed"] and part == "test"
-                and candidate.id == strategy._best_candidate_id
+                and candidate.id == strategy.gate.best_id
                 and candidate.id != self.population[0].id):
             raise error
         return original_evaluate_part(self, candidate, part, items, seed, item_gate=item_gate, **kw)
@@ -3355,10 +3374,10 @@ def _three_test_candidates(monkeypatch):  # type: ignore[no-untyped-def]
     # scores sit above the toy task's real val score, so the final selection
     # promotes nothing. Three distinct test candidates.
     def _val_score(run, cand):  # type: ignore[no-untyped-def]
-        skill = SkillOptLoop._get_skill(cand)
+        skill = _skill(cand)
         return 1.0 + 0.1 * skill.count("Always check.") - 0.2 * ("Updated guidance text." in skill)
 
-    monkeypatch.setattr(SkillOptLoop, "_val_score", staticmethod(_val_score))
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val_score))
 
 
 _THREE_TEST_CANDIDATES = {"max_epochs": 2, "seed": 7}
@@ -3376,8 +3395,8 @@ def test_a_refused_test_rollout_leaves_the_evaluation_incomplete(tmp_path, monke
         tmp_path, config_overrides=_with_test_part(tmp_path),
         skillopt_options=_THREE_TEST_CANDIDATES,
     )
-    assert strategy._best_candidate_id != infra.population[0].id
-    assert strategy._current_skill != strategy._best_skill
+    assert strategy.gate.best_id != infra.population[0].id
+    assert _current_skill(strategy) != _best_skill(strategy)
     strategy_report = report["strategy_report"]
     assert strategy_report["test_eval"] == "incomplete"
     assert "rollout budget is spent" in strategy_report["test_eval_reason"]
@@ -3474,37 +3493,6 @@ def test_a_stop_during_the_post_training_test_rollouts_records_none_of_them(tmp_
     assert actions == ["baseline_test", "best_test", "final_test"]
 
 
-def test_resume_from_a_state_saved_before_test_phases_were_kept(tmp_path):
-    """A state saved by the code before this change has a phase, no
-    test_phases and no traced_phases; that code traced each test phase as it
-    finished. Resumed after best_test, only final_test is evaluated and
-    traced, and the earlier phases are not traced again. Fails when the old
-    phases count as untraced (the trace stops at baseline_test, so final_test
-    is never traced)."""
-    strategy, report = _run_loop(tmp_path / "first", skillopt_options={"max_epochs": 1},
-                                 config_overrides=_with_test_part(tmp_path / "first"))
-    first = report["strategy_report"]
-    old = dict(strategy.strategy_state_dict())
-    old.pop("completed_phases", None)
-    old.pop("traced_phases", None)
-    old["phase"] = "best_test"
-    old["final_eval"] = {
-        "status": "running",
-        "final_selection_hard": first["final_selection_hard"],
-        "baseline_test_hard": first["baseline_test_hard"],
-        "test_hard": first["test_hard"],
-    }
-    _, resumed = _run_loop(tmp_path / "second", skillopt_options={"max_epochs": 1},
-                           config_overrides=_with_test_part(tmp_path / "second"),
-                           preload_state=old)
-    actions = [d["action"] for d in _decisions(_read_trace(tmp_path / "second"), "test_eval")]
-    assert len(actions) == 1 and actions[0] in ("final_test", "final_test_reused"), actions
-    resumed_report = resumed["strategy_report"]
-    assert resumed_report["test_eval"] == "done"
-    assert resumed_report["baseline_test_hard"] == first["baseline_test_hard"]
-    assert resumed_report["final_test_hard"] is not None
-
-
 def test_post_training_evaluation_resumes_where_it_stopped(tmp_path, monkeypatch):
     """A run killed during the best skill's test rollout, after the baseline and
     final rollouts finished, resumes with only that rollout: the finished
@@ -3530,17 +3518,17 @@ def test_post_training_evaluation_resumes_where_it_stopped(tmp_path, monkeypatch
                                  project=Path("."), model=FakeClient())
         report = loop.run()
     strategy = loop._custom_strategy
-    assert strategy._best_candidate_id != loop.population[0].id
+    assert strategy.gate.best_id != loop.population[0].id
     resumed_tests = [(part, cid) for part, cid, _, _ in calls if part == "test"]
-    assert resumed_tests == [("test", strategy._best_candidate_id)]
+    assert resumed_tests == [("test", strategy.gate.best_id)]
     strategy_report = report["strategy_report"]
     assert strategy_report["test_eval"] == "done"
     for key in ("baseline_test_hard", "test_hard", "final_test_hard"):
         assert strategy_report[key] is not None, key
     final_eval = strategy.strategy_state_dict()["final_eval"]
-    assert final_eval["baseline_test_hard"] == strategy_report["baseline_test_hard"]
-    assert list(k for k in final_eval if k.endswith("_hard") and "delta" not in k) == [
-        "final_selection_hard", "baseline_test_hard", "test_hard", "final_test_hard"]
+    assert final_eval["baseline_test"] == strategy_report["baseline_test_hard"]
+    assert [k for k in final_eval if k in FinalEvaluation.PHASES] == [
+        "final_selection", "baseline_test", "best_test", "final_test"]
     assert strategy.strategy_state_dict()["phase"] == "final_done"
     actions = [d["action"] for d in _decisions(_read_trace(tmp_path), "test_eval")]
     assert actions == ["baseline_test", "best_test", "final_test"]
@@ -3619,7 +3607,7 @@ def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeyp
 
     monkeypatch.setattr(SkillTask, "verify", alternating)
     # No patch ever beats the current skill on val, so every epoch is rejected.
-    monkeypatch.setattr(SkillOptLoop, "_val_score", staticmethod(lambda run, cand: 0.5))
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: 0.5))
 
     sampled: list[str] = []
     original = Run.evaluate
@@ -3643,7 +3631,7 @@ def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeyp
     assert _decisions(trace, "slow_update_sample")
     # Both slow-update rollouts are of one candidate.
     assert len(sampled) == 2 and sampled[0] == sampled[1], sampled
-    pairs = loop._comparison_pairs
+    pairs = loop.proposer.comparison_pairs
     assert pairs
     categories = [p["category"] for p in pairs]
     assert set(categories) <= {"improved", "regressed"}, categories
@@ -3706,3 +3694,106 @@ def test_claude_backend_wrapper_option_is_off_by_default_and_a_boolean():
     assert isinstance(framed, ClaudeBackendFraming) and framed.client is model
     with pytest.raises(TypeError, match="claude_backend_wrapper"):
         loop.configure(model=model, claude_backend_wrapper="true")
+
+
+# ── loop-owned search: the proposer is a part, every candidate is attempted ──
+
+
+NOTES_SEED = "# Notes\n\nNOTES_MARKER: keep answers short.\n"
+
+
+class TwoTextProbe(nn.Mode):
+    """SkillProbe with a second text knob, ``notes``, beside ``skill``."""
+
+    name = "two_text_probe"
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {
+            "skill": nn.Knob(default=INITIAL_SKILL, kind="str", description="The skill document"),
+            "notes": nn.Knob(default=NOTES_SEED, kind="str", description="Other text"),
+        }
+
+    def build(self) -> nn.Graph:
+        graph = _probe_graph()
+        graph.nodes["work"].knobs = ("skill", "notes")
+        return graph
+
+    def score(self, run: nn.RunResult) -> float:
+        return SkillProbe.score(self, run)
+
+
+def test_the_proposer_patches_the_text_knob_it_is_given(tmp_path, monkeypatch):
+    """With ``knob=notes`` every SkillOpt edit -- the slow-update placeholder and the
+    patch -- lands on ``notes``, the analysts read ``notes``, and ``skill`` is never
+    touched. Fails when the proposer writes or reads ``skill`` whatever it is given."""
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(
+        lambda run, cand: 1.0 if "Always check." in cand.state["knobs"]["notes"]["value"] else 0.5))
+    client = FakeClient()
+    cfg = _config(tmp_path)
+    with _patch_mode(TwoTextProbe):
+        loop = strategies.create("skillopt", MODE_ID, cfg, project=Path("."), model=client,
+                                 strategy_options={"max_epochs": 1, "knob": "notes"})
+        loop.run()
+    strategy = loop._custom_strategy
+    current = next(c for c in loop.population if c.id == strategy.gate.current_id)
+    notes = current.state["knobs"]["notes"]["value"]
+    assert "Always check." in notes and prompts.SLOW_UPDATE_START in notes
+    assert current.state["knobs"]["skill"]["value"] == INITIAL_SKILL
+    assert _decisions(_read_trace(tmp_path), "val_gate_accept")
+    analyst = next(c["prompt"] for c in client.calls if c["call_key"][0].startswith("analyst_"))
+    assert "NOTES_MARKER" in analyst and "## Problem Solving" not in analyst
+    edits = [e for c in loop.population for e in c.edits]
+    assert edits and all(e["name"] == "notes" for e in edits)
+
+
+def test_a_mode_without_the_knob_is_refused_before_it_spends(tmp_path, monkeypatch):
+    parts = _spy_evaluations(monkeypatch)
+    with pytest.raises(ValueError, match="no 'missing' knob"):
+        _run_loop(tmp_path, skillopt_options={"max_epochs": 1, "knob": "missing"})
+    assert parts == []
+
+
+def test_every_candidate_skillopt_builds_goes_through_run_attempt(tmp_path, monkeypatch):
+    """Two accepting epochs and the post-training block: every candidate SkillOpt
+    rolls out or keeps is the seed or one ``run.attempt`` returned -- the patch,
+    the slow-update placeholder and guidance, and the previous epoch's candidate.
+    Fails when any of them is built from a state directly."""
+    from refactory_dsh.outerloop import Run
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(
+        lambda run, cand: 0.1 * _skill(cand).count("Always check.")))
+    attempted: set[str] = set()
+    used: list[tuple[str, str]] = []
+    original = {name: getattr(Run, name) for name in ("attempt", "evaluate", "evaluate_many", "keep")}
+
+    def attempt(self, proposal, parent):  # type: ignore[no-untyped-def]
+        outcome = original["attempt"](self, proposal, parent)
+        if isinstance(outcome, Candidate):
+            attempted.add(outcome.id)
+        return outcome
+
+    def evaluate(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        used.append(("evaluate", candidate.id))
+        return original["evaluate"](self, candidate, **kwargs)
+
+    def evaluate_many(self, requests, **kwargs):  # type: ignore[no-untyped-def]
+        used.extend(("evaluate_many", r.candidate.id) for r in requests)
+        return original["evaluate_many"](self, requests, **kwargs)
+
+    def keep(self, candidate):  # type: ignore[no-untyped-def]
+        used.append(("keep", candidate.id))
+        return original["keep"](self, candidate)
+
+    for name, spy in (("attempt", attempt), ("evaluate", evaluate),
+                      ("evaluate_many", evaluate_many), ("keep", keep)):
+        monkeypatch.setattr(Run, name, spy)
+    strategy, infra, report = _run_loop_with_infra(
+        tmp_path, config_overrides=_with_test_part(tmp_path), skillopt_options={"max_epochs": 2},
+    )
+    assert report["strategy_report"]["test_eval"] == "done"
+    assert len(_decisions(_read_trace(tmp_path), "val_gate_accept")) == 2
+    assert {kind for kind, _ in used} == {"evaluate", "evaluate_many", "keep"}
+    seed = infra.population[0].id
+    assert {cid for _, cid in used} - {seed} <= attempted
+    assert len([kind for kind, _ in used if kind == "keep"]) >= 4

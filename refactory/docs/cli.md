@@ -172,12 +172,13 @@ installed copy.
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | shared limits for proposals, trials, nested work and final validation | unlimited |
 | `--validation-reserve-s <n>` / `--validation-reserve-tokens <n>` | part of the shared allocation reserved for validation | 0 |
 | `--resume` | continue a compatible saved search and retain consumed resources | off |
-| `--strategy-option KEY=VALUE` | strategy-specific option passed to the strategy's `configure()`; may be repeated. `--strategy skillopt` takes SkillOpt's settings (`max_epochs`, `early_stop_patience`, `seed`, …) and `eval_test`: after training it evaluates the initial, best and final skills on the parts manifest's test part, as SkillOpt does, when the manifest has one; `eval_test=false` skips that. The scores are in the report's `strategy_report` | none |
+| `--strategy-option KEY=VALUE` | strategy-specific option passed to the strategy's `configure()`; may be repeated. `--strategy skillopt` takes SkillOpt's settings (`max_epochs`, `early_stop_patience`, `seed`, …), `knob` (the text knob it optimizes, `skill` by default) and `eval_test`: after training it evaluates the initial, best and final skills on the parts manifest's test part, as SkillOpt does, when the manifest has one; `eval_test=false` skips that. The scores are in the report's `strategy_report` | none |
 | `--max-steps <n>` | step ceiling for one inner run, enforced by the executor | 2000 |
 | `--history-limit <n>` | how many evaluated candidates the optimizer is shown; bounded so a prompt cannot grow without limit | 200 |
 | `--prior-runs <n>` | how many previous runs are summarised as a prior for this one | 3 |
 | `--dsh-timeout-s <n>` | wall-clock ceiling for one inner run when the evaluator is DSH | 900 |
 | `--parts-manifest <path>` | path to a parts.json manifest with train/val/test id lists; the loop copies it to the run root and every evaluation draws items from it | none |
+| `--val-gate <0\|1>` | the default loop's validation gate (`outerloop.ValidationGate`), for any `--optimizer`: every candidate evaluated on train is also rolled out once on the manifest's val part (with `--seed`), stays a parent only when its val score strictly beats its parent's, and the winner is the best on val. Needs a parts manifest with a val part; refused with a custom `--strategy` (SkillOpt keeps its own gate) | 0 |
 | `--seed-results <path>` | seed results exported from an earlier run (`python -m refactory_dsh.seed_cache export`); the seed's first evaluation of each part is read from the file instead of run, when the seed, item set and score context match; a differing context stops the run (see [optimization profiles](optimization-profiles.md)) | none |
 | `--verbose` | print every event, and each candidate's own run output, not only the meaningful ones | off |
 

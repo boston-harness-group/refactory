@@ -58,7 +58,7 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import summarise_reasons
-from refactory_dsh.outerloop import OuterLoop, Run
+from refactory_dsh.outerloop import OuterLoop, OuterLoopError, Run, ValidationGate
 from refactory_dsh.paths import project_root
 
 #: The append-only record of everything a run did. Resume replays it.
@@ -214,6 +214,12 @@ class LoopConfig:
     #: The seed's first evaluation on each part it covers is read from it instead
     #: of run, when the run's score context matches. See :mod:`refactory_dsh.seed_cache`.
     seed_results: str | None = None
+    #: The default loop's validation gate (``outerloop.ValidationGate``). Each
+    #: candidate evaluated on train is also rolled out on the parts manifest's val
+    #: part (with ``seed``) and stays a parent only when its val score strictly beats
+    #: its parent's; the winner is the best on val. Needs a manifest with a val part;
+    #: a custom strategy (SkillOpt) keeps its own gate instead.
+    val_gate: bool = False
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
     #: Strategy-specific options passed to the strategy's ``configure()``
     #: method as keyword arguments.  Set from ``--strategy-option`` on the
@@ -478,6 +484,11 @@ class Loop(OuterLoop):
         self._item_gate: threading.BoundedSemaphore | None = None
         #: Whether _init_item_gate has been called.
         self._item_gate_initialized: bool = False
+        #: The validation gate when ``config.val_gate`` is on (see ``_gate``), and
+        #: the candidates it accepted and rejected, in order.
+        self._val_gate: ValidationGate | None = None
+        self._gate_accepted: list[str] = []
+        self._gate_rejected: list[str] = []
 
     def _init_item_gate(self, candidate: Candidate | None = None) -> None:
         """Create the item-in-flight limiter on the first evaluate_many call.
@@ -650,6 +661,17 @@ class Loop(OuterLoop):
         )
         # Load the loop-level parts manifest if configured or already on disk.
         self._load_parts_manifest()
+        if self.config.val_gate:
+            if self._custom_strategy is not None:
+                raise LoopError(
+                    f"val_gate is the default loop's gate; the {self._custom_strategy.name} "
+                    "strategy keeps its own, so turn val_gate off"
+                )
+            if not (self._parts_manifest and task_module.VAL in self._parts_manifest):
+                raise LoopError(
+                    "val_gate needs a parts manifest with a 'val' part (--parts); "
+                    "give the run one, or turn val_gate off"
+                )
 
         if resumed:
             if getattr(self, "_executing_strategy", False) and self.bound:
@@ -1479,6 +1501,9 @@ class Loop(OuterLoop):
         # a loop instead. Selection is part of "how to search", so the optimizer gets
         # the pool and chooses from it (issue #32).
         parents = [candidate for candidate in self.population if candidate.evaluated]
+        if self.config.val_gate:
+            self._gate()
+            parents = [candidate for candidate in parents if candidate.id in self._gate_accepted]
         if not parents:
             parents = self.select_parents(self.config.elite)
         if not parents:
@@ -2177,7 +2202,54 @@ class Loop(OuterLoop):
     def load_strategy_state(self, state: dict[str, Any]) -> None:
         if self._custom_strategy is not None:
             return self._custom_strategy.load_strategy_state(state)
-        return super().load_strategy_state(state)
+        super().load_strategy_state(state)
+        self._val_gate = None  # rebuilt from the restored state by _gate()
+
+    def _gate(self) -> ValidationGate:
+        """The default loop's validation gate, restored from the strategy state.
+
+        Its state, with the ids it accepted and rejected, is the ``val_gate`` entry of
+        the loop's strategy state, journaled after every decision.
+        """
+        if self._val_gate is None:
+            saved = dict(self._strategy_state.get("val_gate") or {})
+            gate = ValidationGate(seed=self.config.seed)
+            gate.load_state_dict(saved)
+            self._gate_accepted = list(saved.get("accepted") or [])
+            self._gate_rejected = list(saved.get("rejected") or [])
+            self._val_gate = gate
+        return self._val_gate
+
+    def _gate_population(self, run: Run) -> None:
+        """Judge each candidate evaluated on train that the gate has not judged.
+
+        The seed is rolled out on val and accepted; every later candidate is
+        accepted only when its val score strictly beats its parent's. A candidate
+        that failed on train is rejected without a val rollout. A refused rollout
+        (a spent rollout budget) leaves the rest unjudged, and an unjudged
+        candidate is not a parent or a winner.
+        """
+        gate = self._gate()
+        judged = set(self._gate_accepted) | set(self._gate_rejected)
+        for candidate in [c for c in self.population if c.evaluated and c.id not in judged]:
+            try:
+                if gate.best_id is None:
+                    gate.start(run, candidate)
+                    accepted = True
+                elif not candidate.exit_ok:
+                    accepted = False
+                else:
+                    parent = run.candidate(candidate.parent) if candidate.parent else None
+                    accepted = gate.judge(run, candidate, against=parent).accepted
+            except OuterLoopError as error:
+                run.log(f"val gate stopped: {error}")
+                break
+            (self._gate_accepted if accepted else self._gate_rejected).append(candidate.id)
+            self._strategy_state["val_gate"] = {
+                **gate.state_dict(),
+                "accepted": list(self._gate_accepted), "rejected": list(self._gate_rejected),
+            }
+            self._save_strategy_state()
 
     def _save_strategy_state(self) -> None:
         """Journal the strategy's current state unconditionally.
@@ -2198,6 +2270,8 @@ class Loop(OuterLoop):
         """
         self.open_epoch()
         evaluated = self.forward()
+        if self.config.val_gate:
+            self._gate_population(run or Run(_loop=self))
         self.loss_step()
         self.backward()
         candidates, rejections = self.optimizer_step(run)
@@ -2215,7 +2289,8 @@ class Loop(OuterLoop):
 
     # ── report ─────────────────────────────────────────────────────────────
     def leaderboard(self, limit: int | None = None) -> list[Candidate]:
-        """Everything the run kept, ranked, minus what a person rejected.
+        """Everything the run kept, ranked, minus what a person rejected and, with
+        ``val_gate`` on, minus what the validation gate did not accept.
 
         The exclusion is here rather than in the population because rejection is a
         selection fact, not a historical one: `state.json` still records what the
@@ -2223,11 +2298,16 @@ class Loop(OuterLoop):
         the report's winner, the held-out audit, the atomic adopt -- goes through
         this one ranking, so a dismissed branch cannot come back as the best answer.
         """
+        accepted = None
+        if self.config.val_gate:
+            self._gate()  # restores the decisions on a resumed or replayed run
+            accepted = set(self._gate_accepted)
         ordered = sorted(
             [
                 c
                 for c in self._evaluated()
                 if c.exit_ok and c.score is not None and c.id not in self.rejected
+                and (accepted is None or c.id in accepted)
             ],
             key=lambda c: (-(c.score or 0.0), c.id),
         )
@@ -2288,6 +2368,12 @@ class Loop(OuterLoop):
                 strategy_best = strategy.best_candidate(self.population)
             except Exception as e:
                 strategy_error = strategy_error or str(e)
+        # The default loop's validation gate names the best on val as the winner.
+        if strategy is None and self.config.val_gate:
+            try:
+                strategy_best = self._gate().best_in(self.population)
+            except ValueError as e:
+                strategy_error = str(e)
         # A custom strategy's own figures (``OuterLoop.report``), e.g. SkillOpt's
         # post-training test scores; empty for the library's strategies.
         strategy_report: dict[str, Any] = {}
@@ -3044,6 +3130,28 @@ class Loop(OuterLoop):
         """Rebuild the population, the counters and the refusals from the log."""
         by_id: dict[str, Candidate] = {}
         order: list[str] = []
+        # A strategy may evaluate a candidate before it keeps it (``Run.keep``
+        # journals it then), so its score can come before the candidate itself.
+        early_scores: dict[str, dict[str, Any]] = {}
+
+        def apply_score(candidate: Candidate, record: dict[str, Any]) -> None:
+            candidate.score = record.get("score")
+            # A journal written before the size cost existed has no `raw_score`;
+            # its `score` is the evaluator's own number, which is then the raw
+            # one too.
+            raw = record.get("raw_score", record.get("score"))
+            candidate.raw_score = None if raw is None else float(raw)
+            # Old records without an explicit outcome cannot establish a
+            # successful run. Keep them inspectable but ineligible, matching
+            # adoption and console winner selection.
+            candidate.exit_ok = record.get("exit_ok") is True
+            candidate.error = record.get("error")
+            candidate.duration_s = float(record.get("duration_s") or 0.0)
+            candidate.model_calls = int(record.get("model_calls") or 0)
+            candidate.facts = dict(record.get("facts") or {})
+            candidate.measurements = dict(record.get("measurements") or {})
+            candidate.evaluated = True
+
         for line in journal.read_text().splitlines():
             if not line.strip():
                 continue
@@ -3079,26 +3187,14 @@ class Loop(OuterLoop):
                 if candidate.id not in by_id:
                     by_id[candidate.id] = candidate
                     order.append(candidate.id)
+                    if candidate.id in early_scores:
+                        apply_score(candidate, early_scores.pop(candidate.id))
             elif event == "score":
                 candidate = by_id.get(record.get("id"))
                 if candidate is None:
+                    early_scores[str(record.get("id"))] = record
                     continue
-                candidate.score = record.get("score")
-                # A journal written before the size cost existed has no `raw_score`;
-                # its `score` is the evaluator's own number, which is then the raw
-                # one too.
-                raw = record.get("raw_score", record.get("score"))
-                candidate.raw_score = None if raw is None else float(raw)
-                # Old records without an explicit outcome cannot establish a
-                # successful run. Keep them inspectable but ineligible, matching
-                # adoption and console winner selection.
-                candidate.exit_ok = record.get("exit_ok") is True
-                candidate.error = record.get("error")
-                candidate.duration_s = float(record.get("duration_s") or 0.0)
-                candidate.model_calls = int(record.get("model_calls") or 0)
-                candidate.facts = dict(record.get("facts") or {})
-                candidate.measurements = dict(record.get("measurements") or {})
-                candidate.evaluated = True
+                apply_score(candidate, record)
             elif event == "rejection":
                 self.rejections.append(
                     Rejection(

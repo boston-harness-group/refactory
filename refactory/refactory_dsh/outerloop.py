@@ -28,6 +28,11 @@ The two guarantees hold for both, and neither can be overridden:
 `Run` is the harness: the mode, the primitives, the budget, the history. A strategy
 is written against it, so what a strategy can do is what the harness offers rather
 than what it happens to reach for.
+
+Selection on held-out parts is offered here too, for any strategy:
+:class:`ValidationGate` (accept on a strict val improvement, val scores cached per
+whole candidate, the best on val) and :class:`FinalEvaluation` (the post-training
+val check and test rollouts). The default loop uses the gate with ``val_gate``.
 """
 
 from __future__ import annotations
@@ -494,10 +499,25 @@ class Run:
         Separate from ``evaluate`` because a strategy may evaluate a point and
         decide not to keep it -- a fork whose branches are all discarded is a
         legitimate search.
+
+        A kept candidate is journaled, as the default loop's are, so a resumed run
+        holds it again (``candidate`` finds it by id), evaluated or not.
         """
-        self._loop.step([candidate], run=self)  # noqa: SLF001
+        added = self._loop.step([candidate], run=self)  # noqa: SLF001
+        if added:
+            self._loop._journal_candidate(candidate)  # noqa: SLF001
         self._loop.update(self, candidate)  # noqa: SLF001
         return candidate
+
+    def candidate(self, candidate_id: str) -> Candidate | None:
+        """The candidate the search holds under ``candidate_id``, or ``None``.
+
+        A candidate's id is its whole state's (the graph and every knob value), so
+        a strategy saves ids rather than knob values and gets the candidate back
+        here after a resume: the seed, an evaluated candidate, or one it kept and
+        has not evaluated yet.
+        """
+        return next((c for c in self._loop.population if c.id == candidate_id), None)
 
     # ── the run directory ───────────────────────────────────────────────────
     @property
@@ -789,6 +809,318 @@ class OuterLoop:
         stores it in ``_strategy_state``.
         """
         self._strategy_state = dict(state)
+
+
+# ── selection on held-out parts, for any strategy ─────────────────────────
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What :meth:`ValidationGate.judge` decided about one candidate."""
+
+    accepted: bool
+    #: The candidate's val score.
+    score: float
+    #: Whether the score came from the gate's cache (no rollout).
+    cached: bool
+    #: The score it had to beat.
+    incumbent: float
+    #: Whether it became the best on val.
+    best: bool
+
+
+class ValidationGate:
+    """Accept a candidate only on a strict val improvement, and keep the best on val.
+
+    The gate holds the **current** candidate (the last one accepted, or one a
+    strategy carries its score to) and the **best** one on val, each as an id and a
+    score. Val scores are cached per whole candidate: the key is ``Candidate.id``,
+    the id of its state (the graph and every knob value), so a candidate is rolled
+    out on val once, whichever knob or node an edit changed.
+
+    A Type 2 strategy (SkillOpt) makes one and calls it; the default loop uses one
+    when ``LoopConfig.val_gate`` is on. Its state is plain JSON
+    (``state_dict``/``load_state_dict``), journaled with the strategy's own.
+    Every rollout goes through ``Run.evaluate`` with ``seed``.
+    """
+
+    def __init__(self, *, seed: int | None = None) -> None:
+        self.seed = seed
+        self.cache: dict[str, float] = {}
+        self.current_id: str | None = None
+        self.current_score: float = 0.0
+        self.best_id: str | None = None
+        self.best_score: float = 0.0
+
+    @staticmethod
+    def val_score(run: Run, candidate: Candidate) -> float:
+        """A candidate's val score: its first val rollout's, 0.0 when that failed."""
+        scores = run.val_scores(candidate)
+        raw = scores[0].get("score") if scores else None
+        return float(raw) if raw is not None else 0.0
+
+    def start(self, run: Run, candidate: Candidate) -> float:
+        """Roll the starting candidate out on val; it becomes current and best."""
+        run.evaluate(candidate, part="val", seed=self.seed)
+        score = self.val_score(run, candidate)
+        self.cache[candidate.id] = score
+        self.current_id = self.best_id = candidate.id
+        self.current_score = self.best_score = score
+        return score
+
+    def score(self, run: Run, candidate: Candidate) -> tuple[float, bool]:
+        """The candidate's val score and whether it was cached; rolled out once."""
+        if candidate.id in self.cache:
+            return self.cache[candidate.id], True
+        run.evaluate(candidate, part="val", seed=self.seed)
+        score = self.val_score(run, candidate)
+        self.cache[candidate.id] = score
+        return score, False
+
+    def judge(self, run: Run, candidate: Candidate, *, against: Candidate | None = None) -> Verdict:
+        """Score ``candidate`` on val and accept it only if it beats the incumbent.
+
+        The incumbent is the current candidate, or ``against`` when given (a
+        population search compares a child with its parent). An equal score is
+        rejected. An accepted candidate becomes current, and best when it beats
+        the best. Keeping it in the search stays the strategy's call.
+        """
+        incumbent = self.current_score if against is None else self.score(run, against)[0]
+        score, cached = self.score(run, candidate)
+        accepted = score > incumbent
+        best = False
+        if accepted:
+            self.current_id, self.current_score = candidate.id, score
+            best = self.offer_best(candidate.id, score)
+        return Verdict(accepted=accepted, score=score, cached=cached, incumbent=incumbent, best=best)
+
+    def carry(self, candidate: Candidate, *, remember: bool = False) -> None:
+        """Make ``candidate`` current at the current score, without a rollout.
+
+        For a candidate a strategy derives from the current one and accepts by its
+        own rule (SkillOpt's slow update). ``remember`` caches that score for it.
+        """
+        self.current_id = candidate.id
+        if remember:
+            self.cache[candidate.id] = self.current_score
+
+    def offer_best(self, candidate_id: str, score: float) -> bool:
+        """Make the candidate the best on val if ``score`` beats the best's."""
+        if score > self.best_score:
+            self.best_id, self.best_score = candidate_id, score
+            return True
+        return False
+
+    def best_in(self, population: Sequence[Candidate]) -> Candidate | None:
+        """The best candidate, looked up by id; ``None`` before any val score.
+
+        Raises ``ValueError`` when the population does not hold it, so a report
+        never names another winner in its place.
+        """
+        if self.best_id is None:
+            return None
+        for candidate in population:
+            if candidate.id == self.best_id:
+                return candidate
+        raise ValueError(
+            f"the val-best candidate {self.best_id!r} is not in the population of "
+            f"{len(population)} candidates"
+        )
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "val_cache": dict(self.cache),
+            "current_candidate_id": self.current_id,
+            "current_score": self.current_score,
+            "best_candidate_id": self.best_id,
+            "best_score": self.best_score,
+        }
+
+    def load_state_dict(self, data: dict[str, Any]) -> None:
+        self.cache = {str(k): float(v) for k, v in (data.get("val_cache") or {}).items()}
+        self.current_id = data.get("current_candidate_id")
+        self.current_score = float(data.get("current_score", 0.0))
+        self.best_id = data.get("best_candidate_id")
+        self.best_score = float(data.get("best_score", 0.0))
+
+
+class FinalEvaluation:
+    """After a search: the final candidate's val check, then three test rollouts.
+
+    SkillOpt's post-training block (trainer.py:2241-2441), for any strategy with a
+    :class:`ValidationGate`:
+
+    1. ``final_selection``: the gate's current (final) candidate on val -- the best's
+       score when it is the best, else a fresh val rollout; a score above the best's
+       makes it the best.
+    2. ``baseline_test``, ``best_test``, ``final_test``: the seed, the best and the
+       final candidate on test, concurrently through ``Run.evaluate_many``; the final
+       reuses the best's score when it is the best.
+
+    Every rollout uses ``seed``. Each finished phase is kept (``completed``) and
+    ``save`` is called, so a resumed run continues where it stopped; the decisions go
+    to ``record(step_type, **fields)`` in that order, never ahead of an unfinished
+    earlier phase. ``result`` holds the scores by phase name, ``best_test_delta`` and
+    ``final_test_delta`` (each against the baseline), ``status`` (``running``,
+    ``done``, ``skipped``, ``incomplete``) and ``reason``. A rollout the harness
+    refuses (``OuterLoopError``, e.g. a spent rollout budget) ends it ``incomplete``.
+    """
+
+    PHASES = ("final_selection", "baseline_test", "best_test", "final_test", "final_done")
+    TEST_PHASES = ("baseline_test", "best_test", "final_test")
+
+    def __init__(self, *, record: Callable[..., Any] | None = None, label: str = "outer loop") -> None:
+        self.record = record or (lambda step_type, **fields: None)
+        self.label = label
+        self.result: dict[str, Any] = {}
+        self.completed: set[str] = set()
+        self.traced: set[str] = set()
+
+    @property
+    def phase(self) -> str:
+        """The furthest finished phase, in order; empty before any."""
+        return max(self.completed, key=self.PHASES.index) if self.completed else ""
+
+    def skip(self, run: Run, reason: str, save: Callable[[], None]) -> None:
+        """Record that the evaluation does not run, and why."""
+        self.result = {"status": "skipped", "reason": reason}
+        self.record("test_eval", action="skipped", reason=reason)
+        run.log(f"{self.label}: no post-training test evaluation: {reason}")
+        save()
+
+    def run(self, run: Run, gate: ValidationGate, *, seed: int | None, save: Callable[[], None]) -> None:
+        """Run the pending phases; see the class docstring."""
+        if not self.completed:
+            self.result, self.traced = {}, set()
+        result = self.result
+        result["status"] = "running"
+
+        def finished(phase: str) -> None:
+            self.completed.add(phase)
+            self._sync_test_scores()
+            save()
+
+        try:
+            if "final_selection" not in self.completed:
+                if gate.current_id == gate.best_id:
+                    result["final_selection"] = gate.best_score
+                    self.record("final_selection_eval", action="reused", score=gate.best_score)
+                else:
+                    final = self._held(run, gate.current_id)
+                    run.evaluate(final, part="val", seed=seed)
+                    score = self._latest_score(run, final, "val")
+                    result["final_selection"] = score
+                    promoted = score is not None and gate.offer_best(final.id, score)
+                    self.record(
+                        "final_selection_eval", action="promoted" if promoted else "evaluated",
+                        score=score, best_score=gate.best_score,
+                    )
+                finished("final_selection")
+
+            # (phase, candidate) for each pending test phase; None reuses the best's.
+            plan: list[tuple[str, Candidate | None]] = []
+            if "baseline_test" not in self.completed:
+                plan.append(("baseline_test", run.seed()))
+            if "best_test" not in self.completed:
+                plan.append(("best_test", self._held(run, gate.best_id)))
+            if "final_test" not in self.completed:
+                final_is_best = gate.current_id == gate.best_id
+                plan.append(("final_test", None if final_is_best else self._held(run, gate.current_id)))
+            requests = [EvalRequest(candidate=cand, part="test", seed=seed)
+                        for _phase, cand in plan if cand is not None]
+            request_phases = [phase for phase, cand in plan if cand is not None]
+            phases = result.setdefault("test_phases", {})
+            try:
+                if requests:
+                    def _on_result(index: int, candidate: Candidate) -> None:
+                        phases[request_phases[index]] = {
+                            "score": self._latest_score(run, candidate, "test"),
+                            "candidate": candidate.id,
+                        }
+                        finished(request_phases[index])
+
+                    run.evaluate_many(requests, on_result=_on_result)
+                for phase, cand in plan:
+                    if cand is None:  # the final candidate is the best: reuse its score
+                        best = phases.get("best_test") or {}
+                        phases[phase] = {"score": best.get("score", result.get("best_test")),
+                                         "reused": True}
+                        finished(phase)
+            finally:
+                self._trace_test_phases(save)
+        except OuterLoopError as error:
+            result["status"] = "incomplete"
+            result["reason"] = str(error)
+            self.record("test_eval", action="incomplete", reason=str(error))
+            run.log(f"{self.label}: post-training evaluation stopped: {error}")
+            save()
+            return
+        for delta, phase in (("best_test_delta", "best_test"), ("final_test_delta", "final_test")):
+            result[delta] = (
+                result[phase] - (result.get("baseline_test") or 0)
+                if result.get(phase) is not None else None
+            )
+        result["status"] = "done"
+        finished("final_done")
+
+    @staticmethod
+    def _held(run: Run, candidate_id: str | None) -> Candidate:
+        candidate = run.candidate(candidate_id) if candidate_id else None
+        if candidate is None:
+            raise OuterLoopError(f"the search does not hold candidate {candidate_id!r}")
+        return candidate
+
+    @staticmethod
+    def _latest_score(run: Run, candidate: Candidate, part: str) -> float | None:
+        """The candidate's score on its latest ``part`` rollout; ``None`` if it failed."""
+        scores = run.part_scores(candidate, part)
+        raw = scores[-1].get("score") if scores else None
+        return float(raw) if raw is not None else None
+
+    def _sync_test_scores(self) -> None:
+        """Write the finished test phases' scores into ``result`` in phase order,
+        whatever order they finished in."""
+        result = self.result
+        phases = result.get("test_phases") or {}
+        held = {phase: result.pop(phase) for phase in self.TEST_PHASES if phase in result}
+        for phase in self.TEST_PHASES:
+            if phase in phases:
+                result[phase] = phases[phase].get("score")
+            elif phase in held:
+                result[phase] = held[phase]
+
+    def _trace_test_phases(self, save: Callable[[], None]) -> None:
+        """Record the finished test phases not yet recorded, in phase order,
+        stopping at the first unfinished one."""
+        phases = self.result.get("test_phases") or {}
+        wrote = False
+        for phase in self.TEST_PHASES:
+            if phase in self.traced:
+                continue
+            if phase not in self.completed or phase not in phases:
+                break
+            entry = phases[phase]
+            if entry.get("reused"):
+                self.record("test_eval", action="final_test_reused", score=entry.get("score"))
+            else:
+                self.record("test_eval", action=phase, score=entry.get("score"),
+                            candidate=entry.get("candidate", ""))
+            self.traced.add(phase)
+            wrote = True
+        if wrote:
+            save()
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "final_eval": dict(self.result),
+            "completed_phases": sorted(self.completed),
+            "traced_phases": sorted(self.traced),
+        }
+
+    def load_state_dict(self, data: dict[str, Any]) -> None:
+        self.result = dict(data.get("final_eval") or {})
+        self.completed = set(data.get("completed_phases") or ())
+        self.traced = set(data.get("traced_phases") or ())
 
 
 def run_strategy(loop: Any) -> dict[str, Any]:
