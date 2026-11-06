@@ -12299,7 +12299,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/skill_graph
 
-solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.
+solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.
 
 ```json
 {
@@ -12396,7 +12396,9 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "call": "refactory_packages.livemath.skill_graph:decide_prompt",
       "id": "decide_prompt",
       "kind": "op",
-      "knobs": [],
+      "knobs": [
+        "decide_task"
+      ],
       "notes": "",
       "role": "ceo"
     },
@@ -12431,7 +12433,10 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "call": "refactory_packages.livemath.skill_graph:notes_prompts",
       "id": "notes_prompts",
       "kind": "op",
-      "knobs": [],
+      "knobs": [
+        "precision_task",
+        "hypotheses_task"
+      ],
       "notes": "",
       "role": "ceo"
     },
@@ -12451,10 +12456,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "id": "prepare",
       "kind": "op",
       "knobs": [
-        "compare_skill",
-        "precision_skill",
-        "hypotheses_skill",
-        "decide_skill",
+        "compare_task",
         "use_theorem",
         "use_sketch"
       ],
@@ -12480,27 +12482,27 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
   ],
   "parameters": {
     "compare__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{compare_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for compare (frozen; use compare_skill)",
-      "frozen": true,
-      "kind": "str",
-      "range": [
-        null,
-        null
-      ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{compare_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "values": []
-    },
-    "compare_skill": {
-      "default": "## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".",
-      "description": "skill section in the compare step's system message",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for the compare step",
       "frozen": false,
       "kind": "str",
       "range": [
         null,
         null
       ],
-      "value": "## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Option Comparison\n- Compare all options before committing. The correct choice is often the strongest statement justified by the question, while nearby distractors are weaker, overstrong, or miss an equality case.\n- Track exact quantifiers such as \"there exists\", \"for every\", \"if and only if\", and \"exactly when\".\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "compare_task": {
+      "default": "## Your Task\nThis is the first of several analysis steps. Apply the skill in your instructions to every option and write your analysis as notes for the next steps. A final answer is not required.",
+      "description": "task text ending the compare step's user message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "## Your Task\nThis is the first of several analysis steps. Apply the skill in your instructions to every option and write your analysis as notes for the next steps. A final answer is not required.",
       "values": []
     },
     "data_parallelism": {
@@ -12516,51 +12518,51 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "values": []
     },
     "decide__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{decide_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for decide (frozen; use decide_skill)",
-      "frozen": true,
-      "kind": "str",
-      "range": [
-        null,
-        null
-      ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{decide_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "values": []
-    },
-    "decide_skill": {
-      "default": "## Final Answer\n- Output the final answer as the single option label only.",
-      "description": "skill section in the decide step's system message",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Final Answer\n- Output the final answer as the single option label only.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for the decide step",
       "frozen": false,
       "kind": "str",
       "range": [
         null,
         null
       ],
-      "value": "## Final Answer\n- Output the final answer as the single option label only.",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Final Answer\n- Output the final answer as the single option label only.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "decide_task": {
+      "default": "## Your Task\nWeigh the notes above against the question and its options, and choose the single correct option. Think step by step, then provide your final answer inside <answer>...</answer> tags, with only the single choice label inside.",
+      "description": "task text ending the decide step's user message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "## Your Task\nWeigh the notes above against the question and its options, and choose the single correct option. Think step by step, then provide your final answer inside <answer>...</answer> tags, with only the single choice label inside.",
       "values": []
     },
     "hypotheses__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{hypotheses_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for hypotheses (frozen; use hypotheses_skill)",
-      "frozen": true,
-      "kind": "str",
-      "range": [
-        null,
-        null
-      ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{hypotheses_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "values": []
-    },
-    "hypotheses_skill": {
-      "default": "## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.",
-      "description": "skill section in the hypotheses step's system message",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for the hypotheses step",
       "frozen": false,
       "kind": "str",
       "range": [
         null,
         null
       ],
-      "value": "## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Hypotheses\n- Verify the hypotheses and domain carefully. Distractors often keep the theorem shape but alter the required assumptions.\n- Pay close attention to equality cases, extremal conditions, and whether a result applies to the full family or only a restricted subfamily.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "hypotheses_task": {
+      "default": "## Your Task\nUsing the notes above, apply the skill in your instructions to every option and write your analysis as notes for the final step. A final answer is not required.",
+      "description": "task text ending the hypotheses step's user message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "## Your Task\nUsing the notes above, apply the skill in your instructions to every option and write your analysis as notes for the final step. A final answer is not required.",
       "values": []
     },
     "max_completion_tokens": {
@@ -12576,27 +12578,27 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "values": []
     },
     "precision__system_prompt": {
-      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{precision_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "description": "system prompt for precision (frozen; use precision_skill)",
-      "frozen": true,
-      "kind": "str",
-      "range": [
-        null,
-        null
-      ],
-      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{precision_skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
-      "values": []
-    },
-    "precision_skill": {
-      "default": "## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.",
-      "description": "skill section in the precision step's system message",
+      "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "description": "system prompt for the precision step",
       "frozen": false,
       "kind": "str",
       "range": [
         null,
         null
       ],
-      "value": "## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.",
+      "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n## Skill\n## Theorem-Level Precision\n- Check whether an option weakens the conclusion by dropping a characterization, equality clause, or full equivalence.\n- Check whether an option overstates the theorem by upgrading regularity, removing scale restrictions, or changing an existential statement into a universal one.\n\n## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
+      "values": []
+    },
+    "precision_task": {
+      "default": "## Your Task\nUsing the notes above, apply the skill in your instructions to every option and write your analysis as notes for the final step. A final answer is not required.",
+      "description": "task text ending the precision step's user message",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "## Your Task\nUsing the notes above, apply the skill in your instructions to every option and write your analysis as notes for the final step. A final answer is not required.",
       "values": []
     },
     "use_sketch": {
@@ -12630,7 +12632,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
     "doc": "refactory/docs/outer-loop.md",
     "examples": [
       {
-        "explanation": "Solve each LiveMathematicianBench item with the seed skill's four sections as four agent steps: compare, then precision and hypotheses in parallel, then decide. Each step's section text is a knob. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
+        "explanation": "Solve each LiveMathematicianBench item with the seed skill's four sections as four agent steps: compare, then precision and hypotheses in parallel, then decide. Each step's whole system prompt and its task text are knobs. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
           "data_parallelism": 1,
           "max_completion_tokens": 0,
@@ -12644,8 +12646,8 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "cli": "refactory ceo livemath/skill_graph",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step's skill section is a knob (compare_skill, precision_skill, hypotheses_skill, decide_skill); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
-    "reviewed_schema": "80fefbd675296334f66d59bd3535dde20a4fa0401247749ce9b1566028a9a0b1"
+    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide; graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
+    "reviewed_schema": "a37453b57c3b91143eb1a27f1ba039c269e5b5bf9a389e11ec95faa9f6933821"
   }
 }
 ```

@@ -4,8 +4,12 @@ Coverage:
 - registration, graph shape (fork/join inside the data pass), knobs and what is frozen
 - the seed sections are arm A's seed skill, byte for byte
 - every agent node is configured as the baseline solve node (route, timeout, cap)
+- with default knobs every call's system and user prompt is byte-identical to the
+  section-knob graph's (expected strings built here from SYSTEM_PROMPT, SEED_SECTIONS
+  and the old task texts)
 - each step's system prompt holds only its own section; each user prompt holds the
   question, the choices and the earlier steps' notes, framed as arm A's backend frames it
+- each step's system-prompt and task knob reaches only that step, on both runtimes
 - the walker and the spine run the graph, fork and join, record every agent call,
   and grade decide's answer with LiveMath's grader
 """
@@ -129,25 +133,36 @@ def test_graph_is_compare_then_parallel_steps_then_decide_inside_the_data_pass()
     assert set(graph.nodes["precision"].writes).isdisjoint(graph.nodes["hypotheses"].writes)
 
 
-def test_knobs_open_sections_frozen_system_prompts_and_no_skill_knob():
-    from refactory_packages.livemath.skill_graph import SEED_SECTIONS, SkillGraph, step_system_prompt
+def test_knobs_open_system_prompts_and_tasks_and_no_skill_knob():
+    """Per step one open system-prompt knob and one open task knob, nothing else open;
+    the agents bind the system prompt, and each prompt builder declares exactly the
+    task knobs it reads."""
+    from refactory_packages.livemath.skill_graph import TASKS, SkillGraph, step_system_prompt
 
     state = SkillGraph().state_dict()
     knobs = state["knobs"]
     assert "skill" not in knobs
+    assert not [n for n in knobs if n.endswith("_skill") or n.endswith("_skill_section")]
     open_knobs = sorted(n for n, e in knobs.items() if not e["spec"]["frozen"])
-    assert open_knobs == ["compare_skill", "decide_skill", "hypotheses_skill",
-                          "precision_skill"]
+    assert open_knobs == sorted([*(f"{s}__system_prompt" for s in AGENTS),
+                                 *(f"{s}_task" for s in AGENTS)])
+    assert all(knobs[n]["spec"]["kind"] == "str" for n in open_knobs)
     frozen = sorted(n for n, e in knobs.items() if e["spec"]["frozen"])
     assert frozen == sorted(["data_parallelism", "max_completion_tokens",
-                             "use_sketch", "use_theorem",
-                             *(f"{s}__system_prompt" for s in AGENTS)])
+                             "use_sketch", "use_theorem"])
     graph = nn.Graph.from_state(state["graph"])
     for step in AGENTS:
-        assert knobs[f"{step}_skill"]["value"] == SEED_SECTIONS[step]
         assert knobs[f"{step}__system_prompt"]["value"] == step_system_prompt(step)
+        assert graph.nodes[step].system_prompt_template == step_system_prompt(step)
+        assert "{{" not in step_system_prompt(step)
+        assert knobs[f"{step}_task"]["value"] == TASKS[step]
         assert graph.nodes[step].field_bindings == (("system_prompt_template", f"{step}__system_prompt"),)
         assert graph.nodes[step].bound_knob("prompt_template") == ""
+        assert graph.nodes[step].knobs == ("max_completion_tokens", f"{step}__system_prompt")
+    assert graph.nodes["prepare"].knobs == ("compare_task", "use_theorem", "use_sketch")
+    assert graph.nodes["notes_prompts"].knobs == ("precision_task", "hypotheses_task")
+    assert graph.nodes["decide_prompt"].knobs == ("decide_task",)
+    assert graph.nodes["extract_answer"].knobs == ()
     issues = nn.validate_state(state, resolve_calls=False)
     assert not [i for i in issues if i.code in ("V7", "V14")], issues
 
@@ -155,7 +170,7 @@ def test_knobs_open_sections_frozen_system_prompts_and_no_skill_knob():
 @pytest.mark.parametrize("name", ["use_theorem", "use_sketch"])
 def test_an_optimizer_edit_to_the_theorem_or_sketch_switch_is_refused(name):
     """An item's theorem states the correct option: the optimizer's set_knob on either
-    switch is refused, and the state keeps it off. A section knob still moves."""
+    switch is refused, and the state keeps it off. A system-prompt knob still moves."""
     from refactory_dsh.nn import edits
     from refactory_packages.livemath.skill_graph import SkillGraph
 
@@ -163,11 +178,11 @@ def test_an_optimizer_edit_to_the_theorem_or_sketch_switch_is_refused(name):
     with pytest.raises(edits.EditError, match="is frozen and cannot be moved"):
         edits.apply({"op": "set_knob", "name": name, "value": True}, state)
     assert state["knobs"][name]["value"] is False
-    moved = edits.apply({"op": "set_knob", "name": "compare_skill", "value": "X"}, state)
-    assert moved["knobs"]["compare_skill"]["value"] == "X"
+    moved = edits.apply({"op": "set_knob", "name": "compare__system_prompt", "value": "X"}, state)
+    assert moved["knobs"]["compare__system_prompt"]["value"] == "X"
 
 
-#: Method terms of the seed skill's sections: none may appear outside the section knobs.
+#: Method terms of the seed skill's sections: none may appear in the default task texts.
 _SEED_TERMS = ("strongest", "quantifier", "there exists", "for every", "if and only if",
                "exactly when", "distractor", "weaken", "overstat", "characteriz",
                "equivalence", "regularity", "existential", "universal", "hypothes",
@@ -175,9 +190,10 @@ _SEED_TERMS = ("strongest", "quantifier", "there exists", "for every", "if and o
                "theorem")
 
 
-def test_no_seed_guidance_in_the_frozen_step_task_texts():
-    """Every step's task text carries no seed guidance: no seed method term and no
-    four-word run of any seed section, so all method guidance lives in the section knobs."""
+def test_no_seed_guidance_in_the_default_step_task_texts():
+    """Every step's default task text carries no seed guidance: no seed method term and
+    no four-word run of any seed section, so all seed method guidance starts in the
+    system-prompt knobs."""
     import re
 
     from refactory_packages.livemath import skill_graph as sg
@@ -294,12 +310,81 @@ def test_compare_sends_the_baseline_question_unchanged(tmp_path, monkeypatch):
     assert sorted(m for m, _ in _calls(tmp_path, monkeypatch)["compare"]) == expected
 
 
-def test_a_section_knob_reaches_only_its_step(tmp_path, monkeypatch):
-    by_node = _calls(tmp_path, monkeypatch, hypotheses_skill="HYP-SKILL-MARKER",
-                     use_theorem="true")
+#: The step task texts the section-knob graph hardcoded (origin/main before the task
+#: knobs), copied verbatim so a changed default fails the byte-identity test below.
+_OLD_TASKS = {
+    "compare": ("## Your Task\n"
+                "This is the first of several analysis steps. Apply the skill in your "
+                "instructions to every option and write your analysis as notes for the next "
+                "steps. A final answer is not required."),
+    "precision": ("## Your Task\n"
+                  "Using the notes above, apply the skill in your instructions to every option and "
+                  "write your analysis as notes for the final step. A final answer is not required."),
+    "decide": ("## Your Task\n"
+               "Weigh the notes above against the question and its options, and choose the "
+               "single correct option. Think step by step, then provide your final answer "
+               "inside <answer>...</answer> tags, with only the single choice label inside."),
+}
+_OLD_TASKS["hypotheses"] = _OLD_TASKS["precision"]
+
+
+def _old_calls(questions: list[str], notes: dict[str, str]) -> dict[str, list[tuple[str, str]]]:
+    """Every (framed user prompt, system prompt) the section-knob graph sent per step,
+    built independently: SYSTEM_PROMPT with the step's seed section as its ``## Skill``
+    block, and the question, the earlier notes under their headings and the old task."""
+    from refactory_packages.livemath.mode import SYSTEM_PROMPT
+    from refactory_packages.livemath.ops import claude_backend_prompt
+    from refactory_packages.livemath.skill_graph import SEED_SECTIONS
+
+    heads = {"compare": "## Option Comparison Notes", "precision": "## Theorem-Level Precision Notes",
+             "hypotheses": "## Hypotheses Notes"}
+    earlier = {"compare": (), "precision": ("compare",), "hypotheses": ("compare",),
+               "decide": ("compare", "precision", "hypotheses")}
+    out: dict[str, list[tuple[str, str]]] = {}
+    for step in AGENTS:
+        system = SYSTEM_PROMPT.replace("{{skill_section}}",
+                                       "## Skill\n" + SEED_SECTIONS[step].strip() + "\n\n")
+        for question in questions:
+            blocks = [question, *(f"{heads[o]}\n{notes[o].strip()}" for o in earlier[step]),
+                      _OLD_TASKS[step]]
+            out.setdefault(step, []).append((claude_backend_prompt("\n\n".join(blocks)), system))
+        out[step].sort()
+    return out
+
+
+def test_default_knobs_send_byte_identical_prompts(tmp_path, monkeypatch):
+    """With default knobs every agent call's system prompt and framed user prompt is
+    byte-identical to the section-knob graph's, for every fixture item and all four
+    steps. Fails when a system-prompt or task default drifts by one byte."""
+    from refactory_packages.livemath.mode import Solver
+    from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
+
+    baseline = _StepModel({})
+    _walk(Solver(), baseline, tmp_path, monkeypatch, name="baseline")
+    questions = [unwrap_claude_backend_prompt(p) for _, p, _ in baseline.log]
+    assert len(questions) == 5
+    notes = {"compare": "CMP notes\n", "precision": " PREC notes", "hypotheses": "HYP notes"}
+    model = _StepModel({**notes, "decide": "<answer>B</answer>"})
+    _walk(_mode(), model, tmp_path, monkeypatch)
+    sent: dict[str, list[tuple[str, str]]] = {}
+    for node, prompt, system in model.log:
+        sent.setdefault(node, []).append((prompt, system))
+    assert {k: sorted(v) for k, v in sent.items()} == _old_calls(questions, notes)
+
+
+def test_a_system_prompt_or_task_knob_reaches_only_its_step(tmp_path, monkeypatch):
+    """A step's system-prompt knob is that step's whole system prompt, and its task
+    knob ends that step's user message; no other step sees either."""
+    from refactory_packages.livemath.skill_graph import step_system_prompt
+
+    by_node = _calls(tmp_path, monkeypatch, hypotheses__system_prompt="HYP-SYSTEM-MARKER",
+                     use_theorem="true", **{f"{s}_task": f"{s.upper()}-TASK-MARKER" for s in AGENTS})
     for step in AGENTS:
         for message, system in by_node[step]:
-            assert ("## Skill\nHYP-SKILL-MARKER\n\n" in system) == (step == "hypotheses")
+            assert system == ("HYP-SYSTEM-MARKER" if step == "hypotheses"
+                              else step_system_prompt(step)), step
+            assert message.endswith(f"\n\n{step.upper()}-TASK-MARKER"), step
+            assert message.count("-TASK-MARKER") == 1, step
     # use_theorem reaches the question every step sees, as in the baseline (two of
     # the five fixture items carry a theorem).
     for step in AGENTS:
@@ -397,3 +482,36 @@ def test_spine_matches_walker(parallelism, tmp_path, monkeypatch):
         walker.facts["item_scores"])
     spine_records = json.loads((spine_dir / "item_records.json").read_text())
     _check_records(spine_records)
+
+
+@needs_spine
+def test_spine_carries_the_system_prompt_and_task_knobs(tmp_path, monkeypatch):
+    """Lowered for the spine, an edited system-prompt knob is that agent's system
+    prompt and an edited task knob ends that step's user message, as on the walker;
+    the other steps keep their defaults."""
+    from refactory_dsh import lowering
+    from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
+    from refactory_packages.livemath.skill_graph import step_system_prompt
+
+    _patch_task(monkeypatch)
+    mode = _mode(compare__system_prompt="CMP-SYSTEM-MARKER", hypotheses_task="HYP-TASK-MARKER")
+    # Op commands read the knobs from the environment, as ``dsh_runtime`` passes them.
+    monkeypatch.setenv(lowering.KNOBS_ENV,
+                       lowering.knob_environment(mode.state_dict())[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine-knobs"
+    rc = _spine(mode.graph(), spine_dir, tmp_path, agent_responses=_ANSWERS,
+                mode_state=mode.state_dict())
+    assert rc == 0
+    lowered = json.loads(next((tmp_path / f"graphs-{spine_dir.name}").glob("*.graph.json"))
+                         .read_text())["nodes"]
+    for step in AGENTS:
+        assert lowered[step]["system_prompt"] == (
+            "CMP-SYSTEM-MARKER" if step == "compare" else step_system_prompt(step)), step
+    records = json.loads((spine_dir / "item_records.json").read_text())
+    assert len(records) == 5
+    for record in records:
+        for exchange in record["exchanges"]:
+            message = unwrap_claude_backend_prompt(exchange["prompt"])
+            is_hyp = exchange["node"] == "hypotheses"
+            assert message.endswith("\n\nHYP-TASK-MARKER") == is_hyp, exchange["node"]
+            assert ("HYP-TASK-MARKER" in message) == is_hyp, exchange["node"]

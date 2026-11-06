@@ -31,16 +31,20 @@ three sets of notes and answers in the baseline solver's format. LiveMath's unch
 grader scores decide's answer. Each agent runs the solver's system prompt with only its
 own seed-skill section, and the step task texts carry no method guidance.
 
-The four section knobs (`compare_skill`, `precision_skill`, `hypotheses_skill`,
-`decide_skill`) are the only open knobs. Each step's system prompt,
-`max_completion_tokens`, `data_parallelism`, `use_theorem` and `use_sketch` are frozen.
-An item's theorem states the correct option, so the last two stay off. Each item takes
-4 model calls.
+Each step has two open text knobs, one per piece of text it sends:
+`<step>__system_prompt` (`compare__system_prompt`, ...) is the step's whole system prompt,
+seeded with the solver's system prompt and that step's section, and `<step>_task`
+(`compare_task`, ...) is the task text ending its user message. The question and the
+earlier steps' notes are data, not knobs. With the defaults every call is byte-identical
+to the earlier section-knob graph's. `max_completion_tokens`, `data_parallelism`,
+`use_theorem` and `use_sketch` are frozen. An item's theorem states the correct option,
+so the last two stay off. Each item takes 4 model calls.
 
 ## SkillOpt over several text knobs
 
-`--strategy skillopt --strategy-option knobs=compare_skill,precision_skill,hypotheses_skill,decide_skill`
-runs SkillOpt's procedure on all four section knobs at once (arm C1). Without `knobs`,
+`--strategy skillopt --strategy-option knobs=compare__system_prompt,precision__system_prompt,hypotheses__system_prompt,decide__system_prompt`
+runs SkillOpt's procedure on all four system prompts at once (arm C1); add the `_task`
+knobs to the list to let it edit the task texts too. Without `knobs`,
 the strategy optimizes the single `skill` knob exactly as before.
 
 - **One document.** The analysts, the merges, the ranking, the slow update and the meta
@@ -60,7 +64,7 @@ the strategy optimizes the single `skill` knob exactly as before.
     line. The trace reports it as `skipped_cross_section` or
     `skipped_section_line_in_content`, and the rest of the patch applies.
 - **The slow update.** The SLOW_UPDATE placeholder and guidance live at the end of the
-  last knob (`decide_skill` here), where SkillOpt keeps them: at the end of the document.
+  last knob (`decide__system_prompt` here), where SkillOpt keeps them: at the end of the document.
 - **Refused knobs.** A knob that is missing, frozen or not a text knob is refused before
   the run spends anything. A run resumed with different `knobs` is refused too.
 - **Trajectories.** LiveMath's trajectory view labels each message with the step that
