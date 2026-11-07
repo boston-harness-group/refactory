@@ -138,6 +138,28 @@ def _tool_policy_escalated(seed_state: dict[str, Any], candidate_state: dict[str
     return reasons
 
 
+def _lowering_refusal(parent_state: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """``E-lowering`` when the edit makes a state the spine cannot be given.
+
+    The validator states the rules both runtimes share; lowering is the spine's own last
+    word (`lowering.to_workflow`). A candidate whose parent lowers and which does not
+    would score on the walker and fail on the spine, so it is refused here, with
+    lowering's reason. A parent that does not lower itself (a walker-only mode) is not
+    held to it.
+    """
+    from refactory_dsh.lowering import to_workflow
+
+    try:
+        to_workflow(state)
+    except Exception as exc:  # noqa: BLE001 - any failure to lower is the refusal
+        try:
+            to_workflow(parent_state)
+        except Exception:  # noqa: BLE001 - the parent never lowered: not this edit's doing
+            return None
+        return f"E-lowering: the edited state does not lower to the spine's workflow: {exc}"
+    return None
+
+
 def candidate_id(state: dict[str, Any]) -> str:
     """A stable id for a state, so two candidates that are the same state agree.
 
@@ -305,6 +327,9 @@ class ProposalContext:
     #: itself declares frozen. Freezing is a property of the run, not of the mode,
     #: so it cannot be edited into the definition by a candidate.
     frozen: list[str] = field(default_factory=list)
+    #: The mode's protected nodes (``Mode.protected_nodes``): no edit may remove,
+    #: rewire or replace them, and one that does is refused with ``E-protected``.
+    protected: list[str] = field(default_factory=list)
     preset: str = "broad"
     #: What the outer loop decided for *this* iteration, as data.
     #:
@@ -358,6 +383,10 @@ class ProposalContext:
             "",
             "## The pipeline you may edit",
             *([f"Note: {self.graph_note}"] if self.graph_note else []),
+            *([f"Protected nodes: {', '.join(f'`{n}`' for n in self.protected)}. An edit may "
+               "not remove them, change their declarations or out-edges, move a knob they "
+               "read, or let a run finish without them; a new node may go in front of one."]
+              if self.protected else []),
             "Nodes:",
             _table(["id", "kind", "call", "knobs", "notes"],
                    [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
@@ -1253,13 +1282,20 @@ class Optimizer:
         frozen: Sequence[str] | None = None,
         seen: Sequence[str] | None = None,
         seed_state: dict[str, Any] | None = None,
+        protected: Sequence[str] = (),
     ) -> Candidate | list[str]:
         """Apply and validate one proposal: a candidate, or the reasons it failed.
 
         Public because seeding a population and proposing an update have to be the
         same test: a candidate that could not be proposed could not be seeded
         either, and two code paths would eventually disagree about that.
+
+        ``protected`` is the mode's ``protected_nodes()``: an edit that removes,
+        rewires or replaces one is refused with ``E-protected``.
         """
+        if not isinstance(proposal.edit, dict):
+            return [f"E-op: an edit is a JSON object naming its op, not "
+                    f"{type(proposal.edit).__name__} {proposal.edit!r}"[:300]]
         frozen = set(frozen or ())
         if proposal.edit.get("op") == "set_knob" and proposal.edit.get("name") in frozen:
             return [
@@ -1276,7 +1312,8 @@ class Optimizer:
             return [f"E-precondition: {reason}"]
         edit_reports: list[dict[str, Any]] = []
         try:
-            state = nn_edits.apply(proposal.edit, parent.state, edit_reports=edit_reports)
+            state = nn_edits.apply(proposal.edit, parent.state, edit_reports=edit_reports,
+                                   protected=protected)
         except nn_edits.EditError as exc:
             return [f"{exc.code}: {exc}"]
         except Exception as exc:  # an operator bug is reported, not swallowed
@@ -1316,6 +1353,9 @@ class Optimizer:
         issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls)
         if issues:
             return [str(issue) for issue in issues]
+        unlowerable = _lowering_refusal(parent.state, state)
+        if unlowerable:
+            return [unlowerable]
         # Build the per-edit report list parallel to edits.  Parent reports
         # are carried forward; the new report (if any) is appended.
         parent_reports = list(parent.edit_reports) if parent.edit_reports else [

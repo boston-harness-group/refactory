@@ -1,0 +1,28 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    {
+      "op": "wrap",
+      "target": "merge",
+      "node": {
+        "id": "agent1",
+        "kind": "agent",
+        "role": "solver",
+        "tool_policy": "none",
+        "prompt_template": "Think about {{finished}}",
+        "system_prompt_template": "You are agent1.",
+        "writes": [],
+        "produces": [
+          "agent1_fact"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: agent node 'agent1' declares tool_policy='none' but has 0 write(s); a no-tools node must declare exactly one output for its captured reply",
+    "dataflow: agent agent1 reads ['fact finished'], not produced upstream on every path to it",
+    "walker: failed: agent1: ValueError: agent node 'agent1' declares tool_policy='none' but has 0 write(s); a no-tools node must declare exactly one output for its captured reply"
+  ],
+  "fixed_by": "V15: a tool_policy none agent declares exactly one write",
+  "refused_with": "V15"
+}

@@ -1284,18 +1284,146 @@ def precheck(edit: dict, state: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _walk_successors(graph: Graph, node: Node) -> list[str]:
+    """The nodes a walk goes on to after ``node``: its out-edges' targets."""
+    return [edge.target for edge in graph.out_edges(node.id)]
+
+
+def _fork_branch_members(graph: Graph, fork: Node) -> set[str]:
+    """Every node a fork's branches visit before its join (``Graph.fork_join``)."""
+    barrier = graph.fork_join(fork.id)
+    seen: set[str] = set()
+    pending = list(fork.targets)
+    while pending:
+        current = pending.pop()
+        if current == barrier or current in seen or current not in graph.nodes:
+            continue
+        seen.add(current)
+        pending.extend(_walk_successors(graph, graph.nodes[current]))
+        member = graph.nodes[current]
+        if member.kind == "fork":
+            pending.extend(member.targets)
+        if member.kind == "data" and member.subgraph_entry:
+            pending.append(member.subgraph_entry)
+    return seen
+
+
+def _completes_without(graph: Graph, start: str, banned: str, end: str | None,
+                       _passes: frozenset[str] = frozenset()) -> bool:
+    """Whether a run from ``start`` can finish without visiting ``banned``.
+
+    Finishing is reaching ``end`` (a data pass's exit), or with ``end`` None, any node
+    with no out-edge that is not a pass's exit. A fork runs every branch, so it is
+    passed only when no branch visits ``banned``; a data node is passed only when its
+    pass can finish without it; a gate may take any of its verdicts. A data node met
+    again inside its own pass (an edge back into it) cannot be passed.
+    """
+    in_passes = _data_pass_nodes(graph) if end is None else set()
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        if current in seen or current not in graph.nodes or current == banned:
+            continue
+        seen.add(current)
+        node = graph.nodes[current]
+        if end is not None and current == end:
+            return True
+        if node.kind == "fork" and banned in _fork_branch_members(graph, node):
+            continue
+        if node.kind == "data" and node.subgraph_entry and banned in graph.data_body(node.id) and (
+                node.id in _passes or not _completes_without(
+                    graph, node.subgraph_entry, banned, node.subgraph_exit, _passes | {node.id})):
+            continue
+        following = _walk_successors(graph, node)
+        if not following:
+            if end is None and current not in in_passes:
+                return True
+            continue
+        stack.extend(following)
+    return False
+
+
+def _unavoidable(graph: Graph, node_id: str) -> bool:
+    """Whether every run that finishes visits ``node_id``.
+
+    For a node inside a data pass, every finished pass of that data node visits it.
+    """
+    if node_id not in graph.nodes or graph.start not in graph.nodes:
+        return False
+    for data in graph.nodes.values():
+        if data.kind == "data" and node_id in graph.data_body(data.id):
+            return not _completes_without(graph, data.subgraph_entry, node_id, data.subgraph_exit)
+    return not _completes_without(graph, graph.start, node_id, None)
+
+
+def protected_violation(
+    before: Mapping[str, Any], after: Mapping[str, Any], protected: Iterable[str],
+) -> str | None:
+    """Why ``after`` removes, rewires or replaces a protected node of ``before``, or None.
+
+    A protected node (``Mode.protected_nodes``) keeps its declaration, its out-edges and
+    the values of the knobs it reads, and a node every finished run visited is still
+    visited by every finished run. New nodes may be inserted in front of it: its
+    in-edges may change, as long as it is still reached as before.
+    """
+    protected = sorted(set(protected or ()))
+    if not protected:
+        return None
+    old_graph, new_graph = _graph(before), _graph(after)
+    old_knobs, new_knobs = before.get("knobs") or {}, after.get("knobs") or {}
+    for node_id in protected:
+        old = old_graph.nodes.get(node_id)
+        if old is None:
+            continue
+        new = new_graph.nodes.get(node_id)
+        if new is None:
+            return f"node {node_id!r} is protected, and the edit removes it"
+        if new.to_state() != old.to_state():
+            old_state, new_state = old.to_state(), new.to_state()
+            changed = sorted(key for key in set(old_state) | set(new_state)
+                             if old_state.get(key) != new_state.get(key))
+            return (f"node {node_id!r} is protected, and the edit changes its declaration "
+                    f"({', '.join(changed)})")
+        if sorted(e.key() for e in old_graph.out_edges(node_id)) != sorted(
+                e.key() for e in new_graph.out_edges(node_id)):
+            return f"node {node_id!r} is protected, and the edit rewires its out-edges"
+        for knob in old.knobs:
+            if old_knobs.get(knob) != new_knobs.get(knob):
+                return (f"node {node_id!r} is protected, and the edit changes the knob "
+                        f"{knob!r} it reads")
+        if node_id not in new_graph.reachable() or (
+                _unavoidable(old_graph, node_id) and not _unavoidable(new_graph, node_id)):
+            return (f"node {node_id!r} is protected, and after the edit a run can finish "
+                    "without it")
+    return None
+
+
 def apply(
     edit: dict,
     state: Mapping[str, Any],
     *,
     edit_reports: list[dict[str, Any]] | None = None,
+    protected: Iterable[str] = (),
 ) -> State:
     """Apply ``edit`` and return a new state, leaving ``state`` untouched.
 
     If *edit_reports* is given it collects per-edit reports (currently only
     ``set_knob`` with a ``patch`` produces one).  Reports are **not** mutated onto the edit
     dict.
+
+    *protected* names nodes the edit may not remove, rewire or replace
+    (``Mode.protected_nodes``); an edit that does is refused with ``E-protected``. It is
+    checked on the whole edit, so a macro's intermediate steps may pass through states a
+    finished edit could not leave.
     """
+    protected = tuple(protected or ())
+    if protected:
+        out = apply(edit, state, edit_reports=edit_reports)
+        violation = protected_violation(state, out, protected)
+        if violation:
+            raise EditError(violation, code="E-protected")
+        return out
     if not isinstance(edit, dict):
         raise EditError(f"an edit must be an object, got {type(edit).__name__}", code="E-op")
     name = edit.get("op")

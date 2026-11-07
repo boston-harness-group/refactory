@@ -1,0 +1,15 @@
+{
+  "seed": "fuzz_gates",
+  "edits": [
+    {
+      "op": "bypass",
+      "target": "rough"
+    }
+  ],
+  "found": [
+    "dataflow: gate approve reads ['file polished.txt'], not produced upstream on every path to it",
+    "dataflow: op ship reads ['file polished.txt'], not produced upstream on every path to it"
+  ],
+  "fixed_by": "V6: a read is written upstream on every path, not on one gate branch only",
+  "refused_with": "V6"
+}

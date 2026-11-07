@@ -1,0 +1,16 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    {
+      "op": "duplicate",
+      "target": "split"
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: fork 'split': branches declare the same produced facts",
+    "forks: fork split leads to split_copy, not a join",
+    "walker: failed: split: ExecutionError: fork 'split' does not lead to a join"
+  ],
+  "fixed_by": "V16 (fork_branch_conflicts, shared with lowering) and E-lowering",
+  "refused_with": "V16"
+}

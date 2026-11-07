@@ -1,0 +1,16 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    {
+      "op": "bypass",
+      "target": "merge"
+    }
+  ],
+  "found": [
+    "dataflow: agent decide reads ['fact right_fact', 'file left.txt', 'file right_b.txt'], not produced upstream on every path to it",
+    "forks: fork split leads to decide, not a join",
+    "walker: failed: split: ExecutionError: fork 'split' does not lead to a join"
+  ],
+  "fixed_by": "V16: a fork's one unconditional out-edge must lead to its join",
+  "refused_with": "V15"
+}

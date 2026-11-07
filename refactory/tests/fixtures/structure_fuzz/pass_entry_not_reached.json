@@ -1,0 +1,27 @@
+{
+  "seed": "fuzz_multi_terminal",
+  "edits": [
+    {
+      "op": "insert_before",
+      "target": "reject",
+      "node": {
+        "id": "data1",
+        "kind": "data",
+        "subgraph_entry": "escalate",
+        "subgraph_exit": "accept",
+        "task_ref": "structure_fuzz_graphs:FuzzTask",
+        "writes": [
+          "current_item.json"
+        ],
+        "produces": [
+          "item_scores"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "spine: the spine drain ended with rc=1"
+  ],
+  "fixed_by": "V12: a pass's entry reaches its exit, entered only through its data node",
+  "refused_with": "V12"
+}

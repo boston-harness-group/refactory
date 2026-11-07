@@ -1,0 +1,23 @@
+{
+  "seed": "fuzz_multi_terminal",
+  "edits": [
+    {
+      "op": "insert_after",
+      "target": "reject",
+      "node": {
+        "id": "fork3",
+        "kind": "fork",
+        "targets": [
+          "classify",
+          "escalate"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: fork 'fork3': a branch prompt depends on a sibling's facts",
+    "forks: fork fork3 has 0 out-edges, not one unconditional edge to its join"
+  ],
+  "fixed_by": "V16 (fork_branch_conflicts)",
+  "refused_with": "V16"
+}

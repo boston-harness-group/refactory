@@ -1,0 +1,30 @@
+{
+  "seed": "fuzz_dataflow",
+  "edits": [
+    {
+      "op": "add_node",
+      "node": {
+        "id": "fork6",
+        "kind": "fork",
+        "targets": [
+          "clean",
+          "summarise"
+        ]
+      },
+      "position": {
+        "before": "load"
+      }
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: fork 'fork6': branches declare the same produced facts",
+    "dataflow: agent agent4 reads ['fact cleaned'], not produced upstream on every path to it",
+    "dataflow: op clean reads ['file raw.txt'], not produced upstream on every path to it",
+    "dataflow: op emit reads ['file raw.txt'], not produced upstream on every path to it",
+    "dataflow: agent summarise reads ['fact cleaned', 'fact source', 'file clean.txt'], not produced upstream on every path to it",
+    "forks: fork fork6 leads to load, not a join",
+    "walker: failed: fork6: ExecutionError: fork 'fork6' does not lead to a join"
+  ],
+  "fixed_by": "V15: an agent's prompt facts and reads are produced on every path",
+  "refused_with": "V15"
+}

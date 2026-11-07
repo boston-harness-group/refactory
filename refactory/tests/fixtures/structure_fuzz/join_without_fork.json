@@ -1,0 +1,14 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    {
+      "op": "duplicate",
+      "target": "merge"
+    }
+  ],
+  "found": [
+    "forks: join merge_copy belongs to no fork"
+  ],
+  "fixed_by": "V16: every join belongs to exactly one fork",
+  "refused_with": "V16"
+}

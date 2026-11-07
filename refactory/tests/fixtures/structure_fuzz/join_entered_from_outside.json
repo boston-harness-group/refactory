@@ -1,0 +1,21 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    {
+      "op": "loop",
+      "target": "merge",
+      "gate": {
+        "id": "gate9",
+        "kind": "gate",
+        "gate_kind": "agent",
+        "evaluator": "",
+        "max_iterations": 2
+      }
+    }
+  ],
+  "found": [
+    "forks: join merge is entered from ['gate9'], outside the branches of fork split"
+  ],
+  "fixed_by": "V16: a join is entered only from its fork's branches",
+  "refused_with": "V16"
+}

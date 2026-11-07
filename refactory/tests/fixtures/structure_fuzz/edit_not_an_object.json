@@ -1,0 +1,11 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    7
+  ],
+  "found": [
+    "attempt: raised AttributeError: 'int' object has no attribute 'get' (Run.attempt and Optimizer.attempt)"
+  ],
+  "fixed_by": "E-op: an edit is a JSON object",
+  "refused_with": "E-op"
+}

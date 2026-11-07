@@ -363,6 +363,11 @@ class SkillGraph(nn.Mode):
             graph.connect(source, target)
         return graph
 
+    def protected_nodes(self) -> tuple[str, ...]:
+        """The data pass, the answer extraction and the run's finish: what the grade
+        is about. A search edits the steps between them, never these."""
+        return ("data", "extract_answer", "finish")
+
     def run(
         self,
         workdir: Path,

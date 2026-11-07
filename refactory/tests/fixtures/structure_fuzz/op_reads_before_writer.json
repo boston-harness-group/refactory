@@ -1,0 +1,28 @@
+{
+  "seed": "fuzz_dataflow",
+  "edits": [
+    {
+      "op": "insert_before",
+      "target": "load",
+      "node": {
+        "id": "op5",
+        "kind": "op",
+        "call": "structure_fuzz_graphs:step",
+        "reads": [
+          "clean.txt"
+        ],
+        "writes": [
+          "op5.txt"
+        ],
+        "produces": [
+          "op5_fact"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "dataflow: op op5 reads ['file clean.txt'], not produced upstream on every path to it"
+  ],
+  "fixed_by": "V6: a read is written upstream on every path",
+  "refused_with": "V6"
+}

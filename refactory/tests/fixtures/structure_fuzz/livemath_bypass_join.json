@@ -1,0 +1,16 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "bypass",
+      "target": "step_join"
+    }
+  ],
+  "found": [
+    "dataflow: op decide_prompt reads ['file hypotheses_notes.txt', 'file precision_notes.txt'], not produced upstream on every path to it",
+    "forks: fork step_fork leads to decide_prompt, not a join",
+    "walker: failed: data: all 5 items failed"
+  ],
+  "fixed_by": "V16/V6: the bypassed join left the fork without one",
+  "refused_with": "V16"
+}

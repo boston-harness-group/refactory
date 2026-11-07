@@ -267,6 +267,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="run slow tests that spawn a real DSH CEO run",
     )
     parser.addoption(
+        "--run-structure-fuzz-long",
+        action="store_true",
+        default=False,
+        help="run the long tier of the structure-edit invariant harness (thousands of "
+             "edits, with spine runs); see docs/outer-loop.md",
+    )
+    parser.addoption(
         "--toolchain-gate",
         action="store_true",
         default=False,
@@ -298,6 +305,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers", "integration: slow tests that spawn a real DSH CEO run"
     )
     config.addinivalue_line(
+        "markers", "structure_fuzz_long: the structure-edit harness's long tier; runs only "
+        "with --run-structure-fuzz-long"
+    )
+    config.addinivalue_line(
         "markers",
         "toolchain(name): needs a real external tool (lean, mathlib, sympy); "
         "checked by --toolchain-gate",
@@ -326,6 +337,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         marker = item.get_closest_marker("toolchain")
         if marker is not None:
             _TOOLCHAIN[item.nodeid] = str(marker.args[0]) if marker.args else "unknown"
+    if not config.getoption("--run-structure-fuzz-long", default=False):
+        skip_long = pytest.mark.skip(
+            reason="pass --run-structure-fuzz-long to run the structure-edit harness's long tier")
+        for item in items:
+            if "structure_fuzz_long" in item.keywords:
+                item.add_marker(skip_long)
     if config.getoption("--run-integration", default=False):
         return
     skip = pytest.mark.skip(reason="pass --run-integration to run DSH inner-loop tests")

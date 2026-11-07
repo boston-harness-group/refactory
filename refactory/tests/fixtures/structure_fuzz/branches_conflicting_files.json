@@ -1,0 +1,25 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "loop",
+      "target": "step_fork",
+      "gate": {
+        "id": "gate2",
+        "kind": "gate",
+        "gate_kind": "user",
+        "evaluator": "",
+        "max_iterations": 2
+      }
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: fork 'step_fork': branches have conflicting declared file access",
+    "dataflow: op decide_prompt reads ['file hypotheses_notes.txt', 'file precision_notes.txt'], not produced upstream on every path to it",
+    "forks: fork step_fork leads to gate2, not a join",
+    "forks: join step_join belongs to no fork",
+    "walker: failed: data: all 5 items failed"
+  ],
+  "fixed_by": "V16 (fork_branch_conflicts)",
+  "refused_with": "V16"
+}

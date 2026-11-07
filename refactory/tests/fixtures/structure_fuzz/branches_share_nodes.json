@@ -1,0 +1,31 @@
+{
+  "seed": "fuzz_nested_fork",
+  "edits": [
+    {
+      "op": "add_node",
+      "node": {
+        "id": "join6",
+        "kind": "join",
+        "sources": [
+          "outer",
+          "deep_b"
+        ]
+      },
+      "position": {
+        "after": "inner"
+      }
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: fork 'inner': branches declare the same produced facts",
+    "dataflow: op after_inner reads ['file deep_a.txt', 'file deep_b.txt'], not produced upstream on every path to it",
+    "forks: fork inner: branch deep_a runs ['after_inner', 'end', 'inner_join', 'outer_join'], which come after its join join6",
+    "forks: fork inner: branch deep_b runs ['after_inner', 'end', 'inner_join', 'outer_join'], which come after its join join6",
+    "forks: fork inner: branch deep_b shares ['after_inner', 'end', 'inner_join', 'outer_join'] with another branch",
+    "forks: join join6 waits for outer, which is in no branch of fork inner",
+    "forks: join inner_join belongs to no fork",
+    "walker: failed: inner: ExecutionError: fork 'inner' has empty or overlapping branches at 'deep_b'"
+  ],
+  "fixed_by": "V16: branches are disjoint",
+  "refused_with": "V16"
+}

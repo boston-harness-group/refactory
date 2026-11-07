@@ -1,0 +1,16 @@
+{
+  "seed": "fuzz_nested_fork",
+  "edits": [
+    {
+      "op": "remove_edge",
+      "source": "deep_a",
+      "target": "inner_join"
+    }
+  ],
+  "found": [
+    "dataflow: op end reads ['file inner.txt'], not produced upstream on every path to it",
+    "forks: join outer_join waits for after_inner, which a run of branch inner can finish without"
+  ],
+  "fixed_by": "V16: a join waits only for nodes every run of their branch visits",
+  "refused_with": "V16"
+}

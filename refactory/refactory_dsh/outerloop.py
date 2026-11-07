@@ -94,6 +94,11 @@ class Run:
     def attempt(self, proposal: Proposal, parent: Candidate) -> Candidate | list[str]:
         """Apply a typed edit and validate it. Spends no budget."""
         from refactory_dsh.nn import edits
+        if not isinstance(proposal.edit, dict):
+            reason = [f"E-op: an edit is a JSON object naming its op, not "
+                      f"{type(proposal.edit).__name__}"]
+            self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
+            return reason
         op_name = proposal.edit.get("op")
         # Unknown and unpermitted are two facts with two fixes; see Loop._refinement.
         refused = edits.unknown(op_name)
@@ -114,6 +119,7 @@ class Run:
             self._loop.config.frozen,
             self._loop._tried(),  # noqa: SLF001 - the harness owns the population
             seed_state=getattr(self._loop, '_original_seed_state', None),
+            protected=getattr(self._loop, "protected", ()),
         )
         if isinstance(outcome, list):
             self._loop.rejections.append(

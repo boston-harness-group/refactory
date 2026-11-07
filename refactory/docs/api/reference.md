@@ -129,7 +129,7 @@ The edit algebra: every structural change is typed data.
 |---|---|---|
 | class | `EditError` | `(message: 'str', code: 'str' = 'E-shape') -> 'None'` |
 | class | `EditSpec` | `(name: 'str', kind: 'str', description: 'str', fields: 'tuple[str, ...]', macro: 'bool' = False, precondition: 'Callable[[dict, State], str \| None] \| None' = None, expand: 'Callable[[dict, State], list[dict]] \| None' = None, apply: 'Callable[[State, dict], State] \| None' = None) -> None` |
-| function | `apply` | `(edit: 'dict', state: 'Mapping[str, Any]', *, edit_reports: 'list[dict[str, Any]] \| None' = None) -> 'State'` |
+| function | `apply` | `(edit: 'dict', state: 'Mapping[str, Any]', *, edit_reports: 'list[dict[str, Any]] \| None' = None, protected: 'Iterable[str]' = ()) -> 'State'` |
 | function | `apply_many` | `(edits: 'Iterable[dict]', state: 'Mapping[str, Any]') -> 'State'` |
 | function | `catalogue` | `(preset: 'str' = 'broad') -> 'list[dict[str, Any]]'` |
 | function | `configure` | `(state: 'Mapping[str, Any]', name: 'str', value: 'Any') -> 'State'` |
@@ -137,6 +137,7 @@ The edit algebra: every structural change is typed data.
 | function | `is_macro` | `(name: 'str') -> 'bool'` |
 | function | `names` | `() -> 'list[str]'` |
 | function | `precheck` | `(edit: 'dict', state: 'Mapping[str, Any]') -> 'str \| None'` |
+| function | `protected_violation` | `(before: 'Mapping[str, Any]', after: 'Mapping[str, Any]', protected: 'Iterable[str]') -> 'str \| None'` |
 | function | `random_edit` | `(state: 'Mapping[str, Any]', *, preset: 'str' = 'broad', insertable: 'Sequence[Any]' = (), rng: 'random.Random \| None' = None) -> 'dict \| None'` |
 | function | `removed` | `(op: 'object') -> 'str \| None'` |
 | function | `unknown` | `(op: 'object') -> 'str \| None'` |
@@ -148,6 +149,7 @@ The edit algebra: every structural change is typed data.
 - **`configure`** — Set a knob for the run being made, refusing a bad name or value but not a freeze.
 - **`enabled`** — The operations a preset allows. An unknown preset is an error.
 - **`precheck`** — The reason ``edit`` cannot be applied, for the checks that need no state.
+- **`protected_violation`** — Why ``after`` removes, rewires or replaces a protected node of ``before``, or None.
 - **`random_edit`** — A random edit from the enabled set, or ``None`` if none can be built.
 - **`removed`** — Where a folded-away operation went, or None for any other name.
 - **`unknown`** — The refusal for an op the catalogue does not have, or None when it does.
@@ -163,23 +165,43 @@ The validator: what makes architecture-in-the-state safe.
 |---|---|---|
 | class | `Invariant` | `(name: 'str', description: 'str', check: 'Callable[[Graph, Mapping[str, Any]], str \| None]') -> None` |
 | class | `Issue` | `(code: 'str', message: 'str', node: 'str \| None' = None, knob: 'str \| None' = None) -> None` |
+| function | `agent_input_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
 | function | `artifact_produced` | `(*paths: 'str', by: 'str') -> 'Invariant'` |
+| function | `available_inputs` | `(graph: 'Graph', *, isolate_passes: 'bool' = True) -> 'dict[str, set[tuple[str, str]]]'` |
+| function | `cycle_mates` | `(graph: 'Graph') -> 'dict[str, set[str]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
+| function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
+| function | `fork_branches` | `(graph: 'Graph', fork: 'Node', join: 'str \| None') -> 'list[set[str]]'` |
+| function | `fork_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
+| function | `fork_joins` | `(graph: 'Graph') -> 'dict[str, list[str]]'` |
+| function | `gate_label_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
+| function | `read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `rules_text` | `() -> 'str'` |
+| function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
 | function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = ()) -> 'list[Issue]'` |
 | function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True) -> 'list[Issue]'` |
 
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
+- **`agent_input_issues`** — V15: an agent's inputs -- its reads and its prompts' ``{{facts}}`` -- are required.
 - **`artifact_produced`** — Keep a named artifact producer in the executable graph during search.
+- **`available_inputs`** — What is there when each node starts, on every path that reaches it.
+- **`cycle_mates`** — For each node, the nodes in a cycle with it: each can reach the other.
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
+- **`fork_branch_conflicts`** — ``(fork, reason)`` for each fork whose branches cannot run side by side.
+- **`fork_branches`** — Each branch's members, walked as both runtimes walk it: edges and nested forks'
+- **`fork_issues`** — V16: every fork is paired with one join, and its branches are independent.
+- **`fork_joins`** — Each join some fork's unconditional out-edge leads to, and the forks that do.
+- **`gate_label_issues`** — V5: no two out-edges of a gate carry the same verdict (compared as both runtimes
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.
+- **`read_issues`** — V6: every file a node reads is written upstream of it on every path that reaches it.
 - **`rules_text`** — The rules, as the optimizer prompt shows them.
+- **`template_facts`** — The run facts an agent's prompts fill in: their ``{{name}}`` slots, less the knobs
 - **`validate`** — Every reason ``(graph, values)`` is not a runnable, scoreable mode.
 - **`validate_state`** — Validate a state dict without building a mode around it.
 

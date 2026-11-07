@@ -465,6 +465,8 @@ class Loop(OuterLoop):
         self.package = package
         self.mode = self.mode_class()
         self.invariants = self.mode.invariants()
+        #: Nodes no edit may remove, rewire or replace (`Mode.protected_nodes`).
+        self.protected = tuple(self.mode.protected_nodes())
         self.parameters = self.mode.parameters()
 
         if optimizer is not None:
@@ -919,7 +921,7 @@ class Loop(OuterLoop):
             proposal = Proposal(edit=edit, parent=seed.id, rationale="starting population")
             outcome = sampler.attempt(
                 proposal, seed, self.invariants, True, self.config.frozen, self._tried(),
-                seed_state=self._original_seed_state,
+                seed_state=self._original_seed_state, protected=self.protected,
             )
             if isinstance(outcome, Candidate):
                 self.population.append(outcome)
@@ -3461,6 +3463,7 @@ class Loop(OuterLoop):
                        if not self.config.allowed_ops or op["op"] in self.config.allowed_ops],
             insertable=[node.to_state() for node in self.mode.insertable()],
             frozen=list(self.config.frozen),
+            protected=list(self.protected),
             rejections=summarise_reasons(
                 [
                     reason
