@@ -76,6 +76,8 @@ OVERFIT_THRESHOLD = 0.15
 
 #: Where the run writes how the winner did on the items no candidate saw.
 HOLDOUT_FILE = "holdout.json"
+#: The optimizer's model calls (system, prompt, reply, parsed proposals, error).
+OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
 
 class LoopError(RuntimeError):
@@ -682,6 +684,11 @@ class Loop(OuterLoop):
             except seed_cache.SeedCacheError as exc:
                 raise LoopError(str(exc)) from exc
         self._seed_ledger()
+        # Every model call the optimizer makes, appended as it happens; a fresh run
+        # in this directory starts it over, as it does the journal.
+        self.optimizer.trace_path = self.root / OPTIMIZER_TRACE
+        if not self.config.resume:
+            self.optimizer.trace_path.unlink(missing_ok=True)
         resumed = self._replay_if_asked()
         (self.root / run_history.RUN_FILE).write_text(
             json.dumps(

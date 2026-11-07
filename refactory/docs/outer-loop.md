@@ -73,6 +73,36 @@ and `hill_climb` optimizers run with it.
   one batch proposed and gated. Both settings need `--val-gate 1`, are saved with the
   run and are kept on resume.
 
+## What the optimizer sees, and what it said
+
+`ProposalContext.render()` is the request every model optimizer reads. Besides the
+counts and the error-cause and wrong-answer tables for the candidate being edited, it
+shows a sample of that candidate's **train** items in full, as SkillOpt's analysts
+read failed trajectories. Each item shows its input (the item metadata's `question`,
+or `problem`, `task_description`, `instruction`, `input` or `prompt`, else the first
+step's prompt) and its `choices`. Then it shows each step's output from the record's
+`exchanges`, in graph order, then the expected answer (`label` and `label_text`),
+the prediction and the grader's reason.
+
+- **Budget.** Up to 8 items answered wrong and 2 that passed
+  (`TRAJECTORY_FAILED`, `TRAJECTORY_PASSED`). Each text is clipped to 3000 characters,
+  keeping its head and tail (`TRAJECTORY_TEXT_CHARS`), and the section stops at 60000
+  characters, saying how many items it left out (`TRAJECTORY_SECTION_CHARS`). A
+  context can override each through its `trajectory_*` fields.
+- **Sample.** Drawn with a seed from the epoch, so it is reproducible and each round
+  reads other items, as SkillOpt's minibatch groups vary per step.
+- **Train only.** The records are the edited candidate's train records (the loop
+  never hands val or test records to an optimizer). An item whose run errored stays
+  in the cause table and is not shown in full.
+
+Every call the `autoresearch` optimizer makes is appended to
+`<run root>/optimizer_trace.jsonl` as it happens. Each line records the epoch, the
+generation, the proposal round, the system prompt, the prompt, the reply, how many
+proposals were parsed, the diagnosis, and the error for a call that failed. A resumed
+run appends to the file; a fresh run in the same directory starts it over, as it does
+the journal. The other library optimizers call no model; SkillOpt records its own
+calls in `skillopt_trace.jsonl`.
+
 ## LiveMath skill graph (`livemath/skill_graph`)
 
 Arm C of the outer-loop study starts from arm A's seed skill, converted by hand into an

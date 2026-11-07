@@ -31,6 +31,19 @@ from refactory_dsh.nn.validate import Invariant
 REASON_LIMIT = 12
 REASONS_PER_CODE = 2
 
+#: How the edited candidate's train trajectories are shown (``ProposalContext``):
+#: up to this many items answered wrong and passed, each in full -- its input, every
+#: step's output in graph order, the expected answer and the prediction -- with each
+#: step's output clipped (head and tail) and the whole section capped. As SkillOpt's
+#: analysts see failed trajectories, so a proposal can name the failure pattern.
+TRAJECTORY_FAILED = 8
+TRAJECTORY_PASSED = 2
+TRAJECTORY_TEXT_CHARS = 3000
+TRAJECTORY_SECTION_CHARS = 60000
+#: The metadata keys an item's input is read from, first found; else the first
+#: step's prompt stands in for it.
+TRAJECTORY_INPUT_KEYS = ("question", "problem", "task_description", "instruction", "input", "prompt")
+
 
 def reason_code(reason: str) -> str:
     """The rule a refusal names, from the `CODE [node]: message` form."""
@@ -287,6 +300,12 @@ class ProposalContext:
     parent_item_records: list[dict[str, Any]] = field(default_factory=list)
     #: Why the pipeline shown is not the parent's, when it is not (empty when it is).
     graph_note: str = ""
+    #: The trajectory section's budget (see ``TRAJECTORY_*``). The items shown are
+    #: chosen with a seed derived from ``epoch``, so each round sees another sample.
+    trajectory_failed: int = TRAJECTORY_FAILED
+    trajectory_passed: int = TRAJECTORY_PASSED
+    trajectory_text_chars: int = TRAJECTORY_TEXT_CHARS
+    trajectory_section_chars: int = TRAJECTORY_SECTION_CHARS
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -356,6 +375,11 @@ class ProposalContext:
         ]
         if self.item_records:
             sections += ["", *_item_evidence(self.item_records)]
+            sections += ["", *_trajectories(
+                self.item_records, [str(n.get("id")) for n in self.nodes], epoch=self.epoch,
+                failed=self.trajectory_failed, passed=self.trajectory_passed,
+                text_chars=self.trajectory_text_chars,
+                section_chars=self.trajectory_section_chars)]
         sections += [
             "",
             "## What this run has already tried",
@@ -487,6 +511,103 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _clip_middle(text: Any, limit: int) -> str:
+    """``text`` whole when it fits ``limit``, else its head and tail with the cut said."""
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    keep = max(0, limit // 2)
+    return f"{text[:keep]}\n[... {len(text) - 2 * keep} characters omitted ...]\n{text[-keep:]}"
+
+
+def _choice_lines(choices: Any) -> list[str]:
+    lines: list[str] = []
+    for index, choice in enumerate(choices if isinstance(choices, list) else []):
+        if isinstance(choice, dict):
+            label = choice.get("label", chr(ord("A") + index))
+            lines.append(f"{label}. {choice.get('text', '')}")
+        else:
+            lines.append(f"{chr(ord('A') + index)}. {choice}")
+    return lines
+
+
+def _trajectory(record: dict[str, Any], node_order: Sequence[str], text_chars: int) -> str:
+    """One train item in full: input, each step's output in graph order, the answer."""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
+    rank = {node: index for index, node in enumerate(node_order)}
+    steps = sorted(enumerate(exchanges),
+                   key=lambda pair: (rank.get(str(pair[1].get("node")), len(rank)), pair[0]))
+    verdict = "passed" if record.get("passed") else "answered wrong"
+    repeat = f", repeat {record['repeat']}" if record.get("repeat") else ""
+    lines = [f"### Item {record.get('id')} — {verdict} (score {record.get('score')}{repeat})"]
+    key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
+    if key is not None:
+        lines += [f"Input ({key}):", _clip_middle(meta[key], text_chars)]
+    elif exchanges:
+        lines += ["Input (the first step's prompt):",
+                  _clip_middle(exchanges[0].get("prompt"), text_chars)]
+    choices = _choice_lines(meta.get("choices"))
+    if choices:
+        lines += ["Choices:", *(_clip_middle(line, text_chars) for line in choices)]
+    for _index, exchange in steps:
+        lines += [f"Step `{exchange.get('node') or 'agent'}` output:",
+                  _clip_middle(exchange.get("response"), text_chars)]
+    if not steps:
+        lines.append("(no step output was recorded)")
+    label, label_text = record.get("label"), record.get("label_text")
+    if label is not None or label_text is not None:
+        expected = " — ".join(str(part) for part in (label, label_text) if part not in (None, ""))
+        lines.append(f"Expected: {_clip_middle(expected, text_chars)}")
+    if record.get("prediction") is not None:
+        lines.append(f"Predicted: {_clip_middle(record.get('prediction'), text_chars)}")
+    if record.get("fail_reason") and not record.get("passed"):
+        lines.append(f"Grader: {_clip_middle(record['fail_reason'], text_chars)}")
+    return "\n".join(lines)
+
+
+def _trajectories(
+    records: Sequence[dict[str, Any]], node_order: Sequence[str], *, epoch: int,
+    failed: int = TRAJECTORY_FAILED, passed: int = TRAJECTORY_PASSED,
+    text_chars: int = TRAJECTORY_TEXT_CHARS, section_chars: int = TRAJECTORY_SECTION_CHARS,
+) -> list[str]:
+    """A sample of the edited candidate's train items, each shown in full.
+
+    Items answered wrong first, then a few that passed for contrast; an item whose
+    run errored is left to the cause table above. The sample is drawn with a seed
+    from ``epoch``, so it is reproducible and each round reads other items, as
+    SkillOpt's analysts read a new minibatch each step. Train records only.
+    """
+    import random
+
+    clean = [r for r in records if not r.get("error_text")]
+    by_id = lambda r: (str(r.get("id", "")), int(r.get("repeat") or 0))  # noqa: E731
+    wrong = sorted((r for r in clean if not r.get("passed")), key=by_id)
+    right = sorted((r for r in clean if r.get("passed")), key=by_id)
+    rng = random.Random(f"trajectories:{epoch}")
+    chosen = (rng.sample(wrong, min(max(0, failed), len(wrong)))
+              + rng.sample(right, min(max(0, passed), len(right))))
+    if not chosen:
+        return []
+    lines = ["## Trajectories of the candidate being edited",
+             f"{len(chosen)} train item(s) in full: up to {failed} answered wrong and "
+             f"{passed} passed, chosen for this epoch. Read what each step produced and "
+             "where it went wrong before proposing."]
+    used = sum(len(line) for line in lines)
+    shown = 0
+    for record in chosen:
+        block = _trajectory(record, node_order, text_chars)
+        if used + len(block) > section_chars:
+            break
+        lines += ["", block]
+        used += len(block)
+        shown += 1
+    if shown < len(chosen):
+        lines += ["", f"({len(chosen) - shown} more item(s) not shown: the section is "
+                      f"capped at {section_chars} characters)"]
+    return lines
+
+
 def _rules_text() -> str:
     from refactory_dsh.nn.validate import rules_text
 
@@ -522,8 +643,29 @@ class Optimizer:
 
     name: str = "optimizer"
 
+    #: Where an optimizer that calls a model records each call (the loop sets it to
+    #: ``<run root>/optimizer_trace.jsonl``); ``None`` records nothing.
+    trace_path: Any = None
+
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         """Model-using optimizers override this to inherit the run's resources."""
+
+    def record_call(self, **fields: Any) -> None:
+        """Append one model call to ``trace_path`` as a JSON line, as it happens.
+
+        Appended, never rewritten, so a resumed run keeps what it recorded before.
+        """
+        if self.trace_path is None:
+            return
+        import time
+        from pathlib import Path
+
+        path = Path(self.trace_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps({"at": time.time(), "optimizer": self.name,
+                                     "round": self.proposal_rounds, **fields},
+                                    default=str) + "\n")
 
     def __init__(self, *, k: int = 3) -> None:
         #: How many times the loop may ask again after a refusal.
