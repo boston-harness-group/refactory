@@ -518,6 +518,9 @@ class ProposalContext:
     #: The run's size cost per node (``LoopConfig.parsimony``), stated in the answer
     #: rules with what it means in score units; ``None`` says nothing about it.
     parsimony: float | None = None
+    #: Whether the score is the mean of the items' scores (``Loop`` checks every train
+    #: evaluation); only then does the size cost line compare a node with one item.
+    score_is_item_mean: bool = False
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -653,7 +656,8 @@ class ProposalContext:
                 _table(["reasons"], [[r] for r in self.rejections[-12:]]),
             ]
         sections += ["", "## Answer", answer_instructions(
-            self.catalogue, parsimony=self.parsimony, items=_item_count(self.item_records))]
+            self.catalogue, parsimony=self.parsimony,
+            items=_item_count(self.item_records) if self.score_is_item_mean else 0)]
         if self.max_edits > 1:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue)]
         return "\n".join(sections)
@@ -740,7 +744,11 @@ def _blocks_section(insertable: Sequence[dict[str, Any]],
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
                         items: int = 0) -> str:
-    """The answer format and its rules, with examples for what this run permits."""
+    """The answer format and its rules, with examples for what this run permits.
+
+    ``items`` is the number of train items when the raw score is known to be their
+    mean (0 otherwise): only then does the size cost line compare a node with one item.
+    """
     structural = structural_example(catalogue)
     lines = [
         "Write one JSON object and nothing else:",
@@ -768,8 +776,11 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
     if parsimony:
         size = f"- Size cost: {parsimony:g} per node (score = raw score - {parsimony:g} x nodes)"
         if items:
-            size += (f"; one of the {items} train items is worth 1/{items} = "
-                     f"{1 / items:.3g} of the raw score")
+            # Said only when the raw score is the mean of the items' scores.
+            size += (f"; the raw score is the mean over the {items} train items, so one item "
+                     f"is worth 1/{items} = {1 / items:.3g}")
+        else:
+            size += "; compare it with the size of the score differences between candidates"
         lines.append(size + ".")
     lines += [
         "- Few well-argued changes, not many guesses. Prefer an edit whose effect you can",
@@ -786,28 +797,30 @@ ANSWER_INSTRUCTIONS = answer_instructions(
     [{"op": "insert_after", "kind": "topology", "fields": ["target", "node"]}])
 
 
-def bundle_example(catalogue: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """A bundle for the example: a structural edit that adds a node and the new node's
-    own prompt knob, when the run permits a structural op that takes a node and
-    ``set_knob``; else two steps' prompt knobs."""
+def bundle_examples(catalogue: Sequence[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Bundles for the example, neither kind first by privilege: two steps' prompt knobs,
+    then -- when the run also permits a structural op that takes a node and
+    ``set_knob`` -- a structural edit that adds a node and the new node's own prompt
+    knob."""
+    out = [[{"op": "set_knob", "name": "<step A's prompt knob>", "value": "<text>"},
+            {"op": "set_knob", "name": "<step B's prompt knob>", "value": "<text>"}]]
     structural = structural_example(catalogue)
     ops = {op.get("op") for op in catalogue}
     if structural is not None and "node" in structural and "set_knob" in ops:
         # The node leaves its system prompt to the knob the bundle sets.
         node = {k: v for k, v in structural["node"].items() if k != "system_prompt_template"}
-        return [{**structural, "node": node},
-                {"op": "set_knob", "name": "<new step id>__system_prompt",
-                 "value": "<system prompt text>"}]
-    return [{"op": "set_knob", "name": "<step A's prompt knob>", "value": "<text>"},
-            {"op": "set_knob", "name": "<step B's prompt knob>", "value": "<text>"}]
+        out.append([{**structural, "node": node},
+                    {"op": "set_knob", "name": "<new step id>__system_prompt",
+                     "value": "<system prompt text>"}])
+    return out
 
 
 def bundle_instructions(max_edits: int, catalogue: Sequence[dict[str, Any]] = ()) -> str:
     """How a proposal bundles edits, said only when the run allows more than one."""
-    example = json.dumps({"proposals": [{"edits": bundle_example(catalogue),
+    example = json.dumps({"proposals": [{"edits": bundle,
                                          "rationale": "<why these changes only work together>",
                                          "prediction": "<expected effect on the score>",
-                                         "confidence": 0.0}]})
+                                         "confidence": 0.0} for bundle in bundle_examples(catalogue)]})
     return f"""\
 Bundling: when one fix needs coordinated changes -- several steps' prompts that have
 to agree, or a new node and the knob that feeds it -- one proposal may carry up to

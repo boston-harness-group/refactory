@@ -244,11 +244,15 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   placeholders only. When the run permits a structural op, the rules show a structural
   example (an op that puts a new node after an existing step, its `node` built from the
   schema's required fields) beside the parameter-move example, and the bundling example
-  adds that node together with its own `<new step id>__system_prompt` knob; a run that
-  permits parameter moves only sees no structural example. A new node is written from
+  shows two prompt knobs first and then that node together with its own
+  `<new step id>__system_prompt` knob, so neither kind leads; a run that permits
+  parameter moves only sees no structural example. A new node is written from
   the node schema; the mode's blocks, when it declares any, may be used verbatim, and a
-  mode with none says so ("New nodes"). The size cost is stated in score units: the
-  run's parsimony per node beside what one train item is worth (1/N of the raw score).
+  mode with none says so ("New nodes"). The size cost states the run's parsimony per
+  node; only when every train evaluation's score was the mean of its items' scores
+  (the loop checks) does it add what one item is worth (1/N), since a mode's score may
+  be any metric of the run; otherwise it says to compare it with the score differences
+  between candidates.
   The template carries no task or domain vocabulary (`test_proposal_presentation`).
 
 - **Order.** Items answered wrong come first, then those that failed with an error

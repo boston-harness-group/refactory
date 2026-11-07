@@ -35,8 +35,13 @@ def _render(preset: str = "broad", **fields) -> str:  # type: ignore[no-untyped-
 def test_structural_examples_appear_when_structure_is_permitted(preset):
     answer = _answer(_render(preset, max_edits=4))
     assert '"op": "insert_after"' in answer and '"target": "<existing step id>"' in answer
-    assert '"name": "<new step id>__system_prompt"' in answer, "the bundle adds a node and its knob"
+    assert '"name": "<new step id>__system_prompt"' in answer, "a bundle adds a node and its knob"
     assert "parameter moves only" not in answer
+    # Both bundles, the prompt-knobs one first: neither kind is privileged.
+    bundles = json.loads(next(line for line in answer.splitlines()
+                              if line.startswith('{"proposals": [{"edits"')))["proposals"]
+    assert [b["edits"][0]["op"] for b in bundles] == ["set_knob", "insert_after"]
+    assert bundles[0]["edits"][1]["name"] == "<step B's prompt knob>"
 
 
 def test_a_parameters_only_run_shows_no_structural_example():
@@ -45,6 +50,9 @@ def test_a_parameters_only_run_shows_no_structural_example():
     assert "parameter moves only" in answer
     assert not any(op in answer for op in ("insert_after", "add_node", "__system_prompt", '"node"'))
     assert "<step A's prompt knob>" in answer, "the bundle example stays two prompt knobs"
+    bundles = json.loads(next(line for line in answer.splitlines()
+                              if line.startswith('{"proposals": [{"edits"')))["proposals"]
+    assert len(bundles) == 1
     assert "## New nodes" not in text and "## Blocks you may insert" not in text
 
 
@@ -53,7 +61,7 @@ def _examples(answer: str) -> tuple[dict, list[dict]]:
                   if line.strip().startswith('{"op": "insert_after"'))
     bundle = json.loads(next(line for line in answer.splitlines()
                              if line.startswith('{"proposals": [{"edits"')))
-    return single, bundle["proposals"][0]["edits"]
+    return single, bundle["proposals"][1]["edits"]
 
 
 def _fill(value, target: str):  # type: ignore[no-untyped-def]
@@ -96,22 +104,41 @@ def test_new_nodes_come_from_the_schema_without_blocks_and_blocks_are_optional()
 
 
 def test_the_size_cost_is_stated_in_score_units():
+    """The 1/N comparison only when the score is known to be the items' mean;
+    otherwise the size cost is set against score differences between candidates."""
     records = [{"id": f"i{n}"} for n in range(40)] + [{"id": "i0"}]  # a repeat counts once
-    answer = _answer(_render("broad", parsimony=0.02, item_records=records))
-    assert "0.02 per node (score = raw score - 0.02 x nodes)" in answer
-    assert "one of the 40 train items is worth 1/40 = 0.025 of the raw score" in answer
+    mean = _answer(_render("broad", parsimony=0.02, item_records=records, score_is_item_mean=True))
+    assert "0.02 per node (score = raw score - 0.02 x nodes)" in mean
+    assert "the raw score is the mean over the 40 train items, so one item is worth 1/40 = 0.025" in mean
+    other = _answer(_render("broad", parsimony=0.02, item_records=records))
+    assert "1/40" not in other and "score differences between candidates" in other
     assert "Size cost" not in _answer(_render("broad", parsimony=0.0))
     assert "Size cost" not in _answer(_render("broad"))
 
 
-def test_the_loop_hands_its_parsimony_to_the_request(tmp_path):
+@pytest.mark.parametrize("mean", [False, True])
+def test_the_loop_hands_its_parsimony_and_what_its_score_is(tmp_path, monkeypatch, mean):
+    """A run whose every score is the items' mean says one item is worth 1/N; one whose
+    score is another metric of the run (here: the mean, shifted) does not."""
+    from refactory_dsh.loop import Loop
     from test_skillopt import _patch_mode
     from test_val_gate import LevelProbe, _loop
 
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        scores = [r["score"] for r in result.item_records]
+        result.score = sum(scores) / len(scores) + (0.0 if mean else 0.05)
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
     with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, parsimony=0.03)
-        loop.init()
-        assert loop._context().parsimony == 0.03
+        loop = _loop(tmp_path, parsimony=0.03, epochs=1)
+        loop.run()
+        context = loop._context()
+    assert context.parsimony == 0.03 and context.score_is_item_mean is mean
+    assert ("so one item is worth" in context.render()) is mean
 
 
 DENYLIST = ("math", "theorem", "option", "LiveMath", "proof", "answer choice")

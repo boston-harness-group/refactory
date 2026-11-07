@@ -581,6 +581,10 @@ class Loop(OuterLoop):
         self._proposal_attempt = 0
         #: Each accepted proposal's rationale and prediction, by candidate id.
         self._proposal_notes: dict[str, dict[str, Any]] = {}
+        #: Whether every train evaluation so far scored the mean of its items' scores
+        #: (``None`` until one did or did not): only then is one item worth 1/N of the
+        #: score, which the proposal request may then say.
+        self._score_is_item_mean: bool | None = None
         #: A pure OuterLoop subclass whose hooks this Loop drives.  When set,
         #: ``strategy()``, ``strategy_state_dict()``, and
         #: ``load_strategy_state()`` delegate to this object.
@@ -1225,6 +1229,14 @@ class Loop(OuterLoop):
         )
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
+        item_scores = [float(r["score"]) for r in result.item_records
+                       if isinstance(r.get("score"), (int, float)) and not isinstance(r.get("score"), bool)]
+        if result.exit_ok and item_scores:
+            # A mode's score may be any metric of the run; it is a per-item mean only
+            # when it equals the mean of the item scores, every time.
+            mean = math.isclose(sum(item_scores) / len(item_scores), float(result.score),
+                                rel_tol=1e-9, abs_tol=1e-9)
+            self._score_is_item_mean = mean and self._score_is_item_mean is not False
         candidate.score = result.score - self.config.parsimony * nodes if result.exit_ok else None
         candidate.mean_score = candidate.raw_score
         candidate.measurements = measurements
@@ -3562,6 +3574,7 @@ class Loop(OuterLoop):
             reasoning=self._reasoning_entries(board),
             max_edits=int(self.config.max_edits_per_proposal),
             parsimony=float(self.config.parsimony),
+            score_is_item_mean=bool(self._score_is_item_mean),
         )
 
     def _edited_id(self, board: list[Candidate]) -> str | None:
