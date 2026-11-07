@@ -135,6 +135,38 @@ def val_gate_refusal(optimizer: str, strategy: str) -> str:
             "autoresearch or hill_climb optimizer with --val-gate")
 
 
+#: The ways the optimizer may change a text knob (``LoopConfig.text_edit_style``).
+TEXT_EDIT_STYLES = ("free", "small")
+
+
+def text_edit_refusal(edit: Mapping[str, Any], state: Mapping[str, Any], *,
+                      style: str, budget: int) -> str | None:
+    """Why ``edit`` breaks the run's text edit style; ``None`` when it does not.
+
+    Under ``small`` a ``set_knob`` on a text knob (a ``str`` knob with no fixed
+    values) must be a ``patch`` of at most ``budget`` line edits. Every other edit,
+    and every edit under ``free``, passes.
+    """
+    if style != "small" or edit.get("op") != "set_knob":
+        return None
+    name = edit.get("name")
+    spec = ((state.get("knobs") or {}).get(name) or {}).get("spec") or {}
+    if spec.get("kind") != "str" or spec.get("values"):
+        return None
+    if "patch" not in edit:
+        return (f"E-edit-style: this run changes text knobs by small edits "
+                f"(text_edit_style 'small'), so set_knob on {name!r} needs a 'patch' -- a "
+                "list of line edits (replace, delete, insert_after, insert_before, "
+                "append) -- not a whole new 'value'")
+    patch = edit.get("patch")
+    count = len(patch) if isinstance(patch, list) else 0
+    if count > budget:
+        return (f"E-edit-budget: the patch to {name!r} makes {count} line edits; this run "
+                f"allows at most {budget} per proposal (text_edit_budget), so keep the "
+                "few that matter most")
+    return None
+
+
 @dataclass
 class LoopConfig:
     """How a run is shaped."""
@@ -257,6 +289,16 @@ class LoopConfig:
     #: With ``val_gate``: stop once the best val score reaches 1.0 (SkillOpt's
     #: ``early_stop_at_full_val``).
     early_stop_at_full_val: bool = False
+    #: How the optimizer may change a text knob (a ``str`` knob with no fixed
+    #: values). ``free`` (the default): a whole new value or a patch. ``small``: only
+    #: a ``set_knob`` patch of line edits (replace, delete, insert_after,
+    #: insert_before, append), as SkillOpt's 2-4 line edits per step; a whole new
+    #: value is refused before evaluation. Other knobs and structure edits are not
+    #: affected.
+    text_edit_style: str = "free"
+    #: With ``text_edit_style`` ``small``: the most line edits one proposal's patch
+    #: may hold (SkillOpt's ``edit_budget_max``, 4).
+    text_edit_budget: int = 4
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
     #: Strategy-specific options passed to the strategy's ``configure()``
     #: method as keyword arguments.  Set from ``--strategy-option`` on the
@@ -413,6 +455,11 @@ class Loop(OuterLoop):
                     setattr(self.config, key, client_context[key])
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
             raise LoopError("repeats must be an integer from 1 to 10")
+        if self.config.text_edit_style not in TEXT_EDIT_STYLES:
+            raise LoopError(f"text_edit_style must be one of {list(TEXT_EDIT_STYLES)}")
+        if (isinstance(self.config.text_edit_budget, bool)
+                or not isinstance(self.config.text_edit_budget, int) or self.config.text_edit_budget < 1):
+            raise LoopError("text_edit_budget must be a positive integer")
         self.measurements = 0
         self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
@@ -2007,6 +2054,13 @@ class Loop(OuterLoop):
                     self.rejections.append(Rejection(rounds, proposal.edit, ["E-policy: operation is outside this run's permitted edits"]))
                     continue
                 parent = next((p for p in parents if p.id == proposal.parent), parents[0])
+                style = text_edit_refusal(proposal.edit, parent.state,
+                                          style=self.config.text_edit_style,
+                                          budget=self.config.text_edit_budget)
+                if style is not None:
+                    self.rejections.append(Rejection(rounds, proposal.edit, [style],
+                                                     rationale=proposal.rationale))
+                    continue
                 outcome = run.attempt(proposal, parent)
                 if isinstance(outcome, Candidate):
                     if outcome.id in accepted_ids:
@@ -3197,6 +3251,8 @@ class Loop(OuterLoop):
             item_records=self._parent_train_records(board),
             parent_item_records=self._parent_train_records(board),
             graph_note=graph_note,
+            text_edit_style=self.config.text_edit_style,
+            text_edit_budget=self.config.text_edit_budget,
         )
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:

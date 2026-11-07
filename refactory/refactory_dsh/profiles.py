@@ -80,6 +80,12 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("early_stop_at_full_val") not in (True, False, 0, 1):
         raise ProfileError("early_stop_at_full_val must be true or false (1 or 0 on the command line)")
     result["early_stop_at_full_val"] = bool(result.get("early_stop_at_full_val"))
+    from refactory_dsh.loop import TEXT_EDIT_STYLES
+    if result.get("text_edit_style") not in TEXT_EDIT_STYLES:
+        raise ProfileError(f"text_edit_style must be one of {list(TEXT_EDIT_STYLES)}")
+    budget = result.get("text_edit_budget")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        raise ProfileError("text_edit_budget must be a positive integer")
     if result["val_gate"]:
         from refactory_dsh.loop import val_gate_refusal
         refusal = val_gate_refusal(str(result.get("optimizer")), str(result.get("strategy")))
@@ -264,7 +270,7 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
         "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
-        "early_stop_patience", "early_stop_at_full_val")}
+        "early_stop_patience", "early_stop_at_full_val", "text_edit_style", "text_edit_budget")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
