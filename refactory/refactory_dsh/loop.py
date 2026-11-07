@@ -688,7 +688,19 @@ class Loop(OuterLoop):
             snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
         else:
             self._journal("resume_configuration", resolved_profile=snapshot)
-        (self.root / "config.json").write_text(
+        saved = self.root / "config.json"
+        if self.config.resume and saved.exists():
+            try:
+                before = int(json.loads(saved.read_text()).get("train_minibatch") or 0)
+            except (OSError, ValueError, json.JSONDecodeError):
+                before = self.config.train_minibatch
+            if before != self.config.train_minibatch:
+                # The epochs already scored used the old samples; a different size would
+                # compare candidates scored on different-sized minibatches.
+                raise LoopError(
+                    f"this run scores minibatches of {before} train items; resume it with "
+                    f"train_minibatch {before}, or start a new run")
+        saved.write_text(
             json.dumps({"mode": self.mode_id, **self.config.to_dict()}, indent=2, default=str)
         )
         # Recorded for every run, so its seed results can be exported for later ones.
@@ -734,6 +746,15 @@ class Loop(OuterLoop):
             refusal = val_gate_refusal(self.optimizer.name, self.name)
             if refusal:
                 raise LoopError(refusal)
+        elif (self.config.train_minibatch
+              and len(self._train_ids()) > self.config.train_minibatch):
+            # Without the gate the winner and the parents are picked by train score,
+            # and on minibatches those come from different samples.
+            raise LoopError(
+                f"train_minibatch {self.config.train_minibatch} scores each epoch on a "
+                "different train sample, so train scores of different epochs cannot pick "
+                "the winner or the parents; turn val_gate on (--val-gate 1), or score the "
+                "whole train part (train_minibatch 0)")
         elif self.config.early_stop_patience or self.config.early_stop_at_full_val:
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
@@ -967,11 +988,20 @@ class Loop(OuterLoop):
             return
         if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
             return
+        if self.evaluations >= self.config.max_evaluations:
+            return
         workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{self.epoch}"
         task_module.make_manifest(workdir, train_ids=batch)
         result, measurements = self._measure(parent, workdir, task_module.TRAIN,
                                              seed=self._train_seed(self.epoch), items=batch)
         with self._state_lock:
+            # An evaluation like any other: it counts toward the evaluation budget (the
+            # time and token budgets are charged inside the measurement), and it is
+            # journaled so a resumed run counts it too.
+            self.evaluations += 1
+            self._journal("rescore", id=parent.id, epoch=self.epoch,
+                          score=result.score if result.exit_ok else None,
+                          exit_ok=result.exit_ok, measurements=measurements)
             self._train_item_records[parent.id] = list(result.item_records)
             self._records_epoch[parent.id] = self.epoch
             if not measurements.get("cached_from"):
@@ -3474,6 +3504,7 @@ class Loop(OuterLoop):
         # A strategy may evaluate a candidate before it keeps it (``Run.keep``
         # journals it then), so its score can come before the candidate itself.
         early_scores: dict[str, dict[str, Any]] = {}
+        rescores = 0  # re-scores of the edited candidate (train_minibatch), each an evaluation
 
         def apply_score(candidate: Candidate, record: dict[str, Any]) -> None:
             candidate.score = record.get("score")
@@ -3577,6 +3608,8 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
+            elif event == "rescore":
+                rescores += 1
             elif event == "train_minibatch":
                 self._minibatches[int(record["epoch"])] = [str(i) for i in record.get("ids") or ()]
             elif event == "train_records_epoch":
@@ -3606,7 +3639,7 @@ class Loop(OuterLoop):
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")
         self.population = [by_id[node_id] for node_id in order]
-        self.evaluations = sum(1 for c in self.population if c.evaluated)
+        self.evaluations = sum(1 for c in self.population if c.evaluated) + rescores
         self.measurements = sum(c.measurements.get("count", 1) for c in self.population if c.evaluated)
         self.proposals = {
             candidate.id: {

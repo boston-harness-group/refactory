@@ -77,11 +77,13 @@ def test_each_epoch_scores_its_candidates_on_one_seeded_sample(tmp_path, monkeyp
     """N=3 of 8 train items: every candidate of an epoch on the same 3 ids, each
     epoch its own sample from train_batch_seed, journaled."""
     calls = _scored(monkeypatch)
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
     loop, _ = _run(tmp_path, monkeypatch, [[(5, 7), (5, 3)], [(7, 8), (7, 9)], []],
-                   train_minibatch=3)
+                   train_minibatch=3, val_gate=True)
     by_epoch: dict[int, set[tuple[str, ...]]] = {}
     for epoch, _level_, items in calls:
-        by_epoch.setdefault(epoch, set()).add(tuple(items))
+        if epoch <= 3:  # the last epoch's proposals are scored after it, on epoch 4's sample
+            by_epoch.setdefault(epoch, set()).add(tuple(items))
     assert all(len(samples) == 1 for samples in by_epoch.values()), by_epoch
     samples = {epoch: list(next(iter(s))) for epoch, s in by_epoch.items()}
     for epoch, sample in samples.items():
@@ -126,11 +128,13 @@ def test_a_resume_samples_the_same_ids(tmp_path, monkeypatch):
     """A run stopped after one epoch and resumed scores the same minibatches as one
     that ran straight through."""
     straight, _ = _run(tmp_path / "straight", monkeypatch, [[(5, 7)], [(7, 8)], []],
-                       train_minibatch=3, batch_size=1)
-    _run(tmp_path / "resumed", monkeypatch, [[(5, 7)]], train_minibatch=3, batch_size=1, epochs=1)
+                       train_minibatch=3, batch_size=1, val_gate=True)
+    _run(tmp_path / "resumed", monkeypatch, [[(5, 7)]], train_minibatch=3, batch_size=1, epochs=1,
+         val_gate=True)
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
     with _patch_mode(LevelProbe):
-        resumed = _loop(tmp_path / "resumed", epochs=3, batch_size=1, train_minibatch=3, resume=True)
+        resumed = _loop(tmp_path / "resumed", epochs=3, batch_size=1, train_minibatch=3, resume=True,
+                        val_gate=True)
         resumed.optimizer = Watching([[(7, 8)], []])
         resumed.run()
     def batches(loop: Loop) -> dict[int, list[str]]:
@@ -148,3 +152,42 @@ def test_a_negative_size_is_refused(tmp_path):
     profiles.add_arguments(parser)
     args = parser.parse_args(["--train-minibatch", "5"])
     assert profiles.normalize({"train_minibatch": args.train_minibatch})["train_minibatch"] == 5
+
+
+
+def test_a_minibatch_without_the_gate_is_refused_before_any_rollout(tmp_path):
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, train_minibatch=3)
+        with pytest.raises(LoopError, match="turn val_gate on"):
+            loop.run()
+    assert loop.rollouts == 0 and not (loop.root / "runs").exists()
+    with _patch_mode(LevelProbe):
+        whole = _loop(tmp_path / "whole", train_minibatch=len(TRAIN_IDS))
+        whole.run()  # a "minibatch" as large as the train part is the whole part: allowed
+
+
+def test_a_rescore_is_an_evaluation_and_survives_a_resume(tmp_path, monkeypatch):
+    """The edited candidate's re-score on a new epoch's minibatch counts toward the
+    evaluation budget, is journaled, and is still counted after a resume."""
+    loop, _ = _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 3)], [(7, 2)]],
+                   train_minibatch=3, val_gate=True, batch_size=1)
+    rescores = _events(loop, "rescore")
+    assert rescores, "setup: the edited candidate was re-scored"
+    assert loop.evaluations == sum(1 for c in loop.population if c.evaluated) + len(rescores)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=3, batch_size=1, train_minibatch=3, val_gate=True,
+                        resume=True)
+        resumed.optimizer = Watching([[]])
+        resumed.run()
+    assert resumed.evaluations >= loop.evaluations
+
+
+def test_a_resume_with_another_size_is_refused(tmp_path, monkeypatch):
+    _run(tmp_path, monkeypatch, [[(5, 7)]], train_minibatch=3, val_gate=True, batch_size=1,
+         epochs=1)
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=2, batch_size=1, train_minibatch=4, val_gate=True,
+                        resume=True)
+        with pytest.raises(LoopError, match="resume it with train_minibatch 3"):
+            resumed.run()

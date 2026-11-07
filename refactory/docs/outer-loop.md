@@ -77,8 +77,10 @@ and `hill_climb` optimizers run with it.
 
 By default every candidate is scored on the whole train part. With
 `--train-minibatch N` and a train part of more than N items, each epoch samples N train
-ids with SkillOpt's per-epoch seed (`train_batch_seed`), and works with or without
-`--val-gate`:
+ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs `--val-gate 1`:
+without the gate the winner and the parents are picked by train scores, which would
+then come from different samples, so the run is refused before anything is rolled
+out.
 
 - **One sample per epoch.** Every candidate scored in that epoch uses the same sample,
   so candidates in a round are comparable. The sample changes from epoch to epoch, and
@@ -87,8 +89,10 @@ ids with SkillOpt's per-epoch seed (`train_batch_seed`), and works with or witho
   in an earlier epoch, it is scored again on this epoch's minibatch, so the proposal
   evidence is that minibatch, as SkillOpt rolls out its current candidate on each
   step's batch. Its score is left alone; only the records the optimizer reads change.
-  This costs one minibatch of rollouts per such epoch.
-- **Resume.** A resumed run samples the same ids.
+  This re-score is an evaluation like any other: it counts toward the evaluation,
+  rollout, time and token budgets, and it is journaled (`rescore`).
+- **Resume.** A resumed run samples the same ids. Resuming with a different N is
+  refused.
 - **Unaffected.** Val and test are not sampled.
 
 `0`, or a train part of N items or fewer, scores the whole train part as before.
