@@ -381,6 +381,7 @@ The optimizer loop, named like one.
 | class | `LoopError` | `` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
+| function | `overfit_threshold` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'tuple[float, float \| None]'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `val_gate_refusal` | `(optimizer: 'str', strategy: 'str') -> 'str'` |
 
@@ -390,6 +391,7 @@ The optimizer loop, named like one.
 - **`LoopError`** — The run cannot proceed. Always names what is wrong with the mode.
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
+- **`overfit_threshold`** — The overfit threshold for a gap between two scores, and the gap's standard error.
 - **`run`** — Build a loop and run it to its bound.
 - **`val_gate_refusal`** — Why ``val_gate`` cannot run with this optimizer or strategy; empty when it can.
 

@@ -421,18 +421,30 @@ def test_overfit_like_with_like(tmp_path):
                         "required_contract": {"passed": True, "missing_artifacts": []},
                         "tokens": None, "cost": None, "workdir": str(workdir)}],
         }))
-        # Populate explicit val and test parts in loop-private storage.
-        loop._part_results[seed.id] = {
-            "val": [{"part": "val", "occasion": 0, "score": 0.85,
-                     "exit_ok": True, "error": None, "duration_s": 0.1}],
-            "test": [{"part": "test", "occasion": 0, "score": 0.4,
-                      "exit_ok": True, "error": None, "duration_s": 0.1}],
-        }
+        # An optimized winner (a child of the seed that scores higher on train) with
+        # val and test in loop-private storage; the seed's own gap is 0.05, so the
+        # search added 0.40 -- a seed winner is never called overfit.
+        import copy
+        from refactory_dsh.optim import Candidate
+        state = copy.deepcopy(seed.state)
+        first = sorted(state["graph"]["nodes"])[0]
+        state["graph"]["nodes"][first]["notes"] = "the optimized child"
+        child = Candidate.from_state(state, parent=seed.id)
+        child.evaluated, child.exit_ok = True, True
+        child.score = child.raw_score = child.mean_score = 0.9
+        loop.population.append(child)
+
+        def part(score: float, name: str) -> list[dict]:
+            return [{"part": name, "occasion": 0, "score": score,
+                     "exit_ok": True, "error": None, "duration_s": 0.1}]
+
+        loop._part_results[seed.id] = {"val": part(0.6, "val"), "test": part(0.55, "test")}
+        loop._part_results[child.id] = {"val": part(0.85, "val"), "test": part(0.4, "test")}
 
         report = loop.report()
 
     audit = report.get("holdout", {})
-    # audit_parts compares val (0.85) vs test (0.4): gap = 0.45 > 0.15 threshold.
+    # audit_parts compares val (0.85) vs test (0.4) and subtracts the seed's 0.05.
     assert audit.get("overfit") is True, (
         f"expected overfit=True for val=0.85 vs test=0.4; got audit={audit}"
     )
@@ -445,8 +457,8 @@ def test_overfit_like_with_like(tmp_path):
     # they read "the required held-out audit is unavailable" and "no holdout score".
     from refactory_dsh.loop import _holdout_line
     line = _holdout_line(audit)
-    assert line == ("holdout: val 0.8500, test 0.4000, gap 0.4500 against threshold 0.15 "
-                    "— overfit (val and test parts)")
+    assert line == ("holdout: val 0.8500, test 0.4000, gap 0.4500, added by the search 0.4000 "
+                    "against threshold 0.15 — overfit (val and test parts)")
     assert report["error"] == f"the winner overfit ({line})"
 
 

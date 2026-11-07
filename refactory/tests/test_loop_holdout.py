@@ -165,9 +165,38 @@ def test_the_winner_is_audited_on_the_holdout_and_the_gap_is_recorded(tmp_path):
     assert audit["train"] == pytest.approx(1.0)
     assert audit["holdout"] == pytest.approx(0.0)
     assert audit["gap"] == pytest.approx(1.0)
-    assert audit["overfit"] is True
+    # The winner is the seed (the probe has nothing to move): its gap is the parts'
+    # difference, not overfitting. An optimized winner's is checked below.
+    assert audit["overfit"] is False and "the winner is the seed" in audit["note"]
     assert audit["threshold"] == 0.15
     assert audit["instances"] == {"train": 3, "holdout": 1}
+
+
+class BonusProbe(Probe):
+    """The probe with a knob that adds a little to the score, so a moved candidate
+    beats the seed on train and wins."""
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {"bonus": nn.Knob(default=0, kind="int", lo=0, hi=9, description="a bonus")}
+
+    def build(self) -> nn.Graph:
+        graph = _probe_graph(TASK_REF)
+        graph.nodes["work"] = graph.nodes["work"].with_field("knobs", ("bonus",))
+        return graph
+
+    def score(self, run: nn.RunResult) -> float:
+        return super().score(run) + int(self.values()["bonus"]) / 1000
+
+
+def test_an_optimized_winner_that_only_works_on_its_train_items_is_overfit(tmp_path):
+    """A moved candidate wins on train (1.0) and scores 0 on the held-out item: the
+    gap is beyond the threshold, so the winner overfit."""
+    loop, report = _run(tmp_path, mode_class=BonusProbe, batch_size=2)
+    audit = report["holdout"]
+    assert audit["winner"] != loop.population[0].id, "setup: a moved candidate won"
+    assert audit["gap"] > audit["threshold"] and audit["overfit"] is True
+    assert audit["standard_error"] is not None
 
 
 def test_the_audit_is_written_beside_the_run_and_carried_by_the_report(tmp_path):
@@ -257,9 +286,10 @@ def test_optimize_prints_one_line_about_the_held_out_audit(tmp_path, capsys):
     captured = capsys.readouterr()
     lines = [line for line in captured.err.splitlines() if line.startswith("holdout:")]
     assert len(lines) == 1, captured.err
-    assert "train" in lines[0] and "holdout" in lines[0] and "overfit" in lines[0]
+    assert "train" in lines[0] and "holdout" in lines[0] and "holds up" in lines[0]
+    assert "the winner is the seed" in lines[0]
     payload = json.loads(captured.out[captured.out.index("{"):])
-    assert payload["holdout"]["overfit"] is True
+    assert payload["holdout"]["overfit"] is False
     assert payload["raw_best_score"] is not None
 
 
@@ -311,6 +341,13 @@ def _overfit_run(tmp_path: Path) -> Path:
         LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=root),
         project=Path("."),
     ).run()
+    # Its winner is the seed, which the audit never calls overfit; these tests are
+    # about what `best` and `adopt` do with an overfit verdict, so the recorded audit
+    # carries one (the verdict itself is tested above).
+    audit = json.loads((root / "holdout.json").read_text())
+    audit.update(overfit=True, gap=0.5, threshold=0.15)
+    audit.pop("note", None)
+    (root / "holdout.json").write_text(json.dumps(audit))
     return root
 
 

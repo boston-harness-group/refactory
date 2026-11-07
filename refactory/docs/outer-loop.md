@@ -63,6 +63,14 @@ and `hill_climb` optimizers run with it.
   held-out audit then compares the winner's val and test scores, so a `--holdout 0` run
   is audited. Each phase is saved: a resumed run continues it. Without a test part it is
   skipped with that reason.
+- **Overfit audit.** The val-vs-test audit counts only the gap the search added:
+  (winner val − winner test) − (seed val − seed test), using the seed's val score and its
+  test score (`baseline_test`). That is compared with the larger of 0.15 and twice the
+  gap's standard error, sqrt(v(1−v)/n_val + t(1−t)/n_test), so small parts allow more.
+  A winner that is the seed is never overfit; the note says why. `holdout.json` and the
+  report give `gap`, `seed_gap`, `added_gap`, `threshold` and `standard_error`. The
+  train-vs-holdout audit uses the same threshold and the same seed rule; it has no seed
+  holdout score to subtract, so an optimized winner's whole gap counts.
 - **Early stop.** `--early-stop-patience N` (0, off, by default) stops the run after N
   epochs in a row whose gating did not raise the best val score.
   `--early-stop-at-full-val 1` stops it once the best val score reaches 1.0. The first
