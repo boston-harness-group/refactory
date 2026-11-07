@@ -57,7 +57,7 @@ from refactory_dsh.optim import (
     RandomOptimizer,
 )
 from refactory_dsh.optim import create as create_optimizer
-from refactory_dsh.optim.base import summarise_reasons
+from refactory_dsh.optim.base import DEFAULT_MAX_EDITS, proposal_refusal, summarise_reasons
 from refactory_dsh.outerloop import (
     FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
@@ -282,6 +282,19 @@ class LoopConfig:
     #: epoch's minibatch (as SkillOpt rolls out its current candidate on each step's
     #: batch). Val and test are unaffected. Each epoch's ids are journaled.
     train_minibatch: int = 0
+    #: With ``val_gate``: at the start of each epoch's proposal step, re-score the
+    #: candidate the optimizer edits on that epoch's train sample (the whole train part,
+    #: or the ``train_minibatch`` sample) with that epoch's seed, unless its records
+    #: already come from this epoch (it was just created and scored), so the optimizer
+    #: and its readers work from fresh trajectories every epoch, as SkillOpt rolls out
+    #: its current candidate every epoch. The re-score replaces only the evidence
+    #: records: the candidate's id, train score and gate val score stay. 0 turns it
+    #: off (the minibatch re-score of ``train_minibatch`` then stays on). No effect
+    #: without ``val_gate``.
+    fresh_evidence: bool = True
+    #: The most edits one proposal may bundle (``Proposal.edits``): applied together,
+    #: in order, as one candidate the gate judges once. 1 allows single edits only.
+    max_edits_per_proposal: int = DEFAULT_MAX_EDITS
     #: Whether an agent node an edit adds may run with tools. Off by default: a new
     #: agent node runs with ``tool_policy: none``, and one that asks for tools is
     #: refused (``E-new-node-tools``).
@@ -451,6 +464,9 @@ class Loop(OuterLoop):
         minibatch = self.config.train_minibatch
         if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
             raise LoopError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
+        max_edits = self.config.max_edits_per_proposal
+        if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
+            raise LoopError("max_edits_per_proposal must be a positive integer (1 is single edits)")
         self.measurements = 0
         self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
@@ -483,6 +499,8 @@ class Loop(OuterLoop):
             self.optimizer = create_optimizer(
                 self.config.optimizer, seed=self.config.seed, k=self.config.attempts
             )
+        # The run's cap on edits per proposal, enforced where every proposal is applied.
+        self.optimizer.max_edits = int(self.config.max_edits_per_proposal)
 
         # How a candidate is run, and therefore how it is scored. Built here from
         # this loop's own settings rather than switched on inside `_evaluate`, so a
@@ -976,7 +994,9 @@ class Loop(OuterLoop):
                 break
             items = self._minibatch(self.epoch if epoch is None else epoch)
             self._evaluate(candidate, seed=seed, items=items)
-            if items is not None:
+            if items is not None or self._fresh_evidence():
+                # Which epoch's sample and seed its records come from, so the proposal
+                # step re-scores it only when they are another epoch's.
                 self._records_epoch[candidate.id] = self.epoch if epoch is None else epoch
                 self._journal("train_records_epoch", id=candidate.id,
                               epoch=self._records_epoch[candidate.id])
@@ -1031,13 +1051,28 @@ class Loop(OuterLoop):
         self._journal("train_minibatch", epoch=epoch, ids=sample)
         return sample
 
+    def _fresh_evidence(self) -> bool:
+        """Whether the edited candidate is re-scored each epoch on the whole train part
+        (``fresh_evidence`` under ``val_gate``, the default loop's own gate)."""
+        return bool(self.config.val_gate and self.config.fresh_evidence
+                    and self._custom_strategy is None)
+
     def _refresh_edited_records(self) -> None:
-        """Score the edited candidate on this epoch's minibatch when its train records
-        come from another epoch, so the proposal evidence is this epoch's minibatch. Its
-        score is left alone: only the records the optimizer reads change."""
+        """Fresh evidence: score the edited candidate on this epoch's train sample with
+        this epoch's seed when its train records come from another epoch, so the
+        proposal evidence (and every reader's input) is this epoch's rollout.
+
+        On under ``val_gate`` with ``fresh_evidence`` (the whole train part, or the
+        ``train_minibatch`` sample), and with a minibatch in any case. A candidate
+        created and scored this epoch already has this epoch's records and is not
+        scored again; a resumed run reads the epoch from the journal, so it does not
+        either. Its score is left alone: only the records the optimizer reads change.
+        """
         batch = self._minibatch(self.epoch)
+        if not batch and not self._fresh_evidence():
+            return
         edited = self.strategy_decision.get("parent") or self._editing_parent
-        if not batch or not edited or self._records_epoch.get(str(edited)) == self.epoch:
+        if not edited or self._records_epoch.get(str(edited)) == self.epoch:
             return
         parent = next((c for c in self.population if c.id == edited and c.evaluated), None)
         if parent is None:
@@ -1056,7 +1091,12 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 return
         workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{self.epoch}"
-        task_module.make_manifest(workdir, train_ids=batch)
+        if batch:
+            task_module.make_manifest(workdir, train_ids=batch)
+        elif self._parts_manifest is not None and (self.root / task_module.MANIFEST).exists():
+            # The whole train part, as the candidate's first evaluation read it.
+            workdir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.root / task_module.MANIFEST, workdir / task_module.MANIFEST)
         result, measurements = self._measure(parent, workdir, task_module.TRAIN,
                                              seed=self._train_seed(self.epoch), items=batch)
         if not measurements.get("count"):
@@ -1069,6 +1109,7 @@ class Loop(OuterLoop):
             # journaled so a resumed run counts it too.
             self.evaluations += 1
             self._journal("rescore", id=parent.id, epoch=self.epoch,
+                          seed=self._train_seed(self.epoch), items=len(batch or ()) or None,
                           score=result.score if result.exit_ok else None,
                           exit_ok=result.exit_ok, measurements=measurements)
             self._train_item_records[parent.id] = list(result.item_records)
@@ -1078,6 +1119,9 @@ class Loop(OuterLoop):
             self._journal("train_records", id=parent.id, records=list(result.item_records))
             self._journal("train_records_epoch", id=parent.id, epoch=self.epoch)
             self._journal("rollouts", rollouts=self.rollouts)
+        self._progress("rescore", candidate=parent.id, epoch=self.epoch,
+                       score=result.score if result.exit_ok else None,
+                       records=len(result.item_records), duration_s=result.duration_s)
 
     def _carry_ledger(self, workdir: Path) -> None:
         """Put the run's ledger where the candidate's own nodes look for it.
@@ -1736,7 +1780,9 @@ class Loop(OuterLoop):
         structural = [c for c in self.population if c.is_structural()]
         knob_only = [c for c in self.population if not c.is_structural()]
         structural_rejections = [
-            r for r in self.rejections if nn_edits.is_macro(r.edit.get("op", ""))
+            r for r in self.rejections
+            if any(isinstance(step, dict) and nn_edits.is_macro(step.get("op", ""))
+                   for step in Proposal(edit=r.edit).steps)
         ]
         return {
             "structural_candidates": len(structural),
@@ -1802,7 +1848,8 @@ class Loop(OuterLoop):
             record = self.proposals.setdefault(candidate.id, {
                 "id": candidate.id,
                 "parent": candidate.parent,
-                "edits": candidate.edits[-1:],
+                # Every edit its proposal applied: one, or a compound proposal's list.
+                "edits": candidate.own_edits(),
                 "rationale": str(notes.get("rationale") or ""),
                 "prediction": str(notes.get("prediction") or ""),
                 "confidence": float(notes.get("confidence") or 0.0),
@@ -2027,7 +2074,7 @@ class Loop(OuterLoop):
                 self.rejections.append(
                     Rejection(
                         attempt=0,
-                        edit=candidate.edits[-1] if candidate.edits else {},
+                        edit=_edit_record(candidate),
                         reasons=[moved],
                     )
                 )
@@ -2040,7 +2087,7 @@ class Loop(OuterLoop):
                 self.rejections.append(
                     Rejection(
                         attempt=0,
-                        edit=candidate.edits[-1] if candidate.edits else {},
+                        edit=_edit_record(candidate),
                         reasons=[
                             f"E-duplicate: the candidate's state already exists as "
                             f"candidate {candidate.id}, so its batch slot was lost"
@@ -2207,17 +2254,14 @@ class Loop(OuterLoop):
             for proposal in proposals:
                 if len(accepted) >= wanted:
                     break
-                op_name = proposal.edit.get("op")
                 # An op that is not in the catalogue at all is a different fact from
                 # one that exists but is outside this run's permitted edits. Calling
-                # both E-policy hides which fix the refusal is asking for.
-                refused = nn_edits.unknown(op_name)
-                if refused is not None:
-                    self.rejections.append(Rejection(rounds, proposal.edit, [refused]))
-                    continue
-                allowed = self.permitted_ops()
-                if op_name not in allowed:
-                    self.rejections.append(Rejection(rounds, proposal.edit, ["E-policy: operation is outside this run's permitted edits"]))
+                # both E-policy hides which fix the refusal is asking for. Each edit of
+                # a compound proposal is checked, and a refusal names the one.
+                refused = proposal_refusal(proposal, permitted=self.permitted_ops(),
+                                           max_edits=self.config.max_edits_per_proposal)
+                if refused:
+                    self.rejections.append(Rejection(rounds, proposal.edit, refused))
                     continue
                 parent = next((p for p in parents if p.id == proposal.parent), parents[0])
                 outcome = run.attempt(proposal, parent)
@@ -3486,6 +3530,7 @@ class Loop(OuterLoop):
             graph_note=graph_note,
             edit_pairs=self._edit_pairs(board),
             reasoning=self._reasoning_entries(board),
+            max_edits=int(self.config.max_edits_per_proposal),
         )
 
     def _edited_id(self, board: list[Candidate]) -> str | None:
@@ -3507,7 +3552,7 @@ class Loop(OuterLoop):
             parent = by_id.get(child.parent or "")
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
-                "edit": child.edits[-1:], "gate": self._gate_decision(child.id),
+                "edit": child.own_edits(), "gate": self._gate_decision(child.id),
                 "child_records": list(self._train_item_records.get(child.id, [])),
                 "parent_records": (list(self._train_item_records.get(parent.id, []))
                                    if parent else []),
@@ -3542,7 +3587,7 @@ class Loop(OuterLoop):
                       if parent is not None and candidate.evaluated else None)
             entries.append({
                 "id": candidate.id, "epoch": record.get("epoch"),
-                "edit": candidate.edits[-1:], "rationale": record.get("rationale"),
+                "edit": candidate.own_edits(), "rationale": record.get("rationale"),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "gate": self._gate_decision(candidate.id), "score": candidate.score,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
@@ -3727,6 +3772,7 @@ class Loop(OuterLoop):
             parent=candidate.parent,
             edits=candidate.edits,
             edit_reports=candidate.edit_reports,
+            step_edits=candidate.step_edits,
             state=candidate.state,
         )
 
@@ -3752,7 +3798,8 @@ class Loop(OuterLoop):
         # A strategy may evaluate a candidate before it keeps it (``Run.keep``
         # journals it then), so its score can come before the candidate itself.
         early_scores: dict[str, dict[str, Any]] = {}
-        rescores = 0  # re-scores of the edited candidate (train_minibatch), each an evaluation
+        rescores = 0  # re-scores of the edited candidate (fresh evidence), each an evaluation
+        rescore_measurements = 0
 
         def apply_score(candidate: Candidate, record: dict[str, Any]) -> None:
             candidate.score = record.get("score")
@@ -3803,6 +3850,8 @@ class Loop(OuterLoop):
                     parent=record.get("parent"),
                     edits=record.get("edits") or (),
                     edit_reports=record.get("edit_reports") or (),
+                    # A journal written before compound proposals: one edit each.
+                    step_edits=int(record.get("step_edits", 1)),
                 )
                 if candidate.id not in by_id:
                     by_id[candidate.id] = candidate
@@ -3858,6 +3907,7 @@ class Loop(OuterLoop):
                     self.load_strategy_state(record["state"])
             elif event == "rescore":
                 rescores += 1
+                rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
             elif event == "train_minibatch":
                 self._minibatches[int(record["epoch"])] = [str(i) for i in record.get("ids") or ()]
             elif event == "train_records_epoch":
@@ -3888,7 +3938,8 @@ class Loop(OuterLoop):
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")
         self.population = [by_id[node_id] for node_id in order]
         self.evaluations = sum(1 for c in self.population if c.evaluated) + rescores
-        self.measurements = sum(c.measurements.get("count", 1) for c in self.population if c.evaluated)
+        self.measurements = (sum(c.measurements.get("count", 1) for c in self.population if c.evaluated)
+                             + rescore_measurements)
         self.proposals = {
             candidate.id: {
                 "id": candidate.id,
@@ -4083,6 +4134,15 @@ def _yield(accepted: int, refused: int) -> str:
     if not total:
         return "n/a"
     return f"{100.0 * accepted / total:.0f}%"
+
+
+def _edit_record(candidate: Candidate) -> dict[str, Any]:
+    """What a candidate's proposal applied, in a refusal's form: its edit, or
+    ``{"edits": [...]}`` for a compound proposal."""
+    own = candidate.own_edits()
+    if not own:
+        return {}
+    return own[0] if len(own) == 1 else {"edits": own}
 
 
 def _codes(rejections: Sequence[Rejection]) -> dict[str, int]:

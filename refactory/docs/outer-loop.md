@@ -50,6 +50,22 @@ and `hill_climb` optimizers run with it.
   person has not rejected, ranked by val score. Its first is the winner: the report, the
   held-out audit and `adopt` all name it, and the report's `best_score` is its val score
   (`best_score_basis`), with its train score in `best_train_score`.
+- **Fresh evidence.** As SkillOpt rolls out its current candidate on the train part
+  every epoch, the candidate the optimizer edits is scored again at the start of each
+  epoch's proposal step, on that epoch's train sample (the whole train part, or the
+  `--train-minibatch` sample) with that epoch's seed. A candidate created and scored
+  this epoch is not scored twice. The optimizer, and every reader, reads these fresh
+  records; the reader cache is keyed by the records' text, so new records are read
+  again. Only the evidence changes: the candidate keeps its id, its gate val score and
+  its train score, which is the score the leaderboard, the history and the gradient
+  show (its first train evaluation's). The re-score counts as an evaluation, a
+  measurement and its rollouts, is charged to the time and token budgets, and is
+  journaled (`rescore`, with its epoch and seed); a resumed run reads its epoch back and
+  does not repeat it. "What the last edit changed" then compares the latest children
+  with their parent scored in the same epoch, with the same seed. `--fresh-evidence 0`
+  turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
+  35-item train part this is one more train evaluation of 35 rollouts per epoch in
+  which the gate kept no new candidate.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
@@ -113,7 +129,8 @@ out.
   so candidates in a round are comparable. The sample changes from epoch to epoch, and
   each epoch's ids are journaled (`train_minibatch`).
 - **The evidence is that minibatch.** When the candidate the optimizer edits was scored
-  in an earlier epoch, it is scored again on this epoch's minibatch, so the proposal
+  in an earlier epoch, it is scored again on this epoch's minibatch (the gate's fresh
+  evidence, above, on the minibatch), so the proposal
   evidence is that minibatch, as SkillOpt rolls out its current candidate on each
   step's batch. Its score is left alone; only the records the optimizer reads change.
   This re-score is an evaluation like any other: it counts toward the evaluation,
@@ -123,6 +140,38 @@ out.
 - **Unaffected.** Val and test are not sampled.
 
 `0`, or a train part of N items or fewer, scores the whole train part as before.
+
+## Compound proposals (`--max-edits-per-proposal N`)
+
+A proposal may carry an ordered list of edits, `{"edits": [...]}`, instead of one
+`edit`. They are applied together to the parent as one candidate, which is evaluated
+and gated once, so a fix that needs coordinated changes (several steps' prompts that
+must agree, or a new node and the knob that feeds it) is judged as one idea rather than
+as a chain of single edits each judged alone. SkillOpt's round patches change several
+sections at once; this is the default loop's equivalent.
+
+- **Checks.** Every edit's shape, op and permission are checked first; then each edit
+  is prechecked and applied in order, to the state the ones before it left (a
+  `set_knob` on `<id>__system_prompt` therefore goes after the edit that adds node
+  `<id>`). The combined state is then held to every state rule once: frozen knobs, tool
+  policy, protected nodes, the validator, lowering, no-op and duplicate (on the combined
+  state, so the same point reached in another order is a duplicate). A refusal about one
+  edit names it, `[edit k of n: op]`, after the rule's code; one about the combined
+  state names none. A list longer than N is refused `E-too-many-edits`.
+- **Cap.** `--max-edits-per-proposal` (default 4, SkillOpt's edit budget) caps the
+  list; `1` is single edits only, as before.
+- **Who emits lists.** The `autoresearch` request says it may bundle up to N edits when a
+  fix needs coordinated changes, with a JSON example (not shown when N is 1). The random
+  and population optimizers emit single edits. A proposal with one `edit` works as
+  before.
+- **Records.** The candidate's `edits` hold its lineage's edits in order;
+  `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
+  them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
+  "What the last edit changed" and "Your earlier reasoning" show the whole list; a
+  refused list is recorded as `{"edits": [...]}`.
+- **Attribution.** The per-knob attribution credits knob values by state: every knob's
+  value in a compound candidate is credited with that candidate's score (and its gate
+  decision), so each knob a bundle changed gets the credit, shared with the others.
 
 ## What the optimizer sees, and what it said
 

@@ -58,7 +58,9 @@ RULES: dict[str, str] = {
            "reaches it (a data pass's own files and facts stay inside the pass): an agent's "
            "reads and every {{name}} its prompts fill in (not a knob, not in its "
            "feedback_keys, not inside an {% if name %} on the same name), and an op's or a "
-           "gate's required_reads; a tool_policy 'none' agent declares exactly one write",
+           "gate's required_reads; a tool_policy 'none' agent declares exactly one write; "
+           "no agent prompt or feedback_keys uses {{item_scores}}, a data pass's graded "
+           "records",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
@@ -795,6 +797,28 @@ def required_read_issues(graph: Graph) -> list[Issue]:
     return issues
 
 
+#: The fact a data node publishes its graded item records under (``items.SCORES_FACT``):
+#: each item's expected answer, the prediction and the grader's verdict. An op may score
+#: from it; an agent never reads it.
+GRADED_FACT = "item_scores"
+_ANY_SLOT = re.compile(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}")
+
+
+def _uses_graded_records(node: Node, knob_values: Mapping[str, Any]) -> bool:
+    """Whether an agent's bound prompts (any ``{{item_scores}}`` slot, guarded or not) or
+    its ``feedback_keys`` would hand it the graded records."""
+    if GRADED_FACT in node.feedback_keys:
+        return True
+    for field_name in ("prompt_template", "system_prompt_template"):
+        try:
+            text = node.bound(field_name, knob_values)
+        except Exception:  # a bad binding is V14's to report
+            text = getattr(node, field_name)
+        if GRADED_FACT in _ANY_SLOT.findall(str(text or "")):
+            return True
+    return False
+
+
 def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
     """V15: required inputs are there on every path: an op's or a gate's
     ``required_reads``, and an agent's inputs -- its reads and its prompts' ``{{facts}}``.
@@ -803,6 +827,9 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
     prompt with an unfilled ``{{name}}`` as it is, so each must be produced upstream on
     every path to the agent; a data pass's own files and facts stay inside the pass. A
     ``tool_policy`` 'none' agent's reply is its one output, so it declares one write.
+    No agent's prompt fills in ``{{item_scores}}``: a data pass's graded records carry
+    each item's expected answer, and an agent that read them could carry the answers
+    into a later pass (a reloop) or out of the run.
     """
     issues: list[Issue] = []
     available = available_inputs(graph)
@@ -815,6 +842,11 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
                 "V15", f"declares tool_policy 'none' and {len(node.writes)} writes; a no-tools "
                 "agent's reply is its one declared output, so it declares exactly one",
                 node=node_id))
+        if _uses_graded_records(node, knob_values):
+            issues.append(Issue(
+                "V15", f"uses {{{{{GRADED_FACT}}}}}, a data pass's graded records (each item's "
+                "expected answer and the grader's verdict); an agent never reads the grade, so "
+                "it cannot pass the answers on -- an op may score from it", node=node_id))
         have = available.get(node_id, set())
         missing = sorted(f"file {name!r}" for name in node.reads if ("file", name) not in have)
         missing += sorted(f"{{{{{name}}}}}" for name in template_facts(node, knob_values)

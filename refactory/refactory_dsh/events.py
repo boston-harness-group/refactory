@@ -26,6 +26,7 @@ from typing import Any, Callable, TextIO
 MEANINGFUL = frozenset({
     "init",
     "forward",
+    "rescore",
     "optimizer",
     "scheduler",
     "report",
@@ -71,6 +72,14 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         if record.get("exit_ok") is False:
             detail = str(record.get("error") or "").strip()
             return line + " · failed" + (f": {detail[:160]}" if detail else "")
+        if record.get("duration_s") is not None:
+            line += f" · {float(record['duration_s']):.1f}s"
+        return line
+    if step == "rescore":
+        # Fresh evidence: the candidate the optimizer edits, rolled out again on this
+        # epoch's train sample. Shown because it costs a whole train evaluation.
+        line = (f"epoch {epoch} · fresh evidence: re-scored {record.get('candidate', '?')} on "
+                f"this epoch's train sample · score {_score(record.get('score'))}")
         if record.get("duration_s") is not None:
             line += f" · {float(record['duration_s']):.1f}s"
         return line

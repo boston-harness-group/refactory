@@ -198,18 +198,94 @@ def candidate_id(state: dict[str, Any]) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
+#: How many edits one proposal may bundle by default (``LoopConfig.max_edits_per_proposal``):
+#: SkillOpt's edit budget, so a coordinated fix across a pipeline's steps can be one
+#: candidate rather than a chain of single edits the gate judges one by one.
+DEFAULT_MAX_EDITS = 4
+
+
 @dataclass(frozen=True)
 class Proposal:
-    """One proposed update, as typed data."""
+    """One proposed update, as typed data.
 
-    edit: dict[str, Any]
+    Usually one ``edit``. A *compound* proposal carries an ordered list in ``edits``,
+    applied together to the parent as one candidate (each edit to the state the one
+    before it left) and judged once. A one-item ``edits`` is the same as ``edit``.
+    For a compound proposal ``edit`` is ``{"edits": [...]}``, the form refusals and
+    records show; ``steps`` is the list to apply, whichever form was given.
+    """
+
+    edit: Any = field(default_factory=dict)
     rationale: str = ""
     prediction: str = ""
     confidence: float = 0.0
     parent: str | None = None
+    edits: tuple[Any, ...] = ()
+
+    def __post_init__(self) -> None:
+        steps = tuple(self.edits or ())
+        if (not steps and isinstance(self.edit, dict) and "op" not in self.edit
+                and isinstance(self.edit.get("edits"), list)):
+            # The compound form itself, as a refusal or a record shows it.
+            steps = tuple(self.edit["edits"])
+        if not steps:
+            return
+        if len(steps) == 1:
+            object.__setattr__(self, "edit", steps[0])
+            object.__setattr__(self, "edits", ())
+            return
+        object.__setattr__(self, "edits", steps)
+        object.__setattr__(self, "edit", {"edits": list(steps)})
+
+    @property
+    def steps(self) -> list[Any]:
+        """The edits to apply, in order: ``edits`` for a compound proposal, else ``[edit]``."""
+        return list(self.edits) if self.edits else [self.edit]
 
     def summary(self) -> str:
-        return f"{self.edit.get('op')}: {self.rationale or self.prediction}".strip()
+        ops = "+".join(str(step.get("op") if isinstance(step, dict) else step)
+                       for step in self.steps)
+        return f"{ops}: {self.rationale or self.prediction}".strip()
+
+
+def _at(reason: str, index: int, steps: Sequence[Any]) -> str:
+    """``reason``, naming which edit of a compound proposal it is about.
+
+    A single edit's reason is unchanged. The rule's code stays the first word, so a
+    refusal histogram counts a compound proposal's refusals with everyone else's.
+    """
+    if len(steps) <= 1:
+        return reason
+    step = steps[index]
+    op = step.get("op") if isinstance(step, dict) else type(step).__name__
+    return f"{reason} [edit {index + 1} of {len(steps)}: {op}]"
+
+
+def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = None,
+                     max_edits: int | None = None) -> list[str]:
+    """Why a proposal is refused before any edit is applied; empty when it is not.
+
+    Too many edits (``E-too-many-edits``), an edit that is not an object (``E-op``),
+    an op outside the catalogue, and, given ``permitted``, an op outside this run's
+    permitted edits (``E-policy``). Each refusal of a compound proposal names the
+    edit (its index, from 1) it is about.
+    """
+    steps = proposal.steps
+    if max_edits is not None and len(steps) > max(1, int(max_edits)):
+        return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and this run "
+                f"allows at most {max(1, int(max_edits))} per proposal "
+                "(max_edits_per_proposal); split it, or keep the edits the fix needs together"]
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            return [_at(f"E-op: an edit is a JSON object naming its op, not "
+                        f"{type(step).__name__} {step!r}"[:300], index, steps)]
+        refused = nn_edits.unknown(step.get("op"))
+        if refused is not None:
+            return [_at(refused, index, steps)]
+        if permitted is not None and step.get("op") not in permitted:
+            return [_at("E-policy: operation is outside this run's permitted edits",
+                        index, steps)]
+    return []
 
 
 @dataclass(frozen=True)
@@ -246,6 +322,10 @@ class Candidate:
     #: candidate (not on the edit dict) so it is journaled, survives stop+resume,
     #: and does not leak into optimizer prompts.
     edit_reports: list[dict[str, Any] | None] = field(default_factory=list)
+    #: How many of the last ``edits`` the proposal that made this candidate added: 1
+    #: for a single edit, the list's length for a compound proposal (``Proposal.edits``),
+    #: 0 for the seed. ``own_edits()`` is that tail.
+    step_edits: int = 1
     #: The score the search compares: the evaluator's number minus the run's size
     #: cost. Set by the loop, which is the only place the cost is known.
     score: float | None = None
@@ -269,11 +349,18 @@ class Candidate:
         parent: str | None = None,
         edits: Iterable[dict[str, Any]] = (),
         edit_reports: Iterable[dict[str, Any] | None] = (),
+        step_edits: int = 1,
     ) -> "Candidate":
         return cls(
             id=candidate_id(state), parent=parent, state=state,
-            edits=list(edits), edit_reports=list(edit_reports),
+            edits=list(edits), edit_reports=list(edit_reports), step_edits=int(step_edits),
         )
+
+    def own_edits(self) -> list[dict[str, Any]]:
+        """The edits the proposal that made this candidate applied to its parent, in
+        order: one for a single edit, all of a compound proposal's."""
+        count = min(len(self.edits), max(0, int(self.step_edits)))
+        return list(self.edits[len(self.edits) - count:]) if count else []
 
     def is_structural(self) -> bool:
         return any(nn_edits.is_macro(edit.get("op", "")) or edit.get("op") in (
@@ -389,6 +476,10 @@ class ProposalContext:
     #: The proposal attempt within this generation (``Loop.propose`` and
     #: ``Optimizer.propose_valid`` count from 1).
     attempt: int = 0
+    #: How many edits one proposal may bundle (``Proposal.edits``;
+    #: ``LoopConfig.max_edits_per_proposal``). 1 asks for single edits only, and the
+    #: request does not mention bundling.
+    max_edits: int = 1
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -530,6 +621,8 @@ class ProposalContext:
                 _table(["reasons"], [[r] for r in self.rejections[-12:]]),
             ]
         sections += ["", "## Answer", ANSWER_INSTRUCTIONS]
+        if self.max_edits > 1:
+            sections += ["", bundle_instructions(self.max_edits)]
         return "\n".join(sections)
 
 
@@ -552,6 +645,24 @@ Rules:
   you expect and how you could be wrong.
 - If the evidence justifies no change, return an empty proposal list and say why.
 """
+
+
+def bundle_instructions(max_edits: int) -> str:
+    """How a proposal bundles edits, said only when the run allows more than one."""
+    return f"""\
+Bundling: when one fix needs coordinated changes -- several steps' prompts that have
+to agree, or a new node and the knob that feeds it -- one proposal may carry up to
+{max_edits} edits as an ordered list under "edits" instead of "edit". They are applied in
+order to the same parent, each to the state the one before it left, and the result is
+evaluated and judged once as one candidate; if any edit is refused, the whole proposal
+is, and the refusal names the edit. Bundle only what belongs to one idea: separate
+ideas go in separate proposals, so each is judged on its own. Example:
+
+{{"proposals": [{{"edits": [{{"op": "set_knob", "name": "<step A's prompt knob>", "value": "<text>"}},
+                           {{"op": "set_knob", "name": "<step B's prompt knob>", "value": "<text>"}}],
+                "rationale": "<why these changes only work together>",
+                "prediction": "<expected effect on the score>",
+                "confidence": 0.0}}]}}"""
 
 
 #: How many error causes and wrong answers the item summary lists, and how much of
@@ -1148,6 +1259,10 @@ class Optimizer:
     #: ``<run root>/optimizer_trace.jsonl``); ``None`` records nothing.
     trace_path: Any = None
 
+    #: The most edits one proposal may bundle (``Proposal.edits``); more is refused
+    #: with ``E-too-many-edits``. The loop sets it from ``max_edits_per_proposal``.
+    max_edits: int = DEFAULT_MAX_EDITS
+
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         """Model-using optimizers override this to inherit the run's resources."""
 
@@ -1279,7 +1394,7 @@ class Optimizer:
                 else:
                     rejection = Rejection(
                         attempt=attempt,
-                        edit=proposal.edit,
+                        edit=proposal.edit,  # {"edits": [...]} for a compound proposal
                         reasons=outcome,
                         rationale=proposal.rationale,
                     )
@@ -1321,31 +1436,33 @@ class Optimizer:
         search added may run with tools only with ``allow_new_node_tools``
         (``E-new-node-tools``).
         """
-        if not isinstance(proposal.edit, dict):
-            return [f"E-op: an edit is a JSON object naming its op, not "
-                    f"{type(proposal.edit).__name__} {proposal.edit!r}"[:300]]
+        steps = proposal.steps
+        refusal = proposal_refusal(proposal, max_edits=self.max_edits)
+        if refusal:
+            return refusal
         frozen = set(frozen or ())
-        if proposal.edit.get("op") == "set_knob" and proposal.edit.get("name") in frozen:
-            return [
-                f"E-frozen: knob {proposal.edit.get('name')!r} is frozen for this run"
-            ]
-        # An operation that is not in the catalogue is not a failed precondition: the
-        # two are told apart because they point at different fixes, and calling every
-        # refusal a precondition failure hides which one the catalogue is causing.
-        refused = nn_edits.unknown(proposal.edit.get("op"))
-        if refused is not None:
-            return [refused]
-        reason = nn_edits.precheck(proposal.edit, parent.state)
-        if reason:
-            return [f"E-precondition: {reason}"]
-        edit_reports: list[dict[str, Any]] = []
-        try:
-            state = nn_edits.apply(proposal.edit, parent.state, edit_reports=edit_reports,
-                                   protected=protected)
-        except nn_edits.EditError as exc:
-            return [f"{exc.code}: {exc}"]
-        except Exception as exc:  # an operator bug is reported, not swallowed
-            return [f"E-internal: {type(exc).__name__}: {exc}"]
+        # A compound proposal's edits go through the same checks one by one, each
+        # against the state the edits before it left; the combined state is then held
+        # to every rule below once, as one candidate.
+        state = parent.state
+        edit_reports: list[dict[str, Any] | None] = []
+        for index, edit in enumerate(steps):
+            if edit.get("op") == "set_knob" and edit.get("name") in frozen:
+                return [_at(f"E-frozen: knob {edit.get('name')!r} is frozen for this run",
+                            index, steps)]
+            # An operation that is not in the catalogue is not a failed precondition
+            # (`proposal_refusal` refuses it): the two point at different fixes.
+            reason = nn_edits.precheck(edit, state)
+            if reason:
+                return [_at(f"E-precondition: {reason}", index, steps)]
+            reports: list[dict[str, Any]] = []
+            try:
+                state = nn_edits.apply(edit, state, edit_reports=reports, protected=protected)
+            except nn_edits.EditError as exc:
+                return [_at(f"{exc.code}: {exc}", index, steps)]
+            except Exception as exc:  # an operator bug is reported, not swallowed
+                return [_at(f"E-internal: {type(exc).__name__}: {exc}", index, steps)]
+            edit_reports.append(reports[0] if reports else None)
 
         # ── tool-policy escalation check (anchored to the original seed) ──
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
@@ -1367,8 +1484,10 @@ class Optimizer:
             # already holds, or re-adding a node that is already there. Accepting it
             # would spend a batch slot re-evaluating a point already scored, and the
             # search would look productive while making no progress.
+            what = (str(steps[0].get("op")) if len(steps) == 1
+                    else f"the {len(steps)} edits together")
             return [
-                f"E-noop: {proposal.edit.get('op')} leaves the state identical to its "
+                f"E-noop: {what} leaves the state identical to its "
                 "parent, so it would re-evaluate a candidate already scored"
             ]
 
@@ -1389,14 +1508,14 @@ class Optimizer:
         if unlowerable:
             return [unlowerable]
         # Build the per-edit report list parallel to edits.  Parent reports
-        # are carried forward; the new report (if any) is appended.
+        # are carried forward; one report (or None) per applied edit is appended.
         parent_reports = list(parent.edit_reports) if parent.edit_reports else [
             None for _ in parent.edits
         ]
-        new_report = edit_reports[0] if edit_reports else None
         return Candidate.from_state(
             state,
             parent=parent.id,
-            edits=[*parent.edits, proposal.edit],
-            edit_reports=[*parent_reports, new_report],
+            edits=[*parent.edits, *steps],
+            edit_reports=[*parent_reports, *edit_reports],
+            step_edits=len(steps),
         )

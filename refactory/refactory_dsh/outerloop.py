@@ -44,7 +44,7 @@ from typing import Any, Callable, Iterable, Sequence
 import structlog
 
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, Rejection
-from refactory_dsh.optim.base import summarise_reasons
+from refactory_dsh.optim.base import proposal_refusal, summarise_reasons
 
 log = structlog.get_logger()
 
@@ -92,23 +92,13 @@ class Run:
 
     # ── the cheap primitive ────────────────────────────────────────────────
     def attempt(self, proposal: Proposal, parent: Candidate) -> Candidate | list[str]:
-        """Apply a typed edit and validate it. Spends no budget."""
-        from refactory_dsh.nn import edits
-        if not isinstance(proposal.edit, dict):
-            reason = [f"E-op: an edit is a JSON object naming its op, not "
-                      f"{type(proposal.edit).__name__}"]
-            self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
-            return reason
-        op_name = proposal.edit.get("op")
+        """Apply a typed edit -- or a compound proposal's edits, in order, as one
+        candidate -- and validate it. Spends no budget."""
         # Unknown and unpermitted are two facts with two fixes; see Loop._refinement.
-        refused = edits.unknown(op_name)
-        if refused is not None:
-            reason = [refused]
-            self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
-            return reason
-        allowed = self._loop.permitted_ops()
-        if op_name not in allowed:
-            reason = ["E-policy: operation is outside this run's permitted edits"]
+        reason = proposal_refusal(
+            proposal, permitted=self._loop.permitted_ops(),
+            max_edits=getattr(self._loop.config, "max_edits_per_proposal", None))
+        if reason:
             self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
             return reason
         outcome = self._loop.optimizer.attempt(

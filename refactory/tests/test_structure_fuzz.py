@@ -7,6 +7,11 @@
   a spine run beside the walker on a sample of the accepted states. Set
   ``STRUCTURE_FUZZ_EDITS`` and ``STRUCTURE_FUZZ_SEEDS`` to change its size, and
   ``STRUCTURE_FUZZ_REPORT`` to a path for its counts as JSON.
+- **Compound proposals** (quick tier every run, and in the long tier): walks where some
+  steps are lists of 2-4 mixed edits applied as one candidate (``Fuzzer(compound=...)``);
+  every accepted combined state keeps every invariant, and each bundle keeps the
+  ``compound`` invariant (applied in order, all edits recorded, a refusal naming the
+  edit that failed). ``STRUCTURE_FUZZ_COMPOUND`` sets the long tier's share.
 - **Regression corpus** (every run): each minimal case the harness ever found
   (``fixtures/structure_fuzz``) replays clean: refused, or accepted and sound.
 - **Mutation checks**: each invariant's protection is switched off in turn, and the
@@ -31,6 +36,8 @@ validate_mod = importlib.import_module("refactory_dsh.nn.validate")
 
 QUICK_SEED = 20261107
 QUICK_EDITS = 300
+#: The share of compound proposals in the compound tiers.
+COMPOUND_SHARE = 0.5
 
 
 def _report(stats: sf.Stats) -> str:
@@ -88,17 +95,62 @@ def test_quick_tier_every_accepted_edit_is_sound():
     assert not stats.findings, _report(stats)
 
 
+def test_the_compound_generator_mixes_every_kind_of_edit():
+    """Lists of 2-4 edits, now and then one too many; text edits as values and patches;
+    node copies followed by their own prompt knob; structure edits; malformed ones."""
+    import random
+
+    sizes: set[int] = set()
+    kinds: set[str] = set()
+    for name, seed in sorted(sf.seeds().items()):
+        generator = sf.EditGenerator(random.Random(f"compound:{name}"))
+        state = seed.state()
+        for _ in range(120):
+            edits = generator.compound(state)["edits"]
+            sizes.add(len(edits))
+            added: set[str] = set()
+            for edit in edits:
+                if not isinstance(edit, dict) or edit.get("op") not in edits_mod.names():
+                    kinds.add("malformed")
+                    continue
+                if edit["op"] == "set_knob":
+                    kinds.add("patch" if "patch" in edit else "value")
+                    if str(edit.get("name")).removesuffix("__system_prompt") in added:
+                        kinds.add("new node's prompt knob")
+                elif edit["op"] in ("insert_after", "insert_before", "add_node", "wrap"):
+                    added.add(str((edit.get("node") or {}).get("id")))
+                    kinds.add("structure")
+                else:
+                    kinds.add("structure")
+    assert {2, 3, 4} <= sizes and max(sizes) > base_mod.DEFAULT_MAX_EDITS
+    assert kinds == {"malformed", "patch", "value", "new node's prompt knob", "structure"}, kinds
+
+
+def test_quick_compound_tier_every_accepted_bundle_is_sound():
+    stats = sf.Fuzzer(QUICK_SEED, walker=True, compound=COMPOUND_SHARE).run(QUICK_EDITS)
+    summary = stats.summary()["compound"]
+    assert summary["accepted"] > 20, _report(stats)
+    assert summary["refusals_naming_the_edit"] > 0, _report(stats)
+    assert "E-too-many-edits" in summary["refused"], _report(stats)
+    assert not stats.findings, _report(stats)
+
+
 @pytest.mark.structure_fuzz_long
 @needs_spine
 def test_long_tier_every_accepted_edit_is_sound(tmp_path):
     edits = int(os.environ.get("STRUCTURE_FUZZ_EDITS", "4000"))
     seeds = [int(s) for s in os.environ.get("STRUCTURE_FUZZ_SEEDS", "1,2").split(",")]
+    share = float(os.environ.get("STRUCTURE_FUZZ_COMPOUND", str(COMPOUND_SHARE)))
     totals: list[dict] = []
     findings: list[sf.Finding] = []
     for seed in seeds:
         stats = sf.Fuzzer(seed, walker=True, spine_every=12).run(edits)
         totals.append({"seed": seed, **stats.summary()})
         findings += stats.findings
+        if share:
+            stats = sf.Fuzzer(seed, walker=True, spine_every=12, compound=share).run(edits)
+            totals.append({"seed": seed, "compound_share": share, **stats.summary()})
+            findings += stats.findings
     report = os.environ.get("STRUCTURE_FUZZ_REPORT")
     if report:
         Path(report).write_text(json.dumps({
@@ -137,9 +189,9 @@ def test_regression_corpus_case_replays_clean_on_the_spine_too(case):
 
 
 def _finds(invariant: str, *, seeds: tuple[str, ...], edits: int = 2500, walker: bool = False,
-           spine_every: int = 0, seed: int = 3) -> sf.Stats:
+           spine_every: int = 0, seed: int = 3, compound: float = 0.0) -> sf.Stats:
     stats = sf.Fuzzer(seed, seed_names=seeds, walker=walker, spine_every=spine_every,
-                      shrink=False, stop_on=invariant).run(edits)
+                      shrink=False, stop_on=invariant, compound=compound).run(edits)
     assert stats.violations[invariant] > 0, _report(stats)
     return stats
 
@@ -201,6 +253,46 @@ def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
 def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
     monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, allowed: [])
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
+
+
+def test_mutation_compound_refusal_without_the_index_is_caught(monkeypatch):
+    monkeypatch.setattr(base_mod, "_at", lambda reason, index, steps: reason)
+    _finds("compound", seeds=("fuzz_dataflow", "livemath_skill_graph"), edits=600,
+           compound=COMPOUND_SHARE)
+
+
+def test_mutation_compound_applying_only_the_first_edit_is_caught(monkeypatch):
+    monkeypatch.setattr(base_mod.Proposal, "steps", property(
+        lambda self: (list(self.edits) if self.edits else [self.edit])[:1]))
+    _finds("compound", seeds=("fuzz_dataflow", "livemath_skill_graph"), edits=600,
+           compound=COMPOUND_SHARE)
+
+
+def test_mutation_compound_combined_state_unvalidated_is_caught(monkeypatch):
+    """Validate only a bundle's first edit's state, not the combined one: the
+    invariants on the combined state notice."""
+    original = base_mod.Optimizer.attempt
+
+    def first_only(self, proposal, parent, invariants, *args, **kwargs):  # type: ignore[no-untyped-def]
+        outcome = original(self, base_mod.Proposal(edit=proposal.steps[0], parent=proposal.parent),
+                           parent, invariants, *args, **kwargs)
+        if not isinstance(outcome, base_mod.Candidate) or len(proposal.steps) == 1:
+            return outcome
+        state = outcome.state
+        for edit in proposal.steps[1:]:
+            try:
+                state = edits_mod.apply(edit, state)
+            except Exception:  # noqa: BLE001
+                return ["E-precondition: mutated"]
+        return base_mod.Candidate.from_state(state, parent=parent.id,
+                                             edits=[*parent.edits, *proposal.steps],
+                                             step_edits=len(proposal.steps))
+
+    monkeypatch.setattr(base_mod.Optimizer, "attempt", first_only)
+    stats = sf.Fuzzer(3, seed_names=("fuzz_dataflow", "livemath_skill_graph"), walker=False,
+                      shrink=False, compound=COMPOUND_SHARE).run(800)
+    spec = {k: v for k, v in stats.violations.items() if k != "compound"}
+    assert spec, _report(stats)
 
 
 # ── the rules the harness's findings put in place ─────────────────────────
@@ -309,6 +401,29 @@ def test_v15_lets_a_slot_inside_an_if_on_its_name_be_optional():
 def test_mutation_required_without_the_required_read_rule_is_caught(monkeypatch):
     monkeypatch.setattr(validate_mod, "required_read_issues", lambda graph: [])
     _finds("required", seeds=("livemath_skill_graph", "fuzz_dataflow"), walker=True)
+
+
+@pytest.mark.parametrize("how", ["prompt", "guarded prompt", "system prompt", "feedback_keys"])
+def test_v15_refuses_an_agent_that_reads_the_graded_records(how):
+    """``item_scores`` holds a data pass's graded records, expected answers included: an
+    agent after the pass that filled it into a prompt was sent the answers (found by the
+    compound long tier). However it asks for it, the agent is refused."""
+    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    seed = sf.Candidate.from_state(applier.seed_state)
+    node = {"id": "peek", "kind": "agent", "role": "solver", "writes": ["peek.txt"],
+            "prompt_template": "Look again.", "system_prompt_template": "You look."}
+    if how == "prompt":
+        node["prompt_template"] = "Look at {{item_scores}}."
+    elif how == "guarded prompt":
+        node["prompt_template"] = "{% if item_scores %}Look at {{ item_scores }}.{% endif %}"
+    elif how == "system prompt":
+        node["system_prompt_template"] = "You know {{item_scores}}."
+    else:
+        node["feedback_keys"] = ["item_scores"]
+    outcome = applier.attempt(seed, {"op": "add_node", "node": node,
+                                     "position": {"terminal": True}}, {seed.id})
+    assert isinstance(outcome, list) and any(
+        r.startswith("V15") and "item_scores" in r for r in outcome), outcome
 
 
 def test_required_reads_are_a_subset_of_an_op_or_gates_reads():

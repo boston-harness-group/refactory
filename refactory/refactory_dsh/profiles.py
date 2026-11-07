@@ -84,6 +84,13 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("allow_new_node_tools") not in (True, False, 0, 1, None):
         raise ProfileError("allow_new_node_tools must be true or false (1 or 0 on the command line)")
     result["allow_new_node_tools"] = bool(result.get("allow_new_node_tools"))
+    # fresh_evidence: a switch; the command line passes it as 0 or 1.
+    if result.get("fresh_evidence") not in (True, False, 0, 1):
+        raise ProfileError("fresh_evidence must be true or false (1 or 0 on the command line)")
+    result["fresh_evidence"] = bool(result.get("fresh_evidence"))
+    max_edits = result.get("max_edits_per_proposal")
+    if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
+        raise ProfileError("max_edits_per_proposal must be a positive integer (1 is single edits)")
     minibatch = result.get("train_minibatch")
     if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
@@ -271,7 +278,8 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
         "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
-        "early_stop_patience", "early_stop_at_full_val", "train_minibatch")}
+        "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
+        "fresh_evidence", "max_edits_per_proposal")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):

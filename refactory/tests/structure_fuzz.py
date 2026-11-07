@@ -21,6 +21,19 @@ invariants below, each a promise the optimizer's results depend on:
                 exactly the branch ends that lead to it;
 - ``protected`` the mode's protected nodes are as the seed declared them.
 
+With ``compound`` > 0 some steps of a walk are *compound proposals* (``Proposal.edits``):
+an ordered list of 2-4 mixed edits -- text ``set_knob`` (whole value or ``patch``),
+structure macros and primitives, node copies and then their own prompt knobs, now and
+then a malformed one or one too many -- applied as one candidate through the same
+attempt path. Every accepted combined state is checked against every invariant above,
+and the ``compound`` invariant checks the bundle itself:
+
+- ``compound``  an accepted bundle is exactly its edits applied in order and records
+                all of them (``Candidate.own_edits``); a refused one names the edit
+                that fails on its own (``[edit k of n``: the first not an object or not
+                in the catalogue, else the first whose precheck or apply fails in
+                order), and a refusal of the combined state names none.
+
 A violation is a bug. `Fuzzer` shrinks it to a minimal case (the seed's name and the
 accepted edits that reach it) and `save_case` writes it to the regression corpus
 (``fixtures/structure_fuzz``), which `test_structure_fuzz` replays on every run.
@@ -45,7 +58,9 @@ from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
-from refactory_dsh.optim.base import _node_spec, reason_code
+from refactory_dsh.optim.base import (
+    DEFAULT_MAX_EDITS, _node_spec, proposal_refusal, reason_code,
+)
 
 import structure_fuzz_graphs as fg
 
@@ -118,14 +133,16 @@ class Applier:
         self.optimizer = Optimizer()
 
     def attempt(self, parent: Candidate, edit: Any, seen: set[str]) -> Candidate | list[str]:
-        """`Run.attempt`'s checks, then `Optimizer.attempt` with this mode's protection."""
-        if not isinstance(edit, dict):
-            return self.optimizer.attempt(Proposal(edit=edit), parent, self.invariants, True)
-        refused = nn_edits.unknown(edit.get("op"))
-        if refused is not None:
-            return [refused]
+        """`Run.attempt`'s checks, then `Optimizer.attempt` with this mode's protection.
+
+        ``edit`` is one edit, or a compound proposal in its ``{"edits": [...]}`` form.
+        """
+        proposal = Proposal(edit=edit, parent=parent.id)
+        refused = proposal_refusal(proposal, max_edits=DEFAULT_MAX_EDITS)
+        if refused:
+            return refused
         return self.optimizer.attempt(
-            Proposal(edit=edit, parent=parent.id), parent, self.invariants, True, (),
+            proposal, parent, self.invariants, True, (),
             sorted(seen), seed_state=self.seed_state, protected=self.protected,
         )
 
@@ -990,6 +1007,79 @@ class EditGenerator:
             return {"op": "add_node", "node": {**node, "id": some}, "position": {"after": some}}
         return {"op": "remove_edge", "source": some, "target": rng.choice(ids) if ids else "y"}
 
+    def text_knob_edit(self, state: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+        """A text ``set_knob``: a whole new value, or a ``patch`` of text edits."""
+        rng = self.rng
+        knobs = state.get("knobs") or {}
+        texts = sorted(k for k, v in knobs.items() if (v.get("spec") or {}).get("kind") == "str")
+        if name is None:
+            if not texts:
+                return {"op": "set_knob", "name": "ghost", "value": "x"}
+            name = rng.choice(texts)
+        self.counter += 1
+        current = str((knobs.get(name) or {}).get("value") or "")
+        form = rng.random()
+        if form < 0.4:
+            return {"op": "set_knob", "name": name, "value": f"{current}\nCompound edit {self.counter}."}
+        if form < 0.7 or not current.strip():
+            return {"op": "set_knob", "name": name,
+                    "patch": [{"kind": "append", "content": f"Also check step {self.counter}."}]}
+        start = rng.randrange(max(1, len(current) - 12))
+        target = current[start:start + rng.choice((6, 12))]
+        kind = rng.choice(("replace", "insert_after", "insert_before", "delete"))
+        item = {"kind": kind, "target": target}
+        if kind != "delete":
+            item["content"] = f" (revised {self.counter}) "
+        return {"op": "set_knob", "name": name, "patch": [item]}
+
+    def compound(self, state: dict[str, Any]) -> dict[str, Any]:
+        """A compound proposal: 2-4 mixed edits, each made against the state the ones
+        before it leave (when they apply), so later edits can use what earlier ones
+        added -- a copied node's own prompt knob above all. Now and then one edit is
+        malformed, or the list is one longer than the run allows."""
+        rng = self.rng
+        size = rng.choice((2, 2, 3, 3, 4))
+        if rng.random() < 0.04:
+            size = DEFAULT_MAX_EDITS + 1
+        edits: list[Any] = []
+        current = state
+        new_agents: list[str] = []
+        for _ in range(size):
+            roll = rng.random()
+            if new_agents and roll < 0.6:
+                edit = self.text_knob_edit(current, f"{new_agents.pop()}__system_prompt")
+            elif roll < 0.4:
+                edit = self.text_knob_edit(current)
+            elif roll < 0.6 and _graph_of(current).nodes:
+                target = rng.choice(sorted(_graph_of(current).nodes))
+                agents = sorted(n for n, node in _graph_of(current).nodes.items()
+                                if node.kind == "agent")
+                if agents:
+                    source = rng.choice(agents)
+                    node = _rendered_copy(current, source)
+                    node["id"] = self.fresh_id(_graph_of(current), f"{source}_c")
+                    node["system_prompt_template"] = f"You are copy {node['id']}."
+                    node["writes"] = [f"{node['id']}.txt"]
+                    node["produces"] = [f"{node['id']}_fact"]
+                    edit = {"op": rng.choice(("insert_after", "insert_before")),
+                            "target": target, "node": node}
+                else:
+                    edit = self.edit(current)
+            elif roll < 0.67:
+                edit = self.malformed(current)
+            else:
+                edit = self.edit(current)
+            edits.append(edit)
+            try:
+                after = nn_edits.apply(edit, current)
+            except Exception:  # noqa: BLE001 - the attempt path refuses it; keep generating
+                continue
+            if isinstance(edit, dict):
+                added = sorted(set(_graph_of(after).nodes) - set(_graph_of(current).nodes))
+                new_agents += [n for n in added if f"{n}__system_prompt" in (after.get("knobs") or {})]
+            current = after
+        return {"edits": edits}
+
     def edit(self, state: dict[str, Any]) -> Any:
         rng, graph = self.rng, _graph_of(state)
         if rng.random() < 0.08:
@@ -1081,6 +1171,11 @@ class Stats:
     spine_runs: int = 0
     findings: list[Finding] = field(default_factory=list)
     notes: Counter = field(default_factory=Counter)
+    compound_tried: int = 0
+    compound_accepted: int = 0
+    compound_refused: Counter = field(default_factory=Counter)
+    #: Compound refusals that named the edit that failed (``[edit k of n``).
+    compound_named: int = 0
 
     def summary(self) -> dict[str, Any]:
         observed = {k: v for k, v in self.violations.items() if k in OBSERVED or k == "attempt"}
@@ -1092,6 +1187,9 @@ class Stats:
                 "spec": dict(sorted(spec.items())),
                 "notes": dict(sorted(self.notes.items())),
                 "walker_runs": self.walker_runs, "spine_runs": self.spine_runs,
+                "compound": {"tried": self.compound_tried, "accepted": self.compound_accepted,
+                             "refused": dict(sorted(self.compound_refused.items())),
+                             "refusals_naming_the_edit": self.compound_named},
                 "findings": len(self.findings)}
 
 
@@ -1100,7 +1198,8 @@ class Fuzzer:
 
     def __init__(self, seed: int, *, seed_names: tuple[str, ...] | None = None,
                  walk_length: int = 12, walker: bool = True, spine_every: int = 0,
-                 shrink: bool = True, stop_on: str | None = None) -> None:
+                 shrink: bool = True, stop_on: str | None = None,
+                 compound: float = 0.0) -> None:
         self.seed = seed
         self.seeds = {name: s for name, s in seeds().items()
                       if seed_names is None or name in seed_names}
@@ -1110,6 +1209,8 @@ class Fuzzer:
         self.shrink = shrink
         #: Stop once a violation of this invariant is found (the mutation checks).
         self.stop_on = stop_on
+        #: The share of a walk's steps that are compound proposals (0 is none).
+        self.compound = compound
         self.stats = Stats()
 
     def run(self, edits: int) -> Stats:
@@ -1133,14 +1234,26 @@ class Fuzzer:
         for _ in range(self.walk_length):
             if self.stats.tried >= budget or self._stopped():
                 return
-            edit = generator.edit(current.state)
+            bundle = bool(self.compound) and rng.random() < self.compound
+            edit = generator.compound(current.state) if bundle else generator.edit(current.state)
             self.stats.tried += 1
+            self.stats.compound_tried += int(bundle)
             try:
                 outcome = applier.attempt(current, edit, seen)
             except Exception as exc:  # noqa: BLE001 - the attempt path must never raise
                 self._record(seed, applier, [*accepted, edit],
                              [Violation("attempt", f"raised {type(exc).__name__}: {exc}")])
                 continue
+            if bundle:
+                wrong = check_compound(applier, current, edit["edits"], outcome)
+                if isinstance(outcome, list) and outcome:
+                    self.stats.compound_refused[reason_code(outcome[0])] += 1
+                    self.stats.compound_named += int("[edit " in outcome[0])
+                else:
+                    self.stats.compound_accepted += int(not isinstance(outcome, list))
+                if wrong:
+                    self._record(seed, applier, [*accepted, edit], wrong, minimize=False)
+                    return
             if isinstance(outcome, list):
                 code = reason_code(outcome[0]) if outcome else "?"
                 self.stats.refused[code] += 1
@@ -1167,12 +1280,65 @@ class Fuzzer:
         return self.stop_on is not None and self.stats.violations[self.stop_on] > 0
 
     def _record(self, seed: Seed, applier: Applier, edits: list[Any],
-                found: list[Violation], *, spine: bool = False) -> None:
+                found: list[Violation], *, spine: bool = False, minimize: bool = True) -> None:
         for violation in found:
             self.stats.violations[violation.invariant] += 1
-        if self.shrink:
+        if self.shrink and minimize:
             edits = shrink(applier, edits, found[0].invariant, spine=spine)
         self.stats.findings.append(Finding(seed.name, edits, found))
+
+
+def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
+                   ) -> tuple[int | None, dict[str, Any]]:
+    """The index of the edit that fails on its own, and the state the edits reach when
+    none does. As the attempt path checks them: every edit's shape and op first (not an
+    object, not in the catalogue), then each in order against the state the ones before
+    it left (precheck, apply)."""
+    state = parent.state
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
+            return index, state
+    for index, edit in enumerate(edits):
+        if nn_edits.precheck(edit, state):
+            return index, state
+        try:
+            state = nn_edits.apply(edit, state, protected=applier.protected)
+        except nn_edits.EditError:
+            return index, state
+    return None, state
+
+
+def check_compound(applier: Applier, parent: Candidate, edits: list[Any],
+                   outcome: Candidate | list[str]) -> list[Violation]:
+    """The ``compound`` invariant for one bundle and what the attempt path made of it."""
+    if len(edits) > DEFAULT_MAX_EDITS:
+        if isinstance(outcome, list) and outcome and outcome[0].startswith("E-too-many-edits"):
+            return []
+        return [Violation("compound", f"{len(edits)} edits were not refused as too many: "
+                                      f"{outcome if isinstance(outcome, list) else outcome.id}")]
+    failing, state = _first_failing(applier, parent, edits)
+    if isinstance(outcome, Candidate):
+        found = []
+        if failing is not None:
+            found.append(Violation("compound", f"accepted although edit {failing + 1} of "
+                                               f"{len(edits)} fails on its own"))
+        elif outcome.state != state:
+            found.append(Violation("compound", "the accepted state is not the edits applied "
+                                               "in order"))
+        if outcome.own_edits() != list(edits) or outcome.step_edits != len(edits):
+            found.append(Violation("compound", "the candidate does not record every edit of "
+                                               "its proposal"))
+        return found
+    reason = outcome[0] if outcome else ""
+    if failing is None:
+        if "[edit " in reason:
+            return [Violation("compound", f"a refusal of the combined state names an edit: "
+                                          f"{reason[:300]}")]
+        return []
+    if f"[edit {failing + 1} of {len(edits)}:" not in reason:
+        return [Violation("compound", f"edit {failing + 1} of {len(edits)} fails on its own, "
+                                      f"but the refusal does not name it: {reason[:300]}")]
+    return []
 
 
 def violations_of(applier: Applier, edits: list[Any], *, spine: bool = False,
