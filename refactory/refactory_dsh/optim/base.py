@@ -515,6 +515,12 @@ class ProposalContext:
     #: ``LoopConfig.max_edits_per_proposal``). 1 asks for single edits only, and the
     #: request does not mention bundling.
     max_edits: int = 1
+    #: The run's size cost per node (``LoopConfig.parsimony``), stated in the answer
+    #: rules with what it means in score units; ``None`` says nothing about it.
+    parsimony: float | None = None
+    #: Whether the score is the mean of the items' scores (``Loop`` checks every train
+    #: evaluation); only then does the size cost line compare a node with one item.
+    score_is_item_mean: bool = False
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -574,13 +580,7 @@ class ProposalContext:
                    [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
                     for c in self.catalogue]),
             "",
-            "## Blocks you may insert",
-            "Use these node objects verbatim in an `insert_after`/`insert_before`/"
-            "`wrap`/`split` edit, changing nothing but their `id`:",
-            "```json",
-            json.dumps(self.insertable, indent=2, default=str),
-            "```",
-            "",
+            *_blocks_section(self.insertable, self.catalogue),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
@@ -655,35 +655,172 @@ class ProposalContext:
                 "nothing but the answer, so fix the stated reason rather than guessing.",
                 _table(["reasons"], [[r] for r in self.rejections[-12:]]),
             ]
-        sections += ["", "## Answer", ANSWER_INSTRUCTIONS]
+        sections += ["", "## Answer", answer_instructions(
+            self.catalogue, parsimony=self.parsimony,
+            items=_item_count(self.item_records) if self.score_is_item_mean else 0)]
         if self.max_edits > 1:
-            sections += ["", bundle_instructions(self.max_edits)]
+            sections += ["", bundle_instructions(self.max_edits, self.catalogue)]
         return "\n".join(sections)
 
 
-ANSWER_INSTRUCTIONS = """\
-Write one JSON object and nothing else:
-
-{"diagnosis": "<what the evidence shows is limiting the score>",
- "proposals": [{"edit": {"op": "<operation>", ...},
-                "rationale": "<why, citing the evidence>",
-                "prediction": "<expected effect on the score>",
-                "confidence": 0.0}]}
-
-Rules:
-- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>}.
-- A structural move is one of the operations above, using the fields it lists and
-  the block objects verbatim.
-- Few well-argued changes, not many guesses. Prefer an edit whose effect you can
-  state, and vary what you touch.
-- Your prediction is recorded and later checked against the outcome, so say what
-  you expect and how you could be wrong.
-- If the evidence justifies no change, return an empty proposal list and say why.
-"""
+#: The catalogue kinds that change the pipeline's structure (``nn.edits.catalogue``).
+STRUCTURE_KINDS = ("node", "edge", "topology")
+#: Catalogue fields an example leaves out: optional for every op that has them.
+_OPTIONAL_EDIT_FIELDS = ("condition", "new_id", "patch", "config")
+#: Placeholders for the catalogue fields that name an existing step.
+_STEP_FIELDS = ("target", "id", "source", "first", "second")
 
 
-def bundle_instructions(max_edits: int) -> str:
+def structural_ops(catalogue: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The permitted operations that change the pipeline's structure."""
+    return [op for op in catalogue if op.get("kind") in STRUCTURE_KINDS]
+
+
+def example_node() -> dict[str, Any]:
+    """A new agent node for an example, from the generated node schema: its required
+    fields with placeholders, its own system prompt, and the one write a node without
+    tools declares (its reply; rule V15)."""
+    from refactory_dsh.nn.node_schema import node_schema
+
+    fill = {"id": "<new step id>", "kind": "agent", "prompt_template": "<prompt text>"}
+    node = {name: fill.get(name, f"<{name}>") for name in node_schema()["agent"]["required"]}
+    node["system_prompt_template"] = "<system prompt text>"
+    node["writes"] = ["<new step id>.txt"]
+    return node
+
+
+def _node_op(catalogue: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """The structural op an example uses: one that puts a new node after an existing
+    step (``target`` and ``node``), else any that takes a node, else any structural op."""
+    ops = structural_ops(catalogue)
+    for wanted in (lambda f: set(f) == {"target", "node"}, lambda f: "node" in f, lambda f: True):
+        for op in ops:
+            if wanted(op.get("fields") or []):
+                return op
+    return None
+
+
+def structural_example(catalogue: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """An example edit for a structural op this run permits, built from its catalogue
+    fields with placeholders; ``None`` when none is permitted."""
+    op = _node_op(catalogue)
+    if op is None:
+        return None
+    edit: dict[str, Any] = {"op": op["op"]}
+    for name in op.get("fields") or []:
+        if name in _OPTIONAL_EDIT_FIELDS:
+            continue
+        if name == "node":
+            edit[name] = example_node()
+        elif name == "position":
+            edit[name] = {"after": "<existing step id>"}
+        elif name in _STEP_FIELDS:
+            edit[name] = "<existing step id>"
+        else:
+            edit[name] = f"<{name}>"
+    return edit
+
+
+def _item_count(records: Sequence[dict[str, Any]]) -> int:
+    return len({str(record.get("id")) for record in records or ()})
+
+
+def _blocks_section(insertable: Sequence[dict[str, Any]],
+                    catalogue: Sequence[dict[str, Any]]) -> list[str]:
+    """Where a new node comes from: the mode's blocks, verbatim, when it declares any;
+    otherwise the node schema. Nothing when the run permits no structural op."""
+    if not structural_ops(catalogue):
+        return []
+    if not insertable:
+        return ["## New nodes",
+                "This mode declares no ready-made blocks. A new node is written from the node "
+                "schema above (or copied from a node's JSON under \"Each node in full\", with a "
+                "new id).", ""]
+    return ["## Blocks you may insert",
+            "Use these node objects verbatim in an edit that takes a node, changing nothing "
+            "but their `id`, or write a node from the node schema above:",
+            "```json", json.dumps(list(insertable), indent=2, default=str), "```", ""]
+
+
+def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
+                        items: int = 0) -> str:
+    """The answer format and its rules, with examples for what this run permits.
+
+    ``items`` is the number of train items when the raw score is known to be their
+    mean (0 otherwise): only then does the size cost line compare a node with one item.
+    """
+    structural = structural_example(catalogue)
+    lines = [
+        "Write one JSON object and nothing else:",
+        "",
+        '{"diagnosis": "<what the evidence shows is limiting the score>",',
+        ' "proposals": [{"edit": {"op": "<operation>", ...},',
+        '                "rationale": "<why, citing the evidence>",',
+        '                "prediction": "<expected effect on the score>",',
+        '                "confidence": 0.0}]}',
+        "",
+        "Rules:",
+        '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>}.',
+    ]
+    if structural is not None:
+        lines += [
+            "- A structural move is one of the structural operations above, with the fields it "
+            "lists. A `node` is a node object written from the node schema (or a block, or a "
+            "copy of a node's JSON, with a new id). For example:",
+            "  " + json.dumps(structural),
+            "  A new agent node gets its own `<new step id>__system_prompt` knob holding its "
+            "system prompt.",
+        ]
+    else:
+        lines.append("- This run permits parameter moves only.")
+    if parsimony:
+        size = f"- Size cost: {parsimony:g} per node (score = raw score - {parsimony:g} x nodes)"
+        if items:
+            # Said only when the raw score is the mean of the items' scores.
+            size += (f"; the raw score is the mean over the {items} train items, so one item "
+                     f"is worth 1/{items} = {1 / items:.3g}")
+        else:
+            size += "; compare it with the size of the score differences between candidates"
+        lines.append(size + ".")
+    lines += [
+        "- Few well-argued changes, not many guesses. Prefer an edit whose effect you can",
+        "  state, and vary what you touch.",
+        "- Your prediction is recorded and later checked against the outcome, so say what",
+        "  you expect and how you could be wrong.",
+        "- If the evidence justifies no change, return an empty proposal list and say why.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+#: The answer format for a run that permits every operation, as the request shows it.
+ANSWER_INSTRUCTIONS = answer_instructions(
+    [{"op": "insert_after", "kind": "topology", "fields": ["target", "node"]}])
+
+
+def bundle_examples(catalogue: Sequence[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Bundles for the example, neither kind first by privilege: two steps' prompt knobs,
+    then -- when the run also permits a structural op that takes a node and
+    ``set_knob`` -- a structural edit that adds a node and the new node's own prompt
+    knob."""
+    out = [[{"op": "set_knob", "name": "<step A's prompt knob>", "value": "<text>"},
+            {"op": "set_knob", "name": "<step B's prompt knob>", "value": "<text>"}]]
+    structural = structural_example(catalogue)
+    ops = {op.get("op") for op in catalogue}
+    if structural is not None and "node" in structural and "set_knob" in ops:
+        # The node leaves its system prompt to the knob the bundle sets.
+        node = {k: v for k, v in structural["node"].items() if k != "system_prompt_template"}
+        out.append([{**structural, "node": node},
+                    {"op": "set_knob", "name": "<new step id>__system_prompt",
+                     "value": "<system prompt text>"}])
+    return out
+
+
+def bundle_instructions(max_edits: int, catalogue: Sequence[dict[str, Any]] = ()) -> str:
     """How a proposal bundles edits, said only when the run allows more than one."""
+    example = json.dumps({"proposals": [{"edits": bundle,
+                                         "rationale": "<why these changes only work together>",
+                                         "prediction": "<expected effect on the score>",
+                                         "confidence": 0.0} for bundle in bundle_examples(catalogue)]})
     return f"""\
 Bundling: when one fix needs coordinated changes -- several steps' prompts that have
 to agree, or a new node and the knob that feeds it -- one proposal may carry up to
@@ -693,11 +830,7 @@ evaluated and judged once as one candidate; if any edit is refused, the whole pr
 is, and the refusal names the edit. Bundle only what belongs to one idea: separate
 ideas go in separate proposals, so each is judged on its own. Example:
 
-{{"proposals": [{{"edits": [{{"op": "set_knob", "name": "<step A's prompt knob>", "value": "<text>"}},
-                           {{"op": "set_knob", "name": "<step B's prompt knob>", "value": "<text>"}}],
-                "rationale": "<why these changes only work together>",
-                "prediction": "<expected effect on the score>",
-                "confidence": 0.0}}]}}"""
+{example}"""
 
 
 #: How many error causes and wrong answers the item summary lists, and how much of
