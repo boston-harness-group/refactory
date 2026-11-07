@@ -163,7 +163,7 @@ def test_a_duplicate_gets_its_own_knob_at_the_originals_value():
 
 @pytest.mark.parametrize("text, reason", [
     ("keep this\n[... 412 characters omitted ...]\nand this", "clipped text"),
-    ("Answer {{question", "without a matching"),
+    ("Answer {{question", "never closed"),
 ])
 def test_a_node_carrying_a_clipped_or_broken_text_is_refused(tmp_path, text, reason):
     copy = _rendered_node(_prompt(tmp_path), "compare")
@@ -277,3 +277,104 @@ def test_catalogue_rows_say_which_fields_take_a_node():
     assert "into: a list of two full node objects" in rows["split"]
     assert "gate: a full node object" in rows["loop"]
     assert "full node object" not in rows["bypass"]
+
+
+def test_a_prompt_with_json_braces_is_accepted(tmp_path):
+    """Nested JSON in a prompt (`}}` with no `{{`) is not a broken template slot."""
+    copy = _rendered_node(_prompt(tmp_path), "compare")
+    copy.update(id="verify", writes=["verify_notes.txt"],
+                prompt_template='{{compare_prompt}}\nReply as {"a": {"b": 1}}')
+    state = nn_edits.apply({"op": "insert_after", "target": "compare", "node": copy},
+                           SkillGraph().state_dict())
+    assert state["graph"]["nodes"]["verify"]["prompt_template"].endswith('{"b": 1}}')
+
+
+def _with_verify(tmp_path: Path) -> dict[str, Any]:
+    copy = _rendered_node(_prompt(tmp_path), "compare")
+    copy.update(id="verify", writes=["verify_notes.txt"],
+                system_prompt_template="VERIFY SYSTEM PROMPT")
+    return nn_edits.apply({"op": "insert_after", "target": "compare", "node": copy},
+                          SkillGraph().state_dict())
+
+
+def test_removing_a_node_takes_its_own_knob_and_leaves_declared_ones(tmp_path):
+    """An added node's own knob goes with it, so the id can be added again; a
+    declared knob only the removed node read stays, and setting it is refused."""
+    state = _with_verify(tmp_path)
+    removed = nn_edits.apply({"op": "bypass", "target": "verify"}, state)
+    assert "verify__system_prompt" not in removed["knobs"]
+    assert validate_state(removed, invariants=SkillGraph().invariants(), resolve_calls=True) == []
+    again = nn_edits.apply({"op": "insert_after", "target": "compare",
+                            "node": state["graph"]["nodes"]["verify"] | {"field_bindings": [],
+                            "knobs": ["max_completion_tokens"]}}, removed)
+    assert again["knobs"]["verify__system_prompt"]["value"] == "VERIFY SYSTEM PROMPT"
+
+    orphaned = nn_edits.apply({"op": "remove_node", "id": "decide_prompt"},
+                              SkillGraph().state_dict())
+    assert "decide_task" in orphaned["knobs"], "a declared knob is never dropped by an edit"
+    with pytest.raises(nn_edits.EditError, match="read by no node") as refused:
+        nn_edits.apply({"op": "set_knob", "name": "decide_task", "value": "x"}, orphaned)
+    assert refused.value.code == "E-knob"
+
+
+def test_a_new_node_may_not_bind_a_knob_another_node_reads(tmp_path):
+    """compare_task is read (not bound) by prepare-side nodes; binding it is refused."""
+    state = SkillGraph().state_dict()
+    readers = SkillGraph().graph().knob_consumers()
+    knob = "compare_task"
+    assert knob in readers, "setup: another node reads it"
+    copy = _rendered_node(_prompt(tmp_path), "compare")
+    copy.update(id="verify", writes=["verify_notes.txt"], knobs=[*copy["knobs"], knob],
+                field_bindings=[["prompt_template", knob]])
+    with pytest.raises(nn_edits.EditError, match=f"binds knob '{knob}', which node .* reads"):
+        nn_edits.apply({"op": "insert_after", "target": "compare", "node": copy}, state)
+
+
+def test_lowering_binds_an_added_agents_own_system_prompt_knob(tmp_path):
+    """The spine's graph for a state with an edit-added agent node: lowering succeeds
+    and the node's system prompt is its own knob's value."""
+    from refactory_dsh import lowering
+
+    state = _with_verify(tmp_path)
+    state = nn_edits.apply({"op": "set_knob", "name": "verify__system_prompt",
+                            "value": "TUNED VERIFY PROMPT"}, state)
+    path, _workflow = lowering.write_mode_graph(state, tmp_path / "lowered", name="verify-graph")
+    text = path.read_text()
+    assert "TUNED VERIFY PROMPT" in text
+    lowered = json.loads(text)
+    found = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("id") == "verify":
+                found.append(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(lowered)
+    nodes = [node for node in found if "kind" in node or "reads" in node]
+    assert nodes and all("TUNED VERIFY PROMPT" in json.dumps(n) and "VERIFY SYSTEM PROMPT"
+                         not in json.dumps(n) for n in nodes), nodes
+
+
+def test_the_spine_runs_an_added_agent_node(tmp_path):
+    """The real spine drain runs the edited skill_graph: the added node is called on
+    every item, and the pass completes."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_livemath_blocks import NODE, REPO_ROOT, _spine
+
+    if NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists():
+        pytest.skip("the spine drain needs Node and the installed workspace")
+    state = _with_verify(tmp_path)
+    graph = SkillGraph(state=state).graph()
+    answers = {"compare": "compare notes", "verify": "verify notes", "precision": "p notes",
+               "hypotheses": "h notes", "decide": "<answer>B</answer>"}
+    rc = _spine(graph, tmp_path / "spine", tmp_path, agent_responses=answers, mode_state=state)
+    assert rc == 0
+    records = json.loads((tmp_path / "spine" / "item_records.json").read_text())
+    assert records and all("verify" in [e.get("node") for e in r.get("exchanges") or ()]
+                           for r in records)

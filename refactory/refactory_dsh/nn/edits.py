@@ -181,6 +181,8 @@ def _position(position: Any) -> tuple[str, Any]:
 
 #: What a clipped text looks like in an optimizer's prompt (``optim.base._clip_middle``).
 _CLIP_MARKER = re.compile(r"\[\.\.\. \d+ characters omitted \.\.\.\]")
+#: A template slot opened (``{{``) and never closed before the next brace.
+_UNCLOSED_SLOT = re.compile(r"\{\{(?![^{}]*\}\})")
 
 
 def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
@@ -193,10 +195,10 @@ def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
                 f"node {node_state.get('id')!r}: {key} holds a clipped text (it contains "
                 "'[... N characters omitted ...]'); write the text yourself or edit the "
                 "knob it is bound to, rather than copying a clipped one", code="E-node-text")
-        if value.count("{{") != value.count("}}"):
+        if _UNCLOSED_SLOT.search(value):
             raise EditError(
-                f"node {node_state.get('id')!r}: {key} has a '{{{{' without a matching "
-                "'}}' (or the reverse)", code="E-node-text")
+                f"node {node_state.get('id')!r}: {key} opens a template slot '{{{{' that "
+                "is never closed with '}}'", code="E-node-text")
 
 
 def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[Node, dict[str, Any]]:
@@ -210,10 +212,13 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
     """
     owners = {knob: owner.id for owner in graph.nodes.values()
               for _field, knob in owner.field_bindings}
+    readers = graph.knob_consumers()
     for _field, knob in node.field_bindings:
-        if knob in owners:
+        if knob in owners or knob in readers:
+            other = owners.get(knob) or readers[knob][0]
+            how = "owns" if knob in owners else "reads"
             raise EditError(
-                f"new node {node.id!r} binds knob {knob!r}, which node {owners[knob]!r} owns; "
+                f"new node {node.id!r} binds knob {knob!r}, which node {other!r} {how}; "
                 f"drop field_bindings (and the knob from its knobs) -- a new agent node gets "
                 f"its own {node.id}__system_prompt knob from its system_prompt_template",
                 code="E-binding")
@@ -316,6 +321,14 @@ def _move_exits(graph: Graph, old_exit: str, new_exit: str) -> None:
 
 
 def _remove_node(state: State, edit: dict) -> State:
+    """Delete a node, and the knobs that were its own.
+
+    A node's own knobs are the ones it binds that carry its id (``<id>__...``: the
+    system-prompt knob every agent node gets, a duplicate's copies) and no remaining
+    node reads. They go with it, so the state stays valid (V7) and the same id can
+    be added again. Any other knob it alone read stays declared, and the validator
+    refuses the state, so a mode's declared knobs are never dropped by an edit.
+    """
     graph = _graph(state)
     target = _require(graph, edit.get("id"))
     del graph.nodes[target.id]
@@ -324,7 +337,12 @@ def _remove_node(state: State, edit: dict) -> State:
         # Left empty on purpose: the validator reports the missing start rather
         # than this operator choosing a successor to promote.
         graph.start = ""
-    return _finish(state, graph)
+    readers = graph.knob_consumers()
+    out = _finish(state, graph)
+    for _field, knob in target.field_bindings:
+        if knob.startswith(f"{target.id}__") and knob not in readers:
+            out["knobs"].pop(knob, None)
+    return out
 
 
 def _add_edge(state: State, edit: dict) -> State:
@@ -368,6 +386,11 @@ def _set_knob(state: State, edit: dict) -> State:
     knob = Knob.from_spec(entries[name]["spec"])
     if knob.frozen:
         raise EditError(f"knob {name!r} is frozen and cannot be moved", code="E-knob")
+    graph_state = state.get("graph") or {}
+    if graph_state.get("nodes") and name not in _graph(state).knob_consumers():
+        # Moving it would spend an evaluation on a run nothing in it can see.
+        raise EditError(f"knob {name!r} is read by no node of this graph (its node was "
+                        "removed), so setting it cannot change the run", code="E-knob")
     # One edit moves a knob, in one of two forms: the whole new value, or a patch
     # (an ordered list of text edits) to a str knob's current text.
     has_value, has_patch = "value" in edit, "patch" in edit
@@ -865,7 +888,8 @@ _primitive(
 )
 _primitive(
     "remove_node", "node",
-    "Delete a node and every edge touching it. Leaves the hole for the validator to report.",
+    "Delete a node and every edge touching it, with the knobs that were its own "
+    "(`<id>__...`, e.g. its system prompt). Leaves the hole for the validator to report.",
     ("id",), _remove_node,
 )
 _primitive(

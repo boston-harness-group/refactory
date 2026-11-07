@@ -119,12 +119,18 @@ knobs, and uses it verbatim.
 The edit layer enforces the same for every edit that adds a node (`add_node`,
 `insert_after`, `insert_before`, `wrap`, `split`, `loop`):
 
-- **No shared knobs.** A new node may not bind a knob another node binds
+- **No shared knobs.** A new node may not bind a knob another node binds or reads
   (`E-binding`), so a copy cannot silently run the original's prompt.
 - **Own prompt knob.** A new agent node gets its own `<id>__system_prompt` knob holding
   its `system_prompt_template`, as a mode's agent nodes get one when it is built.
 - **Text checks.** A node text carrying the clip marker
-  (`[... N characters omitted ...]`) or an unclosed `{{` is refused (`E-node-text`).
+  (`[... N characters omitted ...]`), or a `{{` never closed by `}}`, is refused
+  (`E-node-text`). JSON braces in a prompt are fine.
+- **Removing a node.** A removed node takes its own knobs with it: the ones it binds
+  that carry its id (`<id>__...`) and no other node reads. The state then still passes
+  V7, and the same id can be added again. A declared knob that only the removed node
+  read stays declared, so the validator refuses the state, and setting a knob no node
+  reads is refused before evaluation (`E-knob`).
 - **Duplicates.** `duplicate` gives the copy its own knob for every field the original
   binds, declared with the original knob's spec and current value.
 
