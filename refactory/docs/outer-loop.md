@@ -77,30 +77,49 @@ and `hill_climb` optimizers run with it.
 
 `ProposalContext.render()` is the request every model optimizer reads. Besides the
 counts and the error-cause and wrong-answer tables for the candidate being edited, it
-shows a sample of that candidate's **train** items in full, as SkillOpt's analysts
-read failed trajectories. Each item shows its input (the item metadata's `question`,
+shows **every** train item of that candidate in full, in every proposal request: all
+failures and all successes, never a sample. Each item shows its input (the item metadata's `question`,
 or `problem`, `task_description`, `instruction`, `input` or `prompt`, else the first
 step's prompt) and its `choices`. Then it shows each step's output from the record's
 `exchanges`, in the order the pass ran them (a fork's branches in branch order), then
 the expected answer (`label` and `label_text`), the prediction and the grader's reason.
 
-- **Budget.** Up to 8 items answered wrong and 2 that passed
-  (`TRAJECTORY_FAILED`, `TRAJECTORY_PASSED`), in a section of at most 120000
-  characters (`TRAJECTORY_SECTION_CHARS`, about what one SkillOpt analyst call reads).
-  Each text keeps its head and tail within 3000 characters (`TRAJECTORY_TEXT_CHARS`).
-  When the items do not fit, that limit shrinks for all of them, down to 600
-  (`TRAJECTORY_TEXT_FLOOR`), so ten LiveMath-sized items all show. Only if even the
-  floor does not fit are items left out, wrong ones first so the passed ones stay, and
-  the section says how many (it keeps its header and that note even when no item fits). A context can override each through its `trajectory_*`
-  fields.
-- **Sample.** Drawn with a seed from the epoch, the generation and the proposal attempt
-  (the loop counts each proposal call of a generation, a retry after a refusal
-  included), so it is reproducible and every round reads other items,
-  as SkillOpt's minibatch groups vary per step. With repeats each item is shown once,
-  from its first repeat.
+- **Order.** Items answered wrong come first, then those that failed with an error
+  and recorded step output (they are in the cause table too), then those that passed,
+  each group by id. With repeats each item is shown once, from its first repeat. An
+  item that errored before any step ran stays in the cause table only.
+- **Full detail, one call's budget.** Items are shown whole, every step output
+  unclipped. One call's evidence budget is 120000 characters (`TRAJECTORY_BUDGET`;
+  the context's `evidence_budget`). When every item fits, they all go inline into the
+  one proposal call.
+- **Readers, when they do not fit.** The items are split into as few balanced groups
+  of whole items as fit the budget, in the same order, each item in exactly one group.
+  The `autoresearch` optimizer sends each group to a reader call: the same model and
+  route, prompt in and JSON out, no edits. A reader returns failure and success
+  patterns, each with its item ids, short verbatim quotes and the step it implicates.
+  Reader calls run concurrently (`READER_CONCURRENCY`, 4) and are recorded in
+  `optimizer_trace.jsonl` with `kind: "reader"`. A retry after a refusal reuses them.
+- **What the proposal call then gets.** All the readers' findings, verbatim. Then a
+  table of every item: outcome, expected, predicted, the grader's reason, the error.
+  Then as many items in full as the rest of the budget holds, failures and passes
+  alternating. A reader call that fails is noted, with its items, and the proposal
+  goes ahead with the findings it has. An optimizer that calls no reader gets the
+  table and the items in full.
+- **Clipping.** Only an item longer than the whole budget on its own is clipped, head
+  and tail, with a note.
+- **Size.** For `livemath/skill_graph` with 35 LiveMath-sized train items (about 528k
+  characters in full): 5 reader calls of 7 items (about 106.5k characters each), then
+  one proposal call of about 123k characters. That is 6 calls, none much over 120k
+  characters (about 30k-40k tokens).
+
+"Evidence from the traces" shows the gradient without the noise. The leaderboard copy
+is already "Recent results". Per-trial worker receipts and run-directory paths
+(`measurements`, `workers`, `workdir`, `trials`) are left out wherever they appear.
+Long keys and texts, such as a text knob's value in `knob_attribution`, are shown by
+their head and length. A `measurement_summary` gives the trial runs, failures,
+timeouts and the top failure causes instead.
 - **Train only.** The records are the edited candidate's train records (the loop
-  never hands val or test records to an optimizer). An item whose run errored stays
-  in the cause table and is not shown in full.
+  never hands val or test records to an optimizer).
 
 The pipeline section also shows each node of the edited graph **in full**, as a node
 object that `add_node`, `insert_after`, `insert_before`, `wrap`, `split` and `loop` take.

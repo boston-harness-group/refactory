@@ -1333,6 +1333,7 @@ class Loop(OuterLoop):
             "scoring": self.scoring(),
             "knob_attribution": self._knob_attribution(evaluated),
             "cost": self._cost(),
+            "measurement_summary": self._measurement_summary(),
             "run_failures": self.loss.get("run_failures", []),
             "rejection_codes": self._rejection_codes(),
             "rejection_reasons": [r for rej in self.rejections[-8:] for r in rej.reasons],
@@ -1521,6 +1522,24 @@ class Loop(OuterLoop):
             "max_s": round(max(durations), 4),
             "total_s": round(sum(durations), 4),
             "inner_model_calls": calls,
+        }
+
+    def _measurement_summary(self) -> dict[str, Any]:
+        """The evaluations' trials in a few numbers, for the optimizer: how many ran,
+        how many failed, and the failures by cause. No receipts and no paths."""
+        trials = [trial for c in self._evaluated()
+                  for trial in (c.measurements or {}).get("trials") or ()]
+        causes: dict[str, int] = {}
+        for trial in trials:
+            if not trial.get("exit_ok"):
+                cause = " ".join(str(trial.get("error") or "unknown").split())[:120]
+                causes[cause] = causes.get(cause, 0) + 1
+        return {
+            "trial_runs": len(trials),
+            "failed": sum(causes.values()),
+            "timeouts": sum(n for cause, n in causes.items() if "timeout" in cause.lower()
+                            or "timed out" in cause.lower()),
+            "failures_by_cause": dict(sorted(causes.items(), key=lambda kv: -kv[1])[:6]),
         }
 
     def _rejection_codes(self) -> dict[str, int]:

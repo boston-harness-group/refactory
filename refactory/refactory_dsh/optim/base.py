@@ -31,18 +31,16 @@ from refactory_dsh.nn.validate import Invariant
 REASON_LIMIT = 12
 REASONS_PER_CODE = 2
 
-#: How the edited candidate's train trajectories are shown (``ProposalContext``):
-#: up to this many items answered wrong and passed, each in full -- its input, every
-#: step's output in the order the pass ran them, the expected answer and the
-#: prediction -- with each text clipped (head and tail) and the whole section capped. As SkillOpt's
-#: analysts see failed trajectories, so a proposal can name the failure pattern.
-TRAJECTORY_FAILED = 8
-TRAJECTORY_PASSED = 2
-TRAJECTORY_TEXT_CHARS = 3000
-#: The least each text keeps (head and tail) when the items are squeezed to fit.
-TRAJECTORY_TEXT_FLOOR = 600
-#: About what a SkillOpt analyst call reads (~124k characters).
-TRAJECTORY_SECTION_CHARS = 120000
+#: How the edited candidate's train trajectories reach the optimizer
+#: (``ProposalContext``): every train item, every proposal, at full detail -- its input,
+#: every step's output in the order the pass ran them, the expected answer and the
+#: prediction -- so a proposal can name the failure pattern and see what already works.
+#: One call's evidence budget: when every item fits it in full, they all go to the
+#: proposal call inline; when not, readers go through them in groups that each fit it,
+#: and the proposal call gets their findings, a table of every item and some in full.
+TRAJECTORY_BUDGET = 120000
+#: How many reader calls run at once.
+READER_CONCURRENCY = 4
 #: The metadata keys an item's input is read from, first found; else the first
 #: step's prompt stands in for it.
 TRAJECTORY_INPUT_KEYS = ("question", "problem", "task_description", "instruction", "input", "prompt")
@@ -317,17 +315,15 @@ class ProposalContext:
     node_states: list[dict[str, Any]] = field(default_factory=list)
     node_spec_text_chars: int = NODE_SPEC_TEXT_CHARS
     node_spec_section_chars: int = NODE_SPEC_SECTION_CHARS
-    #: The trajectory section's budget (see ``TRAJECTORY_*``). The items shown are
-    #: chosen with a seed from ``epoch`` and ``attempt``, so each round sees another
-    #: sample.
-    trajectory_failed: int = TRAJECTORY_FAILED
-    trajectory_passed: int = TRAJECTORY_PASSED
-    trajectory_text_chars: int = TRAJECTORY_TEXT_CHARS
-    trajectory_text_floor: int = TRAJECTORY_TEXT_FLOOR
-    trajectory_section_chars: int = TRAJECTORY_SECTION_CHARS
+    #: One call's evidence budget (``TRAJECTORY_BUDGET``).
+    evidence_budget: int = TRAJECTORY_BUDGET
+    #: What readers found in the items, group by group, when they did not fit one
+    #: call (``AutoresearchOptimizer``); ``None`` when no reader went through them.
+    reader_findings: list[dict[str, Any]] | None = None
+    #: The groups readers could not read, with why.
+    reader_failures: list[dict[str, Any]] = field(default_factory=list)
     #: The proposal attempt within this generation (``Loop.propose`` and
-    #: ``Optimizer.propose_valid`` count from 1), so a retry after a refusal reads
-    #: another sample of items.
+    #: ``Optimizer.propose_valid`` count from 1).
     attempt: int = 0
 
     def render(self) -> str:
@@ -398,16 +394,13 @@ class ProposalContext:
             "",
             "## Evidence from the traces",
             _table(["what", "value"],
-                   [[str(k), json.dumps(v, default=str)] for k, v in _flatten(self.traces)]),
+                   [[str(k), json.dumps(v, default=str)] for k, v in _trace_rows(self.traces)]),
         ]
         if self.item_records:
             sections += ["", *_item_evidence(self.item_records)]
             sections += ["", *_trajectories(
-                self.item_records, epoch=self.epoch, generation=self.generation,
-                attempt=self.attempt,
-                failed=self.trajectory_failed, passed=self.trajectory_passed,
-                text_chars=self.trajectory_text_chars, text_floor=self.trajectory_text_floor,
-                section_chars=self.trajectory_section_chars)]
+                self.item_records, budget=self.evidence_budget,
+                findings=self.reader_findings, failures=self.reader_failures)]
         sections += [
             "",
             "## What this run has already tried",
@@ -561,16 +554,20 @@ def _choice_lines(choices: Any) -> list[str]:
     return lines
 
 
-def _trajectory(record: dict[str, Any], text_chars: int) -> str:
+#: A text kept whole (``_trajectory`` clips only to fit one item into the budget).
+_WHOLE = 10 ** 9
+
+
+def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE) -> str:
     """One train item in full: input, each step's output, the answer.
 
     The steps are in the order the record holds them, which is the order the pass
     ran them (a fork merges its branches in branch order), never sorted by name.
+    Texts are whole unless ``text_chars`` clips them (head and tail).
     """
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
-    verdict = "passed" if record.get("passed") else "answered wrong"
-    lines = [f"### Item {record.get('id')} — {verdict} (score {record.get('score')})"]
+    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"]
     key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
     if key is not None:
         lines += [f"Input ({key}):", _clip_middle(meta[key], text_chars)]
@@ -585,93 +582,166 @@ def _trajectory(record: dict[str, Any], text_chars: int) -> str:
                   _clip_middle(exchange.get("response"), text_chars)]
     if not exchanges:
         lines.append("(no step output was recorded)")
-    label, label_text = record.get("label"), record.get("label_text")
-    if label is not None or label_text is not None:
-        expected = " — ".join(str(part) for part in (label, label_text) if part not in (None, ""))
+    expected = _expected(record)
+    if expected:
         lines.append(f"Expected: {_clip_middle(expected, text_chars)}")
     if record.get("prediction") is not None:
         lines.append(f"Predicted: {_clip_middle(record.get('prediction'), text_chars)}")
     if record.get("fail_reason") and not record.get("passed"):
         lines.append(f"Grader: {_clip_middle(record['fail_reason'], text_chars)}")
+    if record.get("error_text"):
+        lines.append(f"Error: {_clip_middle(record['error_text'], text_chars)}")
     return "\n".join(lines)
 
 
-def _trajectories(
-    records: Sequence[dict[str, Any]], *, epoch: int, generation: int = 0, attempt: int = 0,
-    failed: int = TRAJECTORY_FAILED, passed: int = TRAJECTORY_PASSED,
-    text_chars: int = TRAJECTORY_TEXT_CHARS, text_floor: int = TRAJECTORY_TEXT_FLOOR,
-    section_chars: int = TRAJECTORY_SECTION_CHARS,
-) -> list[str]:
-    """A sample of the edited candidate's train items, each shown in full.
+def _outcome(record: dict[str, Any]) -> str:
+    return ("passed" if record.get("passed") else
+            "failed with an error" if record.get("error_text") else "answered wrong")
 
-    Items answered wrong, then a few that passed for contrast; an item whose run
-    errored is left to the cause table above, and with repeats each item is shown
-    once (its first repeat). The sample is drawn with a seed from ``epoch``,
-    ``generation`` and the proposal ``attempt``, so it is reproducible and every
-    round, a retry after a refusal included, reads other items,
-    as SkillOpt's analysts read a new minibatch each step. Train records only.
 
-    The section fits ``section_chars`` exactly. Every text is clipped to
-    ``text_chars``; when the items do not fit, that limit shrinks for all of them
-    (down to ``text_floor``) rather than dropping any; only when even the floor does
-    not fit are items dropped, wrong ones last chosen first, so the passed items
-    stay. The header and the note on what was left out are always shown, even when
-    no item fits.
-    """
-    import random
+def _expected(record: dict[str, Any]) -> str:
+    label, label_text = record.get("label"), record.get("label_text")
+    return " — ".join(str(part) for part in (label, label_text) if part not in (None, ""))
 
+
+_CLIPPED_ITEM_NOTE = ("(This item alone is longer than one call's evidence budget, so its "
+                      "texts are clipped head and tail.)")
+
+
+def _item_block(record: dict[str, Any], budget: int) -> str:
+    """An item in full; clipped (head and tail, with a note) only when the item alone
+    is longer than ``budget``."""
+    whole = _trajectory(record)
+    if len(whole) <= budget:
+        return whole
+    low, high = 1, max(1, budget)
+    while low < high:  # the largest per-text limit that fits
+        middle = (low + high + 1) // 2
+        if len(_trajectory(record, middle)) + len(_CLIPPED_ITEM_NOTE) + 1 <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return _trajectory(record, low) + "\n" + _CLIPPED_ITEM_NOTE
+
+
+def _ordered_items(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every train item once (its first repeat): wrong, then failed with an error and
+    recorded steps, then passed, each group by id. An error with no steps is the
+    cause table's alone."""
     first: dict[str, dict[str, Any]] = {}
     for record in records:
-        if record.get("error_text"):
+        if record.get("error_text") and not record.get("exchanges"):
             continue
         item = str(record.get("id", ""))
         held = first.get(item)
         if held is None or int(record.get("repeat") or 1) < int(held.get("repeat") or 1):
             first[item] = record
-    clean = [first[item] for item in sorted(first)]
-    wrong = [r for r in clean if not r.get("passed")]
-    right = [r for r in clean if r.get("passed")]
-    rng = random.Random(f"trajectories:{epoch}:{generation}:{attempt}")
-    picked_wrong = rng.sample(wrong, min(max(0, failed), len(wrong)))
-    picked_right = rng.sample(right, min(max(0, passed), len(right)))
-    if not picked_wrong and not picked_right:
+    ordered = [first[item] for item in sorted(first)]
+    return ([r for r in ordered if not r.get("passed") and not r.get("error_text")]
+            + [r for r in ordered if not r.get("passed") and r.get("error_text")]
+            + [r for r in ordered if r.get("passed")])
+
+
+def trajectory_groups(records: Sequence[dict[str, Any]],
+                      budget: int = TRAJECTORY_BUDGET) -> list[list[tuple[str, str]]]:
+    """The items as ``(id, full block)`` groups that each fit ``budget``.
+
+    One group when everything fits; otherwise as few balanced groups as fit, in the
+    stable order of ``_ordered_items``, each item in exactly one group.
+    """
+    import math
+
+    blocks = [(str(r.get("id")), _item_block(r, budget)) for r in _ordered_items(records)]
+    if not blocks:
         return []
+    total = sum(len(block) + 2 for _id, block in blocks)
+    if total <= budget:
+        return [blocks]
+    target = total / math.ceil(total / budget)
+    groups: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    size = 0
+    for item, block in blocks:
+        step = len(block) + 2
+        if current and (size + step > budget or size >= target):
+            groups.append(current)
+            current, size = [], 0
+        current.append((item, block))
+        size += step
+    groups.append(current)
+    return groups
 
-    def section(chosen: list[dict[str, Any]], limit: int) -> list[str]:
-        shown_wrong = sum(1 for r in chosen if not r.get("passed"))
-        lines = ["## Trajectories of the candidate being edited",
-                 f"{shown_wrong} of {len(wrong)} train item(s) answered wrong and "
-                 f"{len(chosen) - shown_wrong} of {len(right)} passed, shown in full, "
-                 "chosen for this round. Read what each step produced and where it went "
-                 "wrong before proposing."]
-        for record in chosen:
-            lines += ["", _trajectory(record, limit)]
-        left = len(picked_wrong) + len(picked_right) - len(chosen)
-        if left:
-            lines += ["", f"({left} more chosen item(s) left out to stay within "
-                          f"{section_chars} characters)"]
-        return lines
 
-    def size(lines: list[str]) -> int:
-        return len("\n".join(lines))
+#: A cell of the every-item table, at most this long.
+_TABLE_CELL_CHARS = 200
 
-    chosen = picked_wrong + picked_right
-    floor = max(1, min(text_floor, text_chars))
-    while chosen:
-        if size(section(chosen, floor)) <= section_chars:
-            low, high = floor, max(floor, text_chars)
-            while low < high:  # the largest limit that still fits
-                middle = (low + high + 1) // 2
-                if size(section(chosen, middle)) <= section_chars:
-                    low = middle
-                else:
-                    high = middle - 1
-            return section(chosen, low)
-        drop = next((i for i in range(len(chosen) - 1, -1, -1)
-                     if not chosen[i].get("passed")), len(chosen) - 1)
-        chosen = chosen[:drop] + chosen[drop + 1:]
-    lines = section([], floor)
-    return lines if size(lines) <= section_chars else []
+
+def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
+                  findings: Sequence[dict[str, Any]] | None = None,
+                  failures: Sequence[dict[str, Any]] = ()) -> list[str]:
+    """Every train item of the candidate being edited.
+
+    When all of them fit ``budget`` in full, every item is shown in full here. When
+    not, readers went through them in groups (``AutoresearchOptimizer``): their
+    findings come first, then a table of every item, then as many items in full as
+    the rest of the budget holds. Train records only.
+    """
+    items = _ordered_items(records)
+    if not items:
+        return []
+    wrong = sum(1 for r in items if _outcome(r) == "answered wrong")
+    errored = sum(1 for r in items if _outcome(r) == "failed with an error")
+    header = ["## Trajectories of the candidate being edited",
+              f"All {len(items)} train item(s): {wrong} answered wrong, {errored} failed with "
+              f"an error, {len(items) - wrong - errored} passed."]
+    groups = trajectory_groups(records, budget)
+    if len(groups) == 1:
+        return header + ["Every item in full. Read what each step produced and where it "
+                         "went wrong before proposing.",
+                         *(line for _id, block in groups[0] for line in ("", block))]
+    lines = header + [
+        f"They do not fit one request in full, so readers went through them in "
+        f"{len(groups)} groups of whole items. Their findings come first, then a table of "
+        "every item, then as many items in full as fit."]
+    if findings is None:
+        lines.append("(No reader went through these items for this request: read the "
+                     "table and the items in full below.)")
+    else:
+        lines += ["", "### What the readers found"]
+        for found in findings:
+            for kind in ("failure_patterns", "success_patterns"):
+                for pattern in found.get(kind) or ():
+                    if not isinstance(pattern, dict):
+                        continue
+                    lines.append(
+                        f"- [{kind.split('_')[0]}] {pattern.get('pattern', '')} (step "
+                        f"`{pattern.get('step', 'unclear')}`; items "
+                        f"{', '.join(str(i) for i in pattern.get('items') or ())}) -- evidence: "
+                        + " | ".join(f'"{quote}"' for quote in pattern.get("evidence") or ()))
+        for failure in failures:
+            lines.append(f"(Group {failure.get('group')} -- items "
+                         f"{', '.join(str(i) for i in failure.get('items') or ())} -- could "
+                         f"not be read: {failure.get('error')}; those items are in the table.)")
+    lines += ["", "### Every item",
+              _table(["item", "outcome", "expected", "predicted", "grader", "error"],
+                     [[r.get("id"), _outcome(r), _clip(_expected(r), _TABLE_CELL_CHARS),
+                       _clip(r.get("prediction"), _TABLE_CELL_CHARS),
+                       _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
+                       _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
+    used = len("\n".join(lines))
+    examples = ["", "### Some items in full"]
+    failing = [r for r in items if not r.get("passed")]
+    passing = [r for r in items if r.get("passed")]
+    interleaved = [r for pair in zip(failing, passing) for r in pair]
+    interleaved += failing[len(passing):] + passing[len(failing):]
+    shown = 0
+    for record in interleaved:
+        block = _item_block(record, budget)
+        if used + len("\n".join(examples)) + len(block) + 2 > budget:
+            continue
+        examples += ["", block]
+        shown += 1
+    return lines + (examples if shown else [])
 
 
 def _edit_fields(fields: Sequence[str]) -> str:
@@ -781,6 +851,36 @@ def _rules_text() -> str:
     return rules_text()
 
 
+#: Trace keys the request leaves out: the leaderboard is "Recent results" already,
+#: and measurements carry per-trial worker receipts and run-directory paths -- noise to
+#: an optimizer, which reads their aggregates (``measurement_summary``) instead.
+TRACE_OMITTED_KEYS = ("leaderboard", "measurements", "workers", "workdir", "trials")
+#: The longest key or text a trace row shows; a text knob's value used as a key
+#: (``knob_attribution``) is shown by its head and length.
+TRACE_TEXT_CHARS = 160
+
+
+def _trace_rows(traces: Sequence[dict[str, Any]]) -> list[tuple[str, Any]]:
+    """The traces as the request shows them: no receipts, no paths, short texts."""
+
+    def short(text: str) -> str:
+        return text if len(text) <= TRACE_TEXT_CHARS else (
+            f"{text[:TRACE_TEXT_CHARS - 40]}… ({len(text)} characters)")
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {short(str(k)): clean(v) for k, v in value.items()
+                    if k not in TRACE_OMITTED_KEYS}
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        if isinstance(value, str):
+            return short(value)
+        return value
+
+    return [(key, clean(value)) for key, value in _flatten(traces)
+            if key not in TRACE_OMITTED_KEYS]
+
+
 def _flatten(rows: Sequence[dict[str, Any]]) -> list[tuple[str, Any]]:
     out: list[tuple[str, Any]] = []
     for row in rows:
@@ -824,14 +924,16 @@ class Optimizer:
         """
         if self.trace_path is None:
             return
+        import threading
         import time
         import warnings
         from pathlib import Path
 
+        lock = self.__dict__.setdefault("_trace_lock", threading.Lock())
         try:
             path = Path(self.trace_path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a") as handle:
+            with lock, path.open("a") as handle:
                 handle.write(json.dumps({"at": time.time(), "optimizer": self.name,
                                          "round": self.proposal_rounds, **fields},
                                         default=str) + "\n")
