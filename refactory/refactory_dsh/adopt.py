@@ -138,6 +138,9 @@ def best(run_root: Path) -> dict[str, Any]:
     """
     run_root = Path(run_root)
     entries = _journal_entries(run_root)
+    gated = _gate_winner(run_root, entries)
+    if gated is not None:
+        return gated
     scores = _score_by_id(entries)
     rejected = _rejected_ids(entries)
 
@@ -171,6 +174,53 @@ def best(run_root: Path) -> dict[str, Any]:
         **_score_basis(entries, winner_id, winner_score),
         "edits": winner_edits,
         "state": winner_state,
+    }
+
+
+def _gate_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The winner of a default-loop run with ``val_gate``: the best on val among the
+    candidates the gate accepted and no person rejected.
+
+    The report names that candidate (``Loop.leaderboard``'s first), so adopting takes
+    the same one, whatever its train score (it has none when its train run failed).
+    ``None`` for a run without the gate.
+    """
+    try:
+        config = json.loads((run_root / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        config = next((entry.get("config") or {} for entry in entries
+                       if entry.get("event") == "start"), {})
+    if not config.get("val_gate"):  # refused with a custom strategy, which keeps its own gate
+        return None
+    gate: dict[str, Any] = {}
+    for entry in entries:
+        if entry.get("event") == "strategy_state":
+            gate = (entry.get("state") or {}).get("val_gate") or {}
+    rejected = _rejected_ids(entries)
+    states = {str(entry.get("id")): entry for entry in entries
+              if entry.get("event") == "candidate" and isinstance(entry.get("state"), dict)}
+    cache = {str(k): float(v) for k, v in (gate.get("val_cache") or {}).items()}
+    eligible = [str(cid) for cid in gate.get("accepted") or ()
+                if str(cid) not in rejected and str(cid) in states]
+    if not eligible:
+        raise AdoptionError(
+            f"{run_root} ran with the validation gate, which accepted no candidate that a "
+            "person has not rejected and whose state was recorded; there is nothing to adopt"
+        )
+    # Loop.leaderboard's order under val_gate: val score descending, then id.
+    winner_id = min(eligible, key=lambda cid: (-cache.get(cid, 0.0), cid))
+    found = states[winner_id]
+    score = cache.get(winner_id, 0.0)
+    train = _score_by_id(entries).get(str(winner_id))
+    return {
+        "run": str(run_root),
+        "candidate": str(winner_id),
+        "score": score,
+        "score_basis": "val",
+        "score_note": (f"{_number(score)} on val, the best the gate accepted; train "
+                       + (_number(train) if train is not None else "none (its train run failed)")),
+        "edits": list(found.get("edits") or ()),
+        "state": found["state"],
     }
 
 

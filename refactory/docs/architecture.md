@@ -211,9 +211,18 @@ is the library's, not one strategy's:
 - `Run.keep` journals what it keeps and `Run.candidate(id)` returns it, so a strategy
   saves candidate ids (not knob values) and gets the candidates back after a resume.
 
-The default loop uses the gate when `--val-gate 1` is set, with any optimizer: each
-candidate evaluated on train is rolled out on val, stays a parent only when it beats
-its parent there, and the best on val is the winner. SkillOpt (`refactory_packages/skillopt`)
+The default loop uses the gate when `--val-gate 1` is set, with any optimizer, and then
+evaluates as SkillOpt does; only where edit ideas come from differs. Train rollouts use
+SkillOpt's per-epoch seed (`train_batch_seed`: `seed + epoch*1000 + 1`). Each candidate
+evaluated on train, one whose train run failed included, is rolled out on val and is
+accepted only when it beats the gate's current candidate there; that candidate is the
+parent, for every optimizer; the optimizers and strategies that need a population of
+parents (`archive`, `evolutionary`, `islands`, `map_elites`; `autoscientists`,
+`best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
+and with a test part `FinalEvaluation` runs, so the held-out audit compares the winner's
+val and test scores. The best on val among the accepted candidates a person has not
+rejected is the winner, in the report and for `adopt`. `--early-stop-patience N` and `--early-stop-at-full-val 1` add SkillOpt's early
+stop (see [outer-loop.md](outer-loop.md)). SkillOpt (`refactory_packages/skillopt`)
 is built from the same pieces plus `SkillOptProposer`, its optimizer steps (analysts,
 failure-first merge, ranked edit budget, patch, slow update, meta skill) as a part
 whose output is `set_knob` edits, so another strategy can reuse it. It edits one text

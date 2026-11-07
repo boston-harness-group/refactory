@@ -70,6 +70,7 @@ from typing import Any, Callable
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.edits import SKILLOPT_PATCH_CONFIG
 from refactory_dsh.optim import Candidate, Proposal, candidate_id
+from refactory_dsh.outerloop import train_batch_seed
 
 from refactory_packages.skillopt import analysts, merge, prompts, schedule
 from refactory_packages.skillopt.env import SkillOptEnv
@@ -621,7 +622,8 @@ class SkillOptProposer:
 
 
 def batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
-    """SkillOpt's train-batch seed for LiveMath: ``seed + epoch*1000 + batch_idx + 1``.
+    """SkillOpt's train-batch seed for LiveMath: ``seed + epoch*1000 + batch_idx + 1``
+    (``outerloop.train_batch_seed``, which the default loop's ``val_gate`` shares).
 
     LiveMath has a dataloader, so the trainer takes each batch's own seed from
     ``plan_train_epoch`` (trainer.py:1170-1177, :1242; dataloader.py:278) and
@@ -629,7 +631,7 @@ def batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
     ``Random(seed + epoch*1000)`` shuffle of base seeds (datasets/base.py:98-109)
     is the dataloader-less path and does not apply.
     """
-    return seed + epoch * 1000 + batch_idx + 1
+    return train_batch_seed(seed, epoch, batch_idx)
 
 
 def knob_values(candidate: Candidate) -> dict[str, Any]:

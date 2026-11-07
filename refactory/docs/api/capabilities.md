@@ -2068,6 +2068,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "attempts": 3,
     "batch_size": 4,
     "dsh_timeout_s": 900,
+    "early_stop_at_full_val": false,
+    "early_stop_patience": 0,
     "edit_preset": "broad",
     "effort": "",
     "elite": 3,
@@ -2163,6 +2165,28 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--dsh-timeout-s"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "early_stop_at_full_val": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--early-stop-at-full-val"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "early_stop_patience": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--early-stop-patience"
       ],
       "nargs": null,
       "positional": false,
@@ -2649,7 +2673,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "c553e78bb5eea2c837fecd94ae834037ac7d5db8d7da30367d47c7fb4e0aa2c0"
+  "reviewed_schema": "9ba6a4baec340c16d3e7b38c0c26341a58604e43f7033cba67799a4baa6f1d13"
 }
 ```
 
@@ -3445,7 +3469,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) keeps a candidate as a parent only when its val score strictly beats its parent's, and names the best on val as the winner.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3476,6 +3500,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "attempts": 3,
     "batch_size": 4,
     "dsh_timeout_s": 900,
+    "early_stop_at_full_val": false,
+    "early_stop_patience": 0,
     "edit_preset": "broad",
     "effort": "",
     "elite": 3,
@@ -3574,6 +3600,28 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--dsh-timeout-s"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "early_stop_at_full_val": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--early-stop-at-full-val"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "early_stop_patience": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--early-stop-patience"
       ],
       "nargs": null,
       "positional": false,
@@ -4070,8 +4118,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) keeps a candidate as a parent only when its val score strictly beats its parent's, and names the best on val as the winner.",
-  "reviewed_schema": "61aaaf72e59fa068b311b5655ddda99c118e26d14ef98497fbc0d57e0a583028"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.",
+  "reviewed_schema": "381b297288eaef1175ca5d9188b7bda4659defbf76d33a4a8b0249cbdedf9ca3"
 }
 ```
 
@@ -5731,7 +5779,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) keeps a candidate as a parent only when its val score strictly beats its parent's, and names the best on val as the winner.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -5744,6 +5792,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "attempts": 3,
     "batch_size": 4,
     "dsh_timeout_s": 900,
+    "early_stop_at_full_val": false,
+    "early_stop_patience": 0,
     "edit_preset": "broad",
     "effort": "",
     "elite": 3,
@@ -5841,6 +5891,28 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--dsh-timeout-s"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "early_stop_at_full_val": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--early-stop-at-full-val"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "early_stop_patience": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--early-stop-patience"
       ],
       "nargs": null,
       "positional": false,
@@ -6329,8 +6401,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) keeps a candidate as a parent only when its val score strictly beats its parent's, and names the best on val as the winner.",
-  "reviewed_schema": "e55745fa3e8198ba6df86c9a30e04cb147970c7f065a6e68ab6acccb74de8d81"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.",
+  "reviewed_schema": "b01269b1d5c4386545fe4520d584ac33edf30aa508cd9001e0ff1e21056a0c0c"
 }
 ```
 

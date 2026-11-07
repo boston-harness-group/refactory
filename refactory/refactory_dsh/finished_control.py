@@ -56,7 +56,7 @@ def recover_selection(root: Path, *, project: Path | None = None) -> dict[str, A
     report.update(kept=loop.kept, rejected=loop.rejected,
                   leaderboard=[loop._row(candidate) for candidate in board],
                   best=loop._row(winner) if winner else None,
-                  best_score=winner.score if winner else None,
+                  **(loop.best_score_fields(winner) if winner else {"best_score": None}),
                   raw_best_score=winner.raw_score if winner else None,
                   lineage=loop._lineage(winner),
                   structural_wins=loop._structural_wins(board),

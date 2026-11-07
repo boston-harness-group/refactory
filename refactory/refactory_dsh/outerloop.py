@@ -62,6 +62,17 @@ class OuterLoopError(RuntimeError):
     """A search cannot proceed. Always names what is wrong."""
 
 
+def train_batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
+    """SkillOpt's train-batch seed: ``seed + epoch*1000 + batch_idx + 1``.
+
+    The seed an epoch's train rollouts use (SkillOpt's ``plan_train_epoch``,
+    trainer.py:1170-1177, :1242; dataloader.py:278), so a Task that shuffles per
+    (item, seed) shuffles differently each epoch. Val and test rollouts keep the
+    run's own ``seed``. Used by SkillOpt and by the default loop with ``val_gate``.
+    """
+    return seed + epoch * 1000 + batch_idx + 1
+
+
 @dataclass
 class Run:
     """Everything a search strategy is built from.

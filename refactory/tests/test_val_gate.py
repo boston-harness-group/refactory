@@ -288,11 +288,12 @@ def _level(candidate: Candidate) -> int:
     return int(candidate.state["knobs"]["level"]["value"])
 
 
-def test_map_elites_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
-    """--optimizer map_elites with the default loop and val_gate on: every
-    candidate evaluated on train is rolled out on val once, a child stays a parent
-    only when its val score strictly beats its parent's, and the winner is the
-    best on val. A resumed run keeps the gate's decisions and rolls nothing again."""
+def test_hill_climb_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
+    """--optimizer hill_climb with the default loop and val_gate on: every
+    candidate evaluated on train is rolled out on val once, each accepted one beats
+    the current candidate before it, only accepted candidates are parents, and the
+    winner is the best on val. A resumed run keeps the gate's decisions and rolls
+    nothing again."""
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
     val_rollouts: list[str] = []
     original = Run.evaluate
@@ -304,20 +305,20 @@ def test_map_elites_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
         return original(self, candidate, part=part, items=items, seed=seed)
 
     monkeypatch.setattr(Run, "evaluate", evaluate)
-    overrides = dict(optimizer="map_elites", val_gate=True, epochs=3, batch_size=3)
+    overrides = dict(optimizer="hill_climb", val_gate=True, epochs=3, batch_size=3)
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, **overrides)
         report = loop.run()
-    assert report["optimizer"] == "map_elites"
+    assert report["optimizer"] == "hill_climb"
     by_id = {c.id: c for c in loop.population}
     accepted, rejected = loop._gate_accepted, loop._gate_rejected
     assert accepted[0] == loop.population[0].id, "the seed is the gate's start"
     judged = accepted[1:] + rejected
     assert accepted[1:] and rejected, "setup: the search both improves and regresses"
+    levels = [_level(by_id[cid]) for cid in accepted]
+    assert levels == sorted(set(levels)), "each accepted candidate beats the current one"
     for cid in judged:
-        child, parent = by_id[cid], by_id[by_id[cid].parent]
-        assert (cid in accepted) == (_level(child) > _level(parent)), (cid, _level(child), _level(parent))
-        assert parent.id in accepted, "only an accepted candidate is a parent"
+        assert by_id[cid].parent in accepted, "only an accepted candidate is a parent"
     assert sorted(val_rollouts) == sorted(accepted + rejected), "one val rollout per judged candidate"
     assert {c.id for c in loop.leaderboard()} <= set(accepted)
     best = max(accepted, key=lambda cid: _level(by_id[cid]))
@@ -331,6 +332,46 @@ def test_map_elites_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
     assert resumed._gate_rejected[:len(rejected)] == rejected
     again = val_rollouts[len(before):]
     assert not set(again) & set(before), "a judged candidate is never rolled out on val again"
+
+
+@pytest.mark.parametrize("optimizer", ["archive", "evolutionary", "islands", "map_elites"])
+def test_val_gate_refuses_a_population_optimizer_before_any_rollout(tmp_path, optimizer):
+    """val_gate follows SkillOpt's single line (the current candidate is the only
+    parent), so an optimizer that breeds from a population is refused, at
+    configuration and at start, before anything is rolled out."""
+    from refactory_dsh import profiles
+
+    with pytest.raises(profiles.ProfileError, match="single line"):
+        profiles.normalize({"val_gate": True, "optimizer": optimizer})
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, val_gate=True, optimizer=optimizer)
+        with pytest.raises(LoopError, match=f"the {optimizer} optimizer.*without --val-gate"):
+            loop.run()
+    assert loop.rollouts == 0 and not (loop.root / "runs").exists()
+    assert profiles.normalize({"optimizer": optimizer})["optimizer"] == optimizer
+
+
+@pytest.mark.parametrize("strategy", ["autoscientists", "best_of_n", "reflective"])
+def test_val_gate_refuses_a_population_strategy_before_any_rollout(tmp_path, strategy):
+    from refactory_dsh import profiles, strategies
+
+    with pytest.raises(profiles.ProfileError, match="single line"):
+        profiles.normalize({"val_gate": True, "strategy": strategy})
+    with _patch_mode(LevelProbe):
+        loop = strategies.resolve(strategy)(MODE_ID, LoopConfig(
+            epochs=2, batch_size=1, optimizer="random", seed=7, runs_root=tmp_path / "run",
+            allowed_ops=("set_knob",), holdout=0.0, val_gate=True, strategy=strategy,
+            parts_manifest=str(_write_parts(tmp_path, test=True))), project=Path("."))
+        with pytest.raises(LoopError, match=f"the {strategy} strategy.*without --val-gate"):
+            loop.init()
+    assert loop.rollouts == 0 and not (loop.root / "runs").exists()
+
+
+@pytest.mark.parametrize("optimizer", ["random", "autoresearch", "hill_climb"])
+def test_val_gate_allows_single_parent_optimizers(optimizer):
+    from refactory_dsh import profiles
+
+    assert profiles.normalize({"val_gate": True, "optimizer": optimizer})["val_gate"] is True
 
 
 def test_val_gate_needs_a_val_part_and_the_default_loop(tmp_path):
@@ -363,19 +404,407 @@ class ScriptedLevels(Optimizer):
         ]
 
 
-def test_the_default_gate_compares_a_child_with_its_parent(tmp_path, monkeypatch):
-    """Seed 5 → 7 (accepted, the best), then 5 → 6: it beats its parent 5 though
-    not the best 7, so it is accepted; then 7 → 2 is rejected and is never handed
-    to the proposer as a parent."""
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
-    proposer = ScriptedLevels([[(5, 7)], [(5, 6)], [(7, 2)], []])
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=4, batch_size=1)
-        loop.optimizer = proposer
-        loop.config.val_gate = True
-        report = loop.run()
+def test_the_default_gate_compares_a_child_with_its_current_candidate(tmp_path, monkeypatch):
+    """SkillOpt's gate: a batch of two children of the seed 5, 7 then 6. 7 is
+    accepted and becomes current; 6 beats its parent 5 but not the current 7, so
+    it is rejected. Then 7 → 8 is accepted."""
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    loop, proposer, report = _gated(
+        tmp_path, monkeypatch, [[(5, 7), (5, 6)], [(7, 8)], []], epochs=3, batch_size=2)
     by_id = {c.id: c for c in loop.population}
-    assert [_level(by_id[cid]) for cid in loop._gate_accepted] == [5, 7, 6]
-    assert [_level(by_id[cid]) for cid in loop._gate_rejected] == [2]
-    assert proposer.handed[-1] == {5, 7, 6}, "the rejected candidate is not a parent"
-    assert _level(by_id[report["best"]["id"]]) == 7
+    assert [_level(by_id[cid]) for cid in loop._gate_accepted] == [5, 7, 8]
+    assert [_level(by_id[cid]) for cid in loop._gate_rejected] == [6]
+    assert _level(by_id[report["best"]["id"]]) == 8
+
+
+# ── val_gate: SkillOpt's evaluation protocol ───────────────────────────────
+
+
+def _gated(tmp_path: Path, monkeypatch: Any, plan: list[list[tuple[int, int]]], *,
+           val: Any = None, **overrides: Any) -> tuple[Loop, ScriptedLevels, dict[str, Any]]:
+    """A val_gate run of the scripted proposer; val scores ``level / 10`` unless ``val``."""
+    monkeypatch.setattr(ValidationGate, "val_score",
+                        staticmethod(val or (lambda run, cand: _level(cand) / 10)))
+    proposer = ScriptedLevels(plan)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, **{"val_gate": True, **overrides})
+        loop.optimizer = proposer
+        report = loop.run()
+    return loop, proposer, report
+
+
+def _record_train_seeds(monkeypatch: Any) -> list[tuple[int, int | None]]:
+    seeds: list[tuple[int, int | None]] = []
+    original = Loop._evaluate
+
+    def evaluate(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        seeds.append((_level(candidate), kwargs.get("seed")))
+        return original(self, candidate, **kwargs)
+
+    monkeypatch.setattr(Loop, "_evaluate", evaluate)
+    return seeds
+
+
+def _record_test_rollouts(monkeypatch: Any) -> list[tuple[int, int | None]]:
+    tests: list[tuple[int, int | None]] = []
+    original_many = Run.evaluate_many
+
+    def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        tests.extend((_level(r.candidate), r.seed) for r in requests if r.part == "test")
+        return original_many(self, requests, on_result=on_result)
+
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    return tests
+
+
+def _journal_events(loop: Loop, event: str) -> list[dict[str, Any]]:
+    lines = (loop.root / "journal.jsonl").read_text().splitlines()
+    return [record for record in map(json.loads, lines) if record.get("event") == event]
+
+
+def test_val_gate_train_rollouts_use_skillopts_epoch_seed(tmp_path, monkeypatch):
+    """Epoch e's train rollouts use seed + e*1000 + 1, as SkillOpt's; the last
+    epoch's proposals, scored after it, get the next epoch's. Val and test keep the
+    run's seed."""
+    seeds = _record_train_seeds(monkeypatch)
+    SkillTask.seen = []
+    _gated(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)]], epochs=2)
+    assert seeds == [(5, 1008), (7, 2008), (8, 3008)]
+    assert {seed for part, seed in SkillTask.seen if part == "train"} == {1008, 2008, 3008}
+    assert {seed for part, seed in SkillTask.seen if part in ("val", "test")} == {7}
+
+
+def test_without_val_gate_the_default_loop_is_unchanged(tmp_path, monkeypatch):
+    """No val_gate: every train rollout uses the run's seed, the last epoch's
+    proposals stay unevaluated, and there is no post-training evaluation."""
+    seeds = _record_train_seeds(monkeypatch)
+    proposer = ScriptedLevels([[(5, 7)], [(7, 8)]])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=2)
+        loop.optimizer = proposer
+        report = loop.run()
+    assert seeds == [(5, 7), (7, 7)]
+    assert [_level(c) for c in loop.population if not c.evaluated] == [8]
+    assert report["strategy_report"] == {}
+    assert not _journal_events(loop, "final_evaluation")
+    assert report["bound"] == "epochs"
+
+
+def test_val_gate_still_gates_a_candidate_whose_train_run_failed(tmp_path, monkeypatch):
+    """A candidate whose train run failed is rolled out on val and the gate
+    decides; here it beats the current candidate, so it is accepted and wins."""
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        if part == "train" and _level(candidate) == 8:
+            result.exit_ok, result.error = False, "the train run failed"
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    val_rollouts: list[int] = []
+    original_evaluate = Run.evaluate
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+        if part == "val":
+            val_rollouts.append(_level(candidate))
+        return original_evaluate(self, candidate, part=part, items=items, seed=seed)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    loop, _, report = _gated(tmp_path, monkeypatch, [[(5, 8)], []], epochs=2)
+    eight = next(c for c in loop.population if _level(c) == 8)
+    assert not eight.exit_ok, "setup: its train run failed"
+    assert 8 in val_rollouts
+    assert eight.id in loop._gate_accepted
+    assert report["best"]["id"] == eight.id
+
+
+def _fail_train_at(monkeypatch: Any, level: int) -> None:
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        if part == "train" and _level(candidate) == level:
+            result.exit_ok, result.error = False, "the train run failed"
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+
+
+def test_val_gate_parent_is_the_current_candidate_for_any_optimizer(tmp_path, monkeypatch):
+    """The gate's current candidate is the parent, though its train run failed and
+    an earlier accepted candidate has a train score: with a scripted proposer and
+    with the random optimizer (which ranks parents by train score)."""
+    _fail_train_at(monkeypatch, 8)
+    loop, proposer, _ = _gated(tmp_path / "scripted", monkeypatch, [[(5, 8)], [(8, 9)]], epochs=2)
+    assert proposer.handed == [{5}, {8}]
+    nine = next(c for c in loop.population if _level(c) == 9)
+    assert _level(next(c for c in loop.population if c.id == nine.parent)) == 8
+    # Every accepted candidate, the failed one included, ranked by val (train ranks
+    # them 5, 9 and 8 last).
+    assert [_level(c) for c in loop.leaderboard()] == [9, 8, 5]
+
+    first = ScriptedLevels([[(5, 8)]])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path / "random", val_gate=True, epochs=1, edit_preset="knob_only")
+        loop.optimizer = first
+        loop.run()
+        eight = next(c for c in loop.population if _level(c) == 8)
+        resumed = _loop(tmp_path / "random", val_gate=True, epochs=2, resume=True,
+                        optimizer="random", batch_size=3, edit_preset="knob_only", attempts=10)
+        resumed.run()
+    assert eight.id in resumed._gate_accepted and not eight.exit_ok
+    epoch2 = [c for c in resumed.population if c.id not in {x.id for x in loop.population}]
+    assert epoch2 and {c.parent for c in epoch2} == {eight.id}
+
+
+def test_val_gate_report_and_adopt_name_the_same_winner(tmp_path, monkeypatch):
+    """A candidate whose train run failed wins on val: the report, the held-out
+    audit and adopt all name it, the report gives its val score as best_score, and
+    adopt's winner passes adopt's held-out check. (The toy package cannot be
+    written out as a package, so adopt's selection and check are called directly.)"""
+    from refactory_dsh.adopt import _check_holdout, best
+
+    _fail_train_at(monkeypatch, 8)
+    loop, _, report = _gated(tmp_path, monkeypatch, [[(5, 8)], [(8, 3)]], epochs=2)
+    eight = next(c for c in loop.population if _level(c) == 8)
+    assert report["best"]["id"] == eight.id and report["exit_ok"] is True, report["error"]
+    assert report["best_score"] == pytest.approx(0.8)
+    assert report["best_score_basis"].startswith("val")
+    assert report["best_train_score"] is None
+    holdout = json.loads((loop.root / "holdout.json").read_text())
+    assert holdout["winner"] == eight.id and holdout["status"] == "measured"
+    winner = best(loop.root)
+    assert winner["candidate"] == eight.id and winner["score"] == pytest.approx(0.8)
+    assert winner["score_basis"] == "val" and "train run failed" in winner["score_note"]
+    _check_holdout(loop.root, winner["candidate"], allow_overfit=False)
+
+
+def test_val_gate_winner_skips_a_candidate_a_person_rejected(tmp_path, monkeypatch):
+    """A person rejects the gate's best (8): the report, holdout.json and adopt all
+    name the best on val among what is left (7), with its val score as best_score;
+    a reject recovered after the search reports the same best_score basis."""
+    from refactory_dsh.adopt import _check_holdout, best
+    from refactory_dsh.control import Control
+    from refactory_dsh.finished_control import recover_selection
+
+    loop, _, _ = _gated(tmp_path / "live", monkeypatch, [[(5, 7)], [(7, 8)]], epochs=2)
+    by_level = {_level(c): c for c in loop.population}
+    with _patch_mode(LevelProbe):
+        loop._honor({"action": "reject", "target": by_level[8].id})
+        report = loop.report()
+    assert report["best"]["id"] == by_level[7].id and report["exit_ok"] is True, report["error"]
+    assert report["best_score"] == pytest.approx(0.7) and report["best_score_basis"].startswith("val")
+    assert json.loads((loop.root / "holdout.json").read_text())["winner"] == by_level[7].id
+    winner = best(loop.root)
+    assert winner["candidate"] == by_level[7].id and winner["score"] == pytest.approx(0.7)
+    _check_holdout(loop.root, winner["candidate"], allow_overfit=False)
+
+    loop, _, _ = _gated(tmp_path / "finished", monkeypatch, [[(5, 7)], [(7, 8)]], epochs=2)
+    by_level = {_level(c): c for c in loop.population}
+    Control(loop.root).path.write_text(json.dumps(
+        {"action": "reject", "target": by_level[8].id, "at": 1.0}))
+    with _patch_mode(LevelProbe):
+        assert recover_selection(loop.root, project=Path(".")) is not None
+    recovered = json.loads((loop.root / "report.json").read_text())
+    assert recovered["best"]["id"] == by_level[7].id
+    assert recovered["best_score"] == pytest.approx(0.7)
+    assert recovered["best_score_basis"].startswith("val")
+    assert recovered["best_train_score"] == pytest.approx(by_level[7].score)
+    assert best(loop.root)["candidate"] == by_level[7].id
+
+
+def test_val_gate_scores_the_last_epochs_proposals(tmp_path, monkeypatch):
+    """Two epochs gate both proposed batches: the one proposed in the last epoch is
+    evaluated and gated before the run ends, and can win."""
+    loop, _, report = _gated(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)]], epochs=2)
+    assert report["unevaluated"] == []
+    eight = next(c for c in loop.population if _level(c) == 8)
+    assert eight.evaluated and eight.id in loop._gate_accepted
+    assert report["best"]["id"] == eight.id
+
+
+def test_val_gate_early_stop_after_patience_stale_epochs(tmp_path, monkeypatch):
+    """SkillOpt's patience: an epoch whose gating does not raise the best val
+    score is stale; two in a row stop the run before it proposes again. A resumed
+    run stops for the same reason without another epoch."""
+    plan = [[(5, 7)], [(7, 6)], [(7, 4)], [(7, 3)], [(7, 2)]]
+    loop, proposer, report = _gated(tmp_path, monkeypatch, plan, epochs=10, early_stop_patience=2)
+    # Epoch 1 gates the seed; 2 gates 7 (best rises); 3 and 4 gate 6 and 4 (stale).
+    assert report["bound"] == "patience_exhausted"
+    assert loop.epoch == 4
+    assert len(proposer.handed) == 3, "the stopping epoch proposes nothing"
+    assert report["unevaluated"] == []
+
+    again = ScriptedLevels([[(7, 1)]])
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, val_gate=True, epochs=10, early_stop_patience=2, resume=True)
+        resumed.optimizer = again
+        report = resumed.run()
+    assert report["bound"] == "patience_exhausted"
+    assert again.handed == [] and resumed.epoch == 4
+
+
+def test_val_gate_early_stop_at_full_val(tmp_path, monkeypatch):
+    """early_stop_at_full_val stops the run once the best val score is 1.0."""
+    plan = [[(5, 9)], [(9, 8)], [(9, 7)]]
+    loop, proposer, report = _gated(
+        tmp_path, monkeypatch, plan, epochs=10, early_stop_at_full_val=True,
+        val=lambda run, cand: 1.0 if _level(cand) == 9 else _level(cand) / 10)
+    assert report["bound"] == "perfect_val"
+    assert loop.epoch == 2 and len(proposer.handed) == 1
+
+
+def test_full_val_seed_still_gets_one_batch_gated(tmp_path, monkeypatch):
+    """SkillOpt checks the early stop at an epoch's end: a seed already at 1.0 on
+    val still gets one batch proposed and gated before perfect_val stops the run."""
+    loop, proposer, report = _gated(
+        tmp_path, monkeypatch, [[(5, 6)], [(5, 4)]], epochs=10, early_stop_at_full_val=True,
+        val=lambda run, cand: 1.0 if _level(cand) == 5 else _level(cand) / 10)
+    assert report["bound"] == "perfect_val"
+    assert len(proposer.handed) == 1 and loop.epoch == 2
+    six = next(c for c in loop.population if _level(c) == 6)
+    assert six.id in loop._gate_rejected
+
+
+def test_val_gate_budget_endings_skip_the_final_scoring(tmp_path, monkeypatch):
+    """As SkillOpt: a spent evaluation budget, or a time/token budget a measurement
+    found spent, ends the search without scoring the last proposals or running the
+    final evaluation; the report keeps the real reason and says why it skipped."""
+    tests = _record_test_rollouts(monkeypatch)
+    loop, _, report = _gated(tmp_path / "evals", monkeypatch, [[(5, 7)], [(7, 8)]],
+                             epochs=5, max_evaluations=2)
+    assert report["bound"] == "evaluations"
+    assert report["strategy_report"]["test_eval"] == "skipped"
+    assert "'evaluations'" in report["strategy_report"]["test_eval_reason"]
+    assert [_level(c) for c in loop.population if not c.evaluated] == [8]
+    assert tests == []
+
+    spent = "the time budget is spent"
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        if part == "train" and _level(candidate) == 7:
+            self.bound = spent
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    loop, _, report = _gated(tmp_path / "time", monkeypatch, [[(5, 7)], [(7, 8)]], epochs=2)
+    assert report["bound"] == spent
+    assert report["strategy_report"]["test_eval"] == "skipped"
+    assert spent in report["strategy_report"]["test_eval_reason"]
+    assert [_level(c) for c in loop.population if not c.evaluated] == [8]
+    assert tests == []
+
+
+def test_a_budget_stop_wins_over_an_early_stop_in_the_same_epoch(tmp_path, monkeypatch):
+    """The epoch whose gating exhausts the patience also finds the time budget
+    spent: the budget is the stop reason, and nothing more is scored."""
+    tests = _record_test_rollouts(monkeypatch)
+    spent = "the time budget is spent"
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        if part == "train" and _level(candidate) == 4:
+            self.bound = spent
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    loop, _, report = _gated(tmp_path, monkeypatch, [[(5, 7)], [(7, 6)], [(7, 4)], [(7, 3)]],
+                             epochs=10, early_stop_patience=2)
+    assert loop.epoch == 4, "setup: the patience is exhausted in the epoch that spent the budget"
+    assert report["bound"] == spent
+    assert report["strategy_report"]["test_eval"] == "skipped"
+    assert tests == []
+
+
+def test_early_stop_needs_the_val_gate(tmp_path):
+    with _patch_mode(LevelProbe):
+        with pytest.raises(LoopError, match="turn val_gate on"):
+            _loop(tmp_path, early_stop_patience=2).run()
+
+
+def test_early_stop_settings_come_from_the_command_line_and_are_saved(tmp_path, monkeypatch):
+    """--early-stop-patience N --early-stop-at-full-val 1, like --val-gate 1; the
+    run's config.json keeps them, and a resume reads its settings from there."""
+    import argparse
+
+    from refactory_dsh import profiles
+
+    parser = argparse.ArgumentParser()
+    profiles.add_arguments(parser)
+    args = parser.parse_args(["--val-gate", "1", "--early-stop-patience", "3",
+                              "--early-stop-at-full-val", "1"])
+    settings = profiles.normalize({key: value for key, value in vars(args).items()
+                                   if key in profiles.defaults() and value is not None})
+    assert settings["val_gate"] is True and settings["early_stop_patience"] == 3
+    assert settings["early_stop_at_full_val"] is True
+    for bad in ({"early_stop_patience": -1}, {"early_stop_patience": True},
+                {"early_stop_at_full_val": 2}):
+        with pytest.raises(profiles.ProfileError, match="early_stop"):
+            profiles.normalize(bad)
+    loop, _, _ = _gated(tmp_path, monkeypatch, [[(5, 7)], []], epochs=2,
+                        early_stop_patience=3, early_stop_at_full_val=True)
+    restored = LoopConfig.from_dict(json.loads((loop.root / "config.json").read_text()))
+    assert restored.early_stop_patience == 3 and restored.early_stop_at_full_val is True
+
+
+def test_val_gate_runs_the_final_evaluation_and_the_audit_sees_test(tmp_path, monkeypatch):
+    """With a test part: the final selection, then the seed and the best on test
+    with the run seed, recorded in the report as SkillOpt records them; the audit
+    compares the winner's val and test, so a --holdout 0 run is measured and passes."""
+    tests = _record_test_rollouts(monkeypatch)
+    loop, _, report = _gated(tmp_path, monkeypatch, [[(5, 7)], [(7, 6)]], epochs=2)
+    figures = report["strategy_report"]
+    assert figures["test_eval"] == "done"
+    assert sorted(tests) == [(5, 7), (7, 7)], "the final candidate is the best: its score is reused"
+    # LevelProbe scores 1 - level/10 on every part; the gate saw level/10.
+    assert figures["final_selection"] == pytest.approx(0.7)
+    assert figures["baseline_test"] == pytest.approx(0.5)
+    assert figures["best_test"] == pytest.approx(0.3) == figures["final_test"]
+    assert figures["best_test_delta"] == pytest.approx(-0.2) == figures["final_test_delta"]
+    assert report["holdout"]["status"] == "measured"
+    assert report["holdout"]["test"] == pytest.approx(0.3)
+    assert report["exit_ok"] is True, report["error"]
+    steps = [(e["step_type"], e.get("action")) for e in _journal_events(loop, "final_evaluation")]
+    assert steps == [("final_selection_eval", "reused"), ("test_eval", "baseline_test"),
+                     ("test_eval", "best_test"), ("test_eval", "final_test_reused")]
+
+
+def test_val_gate_without_a_test_part_records_why_it_skipped(tmp_path, monkeypatch):
+    tests = _record_test_rollouts(monkeypatch)
+    _, _, report = _gated(tmp_path, monkeypatch, [[(5, 7)], []], epochs=2,
+                          parts_manifest=str(_write_parts(tmp_path / "no-test")))
+    figures = report["strategy_report"]
+    assert figures["test_eval"] == "skipped"
+    assert figures["test_eval_reason"] == "the parts manifest has no 'test' part"
+    assert tests == []
+
+
+def test_a_resumed_run_continues_its_final_evaluation(tmp_path, monkeypatch):
+    """A run that dies after the final selection resumes into the test phases
+    without repeating it."""
+    original = Loop._save_strategy_state
+    died: list[bool] = []
+
+    def save(self):  # type: ignore[no-untyped-def]
+        original(self)
+        completed = (self._strategy_state.get("final_evaluation") or {}).get("completed_phases") or []
+        if "final_selection" in completed and not died:
+            died.append(True)
+            raise ProcessDied()
+
+    monkeypatch.setattr(Loop, "_save_strategy_state", save)
+    with pytest.raises(ProcessDied):
+        _gated(tmp_path, monkeypatch, [[(5, 7)], []], epochs=2)
+    tests = _record_test_rollouts(monkeypatch)
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, val_gate=True, epochs=2, resume=True)
+        resumed.optimizer = ScriptedLevels([])
+        report = resumed.run()
+    assert report["strategy_report"]["test_eval"] == "done"
+    assert sorted(tests) == [(5, 7), (7, 7)]
+    steps = [e["step_type"] for e in _journal_events(resumed, "final_evaluation")]
+    assert steps.count("final_selection_eval") == 1
