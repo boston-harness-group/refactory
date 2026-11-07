@@ -357,11 +357,13 @@ state is promised, on any graph shape:
   of their branch visits.
 - **Reads are produced first (V6, V15).** A file a node reads is written by a node on a
   path from the start to a terminal. An op or a gate may read a file that is not there
-  yet (no runtime checks an op's reads), so that is all V6 asks of them. An agent's
-  inputs are required: its reads, and every `{{name}}` its prompts fill in that is not
-  a knob, not in its `feedback_keys` and not inside an `{% if name %}` on the same name,
-  are there on every path to it, and a data pass's own files and facts stay in the
-  pass. A `tool_policy: none` agent declares exactly one write.
+  yet (an optional read), unless it lists the read in `required_reads`: a required read
+  is written upstream on every path to it, and both runtimes refuse to run the node while
+  one is missing. An agent's inputs are all required: its reads, and every `{{name}}`
+  its prompts fill in that is not a knob, not in its `feedback_keys` and not inside an
+  `{% if name %}` on the same name, are there on every path to it. A data pass's own
+  files and facts stay in the pass. A `tool_policy: none` agent declares exactly one
+  write. LiveMath's skill graph declares every read of its four ops as required.
 - **Passes are closed (V12).** A data node's entry reaches its exit, which is not a gate
   and has no out-edge. A pass is entered only through its data node, never by an edge
   from the data node or from outside, and never leads back to it.
@@ -399,8 +401,8 @@ attempt path, and every accepted state is checked two ways.
   run with a scripted model, which must end at a terminal or a halt; the spine beside
   the walker on a sample (same facts and item scores; graphs with a user or an agent gate
   are walker-only, as the test drain answers no gate); no agent sent an unfilled
-  `{{name}}`; and no grader-only item value in any file a node can read or any prompt,
-  found by content. The synthetic ops read their declared inputs; an op's input that is
+  `{{name}}`; no node ran without one of its `required_reads`; and no grader-only item
+  value in any file a node can read or any prompt, found by content. The synthetic ops read their declared inputs; an op's input that is
   not there is counted (`notes.op_read_absent`), not called a violation, since V6 lets an
   op read an optional file.
 - **Spec**, a second statement of the rules beside the validator: knob ownership,

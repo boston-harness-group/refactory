@@ -253,8 +253,11 @@ def extract_answer(ctx: Any) -> dict[str, Any]:
 
 def _op(node_id: str, fn: str, *, reads: tuple[str, ...], produces: tuple[str, ...],
         knobs: tuple[str, ...] = ()) -> nn.Node:
+    """An op of this graph. Every one needs all its reads (the item, or the notes and the
+    answer the steps before it wrote), so they are all ``required_reads``: no edit may put
+    one where they are not written first."""
     return nn.Node(node_id, "op", call=f"{SKILL_GRAPH_OPS}:{fn}", reads=reads,
-                   produces=produces, **({"knobs": knobs} if knobs else {}))
+                   required_reads=reads, produces=produces, **({"knobs": knobs} if knobs else {}))
 
 
 def _agent(step: str, writes: str, timeout_s: int) -> nn.Node:

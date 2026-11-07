@@ -26,7 +26,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Knob` | `(default: 'Any', kind: 'str' = 'float', lo: 'float \| None' = None, hi: 'float \| None' = None, enum: 'tuple[Any, ...]' = (), values: 'tuple[str, ...]' = (), frozen: 'bool' = False, description: 'str' = '', required: 'bool' = False) -> None` |
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
 | class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
@@ -52,7 +52,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `Edge` | `(source: 'str', target: 'str', condition: 'str \| None' = None) -> None` |
 | class | `Graph` | `(*, auto_start: 'bool' = True) -> 'None'` |
 | class | `GraphError` | `` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
 | function | `retry_declaration` | `(value: 'Any') -> 'dict[str, Any] \| None'` |
 | function | `workspace_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
 
@@ -178,6 +178,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
+| function | `required_read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `required_slots` | `(template: 'str') -> 'set[str]'` |
 | function | `rules_text` | `() -> 'str'` |
 | function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
@@ -186,7 +187,7 @@ The validator: what makes architecture-in-the-state safe.
 
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
-- **`agent_input_issues`** — V15: an agent's inputs -- its reads and its prompts' ``{{facts}}`` -- are required.
+- **`agent_input_issues`** — V15: required inputs are there on every path: an op's or a gate's
 - **`artifact_produced`** — Keep a named artifact producer in the executable graph during search.
 - **`available_inputs`** — What is there when each node starts, on every path that reaches it.
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
@@ -199,6 +200,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.
 - **`read_issues`** — V6: every read is produced by a node on a path the run can take.
+- **`required_read_issues`** — V15 for ops and gates: each of a node's ``required_reads`` is written upstream on
 - **`required_slots`** — The ``{{name}}`` slots a template needs filled: all of them, except a slot inside
 - **`rules_text`** — The rules, as the optimizer prompt shows them.
 - **`template_facts`** — The run facts an agent's prompts fill in: their ``{{name}}`` slots, less the knobs

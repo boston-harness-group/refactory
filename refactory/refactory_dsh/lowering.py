@@ -118,6 +118,10 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             # writes from the run-level files it reads through (the walker takes the
             # same set from the graph: Graph.data_body).
             entry["subgraph_nodes"] = sorted(graph.data_body(node_id))
+        if node.required_reads:
+            # The node runner refuses to run the node while one is missing (`run.run_node`),
+            # as the walker does.
+            entry["required_reads"] = sorted(node.required_reads)
         if node.feedback_keys:
             entry["feedback_keys"] = list(node.feedback_keys)
         if node.retry is not None:

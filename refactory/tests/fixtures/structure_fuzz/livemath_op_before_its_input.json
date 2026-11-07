@@ -1,0 +1,33 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "insert_after",
+      "target": "decide_prompt",
+      "node": {
+        "id": "extract_answer_c6",
+        "kind": "op",
+        "call": "refactory_packages.livemath.skill_graph:extract_answer",
+        "knobs": [],
+        "reads": [
+          "answer.txt",
+          "current_item.json"
+        ],
+        "required_reads": [
+          "answer.txt",
+          "current_item.json"
+        ],
+        "writes": [],
+        "produces": [
+          "answer_label",
+          "answer_valid"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "walker: failed: data: all 5 items failed (34 such cases in the long tier: a real LiveMath op placed before the file it reads)"
+  ],
+  "fixed_by": "required_reads: LiveMath's ops declare the reads they cannot run without; V15 holds them to every path, and both runtimes refuse a node while one is missing",
+  "refused_with": "V15"
+}

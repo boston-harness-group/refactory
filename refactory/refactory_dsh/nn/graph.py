@@ -138,6 +138,7 @@ _NODE_FIELDS = frozenset(
         "gate_kind",
         "knobs",
         "reads",
+        "required_reads",
         "writes",
         "produces",
         "prompt_template",
@@ -220,6 +221,11 @@ class Node:
     knobs: tuple[str, ...] = ()
     #: Files in the run directory the node reads; each must be written by an earlier node.
     reads: tuple[str, ...] = ()
+    #: `op` or `gate`: the reads it cannot run without, a subset of ``reads``. Each must
+    #: be written upstream on every path that reaches the node (V15), and both runtimes
+    #: refuse to run the node while one is missing. Unlisted reads are optional, as an
+    #: agent's reads never are.
+    required_reads: tuple[str, ...] = ()
     #: Files the node writes; an `agent`'s reply goes into its first write.
     writes: tuple[str, ...] = ()
     #: Run facts the node sets, which later templates and nodes can read.
@@ -373,6 +379,15 @@ class Node:
                 raise GraphError(f"node {self.id!r} is not a fork but declares optional_targets")
             if set(self.optional_targets) - set(self.targets):
                 raise GraphError("optional_targets must be a subset of targets")
+        if self.required_reads:
+            if self.kind not in ("op", "gate"):
+                raise GraphError(
+                    f"node {self.id!r} is a {self.kind} and declares required_reads; only an op "
+                    "or a gate does (an agent's reads are all required)")
+            outside = sorted(set(self.required_reads) - set(self.reads))
+            if outside:
+                raise GraphError(
+                    f"node {self.id!r}: required_reads {outside} are not among its reads")
         if self.kind != "fork" and self.targets:
             raise GraphError(f"node {self.id!r} is not a fork but declares targets")
         if self.kind != "join" and self.sources:
@@ -477,6 +492,7 @@ class Node:
             **({"gate_kind": self.gate_kind} if self.gate_kind != "fn" else {}),
             "knobs": list(self.knobs),
             "reads": list(self.reads),
+            **({"required_reads": list(self.required_reads)} if self.required_reads else {}),
             "writes": list(self.writes),
             "produces": list(self.produces),
             "prompt_template": self.prompt_template,
@@ -526,6 +542,7 @@ class Node:
             evaluator=str(state.get("evaluator", "")),
             knobs=tuple(state.get("knobs") or ()),
             reads=tuple(state.get("reads") or ()),
+            required_reads=tuple(state.get("required_reads") or ()),
             writes=tuple(state.get("writes") or ()),
             produces=tuple(state.get("produces") or ()),
             prompt_template=str(state.get("prompt_template", "")),
@@ -621,7 +638,7 @@ class Node:
         """A copy with one field replaced, refusing an unknown field."""
         if field_name not in _NODE_FIELDS:
             raise GraphError(f"node {self.id!r} has no field {field_name!r}")
-        if field_name in ("knobs", "reads", "writes", "produces", "tools", "targets",
+        if field_name in ("knobs", "reads", "required_reads", "writes", "produces", "tools", "targets",
                           "optional_targets", "sources", "inline_items", "feedback_keys",
                           "field_bindings") and isinstance(value, list) and field_name != "tool_policy":
             value = tuple(value)

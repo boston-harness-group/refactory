@@ -257,8 +257,9 @@ class Dataflow(nn.Mode):
                knobs=("depth",)),
             agent("summarise", "Summarise {{source}} after {{cleaned}}", writes="summary.txt",
                   reads=("clean.txt",), produces=("summary",)),
-            op("emit", reads=("summary.txt", "raw.txt"), writes=("answer.txt",),
-               produces=("finished",)),
+            nn.Node("emit", "op", call=STEP, reads=("summary.txt", "raw.txt"),
+                    required_reads=("summary.txt",), writes=("answer.txt",),
+                    produces=("finished",)),
         ], [("load", "clean"), ("clean", "summarise"), ("summarise", "emit")])
 
 

@@ -1723,6 +1723,10 @@ class Executor:
         # Resolve workdir to absolute: the child does os.chdir(workdir) and
         # relative paths would resolve against the new CWD otherwise.
         _abs_workdir = str(self.ctx.workdir.resolve())
+        # A declared required read that is missing refuses the node, as on the spine.
+        from refactory_dsh.run import missing_inputs
+
+        missing_inputs(self.ctx.workdir, node.required_reads)
         # Forward the current environment snapshot: forkserver children inherit
         # the forkserver's env, not the parent's current one.  Tests that use
         # monkeypatch.setenv need the child to see those changes.

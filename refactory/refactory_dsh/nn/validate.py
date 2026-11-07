@@ -54,11 +54,11 @@ RULES: dict[str, str] = {
     "V13": "a data node must not appear inside a fork branch",
     "V14": "every field binding must name a declared knob of the field's kind, once per "
            "field, and the field must be in the bindable allowlist",
-    "V15": "an agent node's inputs are required: every file it reads and every {{name}} "
-           "its prompts fill in (not a knob, not in its feedback_keys, not inside an "
-           "{% if name %} on the same name) must be produced upstream on every path that "
-           "reaches it (a data pass's own files and facts stay inside the pass), and a "
-           "tool_policy 'none' agent declares exactly one write",
+    "V15": "a node's required inputs must be produced upstream on every path that "
+           "reaches it (a data pass's own files and facts stay inside the pass): an agent's "
+           "reads and every {{name}} its prompts fill in (not a knob, not in its "
+           "feedback_keys, not inside an {% if name %} on the same name), and an op's or a "
+           "gate's required_reads; a tool_policy 'none' agent declares exactly one write",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
@@ -366,6 +366,7 @@ def validate(
     knob_values = dict(values)
     issues.extend(read_issues(graph))
     issues.extend(agent_input_issues(graph, knob_values))
+    issues.extend(required_read_issues(graph))
 
     # V16 forks and joins are paired, and branches are independent.
     issues.extend(fork_issues(graph, knob_values))
@@ -775,8 +776,28 @@ def read_issues(graph: Graph) -> list[Issue]:
     return issues
 
 
+def required_read_issues(graph: Graph) -> list[Issue]:
+    """V15 for ops and gates: each of a node's ``required_reads`` is written upstream on
+    every path that reaches it; both runtimes refuse to run the node without one."""
+    issues: list[Issue] = []
+    available = available_inputs(graph)
+    for node_id in sorted(graph.reachable()):
+        node = graph.nodes.get(node_id)
+        if node is None or node.kind not in ("op", "gate") or not node.required_reads:
+            continue
+        have = available.get(node_id, set())
+        absent = sorted(name for name in node.required_reads if ("file", name) not in have)
+        if absent:
+            issues.append(Issue(
+                "V15", f"declares {absent} as required_reads, which some path to it does not "
+                "write first; both runtimes refuse to run it without them (a data pass's own "
+                "files stay inside its pass)", node=node_id))
+    return issues
+
+
 def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
-    """V15: an agent's inputs -- its reads and its prompts' ``{{facts}}`` -- are required.
+    """V15: required inputs are there on every path: an op's or a gate's
+    ``required_reads``, and an agent's inputs -- its reads and its prompts' ``{{facts}}``.
 
     Both runtimes refuse to dispatch an agent whose declared read is missing, and send a
     prompt with an unfilled ``{{name}}`` as it is, so each must be produced upstream on

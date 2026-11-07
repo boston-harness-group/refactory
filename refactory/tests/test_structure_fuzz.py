@@ -301,3 +301,71 @@ def test_v15_lets_a_slot_inside_an_if_on_its_name_be_optional():
         writes=("a.txt",), tool_policy="none")
     assert validate_mod.template_facts(node, {}) == {"missing", "needed"}
     assert sf._needed_slots(node.prompt_template) == {"missing", "needed"}
+
+
+# ── required reads ───────────────────────────────────────────────────────
+
+
+def test_mutation_required_without_the_required_read_rule_is_caught(monkeypatch):
+    monkeypatch.setattr(validate_mod, "required_read_issues", lambda graph: [])
+    _finds("required", seeds=("livemath_skill_graph", "fuzz_dataflow"), walker=True)
+
+
+def test_required_reads_are_a_subset_of_an_op_or_gates_reads():
+    from refactory_dsh import nn
+
+    with pytest.raises(nn.GraphError, match="not among its reads"):
+        nn.Node("a", "op", call="json:dumps", reads=("x",), required_reads=("y",))
+    with pytest.raises(nn.GraphError, match="only an op or a gate"):
+        nn.Node("a", "agent", prompt_template="p", reads=("x",), required_reads=("x",))
+    node = nn.Node("a", "op", call="json:dumps", reads=("x", "y"), required_reads=("x",))
+    assert nn.Node.from_state(node.to_state()) == node
+    assert "required_reads" not in nn.Node("b", "op", call="json:dumps").to_state()
+
+
+def _required_state(required: bool) -> dict:
+    from refactory_dsh import nn
+    from structure_fuzz_graphs import STEP
+
+    graph = nn.Graph()
+    graph.add(nn.Node("first", "op", call=STEP, writes=("a.txt",)))
+    graph.add(nn.Node("read", "op", call=STEP, reads=("b.txt",),
+                      required_reads=("b.txt",) if required else ()))
+    graph.add(nn.Node("later", "op", call=STEP, writes=("b.txt",)))
+    graph.connect("first", "read")
+    graph.connect("read", "later")
+    return {"graph": graph.to_state(), "knobs": {}}
+
+
+def test_v15_holds_a_required_read_to_every_path_and_leaves_an_optional_one():
+    assert validate_mod.validate_state(_required_state(False)) == []
+    issues = validate_mod.validate_state(_required_state(True))
+    assert [i.code for i in issues] == ["V15"] and "required_reads" in issues[0].message
+
+
+def test_both_runtimes_refuse_a_node_whose_required_read_is_missing(tmp_path):
+    from refactory_dsh import lowering
+    from refactory_dsh.nn.executor import execute
+    from refactory_dsh.run import declarations, missing_inputs
+
+    state = _required_state(True)
+    result = execute(sf._graph_of(state), tmp_path / "walk", knobs={})
+    assert not result.exit_ok and "required input is missing: b.txt" in str(result.error)
+    run = tmp_path / "spine"
+    run.mkdir()
+    lowering.write_declarations(state, run)
+    assert declarations(run, "read")["required_reads"] == ["b.txt"]
+    with pytest.raises(ValueError, match="required input is missing: b.txt"):
+        missing_inputs(run, declarations(run, "read")["required_reads"])
+
+
+def test_livemath_ops_require_their_reads_and_the_optimizer_sees_it():
+    from refactory_dsh.nn.node_schema import render_schema
+
+    state = sf.seeds()["livemath_skill_graph"].state()
+    nodes = state["graph"]["nodes"]
+    for op in ("prepare", "notes_prompts", "decide_prompt", "extract_answer"):
+        assert nodes[op]["required_reads"] == nodes[op]["reads"], op
+    assert sf._rendered_copy(state, "extract_answer")["required_reads"] == [
+        "answer.txt", "current_item.json"]
+    assert "required_reads" in "\n".join(render_schema())

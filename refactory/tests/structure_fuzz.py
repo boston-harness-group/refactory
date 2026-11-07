@@ -51,11 +51,13 @@ import structure_fuzz_graphs as fg
 
 HERE = Path(__file__).resolve().parent
 CORPUS = HERE / "fixtures" / "structure_fuzz"
-INVARIANTS = ("lowering", "walker", "spine", "grader", "slots", "knobs", "dataflow", "forks",
-              "protected", "tools")
+INVARIANTS = ("lowering", "walker", "spine", "grader", "slots", "required", "knobs", "dataflow",
+              "forks", "protected", "tools")
 #: Checks that run the real code (lowering, the walker, the spine) and look at what it
 #: did; the rest are spec checks, a second statement of the rules beside the validator.
-OBSERVED = ("lowering", "walker", "spine", "grader", "slots")
+OBSERVED = ("lowering", "walker", "spine", "grader", "slots", "required")
+#: How both runtimes refuse a node whose required read is missing (`run.missing_inputs`).
+REQUIRED_MISSING = "required input is missing"
 #: Run facts the harness counts but does not call violations (an op's optional read
 #: that was not there: V6 allows it).
 NOTES: Counter = Counter()
@@ -509,7 +511,8 @@ def check_dataflow(state: dict[str, Any]) -> list[Violation]:
     """Spec check. An agent's inputs are required: every file it reads and every fact
     its prompts need is produced upstream on every path to it, and a data pass's own
     outputs stay in the pass. An op or a gate may read a file that is not there yet (no
-    runtime checks an op's reads), so its reads need only be produced on some run."""
+    runtime checks an op's reads), so its reads need only be produced on some run; its
+    ``required_reads`` are held to every path, as an agent's are."""
     graph = _graph_of(state)
     knobs = _knob_values(state)
     strict = available_before(graph)
@@ -524,7 +527,9 @@ def check_dataflow(state: dict[str, Any]) -> list[Violation]:
             wanted = {("file", n) for n in files} | {("fact", n) for n in facts}
             missing = sorted(f"{k} {n}" for k, n in wanted - strict[node_id])
         else:
-            missing = sorted(f"file {n}" for n in files if n not in some_run)
+            missing = sorted({f"file {n}" for n in files if n not in some_run}
+                             | {f"required file {n}" for n in node.required_reads
+                                if ("file", n) not in strict[node_id]})
         if missing:
             out.append(Violation("dataflow", f"{node.kind} {node_id} reads {missing}, not "
                                              "produced where it needs to be"))
@@ -725,6 +730,9 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
         # take that answer. What a real evaluator answers is its own business, so the
         # run is inconclusive rather than a finding.
         return seen, None
+    if REQUIRED_MISSING in str(result.error or "") or _missing_required(workdir, graph):
+        return [*seen, Violation("required", f"a required read was missing at run time: "
+                                             f"{str(result.error)[:300]}")], result
     if not result.exit_ok or result.error:
         if _unguaranteed_op_reads(graph):
             # V6 lets an op read a file that may not be there (no runtime checks an op's
@@ -743,11 +751,22 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
 
 
 def _unguaranteed_op_reads(graph: Graph) -> list[str]:
-    """Ops and gates whose declared reads are not there on every path to them."""
+    """Ops and gates with an optional (not required) read that is not there on every path."""
     avail = available_before(graph)
     return sorted(n.id for n in graph.nodes.values() if n.kind in ("op", "gate")
                   and n.id in graph.reachable()
-                  and any(("file", r) not in avail[n.id] for r in n.reads))
+                  and any(("file", r) not in avail[n.id] for r in n.reads
+                          if r not in n.required_reads))
+
+
+def _missing_required(workdir: Path, graph: Graph) -> list[str]:
+    """Required reads `step` found missing (it notes them under ``MISSING_DIR``)."""
+    out = []
+    for marker in workdir.rglob(f"{fg.MISSING_DIR}/*"):
+        node = graph.nodes.get(marker.name)
+        if node is not None and marker.is_file():
+            out += [n for n in marker.read_text().split() if n in node.required_reads]
+    return out
 
 
 def _task(seed: Seed, ref: str) -> Any:
@@ -899,8 +918,10 @@ class EditGenerator:
         new_id = self.fresh_id(graph, kind)
         files, facts, ids = self._files(graph), self._facts(graph), sorted(graph.nodes) or [new_id]
         if kind == "op":
-            return {"id": new_id, "kind": "op", "call": fg.STEP,
-                    "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
+            reads = rng.sample(files, k=min(len(files), rng.choice((0, 0, 1, 2))))
+            required = [r for r in reads if rng.random() < 0.5]
+            return {"id": new_id, "kind": "op", "call": fg.STEP, "reads": reads,
+                    **({"required_reads": required} if required else {}),
                     "writes": [f"{new_id}.txt"], "produces": [f"{new_id}_fact"]}
         if kind == "agent":
             # Most new agents omit tool_policy (the edit layer gives them 'none'); some
@@ -960,6 +981,10 @@ class EditGenerator:
             return {"op": "add_node", "node": node, "position": rng.choice(
                 ({"after": some, "before": some}, {"sideways": True}, "after", {"after": "ghost"}))}
         if choice == 9:
+            if rng.random() < 0.5:
+                return {"op": "insert_after", "target": some,
+                        "node": {"id": self.fresh_id(graph, "badreq"), "kind": "op", "call": fg.STEP,
+                                 "reads": [], "required_reads": ["nowhere.txt"]}}
             return {"op": "split", "target": some, "into": [node]}
         if choice == 10:
             return {"op": "add_node", "node": {**node, "id": some}, "position": {"after": some}}
