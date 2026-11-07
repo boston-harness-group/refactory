@@ -73,35 +73,29 @@ PENDING = "pending.json"
 #: The train-minus-holdout gap above which the audit calls a winner overfit. The
 #: reference's number, so a run here and a run there agree about what overfit means.
 OVERFIT_THRESHOLD = 0.15
-#: How many standard errors of the gap the overfit threshold allows: two parts of a
-#: few items differ by chance, so the threshold is max(OVERFIT_THRESHOLD, this x SE),
-#: with SE the gap's standard error from the two scores and the parts' sizes
-#: (``overfit_threshold``).
-OVERFIT_SE_FACTOR = 2.0
 #: Why a seed winner is never called overfit.
 SEED_WINNER_NOTE = ("the winner is the seed, which the search did not change, so the gap "
                     "is the difference between the parts, not overfitting")
 
 
-def overfit_threshold(first: float, first_items: int, second: float,
-                      second_items: int) -> tuple[float, float | None]:
-    """The overfit threshold for a gap between two scores, and the gap's standard error.
+def gap_standard_error(first: float, first_items: int, second: float,
+                       second_items: int) -> float | None:
+    """The standard error of a gap between two scores, for information only.
 
     Each score is read as a pass rate over its part (clipped to [0, 1], the largest
     variance a score in that range can have): SE = sqrt(p1(1-p1)/n1 + p2(1-p2)/n2).
-    The threshold is the larger of ``OVERFIT_THRESHOLD`` and ``OVERFIT_SE_FACTOR`` x SE,
-    so a gap small parts make by chance is not called overfitting. Without both sizes
-    the SE is ``None`` and the threshold is ``OVERFIT_THRESHOLD``.
+    It is reported beside the fixed ``OVERFIT_THRESHOLD`` so a reader can see how much
+    of a gap small parts make by chance; it does not move the threshold. ``None``
+    without both sizes.
     """
     if not first_items or not second_items:
-        return OVERFIT_THRESHOLD, None
+        return None
 
     def variance(score: float, items: int) -> float:
         p = min(1.0, max(0.0, float(score)))
         return p * (1.0 - p) / items
 
-    se = math.sqrt(variance(first, first_items) + variance(second, second_items))
-    return max(OVERFIT_THRESHOLD, OVERFIT_SE_FACTOR * se), round(se, 6)
+    return round(math.sqrt(variance(first, first_items) + variance(second, second_items)), 6)
 
 #: Where the run writes how the winner did on the items no candidate saw.
 HOLDOUT_FILE = "holdout.json"
@@ -2687,7 +2681,7 @@ class Loop(OuterLoop):
 
         exit_ok = (
             best is not None and audit.get("winner") == best.id
-            and audit.get("status") in ("measured", "not_applicable")
+            and audit.get("status") in ("measured", "not_applicable", "unmeasured")
             and not audit.get("overfit")
             and not proposer.get("all_failed")
             and strategy_error is None
@@ -2853,9 +2847,10 @@ class Loop(OuterLoop):
             if train is not None and holdout is not None
             else None
         )
-        threshold, se = (overfit_threshold(train, int(instances.get(task_module.TRAIN) or 0),
-                                           holdout, int(instances.get(task_module.HOLDOUT) or 0))
-                         if gap is not None else (OVERFIT_THRESHOLD, None))
+        threshold = OVERFIT_THRESHOLD
+        se = (gap_standard_error(train, int(instances.get(task_module.TRAIN) or 0),
+                                 holdout, int(instances.get(task_module.HOLDOUT) or 0))
+              if gap is not None else None)
         seed_winner = (winner is not None and bool(self.population)
                        and winner.id == self.population[0].id)
         overfit = None if gap is None else (False if seed_winner else gap > threshold)
@@ -2865,9 +2860,10 @@ class Loop(OuterLoop):
             "holdout": holdout,
             "gap": gap,
             "overfit": overfit,
-            "threshold": round(threshold, 6),
+            "threshold": threshold,
             "standard_error": se,
-            "threshold_basis": f"max({OVERFIT_THRESHOLD}, {OVERFIT_SE_FACTOR} x SE of the gap)",
+            "threshold_basis": (f"fixed {OVERFIT_THRESHOLD}; standard_error (from the part "
+                                "sizes) is for information"),
             "instances": instances,
             "winner": winner.id if winner is not None else None,
             "measurements": self.holdout_measurements,
@@ -2927,28 +2923,34 @@ class Loop(OuterLoop):
         seed_gap = (seed_val - seed_test if seed_val is not None and seed_test is not None
                     else None)
         manifest = self._parts_manifest or {}
-        threshold, se = overfit_threshold(val_score, len(manifest.get(task_module.VAL) or ()),
-                                          test_score, len(manifest.get(task_module.TEST) or ()))
+        se = gap_standard_error(val_score, len(manifest.get(task_module.VAL) or ()),
+                                test_score, len(manifest.get(task_module.TEST) or ()))
         audit: dict[str, Any] = {
             "status": "measured",
             "val": val_score,
             "test": test_score,
             "gap": gap,
             "seed_gap": seed_gap,
-            "threshold": round(threshold, 6),
+            "threshold": OVERFIT_THRESHOLD,
             "standard_error": se,
-            "threshold_basis": (f"max({OVERFIT_THRESHOLD}, {OVERFIT_SE_FACTOR} x SE of the gap, "
-                                "from the val and test part sizes)"),
+            "threshold_basis": (f"fixed {OVERFIT_THRESHOLD} on the gap the search added; "
+                                "standard_error (from the val and test part sizes) is for "
+                                "information"),
             "winner": winner.id,
         }
         if seed is not None and winner.id == seed.id:
             audit.update(added_gap=0.0, overfit=False, note=SEED_WINNER_NOTE)
             return audit
-        added = gap - seed_gap if seed_gap is not None else gap
-        audit.update(added_gap=added, overfit=added > threshold)
         if seed_gap is None:
-            audit["note"] = ("the seed has no val and test scores, so the whole gap is "
-                             "counted as added")
+            # Without the seed's own gap the search's part of it cannot be told apart:
+            # neither a pass nor a failure.
+            audit.update(status="unmeasured", added_gap=None, overfit=None,
+                         note=("unmeasured: the seed's "
+                               + ("test" if seed_val is not None else "val")
+                               + " score is missing, so the gap the search added is unknown"))
+            return audit
+        added = gap - seed_gap
+        audit.update(added_gap=added, overfit=added > OVERFIT_THRESHOLD)
         return audit
 
     def _holdout_score(self, winner: Candidate) -> tuple[float | None, str]:

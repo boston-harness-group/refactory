@@ -1,8 +1,8 @@
-"""The val-vs-test overfit audit counts only the gap the search added, against a
-threshold that allows for small parts.
+"""The val-vs-test overfit audit counts only the gap the search added.
 
-overfit = (winner_val - winner_test) - (seed_val - seed_test) > max(0.15, 2 x SE),
-SE from the scores and the val and test part sizes; a seed winner is never overfit.
+overfit = (winner_val - winner_test) - (seed_val - seed_test) > 0.15 (fixed); the gap's
+standard error from the part sizes is reported beside it for information. A seed
+winner is never overfit; without the seed's test score the audit is unmeasured.
 Each test fails when the behaviour it names is reverted.
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from refactory_dsh.loop import Loop, LoopConfig, overfit_threshold
+from refactory_dsh.loop import Loop, LoopConfig, gap_standard_error
 from refactory_dsh.optim import Candidate
 
 from test_skillopt import _patch_mode
@@ -70,12 +70,61 @@ def test_a_gap_the_seed_already_had_is_not_overfitting(tmp_path):
     assert audit["overfit"] is False
 
 
-def test_small_parts_widen_the_threshold(tmp_path):
-    """The same added gap of 0.40 is chance on 5-item parts and overfitting on
-    200-item parts; the standard error is reported beside the threshold."""
+def test_the_standard_error_is_reported_and_does_not_move_the_threshold(tmp_path):
+    """An added gap of 0.40 on 5-item parts is overfitting: the threshold stays 0.15;
+    the standard error is there for a reader."""
     small = _audit(tmp_path / "s", seed=(0.5, 0.5), winner=(0.9, 0.5), val_items=5, test_items=5)
-    large = _audit(tmp_path / "l", seed=(0.5, 0.5), winner=(0.9, 0.5), val_items=200, test_items=200)
     assert small["standard_error"] == pytest.approx(0.260768, abs=1e-5)
-    assert small["threshold"] > 0.5 and small["overfit"] is False
-    assert large["threshold"] == pytest.approx(0.15) and large["overfit"] is True
-    assert overfit_threshold(0.6471, 17, 0.496, 125)[0] == pytest.approx(0.2485, abs=1e-4)
+    assert small["threshold"] == 0.15 and small["overfit"] is True
+    assert gap_standard_error(0.6471, 17, 0.496, 125) == pytest.approx(0.124229, abs=1e-5)
+
+
+def test_without_the_seeds_test_score_the_audit_is_unmeasured(tmp_path):
+    """The seed has a val score but no test score (a skipped or incomplete final
+    evaluation): neither overfit nor clean."""
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path)
+    seed_c = Candidate.from_state({"graph": {"nodes": {}}, "knobs": {"level": {"value": 5}}})
+    child = Candidate.from_state({"graph": {"nodes": {}}, "knobs": {"level": {"value": 7}}},
+                                 parent=seed_c.id)
+    loop.population = [seed_c, child]
+    loop._parts_manifest = {"train": ["t1"], "val": ["v1"], "test": ["x1"]}
+    loop._part_results[seed_c.id] = {"val": [{"score": 0.5}]}
+    loop._part_results[child.id] = {"val": [{"score": 0.9}], "test": [{"score": 0.4}]}
+    audit = loop.audit_parts(child)
+    assert audit["status"] == "unmeasured" and audit["overfit"] is None
+    assert audit["note"].startswith("unmeasured: the seed's test score is missing")
+
+
+def test_a_candidate_that_games_its_scorer_on_a_small_val_part_is_overfit(tmp_path, monkeypatch):
+    """The #76 kind of failure, run for real: the gate accepts a candidate that scores
+    high on the 4-item val part and low on test, while the seed scores the same on
+    both. The final evaluation measures it, the audit calls it overfit and the run
+    fails."""
+    from refactory_dsh.outerloop import ValidationGate
+    from test_val_gate import ScriptedLevels, _level
+
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        gaming = _level(candidate) == 9
+        if part == "val":
+            result.score = 1.0 if gaming else 0.5
+        elif part == "test":
+            result.score = 0.2 if gaming else 0.5
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(
+        lambda run, cand: 1.0 if _level(cand) == 9 else 0.5))
+    proposer = ScriptedLevels([[(5, 9)], []])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=2, val_gate=True)
+        loop.optimizer = proposer
+        report = loop.run()
+    audit = report["holdout"]
+    assert _level(next(c for c in loop.population if c.id == report["best"]["id"])) == 9
+    assert audit["seed_gap"] == pytest.approx(0.0) and audit["added_gap"] == pytest.approx(0.8)
+    assert audit["overfit"] is True and report["exit_ok"] is False
+    assert "overfit" in report["error"]

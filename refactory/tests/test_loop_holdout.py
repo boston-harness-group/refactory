@@ -309,8 +309,7 @@ def test_adopting_an_overfit_winner_is_refused_unless_the_override_is_given(tmp_
     from refactory_dsh import console
 
     root = _overfit_run(tmp_path)
-    project = tmp_path / "project"
-    project.mkdir()
+    project = tmp_path
     destination = project / ".factory" / "packages" / "taken"
 
     assert console.main([
@@ -330,24 +329,51 @@ def test_adopting_an_overfit_winner_is_refused_unless_the_override_is_given(tmp_
 
 
 def _overfit_run(tmp_path: Path) -> Path:
-    """A real run of a real Task-bound mode whose winner is overfit.
+    """A real run of a real Task-bound mode whose optimized winner is overfit.
 
-    `dataset_probe/dataset` iterates `CountingTask`'s two items: the search rewards
-    alpha's pass (1.0) and the held-out item scores what the Task gives it (0.5).
+    A workspace package subclasses `dataset_probe/dataset` with a `bonus` knob that
+    adds a little to the score, so the swept candidate beats the seed and wins. The
+    search rewards alpha's pass (1.0); the held-out item scores 0.5, so the winner's
+    train-vs-holdout gap is about 0.5 -- beyond the threshold, and not the seed's.
     """
+    source = tmp_path / ".factory" / "packages" / "overfit_pack"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text(
+        "from __future__ import annotations\n\n"
+        "from refactory_dsh.nn import Package\n\n"
+        "from .mode import Overfit\n\n"
+        "PACKAGE = Package(\n"
+        "    name='overfit_pack', description='', modes=(Overfit,),\n"
+        "    ops=('refactory_packages.dataset_probe.ops',),\n"
+        ")\n"
+    )
+    (source / "mode.py").write_text(
+        "from refactory_dsh import nn\n"
+        "from refactory_packages.dataset_probe.mode import Dataset\n\n\n"
+        "class Overfit(Dataset):\n"
+        "    name = 'overfit'\n\n"
+        "    @classmethod\n"
+        "    def declare(cls):\n"
+        "        return {**super().declare(),\n"
+        "                'bonus': nn.Knob(0, 'int', lo=0, hi=9, description='a bonus')}\n\n"
+        "    def build(self):\n"
+        "        graph = super().build()\n"
+        "        work = graph.nodes['work']\n"
+        "        graph.nodes['work'] = work.with_field('knobs', (*work.knobs, 'bonus'))\n"
+        "        return graph\n\n"
+        "    def score(self, run):\n"
+        "        return super().score(run) + int(self.values()['bonus']) / 1000\n"
+    )
     root = tmp_path / "run"
     Loop(
-        "dataset_probe/dataset",
-        LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=root),
-        project=Path("."),
+        "overfit_pack/overfit",
+        LoopConfig(epochs=1, batch_size=2, optimizer="random", seed=1, runs_root=root),
+        project=tmp_path,
     ).run()
-    # Its winner is the seed, which the audit never calls overfit; these tests are
-    # about what `best` and `adopt` do with an overfit verdict, so the recorded audit
-    # carries one (the verdict itself is tested above).
     audit = json.loads((root / "holdout.json").read_text())
-    audit.update(overfit=True, gap=0.5, threshold=0.15)
-    audit.pop("note", None)
-    (root / "holdout.json").write_text(json.dumps(audit))
+    assert audit["overfit"] is True, audit
+    assert audit["winner"] != json.loads((root / "report.json").read_text())["lineage"][0]["id"], (
+        "setup: the winner is not the seed")
     return root
 
 
