@@ -274,6 +274,14 @@ class LoopConfig:
     #: winner is the best on val. Needs a manifest with a val part; a custom strategy
     #: (SkillOpt) keeps its own gate instead.
     val_gate: bool = False
+    #: Train items per epoch: 0 (the default) scores every candidate on the whole train
+    #: part. N > 0, when the train part has more than N items, samples N train ids each
+    #: epoch with SkillOpt's per-epoch seed (``train_batch_seed``), scores every
+    #: candidate of that epoch on that sample, and re-scores the edited candidate on it
+    #: when its records are from another epoch, so the proposal evidence is that
+    #: epoch's minibatch (as SkillOpt rolls out its current candidate on each step's
+    #: batch). Val and test are unaffected. Each epoch's ids are journaled.
+    train_minibatch: int = 0
     #: With ``val_gate``: stop after this many epochs in a row whose gating did not
     #: raise the best val score (SkillOpt's ``early_stop_patience``). 0 is off.
     early_stop_patience: int = 0
@@ -436,6 +444,9 @@ class Loop(OuterLoop):
                     setattr(self.config, key, client_context[key])
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
             raise LoopError("repeats must be an integer from 1 to 10")
+        minibatch = self.config.train_minibatch
+        if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
+            raise LoopError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
         self.measurements = 0
         self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
@@ -533,6 +544,10 @@ class Loop(OuterLoop):
         #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
         #: records the proposal context carries, and is not a strategy decision.
         self._editing_parent: str | None = None
+        #: ``train_minibatch``: each epoch's sampled train ids, and the epoch whose
+        #: minibatch each candidate's train records come from.
+        self._minibatches: dict[int, list[str]] = {}
+        self._records_epoch: dict[str, int] = {}
         #: The proposal attempt within the current optimizer step (``propose``).
         self._proposal_attempt = 0
         #: Each accepted proposal's rationale and prediction, by candidate id.
@@ -698,7 +713,19 @@ class Loop(OuterLoop):
             snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
         else:
             self._journal("resume_configuration", resolved_profile=snapshot)
-        (self.root / "config.json").write_text(
+        saved = self.root / "config.json"
+        if self.config.resume and saved.exists():
+            try:
+                before = int(json.loads(saved.read_text()).get("train_minibatch") or 0)
+            except (OSError, ValueError, json.JSONDecodeError):
+                before = self.config.train_minibatch
+            if before != self.config.train_minibatch:
+                # The epochs already scored used the old samples; a different size would
+                # compare candidates scored on different-sized minibatches.
+                raise LoopError(
+                    f"this run scores minibatches of {before} train items; resume it with "
+                    f"train_minibatch {before}, or start a new run")
+        saved.write_text(
             json.dumps({"mode": self.mode_id, **self.config.to_dict()}, indent=2, default=str)
         )
         # Recorded for every run, so its seed results can be exported for later ones.
@@ -745,6 +772,15 @@ class Loop(OuterLoop):
             refusal = val_gate_refusal(self.optimizer.name, self.name)
             if refusal:
                 raise LoopError(refusal)
+        elif (self.config.train_minibatch
+              and len(self._train_ids()) > self.config.train_minibatch):
+            # Without the gate the winner and the parents are picked by train score,
+            # and on minibatches those come from different samples.
+            raise LoopError(
+                f"train_minibatch {self.config.train_minibatch} scores each epoch on a "
+                "different train sample, so train scores of different epochs cannot pick "
+                "the winner or the parents; turn val_gate on (--val-gate 1), or score the "
+                "whole train part (train_minibatch 0)")
         elif self.config.early_stop_patience or self.config.early_stop_at_full_val:
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
@@ -931,7 +967,12 @@ class Loop(OuterLoop):
                 break
             if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
                 break
-            self._evaluate(candidate, seed=seed)
+            items = self._minibatch(self.epoch if epoch is None else epoch)
+            self._evaluate(candidate, seed=seed, items=items)
+            if items is not None:
+                self._records_epoch[candidate.id] = self.epoch if epoch is None else epoch
+                self._journal("train_records_epoch", id=candidate.id,
+                              epoch=self._records_epoch[candidate.id])
             self._progress(
                 "forward",
                 candidate=candidate.id,
@@ -957,6 +998,79 @@ class Loop(OuterLoop):
         if self.config.val_gate:
             return train_batch_seed(self.config.seed, epoch)
         return self.config.seed
+
+    def _train_ids(self) -> list[str]:
+        """The train part's item ids: the manifest's, else the Task's train split."""
+        manifest = self._parts_manifest
+        if manifest and task_module.TRAIN in manifest:
+            return sorted(str(item) for item in manifest[task_module.TRAIN])
+        state = self.population[0].state if self.population else self.mode.state_dict()
+        return sorted(self._expected_item_ids(state, task_module.TRAIN)[0])
+
+    def _minibatch(self, epoch: int) -> list[str] | None:
+        """The train ids every candidate of ``epoch`` is scored on, or ``None`` for the
+        whole train part. Sampled once per epoch with ``train_batch_seed`` (so a resumed
+        run samples the same ids) and journaled."""
+        size = self.config.train_minibatch
+        if not size:
+            return None
+        if epoch in self._minibatches:
+            return self._minibatches[epoch]
+        ids = self._train_ids()
+        if len(ids) <= size:
+            return None
+        sample = sorted(random.Random(train_batch_seed(self.config.seed, epoch)).sample(ids, size))
+        self._minibatches[epoch] = sample
+        self._journal("train_minibatch", epoch=epoch, ids=sample)
+        return sample
+
+    def _refresh_edited_records(self) -> None:
+        """Score the edited candidate on this epoch's minibatch when its train records
+        come from another epoch, so the proposal evidence is this epoch's minibatch. Its
+        score is left alone: only the records the optimizer reads change."""
+        batch = self._minibatch(self.epoch)
+        edited = self.strategy_decision.get("parent") or self._editing_parent
+        if not batch or not edited or self._records_epoch.get(str(edited)) == self.epoch:
+            return
+        parent = next((c for c in self.population if c.id == edited and c.evaluated), None)
+        if parent is None:
+            return
+        if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+            return
+        if self.evaluations >= self.config.max_evaluations:
+            return
+        if self.budget:
+            # The time and token budgets, checked as every scoring path checks them: a
+            # spent budget stops the re-score here, before anything runs.
+            from refactory_dsh.budgets import BudgetExhausted
+            try:
+                self.budget.checkpoint("work" if self._owns_resource_budget else None)
+            except BudgetExhausted as exc:
+                self.bound = str(exc)
+                return
+        workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{self.epoch}"
+        task_module.make_manifest(workdir, train_ids=batch)
+        result, measurements = self._measure(parent, workdir, task_module.TRAIN,
+                                             seed=self._train_seed(self.epoch), items=batch)
+        if not measurements.get("count"):
+            # The measurement's own budget checkpoint stopped it before a trial ran:
+            # nothing was scored, so nothing is counted and the records stay.
+            return
+        with self._state_lock:
+            # An evaluation like any other: it counts toward the evaluation budget (the
+            # time and token budgets are charged inside the measurement), and it is
+            # journaled so a resumed run counts it too.
+            self.evaluations += 1
+            self._journal("rescore", id=parent.id, epoch=self.epoch,
+                          score=result.score if result.exit_ok else None,
+                          exit_ok=result.exit_ok, measurements=measurements)
+            self._train_item_records[parent.id] = list(result.item_records)
+            self._records_epoch[parent.id] = self.epoch
+            if not measurements.get("cached_from"):
+                self.rollouts += len(result.item_records) or 1
+            self._journal("train_records", id=parent.id, records=list(result.item_records))
+            self._journal("train_records_epoch", id=parent.id, epoch=self.epoch)
+            self._journal("rollouts", rollouts=self.rollouts)
 
     def _carry_ledger(self, workdir: Path) -> None:
         """Put the run's ledger where the candidate's own nodes look for it.
@@ -1662,6 +1776,7 @@ class Loop(OuterLoop):
         else:
             selected = self.select_parents(1)
             self._editing_parent = selected[0].id if selected else None
+        self._refresh_edited_records()
         before = len(self.rejections)
         self._proposal_attempt = 0
         proposals = self.propose(run, parents, self.batch_size(run))
@@ -3629,6 +3744,7 @@ class Loop(OuterLoop):
         # A strategy may evaluate a candidate before it keeps it (``Run.keep``
         # journals it then), so its score can come before the candidate itself.
         early_scores: dict[str, dict[str, Any]] = {}
+        rescores = 0  # re-scores of the edited candidate (train_minibatch), each an evaluation
 
         def apply_score(candidate: Candidate, record: dict[str, Any]) -> None:
             candidate.score = record.get("score")
@@ -3732,6 +3848,12 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
+            elif event == "rescore":
+                rescores += 1
+            elif event == "train_minibatch":
+                self._minibatches[int(record["epoch"])] = [str(i) for i in record.get("ids") or ()]
+            elif event == "train_records_epoch":
+                self._records_epoch[str(record.get("id"))] = int(record.get("epoch") or 0)
             elif event == "train_records":
                 cid = record.get("id")
                 if cid is not None:
@@ -3757,7 +3879,7 @@ class Loop(OuterLoop):
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")
         self.population = [by_id[node_id] for node_id in order]
-        self.evaluations = sum(1 for c in self.population if c.evaluated)
+        self.evaluations = sum(1 for c in self.population if c.evaluated) + rescores
         self.measurements = sum(c.measurements.get("count", 1) for c in self.population if c.evaluated)
         self.proposals = {
             candidate.id: {

@@ -2104,6 +2104,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
+    "train_minibatch": 0,
     "val_gate": false,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
@@ -2627,6 +2628,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "train_minibatch": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--train-minibatch"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "val_gate": {
       "default": null,
       "description": "",
@@ -2673,7 +2685,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "9ba6a4baec340c16d3e7b38c0c26341a58604e43f7033cba67799a4baa6f1d13"
+  "reviewed_schema": "6aff4b0ec84baa1f697173ba0bc6032a4e150d2eaba8ea1cfc29b3e75e78774c"
 }
 ```
 
@@ -3469,7 +3481,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3536,6 +3548,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
+    "train_minibatch": 0,
     "val_gate": false,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
@@ -4073,6 +4086,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "train_minibatch": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--train-minibatch"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "val_gate": {
       "default": null,
       "description": "",
@@ -4118,8 +4142,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.",
-  "reviewed_schema": "381b297288eaef1175ca5d9188b7bda4659defbf76d33a4a8b0249cbdedf9ca3"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled.",
+  "reviewed_schema": "8bd1f12350f33585ecea6d5217cd13af943e6fa919e6acf9317727960bf7a91b"
 }
 ```
 
@@ -5779,7 +5803,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -5828,6 +5852,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
+    "train_minibatch": 0,
     "val_gate": false,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
@@ -6345,6 +6370,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "train_minibatch": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--train-minibatch"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "val_gate": {
       "default": null,
       "description": "",
@@ -6401,8 +6437,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.",
-  "reviewed_schema": "b01269b1d5c4386545fe4520d584ac33edf30aa508cd9001e0ff1e21056a0c0c"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled.",
+  "reviewed_schema": "f4d43401a506144da2402dbed328a9e4f2540070a16ce8bc5241bb24a0175e72"
 }
 ```
 
