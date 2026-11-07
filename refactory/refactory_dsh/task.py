@@ -78,6 +78,10 @@ class Task:
     #: ``current_item.json`` only in a run whose knob is true; a mode that declares
     #: such a knob freezes it, so no search can turn it on.
     revealed_by: dict[str, str] = {}
+    #: Facts or files ``verify`` (or a scorer the Task runs) leaves where the graph's
+    #: nodes could find them: grader-derived, so no node outside the grader side may
+    #: consume them (V17). Default: none.
+    grader_outputs: tuple[str, ...] = ()
 
     def instances(
         self, *, part: str | None = None, seed: int | None = None,
@@ -139,6 +143,20 @@ def load_task(ref: str, project: Path | None = None) -> Task:
         known = ", ".join(sorted(TASKS)) or "none"
         raise TaskError(f"no Task named {ref!r} is registered; registered: {known}")
     return TASKS[ref]()
+
+
+def grader_outputs(ref: str) -> tuple[str, ...]:
+    """A Task's ``grader_outputs``, read from its class without building it (a Task may
+    load its items when built). ``()`` when the reference names no Task."""
+    ref = (ref or "").strip()
+    if ":" in ref:
+        module_name, _, attribute = ref.partition(":")
+        cls = getattr(importlib.import_module(module_name), attribute, None)
+    else:
+        cls = TASKS.get(ref)
+    if not isinstance(cls, type) or not issubclass(cls, Task):
+        return ()
+    return tuple(str(name) for name in (getattr(cls, "grader_outputs", ()) or ()))
 
 
 def node_item(item: dict[str, Any], task: Task | None, knobs: dict[str, Any] | None) -> dict[str, Any]:

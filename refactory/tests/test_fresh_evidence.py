@@ -195,3 +195,88 @@ def test_readers_read_the_fresh_records_every_epoch(tmp_path, monkeypatch):
     for epoch, prompt in client.readers:
         assert f"Predicted: seed {train_batch_seed(SEED, epoch)}" in prompt, epoch
     assert len(_events(loop, "rescore")) == 2
+
+
+def _failing_rescore(monkeypatch: Any, how: str) -> None:
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        if "train_epoch_" in str(workdir):
+            if how == "failed":
+                result.exit_ok, result.error, result.item_records = False, "the model is down", []
+            else:
+                result.item_records = result.item_records[:2]
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("how", ["failed", "partial"])
+def test_a_failed_or_partial_rescore_keeps_the_previous_evidence(tmp_path, monkeypatch, how):
+    _failing_rescore(monkeypatch, how)
+    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 3)], [(5, 2)], []])
+    seed_id = loop.population[0].id
+    assert not _events(loop, "rescore")
+    failed = _events(loop, "rescore_failed")
+    assert [r["epoch"] for r in failed] == [2, 3]
+    assert all(ids == sorted(TRAIN_IDS) for _e, ids in proposer.evidence), "the old records stay"
+    assert [r["epoch"] for r in _events(loop, "train_records_epoch") if r["id"] == seed_id] == [1]
+    assert loop.evaluations == sum(1 for c in loop.population if c.evaluated) + 2
+    progress = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
+    shown = [events.render(r) for r in progress if r.get("step") == "rescore"]
+    assert shown and all("previous records stay" in line for line in shown), shown
+
+
+class PairWatching(SeedWatching):
+    def __init__(self, plan):  # type: ignore[no-untyped-def]
+        super().__init__(plan)
+        self.pairs: list[tuple[int, list[dict[str, Any]]]] = []
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        self.pairs.append((ctx.epoch, list(ctx.edit_pairs)))
+        return super().propose(ctx, n, parents)
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_a_child_is_compared_with_its_parent_scored_with_the_same_seed(tmp_path, monkeypatch, fresh):
+    """With fresh evidence the rejected child of epoch e (scored in epoch e+1) meets its
+    parent's epoch e+1 records; without it the pair is marked as different seeds."""
+    _tag_seeds(monkeypatch)
+    proposer = PairWatching([[(5, 3)], [(5, 2)], []])
+    _run(tmp_path, monkeypatch, [], proposer=proposer, fresh_evidence=fresh)
+    epoch, pairs = proposer.pairs[1]
+    pair = next(p for p in pairs if p.get("parent"))
+    seeds = {r.get("prediction") for r in pair["parent_records"]}
+    child = {r.get("prediction") for r in pair["child_records"]}
+    if fresh:
+        assert pair["same_seed"] is True and seeds == child == {f"seed {train_batch_seed(SEED, epoch)}"}
+    else:
+        assert pair["same_seed"] is False and seeds != child
+        from refactory_dsh.optim.base import _edit_change_lines
+        assert "different seeds" in "\n".join(_edit_change_lines([pair]))
+
+
+def test_an_older_child_is_compared_with_its_parents_records_from_its_own_epoch(tmp_path, monkeypatch):
+    """In epoch 3 the parent has been re-scored twice; the child scored in epoch 2 is
+    still compared with the parent's epoch 2 records (per-epoch records), not its latest."""
+    _tag_seeds(monkeypatch)
+
+    class ReasoningWatching(SeedWatching):
+        def __init__(self, plan):  # type: ignore[no-untyped-def]
+            super().__init__(plan)
+            self.reasoning: list[tuple[int, list[dict[str, Any]]]] = []
+
+        def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+            self.reasoning.append((ctx.epoch, list(ctx.reasoning)))
+            return super().propose(ctx, n, parents)
+
+    proposer = ReasoningWatching([[(5, 3)], [(5, 2)], []])
+    loop, _ = _run(tmp_path, monkeypatch, [], proposer=proposer)
+    level3 = next(c.id for c in loop.population if _level(c) == 3)
+    epoch, entries = proposer.reasoning[2]
+    entry = next(e for e in entries if e["id"] == level3)
+    assert epoch == 3 and entry["same_seed"] is True and entry["fixed"] is not None, entry

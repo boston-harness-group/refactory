@@ -54,12 +54,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from refactory_dsh import lowering, nn
+from refactory_dsh.items import GRADER_FILES, PASS_RECORD
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
 from refactory_dsh.optim.base import (
-    DEFAULT_MAX_EDITS, _node_spec, proposal_refusal, reason_code,
+    DEFAULT_MAX_EDITS, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
 )
 
 import structure_fuzz_graphs as fg
@@ -77,7 +78,7 @@ REQUIRED_MISSING = "required input is missing"
 #: that was not there: V6 allows it).
 NOTES: Counter = Counter()
 #: Files the grader writes after an item is judged: its records carry the whole item.
-GRADER_RECORDS = ("item_records.json", "facts.json", ".item_record.json", ".done")
+GRADER_RECORDS = GRADER_FILES  # the runtime's grading files (`items.GRADER_FILES`)
 SLOT = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 #: A walk restarts from its seed once its graph has this many nodes.
 MAX_NODES = 28
@@ -130,6 +131,7 @@ class Applier:
         self.seed_state = mode.state_dict()
         self.invariants = mode.invariants()
         self.protected = tuple(mode.protected_nodes())
+        self.graders = tuple(mode.grader_nodes())
         self.optimizer = Optimizer()
 
     def attempt(self, parent: Candidate, edit: Any, seen: set[str]) -> Candidate | list[str]:
@@ -144,6 +146,7 @@ class Applier:
         return self.optimizer.attempt(
             proposal, parent, self.invariants, True, (),
             sorted(seen), seed_state=self.seed_state, protected=self.protected,
+            graders=self.graders,
         )
 
     def replay(self, edits: list[Any]) -> tuple[list[Candidate], list[str] | None]:
@@ -670,14 +673,56 @@ def grader_secrets(seed: Seed, state: dict[str, Any]) -> set[str]:
     return secrets
 
 
+def _strings_in(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings_in(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _strings_in(v)]
+    return [str(value)] if value is not None else []
+
+
+def grade_secrets(workdir: Path) -> set[str]:
+    """What the grading itself produced, for content search, whatever the Task: the
+    grader's strings (its reason, the expected answer as it recorded it) in every
+    finished item's record (``items.PASS_RECORD``) that the item's node-visible input
+    does not also hold."""
+    secrets: set[str] = set()
+    for path in workdir.rglob(PASS_RECORD):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        visible = "\n".join(_strings_in(record.get("metadata") or {}))
+        for key, value in record.items():
+            if key in ("id", "exchanges", "metadata", "prediction", "error_text", "error_kind"):
+                continue
+            if isinstance(value, str) and len(value) >= 8 and value not in visible:
+                secrets.add(value)
+    return secrets
+
+
+def _grader_side_writes(seed: Seed, state: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """The grader side's node ids (data nodes, the mode's protected and grader nodes) and
+    the files they write: where the grade may legitimately be."""
+    graph = _graph_of(state)
+    side = set(seed.mode().grader_scope()["grader_side"]) | {
+        n.id for n in graph.nodes.values() if n.kind == "data"}
+    files = {f for n in graph.nodes.values() if n.id in side and n.kind != "data" for f in n.writes}
+    return side, files
+
+
 def check_grader(secrets: set[str], hidden: set[str], workdir: Path,
-                 model: "ScriptedModel | None") -> list[Violation]:
-    """No file a node can read and no prompt holds a grader-only value (by content), and
-    no ``current_item.json`` names a grader-only field."""
+                 model: "ScriptedModel | None", *, grader_side: set[str] = frozenset(),
+                 grader_files: set[str] = frozenset()) -> list[Violation]:
+    """No file a node can read and no prompt outside the grader side holds a grader-only
+    value or anything the grading produced (by content: ``secrets`` and
+    ``grade_secrets``), and no ``current_item.json`` names a grader-only field."""
+    secrets = set(secrets) | grade_secrets(workdir)
     out: list[Violation] = []
     for path in sorted(p for p in workdir.rglob("*") if p.is_file()):
         rel = path.relative_to(workdir)
-        if path.name in GRADER_RECORDS or path.name.endswith(".done") or ".refactory" in rel.parts:
+        if (path.name in GRADER_RECORDS or path.name in grader_files
+                or path.name.endswith(".done") or ".refactory" in rel.parts):
             continue
         try:
             text = path.read_text()
@@ -694,6 +739,8 @@ def check_grader(secrets: set[str], hidden: set[str], workdir: Path,
             if named:
                 out.append(Violation("grader", f"{rel} names grader-only {named}"))
     for node, prompt, system in (model.log if model is not None else ()):
+        if node in grader_side:
+            continue
         leaked = sorted(secret for secret in secrets if secret in prompt or secret in system)
         if leaked:
             out.append(Violation("grader", f"agent {node} was sent grader-only {leaked[0][:60]!r}"))
@@ -737,7 +784,9 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     _count_absent_reads(workdir)
     hidden = {name for n in graph.nodes.values() if n.kind == "data" and n.task_ref
               for name in getattr(_task(seed, n.task_ref), "grader_fields", ())}
-    seen = check_grader(grader_secrets(seed, state), hidden, workdir, model) + check_slots(state, model)
+    side, side_files = _grader_side_writes(seed, state)
+    seen = check_grader(grader_secrets(seed, state), hidden, workdir, model, grader_side=side,
+                        grader_files=side_files) + check_slots(state, model)
     if result.halted:
         # A halt is a defined ending: a gate out of reloops (the scripted evaluator always
         # answers proceed, which may be a loop's retry edge) or a halt verdict.
@@ -872,8 +921,10 @@ def check_state(applier: Applier, state: dict[str, Any], *, walker: bool = True,
             graph = _graph_of(state)
             hidden = {name for n in graph.nodes.values() if n.kind == "data" and n.task_ref
                       for name in getattr(_task(applier.seed, n.task_ref), "grader_fields", ())}
+            side, side_files = _grader_side_writes(applier.seed, state)
             found += [v for v in check_grader(grader_secrets(applier.seed, state), hidden,
-                                              tmp / "spine", None) if "grader" in only]
+                                              tmp / "spine", None, grader_side=side,
+                                              grader_files=side_files) if "grader" in only]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return found
@@ -911,6 +962,14 @@ class EditGenerator:
     def _files(self, graph: Graph) -> list[str]:
         return sorted({n for node in graph.nodes.values() for n in node.writes}) or ["none.txt"]
 
+    def _slot_fact(self, graph: Graph) -> str:
+        """A fact for a new agent's prompt: often one a data pass publishes (its graded
+        records, under whatever name), the input a cheat would want."""
+        published = sorted({f for n in graph.nodes.values() if n.kind == "data" for f in n.produces})
+        if published and self.rng.random() < 0.3:
+            return self.rng.choice(published)
+        return self.rng.choice(self._facts(graph))
+
     def new_node(self, state: dict[str, Any], kind: str | None = None) -> dict[str, Any]:
         """A node to insert: a copy of an existing one as rendered, or a fresh one."""
         rng, graph = self.rng, _graph_of(state)
@@ -947,7 +1006,7 @@ class EditGenerator:
             policy = rng.choice(({},) * 5 + ({"tool_policy": "none"},) * 3 + ({"tool_policy": None},))
             return {"id": new_id, "kind": "agent", "role": "solver", **policy,
                     "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
-                    "prompt_template": f"Think about {{{{{rng.choice(facts)}}}}}",
+                    "prompt_template": f"Think about {{{{{self._slot_fact(graph)}}}}}",
                     "system_prompt_template": f"You are {new_id}.",
                     "writes": rng.choice(([f"{new_id}.txt"],) * 6 + ([], [f"{new_id}.txt", f"{new_id}.md"])),
                     "produces": [f"{new_id}_fact"]}
@@ -1293,7 +1352,7 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
     """The index of the edit that fails on its own, and the state the edits reach when
     none does. As the attempt path checks them: every edit's shape and op first (not an
     object, not in the catalogue), then each in order against the state the ones before
-    it left (precheck, apply)."""
+    it left (precheck, apply, and in a bundle an edit that changes nothing)."""
     state = parent.state
     for index, edit in enumerate(edits):
         if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
@@ -1302,10 +1361,15 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
         if nn_edits.precheck(edit, state):
             return index, state
         try:
-            state = nn_edits.apply(edit, state, protected=applier.protected)
+            after = nn_edits.apply(edit, state, protected=applier.protected)
         except nn_edits.EditError:
             return index, state
-    return None, state
+        if len(edits) > 1 and candidate_id(after) == candidate_id(state):
+            return index, state  # an edit of a bundle that changes nothing
+        state = after
+    dead = (_dead_edit(edits, parent.state, state, applier.protected)
+            if candidate_id(state) != parent.id else None)
+    return dead, state
 
 
 def check_compound(applier: Applier, parent: Candidate, edits: list[Any],

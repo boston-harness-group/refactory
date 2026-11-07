@@ -61,8 +61,12 @@ and `hill_climb` optimizers run with it.
   show (its first train evaluation's). The re-score counts as an evaluation, a
   measurement and its rollouts, is charged to the time and token budgets, and is
   journaled (`rescore`, with its epoch and seed); a resumed run reads its epoch back and
-  does not repeat it. "What the last edit changed" then compares the latest children
-  with their parent scored in the same epoch, with the same seed. `--fresh-evidence 0`
+  does not repeat it. A re-score that fails, or returns fewer items than it ran, is no
+  evidence: the previous records stay, the epoch is not marked, and it is journaled as
+  `rescore_failed` (still counted as an evaluation). Train records are kept per epoch, so
+  "What the last edit changed" and "Your earlier reasoning" compare a child with its
+  parent's records from the child's epoch (the same seed); a pair from different epochs
+  is marked as such. `--fresh-evidence 0`
   turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
   35-item train part this is one more train evaluation of 35 rollouts per epoch in
   which the gate kept no new candidate.
@@ -155,9 +159,11 @@ sections at once; this is the default loop's equivalent.
   `set_knob` on `<id>__system_prompt` therefore goes after the edit that adds node
   `<id>`). The combined state is then held to every state rule once: frozen knobs, tool
   policy, protected nodes, the validator, lowering, no-op and duplicate (on the combined
-  state, so the same point reached in another order is a duplicate). A refusal about one
-  edit names it, `[edit k of n: op]`, after the rule's code; one about the combined
-  state names none. A list longer than N is refused `E-too-many-edits`.
+  state, so the same point reached in another order is a duplicate). An edit the result
+  does not depend on -- one that changes nothing, or that a later edit overwrites or
+  undoes -- is refused `E-noop` with its index. A refusal about one edit names it,
+  `[edit k of n: op]`, after the rule's code; one about the combined state names none. A
+  list longer than N is refused `E-too-many-edits`.
 - **Cap.** `--max-edits-per-proposal` (default 4, SkillOpt's edit budget) caps the
   list; `1` is single edits only, as before.
 - **Who emits lists.** The `autoresearch` request says it may bundle up to N edits when a
@@ -167,11 +173,44 @@ sections at once; this is the default loop's equivalent.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
   `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
   them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
-  "What the last edit changed" and "Your earlier reasoning" show the whole list; a
-  refused list is recorded as `{"edits": [...]}`.
+  "What the last edit changed" and "Your earlier reasoning" list every edit, its op and
+  what it names whole and only long values clipped; a refused list is recorded as
+  `{"edits": [...]}`. The loop-as-a-graph path (`write_pending`/`read_pending`) carries
+  `step_edits` and the edit reports.
 - **Attribution.** The per-knob attribution credits knob values by state: every knob's
   value in a compound candidate is credited with that candidate's score (and its gate
   decision), so each knob a bundle changed gets the credit, shared with the others.
+
+## Grader-derived data stays on the grader side (V17)
+
+No node outside the grader side may consume grader-derived data. The rule is generic: it
+names no fact, file, Task or benchmark. The validator computes a provenance set from the
+graph and the declarations (`nn.validate.grader_derived`):
+
+- what each data node publishes after its pass (its `produces`: the pass's graded
+  records, under whatever name), never the per-item input its pass reads;
+- the files the runtime's grading writes (`items.GRADER_FILES`: the run's facts, each
+  finished item's record and marker, the collected records);
+- what a Task declares its grader leaves where nodes could find it
+  (`Task.grader_outputs`);
+- everything a node the mode declares as grading writes or produces
+  (`Mode.grader_nodes()`);
+- and, to a fixpoint, everything any node that consumes one of these writes or produces:
+  a grade copied through an op, a file or a fact is still the grade.
+
+A node consumes what its prompts fill in (`{{name}}` slots, guarded ones and those of
+knob-bound fields included), its `feedback_keys`, its reads and its required_reads. The
+grader side is the data nodes, the mode's protected nodes and its grader nodes; any
+other agent, op or gate consuming grader-derived data is refused `V17`, on every
+candidate and every shipped or created mode (`registry`, the creation sandbox). The rule
+runs in Python before anything is lowered: the spine only runs states that already
+passed it, so it needs no copy of the rule.
+
+What the graph does not declare, the rule cannot see. An agent with tools can read any
+file in its working directory, `facts.json` included; an agent an edit adds runs without
+tools (`E-new-node-tools`), so tools are only on agents the mode's author gave them,
+and those are trusted as the author's. An op's code may read facts it does not
+declare; ops are the mode's own code, and an edit cannot write one.
 
 ## What the optimizer sees, and what it said
 

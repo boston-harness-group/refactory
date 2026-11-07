@@ -78,6 +78,11 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
     if step == "rescore":
         # Fresh evidence: the candidate the optimizer edits, rolled out again on this
         # epoch's train sample. Shown because it costs a whole train evaluation.
+        if record.get("failed"):
+            return (f"epoch {epoch} · fresh evidence: re-scoring {record.get('candidate', '?')} "
+                    f"failed ({record.get('records')}/{record.get('expected')} items"
+                    + (f": {str(record.get('error'))[:120]}" if record.get("error") else "")
+                    + "); its previous records stay")
         line = (f"epoch {epoch} · fresh evidence: re-scored {record.get('candidate', '?')} on "
                 f"this epoch's train sample · score {_score(record.get('score'))}")
         if record.get("duration_s") is not None:

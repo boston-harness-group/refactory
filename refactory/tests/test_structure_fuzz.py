@@ -255,6 +255,26 @@ def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 
+def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
+    """With V17 off, a node reading what grading produced (under whatever name) gets
+    the grade, and the leak invariant finds it by content: the grader-only answers and
+    the grader's own verdicts in the finished items' records."""
+    monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
+    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=800, seed=5)
+
+
+def test_the_leak_invariant_reads_what_grading_produced():
+    """`grade_secrets` takes the grader's strings from the runtime's per-item records,
+    whatever the Task: the synthetic grader's verdict is one of them."""
+    import tempfile
+
+    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    tmp = Path(tempfile.mkdtemp())
+    model = sf.ScriptedModel(sf._answers(sf._graph_of(applier.seed_state)))
+    sf.run_walker(applier.seed, applier.seed_state, tmp, model)
+    assert any(secret.startswith(sf.fg.VERDICT) for secret in sf.grade_secrets(tmp))
+
+
 def test_mutation_compound_refusal_without_the_index_is_caught(monkeypatch):
     monkeypatch.setattr(base_mod, "_at", lambda reason, index, steps: reason)
     _finds("compound", seeds=("fuzz_dataflow", "livemath_skill_graph"), edits=600,
@@ -404,26 +424,28 @@ def test_mutation_required_without_the_required_read_rule_is_caught(monkeypatch)
 
 
 @pytest.mark.parametrize("how", ["prompt", "guarded prompt", "system prompt", "feedback_keys"])
-def test_v15_refuses_an_agent_that_reads_the_graded_records(how):
-    """``item_scores`` holds a data pass's graded records, expected answers included: an
-    agent after the pass that filled it into a prompt was sent the answers (found by the
-    compound long tier). However it asks for it, the agent is refused."""
+def test_v17_refuses_an_agent_that_reads_the_graded_records(how):
+    """A data pass's graded records hold the expected answers: an agent after the pass
+    that filled them into a prompt was sent the answers (found by the compound long
+    tier). However it asks for them, the agent is refused (V17, provenance-based)."""
     applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
     seed = sf.Candidate.from_state(applier.seed_state)
+    graded = sorted(n for node in sf._graph_of(seed.state).nodes.values() if node.kind == "data"
+                    for n in node.produces)[0]
     node = {"id": "peek", "kind": "agent", "role": "solver", "writes": ["peek.txt"],
             "prompt_template": "Look again.", "system_prompt_template": "You look."}
     if how == "prompt":
-        node["prompt_template"] = "Look at {{item_scores}}."
+        node["prompt_template"] = f"Look at {{{{{graded}}}}}."
     elif how == "guarded prompt":
-        node["prompt_template"] = "{% if item_scores %}Look at {{ item_scores }}.{% endif %}"
+        node["prompt_template"] = f"{{% if {graded} %}}Look at {{{{ {graded} }}}}.{{% endif %}}"
     elif how == "system prompt":
-        node["system_prompt_template"] = "You know {{item_scores}}."
+        node["system_prompt_template"] = f"You know {{{{{graded}}}}}."
     else:
-        node["feedback_keys"] = ["item_scores"]
+        node["feedback_keys"] = [graded]
     outcome = applier.attempt(seed, {"op": "add_node", "node": node,
                                      "position": {"terminal": True}}, {seed.id})
     assert isinstance(outcome, list) and any(
-        r.startswith("V15") and "item_scores" in r for r in outcome), outcome
+        r.startswith("V17") and graded in r for r in outcome), outcome
 
 
 def test_required_reads_are_a_subset_of_an_op_or_gates_reads():

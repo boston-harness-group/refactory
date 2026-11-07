@@ -37,7 +37,8 @@ class TwoLevels(nn.Mode):
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
         return {"level": nn.Knob(default=5, kind="int", lo=0, hi=9, description="a level"),
-                "extra": nn.Knob(default=5, kind="int", lo=0, hi=9, description="another")}
+                "extra": nn.Knob(default=5, kind="int", lo=0, hi=9, description="another"),
+                "note": nn.Knob(default="Be careful.", kind="str", description="a text")}
 
     def build(self) -> nn.Graph:
         graph = nn.Graph()
@@ -47,7 +48,7 @@ class TwoLevels(nn.Mode):
         ))
         graph.add(nn.Node(
             "work", "op", call="loop_ops:record_item", reads=("current_item.json",),
-            writes=("seen.json",), produces=("seen",), knobs=("level", "extra"),
+            writes=("seen.json",), produces=("seen",), knobs=("level", "extra", "note"),
         ))
         graph.add(nn.Node("finish", "op", call="loop_ops:write_best",
                           writes=("best.json",), produces=("best",)))
@@ -84,10 +85,13 @@ def _values(candidate: Candidate) -> dict[str, Any]:
 
 def test_a_list_is_applied_in_order_as_one_candidate():
     seed = _seed()
-    edits = [_knob("level", 3), _knob("extra", 4), _knob("level", 6)]
+    append = {"op": "set_knob", "name": "note", "patch": [{"kind": "append", "content": "Twice."}]}
+    edits = [_knob("level", 3), _knob("note", "Check."), append]
     child = _attempt(Proposal(edits=tuple(edits), parent=seed.id), seed)
     assert isinstance(child, Candidate), child
-    assert _values(child) == {"level": 6, "extra": 4}, "in order: the later level wins"
+    values = _values(child)
+    assert values["level"] == 3 and values["note"].startswith("Check.") and "Twice." in values["note"], \
+        "in order: the patch applies to the value the edit before it set"
     assert child.parent == seed.id and child.edits == edits and child.own_edits() == edits
     assert child.step_edits == 3 and len(child.edit_reports) == 3
     grandchild = _attempt(Proposal(edit=_knob("extra", 1)), child)
@@ -109,7 +113,8 @@ def test_a_refusal_names_the_edit_that_failed():
 
 
 def test_the_cap_is_enforced_and_one_is_todays_behaviour():
-    four = tuple(_knob("extra", v) for v in (1, 2, 3, 4))
+    four = (_knob("extra", 1), _knob("level", 2), _knob("note", "New."),
+            {"op": "set_knob", "name": "note", "patch": [{"kind": "append", "content": "More."}]})
     assert isinstance(_attempt(Proposal(edits=four)), Candidate), "the default allows 4"
     assert DEFAULT_MAX_EDITS == 4
     refused = _attempt(Proposal(edits=(*four, _knob("level", 1))))
@@ -279,3 +284,61 @@ def test_a_new_node_and_its_prompt_knob_in_one_proposal_on_livemath():
     # The knob does not exist before the node: the other order is refused at edit 1.
     refused = applier.attempt(seed, {"edits": [prompt, insert]}, {seed.id})
     assert isinstance(refused, list) and "[edit 1 of 2: set_knob]" in refused[0], refused
+
+
+# ── review: per-edit refusals deeper in a list, dead edits, records ─────────
+
+
+def test_frozen_and_protected_edits_later_in_a_list_are_named():
+    seed = _seed()
+    frozen = Optimizer().attempt(Proposal(edits=(_knob("level", 3), _knob("extra", 1))), seed,
+                                 TwoLevels().invariants(), True, ("extra",), [seed.id])
+    assert frozen[0].startswith("E-frozen") and "[edit 2 of 2: set_knob]" in frozen[0], frozen
+    applier, live = _livemath()
+    text = next(k for k, v in live.state["knobs"].items()
+                if (v.get("spec") or {}).get("kind") == "str" and not (v.get("spec") or {}).get("frozen"))
+    refused = applier.attempt(live, {"edits": [{"op": "set_knob", "name": text, "value": "New."},
+                                               {"op": "remove_node", "id": "finish"}]}, {live.id})
+    assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
+    assert "[edit 2 of 2: remove_node]" in refused[0], refused
+
+
+@pytest.mark.parametrize("edits, dead", [
+    ((_knob("extra", 5), _knob("level", 3)), 1),   # extra is already 5
+    ((_knob("level", 1), _knob("level", 3)), 1),   # overwritten by the next edit
+    ((_knob("level", 3), _knob("extra", 2), _knob("extra", 5)), 2),  # undone
+])
+def test_an_edit_with_no_effect_in_a_list_is_refused_by_index(edits, dead):
+    refused = _attempt(Proposal(edits=edits))
+    assert isinstance(refused, list) and refused[0].startswith("E-noop"), refused
+    assert f"[edit {dead} of {len(edits)}" in refused[0], refused
+
+
+def test_pending_candidates_keep_their_compound_edits(tmp_path, monkeypatch):
+    """The loop-as-a-graph path writes the optimizer's candidates and installs them in
+    another step: a compound candidate keeps its own edits, and a duplicate one is
+    refused with the whole list recorded."""
+    bundle = Proposal(edits=(_knob("level", 3), _knob("extra", 8)))
+    loop = _run(tmp_path, monkeypatch, [[], []], epochs=1)
+    child = _attempt(bundle, loop.population[0])
+    loop.write_pending([child])
+    [again] = loop.read_pending()
+    assert again.step_edits == 2 and again.own_edits() == list(bundle.steps)
+    assert again.edit_reports == child.edit_reports
+    loop.population.append(again)
+    loop.step([again])
+    assert loop.rejections[-1].edit == {"edits": list(bundle.steps)}
+    assert loop.rejections[-1].reasons[0].startswith("E-duplicate")
+
+
+def test_listed_edits_are_not_clipped_away():
+    from refactory_dsh.optim.base import _edit_change_lines, _reasoning_lines
+
+    long = "x" * 5000
+    edits = [{"op": "set_knob", "name": f"step{i}_prompt", "value": long} for i in range(4)]
+    pairs = [{"child": "c", "parent": None, "edit": edits}]
+    text = "\n".join(_edit_change_lines(pairs))
+    reasoning = "\n".join(_reasoning_lines([{"id": "c", "edit": edits, "score": 0.5}]))
+    for i in range(4):
+        assert f'name="step{i}_prompt"' in text and f'name="step{i}_prompt"' in reasoning, i
+    assert long not in text, "values are clipped, names are not"

@@ -33,6 +33,6 @@
   "found": [
     "grader: agent solve_c12 was sent grader-only 'GRADER-ONLY-ANSWER-one'"
   ],
-  "fixed_by": "V15: no agent prompt or feedback_keys uses {{item_scores}}, a data pass's graded records (found by the compound long tier, seed 1)",
-  "refused_with": "V15"
+  "fixed_by": "V17: no node outside the grader side consumes grader-derived data (provenance from the graph and declarations; found by the compound long tier, seed 1)",
+  "refused_with": "V17"
 }

@@ -84,6 +84,14 @@ PASS_MARKER = ".refactory/pass.json"
 #: reads the scores of the items it skips from here.
 PASS_RECORD = ".item_record.json"
 
+#: The run's per-item records, as an evaluator collects them.
+RECORDS_FILE = "item_records.json"
+
+#: The files the runtime's grading writes: the run's facts (the graded records among
+#: them), each finished item's record and its marker, and the collected records. They
+#: are grader-derived wherever they are (`nn.validate.grader_derived`).
+GRADER_FILES = (FACTS, PASS_RECORD, RECORDS_FILE, ".done")
+
 #: Run-level files every pass reads through, whatever the subgraph declares:
 #: the node declarations, the part/seed and item overrides, the person's
 #: steering, the run configuration (steering opt-out, pins, driver profile) and

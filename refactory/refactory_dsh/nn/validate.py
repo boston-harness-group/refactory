@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .graph import Graph, Node
 from .knob import Knob, KnobError
@@ -58,14 +58,20 @@ RULES: dict[str, str] = {
            "reaches it (a data pass's own files and facts stay inside the pass): an agent's "
            "reads and every {{name}} its prompts fill in (not a knob, not in its "
            "feedback_keys, not inside an {% if name %} on the same name), and an op's or a "
-           "gate's required_reads; a tool_policy 'none' agent declares exactly one write; "
-           "no agent prompt or feedback_keys uses {{item_scores}}, a data pass's graded "
-           "records",
+           "gate's required_reads; a tool_policy 'none' agent declares exactly one write",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
            "only within it; a join is entered only from its fork's branches and waits only "
            "for nodes every run of their branch visits",
+    "V17": "no node outside the grader side consumes grader-derived data: what a data "
+           "pass publishes (its graded records), the runtime's grading files, what a "
+           "Task declares its grader writes (Task.grader_outputs), everything a node the "
+           "mode declares as grading writes or produces (Mode.grader_nodes), and whatever "
+           "a node that consumes any of these writes or produces in turn -- whether "
+           "through a prompt slot (bound fields included), feedback_keys, reads or "
+           "required_reads. The grader side is the data nodes, the mode's protected nodes "
+           "and its grader nodes",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -146,8 +152,15 @@ def validate(
     invariants: tuple[Invariant, ...] = (),
     resolve_calls: bool = True,
     ports: tuple[Any, ...] = (),
+    grader_side: Iterable[str] = (),
+    graders: Iterable[str] = (),
 ) -> list[Issue]:
-    """Every reason ``(graph, values)`` is not a runnable, scoreable mode."""
+    """Every reason ``(graph, values)`` is not a runnable, scoreable mode.
+
+    ``grader_side`` names the nodes besides the data nodes that may consume
+    grader-derived data (the mode's protected and grader nodes); ``graders`` the nodes
+    the mode declares as grading, whose every output is grader-derived (V17).
+    """
     issues: list[Issue] = []
 
     # V1 start node exists.
@@ -372,6 +385,10 @@ def validate(
 
     # V16 forks and joins are paired, and branches are independent.
     issues.extend(fork_issues(graph, knob_values))
+
+    # V17 nothing outside the grader side consumes grader-derived data.
+    issues.extend(grader_issues(graph, knob_values, grader_side=grader_side, graders=graders,
+                                resolve_tasks=resolve_calls))
 
     # V7 knobs: consumed ones exist, and declared ones are consumed.
     consumers = graph.knob_consumers()
@@ -797,28 +814,6 @@ def required_read_issues(graph: Graph) -> list[Issue]:
     return issues
 
 
-#: The fact a data node publishes its graded item records under (``items.SCORES_FACT``):
-#: each item's expected answer, the prediction and the grader's verdict. An op may score
-#: from it; an agent never reads it.
-GRADED_FACT = "item_scores"
-_ANY_SLOT = re.compile(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}")
-
-
-def _uses_graded_records(node: Node, knob_values: Mapping[str, Any]) -> bool:
-    """Whether an agent's bound prompts (any ``{{item_scores}}`` slot, guarded or not) or
-    its ``feedback_keys`` would hand it the graded records."""
-    if GRADED_FACT in node.feedback_keys:
-        return True
-    for field_name in ("prompt_template", "system_prompt_template"):
-        try:
-            text = node.bound(field_name, knob_values)
-        except Exception:  # a bad binding is V14's to report
-            text = getattr(node, field_name)
-        if GRADED_FACT in _ANY_SLOT.findall(str(text or "")):
-            return True
-    return False
-
-
 def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
     """V15: required inputs are there on every path: an op's or a gate's
     ``required_reads``, and an agent's inputs -- its reads and its prompts' ``{{facts}}``.
@@ -827,9 +822,6 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
     prompt with an unfilled ``{{name}}`` as it is, so each must be produced upstream on
     every path to the agent; a data pass's own files and facts stay inside the pass. A
     ``tool_policy`` 'none' agent's reply is its one output, so it declares one write.
-    No agent's prompt fills in ``{{item_scores}}``: a data pass's graded records carry
-    each item's expected answer, and an agent that read them could carry the answers
-    into a later pass (a reloop) or out of the run.
     """
     issues: list[Issue] = []
     available = available_inputs(graph)
@@ -842,11 +834,6 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
                 "V15", f"declares tool_policy 'none' and {len(node.writes)} writes; a no-tools "
                 "agent's reply is its one declared output, so it declares exactly one",
                 node=node_id))
-        if _uses_graded_records(node, knob_values):
-            issues.append(Issue(
-                "V15", f"uses {{{{{GRADED_FACT}}}}}, a data pass's graded records (each item's "
-                "expected answer and the grader's verdict); an agent never reads the grade, so "
-                "it cannot pass the answers on -- an op may score from it", node=node_id))
         have = available.get(node_id, set())
         missing = sorted(f"file {name!r}" for name in node.reads if ("file", name) not in have)
         missing += sorted(f"{{{{{name}}}}}" for name in template_facts(node, knob_values)
@@ -858,6 +845,110 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
                 "stay inside its pass). A fact the runtime re-derives before each dispatch "
                 "belongs in the node's feedback_keys, and an optional one goes inside "
                 "{% if name %}...{% endif %}", node=node_id))
+    return issues
+
+
+# ── V17: grader-derived data stays on the grader side ─────────────────────
+
+
+def _made(node: Node) -> set[tuple[str, str]]:
+    return {("file", n) for n in node.writes} | {("fact", n) for n in node.produces}
+
+
+def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
+    slot of its prompts and of every field bound to a knob (rendered with the knob
+    values, guarded slots included), its ``feedback_keys``, its reads and its
+    required_reads."""
+    fields = {"prompt_template", "system_prompt_template"} | {f for f, _k in node.field_bindings}
+    facts: set[str] = set(node.feedback_keys)
+    for field_name in sorted(fields):
+        try:
+            text = node.bound(field_name, knob_values)
+        except Exception:  # a bad binding is V14's to report
+            text = getattr(node, field_name, "")
+        facts |= set(_SLOT.findall(str(text or "")))
+    facts -= set(knob_values)
+    files = set(node.reads) | set(getattr(node, "required_reads", ()) or ())
+    return {("fact", n) for n in facts} | {("file", n) for n in files}
+
+
+def _task_grader_outputs(ref: str) -> tuple[str, ...]:
+    try:
+        from refactory_dsh.task import grader_outputs
+        return tuple(grader_outputs(ref))
+    except Exception:  # an unloadable Task is another rule's to report
+        return ()
+
+
+def grader_derived(graph: Graph, knob_values: Mapping[str, Any], *,
+                   graders: Iterable[str] = (), resolve_tasks: bool = True
+                   ) -> set[tuple[str, str]]:
+    """The provenance set: every ``("fact"|"file", name)`` that carries the grade.
+
+    Computed from the graph and the declarations, never from a list of names:
+
+    - what each data node publishes after its pass (its ``produces``: the pass's graded
+      records), never the per-item input its pass reads;
+    - the files the runtime's grading writes (``items.GRADER_FILES``);
+    - what each data node's Task declares its grader writes (``Task.grader_outputs``),
+      as a file and as a fact;
+    - everything a node the mode declares as grading (``Mode.grader_nodes``) writes or
+      produces;
+    - and, to a fixpoint, everything any node that consumes one of these writes or
+      produces: a grade copied is still the grade.
+    """
+    from refactory_dsh.items import GRADER_FILES
+
+    derived: set[tuple[str, str]] = {("file", name) for name in GRADER_FILES}
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            derived |= {("fact", name) for name in node.produces}
+            if resolve_tasks and node.task_ref:
+                for name in _task_grader_outputs(node.task_ref):
+                    derived |= {("file", name), ("fact", name)}
+    for node_id in graders:
+        node = graph.nodes.get(node_id)
+        if node is not None:
+            derived |= _made(node)
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.nodes.values():
+            if node.kind == "data" or not (consumed(node, knob_values) & derived):
+                continue
+            if not _made(node) <= derived:
+                derived |= _made(node)
+                changed = True
+    return derived
+
+
+def grader_issues(graph: Graph, knob_values: Mapping[str, Any], *,
+                  grader_side: Iterable[str] = (), graders: Iterable[str] = (),
+                  resolve_tasks: bool = True) -> list[Issue]:
+    """V17: a node outside the grader side that consumes grader-derived data.
+
+    The grader side is the data nodes, ``grader_side`` (the mode's protected nodes) and
+    ``graders`` (the mode's grader nodes). Any other node -- an agent, an op, a gate --
+    that takes in a grader-derived fact or file could carry the answers into a later
+    pass, a prompt or the run's output, whatever the Task or the domain.
+    """
+    graders = tuple(graders)
+    side = set(grader_side) | set(graders) | {n.id for n in graph.nodes.values()
+                                              if n.kind == "data"}
+    derived = grader_derived(graph, knob_values, graders=graders, resolve_tasks=resolve_tasks)
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        if node_id in side:
+            continue
+        taken = consumed(graph.nodes[node_id], knob_values) & derived
+        if taken:
+            names = ", ".join(f"{{{{{n}}}}}" if kind == "fact" else f"file {n!r}"
+                              for kind, n in sorted(taken))
+            issues.append(Issue(
+                "V17", f"consumes grader-derived {names} (the grade, or something made from "
+                "it); only the data nodes and the nodes the mode declares protected or grading "
+                "may read what grading produced", node=node_id))
     return issues
 
 
@@ -959,6 +1050,8 @@ def validate_state(
     *,
     invariants: tuple[Invariant, ...] = (),
     resolve_calls: bool = True,
+    grader_side: Iterable[str] = (),
+    graders: Iterable[str] = (),
 ) -> list[Issue]:
     """Validate a state dict without building a mode around it.
 
@@ -986,6 +1079,8 @@ def validate_state(
         invariants=invariants,
         resolve_calls=resolve_calls,
         ports=tuple(ports),
+        grader_side=grader_side,
+        graders=graders,
     )
 
 

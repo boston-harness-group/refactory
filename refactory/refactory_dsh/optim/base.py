@@ -261,6 +261,27 @@ def _at(reason: str, index: int, steps: Sequence[Any]) -> str:
     return f"{reason} [edit {index + 1} of {len(steps)}: {op}]"
 
 
+def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any], result: dict[str, Any],
+               protected: Sequence[str] = ()) -> int | None:
+    """The index of a compound proposal's first edit the result does not depend on: the
+    other edits, applied without it, reach the same state (a later edit overwrote it or
+    undid it). ``None`` for a single edit, or when every edit counts."""
+    if len(steps) < 2:
+        return None
+    target = candidate_id(result)
+    for index in range(len(steps)):
+        state = start
+        try:
+            for other, edit in enumerate(steps):
+                if other != index:
+                    state = nn_edits.apply(edit, state, protected=protected)
+        except Exception:  # noqa: BLE001 - the others need this one: it counts
+            continue
+        if candidate_id(state) == target:
+            return index
+    return None
+
+
 def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = None,
                      max_edits: int | None = None) -> list[str]:
     """Why a proposal is refused before any edit is applied; empty when it is not.
@@ -1115,6 +1136,32 @@ def edit_change(parent_records: Sequence[dict[str, Any]] | None,
             "deltas": {item: round(delta, 6) for delta, item in moved}}
 
 
+#: How much of each long field of an edit (a value, a patch, a node) a listing of a
+#: candidate's edits keeps; the op and what it names are always shown whole.
+EDIT_FIELD_CHARS = 400
+#: The fields that say what an edit touches, shown whole before any value.
+EDIT_NAMING_FIELDS = ("op", "name", "target", "id", "source", "first", "second", "new_id",
+                      "position", "condition")
+
+
+def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS) -> str:
+    """A candidate's edits as a reader needs them: one line per edit, its op and what it
+    names first, whole, then each other field clipped, so no edit of a compound
+    proposal is cut away by a long value before it."""
+    steps = list(edits) if isinstance(edits, (list, tuple)) else [edits]
+    lines = []
+    for index, edit in enumerate(steps, 1):
+        if not isinstance(edit, dict):
+            lines.append(f"{index}. {_clip(json.dumps(edit, default=str), field_chars)}")
+            continue
+        head = " ".join(f"{key}={json.dumps(edit[key], default=str)}"
+                        for key in EDIT_NAMING_FIELDS if key in edit)
+        rest = "; ".join(f"{key}: {_clip(json.dumps(value, default=str), field_chars)}"
+                         for key, value in edit.items() if key not in EDIT_NAMING_FIELDS)
+        lines.append(f"{index}. {head}" + (f" -- {rest}" if rest else ""))
+    return "\n".join(lines) if lines else "(none)"
+
+
 def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only."""
@@ -1123,14 +1170,19 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
     lines = ["## What the last edit changed",
              "The latest children of the candidate you edit (its last batch), or that "
              "candidate itself when it has none yet, each compared with its parent item by "
-             "item on the train items both were scored on. The two were scored in different "
-             "rounds with different seeds, so some changes may be run-to-run noise."]
+             "item on the train items both were scored on. The parent's records are from the "
+             "child's epoch, so the same seed, when it was scored then (the candidate you edit "
+             "is re-scored each epoch); a pair scored with different seeds is marked, and some "
+             "of its changes may be run-to-run noise."]
     blocks: list[str] = []
     rest: list[list[Any]] = []
     for pair in pairs:
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
-        lines += ["", head, "Edit: `" + json.dumps(pair.get("edit"), default=str)[:1000] + "`"]
+        lines += ["", head, "Edits:", describe_edits(pair.get("edit"))]
+        if pair.get("same_seed") is False:
+            lines.append("Parent and child were scored in different epochs, with different "
+                         "seeds: some changes below may be run-to-run noise.")
         if not pair.get("parent"):
             lines.append("This candidate has no parent (it is the seed), so there is nothing "
                          "to compare.")
@@ -1181,9 +1233,10 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
             f"gate {entry['gate']}" if entry.get("gate") else "",
             f"train score {entry.get('score')}",
             (f"{entry['fixed']} fixed / {entry['broken']} broken vs its parent"
+             + (" (scored with different seeds)" if entry.get("same_seed") is False else "")
              if entry.get("fixed") is not None else "")) if part)
         lines += ["", f"### {entry.get('id')} (proposed in epoch {entry.get('epoch', '?')}) -- {outcome}",
-                  "Edit: `" + _clip(json.dumps(entry.get("edit"), default=str), REASONING_TEXT_CHARS) + "`",
+                  "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}"]
@@ -1424,6 +1477,7 @@ class Optimizer:
         seed_state: dict[str, Any] | None = None,
         protected: Sequence[str] = (),
         allow_new_node_tools: bool = False,
+        graders: Sequence[str] = (),
     ) -> Candidate | list[str]:
         """Apply and validate one proposal: a candidate, or the reasons it failed.
 
@@ -1434,7 +1488,9 @@ class Optimizer:
         ``protected`` is the mode's ``protected_nodes()``: an edit that removes,
         rewires or replaces one is refused with ``E-protected``. An agent node the
         search added may run with tools only with ``allow_new_node_tools``
-        (``E-new-node-tools``).
+        (``E-new-node-tools``). ``graders`` is the mode's ``grader_nodes()``: with the
+        protected nodes, the only nodes besides the data nodes that may consume
+        grader-derived data (V17).
         """
         steps = proposal.steps
         refusal = proposal_refusal(proposal, max_edits=self.max_edits)
@@ -1452,6 +1508,7 @@ class Optimizer:
                             index, steps)]
             # An operation that is not in the catalogue is not a failed precondition
             # (`proposal_refusal` refuses it): the two point at different fixes.
+            before_step = state
             reason = nn_edits.precheck(edit, state)
             if reason:
                 return [_at(f"E-precondition: {reason}", index, steps)]
@@ -1462,7 +1519,19 @@ class Optimizer:
                 return [_at(f"{exc.code}: {exc}", index, steps)]
             except Exception as exc:  # an operator bug is reported, not swallowed
                 return [_at(f"E-internal: {type(exc).__name__}: {exc}", index, steps)]
+            if len(steps) > 1 and candidate_id(state) == candidate_id(before_step):
+                # An edit of a bundle that changes nothing would be recorded as part of
+                # the idea while doing nothing; said back rather than kept.
+                return [_at(f"E-noop: {edit.get('op')} leaves the state as the edits before "
+                            "it left it; drop it or change it", index, steps)]
             edit_reports.append(reports[0] if reports else None)
+
+        # A bundle that changes nothing at all is refused below as one no-op.
+        dead = (_dead_edit(steps, parent.state, state, protected)
+                if candidate_id(state) != parent.id else None)
+        if dead is not None:
+            return [_at(f"E-noop: {steps[dead].get('op')} has no effect on the result: the "
+                        "edits after it undo or overwrite it; drop it", dead, steps)]
 
         # ── tool-policy escalation check (anchored to the original seed) ──
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
@@ -1501,7 +1570,8 @@ class Optimizer:
                 "a point already scored; propose a different change"
             ]
 
-        issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls)
+        issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls,
+                                grader_side=(*protected, *graders), graders=tuple(graders))
         if issues:
             return [str(issue) for issue in issues]
         unlowerable = _lowering_refusal(parent.state, state)

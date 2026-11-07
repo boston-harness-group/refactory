@@ -777,7 +777,7 @@ def verify_sandboxed(
         "    if not mode.parameters():\n"
         "        problems.append(f'{identifier} declares no knobs, so there is nothing to optimize')\n"
         "    for issue in validate_state(mode.state_dict(), invariants=mode.invariants(),"
-        " resolve_calls=True):\n"
+        " resolve_calls=True, **mode.grader_scope()):\n"
         "        problems.append(f'{identifier}: {issue}')\n"
         # A creation can be asked for a mode that iterates data. The brief reaching
         # the prompt is a request; this is the check, and it runs where the package is

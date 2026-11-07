@@ -487,6 +487,8 @@ class Loop(OuterLoop):
         self.invariants = self.mode.invariants()
         #: Nodes no edit may remove, rewire or replace (`Mode.protected_nodes`).
         self.protected = tuple(self.mode.protected_nodes())
+        #: Nodes the mode declares as grading (`Mode.grader_nodes`): V17's grader side.
+        self.graders = tuple(self.mode.grader_nodes())
         self.parameters = self.mode.parameters()
 
         if optimizer is not None:
@@ -572,6 +574,9 @@ class Loop(OuterLoop):
         #: minibatch each candidate's train records come from.
         self._minibatches: dict[int, list[str]] = {}
         self._records_epoch: dict[str, int] = {}
+        #: Each candidate's train records by the epoch (and so the seed) they come from,
+        #: so a child is compared with its parent scored in the same epoch.
+        self._records_by_epoch: dict[str, dict[int, list[dict[str, Any]]]] = {}
         #: The proposal attempt within the current optimizer step (``propose``).
         self._proposal_attempt = 0
         #: Each accepted proposal's rationale and prediction, by candidate id.
@@ -691,7 +696,8 @@ class Loop(OuterLoop):
             # read, so it has to carry the same configuration as the population.
             self.mode.load_state_dict(seed_state)
         issues = validate_state(
-            seed_state, invariants=self.invariants, resolve_calls=True
+            seed_state, invariants=self.invariants, resolve_calls=True,
+            grader_side=(*self.protected, *self.graders), graders=self.graders,
         )
         if issues:
             raise LoopError(
@@ -944,6 +950,7 @@ class Loop(OuterLoop):
             outcome = sampler.attempt(
                 proposal, seed, self.invariants, True, self.config.frozen, self._tried(),
                 seed_state=self._original_seed_state, protected=self.protected,
+                graders=self.graders,
                 allow_new_node_tools=self.config.allow_new_node_tools,
             )
             if isinstance(outcome, Candidate):
@@ -998,6 +1005,9 @@ class Loop(OuterLoop):
                 # Which epoch's sample and seed its records come from, so the proposal
                 # step re-scores it only when they are another epoch's.
                 self._records_epoch[candidate.id] = self.epoch if epoch is None else epoch
+                self._records_by_epoch.setdefault(candidate.id, {})[
+                    self._records_epoch[candidate.id]] = list(
+                        self._train_item_records.get(candidate.id, []))
                 self._journal("train_records_epoch", id=candidate.id,
                               epoch=self._records_epoch[candidate.id])
             self._progress(
@@ -1103,6 +1113,25 @@ class Loop(OuterLoop):
             # The measurement's own budget checkpoint stopped it before a trial ran:
             # nothing was scored, so nothing is counted and the records stay.
             return
+        expected = len(batch) if batch else len(self._train_ids())
+        scored = {str(record.get("id")) for record in result.item_records}
+        if not (result.exit_ok and measurements.get("complete") and len(scored) >= expected):
+            # A failed or partial re-score is no evidence: the previous records stay, the
+            # epoch is not marked (a resume in this epoch tries again), and what it spent
+            # is counted and journaled like any evaluation.
+            with self._state_lock:
+                self.evaluations += 1
+                if not measurements.get("cached_from"):
+                    self.rollouts += len(result.item_records) or 1
+                self._journal("rescore_failed", id=parent.id, epoch=self.epoch,
+                              seed=self._train_seed(self.epoch), exit_ok=result.exit_ok,
+                              error=result.error, records=len(scored), expected=expected,
+                              measurements=measurements)
+                self._journal("rollouts", rollouts=self.rollouts)
+            self._progress("rescore", candidate=parent.id, epoch=self.epoch, failed=True,
+                           error=result.error, records=len(scored), expected=expected,
+                           duration_s=result.duration_s)
+            return
         with self._state_lock:
             # An evaluation like any other: it counts toward the evaluation budget (the
             # time and token budgets are charged inside the measurement), and it is
@@ -1114,6 +1143,7 @@ class Loop(OuterLoop):
                           exit_ok=result.exit_ok, measurements=measurements)
             self._train_item_records[parent.id] = list(result.item_records)
             self._records_epoch[parent.id] = self.epoch
+            self._records_by_epoch.setdefault(parent.id, {})[self.epoch] = list(result.item_records)
             if not measurements.get("cached_from"):
                 self.rollouts += len(result.item_records) or 1
             self._journal("train_records", id=parent.id, records=list(result.item_records))
@@ -3550,14 +3580,29 @@ class Loop(OuterLoop):
         pairs = []
         for child in chosen:
             parent = by_id.get(child.parent or "")
+            parent_records, same = (self._records_like(parent.id, child.id) if parent
+                                    else ([], None))
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
                 "child_records": list(self._train_item_records.get(child.id, [])),
-                "parent_records": (list(self._train_item_records.get(parent.id, []))
-                                   if parent else []),
+                "parent_records": parent_records, "same_seed": same,
             })
         return pairs
+
+    def _records_like(self, parent_id: str, child_id: str) -> tuple[list[dict[str, Any]], bool]:
+        """The parent's train records to compare with the child's: from the child's
+        epoch (the same seed) when the parent was scored then, else its latest; and
+        whether the two share a seed. Without ``val_gate`` every train rollout uses the
+        run's seed, so they always do."""
+        latest = list(self._train_item_records.get(parent_id, []))
+        if not self.config.val_gate:
+            return latest, True
+        at = self._records_epoch.get(child_id)
+        history = self._records_by_epoch.get(parent_id, {})
+        if at is not None and at in history:
+            return list(history[at]), True
+        return latest, at is not None and self._records_epoch.get(parent_id) == at
 
     def _reasoning_entries(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """The optimizer's own reasoning about recent candidates -- the line from the
@@ -3582,14 +3627,16 @@ class Loop(OuterLoop):
             if record.get("origin") != "optimizer":
                 continue
             parent = by_id.get(candidate.parent or "")
-            change = (edit_change(self._train_item_records.get(parent.id),
-                                  self._train_item_records.get(candidate.id))
+            parent_records, same = (self._records_like(parent.id, candidate.id)
+                                    if parent is not None else ([], None))
+            change = (edit_change(parent_records, self._train_item_records.get(candidate.id))
                       if parent is not None and candidate.evaluated else None)
             entries.append({
                 "id": candidate.id, "epoch": record.get("epoch"),
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "gate": self._gate_decision(candidate.id), "score": candidate.score,
+                "same_seed": same,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
                 "broken": len(change["broken"]) if change and change["shared"] else None,
             })
@@ -3726,6 +3773,8 @@ class Loop(OuterLoop):
                     "id": candidate.id,
                     "parent": candidate.parent,
                     "edits": candidate.edits,
+                    "edit_reports": candidate.edit_reports,
+                    "step_edits": candidate.step_edits,
                     "state": candidate.state,
                 }
                 for candidate in candidates
@@ -3739,7 +3788,9 @@ class Loop(OuterLoop):
             return []
         return [
             Candidate.from_state(
-                record["state"], parent=record.get("parent"), edits=record.get("edits") or ()
+                record["state"], parent=record.get("parent"), edits=record.get("edits") or (),
+                edit_reports=record.get("edit_reports") or (),
+                step_edits=int(record.get("step_edits", 1)),
             )
             for record in json.loads(path.read_text())
         ]
@@ -3905,13 +3956,16 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
-            elif event == "rescore":
+            elif event in ("rescore", "rescore_failed"):
                 rescores += 1
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
             elif event == "train_minibatch":
                 self._minibatches[int(record["epoch"])] = [str(i) for i in record.get("ids") or ()]
             elif event == "train_records_epoch":
-                self._records_epoch[str(record.get("id"))] = int(record.get("epoch") or 0)
+                cid, at = str(record.get("id")), int(record.get("epoch") or 0)
+                self._records_epoch[cid] = at
+                self._records_by_epoch.setdefault(cid, {})[at] = list(
+                    self._train_item_records.get(cid, []))
             elif event == "train_records":
                 cid = record.get("id")
                 if cid is not None:

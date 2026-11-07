@@ -677,7 +677,8 @@ def verify(project: Path, name: str | None = None) -> dict[str, list[str]]:
                 problems.append(f"{identifier}: cannot be constructed: {exc}")
                 continue
             for issue in validate_state(
-                mode.state_dict(), invariants=mode.invariants(), resolve_calls=True
+                mode.state_dict(), invariants=mode.invariants(), resolve_calls=True,
+                **mode.grader_scope(),
             ):
                 problems.append(f"{identifier}: {issue}")
         findings[package_name] = problems

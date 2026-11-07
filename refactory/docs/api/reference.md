@@ -168,6 +168,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `agent_input_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
 | function | `artifact_produced` | `(*paths: 'str', by: 'str') -> 'Invariant'` |
 | function | `available_inputs` | `(graph: 'Graph') -> 'dict[str, set[tuple[str, str]]]'` |
+| function | `consumed` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[tuple[str, str]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
 | function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
@@ -175,6 +176,8 @@ The validator: what makes architecture-in-the-state safe.
 | function | `fork_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
 | function | `fork_joins` | `(graph: 'Graph') -> 'dict[str, list[str]]'` |
 | function | `gate_label_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
+| function | `grader_derived` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'set[tuple[str, str]]'` |
+| function | `grader_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'list[Issue]'` |
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
@@ -182,14 +185,15 @@ The validator: what makes architecture-in-the-state safe.
 | function | `required_slots` | `(template: 'str') -> 'set[str]'` |
 | function | `rules_text` | `() -> 'str'` |
 | function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
-| function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = ()) -> 'list[Issue]'` |
-| function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True) -> 'list[Issue]'` |
+| function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = (), grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = ()) -> 'list[Issue]'` |
+| function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
 - **`agent_input_issues`** — V15: required inputs are there on every path: an op's or a gate's
 - **`artifact_produced`** — Keep a named artifact producer in the executable graph during search.
 - **`available_inputs`** — What is there when each node starts, on every path that reaches it.
+- **`consumed`** — Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
 - **`fork_branch_conflicts`** — ``(fork, reason)`` for each fork whose branches cannot run side by side.
@@ -197,6 +201,8 @@ The validator: what makes architecture-in-the-state safe.
 - **`fork_issues`** — V16: every fork is paired with one join, and its branches are independent.
 - **`fork_joins`** — Each join some fork's unconditional out-edge leads to, and the forks that do.
 - **`gate_label_issues`** — V5: no two out-edges of a gate carry the same verdict (compared as both runtimes
+- **`grader_derived`** — The provenance set: every ``("fact"|"file", name)`` that carries the grade.
+- **`grader_issues`** — V17: a node outside the grader side that consumes grader-derived data.
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.
 - **`read_issues`** — V6: every read is produced by a node on a path the run can take.
