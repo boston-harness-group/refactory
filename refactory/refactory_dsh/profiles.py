@@ -72,6 +72,14 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("val_gate") not in (True, False, 0, 1):
         raise ProfileError("val_gate must be true or false (1 or 0 on the command line)")
     result["val_gate"] = bool(result.get("val_gate"))
+    # The default loop's early stop (needs val_gate): a count of stale epochs, 0 off,
+    # and a switch the command line passes as 0 or 1.
+    patience = result.get("early_stop_patience")
+    if isinstance(patience, bool) or not isinstance(patience, int) or patience < 0:
+        raise ProfileError("early_stop_patience must be a nonnegative integer (0 is off)")
+    if result.get("early_stop_at_full_val") not in (True, False, 0, 1):
+        raise ProfileError("early_stop_at_full_val must be true or false (1 or 0 on the command line)")
+    result["early_stop_at_full_val"] = bool(result.get("early_stop_at_full_val"))
     # max_items_in_flight: None or positive int
     mif = result.get("max_items_in_flight")
     if mif is not None:
@@ -250,7 +258,8 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
-        "max_concurrent_evaluations", "max_items_in_flight", "val_gate")}
+        "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
+        "early_stop_patience", "early_stop_at_full_val")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):

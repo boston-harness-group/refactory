@@ -58,7 +58,9 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import summarise_reasons
-from refactory_dsh.outerloop import OuterLoop, OuterLoopError, Run, ValidationGate
+from refactory_dsh.outerloop import (
+    FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
+)
 from refactory_dsh.paths import project_root
 
 #: The append-only record of everything a run did. Resume replays it.
@@ -214,12 +216,22 @@ class LoopConfig:
     #: The seed's first evaluation on each part it covers is read from it instead
     #: of run, when the run's score context matches. See :mod:`refactory_dsh.seed_cache`.
     seed_results: str | None = None
-    #: The default loop's validation gate (``outerloop.ValidationGate``). Each
-    #: candidate evaluated on train is also rolled out on the parts manifest's val
-    #: part (with ``seed``) and stays a parent only when its val score strictly beats
-    #: its parent's; the winner is the best on val. Needs a manifest with a val part;
-    #: a custom strategy (SkillOpt) keeps its own gate instead.
+    #: The default loop's validation gate (``outerloop.ValidationGate``), with
+    #: SkillOpt's evaluation protocol: train rollouts use SkillOpt's per-epoch seed
+    #: (``outerloop.train_batch_seed``); every candidate evaluated on train, one that
+    #: failed there included, is rolled out on the parts manifest's val part (with
+    #: ``seed``) and stays a parent only when its val score strictly beats the gate's
+    #: current candidate's; the last epoch's proposals are scored before the run
+    #: ends; and with a test part ``outerloop.FinalEvaluation`` runs at the end. The
+    #: winner is the best on val. Needs a manifest with a val part; a custom strategy
+    #: (SkillOpt) keeps its own gate instead.
     val_gate: bool = False
+    #: With ``val_gate``: stop after this many epochs in a row whose gating did not
+    #: raise the best val score (SkillOpt's ``early_stop_patience``). 0 is off.
+    early_stop_patience: int = 0
+    #: With ``val_gate``: stop once the best val score reaches 1.0 (SkillOpt's
+    #: ``early_stop_at_full_val``).
+    early_stop_at_full_val: bool = False
     resolved_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
     #: Strategy-specific options passed to the strategy's ``configure()``
     #: method as keyword arguments.  Set from ``--strategy-option`` on the
@@ -672,6 +684,11 @@ class Loop(OuterLoop):
                     "val_gate needs a parts manifest with a 'val' part (--parts); "
                     "give the run one, or turn val_gate off"
                 )
+        elif self.config.early_stop_patience or self.config.early_stop_at_full_val:
+            raise LoopError(
+                "early_stop_patience and early_stop_at_full_val measure the validation "
+                "gate's best score; turn val_gate on, or leave them off"
+            )
 
         if resumed:
             if getattr(self, "_executing_strategy", False) and self.bound:
@@ -818,18 +835,19 @@ class Loop(OuterLoop):
         return edits
 
     # ── forward ────────────────────────────────────────────────────────────
-    def forward(self) -> int:
-        """Evaluate every candidate in the batch that has not run yet."""
+    def forward(self, *, epoch: int | None = None) -> int:
+        """Evaluate every candidate in the batch that has not run yet.
+
+        ``epoch`` (default: the current one) picks the train seed under ``val_gate``.
+        """
         batch = [candidate for candidate in self.population if not candidate.evaluated]
+        seed = self._train_seed(self.epoch if epoch is None else epoch)
         for index, candidate in enumerate(batch):
             if self.evaluations >= self.config.max_evaluations:
                 break
             if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
                 break
-            # The run's seed, as SkillOpt and testeval pass theirs: a Task that
-            # shuffles per (item, seed) -- LiveMath's answer choices -- shuffles,
-            # and every candidate of the run meets the same shuffle.
-            self._evaluate(candidate, seed=self.config.seed)
+            self._evaluate(candidate, seed=seed)
             self._progress(
                 "forward",
                 candidate=candidate.id,
@@ -843,6 +861,18 @@ class Loop(OuterLoop):
             if self.budget and self.budget.snapshot().get("exhausted"):
                 break
         return len(batch)
+
+    def _train_seed(self, epoch: int) -> int:
+        """The seed a train rollout in ``epoch`` uses.
+
+        A Task that shuffles per (item, seed) -- LiveMath's answer choices -- meets
+        that seed. Without ``val_gate`` it is the run's seed, so every candidate of
+        the run meets the same shuffle; with it, SkillOpt's per-epoch train seed
+        (``train_batch_seed``), as SkillOpt's train rollouts use.
+        """
+        if self.config.val_gate:
+            return train_batch_seed(self.config.seed, epoch)
+        return self.config.seed
 
     def _carry_ledger(self, workdir: Path) -> None:
         """Put the run's ledger where the candidate's own nodes look for it.
@@ -1978,6 +2008,12 @@ class Loop(OuterLoop):
         """
         if self._custom_strategy is not None:
             return self._custom_strategy.strategy(run)
+        self._search(run)
+        if self.config.val_gate:
+            self._finish_gated_search(run)
+
+    def _search(self, run: Run) -> None:
+        """Epochs until a bound, a stop reason or a person's stop."""
         while True:
             if self._apply_control() == "stop":
                 run.stop("a person asked the run to stop")
@@ -2158,6 +2194,10 @@ class Loop(OuterLoop):
                 return str(exc)
         # A resumed completed epoch must not buy another proposal round. An
         # interrupted open epoch may still finish its bookkeeping at this limit.
+        if not self._epoch_open and self.config.val_gate:
+            early = self._early_stop_reason()
+            if early:
+                return early
         if not self._epoch_open and self.epoch >= self.config.epochs:
             return "epochs"
         if not self._epoch_open and self.evaluations >= self.config.max_evaluations:
@@ -2223,11 +2263,13 @@ class Loop(OuterLoop):
     def _gate_population(self, run: Run) -> None:
         """Judge each candidate evaluated on train that the gate has not judged.
 
-        The seed is rolled out on val and accepted; every later candidate is
-        accepted only when its val score strictly beats its parent's. A candidate
-        that failed on train is rejected without a val rollout. A refused rollout
-        (a spent rollout budget) leaves the rest unjudged, and an unjudged
-        candidate is not a parent or a winner.
+        The seed is rolled out on val and accepted; every later candidate, in
+        population order, is accepted only when its val score strictly beats the
+        gate's current candidate's (the last one accepted), as SkillOpt's gate
+        decides, so a child cannot pass by beating a weak old parent. A candidate
+        whose train run failed is rolled out on val too and the gate decides. A
+        refused rollout (a spent rollout budget) leaves the rest unjudged, and an
+        unjudged candidate is not a parent or a winner.
         """
         gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
@@ -2235,21 +2277,129 @@ class Loop(OuterLoop):
             try:
                 if gate.best_id is None:
                     gate.start(run, candidate)
+                    self._strategy_state["gate_start_epoch"] = self.epoch
                     accepted = True
-                elif not candidate.exit_ok:
-                    accepted = False
                 else:
-                    parent = run.candidate(candidate.parent) if candidate.parent else None
-                    accepted = gate.judge(run, candidate, against=parent).accepted
+                    accepted = gate.judge(run, candidate).accepted
             except OuterLoopError as error:
                 run.log(f"val gate stopped: {error}")
                 break
             (self._gate_accepted if accepted else self._gate_rejected).append(candidate.id)
-            self._strategy_state["val_gate"] = {
-                **gate.state_dict(),
-                "accepted": list(self._gate_accepted), "rejected": list(self._gate_rejected),
-            }
+            self._store_gate_state()
             self._save_strategy_state()
+
+    def _store_gate_state(self) -> None:
+        """Put the gate's state and decisions in the strategy state (not journaled)."""
+        self._strategy_state["val_gate"] = {
+            **self._gate().state_dict(),
+            "accepted": list(self._gate_accepted), "rejected": list(self._gate_rejected),
+        }
+
+    # ── val_gate: SkillOpt's early stop and post-training evaluation ────────
+    #: The bounds a search ends on normally. After any other (a person's stop, a
+    #: spent time or token budget) the last proposals are not scored and there is
+    #: no post-training evaluation, as SkillOpt's ``_TRAINED``.
+    _TRAINED = ("epochs", "evaluations", "max_evaluations", "rollouts",
+                "perfect_val", "patience_exhausted")
+
+    def _count_stale_epoch(self) -> None:
+        """SkillOpt's stale-epoch count, once per epoch after its gating: an epoch
+        whose gating did not raise the best val score above the best seen so far is
+        stale; one that did resets the count.
+
+        The epoch that started the gate gated the starting population, which is
+        SkillOpt's initial val score: it sets the best the count measures from and
+        is not counted. Each later epoch gates the batch the one before proposed,
+        so it is counted as SkillOpt counts the epoch that proposed that batch.
+        """
+        if not (self.config.early_stop_patience or self.config.early_stop_at_full_val):
+            return
+        state = self._strategy_state
+        if state.get("stale_counted_epoch") == self.epoch:
+            return
+        gate = self._gate()
+        state["stale_counted_epoch"] = self.epoch
+        if state.get("gate_start_epoch", self.epoch) == self.epoch:
+            state["early_stop_best"] = gate.best_score
+            return
+        best = float(state.get("early_stop_best", gate.best_score))
+        if gate.best_score > best + 1e-9:
+            state["early_stop_best"] = gate.best_score
+            state["stale_epochs"] = 0
+        else:
+            state["stale_epochs"] = int(state.get("stale_epochs", 0)) + 1
+
+    def _early_stop_reason(self) -> str:
+        """SkillOpt's early stop: ``perfect_val`` once the best val score is 1.0 (with
+        ``early_stop_at_full_val``), ``patience_exhausted`` after
+        ``early_stop_patience`` stale epochs in a row; empty otherwise."""
+        if self.config.early_stop_at_full_val and self._gate().best_score >= 1.0 - 1e-9:
+            return "perfect_val"
+        patience = self.config.early_stop_patience
+        if patience > 0 and int(self._strategy_state.get("stale_epochs", 0)) >= patience:
+            return "patience_exhausted"
+        return ""
+
+    def _final(self) -> FinalEvaluation:
+        """The post-training evaluation, restored from the strategy state."""
+        final = FinalEvaluation(
+            record=lambda step_type, **fields: self._journal(
+                "final_evaluation", step_type=step_type, **fields),
+            label="default loop",
+        )
+        final.load_state_dict(self._strategy_state.get("final_evaluation") or {})
+        return final
+
+    def _finish_gated_search(self, run: Run) -> None:
+        """What SkillOpt does once training ends normally, under ``val_gate``.
+
+        The last epoch's proposals are evaluated on train and gated, so a run of N
+        epochs gates every batch it proposed. Then, with a test part,
+        ``FinalEvaluation`` runs: the final candidate's val check, then the seed,
+        the best and the final candidate on test with the run seed. Each phase is
+        saved, so a resumed run continues where it stopped; a search resumed with
+        more epochs evaluates again. A search that ended any other way is not
+        scored further, and the evaluation records why it was skipped.
+        """
+        ended = str(run.stopped or self.bound or "")
+        state = self._strategy_state
+        if (state.get("final_evaluation") or {}).get("search_epoch") != self.epoch:
+            state.pop("final_evaluation", None)
+        final = self._final()
+
+        def save() -> None:
+            self._store_gate_state()
+            state["final_evaluation"] = {**final.state_dict(), "search_epoch": self.epoch}
+            self._save_strategy_state()
+
+        if final.result.get("status") == "done":
+            return
+        if ended not in self._TRAINED:
+            final.result = {"status": "skipped",
+                            "reason": f"the search did not finish: it ended on {ended!r}"}
+            save()
+            return
+        if self._unevaluated():
+            self.forward(epoch=self.epoch + 1)
+            self._gate_population(run)
+        if not run.has_part(task_module.TEST):
+            final.skip(run, "the parts manifest has no 'test' part", save)
+            return
+        final.run(run, self._gate(), seed=self.config.seed, save=save)
+
+    def final_evaluation(self) -> dict[str, Any]:
+        """The post-training evaluation's figures, for the report (``val_gate``)."""
+        result = self._final().result
+        report: dict[str, Any] = {
+            "best_selection": self._gate().best_score if self._gate().best_id else None,
+            "test_eval": result.get("status") or "not_run",
+        }
+        if result.get("reason"):
+            report["test_eval_reason"] = result["reason"]
+        for key in ("final_selection", "baseline_test", "best_test", "final_test",
+                    "best_test_delta", "final_test_delta"):
+            report[key] = result.get(key)
+        return report
 
     def _save_strategy_state(self) -> None:
         """Journal the strategy's current state unconditionally.
@@ -2270,18 +2420,30 @@ class Loop(OuterLoop):
         """
         self.open_epoch()
         evaluated = self.forward()
+        early = ""
         if self.config.val_gate:
             self._gate_population(run or Run(_loop=self))
+            # SkillOpt's early stop, checked right after the epoch's gating so a
+            # stopping run proposes nothing it will not score.
+            self._count_stale_epoch()
+            early = self._early_stop_reason()
         self.loss_step()
         self.backward()
-        candidates, rejections = self.optimizer_step(run)
-        kept = self.step([c for c in candidates if self.accepts(run, c)], run=run)
-        for candidate in kept:
-            self.update(run, candidate)
+        candidates: list[Candidate] = []
+        rejections: list[Rejection] = []
+        if not early:
+            candidates, rejections = self.optimizer_step(run)
+            kept = self.step([c for c in candidates if self.accepts(run, c)], run=run)
+            for candidate in kept:
+                self.update(run, candidate)
         another = self.scheduler(
             evaluated=evaluated, proposed=len(candidates) + len(rejections),
             accepted=len(candidates), refused=len(rejections),
         )
+        if early:
+            self.bound = early
+            self._journal("bound", bound=early)
+            another = False
         self.on_epoch_end(run)
         self.close_epoch()
         self._save_strategy_state()
@@ -2377,6 +2539,8 @@ class Loop(OuterLoop):
         # A custom strategy's own figures (``OuterLoop.report``), e.g. SkillOpt's
         # post-training test scores; empty for the library's strategies.
         strategy_report: dict[str, Any] = {}
+        if strategy is None and self.config.val_gate:
+            strategy_report = self.final_evaluation()
         if strategy is not None:
             try:
                 strategy_report = dict(strategy.report(Run(_loop=self)) or {})

@@ -22,6 +22,37 @@ call.  This means:
 `command_timeout_s` on each node's subprocess.  It does not use
 `enable_recovery`.
 
+## The default loop's validation gate (`--val-gate 1`)
+
+With `--val-gate 1` and a parts manifest with a val part, the default loop evaluates
+candidates the way the SkillOpt strategy does, using the same `ValidationGate` and
+`FinalEvaluation` from `outerloop.py`. Only the optimizer, where edit ideas come from,
+differs. Without `--val-gate` nothing below applies.
+
+- **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
+  (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
+- **Gate.** Every candidate evaluated on train is rolled out on val, including one whose
+  train run failed, and is accepted only when its val score strictly beats the gate's
+  current candidate (the last one accepted), not its parent. A failed train run gives
+  the candidate no train score, so it can win on val but is not a parent.
+- **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
+  next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
+- **Final evaluation.** After a normal end (epochs, an evaluation or rollout bound, or
+  an early stop), with a test part, the final candidate's val check runs, then the seed,
+  the best and the final candidate on test with `seed`. The report's `strategy_report`
+  holds `final_selection`, `baseline_test`, `best_test`, `final_test` and the two deltas
+  (`test_eval` says `done`, `skipped` or `incomplete`, and `test_eval_reason` why). The
+  held-out audit then compares the winner's val and test scores, so a `--holdout 0` run
+  is audited. Each phase is saved: a resumed run continues it. Without a test part it is
+  skipped with that reason.
+- **Early stop.** `--early-stop-patience N` (0, off, by default) stops the run after N
+  epochs in a row whose gating did not raise the best val score.
+  `--early-stop-at-full-val 1` stops it once the best val score reaches 1.0. Both are
+  checked right after an epoch's gating, before it proposes. The first epoch gates the
+  starting population, which sets the best the count starts from (SkillOpt's initial
+  val score). Each later epoch gates the batch the previous one proposed. Both settings
+  need `--val-gate 1`, are saved with the run and are kept on resume.
+
 ## LiveMath skill graph (`livemath/skill_graph`)
 
 Arm C of the outer-loop study starts from arm A's seed skill, converted by hand into an
