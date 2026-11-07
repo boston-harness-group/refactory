@@ -3169,6 +3169,7 @@ class Loop(OuterLoop):
             ],
             nodes=described["nodes"],
             edges=described["edges"],
+            node_states=described.get("node_states", []),
             leaderboard=[self._row(c) for c in board],
             history=self._history(),
             tried=self._tried(),
@@ -3215,15 +3216,20 @@ class Loop(OuterLoop):
         parent = by_id.get(str(parent_id)) if parent_id else None
         if parent is None and board:
             parent = board[0]
+        def described(mode: Any) -> dict[str, Any]:
+            # The nodes in full too, in node-state form, for a structure edit to copy.
+            nodes = (mode.state_dict().get("graph") or {}).get("nodes") or {}
+            return {**mode.describe(), "node_states": [dict(state) for state in nodes.values()]}
+
         if parent is None:
-            return self.mode.describe(), ""
+            return described(self.mode), ""
         try:
-            return self.mode_class(state=parent.state).describe(), ""
+            return described(self.mode_class(state=parent.state)), ""
         except Exception as exc:
             note = (f"the parent candidate {parent.id} could not be built "
                     f"({type(exc).__name__}: {exc}); the seed's pipeline is shown instead")
             self._progress("warning", candidate=parent.id, warning=note)
-            return self.mode.describe(), note
+            return described(self.mode), note
 
     def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """Train records for the parent the strategy selected for editing.

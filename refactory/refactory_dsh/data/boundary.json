@@ -33,6 +33,7 @@
     "refactory_dsh.nn.executor",
     "refactory_dsh.nn.fork",
     "refactory_dsh.nn.graph",
+    "refactory_dsh.nn.node_schema",
     "refactory_dsh.nn.knob",
     "refactory_dsh.nn.loops",
     "refactory_dsh.nn.mode",
