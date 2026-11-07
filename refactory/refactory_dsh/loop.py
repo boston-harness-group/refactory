@@ -512,6 +512,8 @@ class Loop(OuterLoop):
         self._editing_parent: str | None = None
         #: The proposal attempt within the current optimizer step (``propose``).
         self._proposal_attempt = 0
+        #: Each accepted proposal's rationale and prediction, by candidate id.
+        self._proposal_notes: dict[str, dict[str, Any]] = {}
         #: A pure OuterLoop subclass whose hooks this Loop drives.  When set,
         #: ``strategy()``, ``strategy_state_dict()``, and
         #: ``load_strategy_state()`` delegate to this object.
@@ -1651,16 +1653,20 @@ class Loop(OuterLoop):
             )
         for candidate in candidates:
             self._journal_candidate(candidate)
-            self.proposals.setdefault(candidate.id, {
+            notes = self._proposal_notes.get(candidate.id) or {}
+            record = self.proposals.setdefault(candidate.id, {
                 "id": candidate.id,
                 "parent": candidate.parent,
                 "edits": candidate.edits[-1:],
-                "rationale": "",
-                "prediction": "",
-                "confidence": 0.0,
+                "rationale": str(notes.get("rationale") or ""),
+                "prediction": str(notes.get("prediction") or ""),
+                "confidence": float(notes.get("confidence") or 0.0),
                 "origin": "optimizer",
                 "diagnosis": getattr(self.optimizer, "last_diagnosis", ""),
+                "epoch": self.epoch,
             })
+            # Journaled, so a resumed run still shows the optimizer its own reasoning.
+            self._journal("proposal", **record)
         self._write_analysis()
         self._append_rejections(rejections)
         self._progress(
@@ -2091,6 +2097,10 @@ class Loop(OuterLoop):
                         continue
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
+                    # Its own words, for "Your earlier reasoning" in later requests.
+                    self._proposal_notes[outcome.id] = {
+                        "rationale": proposal.rationale, "prediction": proposal.prediction,
+                        "confidence": proposal.confidence}
             # Another response is useful only if a validation round remains.
             if len(accepted) >= wanted or len(self.rejections) == before or _attempt >= cap:
                 break
@@ -3282,7 +3292,71 @@ class Loop(OuterLoop):
             item_records=self._parent_train_records(board),
             parent_item_records=self._parent_train_records(board),
             graph_note=graph_note,
+            edit_pairs=self._edit_pairs(board),
+            reasoning=self._reasoning_entries(board),
         )
+
+    def _edited_id(self, board: list[Candidate]) -> str | None:
+        parent_id = self.strategy_decision.get("parent") or self._editing_parent
+        return str(parent_id) if parent_id else (board[0].id if board else None)
+
+    def _edit_pairs(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """The latest evaluated children of the edited candidate (one batch), each with
+        its parent's train records; or, when it has none yet, the edited candidate
+        against its own parent. Train records only."""
+        edited = self._edited_id(board)
+        by_id = {c.id: c for c in self.population}
+        if edited is None or edited not in by_id:
+            return []
+        children = [c for c in self.population if c.parent == edited and c.evaluated]
+        chosen = children[-max(1, int(self.config.batch_size)):] or [by_id[edited]]
+        pairs = []
+        for child in chosen:
+            parent = by_id.get(child.parent or "")
+            pairs.append({
+                "child": child.id, "parent": parent.id if parent else None,
+                "edit": child.edits[-1:], "gate": self._gate_decision(child.id),
+                "child_records": list(self._train_item_records.get(child.id, [])),
+                "parent_records": (list(self._train_item_records.get(parent.id, []))
+                                   if parent else []),
+            })
+        return pairs
+
+    def _reasoning_entries(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """The optimizer's own reasoning about recent candidates -- the line from the
+        seed to the edited candidate, and the latest refused children -- beside what
+        happened to each. Train scores and gate decisions only."""
+        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change
+
+        by_id = {c.id: c for c in self.population}
+        line: list[Candidate] = []
+        node = by_id.get(self._edited_id(board) or "")
+        while node is not None and node.parent:
+            line.append(node)
+            node = by_id.get(node.parent)
+        line.reverse()
+        rejected = [c for c in self.population if c.evaluated and c not in line
+                    and self._gate_decision(c.id) == "rejected"]
+        chosen = (line + rejected[-REASONING_ENTRIES:])
+        chosen.sort(key=lambda c: self.population.index(c))
+        entries = []
+        for candidate in chosen[-REASONING_ENTRIES:]:
+            record = self.proposals.get(candidate.id) or {}
+            if record.get("origin") != "optimizer":
+                continue
+            parent = by_id.get(candidate.parent or "")
+            change = (edit_change(self._train_item_records.get(parent.id),
+                                  self._train_item_records.get(candidate.id))
+                      if parent is not None and candidate.evaluated else None)
+            entries.append({
+                "id": candidate.id, "epoch": record.get("epoch"),
+                "edit": candidate.edits[-1:], "rationale": record.get("rationale"),
+                "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
+                "gate": self._gate_decision(candidate.id), "score": candidate.score,
+                "fixed": len(change["fixed"]) if change and change["shared"] else None,
+                "broken": len(change["broken"]) if change and change["shared"] else None,
+            })
+        return entries
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
         """The graph and knobs of the candidate this step edits, and a note when not.
@@ -3628,6 +3702,13 @@ class Loop(OuterLoop):
             }
             for candidate in self.population
         }
+        for line in journal.read_text().splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") == "proposal" and record.get("id") in self.proposals:
+                self.proposals[record["id"]] = {k: v for k, v in record.items() if k != "event"}
 
     def _replay_control(self, record: dict[str, Any]) -> None:
         """Restore one person's act while the journal is being replayed.

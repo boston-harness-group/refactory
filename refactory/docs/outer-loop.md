@@ -192,6 +192,25 @@ from the `Node` dataclass and its validator, so they cannot drift:
 or fn-gate node can only reuse a callable an existing node already names. In the edit
 catalogue, every field that takes a node (`node`, `gate`, and `into` for two) says so.
 
+Two more sections carry what SkillOpt's slow update and carried-forward notes give its
+optimizer, at no extra compute (train records only):
+
+- **What the last edit changed.** The latest children of the edited candidate (one
+  batch), or the edited candidate itself when it has none yet, are compared with their
+  parent item by item, on the train items both were scored on. It shows how many items
+  were fixed (parent wrong, child right) and broken (the reverse), and the largest score
+  rises and drops among the rest. Each changed item is shown with both trajectories, as
+  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); the rest go in a table. It also
+  shows the edit that made the child and the gate's decision on it, and warns that the
+  two were scored in different rounds with different seeds, so some changes may be
+  noise. Without a parent (the seed) or without shared items, it says so.
+- **Your earlier reasoning and what happened.** Up to 6 recent candidates: the line
+  from the seed to the edited candidate, and the latest rejected children. Each shows
+  the rationale and prediction the optimizer gave when proposing it, the round's
+  diagnosis, the gate's decision, its train score and its fixed and broken counts
+  against its parent. Texts are clipped to 600 characters. The proposals' own words are
+  journaled, so a resumed run keeps them.
+
 A proposal refused as a duplicate (`E-duplicate`) is told which candidate it repeats
 (its id), so the retry can look it up and move on. This applies with or without the
 gate.

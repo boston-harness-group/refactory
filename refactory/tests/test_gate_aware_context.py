@@ -63,7 +63,8 @@ def test_rows_and_the_request_carry_the_gates_decision_and_no_val_score(tmp_path
     assert "A `rejected` candidate did not generalise" in text
     assert "| id | parent | score | structural | ok | edits | gate |" in text
     assert "| id | parent | score | structural | edits | gate |" in text
-    row6 = next(line for line in text.splitlines() if history[6]["id"] in line and "rejected" in line)
+    row6 = next(line for line in text.splitlines()
+                if line.startswith("| ") and history[6]["id"] in line and "rejected" in line)
     assert row6.rstrip().endswith("| rejected |")
     assert "best kept by the validation gate" in text
     for score in loop._gate().cache.values():
@@ -125,3 +126,134 @@ def test_without_the_gate_the_epoch_line_is_unchanged(tmp_path, monkeypatch):
     loop, _ = _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 6)], []])
     lines = _epoch_lines(loop)
     assert all(" · improved " in line and "validation gate" not in line for line in lines)
+
+
+
+# ── what the last edit changed, and the optimizer's own reasoning ──────────
+
+
+def _passes_by_level(monkeypatch: Any) -> None:
+    """Train item tN passes when N <= level - 2 (so 7 passes t1-t5, 6 passes t1-t4);
+    graded scores rise with the level. Val and test records are left alone."""
+    from refactory_dsh.loop import Loop
+
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        if part == "train":
+            level = _level(candidate)
+            for record in result.item_records:
+                n = int(str(record["id"]).lstrip("t"))
+                record["passed"] = n <= level - 2
+                record["score"] = round(level / 10 + n / 100, 3)
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+
+
+class Reasoning(Recording):
+    """Proposals that state a rationale and a prediction, and a diagnosis."""
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        self.last_diagnosis = f"DIAGNOSIS-{len(self.contexts) + 1}"
+        from dataclasses import replace
+
+        return [replace(proposal, rationale=f"RATIONALE-{len(self.contexts)}",
+                        prediction=f"PREDICTION-{len(self.contexts)}")
+                for proposal in super().propose(ctx, n, parents)]
+
+
+def _run_reasoning(tmp_path: Path, monkeypatch: Any, **overrides: Any):
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    _passes_by_level(monkeypatch)
+    proposer = Reasoning([[(5, 7)], [(7, 6)], [], []])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, **{"epochs": 3, "val_gate": True, **overrides})
+        loop.optimizer = proposer
+        loop.run()
+    return loop, proposer
+
+
+def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkeypatch):
+    """Epoch 3 edits 7, whose child 6 the gate rejected: 6 against 7 on their shared
+    train items, t5 broken, with both trajectories, the edit, the gate's decision
+    and the noise warning; no val or test item appears."""
+    loop, proposer = _run_reasoning(tmp_path, monkeypatch)
+    text = proposer.contexts[2].render()
+    section = text[text.index("## What the last edit changed"):text.index("\n## ", text.index("## What the last edit changed") + 5)]
+    ids = {_level(c): c.id for c in loop.population}
+    assert f"### Child {ids[6]} of {ids[7]} -- gate: rejected" in section
+    assert "On 8 shared train item(s): 0 fixed (parent wrong, child right), 1 broken" in section
+    assert "#### Item t5 -- broken\nParent:\n### Item t5 — passed" in section
+    assert "Child:\n### Item t5 — answered wrong" in section
+    assert '"value": 6' in section and "different rounds with different seeds" in section
+    assert not any(f"Item {v}" in section for v in ("v1", "v2", "v3", "v4", "x1", "x2", "x3"))
+
+
+def test_without_a_parent_or_shared_items_the_section_says_so(tmp_path, monkeypatch):
+    from refactory_dsh.optim.base import _edit_change_lines, edit_change
+
+    loop, proposer = _run_reasoning(tmp_path, monkeypatch)
+    first = proposer.contexts[0].render()
+    assert "it is the seed), so there is nothing to compare" in first
+    lines = "\n".join(_edit_change_lines([{"child": "c", "parent": "p", "edit": [],
+                                            "child_records": [{"id": "a", "passed": True}],
+                                            "parent_records": [{"id": "b", "passed": False}]}]))
+    assert "share no scored train item" in lines
+    partial = edit_change([{"id": "a", "passed": False, "score": 0.1},
+                           {"id": "b", "passed": True, "score": 0.9},
+                           {"id": "c", "passed": True, "score": 0.5}],
+                          [{"id": "a", "passed": True, "score": 0.8},
+                           {"id": "c", "passed": True, "score": 0.2},
+                           {"id": "d", "passed": False, "score": 0.0}])
+    assert partial["shared"] == 2 and partial["fixed"] == ["a"] and partial["broken"] == []
+    assert partial["down"] == ["c"] and partial["deltas"]["c"] == -0.3
+
+
+def test_graded_changes_list_the_largest_moves_each_way():
+    from refactory_dsh.optim.base import edit_change
+
+    parent = [{"id": f"i{k}", "passed": False, "score": 0.5} for k in range(8)]
+    child = [{"id": f"i{k}", "passed": False, "score": 0.5 + (k - 4) / 10} for k in range(8)]
+    change = edit_change(parent, child)
+    assert change["up"] == ["i7", "i6", "i5"] and change["down"] == ["i0", "i1", "i2"]
+
+
+def test_the_comparison_stays_within_its_budget():
+    from refactory_dsh.optim.base import EDIT_CHANGE_BUDGET, _edit_change_lines
+
+    def big(item: str, passed: bool) -> dict[str, Any]:
+        return {"id": item, "passed": passed, "score": float(passed),
+                "exchanges": [{"node": "s", "prompt": "p", "response": "z" * 9000}]}
+
+    pair = {"child": "c", "parent": "p", "edit": [],
+            "parent_records": [big(f"i{k}", True) for k in range(20)],
+            "child_records": [big(f"i{k}", False) for k in range(20)]}
+    text = "\n".join(_edit_change_lines([pair]))
+    assert len(text) <= EDIT_CHANGE_BUDGET + 3000
+    assert "The other changed items (their trajectories did not fit)" in text
+    assert "| i19 | broken |" in text
+
+
+def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
+    """The line to the edited candidate and the latest rejected child, each with
+    the rationale, prediction and diagnosis it was proposed with, the gate's
+    decision, train score and fixed/broken counts; kept across a resume."""
+    loop, proposer = _run_reasoning(tmp_path, monkeypatch)
+    text = proposer.contexts[2].render()
+    section = text[text.index("## Your earlier reasoning"):]
+    ids = {_level(c): c.id for c in loop.population}
+    assert f"### {ids[7]} (proposed in epoch 1) -- gate current" in section
+    assert f"### {ids[6]} (proposed in epoch 2) -- gate rejected" in section
+    for marker in ("RATIONALE-1", "PREDICTION-1", "DIAGNOSIS-1", "RATIONALE-2", "DIAGNOSIS-2"):
+        assert marker in section, marker
+    assert "1 broken vs its parent" in section and "0 fixed" in section
+
+    again = Reasoning([[]])
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=4, val_gate=True, resume=True)
+        resumed.optimizer = again
+        resumed.run()
+    after = again.contexts[0].render()
+    assert "RATIONALE-1" in after and "DIAGNOSIS-2" in after, "kept across a resume"
