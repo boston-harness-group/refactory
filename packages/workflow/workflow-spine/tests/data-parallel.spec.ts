@@ -130,6 +130,24 @@ const WORK = `${PYTHON} -c 'import json,time,pathlib; d=json.load(open("current_
   + `pathlib.Path("start").write_text(repr(time.time())); time.sleep(float(d["delay"])); `
   + `pathlib.Path("end").write_text(repr(time.time())); pathlib.Path("out.txt").write_text(d["id"])'`
 
+/**
+ * WORK, except that after noting its start the item waits until `ready` (a Python
+ * expression, run in the item's pass directory) holds, then sleeps and ends. A test
+ * that measures overlap sets it with this gate instead of hoping the scheduler starts
+ * the items close enough together. The wait gives up after `timeoutS` and the item
+ * ends anyway, so a drain that never admits enough items fails the test's assertion
+ * instead of hanging it.
+ */
+function gatedWork(ready: string, timeoutS: number): string {
+  return `${PYTHON} -c 'import glob,json,os,time,pathlib; d=json.load(open("current_item.json")); `
+    + `pathlib.Path("start").write_text(repr(time.time())); t=time.time()+${timeoutS}; `
+    + `[time.sleep(0.02) for _ in iter(lambda: not (${ready}) and time.time()<t, False)]; time.sleep(float(d["delay"])); `
+    + `pathlib.Path("end").write_text(repr(time.time())); pathlib.Path("out.txt").write_text(d["id"])'`
+}
+
+/** The gate for `count` items to have started in this pass, counting their own `start` notes. */
+const startedTogether = (count: number): string => `len(glob.glob("../*/start"))>=${count}`
+
 function loaderGraph(parallelism: number, work = WORK): WorkflowGraph {
   return {
     name: 'parallel-loader',
@@ -257,8 +275,10 @@ describe('data-parallel: the concurrent drain', () => {
     for (const parallelism of [1, 4]) {
       const { workdir, taskDir } = loaderRun(ITEMS, parallelism)
       const ran: Ran[] = []
+      // Each item waits for the first `parallelism` items to start, so the peak is
+      // the drain's bound, not the luck of the scheduler (a no-op at parallelism 1).
       const ctx = await mountLoader(processShell(ran), {
-        graph: loaderGraph(parallelism), workdir,
+        graph: loaderGraph(parallelism, gatedWork(startedTogether(parallelism), 10)), workdir,
         commandEnv: { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir },
       })
       const started = Date.now()
@@ -295,7 +315,7 @@ describe('data-parallel: the concurrent drain', () => {
     const { workdir, taskDir } = loaderRun(ITEMS.slice(0, 4), 4)
     const graphPath = join(workdir, 'graphs', 'parallel.graph.json')
     mkdirSync(join(workdir, 'graphs'), { recursive: true })
-    writeFileSync(graphPath, JSON.stringify(loaderGraph(4)))
+    writeFileSync(graphPath, JSON.stringify(loaderGraph(4, gatedWork(startedTogether(4), 10))))
     const stub = join(scratch(), 'open-stub')
     writeFileSync(stub, `#!/bin/sh\nprintf '%s' '${JSON.stringify({
       mode: 'pkg/parallel', run: workdir, name: 'parallel', graph: graphPath,
@@ -479,12 +499,28 @@ describe('data-parallel: non-deterministic body detection', () => {
 // ── Slot-directory gating (correction 1): shared cross-evaluation item limit ──
 
 describe('data-parallel: slot-directory gating', () => {
-  it('two concurrent drains against one slot dir never exceed N in flight and do exceed N/2', async () => {
+  it('two concurrent drains against one slot dir share its N slots: one drain can hold all N while the other waits, never more than N run, and every slot is released', async () => {
     const N = 4
     const itemsPerDrain = 6
     const slotDir = join(scratch(), 'item-slots')
     mkdirSync(slotDir, { recursive: true })
-    const items = Array.from({ length: itemsPerDrain }, (_, i) => ({ id: `d${i}`, delay: 0.1 }))
+    const items = Array.from({ length: itemsPerDrain }, (_, i) => ({ id: `d${i}`, delay: 0 }))
+    // Every item holds its slot until the test opens the gate, so the overlap is set
+    // by the test, not by how the scheduler happens to start the drains.
+    const gate = join(scratch(), 'open')
+    const work = gatedWork(`os.path.exists("${gate}")`, 45)
+
+    /** The items of a drain that have started their body and not ended it. */
+    const running = (workdir: string): number => {
+      const passes = join(workdir, 'passes', 'data')
+      if (!existsSync(passes)) return 0
+      return readdirSync(passes).filter(dir => existsSync(join(passes, dir, 'start')) && !existsSync(join(passes, dir, 'end'))).length
+    }
+    const until = async (what: string, ready: () => boolean): Promise<void> => {
+      for (const deadline = Date.now() + 20_000; !ready(); await new Promise(settle => setTimeout(settle, 25))) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+      }
+    }
 
     // Set process.env so drainConcurrentData reads the slot directory
     const origSlotsDir = process.env.REFACTORY_ITEM_SLOTS_DIR
@@ -493,43 +529,57 @@ describe('data-parallel: slot-directory gating', () => {
     process.env.REFACTORY_ITEM_SLOTS = String(N)
 
     try {
-      // Run two concurrent drains with the shared slot directory
-      const drain1Run = loaderRun(items, 4)
-      const drain2Run = loaderRun(items, 4)
+      // Local parallelism above N, so only the shared slots bound the items.
+      const drain1Run = loaderRun(items, itemsPerDrain)
+      const drain2Run = loaderRun(items, itemsPerDrain)
       const ran1: Ran[] = []
       const ran2: Ran[] = []
 
       const ctx1 = await mountLoader(processShell(ran1), {
-        graph: loaderGraph(4), workdir: drain1Run.workdir,
+        graph: loaderGraph(itemsPerDrain, work), workdir: drain1Run.workdir,
         commandEnv: { REFACTORY_WORKDIR: drain1Run.workdir, PYTHONPATH: drain1Run.taskDir },
       })
       const ctx2 = await mountLoader(processShell(ran2), {
-        graph: loaderGraph(4), workdir: drain2Run.workdir,
+        graph: loaderGraph(itemsPerDrain, work), workdir: drain2Run.workdir,
         commandEnv: { REFACTORY_WORKDIR: drain2Run.workdir, PYTHONPATH: drain2Run.taskDir },
       })
 
-      // Drive both concurrently
-      const [r1, r2] = await Promise.all([drive(ctx1), drive(ctx2)])
-      expect(r1).toMatchObject({ status: 'done' })
-      expect(r2).toMatchObject({ status: 'done' })
+      let drain1: Promise<Record<string, unknown>> | undefined
+      let drain2: Promise<Record<string, unknown>> | undefined
+      let settled: Array<PromiseSettledResult<Record<string, unknown> | undefined>>
+      try {
+        drain1 = drive(ctx1)
+        // One drain alone takes every slot: it is not held to a share (N/2) of them.
+        await until(`the first drain to hold all ${N} slots`, () => running(drain1Run.workdir) >= N)
+        drain2 = drive(ctx2)
+        await until('the second drain to prepare its pass', () => ran2.some(entry => entry.command.includes(' prepare ')))
+        await new Promise(settle => setTimeout(settle, 500))
+        // The N slots are one set for both drains: while the first holds all of them
+        // the second starts nothing, and the first runs N items though it may run 6.
+        expect(running(drain2Run.workdir)).toBe(0)
+        expect(running(drain1Run.workdir)).toBe(N)
+        expect(readdirSync(slotDir)).toHaveLength(N)
+      } finally {
+        writeFileSync(gate, '')
+        settled = await Promise.allSettled([drain1, drain2])
+      }
+      expect(settled).toMatchObject([
+        { status: 'fulfilled', value: { status: 'done' } },
+        { status: 'fulfilled', value: { status: 'done' } },
+      ])
 
       // Collect all start/end times from both drains
       const allSpans: Array<{ start: number; end: number }> = []
       for (const workdir of [drain1Run.workdir, drain2Run.workdir]) {
         const passes = join(workdir, 'passes', 'data')
-        if (existsSync(passes)) {
-          for (const dir of readdirSync(passes)) {
-            const startFile = join(passes, dir, 'start')
-            const endFile = join(passes, dir, 'end')
-            if (existsSync(startFile) && existsSync(endFile)) {
-              allSpans.push({
-                start: Number(readFileSync(startFile, 'utf8')),
-                end: Number(readFileSync(endFile, 'utf8')),
-              })
-            }
-          }
+        for (const dir of readdirSync(passes)) {
+          allSpans.push({
+            start: Number(readFileSync(join(passes, dir, 'start'), 'utf8')),
+            end: Number(readFileSync(join(passes, dir, 'end'), 'utf8')),
+          })
         }
       }
+      expect(allSpans).toHaveLength(2 * itemsPerDrain)
 
       // Compute peak overlap across both drains
       const peak = Math.max(...allSpans.map(span =>
@@ -538,10 +588,8 @@ describe('data-parallel: slot-directory gating', () => {
 
       console.log(`slot-dir gating: peak=${peak}, N=${N}, spans=${allSpans.length}`)
 
-      // Never exceeded N
-      expect(peak).toBeLessThanOrEqual(N)
-      // Exceeded N/2 (proves sharing: if divided, each drain gets N/2=2)
-      expect(peak).toBeGreaterThan(N / 2)
+      // Never exceeded N, and reached it (the gate held N items at once).
+      expect(peak).toBe(N)
       // Every slot was released by the drain that held it.
       expect(readdirSync(slotDir)).toEqual([])
     } finally {

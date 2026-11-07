@@ -732,6 +732,7 @@ class Loop(OuterLoop):
         )
         # Load the loop-level parts manifest if configured or already on disk.
         self._load_parts_manifest()
+        self._check_optimizer_route()
         if self.config.val_gate:
             if self._custom_strategy is not None:
                 raise LoopError(
@@ -792,6 +793,29 @@ class Loop(OuterLoop):
             batch_size=self.config.batch_size,
             optimizer=self.search_name(),
         )
+
+    def _check_optimizer_route(self) -> None:
+        """Refuse, before anything runs, an optimizer that calls a model on a route that
+        cannot run it without tools: its calls are prompt in, JSON out
+        (``optim.random_optimizer.text_only``), and running it with tools is never a
+        silent fallback."""
+        from refactory_dsh.model import TOOL_POLICY_NONE_BACKENDS
+        from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+
+        if not isinstance(self.optimizer, AutoresearchOptimizer) or self.model is None:
+            return
+        route_for = getattr(self.model, "for_node", None)
+        client = route_for("optimizer", role="optimizer") if callable(route_for) else self.model
+        route = client.route() if callable(getattr(client, "route", None)) else {}
+        backend = str((route or {}).get("worker_backend") or "dsh")
+        if backend in TOOL_POLICY_NONE_BACKENDS:
+            return
+        raise LoopError(
+            f"the {self.optimizer.name} optimizer's calls run without tools (tool_policy "
+            f"'none'), which only the {', '.join(TOOL_POLICY_NONE_BACKENDS)} backends "
+            f"enforce, and the optimizer role is routed to {backend}; route the optimizer "
+            "role to one of them, e.g. --role-routes "
+            "'{\"optimizer\": {\"worker_backend\": \"claude_code\"}}'")
 
     def _load_parts_manifest(self) -> None:
         """Load and install the loop-level parts manifest.
@@ -1447,6 +1471,7 @@ class Loop(OuterLoop):
             "scoring": self.scoring(),
             "knob_attribution": self._knob_attribution(evaluated),
             "cost": self._cost(),
+            "measurement_summary": self._measurement_summary(),
             "run_failures": self.loss.get("run_failures", []),
             "rejection_codes": self._rejection_codes(),
             "rejection_reasons": [r for rej in self.rejections[-8:] for r in rej.reasons],
@@ -1635,6 +1660,24 @@ class Loop(OuterLoop):
             "max_s": round(max(durations), 4),
             "total_s": round(sum(durations), 4),
             "inner_model_calls": calls,
+        }
+
+    def _measurement_summary(self) -> dict[str, Any]:
+        """The evaluations' trials in a few numbers, for the optimizer: how many ran,
+        how many failed, and the failures by cause. No receipts and no paths."""
+        trials = [trial for c in self._evaluated()
+                  for trial in (c.measurements or {}).get("trials") or ()]
+        causes: dict[str, int] = {}
+        for trial in trials:
+            if not trial.get("exit_ok"):
+                cause = " ".join(str(trial.get("error") or "unknown").split())[:120]
+                causes[cause] = causes.get(cause, 0) + 1
+        return {
+            "trial_runs": len(trials),
+            "failed": sum(causes.values()),
+            "timeouts": sum(n for cause, n in causes.items() if "timeout" in cause.lower()
+                            or "timed out" in cause.lower()),
+            "failures_by_cause": dict(sorted(causes.items(), key=lambda kv: -kv[1])[:6]),
         }
 
     def _rejection_codes(self) -> dict[str, int]:
