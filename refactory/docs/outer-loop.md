@@ -33,13 +33,23 @@ differs. Without `--val-gate` nothing below applies.
   (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
 - **Gate.** Every candidate evaluated on train is rolled out on val, including one whose
   train run failed, and is accepted only when its val score strictly beats the gate's
-  current candidate (the last one accepted), not its parent. A failed train run gives
-  the candidate no train score, so it can win on val but is not a parent.
+  current candidate (the last one accepted), not its parent. With `--batch-size` above 1
+  the decisions depend on the batch's order: a candidate accepted earlier in the batch
+  raises the bar for the ones after it. SkillOpt gates one candidate per epoch and has
+  no equivalent.
+- **Parent and winner.** As in SkillOpt, the gate's current candidate (also the best on
+  val) is the parent every optimizer edits, with any accepted candidate a person kept,
+  whether or not its train run succeeded. The leaderboard lists the accepted candidates
+  ranked by val score. The winner is the best on val: the report, the held-out audit and
+  `adopt` all name it, and the report's `best_score` is its val score
+  (`best_score_basis`), with its train score in `best_train_score`.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
-- **Final evaluation.** After a normal end (epochs, an evaluation or rollout bound, or
-  an early stop), with a test part, the final candidate's val check runs, then the seed,
-  the best and the final candidate on test with `seed`. The report's `strategy_report`
+- **Final evaluation.** After a normal end (the epoch bound or an early stop), with a
+  test part, the final candidate's val check runs, then the seed, the best and the final
+  candidate on test with `seed`. A run that ends on a spent evaluation, rollout, time or
+  token budget, or a person's stop, scores neither the last proposals nor the test part,
+  as SkillOpt; the report keeps the real stop reason and says why it skipped. The report's `strategy_report`
   holds `final_selection`, `baseline_test`, `best_test`, `final_test` and the two deltas
   (`test_eval` says `done`, `skipped` or `incomplete`, and `test_eval_reason` why). The
   held-out audit then compares the winner's val and test scores, so a `--holdout 0` run
@@ -47,11 +57,13 @@ differs. Without `--val-gate` nothing below applies.
   skipped with that reason.
 - **Early stop.** `--early-stop-patience N` (0, off, by default) stops the run after N
   epochs in a row whose gating did not raise the best val score.
-  `--early-stop-at-full-val 1` stops it once the best val score reaches 1.0. Both are
-  checked right after an epoch's gating, before it proposes. The first epoch gates the
-  starting population, which sets the best the count starts from (SkillOpt's initial
-  val score). Each later epoch gates the batch the previous one proposed. Both settings
-  need `--val-gate 1`, are saved with the run and are kept on resume.
+  `--early-stop-at-full-val 1` stops it once the best val score reaches 1.0. The first
+  epoch gates the starting population, which sets the best the count starts from
+  (SkillOpt's initial val score) and is never a reason to stop. Each later epoch gates
+  the batch the previous one proposed, and is checked right after that gating, before
+  it proposes, as SkillOpt checks at an epoch's end; so a seed already at 1.0 still gets
+  one batch proposed and gated. Both settings need `--val-gate 1`, are saved with the
+  run and are kept on resume.
 
 ## LiveMath skill graph (`livemath/skill_graph`)
 

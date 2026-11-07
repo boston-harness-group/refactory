@@ -1532,8 +1532,7 @@ class Loop(OuterLoop):
         # the pool and chooses from it (issue #32).
         parents = [candidate for candidate in self.population if candidate.evaluated]
         if self.config.val_gate:
-            self._gate()
-            parents = [candidate for candidate in parents if candidate.id in self._gate_accepted]
+            parents = self._gated_parents()
         if not parents:
             parents = self.select_parents(self.config.elite)
         if not parents:
@@ -1851,7 +1850,11 @@ class Loop(OuterLoop):
         self.epochs.append(summary)
         self._write_state()
 
-        if self.epoch >= self.config.epochs:
+        if self.config.val_gate and self.bound:
+            # A budget a measurement found spent is why the run stops; with the
+            # validation gate that reason decides whether the run is scored further.
+            pass
+        elif self.epoch >= self.config.epochs:
             self.bound = "epochs"
         elif self.evaluations >= self.config.max_evaluations:
             self.bound = "evaluations"
@@ -2164,7 +2167,10 @@ class Loop(OuterLoop):
         name = as_name or f"{self.mode_id.split('/', 1)[0]}_adopted"
         outcome["as"] = name
         try:
-            self.audit_holdout()
+            winner = None
+            if self._custom_strategy is None and self.config.val_gate:
+                winner = self._gate().best_in(self.population)
+            self.audit_holdout(winner=winner)
             written = adopt_winner(
                 self.root, as_name=name, project=self.project, mode=self.mode_id
             )
@@ -2270,6 +2276,10 @@ class Loop(OuterLoop):
         whose train run failed is rolled out on val too and the gate decides. A
         refused rollout (a spent rollout budget) leaves the rest unjudged, and an
         unjudged candidate is not a parent or a winner.
+
+        With ``batch_size`` > 1 the decisions depend on the batch's order: a
+        candidate accepted earlier in the batch raises the bar for the ones after
+        it. SkillOpt gates one candidate per epoch, so it has no equivalent.
         """
         gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
@@ -2288,6 +2298,21 @@ class Loop(OuterLoop):
             self._store_gate_state()
             self._save_strategy_state()
 
+    def _gated_parents(self) -> list[Candidate]:
+        """The parents under ``val_gate``: SkillOpt's rule, for every optimizer.
+
+        The gate's current candidate (the last one accepted, which is also the best
+        on val) is the parent, whether or not its train run succeeded, with any
+        accepted candidate a person kept. The optimizer chooses from these alone,
+        so which candidate is edited does not depend on how an optimizer ranks a
+        missing train score.
+        """
+        gate = self._gate()
+        board = self.leaderboard()
+        current = next((c for c in board if c.id == gate.current_id), None)
+        first = [current] if current is not None else board[:1]
+        return first + [c for c in board if c.id in self.kept and c not in first]
+
     def _store_gate_state(self) -> None:
         """Put the gate's state and decisions in the strategy state (not journaled)."""
         self._strategy_state["val_gate"] = {
@@ -2296,11 +2321,11 @@ class Loop(OuterLoop):
         }
 
     # ── val_gate: SkillOpt's early stop and post-training evaluation ────────
-    #: The bounds a search ends on normally. After any other (a person's stop, a
-    #: spent time or token budget) the last proposals are not scored and there is
-    #: no post-training evaluation, as SkillOpt's ``_TRAINED``.
-    _TRAINED = ("epochs", "evaluations", "max_evaluations", "rollouts",
-                "perfect_val", "patience_exhausted")
+    #: The bounds a search ends on normally, as SkillOpt's ``_TRAINED``. After any
+    #: other (a person's stop, a spent evaluation, rollout, time or token budget)
+    #: the last proposals are not scored and the post-training evaluation is
+    #: skipped, with the reason recorded.
+    _TRAINED = ("epochs", "perfect_val", "patience_exhausted")
 
     def _count_stale_epoch(self) -> None:
         """SkillOpt's stale-epoch count, once per epoch after its gating: an epoch
@@ -2332,11 +2357,19 @@ class Loop(OuterLoop):
     def _early_stop_reason(self) -> str:
         """SkillOpt's early stop: ``perfect_val`` once the best val score is 1.0 (with
         ``early_stop_at_full_val``), ``patience_exhausted`` after
-        ``early_stop_patience`` stale epochs in a row; empty otherwise."""
+        ``early_stop_patience`` stale epochs in a row; empty otherwise.
+
+        Checked only once an epoch that gated a proposed batch has been counted, as
+        SkillOpt checks at an epoch's end: a seed already at 1.0 on val still gets
+        one batch proposed and gated."""
+        state = self._strategy_state
+        counted = state.get("stale_counted_epoch")
+        if counted is None or counted == state.get("gate_start_epoch"):
+            return ""
         if self.config.early_stop_at_full_val and self._gate().best_score >= 1.0 - 1e-9:
             return "perfect_val"
         patience = self.config.early_stop_patience
-        if patience > 0 and int(self._strategy_state.get("stale_epochs", 0)) >= patience:
+        if patience > 0 and int(state.get("stale_epochs", 0)) >= patience:
             return "patience_exhausted"
         return ""
 
@@ -2390,6 +2423,11 @@ class Loop(OuterLoop):
     def final_evaluation(self) -> dict[str, Any]:
         """The post-training evaluation's figures, for the report (``val_gate``)."""
         result = self._final().result
+        if not result and self.bound:
+            # The search stopped before the gated search could finish (a spent budget
+            # raised out of a measurement).
+            result = {"status": "skipped",
+                      "reason": f"the search did not finish: it ended on {self.bound!r}"}
         report: dict[str, Any] = {
             "best_selection": self._gate().best_score if self._gate().best_id else None,
             "test_eval": result.get("status") or "not_run",
@@ -2451,8 +2489,9 @@ class Loop(OuterLoop):
 
     # ── report ─────────────────────────────────────────────────────────────
     def leaderboard(self, limit: int | None = None) -> list[Candidate]:
-        """Everything the run kept, ranked, minus what a person rejected and, with
-        ``val_gate`` on, minus what the validation gate did not accept.
+        """Everything the run kept, ranked, minus what a person rejected. With
+        ``val_gate`` on: only what the validation gate accepted (one whose train run
+        failed included), ranked by val score.
 
         The exclusion is here rather than in the population because rejection is a
         selection fact, not a historical one: `state.json` still records what the
@@ -2460,16 +2499,21 @@ class Loop(OuterLoop):
         the report's winner, the held-out audit, the atomic adopt -- goes through
         this one ranking, so a dismissed branch cannot come back as the best answer.
         """
-        accepted = None
         if self.config.val_gate:
-            self._gate()  # restores the decisions on a resumed or replayed run
+            # The candidates the gate accepted, a failed train run included, ranked
+            # by their val score: what the gate selects on, not the train score.
+            gate = self._gate()  # restores the decisions on a resumed or replayed run
             accepted = set(self._gate_accepted)
+            ordered = sorted(
+                [c for c in self._evaluated() if c.id in accepted and c.id not in self.rejected],
+                key=lambda c: (-gate.cache.get(c.id, 0.0), c.id),
+            )
+            return ordered[:limit] if limit else ordered
         ordered = sorted(
             [
                 c
                 for c in self._evaluated()
                 if c.exit_ok and c.score is not None and c.id not in self.rejected
-                and (accepted is None or c.id in accepted)
             ],
             key=lambda c: (-(c.score or 0.0), c.id),
         )
@@ -2551,10 +2595,15 @@ class Loop(OuterLoop):
         audit = self.audit_holdout(winner=best)
         # When the winner has explicit val/test parts, use audit_parts for a
         # like-with-like overfit comparison (both unseen by the optimizer).
+        gated = strategy is None and self.config.val_gate
         if best is not None:
             parts_audit = self.audit_parts(best)
             if parts_audit is not None:
                 audit = parts_audit
+                if gated:
+                    # Adopting reads holdout.json: it checks the audit the report shows.
+                    self.holdout_audit = parts_audit
+                    self._write(HOLDOUT_FILE, parts_audit)
 
         # G32: a run whose every proposal round failed is not a success.
         proposer = self._proposer_health()
@@ -2631,6 +2680,12 @@ class Loop(OuterLoop):
             "holdout": audit,
             "strategy_report": strategy_report,
         }
+        if gated and best is not None:
+            # The winner was chosen on val, so its score is its val score, said so;
+            # its train score (none when its train run failed) is kept beside it.
+            payload["best_score"] = self._gate().best_score
+            payload["best_score_basis"] = "val: the validation gate's best score"
+            payload["best_train_score"] = best.score
         self._write("report.json", payload)
         self._write_text("report.md", self._render_report(payload))
         self._write("manifest.json", progress_file.artifact_manifest(self.root))

@@ -138,6 +138,9 @@ def best(run_root: Path) -> dict[str, Any]:
     """
     run_root = Path(run_root)
     entries = _journal_entries(run_root)
+    gated = _gate_winner(run_root, entries)
+    if gated is not None:
+        return gated
     scores = _score_by_id(entries)
     rejected = _rejected_ids(entries)
 
@@ -171,6 +174,47 @@ def best(run_root: Path) -> dict[str, Any]:
         **_score_basis(entries, winner_id, winner_score),
         "edits": winner_edits,
         "state": winner_state,
+    }
+
+
+def _gate_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The winner of a default-loop run with ``val_gate``: the validation gate's best.
+
+    The report names the best on val as the winner (``Loop.report``), so adopting
+    takes the same candidate, whatever its train score (it has none when its train
+    run failed). ``None`` for a run without the gate.
+    """
+    try:
+        config = json.loads((run_root / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        config = next((entry.get("config") or {} for entry in entries
+                       if entry.get("event") == "start"), {})
+    if not config.get("val_gate"):  # refused with a custom strategy, which keeps its own gate
+        return None
+    gate: dict[str, Any] = {}
+    for entry in entries:
+        if entry.get("event") == "strategy_state":
+            gate = (entry.get("state") or {}).get("val_gate") or {}
+    winner_id = gate.get("best_candidate_id")
+    found = next((entry for entry in reversed(entries) if entry.get("event") == "candidate"
+                  and str(entry.get("id")) == str(winner_id)
+                  and isinstance(entry.get("state"), dict)), None)
+    if not winner_id or found is None:
+        raise AdoptionError(
+            f"{run_root} ran with the validation gate, which recorded no best candidate "
+            "with a state; there is nothing to adopt"
+        )
+    score = float(gate.get("best_score") or 0.0)
+    train = _score_by_id(entries).get(str(winner_id))
+    return {
+        "run": str(run_root),
+        "candidate": str(winner_id),
+        "score": score,
+        "score_basis": "val",
+        "score_note": (f"{_number(score)} on val, the validation gate's best; train "
+                       + (_number(train) if train is not None else "none (its train run failed)")),
+        "edits": list(found.get("edits") or ()),
+        "state": found["state"],
     }
 
 
