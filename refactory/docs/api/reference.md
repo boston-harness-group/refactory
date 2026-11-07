@@ -382,6 +382,7 @@ The optimizer loop, named like one.
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
+| function | `val_gate_refusal` | `(optimizer: 'str', strategy: 'str') -> 'str'` |
 
 - **`EpochSummary`** — One epoch, as the report and the scheduler describe it.
 - **`Loop`** — The default outer loop: the eight steps over one mode.
@@ -390,6 +391,7 @@ The optimizer loop, named like one.
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
 - **`run`** — Build a loop and run it to its bound.
+- **`val_gate_refusal`** — Why ``val_gate`` cannot run with this optimizer or strategy; empty when it can.
 
 
 <a id="refactory_dsh-history"></a>

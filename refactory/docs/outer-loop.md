@@ -29,6 +29,13 @@ candidates the way the SkillOpt strategy does, using the same `ValidationGate` a
 `FinalEvaluation` from `outerloop.py`. Only the optimizer, where edit ideas come from,
 differs. Without `--val-gate` nothing below applies.
 
+It follows SkillOpt's single line, where one current candidate is the only parent, so
+it refuses, before anything is rolled out, the optimizers that breed from a population
+of parents (`archive`, `evolutionary`, `islands`, `map_elites`) and the strategies that
+merge parents or pick among sibling samples outside the gate (`autoscientists`,
+`best_of_n`, `reflective`). Run those without `--val-gate`. The `random`, `autoresearch`
+and `hill_climb` optimizers run with it.
+
 - **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
   (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
 - **Gate.** Every candidate evaluated on train is rolled out on val, including one whose
@@ -39,9 +46,9 @@ differs. Without `--val-gate` nothing below applies.
   no equivalent.
 - **Parent and winner.** As in SkillOpt, the gate's current candidate (also the best on
   val) is the parent every optimizer edits, with any accepted candidate a person kept,
-  whether or not its train run succeeded. The leaderboard lists the accepted candidates
-  ranked by val score. The winner is the best on val: the report, the held-out audit and
-  `adopt` all name it, and the report's `best_score` is its val score
+  whether or not its train run succeeded. The leaderboard lists the accepted candidates a
+  person has not rejected, ranked by val score. Its first is the winner: the report, the
+  held-out audit and `adopt` all name it, and the report's `best_score` is its val score
   (`best_score_basis`), with its train score in `best_train_score`.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
@@ -49,7 +56,8 @@ differs. Without `--val-gate` nothing below applies.
   test part, the final candidate's val check runs, then the seed, the best and the final
   candidate on test with `seed`. A run that ends on a spent evaluation, rollout, time or
   token budget, or a person's stop, scores neither the last proposals nor the test part,
-  as SkillOpt; the report keeps the real stop reason and says why it skipped. The report's `strategy_report`
+  as SkillOpt; the report keeps the real stop reason (a spent budget wins over an early
+  stop in the same epoch) and says why it skipped. The report's `strategy_report`
   holds `final_selection`, `baseline_test`, `best_test`, `final_test` and the two deltas
   (`test_eval` says `done`, `skipped` or `incomplete`, and `test_eval_reason` why). The
   held-out audit then compares the winner's val and test scores, so a `--holdout 0` run

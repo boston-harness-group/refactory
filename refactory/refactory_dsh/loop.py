@@ -110,6 +110,29 @@ def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
     return found
 
 
+#: Under ``val_gate`` the default loop follows SkillOpt's single line: the gate's
+#: current candidate is the only parent. These optimizers breed from a population of
+#: parents (an archive, a tournament, islands, niche champions) ...
+VAL_GATE_REFUSED_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites")
+#: ... and these strategies merge parents or pick among sibling samples outside the
+#: gate, so neither can run under it.
+VAL_GATE_REFUSED_STRATEGIES = ("autoscientists", "best_of_n", "reflective")
+
+
+def val_gate_refusal(optimizer: str, strategy: str) -> str:
+    """Why ``val_gate`` cannot run with this optimizer or strategy; empty when it can."""
+    if optimizer in VAL_GATE_REFUSED_OPTIMIZERS:
+        what = f"the {optimizer} optimizer breeds from a population of parents"
+    elif strategy in VAL_GATE_REFUSED_STRATEGIES:
+        what = (f"the {strategy} strategy merges parents or selects among samples "
+                "outside the gate")
+    else:
+        return ""
+    return (f"val_gate follows SkillOpt's single line, where the gate's current candidate "
+            f"is the only parent, and {what}; run it without --val-gate, or use the random, "
+            "autoresearch or hill_climb optimizer with --val-gate")
+
+
 @dataclass
 class LoopConfig:
     """How a run is shaped."""
@@ -684,6 +707,9 @@ class Loop(OuterLoop):
                     "val_gate needs a parts manifest with a 'val' part (--parts); "
                     "give the run one, or turn val_gate off"
                 )
+            refusal = val_gate_refusal(self.optimizer.name, self.name)
+            if refusal:
+                raise LoopError(refusal)
         elif self.config.early_stop_patience or self.config.early_stop_at_full_val:
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
@@ -2167,10 +2193,7 @@ class Loop(OuterLoop):
         name = as_name or f"{self.mode_id.split('/', 1)[0]}_adopted"
         outcome["as"] = name
         try:
-            winner = None
-            if self._custom_strategy is None and self.config.val_gate:
-                winner = self._gate().best_in(self.population)
-            self.audit_holdout(winner=winner)
+            self.audit_holdout()
             written = adopt_winner(
                 self.root, as_name=name, project=self.project, mode=self.mode_id
             )
@@ -2297,6 +2320,17 @@ class Loop(OuterLoop):
             (self._gate_accepted if accepted else self._gate_rejected).append(candidate.id)
             self._store_gate_state()
             self._save_strategy_state()
+
+    def best_score_fields(self, winner: Candidate) -> dict[str, Any]:
+        """The report's ``best_score`` for ``winner``: with ``val_gate`` its val score,
+        said so, with its train score (none when its train run failed) beside it;
+        otherwise its train score, as before."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return {"best_score": winner.score}
+        gate = self._gate()
+        val = gate.cache.get(winner.id, gate.best_score if winner.id == gate.best_id else None)
+        return {"best_score": val, "best_score_basis": "val: the validation gate's score",
+                "best_train_score": winner.score}
 
     def _gated_parents(self) -> list[Candidate]:
         """The parents under ``val_gate``: SkillOpt's rule, for every optimizer.
@@ -2479,8 +2513,11 @@ class Loop(OuterLoop):
             accepted=len(candidates), refused=len(rejections),
         )
         if early:
-            self.bound = early
-            self._journal("bound", bound=early)
+            # A budget a measurement found spent stays the reason (the scheduler kept
+            # it); an early stop replaces only the epoch bound.
+            if self.bound in ("", "epochs"):
+                self.bound = early
+                self._journal("bound", bound=early)
             another = False
         self.on_epoch_end(run)
         self.close_epoch()
@@ -2574,12 +2611,8 @@ class Loop(OuterLoop):
                 strategy_best = strategy.best_candidate(self.population)
             except Exception as e:
                 strategy_error = strategy_error or str(e)
-        # The default loop's validation gate names the best on val as the winner.
-        if strategy is None and self.config.val_gate:
-            try:
-                strategy_best = self._gate().best_in(self.population)
-            except ValueError as e:
-                strategy_error = str(e)
+        # With the validation gate the leaderboard is the accepted candidates a person
+        # has not rejected, ranked by val: its first is the winner, as adopt reads it.
         # A custom strategy's own figures (``OuterLoop.report``), e.g. SkillOpt's
         # post-training test scores; empty for the library's strategies.
         strategy_report: dict[str, Any] = {}
@@ -2681,11 +2714,7 @@ class Loop(OuterLoop):
             "strategy_report": strategy_report,
         }
         if gated and best is not None:
-            # The winner was chosen on val, so its score is its val score, said so;
-            # its train score (none when its train run failed) is kept beside it.
-            payload["best_score"] = self._gate().best_score
-            payload["best_score_basis"] = "val: the validation gate's best score"
-            payload["best_train_score"] = best.score
+            payload.update(self.best_score_fields(best))
         self._write("report.json", payload)
         self._write_text("report.md", self._render_report(payload))
         self._write("manifest.json", progress_file.artifact_manifest(self.root))

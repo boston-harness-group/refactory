@@ -80,6 +80,11 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("early_stop_at_full_val") not in (True, False, 0, 1):
         raise ProfileError("early_stop_at_full_val must be true or false (1 or 0 on the command line)")
     result["early_stop_at_full_val"] = bool(result.get("early_stop_at_full_val"))
+    if result["val_gate"]:
+        from refactory_dsh.loop import val_gate_refusal
+        refusal = val_gate_refusal(str(result.get("optimizer")), str(result.get("strategy")))
+        if refusal:
+            raise ProfileError(refusal)
     # max_items_in_flight: None or positive int
     mif = result.get("max_items_in_flight")
     if mif is not None:
