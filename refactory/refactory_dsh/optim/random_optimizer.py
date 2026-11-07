@@ -10,11 +10,45 @@ from __future__ import annotations
 import json
 import random
 import re
+from dataclasses import replace
 from typing import Any, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 
-from .base import Candidate, Optimizer, Proposal, ProposalContext
+from .base import (
+    READER_CONCURRENCY, Candidate, Optimizer, Proposal, ProposalContext, trajectory_groups,
+)
+
+def text_only(model: Any) -> Any:
+    """``model`` with ``tool_policy="none"``, when the client supports one.
+
+    Every optimizer call -- the proposal and each reader -- is a prompt in and JSON
+    out. On an agentic route (``claude_code``) the model would otherwise get tools in a
+    working directory next to the run's records. The run's own client is left alone.
+    """
+    with_policy = getattr(model, "with_tool_policy", None)
+    return with_policy("none") if callable(with_policy) else model
+
+
+#: A reader's role: go through one group of whole trajectories and report patterns.
+READER_SYSTEM = (
+    "You read an AI pipeline's trajectories on evaluation items and report what you find. "
+    "You reply with JSON only."
+)
+READER_ANSWER = """Write one JSON object and nothing else:
+
+{"failure_patterns": [{"pattern": "<what goes wrong, in one sentence>",
+                       "step": "<the step it starts in, or \"unclear\">",
+                       "items": ["<item id>", ...],
+                       "evidence": ["<a short verbatim quote from a trajectory>", ...]}],
+ "success_patterns": [{"pattern": "<what the passing items do right>", "step": "...",
+                       "items": [...], "evidence": [...]}]}
+
+Rules:
+- Every pattern names the items it covers and quotes them; no pattern without evidence.
+- Cover every item answered wrong; group items that fail the same way.
+- Do not propose changes: say what happens, not what to do.
+"""
 
 
 def _elite(parents: Sequence[Candidate], ctx: ProposalContext) -> Sequence[Candidate]:
@@ -129,7 +163,7 @@ class AutoresearchOptimizer(Optimizer):
         super().__init__(k=k)
         if client is None:
             raise ValueError("the autoresearch optimizer needs a model client")
-        self._client = client
+        self._client = text_only(client)
         self._completion_options: dict[str, Any] = {}
         self._system = system or (
             "You are the optimizer of a search over workflows. You reply with JSON only."
@@ -137,21 +171,90 @@ class AutoresearchOptimizer(Optimizer):
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         import inspect
-        self._client = model
+        self._client = text_only(model)
         # Keep the original minimal ModelClient protocol compatible. DSH supports
         # an owned workspace, so its proposer receipts belong to this search.
         if workdir is not None and "workdir" in inspect.signature(model.complete).parameters:
             self._completion_options = {"workdir": workdir}
 
+    def _read(self, ctx: ProposalContext, groups: list[list[tuple[str, str]]]
+              ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Readers go through the item groups, concurrently: their findings, and the
+        groups that could not be read. A group read before (a retry after a refusal)
+        is not read again."""
+        from concurrent.futures import ThreadPoolExecutor
+        import hashlib
+
+        cache: dict[str, dict[str, Any]] = getattr(self, "_reader_cache", {})
+        self._reader_cache = cache
+        # Kept in the run directory too, so a resumed run reuses what it paid for. The
+        # key is the group's whole text: the edited candidate's records for exactly
+        # these items.
+        from pathlib import Path
+        store = (Path(self.trace_path).parent / "reader_findings"
+                 if self.trace_path is not None else None)
+        steps = ", ".join(f"`{n.get('id')}`" for n in ctx.nodes) or "(not listed)"
+
+        def read(index: int, group: list[tuple[str, str]]) -> tuple[dict | None, dict | None]:
+            items = [item for item, _block in group]
+            body = "\n\n".join(block for _item, block in group)
+            key = hashlib.sha256(body.encode()).hexdigest()
+            if key in cache:
+                return cache[key], None
+            if store is not None and (store / f"{key}.json").exists():
+                try:
+                    cache[key] = {**json.loads((store / f"{key}.json").read_text()), "group": index}
+                    return cache[key], None
+                except (OSError, json.JSONDecodeError):
+                    pass
+            prompt = (f"# Reading trajectories -- group {index} of {len(groups)}\n\n"
+                      f"Mode: `{ctx.mode_name}`. The pipeline's steps: {steps}.\n\n"
+                      f"Below are {len(items)} train item(s) of the candidate being edited, "
+                      "each in full: its input, every step's output in the order they ran, "
+                      "the expected answer, the prediction and the grader's reason.\n\n"
+                      f"{body}\n\n## Answer\n{READER_ANSWER}")
+            call = {"kind": "reader", "epoch": ctx.epoch, "generation": ctx.generation,
+                    "group": index, "items": items, "system": READER_SYSTEM, "prompt": prompt}
+            try:
+                reply = self._client.complete(prompt, system=READER_SYSTEM,
+                                              **self._completion_options)
+                payload = extract_json(reply)
+            except Exception as exc:
+                self.record_call(**call, reply=locals().get("reply"), error=f"{type(exc).__name__}: {exc}")
+                return None, {"group": index, "items": items, "error": f"{type(exc).__name__}: {exc}"}
+            found = {"group": index, "items": items,
+                     "failure_patterns": list(payload.get("failure_patterns") or []),
+                     "success_patterns": list(payload.get("success_patterns") or [])}
+            self.record_call(**call, reply=reply, error=None,
+                             patterns=len(found["failure_patterns"]) + len(found["success_patterns"]))
+            cache[key] = found
+            if store is not None:
+                try:
+                    store.mkdir(parents=True, exist_ok=True)
+                    (store / f"{key}.json").write_text(json.dumps(found, default=str))
+                except OSError:
+                    pass
+            return found, None
+
+        with ThreadPoolExecutor(max_workers=max(1, min(READER_CONCURRENCY, len(groups)))) as pool:
+            results = list(pool.map(lambda pair: read(*pair), enumerate(groups, 1)))
+        findings = [found for found, _failed in results if found is not None]
+        failures = [failed for _found, failed in results if failed is not None]
+        return findings, failures
+
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
+        groups = trajectory_groups(ctx.item_records, ctx.evidence_budget) if ctx.item_records else []
+        if len(groups) > 1:
+            findings, failures = self._read(ctx, groups)
+            ctx = replace(ctx, reader_findings=findings, reader_failures=failures)
         question = (
             f"{ctx.render()}\n\nPropose at most {max(1, n)} update(s). "
             "Reply with the JSON object described under 'Answer' and nothing else."
         )
-        call = {"epoch": ctx.epoch, "generation": ctx.generation, "system": self._system,
-                "prompt": question}
+        call = {"kind": "proposal", "epoch": ctx.epoch, "generation": ctx.generation,
+                "system": self._system, "prompt": question}
         try:
             text = self._client.complete(question, system=self._system, **self._completion_options)
         except Exception as exc:
