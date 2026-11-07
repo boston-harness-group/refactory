@@ -112,6 +112,8 @@ def test_the_sample_respects_its_budget_and_clips_long_outputs():
     assert sum(item.startswith("w") for item in shown) == 8
     assert sum(item.startswith("p") for item in shown) == 2
     assert "e1" not in shown
+    errored = [_record(f"e{i}", error="CompletionTimeout") for i in range(5)]
+    assert _shown(_render(errored + [_record("w1")])) == ["w1"], "errored items stay in the table"
     assert "CompletionTimeout" in _render(records), "the cause table still lists it"
 
     long = "HEAD " + "x" * 9000 + " TAIL"
@@ -164,6 +166,7 @@ def test_the_sample_varies_by_epoch_and_attempt_and_is_reproducible():
     assert first == _shown(_render(records, epoch=1))
     assert set(first) != set(_shown(_render(records, epoch=2)))
     assert set(first) != set(_shown(_render(records, epoch=1, attempt=2))), "a retry reads others"
+    assert set(first) != set(_shown(_render(records, epoch=1, generation=3))), "so does a generation"
 
 
 def test_repeats_show_each_item_once_and_a_zero_prediction_shows():
@@ -290,3 +293,56 @@ def test_each_proposal_attempt_renders_with_its_own_attempt_number():
     seed = Candidate.from_state({"graph": {"nodes": {}, "edges": []}, "knobs": {}})
     Refused(k=3).propose_valid(ProposalContext(), 1, parents=[seed])
     assert seen == [1, 2, 3]
+
+
+def test_the_loop_gives_each_retry_and_generation_its_own_sample(tmp_path):
+    """Through the real Loop: a proposal refused once is asked for again with the
+    next attempt number and reads another sample; a later generation reads another
+    one too."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_skillopt import _patch_mode, _write_parts
+    from test_val_gate import LevelProbe
+
+    from refactory_dsh.optim import Optimizer, Proposal
+
+    class RefusedOnce(Optimizer):
+        name = "refused_once"
+
+        def __init__(self) -> None:
+            super().__init__(k=1)
+            self.seen: list[tuple[int, int, list[str]]] = []
+
+        def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+            self.seen.append((ctx.generation, ctx.attempt, _shown(ctx.render())))
+            if len(self.seen) == 1:
+                return [Proposal(edit={"op": "no_such_op"}, parent=parents[0].id)]
+            return [Proposal(edit={"op": "set_knob", "name": "level", "value": len(self.seen)},
+                             parent=parents[0].id)]
+
+    proposer = RefusedOnce()
+    with _patch_mode(LevelProbe):
+        loop = Loop("skillopt_probe/probe", LoopConfig(
+            epochs=2, batch_size=1, optimizer="random", seed=7, runs_root=tmp_path / "run",
+            allowed_ops=("set_knob",), holdout=0.0, attempts=3,
+            parts_manifest=str(_write_parts(tmp_path))), project=Path("."))
+        loop.optimizer = proposer
+        loop.run()
+    (gen1, attempt1, first), (gen1b, attempt2, retry), (gen2, attempt3, later) = proposer.seen[:3]
+    assert (gen1, attempt1) == (gen1b - 0, 1) and attempt2 == 2, proposer.seen
+    assert gen2 > gen1 and attempt3 == 1
+    assert first and retry and later
+    assert first != retry, "the retry reads another sample"
+    assert later not in (first, retry), "a later generation reads another sample"
+
+
+def test_items_too_large_to_fit_still_leave_a_note():
+    """Items that do not fit even with every text at the floor: the section still
+    says how many it left out, instead of disappearing."""
+    huge = _record("w1")
+    huge["exchanges"] = [{"node": f"s{i}", "prompt": "p", "response": "x" * 800} for i in range(250)]
+    text = _render([huge], trajectory_section_chars=20000)
+    section = _section(text)
+    assert _shown(text) == []
+    assert "0 of 1 train item(s) answered wrong" in section
+    assert "(1 more chosen item(s) left out to stay within 20000 characters)" in section

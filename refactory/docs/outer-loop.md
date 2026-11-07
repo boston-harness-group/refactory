@@ -91,10 +91,11 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   When the items do not fit, that limit shrinks for all of them, down to 600
   (`TRAJECTORY_TEXT_FLOOR`), so ten LiveMath-sized items all show. Only if even the
   floor does not fit are items left out, wrong ones first so the passed ones stay, and
-  the section says how many. A context can override each through its `trajectory_*`
+  the section says how many (it keeps its header and that note even when no item fits). A context can override each through its `trajectory_*`
   fields.
-- **Sample.** Drawn with a seed from the epoch and the proposal attempt, so it is
-  reproducible and every round, a retry after a refusal included, reads other items,
+- **Sample.** Drawn with a seed from the epoch, the generation and the proposal attempt
+  (the loop counts each proposal call of a generation, a retry after a refusal
+  included), so it is reproducible and every round reads other items,
   as SkillOpt's minibatch groups vary per step. With repeats each item is shown once,
   from its first repeat.
 - **Train only.** The records are the edited candidate's train records (the loop

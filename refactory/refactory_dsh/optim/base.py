@@ -311,8 +311,9 @@ class ProposalContext:
     trajectory_text_chars: int = TRAJECTORY_TEXT_CHARS
     trajectory_text_floor: int = TRAJECTORY_TEXT_FLOOR
     trajectory_section_chars: int = TRAJECTORY_SECTION_CHARS
-    #: The proposal attempt within this generation (``Optimizer.propose_valid``),
-    #: so a retry after a refusal reads another sample of items.
+    #: The proposal attempt within this generation (``Loop.propose`` and
+    #: ``Optimizer.propose_valid`` count from 1), so a retry after a refusal reads
+    #: another sample of items.
     attempt: int = 0
 
     def render(self) -> str:
@@ -384,7 +385,8 @@ class ProposalContext:
         if self.item_records:
             sections += ["", *_item_evidence(self.item_records)]
             sections += ["", *_trajectories(
-                self.item_records, epoch=self.epoch, attempt=self.attempt,
+                self.item_records, epoch=self.epoch, generation=self.generation,
+                attempt=self.attempt,
                 failed=self.trajectory_failed, passed=self.trajectory_passed,
                 text_chars=self.trajectory_text_chars, text_floor=self.trajectory_text_floor,
                 section_chars=self.trajectory_section_chars)]
@@ -577,7 +579,7 @@ def _trajectory(record: dict[str, Any], text_chars: int) -> str:
 
 
 def _trajectories(
-    records: Sequence[dict[str, Any]], *, epoch: int, attempt: int = 0,
+    records: Sequence[dict[str, Any]], *, epoch: int, generation: int = 0, attempt: int = 0,
     failed: int = TRAJECTORY_FAILED, passed: int = TRAJECTORY_PASSED,
     text_chars: int = TRAJECTORY_TEXT_CHARS, text_floor: int = TRAJECTORY_TEXT_FLOOR,
     section_chars: int = TRAJECTORY_SECTION_CHARS,
@@ -586,15 +588,17 @@ def _trajectories(
 
     Items answered wrong, then a few that passed for contrast; an item whose run
     errored is left to the cause table above, and with repeats each item is shown
-    once (its first repeat). The sample is drawn with a seed from ``epoch`` and the
-    proposal ``attempt``, so it is reproducible and every round reads other items,
+    once (its first repeat). The sample is drawn with a seed from ``epoch``,
+    ``generation`` and the proposal ``attempt``, so it is reproducible and every
+    round, a retry after a refusal included, reads other items,
     as SkillOpt's analysts read a new minibatch each step. Train records only.
 
     The section fits ``section_chars`` exactly. Every text is clipped to
     ``text_chars``; when the items do not fit, that limit shrinks for all of them
     (down to ``text_floor``) rather than dropping any; only when even the floor does
     not fit are items dropped, wrong ones last chosen first, so the passed items
-    stay.
+    stay. The header and the note on what was left out are always shown, even when
+    no item fits.
     """
     import random
 
@@ -609,7 +613,7 @@ def _trajectories(
     clean = [first[item] for item in sorted(first)]
     wrong = [r for r in clean if not r.get("passed")]
     right = [r for r in clean if r.get("passed")]
-    rng = random.Random(f"trajectories:{epoch}:{attempt}")
+    rng = random.Random(f"trajectories:{epoch}:{generation}:{attempt}")
     picked_wrong = rng.sample(wrong, min(max(0, failed), len(wrong)))
     picked_right = rng.sample(right, min(max(0, passed), len(right)))
     if not picked_wrong and not picked_right:
@@ -648,7 +652,8 @@ def _trajectories(
         drop = next((i for i in range(len(chosen) - 1, -1, -1)
                      if not chosen[i].get("passed")), len(chosen) - 1)
         chosen = chosen[:drop] + chosen[drop + 1:]
-    return []
+    lines = section([], floor)
+    return lines if size(lines) <= section_chars else []
 
 
 def _rules_text() -> str:
