@@ -326,6 +326,11 @@ class ProposalContext:
     node_spec_section_chars: int = NODE_SPEC_SECTION_CHARS
     #: One call's evidence budget (``TRAJECTORY_BUDGET``).
     evidence_budget: int = TRAJECTORY_BUDGET
+    #: The latest children of the edited candidate with their parents' train records
+    #: (``Loop._edit_pairs``), for "What the last edit changed".
+    edit_pairs: list[dict[str, Any]] = field(default_factory=list)
+    #: The optimizer's earlier reasoning beside outcomes (``Loop._reasoning_entries``).
+    reasoning: list[dict[str, Any]] = field(default_factory=list)
     #: What readers found in the items, group by group, when they did not fit one
     #: call (``AutoresearchOptimizer``); ``None`` when no reader went through them.
     reader_findings: list[dict[str, Any]] | None = None
@@ -397,14 +402,21 @@ class ProposalContext:
             "```",
             "",
             "## Recent results",
-            _table(["id", "parent", "score", "structural", "edits"],
+            *_gate_note(self.leaderboard, self.history),
+            _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
-                     json.dumps(c.get("edits"), default=str)] for c in self.leaderboard]),
+                     json.dumps(c.get("edits"), default=str),
+                     *([c.get("gate", "")] if _gate_column(self.leaderboard) else [])]
+                    for c in self.leaderboard]),
             "",
             "## Evidence from the traces",
             _table(["what", "value"],
                    [[str(k), json.dumps(v, default=str)] for k, v in _trace_rows(self.traces)]),
         ]
+        if self.edit_pairs:
+            sections += ["", *_edit_change_lines(self.edit_pairs)]
+        if self.reasoning:
+            sections += ["", *_reasoning_lines(self.reasoning)]
         if self.item_records:
             sections += ["", *_item_evidence(self.item_records)]
             sections += ["", *_trajectories(
@@ -416,6 +428,11 @@ class ProposalContext:
             (
                 f"{len(self.history)} candidate(s), best "
                 f"{max((c.get('score') or 0.0) for c in self.history):.6g}"
+                if self.history and not _gate_column(self.history)
+                else f"{len(self.history)} candidate(s), best kept by the validation gate "
+                f"{max((c.get('score') or 0.0) for c in self.history if c.get('gate') in ('kept', 'current')):.6g}"
+                if any(c.get("gate") in ("kept", "current") for c in self.history)
+                else f"{len(self.history)} candidate(s), none kept by the validation gate yet"
                 if self.history
                 else "(nothing evaluated yet)"
             )
@@ -425,10 +442,11 @@ class ProposalContext:
                 else ""
             ),
             _table(
-                ["id", "parent", "score", "structural", "ok", "edits"],
+                ["id", "parent", "score", "structural", "ok", "edits", *_gate_column(self.history)],
                 [
                     [c.get("id"), c.get("parent"), c.get("score"), c.get("structural"),
-                     c.get("exit_ok"), json.dumps(c.get("edits"), default=str)]
+                     c.get("exit_ok"), json.dumps(c.get("edits"), default=str),
+                     *([c.get("gate", "")] if _gate_column(self.history) else [])]
                     for c in self.history[-16:]
                 ],
             ),
@@ -868,6 +886,145 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
         chosen = chosen[:-1]
 
 
+def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
+    """``["gate"]`` when the rows carry the validation gate's decisions, else nothing."""
+    return ["gate"] if any("gate" in row for row in rows) else []
+
+
+def _gate_note(*tables: Sequence[dict[str, Any]]) -> list[str]:
+    """What the gate column means, said once, when there is one."""
+    if not any(_gate_column(rows) for rows in tables):
+        return []
+    return ["This run has a validation gate: each candidate was also run on held-out "
+            "items, and the gate kept it only if it beat the current candidate there. "
+            "Scores here are train scores; held-out scores are never shown. You edit the "
+            "candidate marked `current`. A `rejected` candidate did not generalise, so do "
+            "not build on its change or propose it again."]
+
+
+#: The section comparing the last edit's child with its parent fits this many
+#: characters: changed items in full while they fit, the rest in a table.
+EDIT_CHANGE_BUDGET = 60000
+#: The most score changes in each direction listed for graded items.
+EDIT_CHANGE_GRADED = 3
+#: Entries in "Your earlier reasoning", and how much of each text it keeps.
+REASONING_ENTRIES = 6
+REASONING_TEXT_CHARS = 600
+
+
+def _by_item(records: Sequence[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for record in records or ():
+        item = str(record.get("id", ""))
+        held = out.get(item)
+        if held is None or int(record.get("repeat") or 1) < int(held.get("repeat") or 1):
+            out[item] = record
+    return out
+
+
+def _score_of(record: dict[str, Any]) -> float | None:
+    value = record.get("score")
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def edit_change(parent_records: Sequence[dict[str, Any]] | None,
+                child_records: Sequence[dict[str, Any]] | None) -> dict[str, Any]:
+    """How a child did against its parent, item by item, on the train items both
+    were scored on: fixed (parent wrong, child right), broken (the reverse) and the
+    largest score changes either way among the rest. Uses only each record's
+    ``passed`` and ``score``."""
+    parent, child = _by_item(parent_records), _by_item(child_records)
+    shared = sorted(set(parent) & set(child))
+    fixed = [i for i in shared if not parent[i].get("passed") and child[i].get("passed")]
+    broken = [i for i in shared if parent[i].get("passed") and not child[i].get("passed")]
+    moved = []
+    for item in shared:
+        if item in fixed or item in broken:
+            continue
+        before, after = _score_of(parent[item]), _score_of(child[item])
+        if before is not None and after is not None and after != before:
+            moved.append((after - before, item))
+    up = [item for delta, item in sorted(moved, reverse=True) if delta > 0][:EDIT_CHANGE_GRADED]
+    down = [item for delta, item in sorted(moved) if delta < 0][:EDIT_CHANGE_GRADED]
+    return {"shared": len(shared), "fixed": fixed, "broken": broken, "up": up, "down": down,
+            "deltas": {item: round(delta, 6) for delta, item in moved}}
+
+
+def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
+    """'What the last edit changed': each recent child of the edited candidate
+    against its parent, on train items only."""
+    if not pairs:
+        return []
+    lines = ["## What the last edit changed",
+             "The latest children of the candidate you edit (its last batch), or that "
+             "candidate itself when it has none yet, each compared with its parent item by "
+             "item on the train items both were scored on. The two were scored in different "
+             "rounds with different seeds, so some changes may be run-to-run noise."]
+    blocks: list[str] = []
+    rest: list[list[Any]] = []
+    for pair in pairs:
+        head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
+                + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
+        lines += ["", head, "Edit: `" + json.dumps(pair.get("edit"), default=str)[:1000] + "`"]
+        if not pair.get("parent"):
+            lines.append("This candidate has no parent (it is the seed), so there is nothing "
+                         "to compare.")
+            continue
+        change = edit_change(pair.get("parent_records"), pair.get("child_records"))
+        if not change["shared"]:
+            lines.append("The two share no scored train item, so there is nothing to compare.")
+            continue
+        lines.append(f"On {change['shared']} shared train item(s): {len(change['fixed'])} fixed "
+                     f"(parent wrong, child right), {len(change['broken'])} broken (parent right, "
+                     f"child wrong); largest score rises {change['up'] or 'none'}, largest drops "
+                     f"{change['down'] or 'none'}.")
+        parent, child = _by_item(pair.get("parent_records")), _by_item(pair.get("child_records"))
+        for kind, items in (("fixed", change["fixed"]), ("broken", change["broken"]),
+                            ("score rose", change["up"]), ("score dropped", change["down"])):
+            for item in items:
+                block = (f"#### Item {item} -- {kind}\nParent:\n"
+                         + _item_block(parent[item], budget // 2)
+                         + "\nChild:\n" + _item_block(child[item], budget // 2))
+                blocks.append(block)
+                rest.append([item, kind, _outcome(parent[item]), parent[item].get("score"),
+                             _outcome(child[item]), child[item].get("score")])
+    used = len("\n".join(lines))
+    shown = 0
+    for block in blocks:
+        if used + len(block) + 2 > budget:
+            break
+        lines += ["", block]
+        used += len(block) + 2
+        shown += 1
+    if shown < len(blocks):
+        lines += ["", "The other changed items (their trajectories did not fit):",
+                  _table(["item", "change", "parent", "parent score", "child", "child score"],
+                         rest[shown:])]
+    return lines
+
+
+def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
+    """'Your earlier reasoning': what the optimizer said about recent candidates,
+    beside what happened to them."""
+    if not entries:
+        return []
+    lines = ["## Your earlier reasoning and what happened",
+             "Recent candidates on the line you edit, and recently refused ones, with what you "
+             "predicted when you proposed them and what came of it."]
+    for entry in list(entries)[-REASONING_ENTRIES:]:
+        outcome = ", ".join(part for part in (
+            f"gate {entry['gate']}" if entry.get("gate") else "",
+            f"train score {entry.get('score')}",
+            (f"{entry['fixed']} fixed / {entry['broken']} broken vs its parent"
+             if entry.get("fixed") is not None else "")) if part)
+        lines += ["", f"### {entry.get('id')} (proposed in epoch {entry.get('epoch', '?')}) -- {outcome}",
+                  "Edit: `" + _clip(json.dumps(entry.get("edit"), default=str), REASONING_TEXT_CHARS) + "`",
+                  f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
+                  f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
+                  f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}"]
+    return lines
+
+
 def _rules_text() -> str:
     from refactory_dsh.nn.validate import rules_text
 
@@ -1151,8 +1308,9 @@ class Optimizer:
             # silently by the loop, which loses the batch slot and makes the run
             # report a batch it did not actually try.
             return [
-                "E-duplicate: this state already exists in the search, so evaluating it "
-                "again would spend a batch slot on a point already scored"
+                f"E-duplicate: this state already exists in the search as candidate "
+                f"{candidate_id(state)}, so evaluating it again would spend a batch slot on "
+                "a point already scored; propose a different change"
             ]
 
         issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls)

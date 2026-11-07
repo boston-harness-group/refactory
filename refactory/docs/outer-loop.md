@@ -52,6 +52,18 @@ and `hill_climb` optimizers run with it.
   (`best_score_basis`), with its train score in `best_train_score`.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
+- **What the optimizer reads.** Every row it sees (recent results, the history, the
+  gradient's leaderboard) carries the gate's decision: `current` (the candidate it
+  edits), `kept`, `rejected` or `not gated`. The per-knob attribution counts, for each
+  value, how many of its candidates were kept, rejected or not yet gated. The request
+  says it edits the `current` candidate, and that a `rejected` one did not generalise.
+  The history's best is the best kept candidate. Val scores are never shown to it;
+  scores there are train scores. That includes "Previous runs of this mode": a gated
+  sibling run's report gives its winner's val score as `best_score`, so the summary
+  carries that run's `best_train_score` instead.
+- **What a person reads.** Each epoch's progress line says how many candidates the
+  gate kept and rejected that epoch, with the val best and current scores, instead of
+  a train-score "improved".
 - **Final evaluation.** After a normal end (the epoch bound or an early stop), with a
   test part, the final candidate's val check runs, then the seed, the best and the final
   candidate on test with `seed`. A run that ends on a spent evaluation, rollout, time or
@@ -196,6 +208,30 @@ from the `Node` dataclass and its validator, so they cannot drift:
 `call` and `evaluator` must name an importable `module:function` (rule V8), so a new op
 or fn-gate node can only reuse a callable an existing node already names. In the edit
 catalogue, every field that takes a node (`node`, `gate`, and `into` for two) says so.
+
+Two more sections carry what SkillOpt's slow update and carried-forward notes give its
+optimizer, at no extra compute (train records only):
+
+- **What the last edit changed.** The latest children of the edited candidate (its last
+  batch), or the edited candidate itself when it has none yet, are compared with their
+  parent item by item, on the train items both were scored on. It shows how many items
+  were fixed (parent wrong, child right) and broken (the reverse), and the largest score
+  rises and drops among the rest. Each changed item is shown with both trajectories, as
+  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); the rest go in a table. It also
+  shows the edit that made the child and the gate's decision on it, and warns that the
+  two were scored in different rounds with different seeds, so some changes may be
+  noise. Without a parent (the seed) or without shared items, it says so.
+- **Your earlier reasoning and what happened.** Up to 6 recent candidates: the line
+  from the seed to the edited candidate, and the latest rejected children. Each shows
+  the rationale and prediction the optimizer gave when proposing it, the round's
+  diagnosis, the gate's decision, its train score and its fixed and broken counts
+  against its parent. Texts are clipped to 600 characters. Each proposal keeps the
+  diagnosis of the call that produced it, and the proposals' own words are journaled,
+  so a resumed run keeps them.
+
+A proposal refused as a duplicate (`E-duplicate`) is told which candidate it repeats
+(its id), so the retry can look it up and move on. This applies with or without the
+gate.
 
 Every call the `autoresearch` optimizer makes is appended to
 `<run root>/optimizer_trace.jsonl` as it happens. Each line records the epoch, the
