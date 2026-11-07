@@ -21,6 +21,19 @@ invariants below, each a promise the optimizer's results depend on:
                 exactly the branch ends that lead to it;
 - ``protected`` the mode's protected nodes are as the seed declared them.
 
+With ``compound`` > 0 some steps of a walk are *compound proposals* (``Proposal.edits``):
+an ordered list of 2-4 mixed edits -- text ``set_knob`` (whole value or ``patch``),
+structure macros and primitives, node copies and then their own prompt knobs, now and
+then a malformed one or one too many -- applied as one candidate through the same
+attempt path. Every accepted combined state is checked against every invariant above,
+and the ``compound`` invariant checks the bundle itself:
+
+- ``compound``  an accepted bundle is exactly its edits applied in order and records
+                all of them (``Candidate.own_edits``); a refused one names the edit
+                that fails on its own (``[edit k of n``: the first not an object or not
+                in the catalogue, else the first whose precheck or apply fails in
+                order), and a refusal of the combined state names none.
+
 A violation is a bug. `Fuzzer` shrinks it to a minimal case (the seed's name and the
 accepted edits that reach it) and `save_case` writes it to the regression corpus
 (``fixtures/structure_fuzz``), which `test_structure_fuzz` replays on every run.
@@ -41,11 +54,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from refactory_dsh import lowering, nn
+from refactory_dsh.items import GRADER_FILES, PASS_RECORD
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
-from refactory_dsh.optim.base import _node_spec, reason_code
+from refactory_dsh.optim.base import (
+    DEFAULT_MAX_EDITS, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
+)
 
 import structure_fuzz_graphs as fg
 
@@ -62,7 +78,7 @@ REQUIRED_MISSING = "required input is missing"
 #: that was not there: V6 allows it).
 NOTES: Counter = Counter()
 #: Files the grader writes after an item is judged: its records carry the whole item.
-GRADER_RECORDS = ("item_records.json", "facts.json", ".item_record.json", ".done")
+GRADER_RECORDS = GRADER_FILES  # the runtime's grading files (`items.GRADER_FILES`)
 SLOT = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 #: A walk restarts from its seed once its graph has this many nodes.
 MAX_NODES = 28
@@ -114,19 +130,23 @@ class Applier:
         mode = seed.mode()
         self.seed_state = mode.state_dict()
         self.invariants = mode.invariants()
-        self.protected = tuple(mode.protected_nodes())
+        self.protected = tuple(mode.edit_protected())
+        self.graders = tuple(mode.grader_nodes())
         self.optimizer = Optimizer()
 
     def attempt(self, parent: Candidate, edit: Any, seen: set[str]) -> Candidate | list[str]:
-        """`Run.attempt`'s checks, then `Optimizer.attempt` with this mode's protection."""
-        if not isinstance(edit, dict):
-            return self.optimizer.attempt(Proposal(edit=edit), parent, self.invariants, True)
-        refused = nn_edits.unknown(edit.get("op"))
-        if refused is not None:
-            return [refused]
+        """`Run.attempt`'s checks, then `Optimizer.attempt` with this mode's protection.
+
+        ``edit`` is one edit, or a compound proposal in its ``{"edits": [...]}`` form.
+        """
+        proposal = Proposal(edit=edit, parent=parent.id)
+        refused = proposal_refusal(proposal, max_edits=DEFAULT_MAX_EDITS)
+        if refused:
+            return refused
         return self.optimizer.attempt(
-            Proposal(edit=edit, parent=parent.id), parent, self.invariants, True, (),
+            proposal, parent, self.invariants, True, (),
             sorted(seen), seed_state=self.seed_state, protected=self.protected,
+            graders=self.graders,
         )
 
     def replay(self, edits: list[Any]) -> tuple[list[Candidate], list[str] | None]:
@@ -653,14 +673,56 @@ def grader_secrets(seed: Seed, state: dict[str, Any]) -> set[str]:
     return secrets
 
 
+def _strings_in(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings_in(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _strings_in(v)]
+    return [str(value)] if value is not None else []
+
+
+def grade_secrets(workdir: Path) -> set[str]:
+    """What the grading itself produced, for content search, whatever the Task: the
+    grader's strings (its reason, the expected answer as it recorded it) in every
+    finished item's record (``items.PASS_RECORD``) that the item's node-visible input
+    does not also hold."""
+    secrets: set[str] = set()
+    for path in workdir.rglob(PASS_RECORD):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        visible = "\n".join(_strings_in(record.get("metadata") or {}))
+        for key, value in record.items():
+            if key in ("id", "exchanges", "metadata", "prediction", "error_text", "error_kind"):
+                continue
+            if isinstance(value, str) and len(value) >= 8 and value not in visible:
+                secrets.add(value)
+    return secrets
+
+
+def _grader_side_writes(seed: Seed, state: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """The grader side's node ids (data nodes, the mode's protected and grader nodes) and
+    the files they write: where the grade may legitimately be."""
+    graph = _graph_of(state)
+    side = set(seed.mode().grader_scope()["grader_side"]) | {
+        n.id for n in graph.nodes.values() if n.kind == "data"}
+    files = {f for n in graph.nodes.values() if n.id in side and n.kind != "data" for f in n.writes}
+    return side, files
+
+
 def check_grader(secrets: set[str], hidden: set[str], workdir: Path,
-                 model: "ScriptedModel | None") -> list[Violation]:
-    """No file a node can read and no prompt holds a grader-only value (by content), and
-    no ``current_item.json`` names a grader-only field."""
+                 model: "ScriptedModel | None", *, grader_side: set[str] = frozenset(),
+                 grader_files: set[str] = frozenset()) -> list[Violation]:
+    """No file a node can read and no prompt outside the grader side holds a grader-only
+    value or anything the grading produced (by content: ``secrets`` and
+    ``grade_secrets``), and no ``current_item.json`` names a grader-only field."""
+    secrets = set(secrets) | grade_secrets(workdir)
     out: list[Violation] = []
     for path in sorted(p for p in workdir.rglob("*") if p.is_file()):
         rel = path.relative_to(workdir)
-        if path.name in GRADER_RECORDS or path.name.endswith(".done") or ".refactory" in rel.parts:
+        if (path.name in GRADER_RECORDS or path.name in grader_files
+                or path.name.endswith(".done") or ".refactory" in rel.parts):
             continue
         try:
             text = path.read_text()
@@ -677,6 +739,8 @@ def check_grader(secrets: set[str], hidden: set[str], workdir: Path,
             if named:
                 out.append(Violation("grader", f"{rel} names grader-only {named}"))
     for node, prompt, system in (model.log if model is not None else ()):
+        if node in grader_side:
+            continue
         leaked = sorted(secret for secret in secrets if secret in prompt or secret in system)
         if leaked:
             out.append(Violation("grader", f"agent {node} was sent grader-only {leaked[0][:60]!r}"))
@@ -720,7 +784,9 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     _count_absent_reads(workdir)
     hidden = {name for n in graph.nodes.values() if n.kind == "data" and n.task_ref
               for name in getattr(_task(seed, n.task_ref), "grader_fields", ())}
-    seen = check_grader(grader_secrets(seed, state), hidden, workdir, model) + check_slots(state, model)
+    side, side_files = _grader_side_writes(seed, state)
+    seen = check_grader(grader_secrets(seed, state), hidden, workdir, model, grader_side=side,
+                        grader_files=side_files) + check_slots(state, model)
     if result.halted:
         # A halt is a defined ending: a gate out of reloops (the scripted evaluator always
         # answers proceed, which may be a loop's retry edge) or a halt verdict.
@@ -855,8 +921,10 @@ def check_state(applier: Applier, state: dict[str, Any], *, walker: bool = True,
             graph = _graph_of(state)
             hidden = {name for n in graph.nodes.values() if n.kind == "data" and n.task_ref
                       for name in getattr(_task(applier.seed, n.task_ref), "grader_fields", ())}
+            side, side_files = _grader_side_writes(applier.seed, state)
             found += [v for v in check_grader(grader_secrets(applier.seed, state), hidden,
-                                              tmp / "spine", None) if "grader" in only]
+                                              tmp / "spine", None, grader_side=side,
+                                              grader_files=side_files) if "grader" in only]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return found
@@ -894,6 +962,26 @@ class EditGenerator:
     def _files(self, graph: Graph) -> list[str]:
         return sorted({n for node in graph.nodes.values() for n in node.writes}) or ["none.txt"]
 
+    def _slot_fact(self, graph: Graph) -> str:
+        """A fact for a new agent's prompt: often one a data pass publishes (its graded
+        records, under whatever name), the input a cheat would want."""
+        published = sorted({f for n in graph.nodes.values() if n.kind == "data" for f in n.produces})
+        if published and self.rng.random() < 0.3:
+            return self.rng.choice(published)
+        return self.rng.choice(self._facts(graph))
+
+    def _agent_prompt(self, graph: Graph) -> str:
+        """A new agent's prompt: a slot, or now and then a condition on a fact (bare,
+        ``==`` or ``!=``), which reads the fact without printing it."""
+        fact, roll = self._slot_fact(graph), self.rng.random()
+        if roll < 0.1:
+            return f"{{% if {fact} == 'wrong' %}}You were wrong; change your answer.{{% endif %}}Go."
+        if roll < 0.15:
+            return f"{{% if {fact} != 'right' %}}Try again.{{% else %}}Keep it.{{% endif %}}"
+        if roll < 0.2:
+            return f"{{% if {fact} %}}Something was graded.{{% endif %}}Go on."
+        return f"Think about {{{{{fact}}}}}"
+
     def new_node(self, state: dict[str, Any], kind: str | None = None) -> dict[str, Any]:
         """A node to insert: a copy of an existing one as rendered, or a fresh one."""
         rng, graph = self.rng, _graph_of(state)
@@ -930,7 +1018,7 @@ class EditGenerator:
             policy = rng.choice(({},) * 5 + ({"tool_policy": "none"},) * 3 + ({"tool_policy": None},))
             return {"id": new_id, "kind": "agent", "role": "solver", **policy,
                     "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
-                    "prompt_template": f"Think about {{{{{rng.choice(facts)}}}}}",
+                    "prompt_template": self._agent_prompt(graph),
                     "system_prompt_template": f"You are {new_id}.",
                     "writes": rng.choice(([f"{new_id}.txt"],) * 6 + ([], [f"{new_id}.txt", f"{new_id}.md"])),
                     "produces": [f"{new_id}_fact"]}
@@ -989,6 +1077,79 @@ class EditGenerator:
         if choice == 10:
             return {"op": "add_node", "node": {**node, "id": some}, "position": {"after": some}}
         return {"op": "remove_edge", "source": some, "target": rng.choice(ids) if ids else "y"}
+
+    def text_knob_edit(self, state: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+        """A text ``set_knob``: a whole new value, or a ``patch`` of text edits."""
+        rng = self.rng
+        knobs = state.get("knobs") or {}
+        texts = sorted(k for k, v in knobs.items() if (v.get("spec") or {}).get("kind") == "str")
+        if name is None:
+            if not texts:
+                return {"op": "set_knob", "name": "ghost", "value": "x"}
+            name = rng.choice(texts)
+        self.counter += 1
+        current = str((knobs.get(name) or {}).get("value") or "")
+        form = rng.random()
+        if form < 0.4:
+            return {"op": "set_knob", "name": name, "value": f"{current}\nCompound edit {self.counter}."}
+        if form < 0.7 or not current.strip():
+            return {"op": "set_knob", "name": name,
+                    "patch": [{"kind": "append", "content": f"Also check step {self.counter}."}]}
+        start = rng.randrange(max(1, len(current) - 12))
+        target = current[start:start + rng.choice((6, 12))]
+        kind = rng.choice(("replace", "insert_after", "insert_before", "delete"))
+        item = {"kind": kind, "target": target}
+        if kind != "delete":
+            item["content"] = f" (revised {self.counter}) "
+        return {"op": "set_knob", "name": name, "patch": [item]}
+
+    def compound(self, state: dict[str, Any]) -> dict[str, Any]:
+        """A compound proposal: 2-4 mixed edits, each made against the state the ones
+        before it leave (when they apply), so later edits can use what earlier ones
+        added -- a copied node's own prompt knob above all. Now and then one edit is
+        malformed, or the list is one longer than the run allows."""
+        rng = self.rng
+        size = rng.choice((2, 2, 3, 3, 4))
+        if rng.random() < 0.04:
+            size = DEFAULT_MAX_EDITS + 1
+        edits: list[Any] = []
+        current = state
+        new_agents: list[str] = []
+        for _ in range(size):
+            roll = rng.random()
+            if new_agents and roll < 0.6:
+                edit = self.text_knob_edit(current, f"{new_agents.pop()}__system_prompt")
+            elif roll < 0.4:
+                edit = self.text_knob_edit(current)
+            elif roll < 0.6 and _graph_of(current).nodes:
+                target = rng.choice(sorted(_graph_of(current).nodes))
+                agents = sorted(n for n, node in _graph_of(current).nodes.items()
+                                if node.kind == "agent")
+                if agents:
+                    source = rng.choice(agents)
+                    node = _rendered_copy(current, source)
+                    node["id"] = self.fresh_id(_graph_of(current), f"{source}_c")
+                    node["system_prompt_template"] = f"You are copy {node['id']}."
+                    node["writes"] = [f"{node['id']}.txt"]
+                    node["produces"] = [f"{node['id']}_fact"]
+                    edit = {"op": rng.choice(("insert_after", "insert_before")),
+                            "target": target, "node": node}
+                else:
+                    edit = self.edit(current)
+            elif roll < 0.67:
+                edit = self.malformed(current)
+            else:
+                edit = self.edit(current)
+            edits.append(edit)
+            try:
+                after = nn_edits.apply(edit, current)
+            except Exception:  # noqa: BLE001 - the attempt path refuses it; keep generating
+                continue
+            if isinstance(edit, dict):
+                added = sorted(set(_graph_of(after).nodes) - set(_graph_of(current).nodes))
+                new_agents += [n for n in added if f"{n}__system_prompt" in (after.get("knobs") or {})]
+            current = after
+        return {"edits": edits}
 
     def edit(self, state: dict[str, Any]) -> Any:
         rng, graph = self.rng, _graph_of(state)
@@ -1081,6 +1242,11 @@ class Stats:
     spine_runs: int = 0
     findings: list[Finding] = field(default_factory=list)
     notes: Counter = field(default_factory=Counter)
+    compound_tried: int = 0
+    compound_accepted: int = 0
+    compound_refused: Counter = field(default_factory=Counter)
+    #: Compound refusals that named the edit that failed (``[edit k of n``).
+    compound_named: int = 0
 
     def summary(self) -> dict[str, Any]:
         observed = {k: v for k, v in self.violations.items() if k in OBSERVED or k == "attempt"}
@@ -1092,6 +1258,9 @@ class Stats:
                 "spec": dict(sorted(spec.items())),
                 "notes": dict(sorted(self.notes.items())),
                 "walker_runs": self.walker_runs, "spine_runs": self.spine_runs,
+                "compound": {"tried": self.compound_tried, "accepted": self.compound_accepted,
+                             "refused": dict(sorted(self.compound_refused.items())),
+                             "refusals_naming_the_edit": self.compound_named},
                 "findings": len(self.findings)}
 
 
@@ -1100,7 +1269,8 @@ class Fuzzer:
 
     def __init__(self, seed: int, *, seed_names: tuple[str, ...] | None = None,
                  walk_length: int = 12, walker: bool = True, spine_every: int = 0,
-                 shrink: bool = True, stop_on: str | None = None) -> None:
+                 shrink: bool = True, stop_on: str | None = None,
+                 compound: float = 0.0) -> None:
         self.seed = seed
         self.seeds = {name: s for name, s in seeds().items()
                       if seed_names is None or name in seed_names}
@@ -1110,6 +1280,8 @@ class Fuzzer:
         self.shrink = shrink
         #: Stop once a violation of this invariant is found (the mutation checks).
         self.stop_on = stop_on
+        #: The share of a walk's steps that are compound proposals (0 is none).
+        self.compound = compound
         self.stats = Stats()
 
     def run(self, edits: int) -> Stats:
@@ -1133,14 +1305,26 @@ class Fuzzer:
         for _ in range(self.walk_length):
             if self.stats.tried >= budget or self._stopped():
                 return
-            edit = generator.edit(current.state)
+            bundle = bool(self.compound) and rng.random() < self.compound
+            edit = generator.compound(current.state) if bundle else generator.edit(current.state)
             self.stats.tried += 1
+            self.stats.compound_tried += int(bundle)
             try:
                 outcome = applier.attempt(current, edit, seen)
             except Exception as exc:  # noqa: BLE001 - the attempt path must never raise
                 self._record(seed, applier, [*accepted, edit],
                              [Violation("attempt", f"raised {type(exc).__name__}: {exc}")])
                 continue
+            if bundle:
+                wrong = check_compound(applier, current, edit["edits"], outcome)
+                if isinstance(outcome, list) and outcome:
+                    self.stats.compound_refused[reason_code(outcome[0])] += 1
+                    self.stats.compound_named += int("[edit " in outcome[0])
+                else:
+                    self.stats.compound_accepted += int(not isinstance(outcome, list))
+                if wrong:
+                    self._record(seed, applier, [*accepted, edit], wrong, minimize=False)
+                    return
             if isinstance(outcome, list):
                 code = reason_code(outcome[0]) if outcome else "?"
                 self.stats.refused[code] += 1
@@ -1167,12 +1351,70 @@ class Fuzzer:
         return self.stop_on is not None and self.stats.violations[self.stop_on] > 0
 
     def _record(self, seed: Seed, applier: Applier, edits: list[Any],
-                found: list[Violation], *, spine: bool = False) -> None:
+                found: list[Violation], *, spine: bool = False, minimize: bool = True) -> None:
         for violation in found:
             self.stats.violations[violation.invariant] += 1
-        if self.shrink:
+        if self.shrink and minimize:
             edits = shrink(applier, edits, found[0].invariant, spine=spine)
         self.stats.findings.append(Finding(seed.name, edits, found))
+
+
+def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
+                   ) -> tuple[int | None, dict[str, Any]]:
+    """The index of the edit that fails on its own, and the state the edits reach when
+    none does. As the attempt path checks them: every edit's shape and op first (not an
+    object, not in the catalogue), then each in order against the state the ones before
+    it left (precheck, apply, and in a bundle an edit that changes nothing)."""
+    state = parent.state
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
+            return index, state
+    for index, edit in enumerate(edits):
+        if nn_edits.precheck(edit, state):
+            return index, state
+        try:
+            after = nn_edits.apply(edit, state, protected=applier.protected)
+        except nn_edits.EditError:
+            return index, state
+        if len(edits) > 1 and candidate_id(after) == candidate_id(state):
+            return index, state  # an edit of a bundle that changes nothing
+        state = after
+    dead = (_dead_edit(edits, parent.state, state, applier.protected)
+            if candidate_id(state) != parent.id else None)
+    return dead, state
+
+
+def check_compound(applier: Applier, parent: Candidate, edits: list[Any],
+                   outcome: Candidate | list[str]) -> list[Violation]:
+    """The ``compound`` invariant for one bundle and what the attempt path made of it."""
+    if len(edits) > DEFAULT_MAX_EDITS:
+        if isinstance(outcome, list) and outcome and outcome[0].startswith("E-too-many-edits"):
+            return []
+        return [Violation("compound", f"{len(edits)} edits were not refused as too many: "
+                                      f"{outcome if isinstance(outcome, list) else outcome.id}")]
+    failing, state = _first_failing(applier, parent, edits)
+    if isinstance(outcome, Candidate):
+        found = []
+        if failing is not None:
+            found.append(Violation("compound", f"accepted although edit {failing + 1} of "
+                                               f"{len(edits)} fails on its own"))
+        elif outcome.state != state:
+            found.append(Violation("compound", "the accepted state is not the edits applied "
+                                               "in order"))
+        if outcome.own_edits() != list(edits) or outcome.step_edits != len(edits):
+            found.append(Violation("compound", "the candidate does not record every edit of "
+                                               "its proposal"))
+        return found
+    reason = outcome[0] if outcome else ""
+    if failing is None:
+        if "[edit " in reason:
+            return [Violation("compound", f"a refusal of the combined state names an edit: "
+                                          f"{reason[:300]}")]
+        return []
+    if f"[edit {failing + 1} of {len(edits)}:" not in reason:
+        return [Violation("compound", f"edit {failing + 1} of {len(edits)} fails on its own, "
+                                      f"but the refusal does not name it: {reason[:300]}")]
+    return []
 
 
 def violations_of(applier: Applier, edits: list[Any], *, spine: bool = False,

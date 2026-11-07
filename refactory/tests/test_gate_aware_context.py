@@ -187,7 +187,7 @@ def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkey
     assert "On 8 shared train item(s): 0 fixed (parent wrong, child right), 1 broken" in section
     assert "#### Item t5 -- broken\nParent:\n### Item t5 — passed" in section
     assert "Child:\n### Item t5 — answered wrong" in section
-    assert '"value": 6' in section and "different rounds with different seeds" in section
+    assert 'name="level" -- value: 6' in section and "different seeds" in section
     assert not any(f"Item {v}" in section for v in ("v1", "v2", "v3", "v4", "x1", "x2", "x3"))
 
 

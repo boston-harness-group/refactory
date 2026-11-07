@@ -1,0 +1,38 @@
+{
+  "seed": "fuzz_data_pass",
+  "edits": [
+    {
+      "op": "add_node",
+      "node": {
+        "id": "solve_c12",
+        "kind": "agent",
+        "call": "",
+        "evaluator": "",
+        "knobs": [],
+        "reads": [],
+        "writes": [
+          "answer.txt"
+        ],
+        "produces": [],
+        "prompt_template": "New ask for solve_c12: {{item_scores}}",
+        "system_prompt_template": "You are copy solve_c12.",
+        "role": "solver",
+        "tools": [],
+        "max_iterations": 1,
+        "notes": "",
+        "blocking": true,
+        "score_effect": "affects",
+        "timeout_s": 60,
+        "tool_policy": "none"
+      },
+      "position": {
+        "terminal": true
+      }
+    }
+  ],
+  "found": [
+    "grader: agent solve_c12 was sent grader-only 'GRADER-ONLY-ANSWER-one'"
+  ],
+  "fixed_by": "V17: no node outside the grader side consumes grader-derived data (provenance from the graph and declarations; found by the compound long tier, seed 1)",
+  "refused_with": "V17"
+}

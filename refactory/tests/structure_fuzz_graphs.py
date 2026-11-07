@@ -67,6 +67,9 @@ def proceed(ctx: Any) -> str:
 
 #: What every item's grader-only answer key starts with, so a leak is found by content.
 SECRET = "GRADER-ONLY-ANSWER"
+#: What the grader's reason for a failed item starts with: grader-derived content that
+#: reaches the graded records, so a leak of anything grading produced is found too.
+VERDICT = "GRADER-VERDICT"
 
 
 class FuzzTask(Task):
@@ -84,8 +87,11 @@ class FuzzTask(Task):
     def verify(self, instance: TaskInstance, workspace: Path) -> VerifyResult:
         if not str(instance.metadata.get("answer_key", "")).startswith(SECRET):
             raise ValueError("the grader lost its answer key")
-        passed = (Path(workspace) / "answer.txt").exists()
-        return VerifyResult(passed=passed, score=1.0 if passed else 0.0)
+        # Item "two" always fails, with a reason only the grader writes, so every run's
+        # graded records carry grader-derived content (``VERDICT``).
+        passed = (Path(workspace) / "answer.txt").exists() and instance.id == "one"
+        return VerifyResult(passed=passed, score=1.0 if passed else 0.0,
+                            details="" if passed else f"{VERDICT}-{instance.id} judged it wrong")
 
 
 # ── node helpers ──────────────────────────────────────────────────────────

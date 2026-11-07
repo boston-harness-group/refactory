@@ -2041,7 +2041,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## profile-resolve
 
-Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools.
+Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -2076,12 +2076,14 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "elite": 3,
     "epochs": 2,
     "evaluator": "walker",
+    "fresh_evidence": true,
     "frozen": [],
     "history_limit": 200,
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
     "max_concurrent_evaluations": 4,
+    "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
     "max_items_in_flight": null,
@@ -2261,6 +2263,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "fresh_evidence": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--fresh-evidence"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "frozen": {
       "default": null,
       "description": "",
@@ -2327,6 +2340,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_edits_per_proposal": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-edits-per-proposal"
       ],
       "nargs": null,
       "positional": false,
@@ -2696,8 +2720,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools.",
-  "reviewed_schema": "48f4aa6bdded212a81dda986af327bb6f927d7db427392eed8318423fbaadaca"
+  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once.",
+  "reviewed_schema": "e35117098bb0464746904790960f6849cc148163f09d51b7bd2aa4fbeeb92009"
 }
 ```
 
@@ -3493,7 +3517,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools).
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3532,12 +3556,14 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "elite": 3,
     "epochs": 2,
     "evaluator": "walker",
+    "fresh_evidence": true,
     "frozen": [],
     "history_limit": 200,
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
     "max_concurrent_evaluations": 4,
+    "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
     "max_items_in_flight": null,
@@ -3720,6 +3746,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "fresh_evidence": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--fresh-evidence"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "frozen": {
       "default": null,
       "description": "",
@@ -3786,6 +3823,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_edits_per_proposal": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-edits-per-proposal"
       ],
       "nargs": null,
       "positional": false,
@@ -4166,8 +4214,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools).",
-  "reviewed_schema": "650b8e9285008f0cd82e0e6f50fff096c54734f10334f89733986450b3f4cab3"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once.",
+  "reviewed_schema": "dd3e41d3ab4ea32ef2431494fac3ee27a2452d389ce8434fb35893549ed11bfa"
 }
 ```
 
@@ -5827,7 +5875,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools).
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -5848,12 +5896,14 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "elite": 3,
     "epochs": 2,
     "evaluator": "walker",
+    "fresh_evidence": true,
     "frozen": [],
     "history_limit": 200,
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
     "max_concurrent_evaluations": 4,
+    "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
     "max_items_in_flight": null,
@@ -6035,6 +6085,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "fresh_evidence": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--fresh-evidence"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "frozen": {
       "default": null,
       "description": "",
@@ -6101,6 +6162,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-concurrent-evaluations"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "max_edits_per_proposal": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--max-edits-per-proposal"
       ],
       "nargs": null,
       "positional": false,
@@ -6473,8 +6545,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools).",
-  "reviewed_schema": "c5f72585b3862907191fe5b8987bd79a6e5cd9e3f01d54459292610d4343570d"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once.",
+  "reviewed_schema": "c619d00103b9bcecab4f1cff7126363cfca060f972de06f39f797304dc702564"
 }
 ```
 

@@ -272,18 +272,13 @@ class AutoresearchOptimizer(Optimizer):
         for raw in payload.get("proposals") or ():
             if not isinstance(raw, dict):
                 continue
-            edit = raw.get("edit") or raw.get("edit_json")
-            if isinstance(edit, str):
-                try:
-                    edit = json.loads(edit)
-                except json.JSONDecodeError:
-                    continue
-            if not isinstance(edit, dict) or "op" not in edit:
+            steps = _proposal_edits(raw)
+            if not steps:
                 continue
             parent = raw.get("parent")
             proposals.append(
                 Proposal(
-                    edit=edit,
+                    edits=tuple(steps),
                     rationale=str(raw.get("rationale", "") or ""),
                     prediction=str(raw.get("prediction", "") or ""),
                     confidence=_confidence(raw.get("confidence")),
@@ -294,6 +289,29 @@ class AutoresearchOptimizer(Optimizer):
         self.record_call(**call, reply=text, proposals=len(proposals),
                          diagnosis=self.last_diagnosis, error=None)
         return proposals
+
+
+def _parse_edit(edit: Any) -> dict[str, Any] | None:
+    if isinstance(edit, str):
+        try:
+            edit = json.loads(edit)
+        except json.JSONDecodeError:
+            return None
+    return edit if isinstance(edit, dict) and "op" in edit else None
+
+
+def _proposal_edits(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """The edits one answered proposal carries, in order: its ``edits`` list (a
+    compound proposal), else its single ``edit``. An entry that is not an edit drops
+    the whole proposal: applying the rest would score something the model did not
+    propose. More edits than the run allows are kept, so the loop refuses them with
+    the reason (``E-too-many-edits``) the next request shows."""
+    listed = raw.get("edits")
+    if isinstance(listed, list) and listed:
+        steps = [_parse_edit(edit) for edit in listed]
+        return [] if any(step is None for step in steps) else steps  # type: ignore[misc]
+    single = _parse_edit(raw.get("edit") or raw.get("edit_json"))
+    return [single] if single is not None else []
 
 
 def _confidence(value: Any) -> float:

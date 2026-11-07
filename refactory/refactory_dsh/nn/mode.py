@@ -201,6 +201,27 @@ class Mode:
         """
         return ()
 
+    def grader_nodes(self) -> tuple[str, ...]:
+        """Node ids that compute or hold the grade (a scorer, a judge that sees the
+        answer). They may read grader-derived data, and everything they write or produce
+        is grader-derived: no node outside the grader side may consume it (V17). The data
+        nodes and the protected nodes are on the grader side already. Empty by default.
+        """
+        return ()
+
+    def edit_protected(self) -> tuple[str, ...]:
+        """The nodes no edit may remove, rewire or replace: the protected nodes and the
+        grader nodes, since grader status follows a node's id and an edit that could
+        rebuild a grader node could give its own node that status. Their knobs hold too
+        (``Optimizer.attempt``)."""
+        return tuple(dict.fromkeys((*self.protected_nodes(), *self.grader_nodes())))
+
+    def grader_scope(self) -> dict[str, tuple[str, ...]]:
+        """The validator's V17 arguments for this mode: ``grader_side`` (the protected and
+        grader nodes, which may consume grader-derived data) and ``graders``."""
+        graders = tuple(self.grader_nodes())
+        return {"grader_side": (*self.protected_nodes(), *graders), "graders": graders}
+
     def edit_policy(self) -> str:
         """Which edit preset the outer loop may use on this mode."""
         return "broad"

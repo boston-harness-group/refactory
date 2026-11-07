@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .graph import Graph, Node
 from .knob import Knob, KnobError
@@ -64,6 +64,14 @@ RULES: dict[str, str] = {
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
            "only within it; a join is entered only from its fork's branches and waits only "
            "for nodes every run of their branch visits",
+    "V17": "no node outside the grader side consumes grader-derived data: what a data "
+           "pass publishes (its graded records), the runtime's grading files, what a "
+           "Task declares its grader writes (Task.grader_outputs), everything a node the "
+           "mode declares as grading writes or produces (Mode.grader_nodes), and whatever "
+           "a node that consumes any of these writes or produces in turn -- whether "
+           "through a prompt slot or an {% if %} condition (bound fields included), feedback_keys, reads or "
+           "required_reads. The grader side is the data nodes, the mode's protected nodes "
+           "and its grader nodes",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -144,8 +152,15 @@ def validate(
     invariants: tuple[Invariant, ...] = (),
     resolve_calls: bool = True,
     ports: tuple[Any, ...] = (),
+    grader_side: Iterable[str] = (),
+    graders: Iterable[str] = (),
 ) -> list[Issue]:
-    """Every reason ``(graph, values)`` is not a runnable, scoreable mode."""
+    """Every reason ``(graph, values)`` is not a runnable, scoreable mode.
+
+    ``grader_side`` names the nodes besides the data nodes that may consume
+    grader-derived data (the mode's protected and grader nodes); ``graders`` the nodes
+    the mode declares as grading, whose every output is grader-derived (V17).
+    """
     issues: list[Issue] = []
 
     # V1 start node exists.
@@ -371,6 +386,10 @@ def validate(
     # V16 forks and joins are paired, and branches are independent.
     issues.extend(fork_issues(graph, knob_values))
 
+    # V17 nothing outside the grader side consumes grader-derived data.
+    issues.extend(grader_issues(graph, knob_values, grader_side=grader_side, graders=graders,
+                                resolve_tasks=resolve_calls))
+
     # V7 knobs: consumed ones exist, and declared ones are consumed.
     consumers = graph.knob_consumers()
     for node_id in sorted(graph.nodes):
@@ -492,6 +511,23 @@ _CONDITIONAL = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}", r
 #: A condition that is true only when its name has a value: ``name`` or
 #: ``name == 'non-empty literal'``.
 _GUARD = re.compile(r"""([A-Za-z_]\w*)(?:\s*==\s*(?:'[^']+'|"[^"]+"))?""")
+#: Every condition the renderer evaluates (``nn.executor._eval_condition``): ``name``,
+#: ``name == 'literal'`` and ``name != 'literal'``; the name is what it reads.
+_CONDITION_NAME = re.compile(r"""\s*([A-Za-z_]\w*)\s*(?:(?:==|!=)\s*(?:'[^']*'|"[^"]*")\s*)?""")
+
+
+def template_names(template: str) -> set[str]:
+    """Every run value a template reads when rendered: its ``{{name}}`` slots and the
+    name each ``{% if %}``/``{% elif %}`` condition tests (bare, ``==`` or ``!=``). A
+    condition reads its value as surely as a slot does: ``{% if x == 'wrong' %}`` tells
+    the agent something about ``x`` without printing it."""
+    names = set(_SLOT.findall(template))
+    for match in _CONDITIONAL.finditer(template):
+        if match.group(1) in ("if", "elif"):
+            found = _CONDITION_NAME.fullmatch(match.group(2))
+            if found:
+                names.add(found.group(1))
+    return names
 
 
 def required_slots(template: str) -> set[str]:
@@ -609,7 +645,7 @@ def available_inputs(graph: Graph) -> dict[str, set[tuple[str, str]]]:
         universe |= made(node)
         universe |= {("file", n) for n in node.reads}
         universe |= {("fact", n) for f in ("prompt_template", "system_prompt_template")
-                     for n in _SLOT.findall(str(getattr(node, f) or ""))}
+                     for n in template_names(str(getattr(node, f) or ""))}
     joined = {join: forks[0] for join, forks in fork_joins(graph).items() if len(forks) == 1}
     preds: dict[str, list[tuple[str, str]]] = {node_id: [] for node_id in graph.nodes}
     for node in graph.nodes.values():
@@ -829,6 +865,110 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
     return issues
 
 
+# ── V17: grader-derived data stays on the grader side ─────────────────────
+
+
+def _made(node: Node) -> set[tuple[str, str]]:
+    return {("file", n) for n in node.writes} | {("fact", n) for n in node.produces}
+
+
+def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
+    slot and each name a ``{% if %}``/``{% elif %}`` condition tests, in its prompts and
+    in every field bound to a knob (rendered with the knob values, guarded slots
+    included), its ``feedback_keys``, its reads and its required_reads."""
+    fields = {"prompt_template", "system_prompt_template"} | {f for f, _k in node.field_bindings}
+    facts: set[str] = set(node.feedback_keys)
+    for field_name in sorted(fields):
+        try:
+            text = node.bound(field_name, knob_values)
+        except Exception:  # a bad binding is V14's to report
+            text = getattr(node, field_name, "")
+        facts |= template_names(str(text or ""))
+    facts -= set(knob_values)
+    files = set(node.reads) | set(getattr(node, "required_reads", ()) or ())
+    return {("fact", n) for n in facts} | {("file", n) for n in files}
+
+
+def _task_grader_outputs(ref: str) -> tuple[str, ...]:
+    try:
+        from refactory_dsh.task import grader_outputs
+        return tuple(grader_outputs(ref))
+    except Exception:  # an unloadable Task is another rule's to report
+        return ()
+
+
+def grader_derived(graph: Graph, knob_values: Mapping[str, Any], *,
+                   graders: Iterable[str] = (), resolve_tasks: bool = True
+                   ) -> set[tuple[str, str]]:
+    """The provenance set: every ``("fact"|"file", name)`` that carries the grade.
+
+    Computed from the graph and the declarations, never from a list of names:
+
+    - what each data node publishes after its pass (its ``produces``: the pass's graded
+      records), never the per-item input its pass reads;
+    - the files the runtime's grading writes (``items.GRADER_FILES``);
+    - what each data node's Task declares its grader writes (``Task.grader_outputs``),
+      as a file and as a fact;
+    - everything a node the mode declares as grading (``Mode.grader_nodes``) writes or
+      produces;
+    - and, to a fixpoint, everything any node that consumes one of these writes or
+      produces: a grade copied is still the grade.
+    """
+    from refactory_dsh.items import GRADER_FILES
+
+    derived: set[tuple[str, str]] = {("file", name) for name in GRADER_FILES}
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            derived |= {("fact", name) for name in node.produces}
+            if resolve_tasks and node.task_ref:
+                for name in _task_grader_outputs(node.task_ref):
+                    derived |= {("file", name), ("fact", name)}
+    for node_id in graders:
+        node = graph.nodes.get(node_id)
+        if node is not None:
+            derived |= _made(node)
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.nodes.values():
+            if node.kind == "data" or not (consumed(node, knob_values) & derived):
+                continue
+            if not _made(node) <= derived:
+                derived |= _made(node)
+                changed = True
+    return derived
+
+
+def grader_issues(graph: Graph, knob_values: Mapping[str, Any], *,
+                  grader_side: Iterable[str] = (), graders: Iterable[str] = (),
+                  resolve_tasks: bool = True) -> list[Issue]:
+    """V17: a node outside the grader side that consumes grader-derived data.
+
+    The grader side is the data nodes, ``grader_side`` (the mode's protected nodes) and
+    ``graders`` (the mode's grader nodes). Any other node -- an agent, an op, a gate --
+    that takes in a grader-derived fact or file could carry the answers into a later
+    pass, a prompt or the run's output, whatever the Task or the domain.
+    """
+    graders = tuple(graders)
+    side = set(grader_side) | set(graders) | {n.id for n in graph.nodes.values()
+                                              if n.kind == "data"}
+    derived = grader_derived(graph, knob_values, graders=graders, resolve_tasks=resolve_tasks)
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        if node_id in side:
+            continue
+        taken = consumed(graph.nodes[node_id], knob_values) & derived
+        if taken:
+            names = ", ".join(f"{{{{{n}}}}}" if kind == "fact" else f"file {n!r}"
+                              for kind, n in sorted(taken))
+            issues.append(Issue(
+                "V17", f"consumes grader-derived {names} (the grade, or something made from "
+                "it); only the data nodes and the nodes the mode declares protected or grading "
+                "may read what grading produced", node=node_id))
+    return issues
+
+
 def fork_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
     """V16: every fork is paired with one join, and its branches are independent."""
     from .loops import loop_edges
@@ -927,6 +1067,8 @@ def validate_state(
     *,
     invariants: tuple[Invariant, ...] = (),
     resolve_calls: bool = True,
+    grader_side: Iterable[str] = (),
+    graders: Iterable[str] = (),
 ) -> list[Issue]:
     """Validate a state dict without building a mode around it.
 
@@ -954,6 +1096,8 @@ def validate_state(
         invariants=invariants,
         resolve_calls=resolve_calls,
         ports=tuple(ports),
+        grader_side=grader_side,
+        graders=graders,
     )
 
 

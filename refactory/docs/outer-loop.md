@@ -50,6 +50,26 @@ and `hill_climb` optimizers run with it.
   person has not rejected, ranked by val score. Its first is the winner: the report, the
   held-out audit and `adopt` all name it, and the report's `best_score` is its val score
   (`best_score_basis`), with its train score in `best_train_score`.
+- **Fresh evidence.** As SkillOpt rolls out its current candidate on the train part
+  every epoch, the candidate the optimizer edits is scored again at the start of each
+  epoch's proposal step, on that epoch's train sample (the whole train part, or the
+  `--train-minibatch` sample) with that epoch's seed. A candidate created and scored
+  this epoch is not scored twice. The optimizer, and every reader, reads these fresh
+  records; the reader cache is keyed by the records' text, so new records are read
+  again. Only the evidence changes: the candidate keeps its id, its gate val score and
+  its train score, which is the score the leaderboard, the history and the gradient
+  show (its first train evaluation's). The re-score counts as an evaluation, a
+  measurement and its rollouts, is charged to the time and token budgets, and is
+  journaled (`rescore`, with its epoch and seed); a resumed run reads its epoch back and
+  does not repeat it. A re-score that fails, or returns fewer items than it ran, is no
+  evidence: the previous records stay, the epoch is not marked, and it is journaled as
+  `rescore_failed` (still counted as an evaluation). Train records are kept per epoch, so
+  "What the last edit changed" and "Your earlier reasoning" compare a child with its
+  parent's records from the child's epoch (the same seed); a pair from different epochs
+  is marked as such. `--fresh-evidence 0`
+  turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
+  35-item train part this is one more train evaluation of 35 rollouts per epoch in
+  which the gate kept no new candidate.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
@@ -113,7 +133,8 @@ out.
   so candidates in a round are comparable. The sample changes from epoch to epoch, and
   each epoch's ids are journaled (`train_minibatch`).
 - **The evidence is that minibatch.** When the candidate the optimizer edits was scored
-  in an earlier epoch, it is scored again on this epoch's minibatch, so the proposal
+  in an earlier epoch, it is scored again on this epoch's minibatch (the gate's fresh
+  evidence, above, on the minibatch), so the proposal
   evidence is that minibatch, as SkillOpt rolls out its current candidate on each
   step's batch. Its score is left alone; only the records the optimizer reads change.
   This re-score is an evaluation like any other: it counts toward the evaluation,
@@ -123,6 +144,90 @@ out.
 - **Unaffected.** Val and test are not sampled.
 
 `0`, or a train part of N items or fewer, scores the whole train part as before.
+
+## Compound proposals (`--max-edits-per-proposal N`)
+
+A proposal may carry an ordered list of edits, `{"edits": [...]}`, instead of one
+`edit`. They are applied together to the parent as one candidate, which is evaluated
+and gated once, so a fix that needs coordinated changes (several steps' prompts that
+must agree, or a new node and the knob that feeds it) is judged as one idea rather than
+as a chain of single edits each judged alone. SkillOpt's round patches change several
+sections at once; this is the default loop's equivalent.
+
+- **Checks.** Every edit's shape, op and permission are checked first; then each edit
+  is prechecked and applied in order, to the state the ones before it left (a
+  `set_knob` on `<id>__system_prompt` therefore goes after the edit that adds node
+  `<id>`). The combined state is then held to every state rule once: frozen knobs, tool
+  policy, protected nodes, the validator, lowering, no-op and duplicate (on the combined
+  state, so the same point reached in another order is a duplicate). An edit the result
+  does not depend on -- one that changes nothing, or that a later edit overwrites or
+  undoes -- is refused `E-noop` with its index. A refusal about one edit names it,
+  `[edit k of n: op]`, after the rule's code; one about the combined state names none. A
+  list longer than N is refused `E-too-many-edits`.
+- **Cap.** `--max-edits-per-proposal` (default 4, SkillOpt's edit budget) caps the
+  list; `1` is single edits only, as before.
+- **Who emits lists.** The `autoresearch` request says it may bundle up to N edits when a
+  fix needs coordinated changes, with a JSON example (not shown when N is 1). The random
+  and population optimizers emit single edits. A proposal with one `edit` works as
+  before.
+- **Records.** The candidate's `edits` hold its lineage's edits in order;
+  `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
+  them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
+  "What the last edit changed" and "Your earlier reasoning" list every edit, its op and
+  what it names whole and only long values clipped; a refused list is recorded as
+  `{"edits": [...]}`. The loop-as-a-graph path (`write_pending`/`read_pending`) carries
+  `step_edits` and the edit reports.
+- **Attribution.** The per-knob attribution credits knob values by state: every knob's
+  value in a compound candidate is credited with that candidate's score (and its gate
+  decision), so each knob a bundle changed gets the credit, shared with the others.
+
+## Grader-derived data stays on the grader side (V17)
+
+No node outside the grader side may consume grader-derived data. The rule is generic: it
+names no fact, file, Task or benchmark. The validator computes a provenance set from the
+graph and the declarations (`nn.validate.grader_derived`):
+
+- what each data node publishes after its pass (its `produces`: the pass's graded
+  records, under whatever name), never the per-item input its pass reads;
+- the files the runtime's grading writes (`items.GRADER_FILES`: the run's facts, each
+  finished item's record and marker, the collected records);
+- what a Task declares its grader leaves where nodes could find it
+  (`Task.grader_outputs`);
+- everything a node the mode declares as grading writes or produces
+  (`Mode.grader_nodes()`);
+- and, to a fixpoint, everything any node that consumes one of these writes or produces:
+  a grade copied through an op, a file or a fact is still the grade.
+
+A node consumes what its prompts read when rendered -- every `{{name}}` slot and the
+name every `{% if %}`/`{% elif %}` condition tests (bare `name`, `name == '...'`,
+`name != '...'`: a condition tells the agent something about the value without printing
+it), in its prompts and in knob-bound fields -- its `feedback_keys`, its reads and its
+required_reads. The
+grader side is the data nodes, the mode's protected nodes and its grader nodes; any
+other agent, op or gate consuming grader-derived data is refused `V17`, on every
+candidate and every shipped or created mode (`registry`, the creation sandbox). The rule
+runs in Python before anything is lowered: the spine only runs states that already
+passed it, so it needs no copy of the rule.
+
+Grader status follows a node's id, so the grader nodes are protected for edits as the
+protected nodes are (`Mode.edit_protected()`: no edit may remove, rewire or replace them,
+`E-protected`), and every knob a protected or grader node reads or binds holds: an edit
+that sets or removes one is refused `E-frozen`, naming the node. Otherwise a search
+could rebuild a grader node under its id, or rewrite a protected agent's prompt to copy
+answers into what is scored. (Freezing those knobs breaks no shipped mode: LiveMath's
+protected nodes read only knobs that are frozen already.)
+
+Routing on the grade is allowed: a protected or grader gate may send a run back (a
+reloop on a failed check). That is control flow the mode's author wrote, not data a
+search-written node reads; the nodes after the gate learn only which branch ran.
+
+V17 covers what the graph declares, nothing more. What the graph does not declare, the rule cannot see. An agent with tools can read any
+file in its working directory, the runtime's grading files included (`items.GRADER_FILES`;
+the runtime does not hide them from it, since modes such as `build` run tool-enabled
+agents inside a pass that need the working directory as it is); an agent an edit adds runs without
+tools (`E-new-node-tools`), so tools are only on agents the mode's author gave them,
+and those are trusted as the author's. An op's code may read facts it does not
+declare; ops are the mode's own code, and an edit cannot write one.
 
 ## What the optimizer sees, and what it said
 
