@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
@@ -357,7 +357,8 @@ class ProposalContext:
                    [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
             "",
             *_node_specs(self.node_states, text_chars=self.node_spec_text_chars,
-                         section_chars=self.node_spec_section_chars),
+                         section_chars=self.node_spec_section_chars,
+                         knob_values={k.get("name"): k.get("value") for k in self.knobs}),
             "",
             "## What the author says is worth doing",
             self.guidance or "(the mode's author offered no guidance)",
@@ -686,18 +687,32 @@ def _edit_fields(fields: Sequence[str]) -> str:
     return ", ".join(described)
 
 
-def _node_spec(state: dict[str, Any], limit: int) -> str:
-    """One node in full, as a node object; long texts clipped, and what was clipped said."""
+def _node_spec(state: dict[str, Any], limit: int,
+               knob_values: Mapping[str, Any] | None = None) -> str:
+    """One node in full, as a node object to copy; long texts clipped, and said.
+
+    A field bound to a knob shows the knob's current value (the stored field is not
+    what runs), and says to edit the knob. The bindings themselves, and the bound
+    knobs in ``knobs``, are left out: a copy must not bind the original's knob.
+    """
+    knob_values = knob_values or {}
     bound = {str(pair[0]): str(pair[1]) for pair in state.get("field_bindings") or ()
              if isinstance(pair, (list, tuple)) and len(pair) == 2}
     shown: dict[str, Any] = {}
     notes: list[str] = []
     for key, value in state.items():
+        if key == "field_bindings":
+            continue
+        if key == "knobs":
+            value = [name for name in value or () if name not in bound.values()]
+        if key in bound:
+            value = knob_values.get(bound[key], value)
+            notes.append(f"`{key}` is bound to the knob `{bound[key]}` and shows its current "
+                         "value: edit the knob, not this field.")
         if isinstance(value, str) and len(value) > limit:
             shown[key] = _clip_middle(value, limit)
-            where = (f"its full value is the knob `{bound[key]}`, which it is bound to"
-                     if key in bound else f"{len(value)} characters in full")
-            notes.append(f"`{key}` is clipped here ({where}).")
+            notes.append(f"`{key}` is clipped here ({len(value)} characters in full); do not "
+                         "copy it.")
         else:
             shown[key] = value
     lines = [f"#### `{state.get('id')}` ({state.get('kind')})", "```json",
@@ -706,7 +721,8 @@ def _node_spec(state: dict[str, Any], limit: int) -> str:
 
 
 def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC_TEXT_CHARS,
-                section_chars: int = NODE_SPEC_SECTION_CHARS) -> list[str]:
+                section_chars: int = NODE_SPEC_SECTION_CHARS,
+                knob_values: Mapping[str, Any] | None = None) -> list[str]:
     """Each node of the edited graph in full, then the generated node schemas.
 
     A structure edit (``add_node``, ``insert_after``, ``split``, ...) needs a whole
@@ -726,8 +742,13 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
         lines = ["### Each node in full",
                  "Copy a node object, give it a new id, change what you mean to change "
                  "(prompt, reads, writes, produces, knobs), and use it as the `node` of an "
-                 "`add_node`, `insert_after`, `insert_before` or `wrap` edit."]
-        lines += [_node_spec(state, limit) for state in chosen]
+                 "`add_node`, `insert_after`, `insert_before` or `wrap` edit. Knob bindings "
+                 "are left out of these copies: a new agent node gets its own "
+                 "`<id>__system_prompt` knob holding its `system_prompt_template`, and a "
+                 "new node may not bind another node's knob. A clipped text (marked "
+                 "`[... N characters omitted ...]`) must not be copied: write your own, or "
+                 "edit the knob; an edit carrying the marker is refused."]
+        lines += [_node_spec(state, limit, knob_values) for state in chosen]
         left = [str(s.get("id")) for s in ordered[len(chosen):]]
         if left:
             lines.append(f"({len(left)} node(s) not shown in full to stay within "

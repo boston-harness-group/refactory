@@ -113,14 +113,20 @@ def node_schema() -> dict[str, dict[str, Any]]:
     variants += [("gate", gate_kind) for gate_kind in GATE_KINDS]
     schema: dict[str, dict[str, Any]] = {}
     for kind, gate_kind in variants:
-        minimal = _minimal(kind, gate_kind)
+        name = f"gate ({gate_kind})" if kind == "gate" else kind
+        try:
+            minimal = _minimal(kind, gate_kind)
+        except GraphError:
+            # A refusal that names no field: say so rather than fail every request.
+            schema[name] = {"required": [], "optional": [], "refused": [], "example": None,
+                            "note": "required fields: see the validator (Node.__post_init__)"}
+            continue
         required = [name for name in minimal if name != "gate_kind" or gate_kind != "fn"]
         optional, refused = [], []
         for field in _fields():
             if field.name in minimal:
                 continue
             (optional if _accepts({**minimal, **_sample(field)}) else refused).append(field.name)
-        name = f"gate ({gate_kind})" if kind == "gate" else kind
         schema[name] = {
             "required": required, "optional": optional, "refused": refused,
             "example": Node(**minimal).to_state(),
@@ -158,6 +164,9 @@ def render_schema() -> list[str]:
         "",
     ]
     for name, entry in schema.items():
+        if entry.get("example") is None:
+            lines.append(f"`{name}`: {entry.get('note', 'required fields: see the validator')}.")
+            continue
         lines += [
             f"`{name}`: required {', '.join(entry['required'])}; refused "
             f"{', '.join(entry['refused']) or 'nothing'}. Minimal example:",
