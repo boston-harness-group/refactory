@@ -185,6 +185,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `required_slots` | `(template: 'str') -> 'set[str]'` |
 | function | `rules_text` | `() -> 'str'` |
 | function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
+| function | `template_names` | `(template: 'str') -> 'set[str]'` |
 | function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = (), grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 | function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 
@@ -210,6 +211,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`required_slots`** — The ``{{name}}`` slots a template needs filled: all of them, except a slot inside
 - **`rules_text`** — The rules, as the optimizer prompt shows them.
 - **`template_facts`** — The run facts an agent's prompts fill in: their ``{{name}}`` slots, less the knobs
+- **`template_names`** — Every run value a template reads when rendered: its ``{{name}}`` slots and the
 - **`validate`** — Every reason ``(graph, values)`` is not a runnable, scoreable mode.
 - **`validate_state`** — Validate a state dict without building a mode around it.
 

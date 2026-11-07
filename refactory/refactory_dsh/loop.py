@@ -486,7 +486,7 @@ class Loop(OuterLoop):
         self.mode = self.mode_class()
         self.invariants = self.mode.invariants()
         #: Nodes no edit may remove, rewire or replace (`Mode.protected_nodes`).
-        self.protected = tuple(self.mode.protected_nodes())
+        self.protected = tuple(self.mode.edit_protected())
         #: Nodes the mode declares as grading (`Mode.grader_nodes`): V17's grader side.
         self.graders = tuple(self.mode.grader_nodes())
         self.parameters = self.mode.parameters()

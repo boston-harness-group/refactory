@@ -97,6 +97,21 @@ def test_a_declared_grader_nodes_outputs_and_the_grader_side_exception():
     assert _flagged(reader, grader_side=("peek",)) == set(), "a protected node may read it"
 
 
+@pytest.mark.parametrize("prompt", [
+    "{% if verdicts == 'wrong' %}You were wrong; change your answer{% endif %}",
+    "{% if verdicts != 'right' %}Try again{% else %}Keep it{% endif %}",
+    "{% if verdicts %}Something was graded{% endif %}",
+    "{% if other %}a{% elif verdicts == 'wrong' %}b{% endif %}",
+])
+def test_a_condition_on_grader_derived_data_is_consumption(prompt):
+    """The renderer evaluates bare, ``==`` and ``!=`` conditions: each reads the value,
+    so each is consumption, in a prompt and through a knob-bound prompt."""
+    assert _flagged(_graph(_agent("peek", prompt))) == {"peek"}
+    bound = _agent("peek", "Go.", knobs=("peek_prompt",),
+                   field_bindings=(("prompt_template", "peek_prompt"),))
+    assert _flagged(_graph(bound), {"peek_prompt": prompt}) == {"peek"}
+
+
 def test_a_slot_through_a_bound_field_is_consumption():
     node = _agent("peek", "Go.", knobs=("peek_prompt",),
                   field_bindings=(("prompt_template", "peek_prompt"),))

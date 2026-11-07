@@ -198,16 +198,33 @@ graph and the declarations (`nn.validate.grader_derived`):
 - and, to a fixpoint, everything any node that consumes one of these writes or produces:
   a grade copied through an op, a file or a fact is still the grade.
 
-A node consumes what its prompts fill in (`{{name}}` slots, guarded ones and those of
-knob-bound fields included), its `feedback_keys`, its reads and its required_reads. The
+A node consumes what its prompts read when rendered -- every `{{name}}` slot and the
+name every `{% if %}`/`{% elif %}` condition tests (bare `name`, `name == '...'`,
+`name != '...'`: a condition tells the agent something about the value without printing
+it), in its prompts and in knob-bound fields -- its `feedback_keys`, its reads and its
+required_reads. The
 grader side is the data nodes, the mode's protected nodes and its grader nodes; any
 other agent, op or gate consuming grader-derived data is refused `V17`, on every
 candidate and every shipped or created mode (`registry`, the creation sandbox). The rule
 runs in Python before anything is lowered: the spine only runs states that already
 passed it, so it needs no copy of the rule.
 
-What the graph does not declare, the rule cannot see. An agent with tools can read any
-file in its working directory, `facts.json` included; an agent an edit adds runs without
+Grader status follows a node's id, so the grader nodes are protected for edits as the
+protected nodes are (`Mode.edit_protected()`: no edit may remove, rewire or replace them,
+`E-protected`), and every knob a protected or grader node reads or binds holds: an edit
+that sets or removes one is refused `E-frozen`, naming the node. Otherwise a search
+could rebuild a grader node under its id, or rewrite a protected agent's prompt to copy
+answers into what is scored. (Freezing those knobs breaks no shipped mode: LiveMath's
+protected nodes read only knobs that are frozen already.)
+
+Routing on the grade is allowed: a protected or grader gate may send a run back (a
+reloop on a failed check). That is control flow the mode's author wrote, not data a
+search-written node reads; the nodes after the gate learn only which branch ran.
+
+V17 covers what the graph declares, nothing more. What the graph does not declare, the rule cannot see. An agent with tools can read any
+file in its working directory, the runtime's grading files included (`items.GRADER_FILES`;
+the runtime does not hide them from it, since modes such as `build` run tool-enabled
+agents inside a pass that need the working directory as it is); an agent an edit adds runs without
 tools (`E-new-node-tools`), so tools are only on agents the mode's author gave them,
 and those are trusted as the author's. An op's code may read facts it does not
 declare; ops are the mode's own code, and an edit cannot write one.

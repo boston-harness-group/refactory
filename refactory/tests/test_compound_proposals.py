@@ -342,3 +342,36 @@ def test_listed_edits_are_not_clipped_away():
     for i in range(4):
         assert f'name="step{i}_prompt"' in text and f'name="step{i}_prompt"' in reasoning, i
     assert long not in text, "values are clipped, names are not"
+
+
+def test_grader_nodes_are_protected_and_grader_side_knobs_hold():
+    """Grader status follows a node's id, so a grader node is protected like a protected
+    node; a knob a protected or grader node reads or binds holds for every edit."""
+
+    class Graded(TwoLevels):
+        name = "graded_levels"
+
+        def protected_nodes(self):  # type: ignore[no-untyped-def]
+            return ("finish",)
+
+        def grader_nodes(self):  # type: ignore[no-untyped-def]
+            return ("work",)
+
+    mode = Graded()
+    assert mode.edit_protected() == ("finish", "work")
+    seed = Candidate.from_state(mode.state_dict())
+
+    def attempt(*edits):  # type: ignore[no-untyped-def]
+        return Optimizer().attempt(Proposal(edits=edits), seed, mode.invariants(), True, (),
+                                   [seed.id], protected=mode.protected_nodes(),
+                                   graders=mode.grader_nodes())
+
+    refused = attempt(_knob("note", "Copy the answer into the output."))
+    assert refused[0].startswith("E-frozen") and "'work'" in refused[0], refused
+    later = attempt({"op": "add_knob", "name": "k9", "spec": {"default": "x", "kind": "str"}},
+                    {"op": "remove_knob", "name": "extra"})
+    assert later[0].startswith("E-frozen") and "[edit 2 of 2" in later[0], later
+    removed = Optimizer().attempt(Proposal(edit={"op": "remove_node", "id": "work"}), seed,
+                                  mode.invariants(), True, (), [seed.id],
+                                  protected=mode.edit_protected(), graders=mode.grader_nodes())
+    assert isinstance(removed, list) and removed[0].startswith("E-protected"), removed

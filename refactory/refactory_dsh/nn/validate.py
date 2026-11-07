@@ -69,7 +69,7 @@ RULES: dict[str, str] = {
            "Task declares its grader writes (Task.grader_outputs), everything a node the "
            "mode declares as grading writes or produces (Mode.grader_nodes), and whatever "
            "a node that consumes any of these writes or produces in turn -- whether "
-           "through a prompt slot (bound fields included), feedback_keys, reads or "
+           "through a prompt slot or an {% if %} condition (bound fields included), feedback_keys, reads or "
            "required_reads. The grader side is the data nodes, the mode's protected nodes "
            "and its grader nodes",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
@@ -511,6 +511,23 @@ _CONDITIONAL = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}", r
 #: A condition that is true only when its name has a value: ``name`` or
 #: ``name == 'non-empty literal'``.
 _GUARD = re.compile(r"""([A-Za-z_]\w*)(?:\s*==\s*(?:'[^']+'|"[^"]+"))?""")
+#: Every condition the renderer evaluates (``nn.executor._eval_condition``): ``name``,
+#: ``name == 'literal'`` and ``name != 'literal'``; the name is what it reads.
+_CONDITION_NAME = re.compile(r"""\s*([A-Za-z_]\w*)\s*(?:(?:==|!=)\s*(?:'[^']*'|"[^"]*")\s*)?""")
+
+
+def template_names(template: str) -> set[str]:
+    """Every run value a template reads when rendered: its ``{{name}}`` slots and the
+    name each ``{% if %}``/``{% elif %}`` condition tests (bare, ``==`` or ``!=``). A
+    condition reads its value as surely as a slot does: ``{% if x == 'wrong' %}`` tells
+    the agent something about ``x`` without printing it."""
+    names = set(_SLOT.findall(template))
+    for match in _CONDITIONAL.finditer(template):
+        if match.group(1) in ("if", "elif"):
+            found = _CONDITION_NAME.fullmatch(match.group(2))
+            if found:
+                names.add(found.group(1))
+    return names
 
 
 def required_slots(template: str) -> set[str]:
@@ -628,7 +645,7 @@ def available_inputs(graph: Graph) -> dict[str, set[tuple[str, str]]]:
         universe |= made(node)
         universe |= {("file", n) for n in node.reads}
         universe |= {("fact", n) for f in ("prompt_template", "system_prompt_template")
-                     for n in _SLOT.findall(str(getattr(node, f) or ""))}
+                     for n in template_names(str(getattr(node, f) or ""))}
     joined = {join: forks[0] for join, forks in fork_joins(graph).items() if len(forks) == 1}
     preds: dict[str, list[tuple[str, str]]] = {node_id: [] for node_id in graph.nodes}
     for node in graph.nodes.values():
@@ -857,9 +874,9 @@ def _made(node: Node) -> set[tuple[str, str]]:
 
 def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]:
     """Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
-    slot of its prompts and of every field bound to a knob (rendered with the knob
-    values, guarded slots included), its ``feedback_keys``, its reads and its
-    required_reads."""
+    slot and each name a ``{% if %}``/``{% elif %}`` condition tests, in its prompts and
+    in every field bound to a knob (rendered with the knob values, guarded slots
+    included), its ``feedback_keys``, its reads and its required_reads."""
     fields = {"prompt_template", "system_prompt_template"} | {f for f, _k in node.field_bindings}
     facts: set[str] = set(node.feedback_keys)
     for field_name in sorted(fields):
@@ -867,7 +884,7 @@ def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]
             text = node.bound(field_name, knob_values)
         except Exception:  # a bad binding is V14's to report
             text = getattr(node, field_name, "")
-        facts |= set(_SLOT.findall(str(text or "")))
+        facts |= template_names(str(text or ""))
     facts -= set(knob_values)
     files = set(node.reads) | set(getattr(node, "required_reads", ()) or ())
     return {("fact", n) for n in facts} | {("file", n) for n in files}

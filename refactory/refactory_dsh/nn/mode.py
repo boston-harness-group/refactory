@@ -209,6 +209,13 @@ class Mode:
         """
         return ()
 
+    def edit_protected(self) -> tuple[str, ...]:
+        """The nodes no edit may remove, rewire or replace: the protected nodes and the
+        grader nodes, since grader status follows a node's id and an edit that could
+        rebuild a grader node could give its own node that status. Their knobs hold too
+        (``Optimizer.attempt``)."""
+        return tuple(dict.fromkeys((*self.protected_nodes(), *self.grader_nodes())))
+
     def grader_scope(self) -> dict[str, tuple[str, ...]]:
         """The validator's V17 arguments for this mode: ``grader_side`` (the protected and
         grader nodes, which may consume grader-derived data) and ``graders``."""

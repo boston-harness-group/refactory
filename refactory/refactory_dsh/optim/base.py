@@ -261,6 +261,20 @@ def _at(reason: str, index: int, steps: Sequence[Any]) -> str:
     return f"{reason} [edit {index + 1} of {len(steps)}: {op}]"
 
 
+def _grader_side_knobs(state: dict[str, Any], nodes: Sequence[str]) -> dict[str, str]:
+    """The knobs the given (protected or grading) nodes read or bind, each with the
+    first node that does."""
+    out: dict[str, str] = {}
+    graph_nodes = (state.get("graph") or {}).get("nodes") or {}
+    for node_id in sorted(set(nodes)):
+        node = graph_nodes.get(node_id) or {}
+        names = list(node.get("knobs") or ())
+        names += [pair[1] for pair in node.get("field_bindings") or () if len(pair) == 2]
+        for name in names:
+            out.setdefault(str(name), node_id)
+    return out
+
+
 def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any], result: dict[str, Any],
                protected: Sequence[str] = ()) -> int | None:
     """The index of a compound proposal's first edit the result does not depend on: the
@@ -1497,6 +1511,10 @@ class Optimizer:
         if refusal:
             return refusal
         frozen = set(frozen or ())
+        # Knobs a protected or grader node reads or binds hold for every edit: a search
+        # that could rewrite them could rewrite the grader side's behaviour (a protected
+        # agent's prompt copying answers into the scored artifact).
+        guarded = _grader_side_knobs(parent.state, (*protected, *graders))
         # A compound proposal's edits go through the same checks one by one, each
         # against the state the edits before it left; the combined state is then held
         # to every rule below once, as one candidate.
@@ -1506,6 +1524,10 @@ class Optimizer:
             if edit.get("op") == "set_knob" and edit.get("name") in frozen:
                 return [_at(f"E-frozen: knob {edit.get('name')!r} is frozen for this run",
                             index, steps)]
+            if edit.get("op") in ("set_knob", "remove_knob") and edit.get("name") in guarded:
+                return [_at(f"E-frozen: knob {edit.get('name')!r} is read by "
+                            f"{guarded[edit.get('name')]!r}, a protected or grading node, so no "
+                            "edit may change it", index, steps)]
             # An operation that is not in the catalogue is not a failed precondition
             # (`proposal_refusal` refuses it): the two point at different fixes.
             before_step = state
@@ -1542,8 +1564,8 @@ class Optimizer:
         if tooled:
             return tooled
 
-        fixed = frozen | {name for name, value in parent.state.get("knobs", {}).items()
-                          if (value.get("spec") or {}).get("frozen")}
+        fixed = frozen | set(guarded) | {name for name, value in parent.state.get("knobs", {}).items()
+                                         if (value.get("spec") or {}).get("frozen")}
         for name in fixed:
             if state.get("knobs", {}).get(name) != parent.state.get("knobs", {}).get(name):
                 return [f"E-frozen: knob {name!r} must retain its value and declaration"]

@@ -130,7 +130,7 @@ class Applier:
         mode = seed.mode()
         self.seed_state = mode.state_dict()
         self.invariants = mode.invariants()
-        self.protected = tuple(mode.protected_nodes())
+        self.protected = tuple(mode.edit_protected())
         self.graders = tuple(mode.grader_nodes())
         self.optimizer = Optimizer()
 
@@ -970,6 +970,18 @@ class EditGenerator:
             return self.rng.choice(published)
         return self.rng.choice(self._facts(graph))
 
+    def _agent_prompt(self, graph: Graph) -> str:
+        """A new agent's prompt: a slot, or now and then a condition on a fact (bare,
+        ``==`` or ``!=``), which reads the fact without printing it."""
+        fact, roll = self._slot_fact(graph), self.rng.random()
+        if roll < 0.1:
+            return f"{{% if {fact} == 'wrong' %}}You were wrong; change your answer.{{% endif %}}Go."
+        if roll < 0.15:
+            return f"{{% if {fact} != 'right' %}}Try again.{{% else %}}Keep it.{{% endif %}}"
+        if roll < 0.2:
+            return f"{{% if {fact} %}}Something was graded.{{% endif %}}Go on."
+        return f"Think about {{{{{fact}}}}}"
+
     def new_node(self, state: dict[str, Any], kind: str | None = None) -> dict[str, Any]:
         """A node to insert: a copy of an existing one as rendered, or a fresh one."""
         rng, graph = self.rng, _graph_of(state)
@@ -1006,7 +1018,7 @@ class EditGenerator:
             policy = rng.choice(({},) * 5 + ({"tool_policy": "none"},) * 3 + ({"tool_policy": None},))
             return {"id": new_id, "kind": "agent", "role": "solver", **policy,
                     "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
-                    "prompt_template": f"Think about {{{{{self._slot_fact(graph)}}}}}",
+                    "prompt_template": self._agent_prompt(graph),
                     "system_prompt_template": f"You are {new_id}.",
                     "writes": rng.choice(([f"{new_id}.txt"],) * 6 + ([], [f"{new_id}.txt", f"{new_id}.md"])),
                     "produces": [f"{new_id}_fact"]}
