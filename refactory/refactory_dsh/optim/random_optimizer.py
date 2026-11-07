@@ -19,6 +19,17 @@ from .base import (
     READER_CONCURRENCY, Candidate, Optimizer, Proposal, ProposalContext, trajectory_groups,
 )
 
+def text_only(model: Any) -> Any:
+    """``model`` with ``tool_policy="none"``, when the client supports one.
+
+    Every optimizer call -- the proposal and each reader -- is a prompt in and JSON
+    out. On an agentic route (``claude_code``) the model would otherwise get tools in a
+    working directory next to the run's records. The run's own client is left alone.
+    """
+    with_policy = getattr(model, "with_tool_policy", None)
+    return with_policy("none") if callable(with_policy) else model
+
+
 #: A reader's role: go through one group of whole trajectories and report patterns.
 READER_SYSTEM = (
     "You read an AI pipeline's trajectories on evaluation items and report what you find. "
@@ -152,7 +163,7 @@ class AutoresearchOptimizer(Optimizer):
         super().__init__(k=k)
         if client is None:
             raise ValueError("the autoresearch optimizer needs a model client")
-        self._client = client
+        self._client = text_only(client)
         self._completion_options: dict[str, Any] = {}
         self._system = system or (
             "You are the optimizer of a search over workflows. You reply with JSON only."
@@ -160,7 +171,7 @@ class AutoresearchOptimizer(Optimizer):
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         import inspect
-        self._client = model
+        self._client = text_only(model)
         # Keep the original minimal ModelClient protocol compatible. DSH supports
         # an owned workspace, so its proposer receipts belong to this search.
         if workdir is not None and "workdir" in inspect.signature(model.complete).parameters:
@@ -176,6 +187,12 @@ class AutoresearchOptimizer(Optimizer):
 
         cache: dict[str, dict[str, Any]] = getattr(self, "_reader_cache", {})
         self._reader_cache = cache
+        # Kept in the run directory too, so a resumed run reuses what it paid for. The
+        # key is the group's whole text: the edited candidate's records for exactly
+        # these items.
+        from pathlib import Path
+        store = (Path(self.trace_path).parent / "reader_findings"
+                 if self.trace_path is not None else None)
         steps = ", ".join(f"`{n.get('id')}`" for n in ctx.nodes) or "(not listed)"
 
         def read(index: int, group: list[tuple[str, str]]) -> tuple[dict | None, dict | None]:
@@ -184,6 +201,12 @@ class AutoresearchOptimizer(Optimizer):
             key = hashlib.sha256(body.encode()).hexdigest()
             if key in cache:
                 return cache[key], None
+            if store is not None and (store / f"{key}.json").exists():
+                try:
+                    cache[key] = {**json.loads((store / f"{key}.json").read_text()), "group": index}
+                    return cache[key], None
+                except (OSError, json.JSONDecodeError):
+                    pass
             prompt = (f"# Reading trajectories -- group {index} of {len(groups)}\n\n"
                       f"Mode: `{ctx.mode_name}`. The pipeline's steps: {steps}.\n\n"
                       f"Below are {len(items)} train item(s) of the candidate being edited, "
@@ -205,6 +228,12 @@ class AutoresearchOptimizer(Optimizer):
             self.record_call(**call, reply=reply, error=None,
                              patterns=len(found["failure_patterns"]) + len(found["success_patterns"]))
             cache[key] = found
+            if store is not None:
+                try:
+                    store.mkdir(parents=True, exist_ok=True)
+                    (store / f"{key}.json").write_text(json.dumps(found, default=str))
+                except OSError:
+                    pass
             return found, None
 
         with ThreadPoolExecutor(max_workers=max(1, min(READER_CONCURRENCY, len(groups)))) as pool:

@@ -113,8 +113,8 @@ def _livemath_sized(item: str, *, passed: bool = False) -> dict[str, Any]:
 
 def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     """Within the budget: every item, whole (a 9000-character step output is not
-    clipped), wrong first, then failed with an error and recorded steps, then
-    passed, each by id; an error without steps stays in the cause table only."""
+    clipped), wrong first, then failed with an error (with or without recorded
+    steps), then passed, each by id."""
     records = ([_record(f"w{i:02d}") for i in range(12)]
                + [_record(f"p{i}", passed=True) for i in range(5)]
                + [_record("e1", error="CompletionTimeout: timed out")])
@@ -123,10 +123,11 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     long = "HEAD " + "x" * 9000 + " TAIL"
     records[0] = _record("w00", outputs={"compare": long, "precision": "p", "decide": "d"})
     text = _render(records + [stepped])
-    assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e2"] + [f"p{i}" for i in range(5)]
+    assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e1", "e2"] + [f"p{i}" for i in range(5)]
+    assert "All 19 train item(s): 12 answered wrong, 2 failed with an error, 5 passed." in text
+    assert "### Item e1 — failed with an error" in text and "Error: CompletionTimeout: timed out" in text
     assert "Every item in full" in text and long in text and "characters omitted" not in text
     assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text
-    assert "CompletionTimeout" in text, "the cause table still lists e1"
 
 
 def test_an_item_longer_than_the_budget_alone_is_clipped_with_a_note():
@@ -458,3 +459,113 @@ def test_groups_never_exceed_the_budget_with_uneven_items():
     assert len(groups) >= 2
     assert all(len("\n\n".join(block for _i, block in g)) <= 10000 for g in groups)
     assert [item for g in groups for item, _b in g] == ["w0", "w1", "w2", "w3"]
+
+
+
+class _WordyReaderClient(_ReaderClient):
+    """Readers that ramble: 50 patterns each, long texts and many long quotes."""
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+        if system != READER_SYSTEM:
+            return super().complete(prompt, system=system)
+        with self.lock:
+            self.readers.append(prompt)
+        items = [line.split()[2] for line in prompt.splitlines() if line.startswith("### Item ")]
+        return json.dumps({"failure_patterns": [{
+            "pattern": f"WORDY-{k} " + "§" * 5000, "step": "decide" * 50, "items": items * 10,
+            "evidence": ["¤" * 3000] * 8} for k in range(50)], "success_patterns": []})
+
+
+def test_wordy_readers_are_kept_within_the_budget(tmp_path):
+    from refactory_dsh.optim.base import READER_PATTERNS, TRAJECTORY_BUDGET
+
+    client = _WordyReaderClient()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    section = _section(client.proposals[0])
+    assert len(section) <= TRAJECTORY_BUDGET
+    assert section.count("WORDY-") <= READER_PATTERNS * len(client.readers)
+    assert "§" * 500 not in section and "¤" * 300 not in section
+    assert "more pattern(s) not shown: the findings are kept within" in section
+    table = section.split("### Every item", 1)[1]
+    assert all(f"| {r['id']} |" in table for r in _sized_records()), "the table survives"
+
+
+def test_reader_findings_are_kept_and_reused_by_a_resumed_run(tmp_path):
+    records = _sized_records()
+    first = _ReaderClient()
+    optimizer = AutoresearchOptimizer(first)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=records), 1, [])
+    assert list((tmp_path / "reader_findings").glob("*.json"))
+    again = _ReaderClient()
+    resumed = AutoresearchOptimizer(again)  # a fresh process: no in-memory cache
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ProposalContext(nodes=NODES, item_records=records), 1, [])
+    assert again.readers == [], "a resumed run pays for no group again"
+    assert "PATTERN-1" in again.proposals[0]
+
+
+def test_optimizer_and_reader_calls_run_without_tools(tmp_path, monkeypatch):
+    """Every optimizer call goes out with tool_policy none: the worker receipt
+    records it for the proposal and for each reader. The run's own client keeps its
+    tools."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_livemath_blocks import _make_route_client
+
+    from refactory_dsh.model import DshModelClient
+
+    def fake_complete(self, prompt, *, system="", workdir=None, target_workdir=None):  # type: ignore[no-untyped-def]
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+        if system == READER_SYSTEM:
+            return json.dumps({"failure_patterns": [], "success_patterns": []})
+        return '{"diagnosis": "d", "proposals": []}'
+
+    monkeypatch.setattr(DshModelClient, "_complete", fake_complete)
+    client = _make_route_client()
+    client._dsh_home = tmp_path / "home"
+    client._budget = None
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.bind_model(client, workdir=tmp_path / "proposer")
+    assert optimizer._client._tool_policy == "none"
+    assert getattr(client, "_tool_policy", "") == ""
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    receipts = [json.loads(p.read_text()) for p in (tmp_path / "proposer").glob("**/.refactory/workers/*.json")]
+    assert len(receipts) >= 2, "the readers and the proposal each made a call"
+    assert all(r.get("requested_tool_policy") == "none" for r in receipts), receipts
+
+
+class _ManyShortPatterns(_ReaderClient):
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+        if system != READER_SYSTEM:
+            return super().complete(prompt, system=system)
+        with self.lock:
+            self.readers.append(prompt)
+        return json.dumps({"failure_patterns": [
+            {"pattern": f"SHORT-{k}", "step": "decide", "items": ["w00"], "evidence": ["x"]}
+            for k in range(50)], "success_patterns": []})
+
+
+def test_each_reader_contributes_a_bounded_number_of_patterns():
+    from refactory_dsh.optim.base import READER_PATTERNS
+
+    client = _ManyShortPatterns()
+    AutoresearchOptimizer(client).propose(
+        ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    section = _section(client.proposals[0])
+    assert section.count("SHORT-") == READER_PATTERNS * len(client.readers)
+
+
+def test_a_retry_reuses_readers_even_without_a_run_directory():
+    client = _ReaderClient()
+    optimizer = AutoresearchOptimizer(client)  # no trace path, so nothing on disk
+    ctx = ProposalContext(nodes=NODES, item_records=_sized_records())
+    optimizer.propose(ctx, 1, [])
+    read = len(client.readers)
+    optimizer.propose(ctx, 1, [])
+    assert len(client.readers) == read

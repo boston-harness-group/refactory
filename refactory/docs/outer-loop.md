@@ -85,9 +85,9 @@ step's prompt) and its `choices`. Then it shows each step's output from the reco
 the expected answer (`label` and `label_text`), the prediction and the grader's reason.
 
 - **Order.** Items answered wrong come first, then those that failed with an error
-  and recorded step output (they are in the cause table too), then those that passed,
-  each group by id. With repeats each item is shown once, from its first repeat. An
-  item that errored before any step ran stays in the cause table only.
+  (with their error, whether or not any step ran; they are in the cause table too),
+  then those that passed, each group by id. With repeats each item is shown once, from
+  its first repeat.
 - **Full detail, one call's budget.** Items are shown whole, every step output
   unclipped. One call's evidence budget is 120000 characters (`TRAJECTORY_BUDGET`;
   the context's `evidence_budget`). When every item fits, they all go inline into the
@@ -98,8 +98,18 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   route, prompt in and JSON out, no edits. A reader returns failure and success
   patterns, each with its item ids, short verbatim quotes and the step it implicates.
   Reader calls run concurrently (`READER_CONCURRENCY`, 4) and are recorded in
-  `optimizer_trace.jsonl` with `kind: "reader"`. A retry after a refusal reuses them.
-- **What the proposal call then gets.** All the readers' findings, verbatim. Then a
+  `optimizer_trace.jsonl` with `kind: "reader"`. Their findings are kept in
+  `<run root>/reader_findings/`, keyed by the group's whole text (the edited
+  candidate's records for exactly those items), so a retry after a refusal and a
+  resumed run reuse them instead of paying again.
+- **No tools.** Every optimizer call, the proposal and each reader, is made with
+  `tool_policy="none"`: prompt in, JSON out, no tools in a working directory beside
+  the run's records. This is the same mechanism SkillOpt's calls use; the run's own
+  client keeps its tools.
+- **What the proposal call then gets.** The readers' findings, verbatim but bounded:
+  at most 12 patterns per reader, each pattern's text at most 400 characters, at most 3
+  quotes of at most 240 characters and 40 item ids, and the whole findings block at
+  most 40% of the budget (`READER_*`). Then a
   table of every item: outcome, expected, predicted, the grader's reason, the error.
   Then as many items in full as the rest of the budget holds, failures and passes
   alternating. A reader call that fails is noted, with its items, and the proposal
@@ -109,8 +119,8 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   and tail, with a note.
 - **Size.** For `livemath/skill_graph` with 35 LiveMath-sized train items (about 528k
   characters in full): 5 reader calls of 7 items (about 106.5k characters each), then
-  one proposal call of about 123k characters. That is 6 calls, none much over 120k
-  characters (about 30k-40k tokens).
+  one proposal call of about 135k characters (about 34k tokens): the trajectory section
+  is about 105k and the pipeline with its node specs about 18k. That is 6 calls.
 
 "Evidence from the traces" shows the gradient without the noise. The leaderboard copy
 is already "Recent results". Per-trial worker receipts and run-directory paths

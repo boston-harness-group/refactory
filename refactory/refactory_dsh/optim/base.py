@@ -41,6 +41,15 @@ REASONS_PER_CODE = 2
 TRAJECTORY_BUDGET = 120000
 #: How many reader calls run at once.
 READER_CONCURRENCY = 4
+#: A reader's findings as the proposal call shows them: at most this many patterns
+#: per reader, each pattern's text and quotes clipped, at most this many quotes and
+#: item ids per pattern, and the whole findings block within a share of the budget.
+READER_PATTERNS = 12
+READER_PATTERN_CHARS = 400
+READER_QUOTES = 3
+READER_QUOTE_CHARS = 240
+READER_ITEM_IDS = 40
+READER_FINDINGS_SHARE = 0.4
 #: The metadata keys an item's input is read from, first found; else the first
 #: step's prompt stands in for it.
 TRAJECTORY_INPUT_KEYS = ("question", "problem", "task_description", "instruction", "input", "prompt")
@@ -625,13 +634,10 @@ def _item_block(record: dict[str, Any], budget: int) -> str:
 
 
 def _ordered_items(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every train item once (its first repeat): wrong, then failed with an error and
-    recorded steps, then passed, each group by id. An error with no steps is the
-    cause table's alone."""
+    """Every train item once (its first repeat): wrong, then failed with an error,
+    then passed, each group by id."""
     first: dict[str, dict[str, Any]] = {}
     for record in records:
-        if record.get("error_text") and not record.get("exchanges"):
-            continue
         item = str(record.get("id", ""))
         held = first.get(item)
         if held is None or int(record.get("repeat") or 1) < int(held.get("repeat") or 1):
@@ -708,16 +714,32 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                      "table and the items in full below.)")
     else:
         lines += ["", "### What the readers found"]
+        found_lines: list[str] = []
         for found in findings:
+            shown = 0
             for kind in ("failure_patterns", "success_patterns"):
                 for pattern in found.get(kind) or ():
-                    if not isinstance(pattern, dict):
+                    if not isinstance(pattern, dict) or shown >= READER_PATTERNS:
                         continue
-                    lines.append(
-                        f"- [{kind.split('_')[0]}] {pattern.get('pattern', '')} (step "
-                        f"`{pattern.get('step', 'unclear')}`; items "
-                        f"{', '.join(str(i) for i in pattern.get('items') or ())}) -- evidence: "
-                        + " | ".join(f'"{quote}"' for quote in pattern.get("evidence") or ()))
+                    shown += 1
+                    ids = [str(i) for i in pattern.get("items") or ()]
+                    id_text = ", ".join(ids[:READER_ITEM_IDS]) + (
+                        f" and {len(ids) - READER_ITEM_IDS} more" if len(ids) > READER_ITEM_IDS else "")
+                    quotes = [f'"{_clip(quote, READER_QUOTE_CHARS)}"'
+                              for quote in list(pattern.get("evidence") or ())[:READER_QUOTES]]
+                    found_lines.append(
+                        f"- [{kind.split('_')[0]}] {_clip(pattern.get('pattern', ''), READER_PATTERN_CHARS)} "
+                        f"(step `{_clip(pattern.get('step', 'unclear'), 60)}`; items {id_text}) "
+                        "-- evidence: " + " | ".join(quotes))
+        cap = int(budget * READER_FINDINGS_SHARE)
+        used_findings = 0
+        for index, line in enumerate(found_lines):
+            if used_findings + len(line) + 1 > cap:
+                lines.append(f"({len(found_lines) - index} more pattern(s) not shown: the "
+                             f"findings are kept within {cap} characters)")
+                break
+            lines.append(line)
+            used_findings += len(line) + 1
         for failure in failures:
             lines.append(f"(Group {failure.get('group')} -- items "
                          f"{', '.join(str(i) for i in failure.get('items') or ())} -- could "
