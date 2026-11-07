@@ -73,6 +73,26 @@ and `hill_climb` optimizers run with it.
   one batch proposed and gated. Both settings need `--val-gate 1`, are saved with the
   run and are kept on resume.
 
+## Train minibatches (`--train-minibatch N`)
+
+By default every candidate is scored on the whole train part. With
+`--train-minibatch N` and a train part of more than N items, each epoch samples N train
+ids with SkillOpt's per-epoch seed (`train_batch_seed`), and works with or without
+`--val-gate`:
+
+- **One sample per epoch.** Every candidate scored in that epoch uses the same sample,
+  so candidates in a round are comparable. The sample changes from epoch to epoch, and
+  each epoch's ids are journaled (`train_minibatch`).
+- **The evidence is that minibatch.** When the candidate the optimizer edits was scored
+  in an earlier epoch, it is scored again on this epoch's minibatch, so the proposal
+  evidence is that minibatch, as SkillOpt rolls out its current candidate on each
+  step's batch. Its score is left alone; only the records the optimizer reads change.
+  This costs one minibatch of rollouts per such epoch.
+- **Resume.** A resumed run samples the same ids.
+- **Unaffected.** Val and test are not sampled.
+
+`0`, or a train part of N items or fewer, scores the whole train part as before.
+
 ## What the optimizer sees, and what it said
 
 `ProposalContext.render()` is the request every model optimizer reads. Besides the
