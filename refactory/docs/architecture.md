@@ -261,7 +261,9 @@ state**. A policy that needs a wider pool — islands, a niche grid, a tournamen
 an archive — could not be written as a proposer. The loop hands over the evaluated
 population now and the optimizer selects, which is why `ProposalContext` carries
 `elite`: an optimizer with no parent policy of its own takes that many, so widening
-the pool does not silently change what it proposes.
+the pool does not silently change what it proposes. Its `render()` also shows a
+per-epoch sample of the edited candidate's train items in full: input, each step's
+output, expected vs predicted (docs/outer-loop.md, "What the optimizer sees").
 
 ## 7. The loop
 

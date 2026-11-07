@@ -76,6 +76,8 @@ OVERFIT_THRESHOLD = 0.15
 
 #: Where the run writes how the winner did on the items no candidate saw.
 HOLDOUT_FILE = "holdout.json"
+#: The optimizer's model calls (system, prompt, reply, parsed proposals, error).
+OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
 
 class LoopError(RuntimeError):
@@ -508,6 +510,8 @@ class Loop(OuterLoop):
         #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
         #: records the proposal context carries, and is not a strategy decision.
         self._editing_parent: str | None = None
+        #: The proposal attempt within the current optimizer step (``propose``).
+        self._proposal_attempt = 0
         #: A pure OuterLoop subclass whose hooks this Loop drives.  When set,
         #: ``strategy()``, ``strategy_state_dict()``, and
         #: ``load_strategy_state()`` delegate to this object.
@@ -682,6 +686,11 @@ class Loop(OuterLoop):
             except seed_cache.SeedCacheError as exc:
                 raise LoopError(str(exc)) from exc
         self._seed_ledger()
+        # Every model call the optimizer makes, appended as it happens; a fresh run
+        # in this directory starts it over, as it does the journal.
+        self.optimizer.trace_path = self.root / OPTIMIZER_TRACE
+        if not self.config.resume:
+            self.optimizer.trace_path.unlink(missing_ok=True)
         resumed = self._replay_if_asked()
         (self.root / run_history.RUN_FILE).write_text(
             json.dumps(
@@ -1577,6 +1586,7 @@ class Loop(OuterLoop):
             selected = self.select_parents(1)
             self._editing_parent = selected[0].id if selected else None
         before = len(self.rejections)
+        self._proposal_attempt = 0
         proposals = self.propose(run, parents, self.batch_size(run))
         candidates = self.install(run, proposals, parents)
         rejections = self.rejections[before:]
@@ -1939,8 +1949,13 @@ class Loop(OuterLoop):
         from refactory_dsh.budgets import BudgetExhausted
 
         self.optimizer.proposal_rounds += 1
+        # Which attempt of this generation's proposal round this is: a retry after a
+        # refusal reads another sample of the parent's trajectories.
+        self._proposal_attempt += 1
         try:
-            return self.optimizer.propose(self._context(), n, parents)
+            context = self._context()
+            context.attempt = self._proposal_attempt
+            return self.optimizer.propose(context, n, parents)
         except BudgetExhausted as exc:
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
             raise

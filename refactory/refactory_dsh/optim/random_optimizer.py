@@ -150,8 +150,18 @@ class AutoresearchOptimizer(Optimizer):
             f"{ctx.render()}\n\nPropose at most {max(1, n)} update(s). "
             "Reply with the JSON object described under 'Answer' and nothing else."
         )
-        text = self._client.complete(question, system=self._system, **self._completion_options)
-        payload = extract_json(text)
+        call = {"epoch": ctx.epoch, "generation": ctx.generation, "system": self._system,
+                "prompt": question}
+        try:
+            text = self._client.complete(question, system=self._system, **self._completion_options)
+        except Exception as exc:
+            self.record_call(**call, reply=None, proposals=0, error=f"{type(exc).__name__}: {exc}")
+            raise
+        try:
+            payload = extract_json(text)
+        except Exception as exc:
+            self.record_call(**call, reply=text, proposals=0, error=f"{type(exc).__name__}: {exc}")
+            raise
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
         parent_ids = {parent.id for parent in parents}
 
@@ -177,7 +187,10 @@ class AutoresearchOptimizer(Optimizer):
                     parent=parent if parent in parent_ids else None,
                 )
             )
-        return proposals[: max(1, n)]
+        proposals = proposals[: max(1, n)]
+        self.record_call(**call, reply=text, proposals=len(proposals),
+                         diagnosis=self.last_diagnosis, error=None)
+        return proposals
 
 
 def _confidence(value: Any) -> float:
