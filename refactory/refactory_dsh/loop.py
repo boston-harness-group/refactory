@@ -512,6 +512,8 @@ class Loop(OuterLoop):
         self._editing_parent: str | None = None
         #: The proposal attempt within the current optimizer step (``propose``).
         self._proposal_attempt = 0
+        #: Each accepted proposal's rationale and prediction, by candidate id.
+        self._proposal_notes: dict[str, dict[str, Any]] = {}
         #: A pure OuterLoop subclass whose hooks this Loop drives.  When set,
         #: ``strategy()``, ``strategy_state_dict()``, and
         #: ``load_strategy_state()`` delegate to this object.
@@ -1385,11 +1387,19 @@ class Loop(OuterLoop):
         one nobody has tried, and will keep re-proposing what it already knows.
         """
         buckets: dict[str, dict[str, list[float]]] = {}
+        # With the validation gate, what it decided about the candidates behind each
+        # value, so a value whose candidates were all rejected is not read as a gain.
+        decisions: dict[str, dict[str, dict[str, int]]] = {}
         for candidate in evaluated:
+            decision = self._gate_decision(candidate.id)
             for name, entry in (candidate.state.get("knobs") or {}).items():
                 buckets.setdefault(name, {}).setdefault(str(entry["value"]), []).append(
                     float(candidate.score)
                 )
+                if decision is not None:
+                    counts = decisions.setdefault(name, {}).setdefault(
+                        str(entry["value"]), {"kept": 0, "rejected": 0, "not gated": 0})
+                    counts["kept" if decision in ("kept", "current") else decision] += 1
         attribution: dict[str, Any] = {}
         for name, values in sorted(buckets.items()):
             attribution[name] = {
@@ -1398,6 +1408,7 @@ class Loop(OuterLoop):
                         "n": len(scores),
                         "mean": round(sum(scores) / len(scores), 6),
                         "max": round(max(scores), 6),
+                        **({"gate": decisions[name][value]} if name in decisions else {}),
                     }
                     for value, scores in sorted(values.items())
                 },
@@ -1642,16 +1653,21 @@ class Loop(OuterLoop):
             )
         for candidate in candidates:
             self._journal_candidate(candidate)
-            self.proposals.setdefault(candidate.id, {
+            notes = self._proposal_notes.get(candidate.id) or {}
+            record = self.proposals.setdefault(candidate.id, {
                 "id": candidate.id,
                 "parent": candidate.parent,
                 "edits": candidate.edits[-1:],
-                "rationale": "",
-                "prediction": "",
-                "confidence": 0.0,
+                "rationale": str(notes.get("rationale") or ""),
+                "prediction": str(notes.get("prediction") or ""),
+                "confidence": float(notes.get("confidence") or 0.0),
                 "origin": "optimizer",
-                "diagnosis": getattr(self.optimizer, "last_diagnosis", ""),
+                "diagnosis": str(notes.get("diagnosis")
+                                 or getattr(self.optimizer, "last_diagnosis", "") or ""),
+                "epoch": self.epoch,
             })
+            # Journaled, so a resumed run still shows the optimizer its own reasoning.
+            self._journal("proposal", **record)
         self._write_analysis()
         self._append_rejections(rejections)
         self._progress(
@@ -1881,8 +1897,8 @@ class Loop(OuterLoop):
                         attempt=0,
                         edit=candidate.edits[-1] if candidate.edits else {},
                         reasons=[
-                            "E-duplicate: the candidate's state already exists, so its "
-                            "batch slot was lost"
+                            f"E-duplicate: the candidate's state already exists as "
+                            f"candidate {candidate.id}, so its batch slot was lost"
                         ],
                     )
                 )
@@ -1943,6 +1959,14 @@ class Loop(OuterLoop):
             # Journaled, not derived: the report states what bound the run, and a
             # run whose steps are separate processes reads that from the log.
             self._journal("bound", bound=self.bound)
+        gate_fields: dict[str, Any] = {}
+        if self.config.val_gate and self._custom_strategy is None:
+            # A person reads this line: say what the gate decided, with its val scores,
+            # rather than a train-score "improved" the gate may have rejected.
+            gate = self._gate()
+            gate_fields = {"gate": dict(getattr(self, "_epoch_gate", {}) or {}),
+                           "val_best": gate.best_score if gate.best_id else None,
+                           "val_current": gate.current_score if gate.current_id else None}
         self._progress(
             "scheduler",
             epoch=self.epoch,
@@ -1951,6 +1975,7 @@ class Loop(OuterLoop):
             improved=summary.improved,
             bound=self.bound,
             another=not self.bound,
+            **gate_fields,
         )
         return not self.bound
 
@@ -2063,9 +2088,9 @@ class Loop(OuterLoop):
                                 attempt=rounds,
                                 edit=proposal.edit,
                                 reasons=[
-                                    "E-duplicate: this state was already accepted from "
-                                    "the same batch, so evaluating it again would spend "
-                                    "a batch slot on a point already scored"
+                                    f"E-duplicate: this state is candidate {outcome.id}, "
+                                    "already accepted from the same batch, so evaluating it "
+                                    "again would spend a batch slot on a point already scored"
                                 ],
                                 rationale=proposal.rationale,
                             )
@@ -2073,6 +2098,13 @@ class Loop(OuterLoop):
                         continue
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
+                    # Its own words, for "Your earlier reasoning" in later requests.
+                    # The diagnosis of the call that produced this proposal: a later
+                    # retry in the same round replaces the optimizer's last one.
+                    self._proposal_notes[outcome.id] = {
+                        "rationale": proposal.rationale, "prediction": proposal.prediction,
+                        "confidence": proposal.confidence,
+                        "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or "")}
             # Another response is useful only if a validation round remains.
             if len(accepted) >= wanted or len(self.rejections) == before or _attempt >= cap:
                 break
@@ -2551,8 +2583,12 @@ class Loop(OuterLoop):
         self.open_epoch()
         evaluated = self.forward()
         early = ""
+        before = (len(self._gate_accepted), len(self._gate_rejected))
         if self.config.val_gate:
             self._gate_population(run or Run(_loop=self))
+            # What this epoch's gating decided, for the epoch's progress line.
+            self._epoch_gate = {"kept": len(self._gate_accepted) - before[0],
+                                "rejected": len(self._gate_rejected) - before[1]}
             # SkillOpt's early stop, checked right after the epoch's gating so a
             # stopping run proposes nothing it will not score.
             self._count_stale_epoch()
@@ -2635,11 +2671,30 @@ class Loop(OuterLoop):
         taken off it.
         """
         nodes = node_count(candidate.state)
-        return {
+        row = {
             **candidate.describe(),
             "nodes": nodes,
             "size_cost": round(self.config.parsimony * nodes, 6),
         }
+        gate = self._gate_decision(candidate.id)
+        if gate is not None:
+            row["gate"] = gate
+        return row
+
+    def _gate_decision(self, candidate_id: str) -> str | None:
+        """What the validation gate decided about a candidate, as the optimizer reads
+        it: ``current`` (the one it edits), ``kept``, ``rejected`` or ``not gated``.
+        ``None`` without ``val_gate``. Never a val score."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return None
+        gate = self._gate()
+        if candidate_id == gate.current_id:
+            return "current"
+        if candidate_id in self._gate_accepted:
+            return "kept"
+        if candidate_id in self._gate_rejected:
+            return "rejected"
+        return "not gated"
 
     def scoring(self) -> dict[str, Any]:
         """How a candidate's score is built, said where the numbers are recorded."""
@@ -3241,7 +3296,71 @@ class Loop(OuterLoop):
             item_records=self._parent_train_records(board),
             parent_item_records=self._parent_train_records(board),
             graph_note=graph_note,
+            edit_pairs=self._edit_pairs(board),
+            reasoning=self._reasoning_entries(board),
         )
+
+    def _edited_id(self, board: list[Candidate]) -> str | None:
+        parent_id = self.strategy_decision.get("parent") or self._editing_parent
+        return str(parent_id) if parent_id else (board[0].id if board else None)
+
+    def _edit_pairs(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """The latest evaluated children of the edited candidate (one batch), each with
+        its parent's train records; or, when it has none yet, the edited candidate
+        against its own parent. Train records only."""
+        edited = self._edited_id(board)
+        by_id = {c.id: c for c in self.population}
+        if edited is None or edited not in by_id:
+            return []
+        children = [c for c in self.population if c.parent == edited and c.evaluated]
+        chosen = children[-max(1, int(self.config.batch_size)):] or [by_id[edited]]
+        pairs = []
+        for child in chosen:
+            parent = by_id.get(child.parent or "")
+            pairs.append({
+                "child": child.id, "parent": parent.id if parent else None,
+                "edit": child.edits[-1:], "gate": self._gate_decision(child.id),
+                "child_records": list(self._train_item_records.get(child.id, [])),
+                "parent_records": (list(self._train_item_records.get(parent.id, []))
+                                   if parent else []),
+            })
+        return pairs
+
+    def _reasoning_entries(self, board: list[Candidate]) -> list[dict[str, Any]]:
+        """The optimizer's own reasoning about recent candidates -- the line from the
+        seed to the edited candidate, and the latest refused children -- beside what
+        happened to each. Train scores and gate decisions only."""
+        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change
+
+        by_id = {c.id: c for c in self.population}
+        line: list[Candidate] = []
+        node = by_id.get(self._edited_id(board) or "")
+        while node is not None and node.parent:
+            line.append(node)
+            node = by_id.get(node.parent)
+        line.reverse()
+        rejected = [c for c in self.population if c.evaluated and c not in line
+                    and self._gate_decision(c.id) == "rejected"]
+        chosen = (line + rejected[-REASONING_ENTRIES:])
+        chosen.sort(key=lambda c: self.population.index(c))
+        entries = []
+        for candidate in chosen[-REASONING_ENTRIES:]:
+            record = self.proposals.get(candidate.id) or {}
+            if record.get("origin") != "optimizer":
+                continue
+            parent = by_id.get(candidate.parent or "")
+            change = (edit_change(self._train_item_records.get(parent.id),
+                                  self._train_item_records.get(candidate.id))
+                      if parent is not None and candidate.evaluated else None)
+            entries.append({
+                "id": candidate.id, "epoch": record.get("epoch"),
+                "edit": candidate.edits[-1:], "rationale": record.get("rationale"),
+                "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
+                "gate": self._gate_decision(candidate.id), "score": candidate.score,
+                "fixed": len(change["fixed"]) if change and change["shared"] else None,
+                "broken": len(change["broken"]) if change and change["shared"] else None,
+            })
+        return entries
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
         """The graph and knobs of the candidate this step edits, and a note when not.
@@ -3587,6 +3706,13 @@ class Loop(OuterLoop):
             }
             for candidate in self.population
         }
+        for line in journal.read_text().splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") == "proposal" and record.get("id") in self.proposals:
+                self.proposals[record["id"]] = {k: v for k, v in record.items() if k != "event"}
 
     def _replay_control(self, record: dict[str, Any]) -> None:
         """Restore one person's act while the journal is being replayed.
