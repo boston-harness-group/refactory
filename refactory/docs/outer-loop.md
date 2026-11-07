@@ -58,7 +58,9 @@ and `hill_climb` optimizers run with it.
   value, how many of its candidates were kept, rejected or not yet gated. The request
   says it edits the `current` candidate, and that a `rejected` one did not generalise.
   The history's best is the best kept candidate. Val scores are never shown to it;
-  scores there are train scores.
+  scores there are train scores. That includes "Previous runs of this mode": a gated
+  sibling run's report gives its winner's val score as `best_score`, so the summary
+  carries that run's `best_train_score` instead.
 - **What a person reads.** Each epoch's progress line says how many candidates the
   gate kept and rejected that epoch, with the val best and current scores, instead of
   a train-score "improved".
@@ -195,7 +197,7 @@ catalogue, every field that takes a node (`node`, `gate`, and `into` for two) sa
 Two more sections carry what SkillOpt's slow update and carried-forward notes give its
 optimizer, at no extra compute (train records only):
 
-- **What the last edit changed.** The latest children of the edited candidate (one
+- **What the last edit changed.** The latest children of the edited candidate (its last
   batch), or the edited candidate itself when it has none yet, are compared with their
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
@@ -208,8 +210,9 @@ optimizer, at no extra compute (train records only):
   from the seed to the edited candidate, and the latest rejected children. Each shows
   the rationale and prediction the optimizer gave when proposing it, the round's
   diagnosis, the gate's decision, its train score and its fixed and broken counts
-  against its parent. Texts are clipped to 600 characters. The proposals' own words are
-  journaled, so a resumed run keeps them.
+  against its parent. Texts are clipped to 600 characters. Each proposal keeps the
+  diagnosis of the call that produced it, and the proposals' own words are journaled,
+  so a resumed run keeps them.
 
 A proposal refused as a duplicate (`E-duplicate`) is told which candidate it repeats
 (its id), so the retry can look it up and move on. This applies with or without the

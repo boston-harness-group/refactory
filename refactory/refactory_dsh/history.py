@@ -136,7 +136,12 @@ def _from_report(path: Path, report: dict[str, Any], *, limit: int) -> RunArchiv
         bound=str(report.get("bound", "")),
         evaluations=int(report.get("evaluations") or 0),
         seed_score=_number(report.get("seed_score")),
-        best_score=_number(report.get("best_score")),
+        # A validation-gated run's report gives its winner's val score as best_score
+        # (best_score_basis); an optimizer is never shown a held-out number, so the
+        # train score it reports beside it is carried forward instead.
+        best_score=_number(report.get("best_train_score")
+                           if str(report.get("best_score_basis") or "").startswith("val")
+                           else report.get("best_score")),
         candidates=tuple(board[:limit]),
         rejection_codes=dict(report.get("rejection_codes") or {}),
         accepted_op_mix=dict(report.get("accepted_op_mix") or {}),

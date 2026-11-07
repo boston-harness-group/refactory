@@ -1662,7 +1662,8 @@ class Loop(OuterLoop):
                 "prediction": str(notes.get("prediction") or ""),
                 "confidence": float(notes.get("confidence") or 0.0),
                 "origin": "optimizer",
-                "diagnosis": getattr(self.optimizer, "last_diagnosis", ""),
+                "diagnosis": str(notes.get("diagnosis")
+                                 or getattr(self.optimizer, "last_diagnosis", "") or ""),
                 "epoch": self.epoch,
             })
             # Journaled, so a resumed run still shows the optimizer its own reasoning.
@@ -2098,9 +2099,12 @@ class Loop(OuterLoop):
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
                     # Its own words, for "Your earlier reasoning" in later requests.
+                    # The diagnosis of the call that produced this proposal: a later
+                    # retry in the same round replaces the optimizer's last one.
                     self._proposal_notes[outcome.id] = {
                         "rationale": proposal.rationale, "prediction": proposal.prediction,
-                        "confidence": proposal.confidence}
+                        "confidence": proposal.confidence,
+                        "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or "")}
             # Another response is useful only if a validation round remains.
             if len(accepted) >= wanted or len(self.rejections) == before or _attempt >= cap:
                 break

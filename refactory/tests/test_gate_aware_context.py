@@ -257,3 +257,62 @@ def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path,
         resumed.run()
     after = again.contexts[0].render()
     assert "RATIONALE-1" in after and "DIAGNOSIS-2" in after, "kept across a resume"
+
+
+def test_a_prior_gated_runs_val_score_never_reaches_the_prompt(tmp_path, monkeypatch):
+    """A sibling run with the validation gate reports its winner's val score as
+    best_score; the next run's "Previous runs" shows that run's train score instead."""
+    import json
+
+    first, _ = _run(tmp_path, monkeypatch, [[(5, 7)], [], []], val_gate=True,
+                    runs_root=tmp_path / "runs" / "a")
+    report = json.loads((first.root / "report.json").read_text())
+    assert report["best_score_basis"].startswith("val"), "setup: a gated run"
+    val_best, train_best = report["best_score"], report["best_train_score"]
+    assert val_best != train_best
+    second, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], [], []],
+                            val_gate=True, epochs=1, runs_root=tmp_path / "runs" / "b")
+    text = proposer.contexts[0].render()
+    previous = text[text.index("## Previous runs of this mode"):]
+    previous = previous[:previous.index("\n## ", 5)]
+    assert str(val_best) not in previous and f"{val_best:.6g}" not in previous
+    assert str(train_best) in previous
+
+
+def test_each_proposal_keeps_the_diagnosis_of_the_call_that_made_it(tmp_path, monkeypatch):
+    """The first call's proposal is accepted; a retry for the rest of the batch says
+    something else. The accepted candidate keeps the first call's diagnosis."""
+    from refactory_dsh.loop import Loop
+    from refactory_dsh.optim import Optimizer, Proposal
+
+    class TwoCalls(Optimizer):
+        name = "two_calls"
+
+        def __init__(self) -> None:
+            super().__init__(k=1)
+            self.calls = 0
+
+        def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            self.last_diagnosis = f"DIAGNOSIS-{self.calls}"
+            if self.calls == 1:
+                return [Proposal(edit={"op": "set_knob", "name": "level", "value": 7},
+                                 parent=parents[0].id),
+                        Proposal(edit={"op": "no_such_op"}, parent=parents[0].id)]
+            return [Proposal(edit={"op": "no_such_op_again"}, parent=parents[0].id)]
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    proposer = TwoCalls()
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=1, batch_size=2, attempts=2)
+        loop.optimizer = proposer
+        loop.run()
+    assert proposer.calls >= 2, "setup: a retry happened"
+    seven = next(c for c in loop.population if _level(c) == 7)
+    assert loop.proposals[seven.id]["diagnosis"] == "DIAGNOSIS-1"
+
+
+def test_the_comparison_heading_says_children(tmp_path, monkeypatch):
+    _loop_, proposer = _run_reasoning(tmp_path, monkeypatch)
+    assert "The latest children of the candidate you edit (its last batch)" in proposer.contexts[2].render()

@@ -956,7 +956,8 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
     if not pairs:
         return []
     lines = ["## What the last edit changed",
-             "The latest child of the candidate you edit, compared with its parent item by "
+             "The latest children of the candidate you edit (its last batch), or that "
+             "candidate itself when it has none yet, each compared with its parent item by "
              "item on the train items both were scored on. The two were scored in different "
              "rounds with different seeds, so some changes may be run-to-run noise."]
     blocks: list[str] = []
