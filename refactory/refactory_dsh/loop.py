@@ -3724,7 +3724,8 @@ def _holdout_line(audit: dict[str, Any]) -> str:
         # ``audit_parts``: the winner's latest val score against its latest test score.
         if audit["val"] is None or audit["test"] is None:
             return f"holdout: {audit.get('note') or 'no val or test score'} (val and test parts)"
-        verdict = "overfit" if audit.get("overfit") else "holds up"
+        verdict = ("unmeasured" if audit.get("status") == "unmeasured"
+                   else "overfit" if audit.get("overfit") else "holds up")
         added = audit.get("added_gap")
         added_text = (f", added by the search {added:.4f}" if isinstance(added, (int, float))
                       else "")

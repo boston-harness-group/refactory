@@ -128,3 +128,20 @@ def test_a_candidate_that_games_its_scorer_on_a_small_val_part_is_overfit(tmp_pa
     assert audit["seed_gap"] == pytest.approx(0.0) and audit["added_gap"] == pytest.approx(0.8)
     assert audit["overfit"] is True and report["exit_ok"] is False
     assert "overfit" in report["error"]
+
+
+def test_an_unmeasured_audit_has_its_own_line(tmp_path):
+    from refactory_dsh.loop import _holdout_line
+
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path)
+    seed_c = Candidate.from_state({"graph": {"nodes": {}}, "knobs": {"level": {"value": 5}}})
+    child = Candidate.from_state({"graph": {"nodes": {}}, "knobs": {"level": {"value": 7}}},
+                                 parent=seed_c.id)
+    loop.population = [seed_c, child]
+    loop._parts_manifest = {"train": ["t1"], "val": ["v1"], "test": ["x1"]}
+    loop._part_results[seed_c.id] = {"val": [{"score": 0.5}]}
+    loop._part_results[child.id] = {"val": [{"score": 0.9}], "test": [{"score": 0.4}]}
+    line = _holdout_line(loop.audit_parts(child))
+    assert "— unmeasured (val and test parts)" in line
+    assert "holds up" not in line and "overfit (" not in line
