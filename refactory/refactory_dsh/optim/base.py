@@ -743,7 +743,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
         for failure in failures:
             lines.append(f"(Group {failure.get('group')} -- items "
                          f"{', '.join(str(i) for i in failure.get('items') or ())} -- could "
-                         f"not be read: {failure.get('error')}; those items are in the table.)")
+                         f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
+                         "the table.)")
     lines += ["", "### Every item",
               _table(["item", "outcome", "expected", "predicted", "grader", "error"],
                      [[r.get("id"), _outcome(r), _clip(_expected(r), _TABLE_CELL_CHARS),

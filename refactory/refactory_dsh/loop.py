@@ -705,6 +705,7 @@ class Loop(OuterLoop):
         )
         # Load the loop-level parts manifest if configured or already on disk.
         self._load_parts_manifest()
+        self._check_optimizer_route()
         if self.config.val_gate:
             if self._custom_strategy is not None:
                 raise LoopError(
@@ -756,6 +757,29 @@ class Loop(OuterLoop):
             batch_size=self.config.batch_size,
             optimizer=self.search_name(),
         )
+
+    def _check_optimizer_route(self) -> None:
+        """Refuse, before anything runs, an optimizer that calls a model on a route that
+        cannot run it without tools: its calls are prompt in, JSON out
+        (``optim.random_optimizer.text_only``), and running it with tools is never a
+        silent fallback."""
+        from refactory_dsh.model import TOOL_POLICY_NONE_BACKENDS
+        from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+
+        if not isinstance(self.optimizer, AutoresearchOptimizer) or self.model is None:
+            return
+        route_for = getattr(self.model, "for_node", None)
+        client = route_for("optimizer", role="optimizer") if callable(route_for) else self.model
+        route = client.route() if callable(getattr(client, "route", None)) else {}
+        backend = str((route or {}).get("worker_backend") or "dsh")
+        if backend in TOOL_POLICY_NONE_BACKENDS:
+            return
+        raise LoopError(
+            f"the {self.optimizer.name} optimizer's calls run without tools (tool_policy "
+            f"'none'), which only the {', '.join(TOOL_POLICY_NONE_BACKENDS)} backends "
+            f"enforce, and the optimizer role is routed to {backend}; route the optimizer "
+            "role to one of them, e.g. --role-routes "
+            "'{\"optimizer\": {\"worker_backend\": \"claude_code\"}}'")
 
     def _load_parts_manifest(self) -> None:
         """Load and install the loop-level parts manifest.

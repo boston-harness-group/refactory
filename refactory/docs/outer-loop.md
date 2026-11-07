@@ -105,7 +105,12 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
 - **No tools.** Every optimizer call, the proposal and each reader, is made with
   `tool_policy="none"`: prompt in, JSON out, no tools in a working directory beside
   the run's records. This is the same mechanism SkillOpt's calls use; the run's own
-  client keeps its tools.
+  client keeps its tools, and a token-limited run's budget guard stays in place. Only
+  the `dsh` and `claude_code` backends can run a call without tools, so a run whose
+  optimizer role is routed elsewhere (`codex`, `openshell`) is refused at launch,
+  before anything runs. The message says how to route the role, for example
+  `--role-routes '{"optimizer": {"worker_backend": "claude_code"}}'`. It never runs
+  the optimizer with tools.
 - **What the proposal call then gets.** The readers' findings, verbatim but bounded:
   at most 12 patterns per reader, each pattern's text at most 400 characters, at most 3
   quotes of at most 240 characters and 40 item ids, and the whole findings block at

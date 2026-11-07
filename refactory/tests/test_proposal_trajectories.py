@@ -569,3 +569,79 @@ def test_a_retry_reuses_readers_even_without_a_run_directory():
     read = len(client.readers)
     optimizer.propose(ctx, 1, [])
     assert len(client.readers) == read
+
+
+class _Routed:
+    """A model client whose optimizer role is routed to ``backend``."""
+
+    def __init__(self, backend: str) -> None:
+        self.backend = backend
+
+    def for_node(self, node_id: str, role: str = "") -> "_Routed":
+        return self
+
+    def route(self) -> dict:
+        return {"worker_backend": self.backend}
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        return '{"diagnosis": "d", "proposals": []}'
+
+
+@pytest.mark.parametrize("backend", ["codex", "openshell"])
+def test_an_optimizer_routed_where_tools_cannot_be_removed_is_refused_at_launch(backend):
+    """The autoresearch optimizer's calls run without tools; a route that cannot
+    enforce that is refused before anything runs, saying how to route it."""
+    from refactory_dsh.loop import LoopError
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(optimizer="autoresearch"),
+                project=Path("."), model=_Routed(backend))
+    with pytest.raises(LoopError, match=rf"dsh, claude_code backends.*routed to {backend}.*--role-routes"):
+        loop._check_optimizer_route()
+    for allowed in ("dsh", "claude_code"):
+        Loop("circle_packing/adaptive", LoopConfig(optimizer="autoresearch"), project=Path("."),
+             model=_Routed(allowed))._check_optimizer_route()
+
+
+def test_the_launch_refusal_comes_before_any_rollout(tmp_path):
+    from refactory_dsh.loop import LoopError
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(optimizer="autoresearch",
+                runs_root=tmp_path / "run", epochs=1), project=Path("."), model=_Routed("codex"))
+    with pytest.raises(LoopError, match="routed to codex"):
+        loop.run()
+    assert loop.rollouts == 0 and not (tmp_path / "run" / "runs").exists()
+
+
+def test_text_only_keeps_the_budget_guard():
+    """A token-limited run wraps a client without usage telemetry in a guard that
+    refuses its completions; taking the no-tools copy keeps the guard."""
+    from refactory_dsh.budgets import BudgetExhausted, _UnmeteredModel
+    from refactory_dsh.optim.random_optimizer import text_only
+
+    class Inner:
+        policy = ""
+
+        def with_tool_policy(self, policy: str) -> "Inner":
+            copy = Inner()
+            copy.policy = policy
+            return copy
+
+    class Budget:
+        def require_usage_capability(self, available: bool) -> None:
+            pass
+
+    guarded = text_only(_UnmeteredModel(Inner(), Budget()))
+    assert isinstance(guarded, _UnmeteredModel) and guarded._model.policy == "none"
+    with pytest.raises(BudgetExhausted):
+        guarded.complete("p")
+
+
+def test_a_failed_readers_error_is_clipped():
+    from refactory_dsh.optim.base import _trajectories, trajectory_groups
+
+    records = _sized_records()
+    groups = trajectory_groups(records)
+    failure = {"group": 1, "items": [i for i, _b in groups[0]], "error": "E" * 5000}
+    text = "\n".join(_trajectories(records, findings=[], failures=[failure]))
+    line = next(l for l in text.splitlines() if l.startswith("(Group 1"))
+    assert "E" * 400 not in line and "could not be read" in line
