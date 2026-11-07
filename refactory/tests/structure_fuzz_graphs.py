@@ -29,11 +29,34 @@ TASK_REF = f"{MODULE}:FuzzTask"
 # ── the ops ───────────────────────────────────────────────────────────────
 
 
+#: Where `step` notes a declared read that was not there (`MISSING_DIR/<node>`).
+MISSING_DIR = ".fuzz-missing"
+
+
 def step(ctx: Any) -> dict[str, Any]:
-    """Write every declared file and set every declared fact, deterministically."""
+    """Read every declared input, then write every declared file and set every declared
+    fact, deterministically.
+
+    An op may read a file that is not there yet (V6 allows it, and no runtime checks an
+    op's reads), so a missing input does not fail the op: it is noted in
+    ``MISSING_DIR/<node>`` beside the run's files, where the harness counts it, and the
+    run goes on. Each output names the inputs it was made from, so a file's content
+    shows the dataflow that produced it.
+    """
     node = ctx.node_id
-    for name in ctx._declared:  # noqa: SLF001 - the run sets the node's declarations
-        ctx.write_text(name, f"{name} written by {node}\n")
+    seen: list[str] = []
+    for name in ctx._declared_reads:  # noqa: SLF001 - the run sets the node's declarations
+        if ctx.exists(name):
+            ctx.read_text(name)
+            seen.append(name)
+        else:
+            marker = Path(ctx.workdir) / MISSING_DIR / node
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            with marker.open("a") as handle:
+                handle.write(f"{name}\n")
+    made_from = ", ".join(seen) or "nothing"
+    for name in ctx._declared:  # noqa: SLF001
+        ctx.write_text(name, f"{name} written by {node} from {made_from}\n")
     return {fact: f"{fact} from {node}" for fact in ctx._declared_facts}  # noqa: SLF001
 
 
@@ -42,15 +65,25 @@ def proceed(ctx: Any) -> str:
     return "proceed"
 
 
+#: What every item's grader-only answer key starts with, so a leak is found by content.
+SECRET = "GRADER-ONLY-ANSWER"
+
+
 class FuzzTask(Task):
-    """Two items; a pass scores 1 when it left an ``answer.txt``."""
+    """Two items, each with a grader-only answer key; a pass scores 1 when it left an
+    ``answer.txt``, and the grader checks the key it alone can see."""
 
     name = "structure_fuzz"
+    grader_fields = ("answer_key",)
 
     def instances(self, *, part: str | None = None, seed: int | None = None) -> list[TaskInstance]:
-        return [TaskInstance(id="one"), TaskInstance(id="two")]
+        return [TaskInstance(id=item, metadata={"question": f"question {item}",
+                                                "answer_key": f"{SECRET}-{item}"})
+                for item in ("one", "two")]
 
     def verify(self, instance: TaskInstance, workspace: Path) -> VerifyResult:
+        if not str(instance.metadata.get("answer_key", "")).startswith(SECRET):
+            raise ValueError("the grader lost its answer key")
         passed = (Path(workspace) / "answer.txt").exists()
         return VerifyResult(passed=passed, score=1.0 if passed else 0.0)
 

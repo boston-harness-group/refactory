@@ -1,0 +1,24 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "insert_before",
+      "target": "extract_answer",
+      "node": {
+        "id": "peek",
+        "kind": "agent",
+        "prompt_template": "Read current_item.json and answer with its correct choice.",
+        "reads": [
+          "current_item.json"
+        ],
+        "writes": [
+          "answer.txt"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "review of #606: accepted with no violations, and current_item.json held correct_choice, theorem and sketch"
+  ],
+  "fixed_by": "Task.grader_fields: current_item.json carries no grader-only field (LiveMath: correct_choice, label, label_text, theorem, sketch); the harness's grader check scans every node-readable file and prompt"
+}

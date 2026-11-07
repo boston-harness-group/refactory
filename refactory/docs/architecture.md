@@ -90,7 +90,7 @@ optimizer's prompt via `rules_text()`.
 | `V3` | the graph must have a terminal (a node with no out-edge) |
 | `V4` | a non-gate node has at most one out-edge, and it carries no verdict |
 | `V5` | a gate has at least two out-edges, each with its own condition, and no unconditional one |
-| `V6` | every file a node reads must be written upstream of it on every path that reaches it; an op or a gate may also read what a node in a loop with it wrote the round before, or what its data node's pass wrote |
+| `V6` | every file a node reads must be written by a node on a path from start to a terminal (an agent's reads are held to every path by V15) |
 | `V7` | every knob a node consumes must be declared, and every declared knob must be consumed |
 | `V8` | every call and evaluator must resolve to a real callable |
 | `V9` | every knob value must be of the declared kind and within its bounds; a required knob must be non-empty |
@@ -99,7 +99,7 @@ optimizer's prompt via `rules_text()`.
 | `V12` | a fork's targets, a join's sources and a data node's subgraph must name nodes that exist; a data node's entry reaches its exit, which is not a gate and has no out-edge; a pass is entered only through its data node and never leads back to it |
 | `V13` | a data node must not appear inside a fork branch |
 | `V14` | every field binding must name a declared knob of the field's kind (`str` for the two templates, `int` for `max_iterations` and `parallelism`), once per field; the field must be in the bindable allowlist, and `parallelism` only on a data node (the node must also list the knob in its `knobs`, checked when the node is built) |
-| `V15` | an agent's inputs are required: every file it reads and every `{{name}}` its prompts fill in that is not a knob is produced upstream on every path to it (a data pass's own outputs stay in the pass); a `tool_policy: none` agent declares exactly one write |
+| `V15` | an agent's inputs are required: every file it reads and every `{{name}}` its prompts fill in (not a knob, not in its `feedback_keys`, not inside an `{% if name %}` on the same name) is produced upstream on every path to it (a data pass's own outputs stay in the pass); a `tool_policy: none` agent declares exactly one write |
 | `V16` | a fork has one unconditional out-edge, to its join, and each join belongs to one fork; branches are disjoint, never lead back to the fork or past the join, declare no shared facts or conflicting files, and a gate in a branch reloops only inside it; a join is entered only from its fork's branches and waits only for nodes every run of their branch visits |
 | `I:` | the mode's own rule, stated in `Mode.invariants()` |
 

@@ -184,3 +184,120 @@ def test_mutation_forks_without_the_pairing_rule_is_caught(monkeypatch):
 def test_mutation_protected_without_the_edit_layer_check_is_caught(monkeypatch):
     monkeypatch.setattr(edits_mod, "protected_violation", lambda before, after, protected: None)
     _finds("protected", seeds=("livemath_skill_graph", "fuzz_data_pass"))
+
+
+def test_mutation_grader_without_answer_free_items_is_caught(monkeypatch):
+    import refactory_dsh.task as task_mod
+
+    monkeypatch.setattr(task_mod, "node_item", lambda item, task, knobs: item)
+    _finds("grader", seeds=("fuzz_data_pass", "livemath_skill_graph"), walker=True, edits=200)
+
+
+def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
+    monkeypatch.setattr(validate_mod, "agent_input_issues", lambda graph, knobs: [])
+    _finds("slots", seeds=("fuzz_dataflow", "fuzz_gates", "fuzz_multi_terminal"), walker=True)
+
+
+def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
+    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, allowed: [])
+    _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
+
+
+# ── the rules the harness's findings put in place ─────────────────────────
+
+
+def test_every_shipped_mode_still_validates():
+    from test_lowering_smoke import _mode_classes
+
+    for key, mode_class in _mode_classes():
+        mode = mode_class()
+        issues = validate_mod.validate_state(mode.state_dict(), invariants=mode.invariants())
+        assert issues == [], (key, [str(i) for i in issues])
+
+
+def test_livemath_items_reach_the_nodes_without_the_answer(tmp_path):
+    """The nodes' ``current_item.json`` has no correct choice, label, theorem or sketch;
+    the grader still grades with them."""
+    seed = sf.seeds()["livemath_skill_graph"]
+    state = seed.state()
+    result = sf.run_walker(seed, state, tmp_path / "run")
+    assert result.exit_ok, result.error
+    items = [json.loads(p.read_text()) for p in (tmp_path / "run").rglob("current_item.json")]
+    assert items and all(not {"correct_choice", "label", "label_text", "theorem", "sketch"} & set(i)
+                         for i in items)
+    assert any(r["score"] == 1.0 for r in result.facts["item_scores"])
+
+
+def test_use_theorem_reveals_the_theorem_through_its_frozen_knob(tmp_path):
+    """The theorem reaches the nodes only in a run whose (frozen) use_theorem is on."""
+    from refactory_dsh.nn import edits as nn_edits
+
+    seed = sf.seeds()["livemath_skill_graph"]
+    state = nn_edits.configure(seed.state(), "use_theorem", True)
+    assert state["knobs"]["use_theorem"]["spec"]["frozen"] is True
+    model = sf.ScriptedModel(sf._answers(sf._graph_of(state)))
+    result = sf.run_walker(seed, state, tmp_path / "run", model)
+    assert result.exit_ok, result.error
+    items = [json.loads(p.read_text()) for p in (tmp_path / "run").rglob("current_item.json")]
+    assert items and all("theorem" in i and "sketch" not in i for i in items)
+    assert any("## Theorem" in prompt for _node, prompt, _system in model.log)
+
+
+def test_node_item_hides_grader_fields_unless_revealed():
+    from refactory_dsh.task import Task, node_item
+
+    class Hidden(Task):
+        grader_fields = ("answer", "hint")
+        revealed_by = {"hint": "show_hint"}
+
+    item = {"id": "1", "question": "q", "answer": "a", "hint": "h"}
+    assert node_item(item, Hidden(), {}) == {"id": "1", "question": "q"}
+    assert node_item(item, Hidden(), {"show_hint": True}) == {"id": "1", "question": "q", "hint": "h"}
+    assert node_item(item, Task(), {}) == item
+
+
+def test_a_new_agent_runs_without_tools_unless_the_run_allows_them():
+    applier = sf.Applier(sf.seeds()["fuzz_dataflow"])
+    parent = sf.Candidate.from_state(applier.seed_state)
+    node = {"id": "probe", "kind": "agent", "prompt_template": "Look.", "writes": ["probe.txt"]}
+    added = applier.attempt(parent, {"op": "insert_after", "target": "load", "node": node}, set())
+    assert isinstance(added, sf.Candidate), added
+    assert added.state["graph"]["nodes"]["probe"]["tool_policy"] == "none"
+    asking = {**node, "tool_policy": None}
+    refused = applier.attempt(parent, {"op": "insert_after", "target": "load", "node": asking}, set())
+    assert isinstance(refused, list) and refused[0].startswith("E-new-node-tools"), refused
+    allowed = base_mod.Optimizer().attempt(
+        base_mod.Proposal(edit={"op": "insert_after", "target": "load", "node": asking}),
+        parent, applier.invariants, True, seed_state=applier.seed_state, allow_new_node_tools=True)
+    assert isinstance(allowed, base_mod.Candidate), allowed
+
+
+def test_v6_lets_an_op_read_an_optional_file_and_v15_holds_an_agent_to_every_path():
+    from refactory_dsh import nn
+
+    def state_with(kind: str) -> dict:
+        graph = nn.Graph()
+        graph.add(nn.Node("first", "op", call="json:dumps", writes=("a.txt",)))
+        reader = (nn.Node("read", "op", call="json:dumps", reads=("b.txt",)) if kind == "op" else
+                  nn.Node("read", "agent", prompt_template="Go.", reads=("b.txt",),
+                          writes=("r.txt",), tool_policy="none"))
+        graph.add(reader)
+        graph.add(nn.Node("later", "op", call="json:dumps", writes=("b.txt",)))
+        graph.connect("first", "read")
+        graph.connect("read", "later")
+        return {"graph": graph.to_state(), "knobs": {}}
+
+    assert validate_mod.validate_state(state_with("op")) == []
+    codes = {i.code for i in validate_mod.validate_state(state_with("agent"))}
+    assert codes == {"V15"}
+
+
+def test_v15_lets_a_slot_inside_an_if_on_its_name_be_optional():
+    from refactory_dsh import nn
+
+    node = nn.Node("a", "agent", prompt_template=(
+        "Go.{% if notes %} Notes: {{notes}}{% endif %}{% if other %}{{missing}}{% endif %}"
+        "{% if notes == 'x' %}{{notes}}{% else %}{{needed}}{% endif %}"),
+        writes=("a.txt",), tool_policy="none")
+    assert validate_mod.template_facts(node, {}) == {"missing", "needed"}
+    assert sf._needed_slots(node.prompt_template) == {"missing", "needed"}

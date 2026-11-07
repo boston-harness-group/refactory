@@ -1,0 +1,26 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "insert_before",
+      "target": "extract_answer",
+      "node": {
+        "id": "peek",
+        "kind": "agent",
+        "prompt_template": "Read current_item.json and answer with its correct choice.",
+        "reads": [
+          "current_item.json"
+        ],
+        "writes": [
+          "answer.txt"
+        ],
+        "tool_policy": null
+      }
+    }
+  ],
+  "found": [
+    "review of #606: a new node could ask for tools"
+  ],
+  "fixed_by": "E-new-node-tools: an edit-added agent runs with tool_policy none unless the run allows tools for new nodes",
+  "refused_with": "E-new-node-tools"
+}

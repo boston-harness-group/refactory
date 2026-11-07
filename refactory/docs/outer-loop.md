@@ -355,12 +355,13 @@ state is promised, on any graph shape:
   rules, `nn.validate.fork_branch_conflicts`). A gate in a branch reloops only inside
   it. A join is entered only from its fork's branches and waits only for nodes every run
   of their branch visits.
-- **Reads are produced first (V6, V15).** A file a node reads is written upstream of it
-  on every path that reaches it. An op or a gate may also read what a node in a loop
-  with it wrote the round before, or what its data node's pass wrote (it may check for
-  one). An agent's inputs are required: its reads, and every `{{name}}` its prompts fill
-  in that is not a knob, are there on every path to it, and a data pass's own files and
-  facts stay in the pass. A `tool_policy: none` agent declares exactly one write.
+- **Reads are produced first (V6, V15).** A file a node reads is written by a node on a
+  path from the start to a terminal. An op or a gate may read a file that is not there
+  yet (no runtime checks an op's reads), so that is all V6 asks of them. An agent's
+  inputs are required: its reads, and every `{{name}}` its prompts fill in that is not
+  a knob, not in its `feedback_keys` and not inside an `{% if name %}` on the same name,
+  are there on every path to it, and a data pass's own files and facts stay in the
+  pass. A `tool_policy: none` agent declares exactly one write.
 - **Passes are closed (V12).** A data node's entry reaches its exit, which is not a gate
   and has no out-edge. A pass is entered only through its data node, never by an edge
   from the data node or from outside, and never leads back to it.
@@ -368,6 +369,16 @@ state is promised, on any graph shape:
 - **Each agent runs its own prompt.** An agent node an edit adds gets its own
   `<id>__system_prompt` knob, a copy never binds the original's knob (`E-binding`), and
   every declared knob is read (V7).
+- **Items reach the nodes without their answer.** A Task names the item fields only its
+  grader may see (`Task.grader_fields`, default none). `current_item.json`, the file the
+  graph's nodes read, never carries them, on either runtime; the grader gets the whole
+  item. A field in `Task.revealed_by` is shown when the run's knob for it is on.
+  LiveMath hides `correct_choice`, `label`, `label_text`, `theorem` and `sketch`; its
+  frozen `use_theorem` and `use_sketch` reveal the theorem and the sketch.
+- **New agents run without tools.** An agent node an edit adds gets `tool_policy: none`
+  unless it asks for tools (`tool_policy: null` or a `tools` list), and asking is refused
+  `E-new-node-tools` unless the run allows it (`LoopConfig.allow_new_node_tools`, off by
+  default). A node whose id the seed has keeps the seed's policy.
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
@@ -382,11 +393,18 @@ from a seed, over LiveMath's skill graph and seven small graphs
 a gate loop, a data pass, a pipeline of ops, and several terminals). The edits cover
 every primitive and macro, node copies taken from the node JSON the optimizer is shown
 (new ids, new prompts), and malformed edits. Each walk applies them through the same
-attempt path, and every accepted state is checked independently of the validator:
-lowering, a walker run with a scripted model (it must end at a terminal or a halt), the
-spine beside the walker on a sample (same facts and item scores; graphs with a user or an
-agent gate are walker-only, as the test drain answers no gate), the knob ownership, the
-dataflow, the fork pairing and the protected nodes.
+attempt path, and every accepted state is checked two ways.
+
+- **Observed**, by running the real code and looking at what it did: lowering; a walker
+  run with a scripted model, which must end at a terminal or a halt; the spine beside
+  the walker on a sample (same facts and item scores; graphs with a user or an agent gate
+  are walker-only, as the test drain answers no gate); no agent sent an unfilled
+  `{{name}}`; and no grader-only item value in any file a node can read or any prompt,
+  found by content. The synthetic ops read their declared inputs; an op's input that is
+  not there is counted (`notes.op_read_absent`), not called a violation, since V6 lets an
+  op read an optional file.
+- **Spec**, a second statement of the rules beside the validator: knob ownership,
+  dataflow, fork pairing, protected nodes and new agents' tools.
 
 A violation is shrunk to the fewest edits that still show it and can be saved, with
 `structure_fuzz.save_case`, to `tests/fixtures/structure_fuzz/`; each case there replays

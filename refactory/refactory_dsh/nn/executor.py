@@ -1192,10 +1192,14 @@ class Executor:
                         self.ctx._declared_reads = node.reads  # noqa: SLF001
                         self.ctx._declared_facts = node.produces  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
-                        self.ctx.write_json(CURRENT_ITEM, item)
+                        # The nodes read the item without its grader-only fields.
+                        from refactory_dsh.task import node_item
+
+                        _visible = node_item(item, task, self.ctx.knobs)
+                        self.ctx.write_json(CURRENT_ITEM, _visible)
                         # Dual-write current_item to run-level workdir for progress (PIT-005).
                         (_run_workdir / CURRENT_ITEM).write_text(
-                            json.dumps(item, indent=2, default=str)
+                            json.dumps(_visible, indent=2, default=str)
                         )
                         # Clear per-item exchanges before each pass.
                         self._item_exchanges = []

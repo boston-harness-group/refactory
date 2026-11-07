@@ -160,6 +160,31 @@ def _lowering_refusal(parent_state: dict[str, Any], state: dict[str, Any]) -> st
     return None
 
 
+def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
+                    allowed: bool) -> list[str]:
+    """``E-new-node-tools`` for each agent node the search added that would run with tools.
+
+    A node an edit adds gets ``tool_policy: none`` by default (`nn.edits`): with tools
+    it could read anything in the run directory or beyond it. Asking for tools
+    (``tool_policy: null`` or a ``tools`` list) needs the run to allow it
+    (``LoopConfig.allow_new_node_tools``). A node whose id the seed has is held to the
+    seed's own policy instead (`_tool_policy_escalated`).
+    """
+    if allowed:
+        return []
+    seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
+    reasons = []
+    for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
+        if node_id in seed_nodes or node.get("kind") != "agent":
+            continue
+        if node.get("tool_policy") != "none" or node.get("tools"):
+            reasons.append(
+                f"E-new-node-tools: new agent node {node_id!r} would run with tools; a node "
+                "an edit adds runs without tools (omit tool_policy, or set it to 'none') "
+                "unless the run allows tools for new nodes (allow_new_node_tools)")
+    return reasons
+
+
 def candidate_id(state: dict[str, Any]) -> str:
     """A stable id for a state, so two candidates that are the same state agree.
 
@@ -1283,6 +1308,7 @@ class Optimizer:
         seen: Sequence[str] | None = None,
         seed_state: dict[str, Any] | None = None,
         protected: Sequence[str] = (),
+        allow_new_node_tools: bool = False,
     ) -> Candidate | list[str]:
         """Apply and validate one proposal: a candidate, or the reasons it failed.
 
@@ -1291,7 +1317,9 @@ class Optimizer:
         either, and two code paths would eventually disagree about that.
 
         ``protected`` is the mode's ``protected_nodes()``: an edit that removes,
-        rewires or replaces one is refused with ``E-protected``.
+        rewires or replaces one is refused with ``E-protected``. An agent node the
+        search added may run with tools only with ``allow_new_node_tools``
+        (``E-new-node-tools``).
         """
         if not isinstance(proposal.edit, dict):
             return [f"E-op: an edit is a JSON object naming its op, not "
@@ -1323,6 +1351,10 @@ class Optimizer:
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
         if escalation:
             return escalation
+        tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state,
+                                 allow_new_node_tools)
+        if tooled:
+            return tooled
 
         fixed = frozen | {name for name, value in parent.state.get("knobs", {}).items()
                           if (value.get("spec") or {}).get("frozen")}

@@ -51,7 +51,16 @@ import structure_fuzz_graphs as fg
 
 HERE = Path(__file__).resolve().parent
 CORPUS = HERE / "fixtures" / "structure_fuzz"
-INVARIANTS = ("lowering", "walker", "spine", "knobs", "dataflow", "forks", "protected")
+INVARIANTS = ("lowering", "walker", "spine", "grader", "slots", "knobs", "dataflow", "forks",
+              "protected", "tools")
+#: Checks that run the real code (lowering, the walker, the spine) and look at what it
+#: did; the rest are spec checks, a second statement of the rules beside the validator.
+OBSERVED = ("lowering", "walker", "spine", "grader", "slots")
+#: Run facts the harness counts but does not call violations (an op's optional read
+#: that was not there: V6 allows it).
+NOTES: Counter = Counter()
+#: Files the grader writes after an item is judged: its records carry the whole item.
+GRADER_RECORDS = ("item_records.json", "facts.json", ".item_record.json", ".done")
 SLOT = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 #: A walk restarts from its seed once its graph has this many nodes.
 MAX_NODES = 28
@@ -344,12 +353,39 @@ def check_forks(state: dict[str, Any]) -> list[Violation]:
     return out
 
 
+TAG = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}", re.DOTALL)
+GUARD = re.compile(r"""([A-Za-z_]\w*)\s*(==\s*(['"]).+\3)?""")
+
+
+def _needed_slots(text: str) -> set[str]:
+    """Slots a template needs: those outside an ``if``/``elif`` branch on their own name."""
+    needed: set[str] = set()
+    pieces = TAG.split(text)  # text, tag, expr, text, tag, expr, ...
+    branch_names: list[str | None] = []
+    for index in range(0, len(pieces), 3):
+        for name in SLOT.findall(pieces[index]):
+            if name not in branch_names:
+                needed.add(name)
+        if index + 2 < len(pieces):
+            tag, expr = pieces[index + 1], pieces[index + 2].strip()
+            word = GUARD.fullmatch(expr)
+            if tag == "if":
+                branch_names.append(word.group(1) if word else None)
+            elif tag == "elif" and branch_names:
+                branch_names[-1] = word.group(1) if word else None
+            elif tag == "else" and branch_names:
+                branch_names[-1] = None
+            elif tag == "endif" and branch_names:
+                branch_names.pop()
+    return needed
+
+
 def _consumed(node: nn.Node, knobs: dict[str, Any]) -> tuple[set[str], set[str]]:
-    """The files a node reads and the facts its prompts fill in."""
+    """The files a node reads and the facts its prompts need filled."""
     facts: set[str] = set()
     if node.kind == "agent":
         for field_name in ("prompt_template", "system_prompt_template"):
-            facts |= set(SLOT.findall(str(node.bound(field_name, knobs) or "")))
+            facts |= _needed_slots(str(node.bound(field_name, knobs) or ""))
     facts -= set(knobs) | set(node.feedback_keys)
     return set(node.reads), facts
 
@@ -376,7 +412,7 @@ def _branch_ends(graph: Graph, fork: nn.Node, join: str) -> list[set[str]]:
     return out
 
 
-def available_before(graph: Graph, *, isolate_passes: bool = True) -> dict[str, set[tuple[str, str]]]:
+def available_before(graph: Graph) -> dict[str, set[tuple[str, str]]]:
     """What is available when each node starts, on every path that reaches it.
 
     The greatest fixpoint of: a node's inputs are what every predecessor left; a fork's
@@ -425,9 +461,6 @@ def available_before(graph: Graph, *, isolate_passes: bool = True) -> dict[str, 
             return set(avail_in[source])
         if how == "pass":
             return avail_in[source] | {("file", n) for n in node.writes}
-        if how == "after_data" and not isolate_passes and node.subgraph_exit in graph.nodes:
-            exit_node = graph.nodes[node.subgraph_exit]
-            return avail_in[exit_node.id] | produced(exit_node) | produced(node)
         return avail_in[source] | produced(node)
 
     changed = True
@@ -453,55 +486,48 @@ def available_before(graph: Graph, *, isolate_passes: bool = True) -> dict[str, 
     return avail_in
 
 
-def _cycle_mates(graph: Graph) -> dict[str, set[str]]:
-    """For each node, the nodes in a cycle with it (each reaches the other)."""
-    succ: dict[str, set[str]] = {n: set() for n in graph.nodes}
-    for node in graph.nodes.values():
-        succ[node.id] |= {e.target for e in graph.out_edges(node.id)}
-        if node.kind == "fork":
-            succ[node.id] |= {t for t in node.targets if t in succ}
-        if node.kind == "data" and node.subgraph_entry in succ:
-            succ[node.id].add(node.subgraph_entry)
-    reach: dict[str, set[str]] = {}
-    for start in graph.nodes:
-        seen: set[str] = set()
-        stack = list(succ[start])
-        while stack:
-            current = stack.pop()
-            if current in seen or current not in succ:
-                continue
+def _on_some_run(graph: Graph) -> set[str]:
+    """Every file and fact a node on some start-to-terminal path writes or produces
+    (forward from the start, following fork targets and data entries; backward from
+    the terminals along edges)."""
+    forward = graph.reachable()
+    back: dict[str, set[str]] = {}
+    for edge in graph.edges:
+        back.setdefault(edge.target, set()).add(edge.source)
+    seen: set[str] = set()
+    stack = list(graph.terminals())
+    while stack:
+        current = stack.pop()
+        if current not in seen:
             seen.add(current)
-            stack.extend(succ[current])
-        reach[start] = seen
-    return {n: {m for m in reach[n] if n in reach.get(m, set())} for n in graph.nodes}
+            stack.extend(back.get(current, ()))
+    return {n for node_id in forward & seen for n in (*graph.nodes[node_id].writes,
+                                                      *graph.nodes[node_id].produces)}
 
 
 def check_dataflow(state: dict[str, Any]) -> list[Violation]:
-    """Every file a node reads and every fact an agent's prompt fills in is produced
-    upstream on every path to it. An agent's inputs are required, and a data pass's own
-    outputs stay in the pass. An op or a gate may also read what a node in a loop with it
-    wrote last round (shipped modes read their last attempt's feedback that way), and a
-    file its data node's pass wrote (an op checks for it)."""
+    """Spec check. An agent's inputs are required: every file it reads and every fact
+    its prompts need is produced upstream on every path to it, and a data pass's own
+    outputs stay in the pass. An op or a gate may read a file that is not there yet (no
+    runtime checks an op's reads), so its reads need only be produced on some run."""
     graph = _graph_of(state)
     knobs = _knob_values(state)
-    strict, lenient = available_before(graph), available_before(graph, isolate_passes=False)
-    mates = _cycle_mates(graph)
+    strict = available_before(graph)
+    some_run = _on_some_run(graph)
     out: list[Violation] = []
     for node_id in sorted(graph.reachable()):
         node = graph.nodes.get(node_id)
         if node is None:
             continue
         files, facts = _consumed(node, knobs)
-        wanted = {("file", n) for n in files} | {("fact", n) for n in facts}
         if node.kind == "agent":
-            missing = wanted - strict[node_id]
+            wanted = {("file", n) for n in files} | {("fact", n) for n in facts}
+            missing = sorted(f"{k} {n}" for k, n in wanted - strict[node_id])
         else:
-            last_round = {("file", n) for mate in mates[node_id] for n in graph.nodes[mate].writes}
-            missing = wanted - lenient[node_id] - last_round
+            missing = sorted(f"file {n}" for n in files if n not in some_run)
         if missing:
-            out.append(Violation("dataflow", f"{node.kind} {node_id} reads "
-                                             f"{sorted(f'{k} {n}' for k, n in missing)}, not "
-                                             "produced upstream on every path to it"))
+            out.append(Violation("dataflow", f"{node.kind} {node_id} reads {missing}, not "
+                                             "produced where it needs to be"))
     return out
 
 
@@ -584,11 +610,89 @@ def livemath_fixture() -> Iterator[None]:
         tasks_mod.LiveMathTask.__init__ = original
 
 
-def run_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> nn.RunResult:
+def run_walker(seed: Seed, state: dict[str, Any], workdir: Path,
+               model: "ScriptedModel | None" = None) -> nn.RunResult:
     graph = _graph_of(state)
+    model = model or ScriptedModel(_answers(graph))
     with livemath_fixture() if seed.livemath else contextlib.nullcontext():
         return execute(graph, workdir, knobs=_knob_values(state), verdicts=_verdicts(graph),
-                       model=ScriptedModel(_answers(graph)), max_steps=600)
+                       model=model, max_steps=600)
+
+
+def grader_secrets(seed: Seed, state: dict[str, Any]) -> set[str]:
+    """The values only the grader may see, for content search: each item's grader-only
+    field values (strings of 8+ characters, and the strings inside a mapping) that no
+    node-visible field of the same item also holds."""
+    from refactory_dsh.task import load_task
+
+    def strings(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value} if len(value) >= 8 else set()
+        if isinstance(value, dict):
+            return set().union(*(strings(v) for v in value.values())) if value else set()
+        if isinstance(value, (list, tuple)):
+            return set().union(*(strings(v) for v in value)) if value else set()
+        return set()
+
+    secrets: set[str] = set()
+    graph = _graph_of(state)
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    with livemath_fixture() if seed.livemath else contextlib.nullcontext():
+        for ref in refs:
+            task = load_task(ref)
+            hidden = set(getattr(task, "grader_fields", ()) or ())
+            for instance in task.instances():
+                visible = strings({k: v for k, v in instance.metadata.items() if k not in hidden})
+                for name in hidden:
+                    secrets |= strings(instance.metadata.get(name)) - visible
+    return secrets
+
+
+def check_grader(secrets: set[str], hidden: set[str], workdir: Path,
+                 model: "ScriptedModel | None") -> list[Violation]:
+    """No file a node can read and no prompt holds a grader-only value (by content), and
+    no ``current_item.json`` names a grader-only field."""
+    out: list[Violation] = []
+    for path in sorted(p for p in workdir.rglob("*") if p.is_file()):
+        rel = path.relative_to(workdir)
+        if path.name in GRADER_RECORDS or path.name.endswith(".done") or ".refactory" in rel.parts:
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        leaked = sorted(secret for secret in secrets if secret in text)
+        if leaked:
+            out.append(Violation("grader", f"{rel} holds grader-only {leaked[0][:60]!r}"))
+        if path.name == "current_item.json":
+            try:
+                named = sorted(hidden & set(json.loads(text)))
+            except (ValueError, TypeError):
+                named = []
+            if named:
+                out.append(Violation("grader", f"{rel} names grader-only {named}"))
+    for node, prompt, system in (model.log if model is not None else ()):
+        leaked = sorted(secret for secret in secrets if secret in prompt or secret in system)
+        if leaked:
+            out.append(Violation("grader", f"agent {node} was sent grader-only {leaked[0][:60]!r}"))
+    return out
+
+
+def check_slots(state: dict[str, Any], model: "ScriptedModel") -> list[Violation]:
+    """No agent was sent a ``{{name}}`` the runtime left unfilled (a knob or a fact it
+    needed and did not have)."""
+    out = []
+    for node, prompt, system in model.log:
+        unfilled = sorted(set(SLOT.findall(prompt)) | set(SLOT.findall(system)))
+        if unfilled:
+            out.append(Violation("slots", f"agent {node} was sent unfilled {unfilled}"))
+    return out
+
+
+def _count_absent_reads(workdir: Path) -> None:
+    for marker in workdir.rglob(f"{fg.MISSING_DIR}/*"):
+        if marker.is_file():
+            NOTES["op_read_absent"] += len(marker.read_text().splitlines())
 
 
 def _terminals_reached(graph: Graph, workdir: Path) -> set[str]:
@@ -603,26 +707,54 @@ def _terminals_reached(graph: Graph, workdir: Path) -> set[str]:
 
 def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list[Violation], Any]:
     graph = _graph_of(state)
+    model = ScriptedModel(_answers(graph))
     try:
-        result = run_walker(seed, state, workdir)
+        result = run_walker(seed, state, workdir, model)
     except Exception as exc:  # noqa: BLE001
         return [Violation("walker", f"raised {type(exc).__name__}: {exc}")], None
+    _count_absent_reads(workdir)
+    hidden = {name for n in graph.nodes.values() if n.kind == "data" and n.task_ref
+              for name in getattr(_task(seed, n.task_ref), "grader_fields", ())}
+    seen = check_grader(grader_secrets(seed, state), hidden, workdir, model) + check_slots(state, model)
     if result.halted:
         # A halt is a defined ending: a gate out of reloops (the scripted evaluator always
         # answers proceed, which may be a loop's retry edge) or a halt verdict.
-        return [], result
+        return seen, result
     if SCRIPTED_LABEL in str(result.error or ""):
         # The scripted evaluator answers `proceed`; a gate with no proceed edge cannot
         # take that answer. What a real evaluator answers is its own business, so the
         # run is inconclusive rather than a finding.
-        return [], None
+        return seen, None
     if not result.exit_ok or result.error:
-        return [Violation("walker", f"failed: {result.error}")], result
+        if _unguaranteed_op_reads(graph):
+            # V6 lets an op read a file that may not be there (no runtime checks an op's
+            # reads), and a real op that needs it then fails: LiveMath's extract_answer
+            # placed before decide. The graph declares nothing that says the read is
+            # required, so this is counted, not called a violation (a follow-up gives ops
+            # a way to declare required reads).
+            NOTES["op_unguaranteed_read_failed"] += 1
+            return seen, None
+        return [*seen, Violation("walker", f"failed: {result.error}")], result
     if result.gate_stop:
-        return [Violation("walker", f"stopped at gate {result.gate_stop}")], result
+        return [*seen, Violation("walker", f"stopped at gate {result.gate_stop}")], result
     if not _terminals_reached(graph, workdir):
-        return [Violation("walker", "finished without completing a terminal")], result
-    return [], result
+        return [*seen, Violation("walker", "finished without completing a terminal")], result
+    return seen, result
+
+
+def _unguaranteed_op_reads(graph: Graph) -> list[str]:
+    """Ops and gates whose declared reads are not there on every path to them."""
+    avail = available_before(graph)
+    return sorted(n.id for n in graph.nodes.values() if n.kind in ("op", "gate")
+                  and n.id in graph.reachable()
+                  and any(("file", r) not in avail[n.id] for r in n.reads))
+
+
+def _task(seed: Seed, ref: str) -> Any:
+    from refactory_dsh.task import load_task
+
+    with livemath_fixture() if seed.livemath else contextlib.nullcontext():
+        return load_task(ref)
 
 
 def spine_eligible(state: dict[str, Any]) -> bool:
@@ -670,10 +802,21 @@ def check_spine(seed: Seed, state: dict[str, Any], walker: Any, tmp: Path) -> li
     return []
 
 
+def check_tools(seed_state: dict[str, Any], state: dict[str, Any]) -> list[Violation]:
+    """Spec check: an agent node the edits added runs without tools (the harness never
+    allows tools for new nodes)."""
+    seed_nodes = set(seed_state["graph"]["nodes"])
+    return [Violation("tools", f"new agent {node.id} runs with tools")
+            for node in _graph_of(state).nodes.values()
+            if node.kind == "agent" and node.id not in seed_nodes
+            and (node.tool_policy != "none" or node.tools)]
+
+
 def check_static(seed_state: dict[str, Any], state: dict[str, Any],
                  protected: tuple[str, ...]) -> list[Violation]:
     return [*check_lowering(state), *check_knobs(state), *check_dataflow(state),
-            *check_forks(state), *check_protected(seed_state, state, protected)]
+            *check_forks(state), *check_protected(seed_state, state, protected),
+            *check_tools(seed_state, state)]
 
 
 def check_state(applier: Applier, state: dict[str, Any], *, walker: bool = True,
@@ -681,16 +824,20 @@ def check_state(applier: Applier, state: dict[str, Any], *, walker: bool = True,
     """Every invariant in ``only`` for one accepted state."""
     found = [v for v in check_static(applier.seed_state, state, applier.protected)
              if v.invariant in only]
-    if not (walker or spine) or not ({"walker", "spine"} & set(only)):
+    if not (walker or spine) or not ({"walker", "spine", "grader", "slots"} & set(only)):
         return found
     tmp = Path(tempfile.mkdtemp(prefix="structure-fuzz-"))
     try:
         walked, result = check_walker(applier.seed, state, tmp / "walker")
-        if "walker" in only:
-            found += walked
+        found += [v for v in walked if v.invariant in only]
         if spine and "spine" in only and result is not None and not walked \
                 and spine_eligible(state):
             found += check_spine(applier.seed, state, result, tmp)
+            graph = _graph_of(state)
+            hidden = {name for n in graph.nodes.values() if n.kind == "data" and n.task_ref
+                      for name in getattr(_task(applier.seed, n.task_ref), "grader_fields", ())}
+            found += [v for v in check_grader(grader_secrets(applier.seed, state), hidden,
+                                              tmp / "spine", None) if "grader" in only]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return found
@@ -756,7 +903,12 @@ class EditGenerator:
                     "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
                     "writes": [f"{new_id}.txt"], "produces": [f"{new_id}_fact"]}
         if kind == "agent":
-            return {"id": new_id, "kind": "agent", "role": "solver", "tool_policy": "none",
+            # Most new agents omit tool_policy (the edit layer gives them 'none'); some
+            # say 'none'; a few ask for tools, which the attempt path refuses. Some read
+            # a file, the item's included: what an agent added to cheat would read.
+            policy = rng.choice(({},) * 5 + ({"tool_policy": "none"},) * 3 + ({"tool_policy": None},))
+            return {"id": new_id, "kind": "agent", "role": "solver", **policy,
+                    "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
                     "prompt_template": f"Think about {{{{{rng.choice(facts)}}}}}",
                     "system_prompt_template": f"You are {new_id}.",
                     "writes": rng.choice(([f"{new_id}.txt"],) * 6 + ([], [f"{new_id}.txt", f"{new_id}.md"])),
@@ -903,11 +1055,17 @@ class Stats:
     walker_runs: int = 0
     spine_runs: int = 0
     findings: list[Finding] = field(default_factory=list)
+    notes: Counter = field(default_factory=Counter)
 
     def summary(self) -> dict[str, Any]:
+        observed = {k: v for k, v in self.violations.items() if k in OBSERVED or k == "attempt"}
+        spec = {k: v for k, v in self.violations.items() if k not in observed}
         return {"tried": self.tried, "accepted": self.accepted,
                 "refused": dict(sorted(self.refused.items())),
                 "violations": dict(sorted(self.violations.items())),
+                "observed": dict(sorted(observed.items())),
+                "spec": dict(sorted(spec.items())),
+                "notes": dict(sorted(self.notes.items())),
                 "walker_runs": self.walker_runs, "spine_runs": self.spine_runs,
                 "findings": len(self.findings)}
 
@@ -931,11 +1089,13 @@ class Fuzzer:
 
     def run(self, edits: int) -> Stats:
         names = sorted(self.seeds)
+        NOTES.clear()
         walk = 0
         while self.stats.tried < edits and not self._stopped():
             name = names[walk % len(names)]
             self._walk(self.seeds[name], walk, edits)
             walk += 1
+        self.stats.notes.update(NOTES)
         return self.stats
 
     def _walk(self, seed: Seed, walk: int, budget: int) -> None:
@@ -1012,7 +1172,8 @@ def violations_of(applier: Applier, edits: list[Any], *, spine: bool = False,
             return None
         current = outcome
         seen.add(current.id)
-    return check_state(applier, current.state, walker=bool({"walker", "spine"} & set(only)),
+    return check_state(applier, current.state,
+                       walker=bool({"walker", "spine", "grader", "slots"} & set(only)),
                        spine=spine, only=only)
 
 

@@ -726,8 +726,14 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
     pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads)
 
     # Write current_item to both pass_dir (for the subgraph) and workdir
-    # (for progress tracking / PIT-005).
-    item_json = json.dumps(item, indent=2, default=str)
+    # (for progress tracking / PIT-005), without the Task's grader-only fields: the
+    # nodes read this file, the grader reads the whole item (`instance_of`). The knobs
+    # are the run's, as a node command reads them (`run._knobs`).
+    from refactory_dsh.run import _knobs
+    from refactory_dsh.task import node_item
+
+    task = _task_of(node, workdir)
+    item_json = json.dumps(node_item(item, task, _knobs()), indent=2, default=str)
     (pass_dir / CURRENT_ITEM).write_text(item_json)
     (workdir / CURRENT_ITEM).write_text(item_json)
 
@@ -736,7 +742,6 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
     if sidecar.exists():
         sidecar.unlink(missing_ok=True)
 
-    task = _task_of(node, workdir)
     if task is not None:
         from refactory_dsh.task import part_seed_kwargs, subset_part_seed
         subset_part, subset_seed = subset_part_seed(workdir)

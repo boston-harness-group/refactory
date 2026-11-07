@@ -241,6 +241,11 @@ def _add_node(state: State, edit: dict) -> State:
     if not isinstance(node_state, dict):
         raise EditError("add_node needs a 'node' object")
     _check_new_node_texts(node_state)
+    if node_state.get("kind") == "agent" and "tool_policy" not in node_state:
+        # A new agent runs without tools unless it asks for them (``tool_policy:
+        # null``), which the attempt path allows only when the run does
+        # (``E-new-node-tools``). A default, as its own system-prompt knob is.
+        node_state = {**node_state, "tool_policy": "none"}
     try:
         node = Node.from_state(node_state)
     except GraphError as exc:
@@ -1290,22 +1295,11 @@ def _walk_successors(graph: Graph, node: Node) -> list[str]:
 
 
 def _fork_branch_members(graph: Graph, fork: Node) -> set[str]:
-    """Every node a fork's branches visit before its join (``Graph.fork_join``)."""
-    barrier = graph.fork_join(fork.id)
-    seen: set[str] = set()
-    pending = list(fork.targets)
-    while pending:
-        current = pending.pop()
-        if current == barrier or current in seen or current not in graph.nodes:
-            continue
-        seen.add(current)
-        pending.extend(_walk_successors(graph, graph.nodes[current]))
-        member = graph.nodes[current]
-        if member.kind == "fork":
-            pending.extend(member.targets)
-        if member.kind == "data" and member.subgraph_entry:
-            pending.append(member.subgraph_entry)
-    return seen
+    """Every node a fork's branches visit before its join, walked as the validator and
+    lowering walk them (`nn.validate.fork_branches`)."""
+    from .validate import fork_branches
+
+    return set().union(*fork_branches(graph, fork, graph.fork_join(fork.id)))
 
 
 def _completes_without(graph: Graph, start: str, banned: str, end: str | None,

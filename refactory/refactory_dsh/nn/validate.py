@@ -37,9 +37,8 @@ RULES: dict[str, str] = {
     "V4": "a non-gate node has at most one out-edge, and it carries no verdict",
     "V5": "a gate has at least two out-edges, each with its own condition, and no "
           "unconditional out-edge",
-    "V6": "every file a node reads must be written upstream of it on every path that "
-          "reaches it; an op or a gate may also read what a node in a loop with it wrote "
-          "the round before, or what its data node's pass wrote",
+    "V6": "every file a node reads must be written by a node on a path from the "
+          "start node to a terminal",
     "V7": "every knob a node consumes must be declared, and every declared knob "
           "must be consumed by some node",
     "V8": "every call and evaluator must resolve to a real callable",
@@ -56,8 +55,9 @@ RULES: dict[str, str] = {
     "V14": "every field binding must name a declared knob of the field's kind, once per "
            "field, and the field must be in the bindable allowlist",
     "V15": "an agent node's inputs are required: every file it reads and every {{name}} "
-           "its prompts fill in that is not a knob must be produced upstream on every path "
-           "that reaches it (a data pass's own files and facts stay inside the pass), and a "
+           "its prompts fill in (not a knob, not in its feedback_keys, not inside an "
+           "{% if name %} on the same name) must be produced upstream on every path that "
+           "reaches it (a data pass's own files and facts stay inside the pass), and a "
            "tool_policy 'none' agent declares exactly one write",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
@@ -481,8 +481,45 @@ def template_facts(node: Node, knob_values: Mapping[str, Any]) -> set[str]:
             text = node.bound(field_name, knob_values)
         except Exception:  # a bad binding is V14's to report
             text = getattr(node, field_name)
-        names |= set(_SLOT.findall(str(text or "")))
+        names |= required_slots(str(text or ""))
     return names - set(knob_values) - set(node.feedback_keys)
+
+
+#: A ``{% if %}``/``{% elif %}``/``{% else %}``/``{% endif %}`` tag, as the renderer
+#: reads it (``nn.executor._render_conditionals``).
+_CONDITIONAL = re.compile(r"\{%[-\s]*(if|elif|else|endif)\b\s*(.*?)[-\s]*%\}", re.DOTALL)
+#: A condition that is true only when its name has a value: ``name`` or
+#: ``name == 'non-empty literal'``.
+_GUARD = re.compile(r"""([A-Za-z_]\w*)(?:\s*==\s*(?:'[^']+'|"[^"]+"))?""")
+
+
+def required_slots(template: str) -> set[str]:
+    """The ``{{name}}`` slots a template needs filled: all of them, except a slot inside
+    an ``{% if name %}`` (or ``{% elif name %}``, or ``name == '...'``) branch on the same
+    name, which renders only when the name has a value."""
+    names: set[str] = set()
+    guards: list[set[str]] = []  # per open conditional: the names its current branch guards
+    pos = 0
+
+    def take(text: str) -> None:
+        guarded = set().union(*guards) if guards else set()
+        names.update(name for name in _SLOT.findall(text) if name not in guarded)
+
+    for match in _CONDITIONAL.finditer(template):
+        take(template[pos:match.start()])
+        pos = match.end()
+        tag, expr = match.group(1), match.group(2).strip()
+        guard = _GUARD.fullmatch(expr)
+        if tag == "if":
+            guards.append({guard.group(1)} if guard else set())
+        elif tag == "elif" and guards:
+            guards[-1] = {guard.group(1)} if guard else set()
+        elif tag == "else" and guards:
+            guards[-1] = set()
+        elif tag == "endif" and guards:
+            guards.pop()
+    take(template[pos:])
+    return names
 
 
 def fork_joins(graph: Graph) -> dict[str, list[str]]:
@@ -522,45 +559,6 @@ def _branch_ends(graph: Graph, branch: set[str], join: str) -> set[str]:
             if not graph.out_edges(member) or any(e.target == join for e in graph.out_edges(member))}
 
 
-def _successors(graph: Graph) -> dict[str, set[str]]:
-    """Where the run can go next from each node, for dataflow: edges, a fork's targets, a
-    data node's entry, a branch's end to its fork's join, and a pass's exit to the data
-    node's successor."""
-    succ: dict[str, set[str]] = {node_id: set() for node_id in graph.nodes}
-    for node in graph.nodes.values():
-        succ[node.id] |= {e.target for e in graph.out_edges(node.id) if e.target in succ}
-        if node.kind == "fork":
-            succ[node.id] |= {t for t in node.targets if t in succ}
-        if node.kind == "data":
-            if node.subgraph_entry in succ:
-                succ[node.id].add(node.subgraph_entry)
-            if node.subgraph_exit in succ:
-                succ[node.subgraph_exit] |= {e.target for e in graph.out_edges(node.id)}
-    for join, forks in fork_joins(graph).items():
-        for fork_id in forks:
-            for branch in fork_branches(graph, graph.nodes[fork_id], join):
-                for end in _branch_ends(graph, branch, join):
-                    succ[end].add(join)
-    return succ
-
-
-def cycle_mates(graph: Graph) -> dict[str, set[str]]:
-    """For each node, the nodes in a cycle with it: each can reach the other."""
-    succ = _successors(graph)
-    reach: dict[str, set[str]] = {}
-    for start in graph.nodes:
-        seen: set[str] = set()
-        stack = list(succ[start])
-        while stack:
-            current = stack.pop()
-            if current in seen:
-                continue
-            seen.add(current)
-            stack.extend(succ[current])
-        reach[start] = seen
-    return {node_id: {m for m in reach[node_id] if node_id in reach[m]} for node_id in graph.nodes}
-
-
 def _data_pass_issues(graph: Graph, data: Node) -> list[Issue]:
     """V12's rules for one data node's pass, as both runtimes run it."""
     entry, exit_ = data.subgraph_entry, data.subgraph_exit
@@ -592,7 +590,7 @@ def _data_pass_issues(graph: Graph, data: Node) -> list[Issue]:
     return issues
 
 
-def available_inputs(graph: Graph, *, isolate_passes: bool = True) -> dict[str, set[tuple[str, str]]]:
+def available_inputs(graph: Graph) -> dict[str, set[tuple[str, str]]]:
     """What is there when each node starts, on every path that reaches it.
 
     ``("file", name)`` and ``("fact", name)`` entries; the greatest fixpoint of: a node
@@ -600,8 +598,7 @@ def available_inputs(graph: Graph, *, isolate_passes: bool = True) -> dict[str, 
     a fork's join with what the fork had and what every run of each branch left; a data
     pass with what its data node had and the data node's writes; the data node's
     successor with what the data node had and declares -- never what its pass made,
-    which stays in the pass on both runtimes. With ``isolate_passes`` false, the data
-    node's successor also gets what its pass's exit left: what an op may look for.
+    which stays in the pass on both runtimes.
     """
     def made(node: Node) -> set[tuple[str, str]]:
         return {("file", n) for n in node.writes} | {("fact", n) for n in node.produces}
@@ -646,9 +643,6 @@ def available_inputs(graph: Graph, *, isolate_passes: bool = True) -> dict[str, 
             return avail[node_id]
         if how == "pass":
             return avail[node_id] | {("file", n) for n in node.writes}
-        if node.kind == "data" and not isolate_passes and node.subgraph_exit in graph.nodes:
-            exit_ = graph.nodes[node.subgraph_exit]
-            return avail[exit_.id] | made(exit_) | made(node)
         return avail[node_id] | made(node)
 
     changed = True
@@ -763,24 +757,21 @@ def gate_label_issues(graph: Graph) -> list[Issue]:
 
 
 def read_issues(graph: Graph) -> list[Issue]:
-    """V6: every file a node reads is written upstream of it on every path that reaches it.
+    """V6: every read is produced by a node on a path the run can take.
 
-    An op or a gate may read what a node in a loop with it wrote the round before (a
-    retry reads its last attempt's feedback), and a file its data node's pass wrote: it
-    may check for one. An agent may not; V15 holds its reads to every path.
+    Only that: an op or a gate may read a file that is not there yet (neither runtime
+    checks an op's reads, and shipped modes read an optional file or the last round's
+    feedback that way). An agent's reads are required, and V15 holds them to every
+    path that reaches it.
     """
     issues: list[Issue] = []
-    lenient = available_inputs(graph, isolate_passes=False)
-    mates = cycle_mates(graph)
+    produced = produced_on_path(graph)
     for node_id in sorted(graph.nodes):
-        node = graph.nodes[node_id]
-        last_round = set() if node.kind == "agent" else {
-            name for mate in mates.get(node_id, ()) for name in graph.nodes[mate].writes}
-        for name in node.reads:
-            if ("file", name) not in lenient.get(node_id, set()) and name not in last_round:
+        for name in graph.nodes[node_id].reads:
+            if name not in produced:
                 issues.append(Issue(
-                    "V6", f"reads {name!r}, which some path from {graph.start!r} to it does not "
-                    "write first", node=node_id))
+                    "V6", f"reads {name!r}, which no node on a path from {graph.start!r} to a "
+                    "terminal produces", node=node_id))
     return issues
 
 
@@ -811,7 +802,9 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
             issues.append(Issue(
                 "V15", f"needs {', '.join(missing)}, which some path to it does not produce "
                 "first; an agent's inputs are required (a data pass's own files and facts "
-                "stay inside its pass)", node=node_id))
+                "stay inside its pass). A fact the runtime re-derives before each dispatch "
+                "belongs in the node's feedback_keys, and an optional one goes inside "
+                "{% if name %}...{% endif %}", node=node_id))
     return issues
 
 

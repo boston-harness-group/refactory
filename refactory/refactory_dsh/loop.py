@@ -282,6 +282,10 @@ class LoopConfig:
     #: epoch's minibatch (as SkillOpt rolls out its current candidate on each step's
     #: batch). Val and test are unaffected. Each epoch's ids are journaled.
     train_minibatch: int = 0
+    #: Whether an agent node an edit adds may run with tools. Off by default: a new
+    #: agent node runs with ``tool_policy: none``, and one that asks for tools is
+    #: refused (``E-new-node-tools``).
+    allow_new_node_tools: bool = False
     #: With ``val_gate``: stop after this many epochs in a row whose gating did not
     #: raise the best val score (SkillOpt's ``early_stop_patience``). 0 is off.
     early_stop_patience: int = 0
@@ -922,6 +926,7 @@ class Loop(OuterLoop):
             outcome = sampler.attempt(
                 proposal, seed, self.invariants, True, self.config.frozen, self._tried(),
                 seed_state=self._original_seed_state, protected=self.protected,
+                allow_new_node_tools=self.config.allow_new_node_tools,
             )
             if isinstance(outcome, Candidate):
                 self.population.append(outcome)

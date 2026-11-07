@@ -120,6 +120,7 @@ class Run:
             self._loop._tried(),  # noqa: SLF001 - the harness owns the population
             seed_state=getattr(self._loop, '_original_seed_state', None),
             protected=getattr(self._loop, "protected", ()),
+            allow_new_node_tools=bool(getattr(self._loop.config, "allow_new_node_tools", False)),
         )
         if isinstance(outcome, list):
             self._loop.rejections.append(

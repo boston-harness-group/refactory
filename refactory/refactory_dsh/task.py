@@ -67,6 +67,17 @@ class Task:
     """The three hooks a dataset binding implements."""
 
     name = ""
+    #: Item fields only the grader may see: the answer, and anything that states it.
+    #: ``verify`` gets the whole item (its instance), but the per-item file the
+    #: graph's nodes read (``current_item.json``) never carries these, on either
+    #: runtime (`node_item`). A node an optimizer adds can read that file, so a Task
+    #: whose items hold their own answer has to say so here. Default: none.
+    grader_fields: tuple[str, ...] = ()
+    #: Grader-only fields a run may still show the nodes, each behind the knob that
+    #: turns it on (``{"theorem": "use_theorem"}``). The field reaches
+    #: ``current_item.json`` only in a run whose knob is true; a mode that declares
+    #: such a knob freezes it, so no search can turn it on.
+    revealed_by: dict[str, str] = {}
 
     def instances(
         self, *, part: str | None = None, seed: int | None = None,
@@ -128,6 +139,22 @@ def load_task(ref: str, project: Path | None = None) -> Task:
         known = ", ".join(sorted(TASKS)) or "none"
         raise TaskError(f"no Task named {ref!r} is registered; registered: {known}")
     return TASKS[ref]()
+
+
+def node_item(item: dict[str, Any], task: Task | None, knobs: dict[str, Any] | None) -> dict[str, Any]:
+    """The item as the graph's nodes may read it: without the Task's grader-only fields.
+
+    A grader-only field named in ``revealed_by`` stays when the run's knob for it is
+    true. Both runtimes write ``current_item.json`` through here; the grader keeps the
+    whole item (``instance_of``).
+    """
+    hidden = set(getattr(task, "grader_fields", ()) or ())
+    if not hidden:
+        return item
+    revealed = getattr(task, "revealed_by", None) or {}
+    knobs = knobs or {}
+    shown = {name for name in hidden if name in revealed and bool(knobs.get(revealed[name]))}
+    return {key: value for key, value in item.items() if key not in hidden - shown}
 
 
 def instance_of(item: dict[str, Any]) -> TaskInstance:
