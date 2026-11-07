@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import random
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -178,10 +179,68 @@ def _position(position: Any) -> tuple[str, Any]:
     return kind, value
 
 
+#: What a clipped text looks like in an optimizer's prompt (``optim.base._clip_middle``).
+_CLIP_MARKER = re.compile(r"\[\.\.\. \d+ characters omitted \.\.\.\]")
+#: A template slot opened (``{{``) and never closed before the next brace.
+_UNCLOSED_SLOT = re.compile(r"\{\{(?![^{}]*\}\})")
+
+
+def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
+    """A new node's texts carry no clip marker and no unclosed ``{{``."""
+    for key, value in node_state.items():
+        if not isinstance(value, str):
+            continue
+        if _CLIP_MARKER.search(value):
+            raise EditError(
+                f"node {node_state.get('id')!r}: {key} holds a clipped text (it contains "
+                "'[... N characters omitted ...]'); write the text yourself or edit the "
+                "knob it is bound to, rather than copying a clipped one", code="E-node-text")
+        if _UNCLOSED_SLOT.search(value):
+            raise EditError(
+                f"node {node_state.get('id')!r}: {key} opens a template slot '{{{{' that "
+                "is never closed with '}}'", code="E-node-text")
+
+
+def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[Node, dict[str, Any]]:
+    """The new node with knobs of its own, and the knobs to declare for it.
+
+    A new node may not bind a knob another node binds: it would silently run that
+    node's value (a copied agent running the original's system prompt). A new agent
+    node with no system-prompt binding gets its own ``<id>__system_prompt`` knob, as
+    a mode's agent nodes do when it is built (``Mode._auto_system_prompt_knobs``),
+    holding the system prompt the edit gave it.
+    """
+    owners = {knob: owner.id for owner in graph.nodes.values()
+              for _field, knob in owner.field_bindings}
+    readers = graph.knob_consumers()
+    for _field, knob in node.field_bindings:
+        if knob in owners or knob in readers:
+            other = owners.get(knob) or readers[knob][0]
+            how = "owns" if knob in owners else "reads"
+            raise EditError(
+                f"new node {node.id!r} binds knob {knob!r}, which node {other!r} {how}; "
+                f"drop field_bindings (and the knob from its knobs) -- a new agent node gets "
+                f"its own {node.id}__system_prompt knob from its system_prompt_template",
+                code="E-binding")
+    if node.kind != "agent" or any(f == "system_prompt_template" for f, _ in node.field_bindings):
+        return node, {}
+    from .knob import Knob
+
+    name = f"{node.id}__system_prompt"
+    if name in (state.get("knobs") or {}):
+        raise EditError(f"knob {name!r} already exists, so node {node.id!r} cannot get its own "
+                        "system-prompt knob; choose another node id", code="E-knob")
+    knob = Knob(node.system_prompt_template or "", "str", description=f"system prompt for {node.id}")
+    node = replace(node, knobs=(*node.knobs, name),
+                   field_bindings=(*node.field_bindings, ("system_prompt_template", name)))
+    return node, {name: {"value": knob.default, "spec": knob.spec()}}
+
+
 def _add_node(state: State, edit: dict) -> State:
     node_state = edit.get("node")
     if not isinstance(node_state, dict):
         raise EditError("add_node needs a 'node' object")
+    _check_new_node_texts(node_state)
     try:
         node = Node.from_state(node_state)
     except GraphError as exc:
@@ -190,6 +249,7 @@ def _add_node(state: State, edit: dict) -> State:
     graph = _graph(state)
     if node.id in graph.nodes:
         raise EditError(f"node {node.id!r} already exists")
+    node, own_knobs = _own_bindings(node, graph, state)
 
     if kind == "start":
         previous = graph.start
@@ -239,7 +299,9 @@ def _add_node(state: State, edit: dict) -> State:
         for data_id, data in list(graph.nodes.items()):
             if data.kind == "data" and data.subgraph_entry == target.id:
                 graph.nodes[data_id] = replace(data, subgraph_entry=node.id)
-    return _finish(state, graph)
+    out = _finish(state, graph)
+    out["knobs"].update(own_knobs)
+    return out
 
 
 def _data_pass_nodes(graph: Graph) -> set[str]:
@@ -259,6 +321,14 @@ def _move_exits(graph: Graph, old_exit: str, new_exit: str) -> None:
 
 
 def _remove_node(state: State, edit: dict) -> State:
+    """Delete a node, and the knobs that were its own.
+
+    A node's own knobs are the ones it binds that carry its id (``<id>__...``: the
+    system-prompt knob every agent node gets, a duplicate's copies) and no remaining
+    node reads. They go with it, so the state stays valid (V7) and the same id can
+    be added again. Any other knob it alone read stays declared, and the validator
+    refuses the state, so a mode's declared knobs are never dropped by an edit.
+    """
     graph = _graph(state)
     target = _require(graph, edit.get("id"))
     del graph.nodes[target.id]
@@ -267,7 +337,12 @@ def _remove_node(state: State, edit: dict) -> State:
         # Left empty on purpose: the validator reports the missing start rather
         # than this operator choosing a successor to promote.
         graph.start = ""
-    return _finish(state, graph)
+    readers = graph.knob_consumers()
+    out = _finish(state, graph)
+    for _field, knob in target.field_bindings:
+        if knob.startswith(f"{target.id}__") and knob not in readers:
+            out["knobs"].pop(knob, None)
+    return out
 
 
 def _add_edge(state: State, edit: dict) -> State:
@@ -311,6 +386,11 @@ def _set_knob(state: State, edit: dict) -> State:
     knob = Knob.from_spec(entries[name]["spec"])
     if knob.frozen:
         raise EditError(f"knob {name!r} is frozen and cannot be moved", code="E-knob")
+    graph_state = state.get("graph") or {}
+    if graph_state.get("nodes") and name not in _graph(state).knob_consumers():
+        # Moving it would spend an evaluation on a run nothing in it can see.
+        raise EditError(f"knob {name!r} is read by no node of this graph (its node was "
+                        "removed), so setting it cannot change the run", code="E-knob")
     # One edit moves a knob, in one of two forms: the whole new value, or a patch
     # (an ordered list of text edits) to a str knob's current text.
     has_value, has_patch = "value" in edit, "patch" in edit
@@ -808,7 +888,8 @@ _primitive(
 )
 _primitive(
     "remove_node", "node",
-    "Delete a node and every edge touching it. Leaves the hole for the validator to report.",
+    "Delete a node and every edge touching it, with the knobs that were its own "
+    "(`<id>__...`, e.g. its system prompt). Leaves the hole for the validator to report.",
     ("id",), _remove_node,
 )
 _primitive(
@@ -962,11 +1043,33 @@ def _pre_duplicate(edit: dict, state: State) -> str | None:
 
 
 def _expand_duplicate(edit: dict, state: State) -> list[dict]:
+    """A copy of the node, with knobs of its own for what the original binds.
+
+    Each bound field gets a new knob (``<new id>__<suffix>``) declared with the
+    original knob's spec and current value, so the copy starts out the same and is
+    tuned on its own; it never shares the original's knob."""
     graph = _graph(state)
     source = graph.nodes[edit["target"]]
     node = source.to_state()
-    node["id"] = str(edit.get("new_id") or _fresh_id(graph, f"{source.id}_copy"))
-    return [{"op": "add_node", "node": node, "position": {"after": source.id}}]
+    new_id = str(edit.get("new_id") or _fresh_id(graph, f"{source.id}_copy"))
+    node["id"] = new_id
+    knobs = state.get("knobs") or {}
+    steps: list[dict] = []
+    bindings: list[list[str]] = []
+    for field_name, knob in source.field_bindings:
+        prefix = f"{source.id}__"
+        own = (f"{new_id}__{knob[len(prefix):]}" if knob.startswith(prefix)
+               else f"{new_id}__{field_name}")
+        entry = knobs.get(knob) or {}
+        spec = {**dict(entry.get("spec") or {}), "default": entry.get("value")}
+        steps.append({"op": "add_knob", "name": own, "spec": spec})
+        bindings.append([field_name, own])
+    bound = {knob for _field, knob in source.field_bindings}
+    node["knobs"] = [k for k in node.get("knobs", []) if k not in bound] + [own for _f, own in bindings]
+    node.pop("field_bindings", None)
+    if bindings:
+        node["field_bindings"] = bindings
+    return [*steps, {"op": "add_node", "node": node, "position": {"after": source.id}}]
 
 
 def _pre_split(edit: dict, state: State) -> str | None:
@@ -1065,7 +1168,8 @@ _macro("wrap", "Put a new node on every out-edge of an existing node, so it sees
        ("target", "node"), _pre_wrap, _expand_wrap)
 _macro("bypass", "Remove a node and reconnect each predecessor to each successor.",
        ("target",), _pre_bypass, _expand_bypass)
-_macro("duplicate", "Insert a copy of a node directly after it.",
+_macro("duplicate", "Insert a copy of a node directly after it; the copy gets its own "
+       "knobs (same current values) for every field the original binds to a knob.",
        ("target", "new_id"), _pre_duplicate, _expand_duplicate)
 _macro("split", "Replace one step with two consecutive steps.",
        ("target", "into"), _pre_split, _expand_split)
