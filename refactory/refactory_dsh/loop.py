@@ -990,10 +990,23 @@ class Loop(OuterLoop):
             return
         if self.evaluations >= self.config.max_evaluations:
             return
+        if self.budget:
+            # The time and token budgets, checked as every scoring path checks them: a
+            # spent budget stops the re-score here, before anything runs.
+            from refactory_dsh.budgets import BudgetExhausted
+            try:
+                self.budget.checkpoint("work" if self._owns_resource_budget else None)
+            except BudgetExhausted as exc:
+                self.bound = str(exc)
+                return
         workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{self.epoch}"
         task_module.make_manifest(workdir, train_ids=batch)
         result, measurements = self._measure(parent, workdir, task_module.TRAIN,
                                              seed=self._train_seed(self.epoch), items=batch)
+        if not measurements.get("count"):
+            # The measurement's own budget checkpoint stopped it before a trial ran:
+            # nothing was scored, so nothing is counted and the records stay.
+            return
         with self._state_lock:
             # An evaluation like any other: it counts toward the evaluation budget (the
             # time and token budgets are charged inside the measurement), and it is

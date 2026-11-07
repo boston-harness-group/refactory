@@ -191,3 +191,64 @@ def test_a_resume_with_another_size_is_refused(tmp_path, monkeypatch):
                         resume=True)
         with pytest.raises(LoopError, match="resume it with train_minibatch 3"):
             resumed.run()
+
+
+class _SpentBudget:
+    """A budget whose time or tokens are spent: every checkpoint refuses."""
+
+    def __init__(self, *, refuse_first: bool = True) -> None:
+        self.refuse_first = refuse_first
+        self.calls = 0
+
+    def checkpoint(self, *args: Any, **kwargs: Any) -> None:
+        from refactory_dsh.budgets import BudgetExhausted
+
+        self.calls += 1
+        if self.refuse_first or self.calls > 1:
+            raise BudgetExhausted("the time budget is spent")
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"exhausted": True}
+
+    def retain_validation_reserve(self):  # type: ignore[no-untyped-def]
+        import contextlib
+        return contextlib.nullcontext()
+
+
+def _ready_for_rescore(tmp_path: Path, monkeypatch: Any) -> Loop:
+    """A finished gated minibatch run, set up as the next epoch about to re-score its
+    current candidate."""
+    loop, _ = _run(tmp_path, monkeypatch, [[(5, 7)], []], train_minibatch=3, val_gate=True,
+                   batch_size=1, epochs=2)
+    loop.epoch += 1
+    loop._epoch_open = True
+    loop._editing_parent = loop._gate().current_id
+    return loop
+
+
+def test_a_spent_time_or_token_budget_stops_the_rescore_before_it_runs(tmp_path, monkeypatch):
+    loop = _ready_for_rescore(tmp_path, monkeypatch)
+    measured: list[str] = []
+    monkeypatch.setattr(Loop, "_measure", lambda self, *a, **k: measured.append("m") or (None, {}))
+    before = (loop.evaluations, list(loop._train_item_records[loop._editing_parent]))
+    rescores = len(_events(loop, "rescore"))
+    loop.budget = _SpentBudget()
+    loop._refresh_edited_records()
+    assert measured == [], "nothing is measured on a spent budget"
+    assert (loop.evaluations, loop._train_item_records[loop._editing_parent]) == (
+        before[0], before[1])
+    assert len(_events(loop, "rescore")) == rescores and "spent" in loop.bound
+
+
+def test_a_rescore_the_measurement_stopped_counts_nothing(tmp_path, monkeypatch):
+    """The budget runs out between the loop's check and the measurement's own: no
+    trial ran, so no evaluation is counted and the records stay."""
+    loop = _ready_for_rescore(tmp_path, monkeypatch)
+    edited = loop._editing_parent
+    before = (loop.evaluations, list(loop._train_item_records[edited]))
+    rescores = len(_events(loop, "rescore"))
+    loop.budget = _SpentBudget(refuse_first=False)
+    loop._owns_resource_budget = True
+    loop._refresh_edited_records()
+    assert (loop.evaluations, loop._train_item_records[edited]) == before
+    assert len(_events(loop, "rescore")) == rescores
