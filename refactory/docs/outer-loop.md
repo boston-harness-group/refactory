@@ -287,6 +287,10 @@ the solver's, byte for byte. `max_completion_tokens`, `data_parallelism`,
 `use_theorem` and `use_sketch` are frozen. An item's theorem states the correct option,
 so the last two stay off. Each item takes 4 model calls.
 
+`data`, `extract_answer` and `finish` are protected (`SkillGraph.protected_nodes`): a
+search edits the steps between them, never the pass, the answer extraction or the run's
+end. See "Structure edits" below.
+
 ## SkillOpt over several text knobs
 
 `--strategy skillopt --strategy-option knobs=compare__system_prompt,precision__system_prompt,hypotheses__system_prompt,decide__system_prompt`
@@ -333,3 +337,92 @@ the strategy optimizes the single `skill` knob exactly as before.
   the run spends anything. A run resumed with different `knobs` is refused too.
 - **Trajectories.** LiveMath's trajectory view labels each message with the step that
   wrote it (`[compare] …`) when a record has several steps.
+
+## Structure edits: what an accepted edit guarantees
+
+A structure edit reaches the search only through `Optimizer.attempt` (which `Run.attempt`
+and the default loop call): the macro's precondition, the edit itself, the mode's
+protected nodes, the validator, and lowering. An edit that passes all of them is a
+candidate; any other gets the first refusal's code and reason back. What an accepted
+state is promised, on any graph shape:
+
+- **It lowers.** The spine's lowering accepts it. A child whose parent lowers and which
+  does not is refused `E-lowering`, with lowering's reason.
+- **Forks pair with joins (V16).** A fork has one unconditional out-edge, to its join,
+  and each join belongs to one fork. Branches are disjoint, end at the join or at a dead
+  end, never lead back to the fork or past the join, and declare no shared facts, no fact
+  a sibling's prompt reads, and no conflicting files (lowering and V16 read the same
+  rules, `nn.validate.fork_branch_conflicts`). A gate in a branch reloops only inside
+  it. A join is entered only from its fork's branches and waits only for nodes every run
+  of their branch visits.
+- **Reads are produced first (V6, V15).** A file a node reads is written by a node on a
+  path from the start to a terminal. An op or a gate may read a file that is not there
+  yet (an optional read), unless it lists the read in `required_reads`: a required read
+  is written upstream on every path to it, and both runtimes refuse to run the node while
+  one is missing. An agent's inputs are all required: its reads, and every `{{name}}`
+  its prompts fill in that is not a knob, not in its `feedback_keys` and not inside an
+  `{% if name %}` on the same name, are there on every path to it. A data pass's own
+  files and facts stay in the pass. A `tool_policy: none` agent declares exactly one
+  write. LiveMath's skill graph declares every read of its four ops as required.
+- **Passes are closed (V12).** A data node's entry reaches its exit, which is not a gate
+  and has no out-edge. A pass is entered only through its data node, never by an edge
+  from the data node or from outside, and never leads back to it.
+- **Verdicts are unambiguous (V5).** No two out-edges of a gate carry the same verdict.
+- **Each agent runs its own prompt.** An agent node an edit adds gets its own
+  `<id>__system_prompt` knob, a copy never binds the original's knob (`E-binding`), and
+  every declared knob is read (V7).
+- **Items reach the nodes without their answer.** A Task names the item fields only its
+  grader may see (`Task.grader_fields`, default none). `current_item.json`, the file the
+  graph's nodes read, never carries them, on either runtime; the grader gets the whole
+  item. A field in `Task.revealed_by` is shown when the run's knob for it is on.
+  LiveMath hides `correct_choice`, `label`, `label_text`, `theorem` and `sketch`; its
+  frozen `use_theorem` and `use_sketch` reveal the theorem and the sketch.
+- **New agents run without tools.** An agent node an edit adds gets `tool_policy: none`
+  unless it asks for tools (`tool_policy: null` or a `tools` list), and asking is refused
+  `E-new-node-tools` unless the run allows it (`LoopConfig.allow_new_node_tools`, off by
+  default). A node whose id the seed has keeps the seed's policy.
+- **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
+  (default none). An edit that removes one, changes its declaration or out-edges, moves a
+  knob it reads, or lets a run finish without one that every run used to visit is refused
+  `E-protected`. A new node may still go in front of one. The optimizer's request lists
+  them.
+
+### The invariant harness
+
+`tests/structure_fuzz.py` checks those promises by generating random structure edits
+from a seed, over LiveMath's skill graph and seven small graphs
+(`tests/structure_fuzz_graphs.py`: a fork and join, a nested fork, the three gate kinds,
+a gate loop, a data pass, a pipeline of ops, and several terminals). The edits cover
+every primitive and macro, node copies taken from the node JSON the optimizer is shown
+(new ids, new prompts), and malformed edits. Each walk applies them through the same
+attempt path, and every accepted state is checked two ways.
+
+- **Observed**, by running the real code and looking at what it did: lowering; a walker
+  run with a scripted model, which must end at a terminal or a halt; the spine beside
+  the walker on a sample (same facts and item scores; graphs with a user or an agent gate
+  are walker-only, as the test drain answers no gate); no agent sent an unfilled
+  `{{name}}`; no node ran without one of its `required_reads`; and no grader-only item
+  value in any file a node can read or any prompt, found by content. The synthetic ops read their declared inputs; an op's input that is
+  not there is counted (`notes.op_read_absent`), not called a violation, since V6 lets an
+  op read an optional file.
+- **Spec**, a second statement of the rules beside the validator: knob ownership,
+  dataflow, fork pairing, protected nodes and new agents' tools.
+
+A violation is shrunk to the fewest edits that still show it and can be saved, with
+`structure_fuzz.save_case`, to `tests/fixtures/structure_fuzz/`; each case there replays
+in the normal suite and must now be refused or sound. The same `seed` tries the same
+edits in the same order.
+
+- **Quick tier**, in every run: `pytest refactory/tests/test_structure_fuzz.py` (300
+  edits on the walker, about 10 s), the corpus, and one mutation check per invariant,
+  which switches that invariant's protection off and requires the harness to find a
+  violation.
+- **Long tier**, by hand: thousands of edits per seed, with the spine on every twelfth
+  accepted state, the corpus on the spine, and the spine's mutation check. It needs the
+  installed workspace (`pnpm install`).
+
+```bash
+uv run python -m pytest refactory/tests/test_structure_fuzz.py --run-structure-fuzz-long \
+    -k long_tier   # STRUCTURE_FUZZ_EDITS=4000 STRUCTURE_FUZZ_SEEDS=1,2 by default
+STRUCTURE_FUZZ_REPORT=/tmp/fuzz.json   # optional: the counts and findings as JSON
+```

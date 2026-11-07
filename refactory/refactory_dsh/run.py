@@ -288,6 +288,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
             }
             if entry.get("optional"):
                 result["optional"] = True
+            if entry.get("required_reads"):
+                result["required_reads"] = list(entry["required_reads"])
             return result
     manifest = _manifest()
     if str(manifest.get("id")) == node_id:
@@ -313,6 +315,18 @@ def install_workspace_packages() -> None:
     from refactory_dsh.paths import project_root, project_for_nodes
 
     registry.install_workspace(project_for_nodes())
+
+
+def missing_inputs(directory: Path, required: Any) -> None:
+    """Refuse to run a node while one of its ``required_reads`` is missing.
+
+    Both runtimes call this before an op or a gate runs (the walker in
+    ``Executor._run_op_timed``), with the message the agent runtimes use for a missing
+    read, so a node declared as needing an input never runs without it.
+    """
+    for name in required:
+        if not (Path(directory) / name).exists():
+            raise ValueError(f"required input is missing: {name}")
 
 
 def build_op_context(
@@ -368,6 +382,7 @@ def run_node(
         directory, node_id,
         task={"node": node_id, "type": manifest.get("type", "")},
     )
+    missing_inputs(directory, declarations(directory, node_id).get("required_reads") or ())
     node_type = manifest.get("type", "")
     is_retryable = node_type not in ("gate", "GateNode")
     started = copy.deepcopy(ctx.facts)

@@ -80,6 +80,10 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("early_stop_at_full_val") not in (True, False, 0, 1):
         raise ProfileError("early_stop_at_full_val must be true or false (1 or 0 on the command line)")
     result["early_stop_at_full_val"] = bool(result.get("early_stop_at_full_val"))
+    # allow_new_node_tools: a switch; the command line passes it as 0 or 1.
+    if result.get("allow_new_node_tools") not in (True, False, 0, 1, None):
+        raise ProfileError("allow_new_node_tools must be true or false (1 or 0 on the command line)")
+    result["allow_new_node_tools"] = bool(result.get("allow_new_node_tools"))
     minibatch = result.get("train_minibatch")
     if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")

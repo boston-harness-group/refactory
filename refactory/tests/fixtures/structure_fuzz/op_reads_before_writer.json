@@ -1,0 +1,27 @@
+{
+  "seed": "fuzz_dataflow",
+  "edits": [
+    {
+      "op": "insert_before",
+      "target": "load",
+      "node": {
+        "id": "op5",
+        "kind": "op",
+        "call": "structure_fuzz_graphs:step",
+        "reads": [
+          "clean.txt"
+        ],
+        "writes": [
+          "op5.txt"
+        ],
+        "produces": [
+          "op5_fact"
+        ]
+      }
+    }
+  ],
+  "found": [
+    "dataflow: op op5 reads ['file clean.txt'], not produced upstream on every path to it"
+  ],
+  "fixed_by": "accepted since the review of #606: an op or a gate may read a file that is not there yet (no runtime checks an op's reads), so V6 keeps its on-some-path rule for them; the harness's step op notes the absent read (notes.op_read_absent) and the run must still finish"
+}

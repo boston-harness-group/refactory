@@ -1,0 +1,19 @@
+{
+  "seed": "fuzz_fork_join",
+  "edits": [
+    {
+      "op": "remove_edge",
+      "source": "split",
+      "target": "merge"
+    }
+  ],
+  "found": [
+    "lowering: LoweringError: fork 'split': branches declare the same produced facts",
+    "dataflow: agent decide reads ['fact right_fact', 'file left.txt', 'file right_b.txt'], not produced upstream on every path to it",
+    "forks: fork split has 0 out-edges, not one unconditional edge to its join",
+    "forks: join merge belongs to no fork",
+    "walker: failed: split: ExecutionError: fork 'split' needs one unconditional join edge"
+  ],
+  "fixed_by": "V16: a fork needs exactly one unconditional out-edge",
+  "refused_with": "V15"
+}

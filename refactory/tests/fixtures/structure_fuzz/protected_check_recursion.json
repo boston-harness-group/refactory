@@ -1,0 +1,16 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "add_edge",
+      "source": "compare",
+      "target": "data",
+      "condition": null
+    }
+  ],
+  "found": [
+    "attempt: E-internal: RecursionError: maximum recursion depth exceeded (the new protected-node check, before its fix)"
+  ],
+  "fixed_by": "edits._completes_without stops at a data node met again inside its own pass; V12 refuses the edge back",
+  "refused_with": "V10"
+}

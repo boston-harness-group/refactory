@@ -77,6 +77,14 @@ class CountingTask(Task):
 
 There is no hook that writes the prompt. An item is data — it reaches the pass as `current_item.json` — and what the agent for an item is asked is the mode's own business, stated in its agent node's prompt template. Two places that both decide the ask is one place too many.
 
+An item that carries its own answer says which fields are the answer's. `grader_fields`
+on the Task (default none) names them: `current_item.json`, which every node of the pass
+can read (an optimizer's new nodes included), never holds them, on either runtime, and
+`verify` still gets the whole item. `revealed_by` maps a grader-only field to the knob
+that shows it to the nodes in a run that turns the knob on; a mode freezes such a knob,
+so a search cannot. LiveMath's Task hides `correct_choice`, `label`, `label_text`,
+`theorem` and `sketch`, and its frozen `use_theorem` and `use_sketch` reveal the last two.
+
 The verdicts are recorded as `item_scores` when the data node declares that fact, so
 `score()` reads what the Task decided rather than a number the graph guessed.
 

@@ -1192,10 +1192,14 @@ class Executor:
                         self.ctx._declared_reads = node.reads  # noqa: SLF001
                         self.ctx._declared_facts = node.produces  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
-                        self.ctx.write_json(CURRENT_ITEM, item)
+                        # The nodes read the item without its grader-only fields.
+                        from refactory_dsh.task import node_item
+
+                        _visible = node_item(item, task, self.ctx.knobs)
+                        self.ctx.write_json(CURRENT_ITEM, _visible)
                         # Dual-write current_item to run-level workdir for progress (PIT-005).
                         (_run_workdir / CURRENT_ITEM).write_text(
-                            json.dumps(item, indent=2, default=str)
+                            json.dumps(_visible, indent=2, default=str)
                         )
                         # Clear per-item exchanges before each pass.
                         self._item_exchanges = []
@@ -1719,6 +1723,10 @@ class Executor:
         # Resolve workdir to absolute: the child does os.chdir(workdir) and
         # relative paths would resolve against the new CWD otherwise.
         _abs_workdir = str(self.ctx.workdir.resolve())
+        # A declared required read that is missing refuses the node, as on the spine.
+        from refactory_dsh.run import missing_inputs
+
+        missing_inputs(self.ctx.workdir, node.required_reads)
         # Forward the current environment snapshot: forkserver children inherit
         # the forkserver's env, not the parent's current one.  Tests that use
         # monkeypatch.setenv need the child to see those changes.

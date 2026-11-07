@@ -188,6 +188,19 @@ class Mode:
         """Mode-declared rules the validator checks on every candidate."""
         return ()
 
+    def protected_nodes(self) -> tuple[str, ...]:
+        """Node ids no structure edit may remove, rewire or replace.
+
+        The parts a search must not touch because the score, or what the score is
+        about, depends on them: the step that extracts the graded answer, the run's
+        last step, the data pass that iterates the items. An edit that deletes one,
+        changes its declaration or its out-edges, moves a knob it reads, or lets a run
+        reach a terminal without it when every run used to pass through it is refused
+        with ``E-protected`` (`nn.edits.protected_violation`). Nodes may still be
+        inserted before one. Empty by default: nothing is protected.
+        """
+        return ()
+
     def edit_policy(self) -> str:
         """Which edit preset the outer loop may use on this mode."""
         return "broad"

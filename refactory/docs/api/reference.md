@@ -26,7 +26,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Knob` | `(default: 'Any', kind: 'str' = 'float', lo: 'float \| None' = None, hi: 'float \| None' = None, enum: 'tuple[Any, ...]' = (), values: 'tuple[str, ...]' = (), frozen: 'bool' = False, description: 'str' = '', required: 'bool' = False) -> None` |
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
 | class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
@@ -52,7 +52,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `Edge` | `(source: 'str', target: 'str', condition: 'str \| None' = None) -> None` |
 | class | `Graph` | `(*, auto_start: 'bool' = True) -> 'None'` |
 | class | `GraphError` | `` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = ()) -> None` |
 | function | `retry_declaration` | `(value: 'Any') -> 'dict[str, Any] \| None'` |
 | function | `workspace_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
 
@@ -129,7 +129,7 @@ The edit algebra: every structural change is typed data.
 |---|---|---|
 | class | `EditError` | `(message: 'str', code: 'str' = 'E-shape') -> 'None'` |
 | class | `EditSpec` | `(name: 'str', kind: 'str', description: 'str', fields: 'tuple[str, ...]', macro: 'bool' = False, precondition: 'Callable[[dict, State], str \| None] \| None' = None, expand: 'Callable[[dict, State], list[dict]] \| None' = None, apply: 'Callable[[State, dict], State] \| None' = None) -> None` |
-| function | `apply` | `(edit: 'dict', state: 'Mapping[str, Any]', *, edit_reports: 'list[dict[str, Any]] \| None' = None) -> 'State'` |
+| function | `apply` | `(edit: 'dict', state: 'Mapping[str, Any]', *, edit_reports: 'list[dict[str, Any]] \| None' = None, protected: 'Iterable[str]' = ()) -> 'State'` |
 | function | `apply_many` | `(edits: 'Iterable[dict]', state: 'Mapping[str, Any]') -> 'State'` |
 | function | `catalogue` | `(preset: 'str' = 'broad') -> 'list[dict[str, Any]]'` |
 | function | `configure` | `(state: 'Mapping[str, Any]', name: 'str', value: 'Any') -> 'State'` |
@@ -137,6 +137,7 @@ The edit algebra: every structural change is typed data.
 | function | `is_macro` | `(name: 'str') -> 'bool'` |
 | function | `names` | `() -> 'list[str]'` |
 | function | `precheck` | `(edit: 'dict', state: 'Mapping[str, Any]') -> 'str \| None'` |
+| function | `protected_violation` | `(before: 'Mapping[str, Any]', after: 'Mapping[str, Any]', protected: 'Iterable[str]') -> 'str \| None'` |
 | function | `random_edit` | `(state: 'Mapping[str, Any]', *, preset: 'str' = 'broad', insertable: 'Sequence[Any]' = (), rng: 'random.Random \| None' = None) -> 'dict \| None'` |
 | function | `removed` | `(op: 'object') -> 'str \| None'` |
 | function | `unknown` | `(op: 'object') -> 'str \| None'` |
@@ -148,6 +149,7 @@ The edit algebra: every structural change is typed data.
 - **`configure`** — Set a knob for the run being made, refusing a bad name or value but not a freeze.
 - **`enabled`** — The operations a preset allows. An unknown preset is an error.
 - **`precheck`** — The reason ``edit`` cannot be applied, for the checks that need no state.
+- **`protected_violation`** — Why ``after`` removes, rewires or replaces a protected node of ``before``, or None.
 - **`random_edit`** — A random edit from the enabled set, or ``None`` if none can be built.
 - **`removed`** — Where a folded-away operation went, or None for any other name.
 - **`unknown`** — The refusal for an op the catalogue does not have, or None when it does.
@@ -163,23 +165,45 @@ The validator: what makes architecture-in-the-state safe.
 |---|---|---|
 | class | `Invariant` | `(name: 'str', description: 'str', check: 'Callable[[Graph, Mapping[str, Any]], str \| None]') -> None` |
 | class | `Issue` | `(code: 'str', message: 'str', node: 'str \| None' = None, knob: 'str \| None' = None) -> None` |
+| function | `agent_input_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
 | function | `artifact_produced` | `(*paths: 'str', by: 'str') -> 'Invariant'` |
+| function | `available_inputs` | `(graph: 'Graph') -> 'dict[str, set[tuple[str, str]]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
+| function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
+| function | `fork_branches` | `(graph: 'Graph', fork: 'Node', join: 'str \| None') -> 'list[set[str]]'` |
+| function | `fork_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
+| function | `fork_joins` | `(graph: 'Graph') -> 'dict[str, list[str]]'` |
+| function | `gate_label_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
+| function | `read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
+| function | `required_read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
+| function | `required_slots` | `(template: 'str') -> 'set[str]'` |
 | function | `rules_text` | `() -> 'str'` |
+| function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
 | function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = ()) -> 'list[Issue]'` |
 | function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True) -> 'list[Issue]'` |
 
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
+- **`agent_input_issues`** — V15: required inputs are there on every path: an op's or a gate's
 - **`artifact_produced`** — Keep a named artifact producer in the executable graph during search.
+- **`available_inputs`** — What is there when each node starts, on every path that reaches it.
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
+- **`fork_branch_conflicts`** — ``(fork, reason)`` for each fork whose branches cannot run side by side.
+- **`fork_branches`** — Each branch's members, walked as both runtimes walk it: edges and nested forks'
+- **`fork_issues`** — V16: every fork is paired with one join, and its branches are independent.
+- **`fork_joins`** — Each join some fork's unconditional out-edge leads to, and the forks that do.
+- **`gate_label_issues`** — V5: no two out-edges of a gate carry the same verdict (compared as both runtimes
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.
+- **`read_issues`** — V6: every read is produced by a node on a path the run can take.
+- **`required_read_issues`** — V15 for ops and gates: each of a node's ``required_reads`` is written upstream on
+- **`required_slots`** — The ``{{name}}`` slots a template needs filled: all of them, except a slot inside
 - **`rules_text`** — The rules, as the optimizer prompt shows them.
+- **`template_facts`** — The run facts an agent's prompts fill in: their ``{{name}}`` slots, less the knobs
 - **`validate`** — Every reason ``(graph, values)`` is not a runnable, scoreable mode.
 - **`validate_state`** — Validate a state dict without building a mode around it.
 
@@ -377,7 +401,7 @@ The optimizer loop, named like one.
 |---|---|---|
 | class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool' = False, train_minibatch: 'int' = 0, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>) -> None` |
+| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool' = False, train_minibatch: 'int' = 0, allow_new_node_tools: 'bool' = False, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>) -> None` |
 | class | `LoopError` | `` |
 | function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |

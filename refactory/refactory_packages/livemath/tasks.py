@@ -163,6 +163,13 @@ class LiveMathTask(Task):
     """
 
     name = "livemath"
+    #: The answer, and what states it: the correct choice (and its label and text),
+    #: and the theorem and its sketch, which state the correct option. The grader
+    #: reads them from the instance; ``current_item.json`` never carries them.
+    grader_fields = ("correct_choice", "label", "label_text", "theorem", "sketch")
+    #: A run that turns ``use_theorem`` or ``use_sketch`` on (both frozen off in every
+    #: LiveMath mode) shows that field to the nodes, as SkillOpt's option does.
+    revealed_by = {"theorem": "use_theorem", "sketch": "use_sketch"}
 
     def __init__(
         self,

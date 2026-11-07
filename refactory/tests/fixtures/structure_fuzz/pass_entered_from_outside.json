@@ -1,0 +1,15 @@
+{
+  "seed": "fuzz_data_pass",
+  "edits": [
+    {
+      "op": "add_edge",
+      "source": "report",
+      "target": "read_item"
+    }
+  ],
+  "found": [
+    "walker: finished without completing a terminal"
+  ],
+  "fixed_by": "V12: a pass is entered only through its data node",
+  "refused_with": "V12"
+}

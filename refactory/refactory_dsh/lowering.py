@@ -118,6 +118,10 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             # writes from the run-level files it reads through (the walker takes the
             # same set from the graph: Graph.data_body).
             entry["subgraph_nodes"] = sorted(graph.data_body(node_id))
+        if node.required_reads:
+            # The node runner refuses to run the node while one is missing (`run.run_node`),
+            # as the walker does.
+            entry["required_reads"] = sorted(node.required_reads)
         if node.feedback_keys:
             entry["feedback_keys"] = list(node.feedback_keys)
         if node.retry is not None:
@@ -304,74 +308,24 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
 
     # SWEEP-1: Validate fork-shape rules at lowering so the spine refuses the same
     # shapes the walker does (nn/fork.py:112-122). Branches that produce the same
-    # facts, overlap in reads/writes, or read a sibling's facts are refused.
-    import re as _re
+    # facts, overlap in reads/writes, or read a sibling's facts are refused; the rules
+    # live in one place (`nn.validate.fork_branch_conflicts`), which the validator's V16
+    # also reads, so a search is refused them before anything is lowered.
+    from refactory_dsh.nn.validate import fork_branch_conflicts, fork_branches
+
     for fork_id, fork_node in graph.nodes.items():
         if fork_node.kind != "fork":
             continue
-        # Collect each branch's members.
-        barrier = graph.fork_join(fork_id)
-        _branch_lists: list[list[Any]] = []
-        for target in fork_node.targets:
-            seen: set[str] = set()
-            pending = [target]
-            while pending:
-                current = pending.pop()
-                if current == barrier or current in seen:
-                    continue
-                if current not in graph.nodes:
-                    continue
-                seen.add(current)
+        for branch in fork_branches(graph, fork_node, graph.fork_join(fork_id)):
+            for current in sorted(branch):
                 if graph.nodes[current].kind == "data":
                     raise LoweringError(
                         f"fork {fork_id!r}: data node {current!r} inside a fork branch "
                         "is not supported; move the data node outside the fork or "
                         "place the fork inside the data body"
                     )
-                pending.extend(e.target for e in graph.out_edges(current))
-                # A nested fork's branches belong to this branch too (nn/fork.py).
-                if graph.nodes[current].kind == "fork":
-                    pending.extend(graph.nodes[current].targets)
-            _branch_lists.append([graph.nodes[n] for n in sorted(seen)])
-        _branch_facts = [{name for n in branch for name in n.produces} for branch in _branch_lists]
-        # The prompt each branch node sends: its bound template (fork.py does the same).
-        _branch_consumed = [{match for n in branch for match in _re.findall(
-            r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", n.bound("prompt_template", knob_values))}
-            for branch in _branch_lists]
-        # Per-branch write and read sets for the file-overlap check (fork.py:120-122).
-        # Use directory-containment overlap matching the walker (fork.py:24-27).
-        from pathlib import PurePosixPath as _PP
-
-        def _overlap(left: _PP, right: _PP) -> bool:
-            return left == right or left in right.parents or right in left.parents
-
-        _branch_write_paths = [[_PP(p) for n in branch for p in n.writes] for branch in _branch_lists]
-        _branch_read_paths = [[_PP(p) for n in branch for p in n.reads] for branch in _branch_lists]
-        _refactory_root = _PP(".refactory")
-        for idx, bf in enumerate(_branch_facts):
-            # Refuse a branch whose writes overlap with .refactory (fork.py:113-114).
-            if any(_overlap(p, _refactory_root) for p in _branch_write_paths[idx]):
-                raise LoweringError(
-                    f"fork {fork_id!r}: a branch declares executor metadata as output"
-                )
-            for other in range(idx):
-                if bf & _branch_facts[other]:
-                    raise LoweringError(
-                        f"fork {fork_id!r}: branches declare the same produced facts"
-                    )
-                if bf & _branch_consumed[other] or _branch_facts[other] & _branch_consumed[idx]:
-                    raise LoweringError(
-                        f"fork {fork_id!r}: a branch prompt depends on a sibling's facts"
-                    )
-                # Reads/writes overlap using directory containment: a branch writing
-                # "out" conflicts with a sibling reading "out/x.txt" (fork.py:120-122).
-                if (any(_overlap(a, b) for a in _branch_write_paths[idx]
-                        for b in _branch_write_paths[other] + _branch_read_paths[other])
-                        or any(_overlap(a, b) for a in _branch_write_paths[other]
-                               for b in _branch_read_paths[idx])):
-                    raise LoweringError(
-                        f"fork {fork_id!r}: branches have conflicting declared file access"
-                    )
+    for _fork_id, reason in fork_branch_conflicts(graph, knob_values):
+        raise LoweringError(reason)
 
     edges = [
         Edge(source=edge.source, target=edge.target, condition=edge.condition)

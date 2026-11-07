@@ -36,6 +36,7 @@ _CONSTRAINED: dict[str, dict[str, Any]] = {
     "optional_targets": {"optional_targets": ("b",), "targets": ("b",)},
     "field_bindings": {"field_bindings": (("prompt_template", "k"),), "knobs": ("k",)},
     "inline_items": {"inline_items": ({"id": "1"},)},
+    "required_reads": {"required_reads": ("in.txt",), "reads": ("in.txt",)},
 }
 
 
