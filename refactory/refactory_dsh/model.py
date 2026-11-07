@@ -209,6 +209,9 @@ def require_model_choice(client: Any, *, interactive: bool = False) -> Any:
     return chosen
 
 
+#: The worker backends that can run a call with no tools at all (tool_policy "none").
+TOOL_POLICY_NONE_BACKENDS = ("dsh", "claude_code")
+
 #: The overlay that keeps a node's completion from backgrounding its own work. Checked
 #: in rather than generated, so what a node's model call is configured with is
 #: reviewable in the repository.
@@ -843,7 +846,7 @@ class DshModelClient:
         # starts without a complete route, so the headless profile's default never answers.
         if self._worker_backend == "dsh" and not (self._provider and self._model):
             raise ModelChoiceError()
-        if getattr(self, '_tool_policy', '') == 'none' and self._worker_backend not in ('dsh', 'claude_code'):
+        if getattr(self, '_tool_policy', '') == 'none' and self._worker_backend not in TOOL_POLICY_NONE_BACKENDS:
             raise ValueError(f"{self._worker_backend} cannot enforce tool_policy='none'")
         self._system_text = system
         task = prompt

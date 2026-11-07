@@ -104,7 +104,7 @@ def test_the_prompt_tells_errored_items_from_wrong_answers():
     assert errors.index("max-tokens") < errors.index("timed out")
     assert "| 2 | " in errors and "m2_2, m2_3" in errors
     # A wrong answer shows the grader's reason; an errored item is not listed twice.
-    wrong = prompt.split("Wrong answers, with the grader's reason:")[1]
+    wrong = prompt.split("Wrong answers, with the grader's reason:")[1].split("\n\n")[0]
     assert "the king escapes to f8" in wrong
     assert "m2_2" not in wrong
 

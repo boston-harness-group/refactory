@@ -100,39 +100,6 @@ def _section(text: str) -> str:
     return text[start:text.index("\n## What this run has already tried", start)]
 
 
-def test_the_sample_respects_its_budget_and_clips_long_outputs():
-    """Up to 8 wrong and 2 passed items; a long step output keeps its head and tail;
-    when the section is too small even at the floor, wrong items are left out (the
-    passed ones stay), the cap is exact and the note says how many; an errored item
-    stays in the cause table only."""
-    records = ([_record(f"w{i:02d}") for i in range(12)]
-               + [_record(f"p{i}", passed=True) for i in range(5)]
-               + [_record("e1", error="CompletionTimeout: timed out")])
-    shown = _shown(_render(records))
-    assert sum(item.startswith("w") for item in shown) == 8
-    assert sum(item.startswith("p") for item in shown) == 2
-    assert "e1" not in shown
-    errored = [_record(f"e{i}", error="CompletionTimeout") for i in range(5)]
-    assert _shown(_render(errored + [_record("w1")])) == ["w1"], "errored items stay in the table"
-    assert "CompletionTimeout" in _render(records), "the cause table still lists it"
-
-    long = "HEAD " + "x" * 9000 + " TAIL"
-    text = _render([_record("i1", outputs={"compare": long, "precision": "p", "decide": "d"})],
-                   trajectory_text_chars=400)
-    assert "HEAD" in text and "TAIL" in text and "characters omitted" in text
-    assert "x" * 300 not in text
-
-    for cap in range(2000, 6500, 37):  # the cap is exact, separators and note included
-        assert len(_section(_render(records, trajectory_section_chars=cap))) <= cap, cap
-    for cap in (2500, 4000):
-        capped = _render(records, trajectory_section_chars=cap)
-        shown = _shown(capped)
-        assert len(_section(capped)) <= cap, cap
-        assert sum(item.startswith("p") for item in shown) == 2, "the passed items stay"
-        left = 10 - len(shown)
-        assert left > 0 and f"({left} more chosen item(s) left out to stay within {cap} characters)" in capped
-
-
 def _livemath_sized(item: str, *, passed: bool = False) -> dict[str, Any]:
     """A record the size of a real LiveMath skill_graph item: a 1.5k question, five
     400-character choices, four steps of 2.8k each."""
@@ -144,29 +111,135 @@ def _livemath_sized(item: str, *, passed: bool = False) -> dict[str, Any]:
     return record
 
 
-def test_livemath_sized_items_all_fit_at_the_defaults():
-    """Eight wrong and two passed LiveMath-sized items (~15k characters each) are all
-    shown at the default 120k cap: each text is clipped further instead of an item
-    being dropped, and the cap holds."""
-    records = ([_livemath_sized(f"w{i:02d}") for i in range(12)]
-               + [_livemath_sized(f"p{i}", passed=True) for i in range(4)])
-    text = _render(records)
-    shown = _shown(text)
-    assert sum(item.startswith("w") for item in shown) == 8
-    assert sum(item.startswith("p") for item in shown) == 2
+def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
+    """Within the budget: every item, whole (a 9000-character step output is not
+    clipped), wrong first, then failed with an error (with or without recorded
+    steps), then passed, each by id."""
+    records = ([_record(f"w{i:02d}") for i in range(12)]
+               + [_record(f"p{i}", passed=True) for i in range(5)]
+               + [_record("e1", error="CompletionTimeout: timed out")])
+    stepped = {**_record("e2"), "error_text": "RuntimeError: decide crashed",
+               "error_kind": "RuntimeError"}
+    long = "HEAD " + "x" * 9000 + " TAIL"
+    records[0] = _record("w00", outputs={"compare": long, "precision": "p", "decide": "d"})
+    text = _render(records + [stepped])
+    assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e1", "e2"] + [f"p{i}" for i in range(5)]
+    assert "All 19 train item(s): 12 answered wrong, 2 failed with an error, 5 passed." in text
+    assert "### Item e1 — failed with an error" in text and "Error: CompletionTimeout: timed out" in text
+    assert "Every item in full" in text and long in text and "characters omitted" not in text
+    assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text
+
+
+def test_an_item_longer_than_the_budget_alone_is_clipped_with_a_note():
+    long = "HEAD " + "x" * 9000 + " TAIL"
+    text = _render([_record("w1", outputs={"compare": long, "precision": "p", "decide": "d"})],
+                   evidence_budget=4000)
     section = _section(text)
-    assert 100000 < len(section) <= 120000, "the texts use the room, within the cap"
-    assert "characters omitted" in section and "left out" not in section
-    assert section.count("START") == 40 and section.count("END") == 40, "every step keeps head and tail"
+    assert "HEAD" in section and "TAIL" in section and "characters omitted" in section
+    assert "longer than one call's evidence budget" in section
+    from refactory_dsh.optim.base import trajectory_groups
+    (group,) = trajectory_groups([_record("w1", outputs={"compare": long, "precision": "p",
+                                                          "decide": "d"})], 4000)
+    assert len(group[0][1]) <= 4000
 
 
-def test_the_sample_varies_by_epoch_and_attempt_and_is_reproducible():
-    records = [_record(f"w{i:02d}") for i in range(30)]
-    first = _shown(_render(records, epoch=1))
-    assert first == _shown(_render(records, epoch=1))
-    assert set(first) != set(_shown(_render(records, epoch=2)))
-    assert set(first) != set(_shown(_render(records, epoch=1, attempt=2))), "a retry reads others"
-    assert set(first) != set(_shown(_render(records, epoch=1, generation=3))), "so does a generation"
+class _ReaderClient:
+    """Readers answer with one failure pattern naming their group's items; the
+    proposal call is recorded. ``fail_group`` makes that reader call fail."""
+
+    def __init__(self, fail_group: int | None = None) -> None:
+        self.fail_group = fail_group
+        self.readers: list[str] = []
+        self.proposals: list[str] = []
+        self.lock = __import__("threading").Lock()
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+        if system == READER_SYSTEM:
+            group = int(prompt.split("group ", 1)[1].split(" ", 1)[0])
+            with self.lock:
+                self.readers.append(prompt)
+            if group == self.fail_group:
+                raise RuntimeError("503 overloaded")
+            items = [line.split()[2] for line in prompt.splitlines() if line.startswith("### Item ")]
+            return json.dumps({"failure_patterns": [{
+                "pattern": f"PATTERN-{group}", "step": "decide", "items": items,
+                "evidence": [f"QUOTE-{group}"]}], "success_patterns": []})
+        self.proposals.append(prompt)
+        return '{"diagnosis": "d", "proposals": []}'
+
+
+def _sized_records() -> list[dict[str, Any]]:
+    return ([_livemath_sized(f"w{i:02d}") for i in range(25)]
+            + [_livemath_sized(f"p{i:02d}", passed=True) for i in range(10)])
+
+
+def test_a_large_set_is_read_in_groups_and_the_findings_reach_the_proposal(tmp_path):
+    """35 LiveMath-sized items: readers go through whole-item groups, each within the
+    budget, every item exactly once, concurrently; their findings, a table of every
+    item and some items in full reach the proposal call; the trace records each
+    reader call; a retry reads nothing again."""
+    from refactory_dsh.optim.base import TRAJECTORY_BUDGET, trajectory_groups
+
+    records = _sized_records()
+    groups = trajectory_groups(records)
+    assert len(groups) > 1
+    assert all(len("\n\n".join(block for _i, block in g)) <= TRAJECTORY_BUDGET for g in groups)
+    covered = [item for g in groups for item, _block in g]
+    assert sorted(covered) == sorted(r["id"] for r in records) and len(covered) == len(set(covered))
+
+    client = _ReaderClient()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    ctx = ProposalContext(nodes=NODES, item_records=records, epoch=1, generation=2)
+    optimizer.propose(ctx, 1, [])
+    assert len(client.readers) == len(groups)
+    read = sorted(line.split()[2] for p in client.readers for line in p.splitlines()
+                  if line.startswith("### Item "))
+    assert read == sorted(covered), "every item read exactly once"
+    prompt = client.proposals[0]
+    for index in range(1, len(groups) + 1):
+        assert f"PATTERN-{index}" in prompt and f'"QUOTE-{index}"' in prompt
+    table = prompt.split("### Every item", 1)[1].split("### Some items in full", 1)[0]
+    assert all(f"| {r['id']} |" in table for r in records)
+    assert "### Item " in prompt.split("### Some items in full", 1)[1]
+    assert len(_section(prompt)) <= TRAJECTORY_BUDGET
+    calls = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    assert [c["kind"] for c in calls].count("reader") == len(groups)
+    assert calls[-1]["kind"] == "proposal"
+    optimizer.propose(ctx, 1, [])
+    assert len(client.readers) == len(groups), "a retry reads no group again"
+
+
+def test_a_failed_reader_leaves_the_proposal_with_what_it_has(tmp_path):
+    records = _sized_records()
+    client = _ReaderClient(fail_group=2)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=records), 1, [])
+    prompt = client.proposals[0]
+    assert "PATTERN-1" in prompt and "PATTERN-2" not in prompt
+    assert "(Group 2 -- items" in prompt and "could not be read: RuntimeError: 503 overloaded" in prompt
+    failed = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()
+              if json.loads(line).get("group") == 2]
+    assert failed and "503 overloaded" in failed[0]["error"]
+
+
+def test_a_large_set_without_readers_still_lists_every_item():
+    """An optimizer that calls no reader still gets every item in the table."""
+    records = _sized_records()
+    text = _render(records)
+    assert "No reader went through these items" in text
+    table = text.split("### Every item", 1)[1]
+    assert all(f"| {r['id']} |" in table for r in records)
+
+
+def test_every_proposal_sees_the_same_complete_set():
+    records = [_record(f"w{i:02d}") for i in range(30)] + [_record("p1", passed=True)]
+    shown = _shown(_render(records, epoch=1))
+    assert shown == [f"w{i:02d}" for i in range(30)] + ["p1"]
+    assert shown == _shown(_render(records, epoch=2, generation=3, attempt=2))
 
 
 def test_repeats_show_each_item_once_and_a_zero_prediction_shows():
@@ -277,7 +350,7 @@ def test_the_trace_is_written_by_a_run_and_survives_a_resume(tmp_path):
 
 
 def test_each_proposal_attempt_renders_with_its_own_attempt_number():
-    """A retry after a refusal is handed the attempt number, so its sample differs."""
+    """A retry after a refusal is handed the attempt number."""
     from refactory_dsh.optim import Candidate, Optimizer, Proposal
 
     seen: list[int] = []
@@ -295,13 +368,12 @@ def test_each_proposal_attempt_renders_with_its_own_attempt_number():
     assert seen == [1, 2, 3]
 
 
-def test_the_loop_gives_each_retry_and_generation_its_own_sample(tmp_path):
-    """Through the real Loop: a proposal refused once is asked for again with the
-    next attempt number and reads another sample; a later generation reads another
-    one too."""
+def test_the_loop_shows_every_train_item_in_every_request(tmp_path):
+    """Through the real Loop, every proposal request (a retry after a refusal and a
+    later generation included) shows every train item of the candidate edited."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
-    from test_skillopt import _patch_mode, _write_parts
+    from test_skillopt import TRAIN_IDS, _patch_mode, _write_parts
     from test_val_gate import LevelProbe
 
     from refactory_dsh.optim import Optimizer, Proposal
@@ -311,10 +383,10 @@ def test_the_loop_gives_each_retry_and_generation_its_own_sample(tmp_path):
 
         def __init__(self) -> None:
             super().__init__(k=1)
-            self.seen: list[tuple[int, int, list[str]]] = []
+            self.seen: list[list[str]] = []
 
         def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
-            self.seen.append((ctx.generation, ctx.attempt, _shown(ctx.render())))
+            self.seen.append(_shown(ctx.render()))
             if len(self.seen) == 1:
                 return [Proposal(edit={"op": "no_such_op"}, parent=parents[0].id)]
             return [Proposal(edit={"op": "set_knob", "name": "level", "value": len(self.seen)},
@@ -328,21 +400,248 @@ def test_the_loop_gives_each_retry_and_generation_its_own_sample(tmp_path):
             parts_manifest=str(_write_parts(tmp_path))), project=Path("."))
         loop.optimizer = proposer
         loop.run()
-    (gen1, attempt1, first), (gen1b, attempt2, retry), (gen2, attempt3, later) = proposer.seen[:3]
-    assert (gen1, attempt1) == (gen1b - 0, 1) and attempt2 == 2, proposer.seen
-    assert gen2 > gen1 and attempt3 == 1
-    assert first and retry and later
-    assert first != retry, "the retry reads another sample"
-    assert later not in (first, retry), "a later generation reads another sample"
+    assert len(proposer.seen) >= 3
+    for shown in proposer.seen:
+        assert sorted(shown) == sorted(TRAIN_IDS), shown
 
 
-def test_items_too_large_to_fit_still_leave_a_note():
-    """Items that do not fit even with every text at the floor: the section still
-    says how many it left out, instead of disappearing."""
-    huge = _record("w1")
-    huge["exchanges"] = [{"node": f"s{i}", "prompt": "p", "response": "x" * 800} for i in range(250)]
-    text = _render([huge], trajectory_section_chars=20000)
-    section = _section(text)
-    assert _shown(text) == []
-    assert "0 of 1 train item(s) answered wrong" in section
-    assert "(1 more chosen item(s) left out to stay within 20000 characters)" in section
+def _traces_section(text: str) -> str:
+    start = text.index("## Evidence from the traces")
+    return text[start:text.index("\n## ", start + 5)]
+
+
+def test_the_traces_carry_no_worker_receipts_or_paths(tmp_path, monkeypatch):
+    """Through the loop: the evidence from the traces has the measurement summary
+    and no receipts, run directories or leaderboard copy, and stays small; a
+    livemath/skill_graph-like gradient with 140 receipts per candidate shrinks to a
+    few lines."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_skillopt import _patch_mode, _write_parts
+    from test_val_gate import LevelProbe
+
+    with _patch_mode(LevelProbe):
+        loop = Loop("skillopt_probe/probe", LoopConfig(
+            epochs=2, batch_size=2, optimizer="random", seed=7, runs_root=tmp_path / "run",
+            allowed_ops=("set_knob",), holdout=0.0, parts_manifest=str(_write_parts(tmp_path))),
+            project=Path("."))
+        loop.run()
+        section = _traces_section(loop._context().render())
+    assert str(tmp_path) not in section and "workdir" not in section
+    assert "measurement_summary" in section and '"trial_runs":' in section
+    assert len(section) < 4000
+
+    receipts = [{"worker_id": f"w-{i:04d}", "node_id": "compare", "role": "solver",
+                 "state": "done", "actual_route": {"model": "m"},
+                 "runtime": {"dir": f"/runs/abc/runs/xyz/.refactory/workers/w-{i:04d}"},
+                 "usage": {"tokens": 10}} for i in range(140)]
+    row = {"id": "c1", "score": 0.4, "measurements": {"trials": [
+        {"trial": 1, "workdir": "/runs/abc/runs/c1", "workers": receipts}]}}
+    gradient = {"epoch": 2, "leaderboard": [row] * 8,
+                # A strategy's own trace key holding rows: cleaned the same way.
+                "recent": [row] * 2,
+                "knob_attribution": {"compare__system_prompt": {"tried": {
+                    "You are an expert. " + "x" * 3000: {"n": 1, "mean": 0.4, "max": 0.4}}}},
+                "measurement_summary": {"trial_runs": 8, "failed": 1, "timeouts": 1,
+                                        "failures_by_cause": {"CompletionTimeout": 1}}}
+    section = _traces_section(ProposalContext(traces=[gradient]).render())
+    assert "w-0001" not in section and "/runs/" not in section and "workers" not in section
+    assert "(3019 characters)" in section and "CompletionTimeout" in section
+    assert len(section) < 1500
+
+
+def test_groups_never_exceed_the_budget_with_uneven_items():
+    from refactory_dsh.optim.base import trajectory_groups
+
+    records = [_record(f"w{i}", outputs={"compare": "y" * size, "precision": "p", "decide": "d"})
+               for i, size in enumerate((6000, 6000, 6000, 1000))]
+    groups = trajectory_groups(records, 10000)
+    assert len(groups) >= 2
+    assert all(len("\n\n".join(block for _i, block in g)) <= 10000 for g in groups)
+    assert [item for g in groups for item, _b in g] == ["w0", "w1", "w2", "w3"]
+
+
+
+class _WordyReaderClient(_ReaderClient):
+    """Readers that ramble: 50 patterns each, long texts and many long quotes."""
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+        if system != READER_SYSTEM:
+            return super().complete(prompt, system=system)
+        with self.lock:
+            self.readers.append(prompt)
+        items = [line.split()[2] for line in prompt.splitlines() if line.startswith("### Item ")]
+        return json.dumps({"failure_patterns": [{
+            "pattern": f"WORDY-{k} " + "§" * 5000, "step": "decide" * 50, "items": items * 10,
+            "evidence": ["¤" * 3000] * 8} for k in range(50)], "success_patterns": []})
+
+
+def test_wordy_readers_are_kept_within_the_budget(tmp_path):
+    from refactory_dsh.optim.base import READER_PATTERNS, TRAJECTORY_BUDGET
+
+    client = _WordyReaderClient()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    section = _section(client.proposals[0])
+    assert len(section) <= TRAJECTORY_BUDGET
+    assert section.count("WORDY-") <= READER_PATTERNS * len(client.readers)
+    assert "§" * 500 not in section and "¤" * 300 not in section
+    assert "more pattern(s) not shown: the findings are kept within" in section
+    table = section.split("### Every item", 1)[1]
+    assert all(f"| {r['id']} |" in table for r in _sized_records()), "the table survives"
+
+
+def test_reader_findings_are_kept_and_reused_by_a_resumed_run(tmp_path):
+    records = _sized_records()
+    first = _ReaderClient()
+    optimizer = AutoresearchOptimizer(first)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=records), 1, [])
+    assert list((tmp_path / "reader_findings").glob("*.json"))
+    again = _ReaderClient()
+    resumed = AutoresearchOptimizer(again)  # a fresh process: no in-memory cache
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ProposalContext(nodes=NODES, item_records=records), 1, [])
+    assert again.readers == [], "a resumed run pays for no group again"
+    assert "PATTERN-1" in again.proposals[0]
+
+
+def test_optimizer_and_reader_calls_run_without_tools(tmp_path, monkeypatch):
+    """Every optimizer call goes out with tool_policy none: the worker receipt
+    records it for the proposal and for each reader. The run's own client keeps its
+    tools."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_livemath_blocks import _make_route_client
+
+    from refactory_dsh.model import DshModelClient
+
+    def fake_complete(self, prompt, *, system="", workdir=None, target_workdir=None):  # type: ignore[no-untyped-def]
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+        if system == READER_SYSTEM:
+            return json.dumps({"failure_patterns": [], "success_patterns": []})
+        return '{"diagnosis": "d", "proposals": []}'
+
+    monkeypatch.setattr(DshModelClient, "_complete", fake_complete)
+    client = _make_route_client()
+    client._dsh_home = tmp_path / "home"
+    client._budget = None
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.bind_model(client, workdir=tmp_path / "proposer")
+    assert optimizer._client._tool_policy == "none"
+    assert getattr(client, "_tool_policy", "") == ""
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    receipts = [json.loads(p.read_text()) for p in (tmp_path / "proposer").glob("**/.refactory/workers/*.json")]
+    assert len(receipts) >= 2, "the readers and the proposal each made a call"
+    assert all(r.get("requested_tool_policy") == "none" for r in receipts), receipts
+
+
+class _ManyShortPatterns(_ReaderClient):
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+        if system != READER_SYSTEM:
+            return super().complete(prompt, system=system)
+        with self.lock:
+            self.readers.append(prompt)
+        return json.dumps({"failure_patterns": [
+            {"pattern": f"SHORT-{k}", "step": "decide", "items": ["w00"], "evidence": ["x"]}
+            for k in range(50)], "success_patterns": []})
+
+
+def test_each_reader_contributes_a_bounded_number_of_patterns():
+    from refactory_dsh.optim.base import READER_PATTERNS
+
+    client = _ManyShortPatterns()
+    AutoresearchOptimizer(client).propose(
+        ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    section = _section(client.proposals[0])
+    assert section.count("SHORT-") == READER_PATTERNS * len(client.readers)
+
+
+def test_a_retry_reuses_readers_even_without_a_run_directory():
+    client = _ReaderClient()
+    optimizer = AutoresearchOptimizer(client)  # no trace path, so nothing on disk
+    ctx = ProposalContext(nodes=NODES, item_records=_sized_records())
+    optimizer.propose(ctx, 1, [])
+    read = len(client.readers)
+    optimizer.propose(ctx, 1, [])
+    assert len(client.readers) == read
+
+
+class _Routed:
+    """A model client whose optimizer role is routed to ``backend``."""
+
+    def __init__(self, backend: str) -> None:
+        self.backend = backend
+
+    def for_node(self, node_id: str, role: str = "") -> "_Routed":
+        return self
+
+    def route(self) -> dict:
+        return {"worker_backend": self.backend}
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        return '{"diagnosis": "d", "proposals": []}'
+
+
+@pytest.mark.parametrize("backend", ["codex", "openshell"])
+def test_an_optimizer_routed_where_tools_cannot_be_removed_is_refused_at_launch(backend):
+    """The autoresearch optimizer's calls run without tools; a route that cannot
+    enforce that is refused before anything runs, saying how to route it."""
+    from refactory_dsh.loop import LoopError
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(optimizer="autoresearch"),
+                project=Path("."), model=_Routed(backend))
+    with pytest.raises(LoopError, match=rf"dsh, claude_code backends.*routed to {backend}.*--role-routes"):
+        loop._check_optimizer_route()
+    for allowed in ("dsh", "claude_code"):
+        Loop("circle_packing/adaptive", LoopConfig(optimizer="autoresearch"), project=Path("."),
+             model=_Routed(allowed))._check_optimizer_route()
+
+
+def test_the_launch_refusal_comes_before_any_rollout(tmp_path):
+    from refactory_dsh.loop import LoopError
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(optimizer="autoresearch",
+                runs_root=tmp_path / "run", epochs=1), project=Path("."), model=_Routed("codex"))
+    with pytest.raises(LoopError, match="routed to codex"):
+        loop.run()
+    assert loop.rollouts == 0 and not (tmp_path / "run" / "runs").exists()
+
+
+def test_text_only_keeps_the_budget_guard():
+    """A token-limited run wraps a client without usage telemetry in a guard that
+    refuses its completions; taking the no-tools copy keeps the guard."""
+    from refactory_dsh.budgets import BudgetExhausted, _UnmeteredModel
+    from refactory_dsh.optim.random_optimizer import text_only
+
+    class Inner:
+        policy = ""
+
+        def with_tool_policy(self, policy: str) -> "Inner":
+            copy = Inner()
+            copy.policy = policy
+            return copy
+
+    class Budget:
+        def require_usage_capability(self, available: bool) -> None:
+            pass
+
+    guarded = text_only(_UnmeteredModel(Inner(), Budget()))
+    assert isinstance(guarded, _UnmeteredModel) and guarded._model.policy == "none"
+    with pytest.raises(BudgetExhausted):
+        guarded.complete("p")
+
+
+def test_a_failed_readers_error_is_clipped():
+    from refactory_dsh.optim.base import _trajectories, trajectory_groups
+
+    records = _sized_records()
+    groups = trajectory_groups(records)
+    failure = {"group": 1, "items": [i for i, _b in groups[0]], "error": "E" * 5000}
+    text = "\n".join(_trajectories(records, findings=[], failures=[failure]))
+    line = next(l for l in text.splitlines() if l.startswith("(Group 1"))
+    assert "E" * 400 not in line and "could not be read" in line

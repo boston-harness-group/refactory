@@ -40,6 +40,11 @@ class _UnmeteredModel:
     def with_budget(self, budget: Any) -> Any:
         return type(self)(self._model, budget)
 
+    def with_tool_policy(self, policy: str) -> Any:
+        """The inner model with ``policy``, still behind this guard."""
+        inner = getattr(self._model, "with_tool_policy", None)
+        return type(self)(inner(policy) if callable(inner) else self._model, self._budget)
+
     def for_node(self, node_id: str, role: str = "worker") -> Any:
         route = getattr(self._model, "for_node", None)
         model = route(node_id, role=role) if callable(route) else self._model
