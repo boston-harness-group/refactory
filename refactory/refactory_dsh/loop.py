@@ -3561,6 +3561,7 @@ class Loop(OuterLoop):
             edit_pairs=self._edit_pairs(board),
             reasoning=self._reasoning_entries(board),
             max_edits=int(self.config.max_edits_per_proposal),
+            parsimony=float(self.config.parsimony),
         )
 
     def _edited_id(self, board: list[Candidate]) -> str | None:
