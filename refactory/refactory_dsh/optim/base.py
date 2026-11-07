@@ -47,6 +47,15 @@ TRAJECTORY_SECTION_CHARS = 120000
 #: step's prompt stands in for it.
 TRAJECTORY_INPUT_KEYS = ("question", "problem", "task_description", "instruction", "input", "prompt")
 
+#: How the edited graph's nodes are shown in full (``ProposalContext.node_states``):
+#: each long text field keeps its head and tail within this many characters, and the
+#: whole section (each node's state plus the generated node schemas) fits this cap.
+NODE_SPEC_TEXT_CHARS = 1200
+NODE_SPEC_TEXT_FLOOR = 200
+NODE_SPEC_SECTION_CHARS = 30000
+#: Edit fields that take a whole node object (``into`` takes a list of two).
+NODE_OBJECT_FIELDS = ("node", "into", "gate")
+
 
 def reason_code(reason: str) -> str:
     """The rule a refusal names, from the `CODE [node]: message` form."""
@@ -303,6 +312,11 @@ class ProposalContext:
     parent_item_records: list[dict[str, Any]] = field(default_factory=list)
     #: Why the pipeline shown is not the parent's, when it is not (empty when it is).
     graph_note: str = ""
+    #: The edited graph's nodes in node-state form, as ``add_node`` and
+    #: ``insert_after`` take a node, so a model can copy one and change it.
+    node_states: list[dict[str, Any]] = field(default_factory=list)
+    node_spec_text_chars: int = NODE_SPEC_TEXT_CHARS
+    node_spec_section_chars: int = NODE_SPEC_SECTION_CHARS
     #: The trajectory section's budget (see ``TRAJECTORY_*``). The items shown are
     #: chosen with a seed from ``epoch`` and ``attempt``, so each round sees another
     #: sample.
@@ -342,6 +356,9 @@ class ProposalContext:
             _table(["source", "target", "condition"],
                    [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
             "",
+            *_node_specs(self.node_states, text_chars=self.node_spec_text_chars,
+                         section_chars=self.node_spec_section_chars),
+            "",
             "## What the author says is worth doing",
             self.guidance or "(the mode's author offered no guidance)",
             (
@@ -363,7 +380,7 @@ class ProposalContext:
             "",
             "## The operations you may use",
             _table(["op", "kind", "macro", "fields", "description"],
-                   [[c["op"], c["kind"], c["macro"], c["fields"], c["description"]]
+                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
                     for c in self.catalogue]),
             "",
             "## Blocks you may insert",
@@ -654,6 +671,87 @@ def _trajectories(
         chosen = chosen[:drop] + chosen[drop + 1:]
     lines = section([], floor)
     return lines if size(lines) <= section_chars else []
+
+
+def _edit_fields(fields: Sequence[str]) -> str:
+    """An operation's fields, saying which take a whole node object."""
+    described = []
+    for name in fields:
+        if name == "into":
+            described.append("into: a list of two full node objects (see the node schemas above)")
+        elif name in NODE_OBJECT_FIELDS:
+            described.append(f"{name}: a full node object (see the node schemas above)")
+        else:
+            described.append(name)
+    return ", ".join(described)
+
+
+def _node_spec(state: dict[str, Any], limit: int) -> str:
+    """One node in full, as a node object; long texts clipped, and what was clipped said."""
+    bound = {str(pair[0]): str(pair[1]) for pair in state.get("field_bindings") or ()
+             if isinstance(pair, (list, tuple)) and len(pair) == 2}
+    shown: dict[str, Any] = {}
+    notes: list[str] = []
+    for key, value in state.items():
+        if isinstance(value, str) and len(value) > limit:
+            shown[key] = _clip_middle(value, limit)
+            where = (f"its full value is the knob `{bound[key]}`, which it is bound to"
+                     if key in bound else f"{len(value)} characters in full")
+            notes.append(f"`{key}` is clipped here ({where}).")
+        else:
+            shown[key] = value
+    lines = [f"#### `{state.get('id')}` ({state.get('kind')})", "```json",
+             json.dumps(shown, default=str), "```"]
+    return "\n".join(lines + notes)
+
+
+def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC_TEXT_CHARS,
+                section_chars: int = NODE_SPEC_SECTION_CHARS) -> list[str]:
+    """Each node of the edited graph in full, then the generated node schemas.
+
+    A structure edit (``add_node``, ``insert_after``, ``split``, ...) needs a whole
+    node object; with these a model copies a node, changes its id and the fields it
+    means to change, and uses it verbatim. Fits ``section_chars`` exactly: the text
+    limit shrinks (to ``NODE_SPEC_TEXT_FLOOR``) before nodes are left out, last first,
+    with a note naming them.
+    """
+    from refactory_dsh.nn.node_schema import render_schema
+
+    if not states:
+        return []
+    schema = render_schema()
+    ordered = sorted(states, key=lambda s: str(s.get("id")))
+
+    def section(chosen: Sequence[dict[str, Any]], limit: int) -> list[str]:
+        lines = ["### Each node in full",
+                 "Copy a node object, give it a new id, change what you mean to change "
+                 "(prompt, reads, writes, produces, knobs), and use it as the `node` of an "
+                 "`add_node`, `insert_after`, `insert_before` or `wrap` edit."]
+        lines += [_node_spec(state, limit) for state in chosen]
+        left = [str(s.get("id")) for s in ordered[len(chosen):]]
+        if left:
+            lines.append(f"({len(left)} node(s) not shown in full to stay within "
+                         f"{section_chars} characters: {', '.join(left)})")
+        return lines + [""] + schema
+
+    def size(lines: list[str]) -> int:
+        return len("\n".join(lines))
+
+    chosen = list(ordered)
+    floor = min(NODE_SPEC_TEXT_FLOOR, text_chars)
+    while True:
+        if size(section(chosen, floor)) <= section_chars:
+            low, high = floor, max(floor, text_chars)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if size(section(chosen, middle)) <= section_chars:
+                    low = middle
+                else:
+                    high = middle - 1
+            return section(chosen, low)
+        if not chosen:
+            return schema if size(schema) <= section_chars else []
+        chosen = chosen[:-1]
 
 
 def _rules_text() -> str:

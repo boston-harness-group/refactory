@@ -206,24 +206,38 @@ class Node:
     declarations, and the executor enforces them.
     """
 
+    #: The node's unique id within the graph.
     id: str
+    #: What the node is: op, agent, gate, fork, join or data (``NODE_KINDS``).
     kind: str
+    #: `op`: the ``module:function`` it runs; must be importable (V8).
     call: str = ""
+    #: `gate` with gate_kind ``fn``: the ``module:function`` that returns the verdict (V8).
     evaluator: str = ""
     #: Who answers this gate: ``fn`` (the default), ``user`` or ``agent``.
     gate_kind: str = "fn"
+    #: The parameters (knobs) the node consumes; template ``{{name}}`` values come from these.
     knobs: tuple[str, ...] = ()
+    #: Files in the run directory the node reads; each must be written by an earlier node.
     reads: tuple[str, ...] = ()
+    #: Files the node writes; an `agent`'s reply goes into its first write.
     writes: tuple[str, ...] = ()
+    #: Run facts the node sets, which later templates and nodes can read.
     produces: tuple[str, ...] = ()
+    #: `agent`: the user prompt, with ``{{knob}}`` and ``{{fact}}`` filled in.
     prompt_template: str = ""
     #: Optional system-prompt template for agent nodes, rendered with knobs/facts.
     #: Distinct from notes and the user prompt.
     system_prompt_template: str = ""
+    #: `agent`: the worker role, which picks the model route (``role_routes``).
     role: str = "ceo"
+    #: `agent`: tools the model may use.
     tools: tuple[str, ...] = ()
+    #: How many times a gate's retry edge may send control back to this node.
     max_iterations: int = 1
+    #: Free text for readers; no effect on the run.
     notes: str = ""
+    #: Carried to the lowered workflow as the node's blocking flag; leave it true unless you know otherwise.
     blocking: bool = True
     #: Whether inserting this node can change the score. ``affects`` is the
     #: default; ``none`` says the node is advisory, which is worth stating because
@@ -241,13 +255,19 @@ class Node:
     optional_targets: tuple[str, ...] = ()
     #: `join`: the nodes this barrier waits for. Declared for the same reason.
     sources: tuple[str, ...] = ()
-    #: `data`: the subgraph it runs once per item, and where the items come from.
+    #: `data`: the first node of the subgraph it runs once per item.
     subgraph_entry: str = ""
+    #: `data`: the last node of the per-item subgraph.
     subgraph_exit: str = ""
+    #: `data`: the Task (``module:Class``) whose items it iterates.
     task_ref: str = ""
+    #: `data`: a file of items to read instead of the Task's own source.
     source_path: str = ""
+    #: `data`: the format of ``source_path``.
     source_format: str = ""
+    #: `data`: items declared inline, instead of a Task or a file.
     inline_items: tuple[dict[str, Any], ...] = ()
+    #: `data`: the most items to run (0 is all).
     limit: int = 0
     #: `data`: the most items to run at once. 1 is sequential (the default);
     #: N > 1 lets up to N items run concurrently on both runtimes.
@@ -261,6 +281,7 @@ class Node:
     #: Resource phase is independent of worker routing. Unset preserves the
     #: enclosing phase, except the legacy validation role enters validation.
     resource_role: str | None = None
+    #: `agent`: facts re-derived from the run directory before each dispatch.
     feedback_keys: tuple[str, ...] = ()
     #: `agent`: the most wall time the node's model work may take, in seconds, on
     #: either runtime. Unset, the selected route's envelope applies. A node that
