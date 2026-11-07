@@ -165,9 +165,38 @@ def test_the_winner_is_audited_on_the_holdout_and_the_gap_is_recorded(tmp_path):
     assert audit["train"] == pytest.approx(1.0)
     assert audit["holdout"] == pytest.approx(0.0)
     assert audit["gap"] == pytest.approx(1.0)
-    assert audit["overfit"] is True
+    # The winner is the seed (the probe has nothing to move): its gap is the parts'
+    # difference, not overfitting. An optimized winner's is checked below.
+    assert audit["overfit"] is False and "the winner is the seed" in audit["note"]
     assert audit["threshold"] == 0.15
     assert audit["instances"] == {"train": 3, "holdout": 1}
+
+
+class BonusProbe(Probe):
+    """The probe with a knob that adds a little to the score, so a moved candidate
+    beats the seed on train and wins."""
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {"bonus": nn.Knob(default=0, kind="int", lo=0, hi=9, description="a bonus")}
+
+    def build(self) -> nn.Graph:
+        graph = _probe_graph(TASK_REF)
+        graph.nodes["work"] = graph.nodes["work"].with_field("knobs", ("bonus",))
+        return graph
+
+    def score(self, run: nn.RunResult) -> float:
+        return super().score(run) + int(self.values()["bonus"]) / 1000
+
+
+def test_an_optimized_winner_that_only_works_on_its_train_items_is_overfit(tmp_path):
+    """A moved candidate wins on train (1.0) and scores 0 on the held-out item: the
+    gap is beyond the threshold, so the winner overfit."""
+    loop, report = _run(tmp_path, mode_class=BonusProbe, batch_size=2)
+    audit = report["holdout"]
+    assert audit["winner"] != loop.population[0].id, "setup: a moved candidate won"
+    assert audit["gap"] > audit["threshold"] and audit["overfit"] is True
+    assert audit["standard_error"] is not None
 
 
 def test_the_audit_is_written_beside_the_run_and_carried_by_the_report(tmp_path):
@@ -257,9 +286,10 @@ def test_optimize_prints_one_line_about_the_held_out_audit(tmp_path, capsys):
     captured = capsys.readouterr()
     lines = [line for line in captured.err.splitlines() if line.startswith("holdout:")]
     assert len(lines) == 1, captured.err
-    assert "train" in lines[0] and "holdout" in lines[0] and "overfit" in lines[0]
+    assert "train" in lines[0] and "holdout" in lines[0] and "holds up" in lines[0]
+    assert "the winner is the seed" in lines[0]
     payload = json.loads(captured.out[captured.out.index("{"):])
-    assert payload["holdout"]["overfit"] is True
+    assert payload["holdout"]["overfit"] is False
     assert payload["raw_best_score"] is not None
 
 
@@ -279,8 +309,7 @@ def test_adopting_an_overfit_winner_is_refused_unless_the_override_is_given(tmp_
     from refactory_dsh import console
 
     root = _overfit_run(tmp_path)
-    project = tmp_path / "project"
-    project.mkdir()
+    project = tmp_path
     destination = project / ".factory" / "packages" / "taken"
 
     assert console.main([
@@ -300,17 +329,51 @@ def test_adopting_an_overfit_winner_is_refused_unless_the_override_is_given(tmp_
 
 
 def _overfit_run(tmp_path: Path) -> Path:
-    """A real run of a real Task-bound mode whose winner is overfit.
+    """A real run of a real Task-bound mode whose optimized winner is overfit.
 
-    `dataset_probe/dataset` iterates `CountingTask`'s two items: the search rewards
-    alpha's pass (1.0) and the held-out item scores what the Task gives it (0.5).
+    A workspace package subclasses `dataset_probe/dataset` with a `bonus` knob that
+    adds a little to the score, so the swept candidate beats the seed and wins. The
+    search rewards alpha's pass (1.0); the held-out item scores 0.5, so the winner's
+    train-vs-holdout gap is about 0.5 -- beyond the threshold, and not the seed's.
     """
+    source = tmp_path / ".factory" / "packages" / "overfit_pack"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text(
+        "from __future__ import annotations\n\n"
+        "from refactory_dsh.nn import Package\n\n"
+        "from .mode import Overfit\n\n"
+        "PACKAGE = Package(\n"
+        "    name='overfit_pack', description='', modes=(Overfit,),\n"
+        "    ops=('refactory_packages.dataset_probe.ops',),\n"
+        ")\n"
+    )
+    (source / "mode.py").write_text(
+        "from refactory_dsh import nn\n"
+        "from refactory_packages.dataset_probe.mode import Dataset\n\n\n"
+        "class Overfit(Dataset):\n"
+        "    name = 'overfit'\n\n"
+        "    @classmethod\n"
+        "    def declare(cls):\n"
+        "        return {**super().declare(),\n"
+        "                'bonus': nn.Knob(0, 'int', lo=0, hi=9, description='a bonus')}\n\n"
+        "    def build(self):\n"
+        "        graph = super().build()\n"
+        "        work = graph.nodes['work']\n"
+        "        graph.nodes['work'] = work.with_field('knobs', (*work.knobs, 'bonus'))\n"
+        "        return graph\n\n"
+        "    def score(self, run):\n"
+        "        return super().score(run) + int(self.values()['bonus']) / 1000\n"
+    )
     root = tmp_path / "run"
     Loop(
-        "dataset_probe/dataset",
-        LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=root),
-        project=Path("."),
+        "overfit_pack/overfit",
+        LoopConfig(epochs=1, batch_size=2, optimizer="random", seed=1, runs_root=root),
+        project=tmp_path,
     ).run()
+    audit = json.loads((root / "holdout.json").read_text())
+    assert audit["overfit"] is True, audit
+    assert audit["winner"] != json.loads((root / "report.json").read_text())["lineage"][0]["id"], (
+        "setup: the winner is not the seed")
     return root
 
 
