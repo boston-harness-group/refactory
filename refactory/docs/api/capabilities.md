@@ -2104,6 +2104,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
+    "text_edit_budget": 4,
+    "text_edit_style": "free",
     "val_gate": false,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
@@ -2627,6 +2629,28 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "text_edit_budget": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--text-edit-budget"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "text_edit_style": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--text-edit-style"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "val_gate": {
       "default": null,
       "description": "",
@@ -2673,7 +2697,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     }
   },
   "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts.",
-  "reviewed_schema": "9ba6a4baec340c16d3e7b38c0c26341a58604e43f7033cba67799a4baa6f1d13"
+  "reviewed_schema": "3fb56492f5edf21b6ab48e107d8daf25c091d316837238ba612dac08b16c292f"
 }
 ```
 
@@ -3469,7 +3493,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The text_edit_style option (free by default; small) makes the optimizer change text knobs only by set_knob patches of at most text_edit_budget line edits (4 by default), as SkillOpt does; a whole new text value is refused before evaluation.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3536,6 +3560,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
+    "text_edit_budget": 4,
+    "text_edit_style": "free",
     "val_gate": false,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
@@ -4073,6 +4099,28 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "text_edit_budget": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--text-edit-budget"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "text_edit_style": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--text-edit-style"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "val_gate": {
       "default": null,
       "description": "",
@@ -4118,8 +4166,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.",
-  "reviewed_schema": "381b297288eaef1175ca5d9188b7bda4659defbf76d33a4a8b0249cbdedf9ca3"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The text_edit_style option (free by default; small) makes the optimizer change text knobs only by set_knob patches of at most text_edit_budget line edits (4 by default), as SkillOpt does; a whole new text value is refused before evaluation.",
+  "reviewed_schema": "5b2d76609c3cef04f24c7cf38a31e89c29daab70c1d1e6fa1638f0a7eb6c4373"
 }
 ```
 
@@ -5779,7 +5827,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The text_edit_style option (free by default; small) makes the optimizer change text knobs only by set_knob patches of at most text_edit_budget line edits (4 by default), as SkillOpt does; a whole new text value is refused before evaluation.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -5828,6 +5876,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "setting_sources": "",
     "strategy": "default",
     "strategy_options": {},
+    "text_edit_budget": 4,
+    "text_edit_style": "free",
     "val_gate": false,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
@@ -6345,6 +6395,28 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
+    "text_edit_budget": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--text-edit-budget"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
+    "text_edit_style": {
+      "default": null,
+      "description": "",
+      "flags": [
+        "--text-edit-style"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "val_gate": {
       "default": null,
       "description": "",
@@ -6401,8 +6473,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0.",
-  "reviewed_schema": "b01269b1d5c4386545fe4520d584ac33edf30aa508cd9001e0ff1e21056a0c0c"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (it needs a parts manifest with a val part) evaluates as the SkillOpt strategy does: per-epoch train seeds, a candidate stays a parent only when its val score strictly beats the gate's current candidate's, the last epoch's proposals are scored, the best on val is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The text_edit_style option (free by default; small) makes the optimizer change text knobs only by set_knob patches of at most text_edit_budget line edits (4 by default), as SkillOpt does; a whole new text value is refused before evaluation.",
+  "reviewed_schema": "a29b4a6f78b4c452d10aeccc0fff77988944cf8aa66d833dbe5ef6887f7db63f"
 }
 ```
 

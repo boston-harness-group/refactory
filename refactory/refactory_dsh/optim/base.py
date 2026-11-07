@@ -303,6 +303,10 @@ class ProposalContext:
     parent_item_records: list[dict[str, Any]] = field(default_factory=list)
     #: Why the pipeline shown is not the parent's, when it is not (empty when it is).
     graph_note: str = ""
+    #: How text knobs may change (``LoopConfig.text_edit_style``), and the most line
+    #: edits one proposal may make under ``small``; the request says so when small.
+    text_edit_style: str = "free"
+    text_edit_budget: int = 4
     #: The trajectory section's budget (see ``TRAJECTORY_*``). The items shown are
     #: chosen with a seed from ``epoch`` and ``attempt``, so each round sees another
     #: sample.
@@ -355,6 +359,7 @@ class ProposalContext:
             "score. It is available and it may be worth having, but it is not a way "
             "to improve the number.",
             "",
+            *_text_edit_lines(self.text_edit_style, self.text_edit_budget, self.knobs),
             "## The rules a proposal must satisfy",
             "A proposal that breaks one of these is refused before anything runs, so it "
             "costs nothing but the answer. They are the same rules the validator "
@@ -654,6 +659,35 @@ def _trajectories(
         chosen = chosen[:drop] + chosen[drop + 1:]
     lines = section([], floor)
     return lines if size(lines) <= section_chars else []
+
+
+def _text_edit_lines(style: str, budget: int, knobs: Sequence[dict[str, Any]]) -> list[str]:
+    """What the request says about changing text knobs under ``small``; nothing else."""
+    if style != "small":
+        return []
+    example_knob, example_line = "<text knob>", "<a line of its current text>"
+    for knob in knobs:
+        if knob.get("kind") == "str" and not knob.get("values") and not knob.get("frozen"):
+            lines = [line for line in str(knob.get("value") or "").splitlines()
+                     if line.strip() and len(line) <= 120]
+            if lines:
+                example_knob, example_line = str(knob["name"]), lines[0]
+                break
+    example = {"op": "set_knob", "name": example_knob,
+               "patch": [{"kind": "replace", "target": example_line,
+                          "content": "<that line, improved>"}]}
+    return [
+        "## How to change a text parameter",
+        "This run changes text parameters by small edits, not rewrites: a `set_knob` on "
+        "a text parameter must carry a `patch` -- a list of line edits, each with a "
+        "`kind` (`replace`, `delete`, `insert_after`, `insert_before`, `append`), the "
+        "`target` text it applies to and its `content` -- and no whole new `value`, with "
+        f"at most {budget} line edits per "
+        "proposal. Keep what works and change only the lines the evidence points at. "
+        "Other parameters and structure edits are unchanged. For example:",
+        "`" + json.dumps(example) + "`",
+        "",
+    ]
 
 
 def _rules_text() -> str:

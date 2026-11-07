@@ -73,6 +73,25 @@ and `hill_climb` optimizers run with it.
   one batch proposed and gated. Both settings need `--val-gate 1`, are saved with the
   run and are kept on resume.
 
+## Small text edits (`--text-edit-style small`)
+
+By default (`free`) the optimizer may change a text knob (a `str` knob with no fixed
+values) by writing a whole new value, which in practice rewrites a prompt each round.
+`--text-edit-style small` makes it edit as SkillOpt does, a few lines at a time.
+
+- **Patches only.** A `set_knob` on a text knob must carry a `patch`: a list of line
+  edits, each with a `kind` (`replace`, `delete`, `insert_after`, `insert_before`,
+  `append`), a `target` and its `content`. A whole new `value` is refused before
+  anything runs (`E-edit-style`), and the refusal reaches the optimizer's retry.
+- **Budget.** A patch may hold at most `--text-edit-budget` line edits (4 by default,
+  SkillOpt's `edit_budget_max`). More is refused (`E-edit-budget`).
+- **The request says so.** The proposal request describes the style and the budget,
+  with an example patch on one of the run's real text knobs.
+- **Unaffected.** Other knobs (enums, numbers, `str` knobs with fixed values) and
+  structure edits are unchanged.
+- **Saved.** Both settings are saved with the run and kept on resume. They are search
+  settings, not part of the evidence context, so changing them on resume is allowed.
+
 ## What the optimizer sees, and what it said
 
 `ProposalContext.render()` is the request every model optimizer reads. Besides the
