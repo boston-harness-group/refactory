@@ -397,9 +397,12 @@ class ProposalContext:
             "```",
             "",
             "## Recent results",
-            _table(["id", "parent", "score", "structural", "edits"],
+            *_gate_note(self.leaderboard, self.history),
+            _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
-                     json.dumps(c.get("edits"), default=str)] for c in self.leaderboard]),
+                     json.dumps(c.get("edits"), default=str),
+                     *([c.get("gate", "")] if _gate_column(self.leaderboard) else [])]
+                    for c in self.leaderboard]),
             "",
             "## Evidence from the traces",
             _table(["what", "value"],
@@ -416,6 +419,11 @@ class ProposalContext:
             (
                 f"{len(self.history)} candidate(s), best "
                 f"{max((c.get('score') or 0.0) for c in self.history):.6g}"
+                if self.history and not _gate_column(self.history)
+                else f"{len(self.history)} candidate(s), best kept by the validation gate "
+                f"{max((c.get('score') or 0.0) for c in self.history if c.get('gate') in ('kept', 'current')):.6g}"
+                if any(c.get("gate") in ("kept", "current") for c in self.history)
+                else f"{len(self.history)} candidate(s), none kept by the validation gate yet"
                 if self.history
                 else "(nothing evaluated yet)"
             )
@@ -425,10 +433,11 @@ class ProposalContext:
                 else ""
             ),
             _table(
-                ["id", "parent", "score", "structural", "ok", "edits"],
+                ["id", "parent", "score", "structural", "ok", "edits", *_gate_column(self.history)],
                 [
                     [c.get("id"), c.get("parent"), c.get("score"), c.get("structural"),
-                     c.get("exit_ok"), json.dumps(c.get("edits"), default=str)]
+                     c.get("exit_ok"), json.dumps(c.get("edits"), default=str),
+                     *([c.get("gate", "")] if _gate_column(self.history) else [])]
                     for c in self.history[-16:]
                 ],
             ),
@@ -868,6 +877,22 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
         chosen = chosen[:-1]
 
 
+def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
+    """``["gate"]`` when the rows carry the validation gate's decisions, else nothing."""
+    return ["gate"] if any("gate" in row for row in rows) else []
+
+
+def _gate_note(*tables: Sequence[dict[str, Any]]) -> list[str]:
+    """What the gate column means, said once, when there is one."""
+    if not any(_gate_column(rows) for rows in tables):
+        return []
+    return ["This run has a validation gate: each candidate was also run on held-out "
+            "items, and the gate kept it only if it beat the current candidate there. "
+            "Scores here are train scores; held-out scores are never shown. You edit the "
+            "candidate marked `current`. A `rejected` candidate did not generalise, so do "
+            "not build on its change or propose it again."]
+
+
 def _rules_text() -> str:
     from refactory_dsh.nn.validate import rules_text
 
@@ -1151,8 +1176,9 @@ class Optimizer:
             # silently by the loop, which loses the batch slot and makes the run
             # report a batch it did not actually try.
             return [
-                "E-duplicate: this state already exists in the search, so evaluating it "
-                "again would spend a batch slot on a point already scored"
+                f"E-duplicate: this state already exists in the search as candidate "
+                f"{candidate_id(state)}, so evaluating it again would spend a batch slot on "
+                "a point already scored; propose a different change"
             ]
 
         issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls)

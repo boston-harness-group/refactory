@@ -52,6 +52,16 @@ and `hill_climb` optimizers run with it.
   (`best_score_basis`), with its train score in `best_train_score`.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
+- **What the optimizer reads.** Every row it sees (recent results, the history, the
+  gradient's leaderboard) carries the gate's decision: `current` (the candidate it
+  edits), `kept`, `rejected` or `not gated`. The per-knob attribution counts, for each
+  value, how many of its candidates were kept, rejected or not yet gated. The request
+  says it edits the `current` candidate, and that a `rejected` one did not generalise.
+  The history's best is the best kept candidate. Val scores are never shown to it;
+  scores there are train scores.
+- **What a person reads.** Each epoch's progress line says how many candidates the
+  gate kept and rejected that epoch, with the val best and current scores, instead of
+  a train-score "improved".
 - **Final evaluation.** After a normal end (the epoch bound or an early stop), with a
   test part, the final candidate's val check runs, then the seed, the best and the final
   candidate on test with `seed`. A run that ends on a spent evaluation, rollout, time or
@@ -181,6 +191,10 @@ from the `Node` dataclass and its validator, so they cannot drift:
 `call` and `evaluator` must name an importable `module:function` (rule V8), so a new op
 or fn-gate node can only reuse a callable an existing node already names. In the edit
 catalogue, every field that takes a node (`node`, `gate`, and `into` for two) says so.
+
+A proposal refused as a duplicate (`E-duplicate`) is told which candidate it repeats
+(its id), so the retry can look it up and move on. This applies with or without the
+gate.
 
 Every call the `autoresearch` optimizer makes is appended to
 `<run root>/optimizer_trace.jsonl` as it happens. Each line records the epoch, the

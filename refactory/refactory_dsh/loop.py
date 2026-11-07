@@ -1385,11 +1385,19 @@ class Loop(OuterLoop):
         one nobody has tried, and will keep re-proposing what it already knows.
         """
         buckets: dict[str, dict[str, list[float]]] = {}
+        # With the validation gate, what it decided about the candidates behind each
+        # value, so a value whose candidates were all rejected is not read as a gain.
+        decisions: dict[str, dict[str, dict[str, int]]] = {}
         for candidate in evaluated:
+            decision = self._gate_decision(candidate.id)
             for name, entry in (candidate.state.get("knobs") or {}).items():
                 buckets.setdefault(name, {}).setdefault(str(entry["value"]), []).append(
                     float(candidate.score)
                 )
+                if decision is not None:
+                    counts = decisions.setdefault(name, {}).setdefault(
+                        str(entry["value"]), {"kept": 0, "rejected": 0, "not gated": 0})
+                    counts["kept" if decision in ("kept", "current") else decision] += 1
         attribution: dict[str, Any] = {}
         for name, values in sorted(buckets.items()):
             attribution[name] = {
@@ -1398,6 +1406,7 @@ class Loop(OuterLoop):
                         "n": len(scores),
                         "mean": round(sum(scores) / len(scores), 6),
                         "max": round(max(scores), 6),
+                        **({"gate": decisions[name][value]} if name in decisions else {}),
                     }
                     for value, scores in sorted(values.items())
                 },
@@ -1881,8 +1890,8 @@ class Loop(OuterLoop):
                         attempt=0,
                         edit=candidate.edits[-1] if candidate.edits else {},
                         reasons=[
-                            "E-duplicate: the candidate's state already exists, so its "
-                            "batch slot was lost"
+                            f"E-duplicate: the candidate's state already exists as "
+                            f"candidate {candidate.id}, so its batch slot was lost"
                         ],
                     )
                 )
@@ -1943,6 +1952,14 @@ class Loop(OuterLoop):
             # Journaled, not derived: the report states what bound the run, and a
             # run whose steps are separate processes reads that from the log.
             self._journal("bound", bound=self.bound)
+        gate_fields: dict[str, Any] = {}
+        if self.config.val_gate and self._custom_strategy is None:
+            # A person reads this line: say what the gate decided, with its val scores,
+            # rather than a train-score "improved" the gate may have rejected.
+            gate = self._gate()
+            gate_fields = {"gate": dict(getattr(self, "_epoch_gate", {}) or {}),
+                           "val_best": gate.best_score if gate.best_id else None,
+                           "val_current": gate.current_score if gate.current_id else None}
         self._progress(
             "scheduler",
             epoch=self.epoch,
@@ -1951,6 +1968,7 @@ class Loop(OuterLoop):
             improved=summary.improved,
             bound=self.bound,
             another=not self.bound,
+            **gate_fields,
         )
         return not self.bound
 
@@ -2063,9 +2081,9 @@ class Loop(OuterLoop):
                                 attempt=rounds,
                                 edit=proposal.edit,
                                 reasons=[
-                                    "E-duplicate: this state was already accepted from "
-                                    "the same batch, so evaluating it again would spend "
-                                    "a batch slot on a point already scored"
+                                    f"E-duplicate: this state is candidate {outcome.id}, "
+                                    "already accepted from the same batch, so evaluating it "
+                                    "again would spend a batch slot on a point already scored"
                                 ],
                                 rationale=proposal.rationale,
                             )
@@ -2551,8 +2569,12 @@ class Loop(OuterLoop):
         self.open_epoch()
         evaluated = self.forward()
         early = ""
+        before = (len(self._gate_accepted), len(self._gate_rejected))
         if self.config.val_gate:
             self._gate_population(run or Run(_loop=self))
+            # What this epoch's gating decided, for the epoch's progress line.
+            self._epoch_gate = {"kept": len(self._gate_accepted) - before[0],
+                                "rejected": len(self._gate_rejected) - before[1]}
             # SkillOpt's early stop, checked right after the epoch's gating so a
             # stopping run proposes nothing it will not score.
             self._count_stale_epoch()
@@ -2635,11 +2657,30 @@ class Loop(OuterLoop):
         taken off it.
         """
         nodes = node_count(candidate.state)
-        return {
+        row = {
             **candidate.describe(),
             "nodes": nodes,
             "size_cost": round(self.config.parsimony * nodes, 6),
         }
+        gate = self._gate_decision(candidate.id)
+        if gate is not None:
+            row["gate"] = gate
+        return row
+
+    def _gate_decision(self, candidate_id: str) -> str | None:
+        """What the validation gate decided about a candidate, as the optimizer reads
+        it: ``current`` (the one it edits), ``kept``, ``rejected`` or ``not gated``.
+        ``None`` without ``val_gate``. Never a val score."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return None
+        gate = self._gate()
+        if candidate_id == gate.current_id:
+            return "current"
+        if candidate_id in self._gate_accepted:
+            return "kept"
+        if candidate_id in self._gate_rejected:
+            return "rejected"
+        return "not gated"
 
     def scoring(self) -> dict[str, Any]:
         """How a candidate's score is built, said where the numbers are recorded."""
