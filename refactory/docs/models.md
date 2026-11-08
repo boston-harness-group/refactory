@@ -349,7 +349,12 @@ default), so a network or DNS blip of up to about a minute does not fail the nod
 (dm-218). These retries happen on the `dsh` backend and, for a session without tools
 (`tool_policy: none`, such as the optimizer's text-only calls and no-tools agent nodes),
 on every backend, `claude_code` and `codex` included; a native session with tools makes
-one attempt, since replaying it could repeat real work. In a session without tools, a
+one attempt, since replaying it could repeat real work. The count follows each node's
+own route, not the run's default, on both runtimes: in a `dsh` run, a node routed to
+`claude_code` with tools makes one attempt and the spine gives it one completion's
+time limit (1800 + 600 s by default; it used to inherit the run's 3 attempts and
+3 x 1800 + 600 s); in a `claude_code` run, a node routed to `dsh` gets 3 attempts and
+3 x 1800 + 600 s, as in a `dsh` run (it used to be held to one attempt and 2400 s). In a session without tools, a
 worker teardown failure after a clean CLI exit is retried the same way, within the same
 attempts and window: the failure's diagnostic line has
 `stage: teardown; ...; exit code: 0` in one group (the CLI finished, and DSH's cleanup

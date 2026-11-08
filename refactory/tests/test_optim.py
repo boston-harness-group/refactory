@@ -902,3 +902,40 @@ def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, 
         os.environ.clear()
         os.environ.update(saved)
     assert seen == {"policy": "none", "attempts": 3}
+
+
+@pytest.mark.parametrize("run_route, node_route, attempts", [
+    # A dsh run with one node routed to claude_code (tools): that node's native session
+    # makes one attempt and gets one completion's time limit (it used to inherit dsh's 3).
+    ({"worker_backend": "dsh", "provider": "p", "model": "m"},
+     {"worker_backend": "claude_code"}, 1),
+    # A claude_code run with one node routed to dsh (tools): that node retries as a dsh
+    # run's nodes do, with the time limit for every attempt (it used to be held to 1).
+    ({"worker_backend": "claude_code"},
+     {"worker_backend": "dsh", "provider": "p", "model": "m"}, 3),
+])
+def test_a_mixed_route_node_gets_its_own_routes_attempts_and_time_limit(
+        tmp_path, run_route, node_route, attempts):
+    """The attempt count and the spine's time limit follow the node's own route, not
+    the run's default: on the spine (the lower_workflow spec, rebuilt as worker_node
+    does) and on the walker (the for_node client)."""
+    import json
+
+    from refactory_dsh import workers
+    from refactory_dsh.ir import AgentNode, AgentRole, Workflow
+    from refactory_dsh.model import DEFAULT_TIMEOUT_S, DshModelClient, node_session_budget_s
+
+    run = DshModelClient(**run_route, node_routes={"answer": node_route})
+    node = AgentNode(id="answer", role=AgentRole.BUILDER, prompt_template="q",
+                     writes={"answer.txt"})
+    graph = Workflow(name="g", nodes={"answer": node}, edges=[], start_node="answer")
+    lowered = workers.lower_workflow(graph, tmp_path, run.context()).nodes["answer"]
+    assert lowered.command_timeout_s == node_session_budget_s(attempts, DEFAULT_TIMEOUT_S)
+    spec = json.loads(Path(lowered.dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
+    rebuilt = DshModelClient(**spec["model_context"]).for_node("answer", role="builder")
+    rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")
+    assert rebuilt.route()["worker_backend"] == node_route["worker_backend"]
+    assert rebuilt.retry_attempts() == attempts
+    walker = run.for_node("answer", role="builder").with_tool_policy("")
+    assert walker.route()["worker_backend"] == node_route["worker_backend"]
+    assert walker.retry_attempts() == attempts
