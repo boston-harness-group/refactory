@@ -22,6 +22,7 @@ failure. Those are two different messages, and both are fed back to the optimize
 from __future__ import annotations
 
 import copy
+import json
 import random
 import re
 from dataclasses import dataclass, replace
@@ -749,7 +750,7 @@ def _patch_knob(state: State, edit: dict, name: str, knob: Any,
 
     def _one(i: int, edit_item: Any) -> dict[str, Any]:
         nonlocal text
-        kind = edit_item.get("kind")
+        kind = edit_item.get(PATCH_KIND_KEY)
         target = edit_item.get("target", "")
         content = edit_item.get("content", "")
         skillopt_order = protected_check == "target_start"
@@ -759,7 +760,7 @@ def _patch_knob(state: State, edit: dict, name: str, knob: Any,
                     "index": i, "kind": kind, "target": "", "content_preview": "",
                     "status": _status("skipped_unknown_kind"),
                 }
-            raise EditError(f"unknown edit kind {kind!r}", code="E-patch")
+            raise EditError(_unknown_kind(kind), code="E-patch")
 
         # skill.py:78-79 strips whitespace first, then removes markers.
         if content_strip:
@@ -783,7 +784,7 @@ def _patch_knob(state: State, edit: dict, name: str, knob: Any,
                 if unknown_kind_policy == "skip":
                     outcome["status"] = _status("skipped_unknown_kind")
                     return outcome
-                raise EditError(f"unknown edit kind {kind!r}", code="E-patch")
+                raise EditError(_unknown_kind(kind), code="E-patch")
 
         if kind == "append":
             if _do_append(content):
@@ -918,12 +919,34 @@ _primitive(
     "Remove the edge between two nodes, optionally only one condition.",
     ("source", "target", "condition"), _remove_edge,
 )
+#: The key of a ``set_knob`` patch entry that names its action, and the actions.
+PATCH_KIND_KEY = "kind"
+PATCH_KINDS = ("replace", "delete", "insert_after", "insert_before", "append")
+#: One patching ``set_knob``, as the catalogue and the answer rules show it.
+PATCH_EXAMPLE = {"op": "set_knob", "name": "<str knob>",
+                 "patch": [{"kind": "replace", "target": "<exact text in the knob>",
+                            "content": "<its replacement>"}]}
+PATCH_FORMAT = (
+    "each patch entry is {\"kind\": <action>, \"target\": \"<exact text in the knob>\", "
+    "\"content\": \"<new text>\"}, its action under \"kind\" -- one of "
+    + ", ".join(PATCH_KINDS) + " (append needs no target, delete no content); e.g. "
+    + json.dumps(PATCH_EXAMPLE))
+
+
+
+def _unknown_kind(kind: Any) -> str:
+    """The refusal of a patch entry whose action is missing or not one of the actions,
+    naming the key the action belongs under."""
+    return (f"unknown edit kind {kind!r}: each patch entry names its action under "
+            f"{PATCH_KIND_KEY!r}, one of " + ", ".join(PATCH_KINDS))
+
+
 _primitive(
     "set_knob", "knob",
     "Set a parameter: exactly one of 'value' (the whole new value) or 'patch' (an "
-    "ordered list of text edits -- replace, delete, insert_after, insert_before, "
-    "append -- applied to a str knob as one patch, configured by 'config'). Refused "
-    "for a frozen knob or a value outside its bounds.",
+    "ordered list of text edits applied to a str knob as one patch, configured by "
+    "'config'); " + PATCH_FORMAT + ". Refused for a frozen knob or a value outside "
+    "its bounds.",
     ("name", "value", "patch", "config"), _set_knob,
 )
 _primitive(

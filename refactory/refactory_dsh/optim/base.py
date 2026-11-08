@@ -982,6 +982,9 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         "Rules:",
         '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>}.',
     ]
+    if any(op.get("op") == "set_knob" for op in catalogue):
+        lines.append("- A str parameter may be patched instead of rewritten: "
+                     + nn_edits.PATCH_FORMAT + ".")
     if structural is not None:
         lines += [
             "- A structural move is one of the structural operations above, with the fields it "

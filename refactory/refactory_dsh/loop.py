@@ -1653,9 +1653,14 @@ class Loop(OuterLoop):
         # With the validation gate, what it decided about the candidates behind each
         # value, so a value whose candidates were all rejected is not read as a gain.
         decisions: dict[str, dict[str, dict[str, int]]] = {}
+        # Each knob's declaration as the candidates carry it (the latest wins), so a
+        # knob an edit added is enumerated like one the mode declares.
+        specs: dict[str, dict[str, Any]] = {}
         for candidate in evaluated:
             decision = self._gate_decision(candidate.id)
             for name, entry in (candidate.state.get("knobs") or {}).items():
+                if isinstance(entry.get("spec"), dict):
+                    specs[name] = entry["spec"]
                 buckets.setdefault(name, {}).setdefault(str(entry["value"]), []).append(
                     float(candidate.score)
                 )
@@ -1675,19 +1680,22 @@ class Loop(OuterLoop):
                     }
                     for value, scores in sorted(values.items())
                 },
-                "untried": self._untried(name, values),
+                "untried": self._untried(name, values, specs.get(name)),
             }
         return attribution
 
-    def _untried(self, name: str, tried: dict[str, list[float]]) -> list[Any]:
+    def _untried(self, name: str, tried: dict[str, list[float]],
+                 spec: Mapping[str, Any] | None = None) -> list[Any]:
         """The declared values of a knob that have not been evaluated.
 
         A knob with a finite set -- an enum, or a ``str`` with declared values --
         enumerates it. An ``int`` with both bounds declared is just as finite and
         just as readable, so it enumerates its range too. An open-ended numeric
-        knob has no set to enumerate and answers empty.
+        knob has no set to enumerate and answers empty. ``spec`` is the declaration
+        the candidates carry, read before the mode's: a knob an edit added has no
+        declaration in the mode.
         """
-        knob = self.parameters.get(name)
+        knob = Knob.from_spec(dict(spec)) if spec else self.parameters.get(name)
         if knob is None:
             return []
         finite = knob.accepted()
@@ -2298,6 +2306,12 @@ class Loop(OuterLoop):
             detail = f"{type(exc).__name__}: {exc}"
             self.optimizer.proposal_failures.append(detail)
             run.log(f"{self.optimizer.name} could not propose: {detail}")
+            # In the progress stream too, where a person watching the run looks: a
+            # round that never reached the model otherwise reads as one that did and
+            # proposed nothing.
+            self._progress("proposal_failed", optimizer=self.optimizer.name,
+                           parent=self._editing_parent, attempt=self._proposal_attempt,
+                           error=type(exc).__name__, detail=str(exc)[:500])
             return []
 
     def batch_size(self, run: Run) -> int:
@@ -3465,6 +3479,8 @@ class Loop(OuterLoop):
                     "",
                     payload["proposer"]["finding"],
                     "",
+                    *[f"- {failure[:300]}" for failure in payload["proposer"]["failures"]],
+                    "",
                 ]
                 if payload["proposer"]["failure_count"]
                 else []
@@ -3568,7 +3584,8 @@ class Loop(OuterLoop):
             best_score=(board[0].score if board else None),
             mean_score=self.loss.get("mean"),
             knobs=[
-                {"name": name, **spec, "reachable": self._reachable(name, spec)}
+                {"name": name, **spec,
+                 "reachable": self._reachable(name, spec, described["knob_states"])}
                 for name, spec in described["knobs"].items()
             ],
             nodes=described["nodes"],
@@ -3727,8 +3744,12 @@ class Loop(OuterLoop):
             parent = board[0]
         def described(mode: Any) -> dict[str, Any]:
             # The nodes in full too, in node-state form, for a structure edit to copy.
-            nodes = (mode.state_dict().get("graph") or {}).get("nodes") or {}
-            return {**mode.describe(), "node_states": [dict(state) for state in nodes.values()]}
+            # And its knob states (spec + value): a node an earlier edit added brings
+            # its own knobs, which the seed does not declare.
+            whole = mode.state_dict()
+            nodes = (whole.get("graph") or {}).get("nodes") or {}
+            return {**mode.describe(), "node_states": [dict(state) for state in nodes.values()],
+                    "knob_states": dict(whole.get("knobs") or {})}
 
         if parent is None:
             return described(self.mode), ""
@@ -3771,9 +3792,20 @@ class Loop(OuterLoop):
 
         return Ledger(self.root).render()
 
-    def _reachable(self, name: str, spec: dict[str, Any]) -> bool:
-        """Whether the selected optimizer can move this knob at all."""
-        knob = Knob.from_spec(self.mode.state_dict()["knobs"][name]["spec"])
+    def _reachable(self, name: str, spec: dict[str, Any],
+                   knob_states: Mapping[str, Any] | None = None) -> bool:
+        """Whether the selected optimizer can move this knob at all.
+
+        The knob is read from ``knob_states`` -- the edited candidate's own knobs --
+        before the seed's: a node added by an earlier edit (a new agent's
+        ``<id>__system_prompt``, a code node's ``<id>__code``, a duplicate's or a
+        split's copies) declares knobs the seed never had.
+        """
+        entry = (knob_states or {}).get(name) or self.mode.state_dict()["knobs"].get(name)
+        if entry is None:
+            raise KeyError(f"knob {name!r} is declared neither by the edited candidate "
+                           "nor by the mode")
+        knob = Knob.from_spec(entry["spec"])
         if knob.frozen or name in self.config.frozen:
             return False
         return self.optimizer.can_move(knob, spec.get("value"))

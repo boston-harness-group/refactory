@@ -48,7 +48,8 @@ def test_a_parameters_only_run_shows_no_structural_example():
     text = _render("knob_only", max_edits=4)
     answer = _answer(text)
     assert "parameter moves only" in answer
-    assert not any(op in answer for op in ("insert_after", "add_node", "__system_prompt", '"node"'))
+    # A set_knob patch entry may name the action insert_after; a structural example names it as an op.
+    assert not any(op in answer for op in ('"op": "insert_after"', "add_node", "__system_prompt", '"node"'))
     assert "<step A's prompt knob>" in answer, "the bundle example stays two prompt knobs"
     bundles = json.loads(next(line for line in answer.splitlines()
                               if line.startswith('{"proposals": [{"edits"')))["proposals"]

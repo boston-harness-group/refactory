@@ -129,9 +129,11 @@ hides the edit that caused the problem.
 - **4 presets** declare which operations a run may use: `broad` (15),
   `structure` (15), `conservative` (4), `knob_only` (3).
 - **`set_knob` is the one edit that moves a knob**, in exactly one of two forms:
-  `value` replaces the whole value; `patch` is an ordered list of text edits
-  (`replace`, `delete`, `insert_after`, `insert_before`, `append`, with
-  `config` for the matching and protected-region policies) applied to a `str`
+  `value` replaces the whole value; `patch` is an ordered list of text edits,
+  each `{"kind": <action>, "target": ..., "content": ...}` with the action
+  (`replace`, `delete`, `insert_after`, `insert_before`, `append`) under
+  `kind` (an entry without it is refused, naming the key), and
+  `config` for the matching and protected-region policies, applied to a `str`
   knob as one patch. Both or neither is refused, and so is a patch on any other
   kind. A frozen knob refuses both forms. Random search samples only the `value`
   form, so seeded random runs are unchanged by the patch form.
