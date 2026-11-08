@@ -390,6 +390,31 @@ def test_portfolio_evaluates_both_levels_under_the_gate_and_counts_the_extra(tmp
     assert "## Portfolio" in text and "| shadowed |" in text
 
 
+def test_the_portfolio_report_lists_candidates_in_the_order_the_gate_judged_them(
+        tmp_path, monkeypatch):
+    """Shadowing is read off the report's order, so that order must be the gate's: the
+    calls to ``ValidationGate.judge`` are recorded and compared round by round."""
+    from refactory_dsh.outerloop import ValidationGate
+
+    judged: list[str] = []
+    original = ValidationGate.judge
+
+    def recording(self, run, candidate, *args, **kwargs):  # type: ignore[no-untyped-def]
+        judged.append(candidate.id)
+        return original(self, run, candidate, *args, **kwargs)
+
+    monkeypatch.setattr(ValidationGate, "judge", recording)
+    loop = _run("default", tmp_path, ComboModel(portfolio), val_gate=True, batch_size=1,
+                epochs=3, portfolio="prompt+pipeline")
+    report = json.loads((loop.root / "report.json").read_text())["portfolio"]
+    listed = [c["id"] for entry in report["per_round"] for c in entry["candidates"]
+              if c["gate"] in ("kept", "current", "rejected")]
+    assert listed and listed == [cid for cid in judged if cid in set(listed)]
+    for entry in report["per_round"]:
+        levels = [c["level"] for c in entry["candidates"]]
+        assert levels == ["prompt_knob", "pipeline"], levels  # the order proposed
+
+
 def test_portfolio_refuses_a_second_candidate_of_one_level_and_asks_for_the_missing_one(tmp_path):
     def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
         if request.levels == ["pipeline"]:

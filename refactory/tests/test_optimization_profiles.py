@@ -378,3 +378,36 @@ def test_an_autoresearch_profile_resolves_with_its_proposer_and_task_routes(proj
     assert seen[0]["node_routes"] == {"work": {"model": "task-model"}}
     assert (seen[0]["provider"], seen[0]["model"]) == ("fake-provider", "task-model")
     assert not (project / "r" / "journal.jsonl").exists()
+
+
+def test_a_profile_with_a_parent_picker_and_a_portfolio_round_trips(project):
+    """``parent_picker`` and ``portfolio`` pass the type check, survive save, load and
+    resolve, change the context hash only when set, and reach the run."""
+    from refactory_dsh.loop import LoopConfig
+
+    auto = {**_experiment(project), "optimizer": "autoresearch", "val_gate": False,
+            "train_minibatch": 0, "parent_picker": "map_elites", "portfolio": "prompt+pipeline"}
+    profiles.save(project, "combo", {"settings": auto})
+    assert profiles.load(project, "combo")["settings"]["parent_picker"] == "map_elites"
+    snapshot = profiles.resolve(project, MODE, name="combo")
+    assert snapshot["settings"]["parent_picker"] == "map_elites"
+    assert snapshot["settings"]["portfolio"] == "prompt+pipeline"
+    config = LoopConfig.from_dict(snapshot["settings"])
+    assert (config.parent_picker, config.portfolio) == ("map_elites", "prompt+pipeline")
+    plain = profiles.resolve(project, MODE, overrides={**auto, "parent_picker": "", "portfolio": ""})
+    assert plain["evaluation_context"]["settings"] != snapshot["evaluation_context"]["settings"]
+    for bad, message in (({"parent_picker": 3}, "parent_picker"),
+                         ({"parent_picker": "tournament"}, "parent_picker"),
+                         ({"portfolio": "everything"}, "portfolio"),
+                         ({"optimizer": "random", "portfolio": "prompt+pipeline"}, "portfolio")):
+        with pytest.raises(profiles.ProfileError, match=message):
+            profiles.normalize({**auto, **bad})
+
+    # A random proposer with a picker runs from the profile, no model needed.
+    profiles.save(project, "picked", {"settings": {**_experiment(project), "val_gate": False,
+                                                   "train_minibatch": 0,
+                                                   "parent_picker": "map_elites"}})
+    code, root = _run(project, "picked-run", "--profile", "picked")
+    assert code == 0
+    assert _read(root, "config.json")["parent_picker"] == "map_elites"
+    assert _read(root, "report.json")["optimizer"] == "random+map_elites"
