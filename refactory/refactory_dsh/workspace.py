@@ -554,7 +554,9 @@ def _complete_in_openshell(workspace: Workspace, client: Any, prompt: str, *, wo
     (session / "prompt.md").write_text(f"{system}\n\n{prompt}" if system else prompt)
     (session / "response.md").unlink(missing_ok=True)
     context = client.context() if callable(getattr(client, "context", None)) else {}
-    timeout = node_session_budget_s(int(context.get("attempts") or 1),
+    attempts = (client.retry_attempts() if callable(getattr(client, "retry_attempts", None))
+                else int(context.get("attempts") or 1))
+    timeout = node_session_budget_s(attempts,
                                     int(context.get("timeout_s") or DEFAULT_TIMEOUT_S))
     staging = workspace.root / "openshell"
     shutil.rmtree(staging, ignore_errors=True)

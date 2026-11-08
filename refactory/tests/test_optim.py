@@ -816,3 +816,89 @@ def test_a_transport_failure_is_still_retried_and_the_predicates_stay_apart(monk
     assert is_retryable_failure(TEARDOWN, tool_policy="none")
     assert not is_retryable_failure(TEARDOWN)
     assert failure_cause(f"noise\n{TEARDOWN}\n") == TEARDOWN
+
+
+def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monkeypatch):
+    """On a native backend (claude_code) a session without tools retries a transport
+    failure and a clean-exit teardown within the configured attempts; a session with
+    tools makes one attempt, as before. The configured count survives a context
+    round trip."""
+    from refactory_dsh.model import DshModelClient
+
+    native = DshModelClient(worker_backend="claude_code")
+    text = native.with_tool_policy("none")
+    assert native.retry_attempts() == 1 and text.retry_attempts() == 3
+    rebuilt = DshModelClient(**native.context()).with_tool_policy("none")
+    assert rebuilt.retry_attempts() == 3
+    for failure in (TEARDOWN, "dsh: TRANSPORT: socket hang up"):
+        queue, waits = _answers(monkeypatch, _Failed(failure), _Done())
+        assert text.complete("hello") == "done\n"
+        assert queue == [] and len(waits) == 1
+        queue, waits = _answers(monkeypatch, _Failed(failure), _Done())
+        with pytest.raises(RuntimeError, match="model completion failed"):
+            native.complete("hello")
+        assert len(queue) == 1 and waits == []
+
+
+def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, monkeypatch):
+    """The client a tool_policy "none" agent node calls is a no-tools client on both
+    runtimes, and so is the optimizer's: the walker (`GraphExecutor`, via for_node and
+    with_tool_policy), the spine (`workers.lower_workflow` writes the policy and the
+    node's attempts into the worker spec that `worker_node` rebuilds its client from),
+    and `text_only`. On a native backend each retries; the spine's envelope reserves
+    every attempt."""
+    import json
+
+    from refactory_dsh import workers
+    from refactory_dsh.ir import AgentNode, AgentRole, Workflow
+    from refactory_dsh.model import DEFAULT_TIMEOUT_S, DshModelClient, node_session_budget_s
+    from refactory_dsh.optim.random_optimizer import text_only
+
+    native = DshModelClient(worker_backend="claude_code")
+    assert text_only(native)._tool_policy == "none" and text_only(native).retry_attempts() == 3
+
+    def graph(policy):  # type: ignore[no-untyped-def]
+        node = AgentNode(id="answer", role=AgentRole.BUILDER, prompt_template="q",
+                         writes={"answer.txt"}, tool_policy=policy)
+        return Workflow(name="g", nodes={"answer": node}, edges=[], start_node="answer")
+
+    for policy, attempts in (("none", 3), (None, 1)):
+        lowered = workers.lower_workflow(graph(policy), tmp_path / str(policy), native.context())
+        node = lowered.nodes["answer"]
+        spec = json.loads(Path(node.dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
+        rebuilt = DshModelClient(**spec["model_context"]).for_node("answer", role="builder")
+        rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")  # as worker_node does
+        assert (rebuilt._tool_policy == "none") is (policy == "none")
+        assert rebuilt.retry_attempts() == attempts
+        assert node.command_timeout_s == node_session_budget_s(attempts, DEFAULT_TIMEOUT_S)
+
+    # The walker: the executor hands an agent node the for_node client with the node's
+    # tool policy applied.
+    from refactory_dsh.nn import executor as nn_executor
+
+    seen = {}
+
+    def ask(model, prompt, *, system, workdir):  # type: ignore[no-untyped-def]
+        seen["policy"], seen["attempts"] = model._tool_policy, model.retry_attempts()
+        return "A"
+
+    monkeypatch.setattr(nn_executor, "_ask_model", ask)
+    from refactory_dsh.nn.graph import Graph, Node
+
+    node = Node(id="answer", kind="agent", prompt_template="q", tool_policy="none",
+                writes=("answer.txt",))
+    walk = Graph()
+    walk.add(node)
+    walk.start = "answer"
+    executor = nn_executor.Executor(walk, nn_executor.RunContext(tmp_path / "walk", model=native))
+    import os
+
+    saved = dict(os.environ)  # the visit sets run variables; leave none behind
+    try:
+        executor._visit_agent(node)
+    except Exception:  # noqa: BLE001 - only the client the node asked with matters here
+        pass
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    assert seen == {"policy": "none", "attempts": 3}

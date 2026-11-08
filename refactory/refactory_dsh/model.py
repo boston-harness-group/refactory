@@ -415,7 +415,10 @@ class DshModelClient:
     on the wire -- or, in a session without tools, in the worker's teardown after a
     clean CLI exit (`is_retryable_failure`) -- is retried, up to ``attempts`` in all,
     with waits that double and add up to ``retry_window_s`` (`retry_delays`); one that
-    fails for any other reason is raised straight away with the cause named. ``backoff_s`` is the schedule a saved worker spec
+    fails for any other reason is raised straight away with the cause named. Retries
+    happen on the ``dsh`` backend, and on any backend for a session without tools; a
+    native session with tools makes one attempt (`retry_attempts`), since replaying it
+    could repeat real work. ``backoff_s`` is the schedule a saved worker spec
     or run configuration from before ``retry_window_s`` carries: when it is given, the
     first wait is ``backoff_s`` and each next one doubles, as it was then.
     """
@@ -560,11 +563,30 @@ class DshModelClient:
         if tool_policy not in ("", "none"):
             raise ValueError(f"invalid tool_policy {tool_policy!r}")
         self._tool_policy = tool_policy
-        self._attempts = max(1, int(attempts)) if self._worker_backend == "dsh" else 1
+        self._configured_attempts = max(1, int(attempts))
         self._backoff_s = None if backoff_s is None else max(0.0, float(backoff_s))
         self._retry_window_s = max(0.0, float(retry_window_s))
         self._cancellations: tuple[threading.Event, ...] = ()
         validate_route(self.route())
+
+    def retry_attempts(self) -> int:
+        """How many completions one ``complete`` call may make: the configured
+        ``attempts`` on the ``dsh`` backend, and on any backend for a session without
+        tools (``tool_policy == "none"``), whose replay has no side effects; 1 for a
+        native session with tools, whose replay could repeat real work."""
+        configured = max(1, int(getattr(self, "_configured_attempts", 1)))
+        if (getattr(self, "_worker_backend", "dsh") == "dsh"
+                or getattr(self, "_tool_policy", "") == "none"):
+            return configured
+        return 1
+
+    @property
+    def _attempts(self) -> int:
+        return self.retry_attempts()
+
+    @_attempts.setter
+    def _attempts(self, value: int) -> None:
+        self._configured_attempts = max(1, int(value))
 
     def route(self) -> dict[str, str]:
         result = {"worker_backend": self._worker_backend, "provider": self._provider,
@@ -666,7 +688,10 @@ class DshModelClient:
         return {
             "routes_resolved": True, "routing_provenance": copy.deepcopy(self._routing_provenance),
             "dsh_home": str(self._dsh_home), "provider": self._provider, "model": self._model,
-            "timeout_s": self._timeout_s, "attempts": self._attempts, "retry_window_s": self._retry_window_s,
+            "timeout_s": self._timeout_s,
+            # The configured count, so a client rebuilt from this context and given
+            # tool_policy "none" keeps its retries; `retry_attempts` applies the rule.
+            "attempts": getattr(self, "_configured_attempts", 1), "retry_window_s": self._retry_window_s,
             **({} if self._backoff_s is None else {"backoff_s": self._backoff_s}),
             "runtime_root": str(self._runtime_root), "dsh_cli": self._dsh_cli,
             "python_bin": str(self._python_bin),

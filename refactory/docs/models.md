@@ -346,9 +346,12 @@ agent may already have written files or started tool work. Explicit transport
 failures retain their bounded retry policy: up to `attempts` completions (3 by
 default), with waits between them that double and add up to `retry_window_s` (60 s by
 default), so a network or DNS blip of up to about a minute does not fail the node
-(dm-218). In a session without tools (`tool_policy: none`, such as the optimizer's
-text-only calls), a worker teardown failure after a clean CLI exit is retried the same
-way, within the same attempts and window: the failure's diagnostic line has
+(dm-218). These retries happen on the `dsh` backend and, for a session without tools
+(`tool_policy: none`, such as the optimizer's text-only calls and no-tools agent nodes),
+on every backend, `claude_code` and `codex` included; a native session with tools makes
+one attempt, since replaying it could repeat real work. In a session without tools, a
+worker teardown failure after a clean CLI exit is retried the same way, within the same
+attempts and window: the failure's diagnostic line has
 `stage: teardown; ...; exit code: 0` in one group (the CLI finished, and DSH's cleanup
 after it failed, for example under load). A session with tools is not retried for it,
 because its work (files, commits, pushes) is already done and a replay would repeat it;
