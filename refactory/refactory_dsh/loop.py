@@ -2007,7 +2007,8 @@ class Loop(OuterLoop):
         choose = getattr(self.optimizer, "choose_parent", None)
         picked = None if explicit or not callable(choose) else choose(
             ProposalContext(epoch=self.epoch, generation=self.generation,
-                            mode_name=self.mode_id, elite=int(self.config.elite)), parents)
+                            mode_name=self.mode_id, elite=int(self.config.elite),
+                            val_scores=self._val_scores()), parents)
         if explicit:
             self._editing_parent = str(explicit)
         elif picked is not None:
@@ -2067,28 +2068,60 @@ class Loop(OuterLoop):
         return candidates, rejections
 
     def _portfolio_report(self) -> dict[str, Any]:
-        """What ``portfolio`` cost and produced: candidates per edit level (proposed,
-        evaluated, kept by the validation gate) and the evaluations beyond
-        ``batch_size``, from the journaled proposal records."""
+        """What ``portfolio`` cost and produced, from the journaled proposal records.
+
+        ``by_level``: candidates proposed, evaluated and kept by the validation gate,
+        and the evaluations they cost (a train run, plus each val or test occasion).
+        ``rounds``: each round's candidates in the order they were gated, with the
+        gate's decision; a candidate the gate rejected although its val score beat
+        its parent's, after a sibling of the same round was accepted first, is
+        ``shadowed``: gating in proposal order raised the bar it lost to.
+        ``extra_evaluations``: what the candidates beyond ``batch_size`` in each round
+        cost."""
         from refactory_dsh.optim.base import EDIT_LEVELS
 
         by_id = {c.id: c for c in self.population}
-        records = [r for r in self.proposals.values() if r.get("level")]
-        by_level = {level: {"proposed": 0, "evaluated": 0, "kept": 0} for level in EDIT_LEVELS}
-        evaluated_by_epoch: dict[Any, int] = {}
+        order = {c.id: index for index, c in enumerate(self.population)}
+        records = sorted((r for r in self.proposals.values() if r.get("level")),
+                         key=lambda r: order.get(r["id"], len(order)))
+        cache = self._gate().cache if self.config.val_gate and self._custom_strategy is None else {}
+
+        def cost(candidate: Candidate | None) -> int:
+            if candidate is None or not candidate.evaluated:
+                return 0
+            return 1 + sum((self._occasion_counters.get(candidate.id) or {}).values())
+
+        by_level = {level: {"proposed": 0, "evaluated": 0, "kept": 0, "evaluations": 0}
+                    for level in EDIT_LEVELS}
+        rounds: dict[Any, list[dict[str, Any]]] = {}
         for record in records:
-            entry = by_level.setdefault(str(record["level"]), {"proposed": 0, "evaluated": 0, "kept": 0})
-            entry["proposed"] += 1
             candidate = by_id.get(record["id"])
+            entry = by_level.setdefault(str(record["level"]), {
+                "proposed": 0, "evaluated": 0, "kept": 0, "evaluations": 0})
+            entry["proposed"] += 1
+            decision = self._gate_decision(record["id"])
             if candidate is not None and candidate.evaluated:
                 entry["evaluated"] += 1
-                evaluated_by_epoch[record.get("epoch")] = evaluated_by_epoch.get(record.get("epoch"), 0) + 1
-            if self._gate_decision(record["id"]) in ("kept", "current"):
+            entry["evaluations"] += cost(candidate)
+            kept = decision in ("kept", "current")
+            if kept:
                 entry["kept"] += 1
+            siblings = rounds.setdefault(record.get("epoch"), [])
+            val, parent_val = cache.get(record["id"]), cache.get(record.get("parent") or "")
+            shadowed = (decision == "rejected" and val is not None and parent_val is not None
+                        and val > parent_val and any(s["kept"] for s in siblings))
+            siblings.append({"id": record["id"], "level": record["level"],
+                             "evaluated": bool(candidate is not None and candidate.evaluated),
+                             "gate": decision, "kept": kept, "shadowed": shadowed,
+                             "val": val, "parent_val": parent_val,
+                             "evaluations": cost(candidate)})
         base = int(self.config.batch_size)
         return {"setting": self.config.portfolio, "batch_size": base,
-                "rounds": len({r.get("epoch") for r in records}), "by_level": by_level,
-                "extra_evaluations": sum(max(0, n - base) for n in evaluated_by_epoch.values())}
+                "rounds": len(rounds), "by_level": by_level,
+                "per_round": [{"epoch": epoch, "candidates": entries}
+                              for epoch, entries in rounds.items()],
+                "extra_evaluations": sum(entry["evaluations"] for entries in rounds.values()
+                                         for entry in entries[base:])}
 
     def _write_analysis(self) -> None:
         diagnosis = str(getattr(self.optimizer, "last_diagnosis", "") or "")
@@ -3796,9 +3829,17 @@ class Loop(OuterLoop):
             val_items=self._gate_val_items(),
             seed_knob_values=self._seed_knob_values(),
             parent=self._edited_id(board),
+            val_scores=self._val_scores(),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
         )
+
+    def _val_scores(self) -> dict[str, float]:
+        """The gate's val score per judged candidate under ``val_gate`` (parent
+        policies rank by it); empty otherwise."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return {}
+        return dict(self._gate().cache)
 
     def _seed_knob_values(self) -> dict[str, Any]:
         """The root candidate's knob values, which every candidate's edit lineage
@@ -4435,13 +4476,28 @@ def _holdout_line(audit: dict[str, Any]) -> str:
 def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
     if not portfolio:
         return []
-    rows = [[level, entry["proposed"], entry["evaluated"], entry["kept"]]
+    rows = [[level, entry["proposed"], entry["evaluated"], entry["kept"], entry["evaluations"]]
             for level, entry in portfolio["by_level"].items()]
-    return ["## Portfolio", "",
-            f"`{portfolio['setting']}`: {portfolio['rounds']} round(s) asked for one candidate "
-            f"per edit level; {portfolio['extra_evaluations']} evaluation(s) beyond the "
-            f"batch size of {portfolio['batch_size']}.", "",
-            _md_table(["level", "proposed", "evaluated", "kept by the gate"], rows), ""]
+    lines = ["## Portfolio", "",
+             f"`{portfolio['setting']}`: {portfolio['rounds']} round(s) asked for one candidate "
+             f"per edit level; the candidates beyond the batch size of {portfolio['batch_size']} "
+             f"cost {portfolio['extra_evaluations']} evaluation(s) (train and val runs). The "
+             "gate judges a round's candidates in the order they were proposed, so one it "
+             "accepts first raises the bar for the next: a candidate that beat its parent on "
+             "val but lost to that sibling is marked shadowed.", "",
+             _md_table(["level", "proposed", "evaluated", "kept by the gate", "evaluations"], rows),
+             ""]
+    round_rows = []
+    for entry in portfolio.get("per_round") or []:
+        for candidate in entry["candidates"]:
+            outcome = ("shadowed" if candidate["shadowed"] else candidate["gate"]
+                       or ("evaluated" if candidate["evaluated"] else "not evaluated"))
+            round_rows.append([entry["epoch"], candidate["level"], candidate["id"], outcome,
+                               candidate["val"], candidate["parent_val"]])
+    if round_rows:
+        lines += [_md_table(["round", "level", "candidate", "outcome", "val", "parent val"],
+                            round_rows), ""]
+    return lines
 
 
 def _strategy_report_section(report: dict[str, Any]) -> list[str]:

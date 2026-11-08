@@ -630,6 +630,11 @@ class ProposalContext:
     #: ``LoopConfig.portfolio``, or one level a strategy decided); empty asks for none
     #: in particular.
     edit_levels: list[str] = field(default_factory=list)
+    #: The validation gate's score of each candidate it judged, by id, under the
+    #: default loop's ``val_gate``; empty otherwise. For a parent policy to rank by
+    #: what the gate ranks by (``HillClimbSelector``). Never rendered: the model's
+    #: request shows gate decisions, not val scores.
+    val_scores: dict[str, float] = field(default_factory=dict)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""

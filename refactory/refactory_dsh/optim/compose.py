@@ -90,6 +90,17 @@ class PickedParent(Optimizer):
         if not parents:
             return []
         by_id = {parent.id: parent for parent in parents}
+        named = str(ctx.strategy.get("parent") or "")
+        if named in by_id:
+            # The strategy chose this round's node itself (tree_search's debug, draft or
+            # improve): its choice stands, and the request credits it, not the picker.
+            parent = by_id[named]
+            decision = {**ctx.strategy,
+                        "parent_picker": f"not used this round: the strategy chose "
+                                         f"candidate {parent.id}, so {self.picker.name} did not"}
+            ctx = replace(ctx, parent=parent.id, strategy=decision)
+            proposals = self.proposer.propose(ctx, n, [parent]) or []
+            return [replace(proposal, parent=parent.id) for proposal in proposals]
         parent = by_id.get(ctx.parent or "")
         if parent is None and self._picked and self._picked[0] == (ctx.epoch, ctx.generation):
             parent = by_id.get(self._picked[1])

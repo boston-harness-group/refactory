@@ -370,12 +370,24 @@ def test_portfolio_evaluates_both_levels_under_the_gate_and_counts_the_extra(tmp
     report = json.loads((loop.root / "report.json").read_text())
     rounds = report["portfolio"]["rounds"]
     assert rounds == len(model.requests)
-    # One evaluation beyond the batch size (1) per round whose two candidates both ran.
-    per_epoch: dict[Any, int] = {}
-    for child in children:
-        per_epoch[loop.proposals[child.id]["epoch"]] = per_epoch.get(loop.proposals[child.id]["epoch"], 0) + 1
-    assert report["portfolio"]["extra_evaluations"] == sum(n - 1 for n in per_epoch.values()) >= 1
-    assert "## Portfolio" in (loop.root / "report.md").read_text()
+    # Evaluations, not candidates: a train run plus each val (or test) occasion, for
+    # every candidate beyond the batch size (1) of its round.
+    def cost(cid: str) -> int:
+        return 1 + sum((loop._occasion_counters.get(cid) or {}).values())
+
+    per_round = report["portfolio"]["per_round"]
+    extra = sum(cost(c["id"]) for entry in per_round for c in entry["candidates"][1:]
+                if c["evaluated"])
+    assert report["portfolio"]["extra_evaluations"] == extra >= 2 * (rounds - 1)
+    for level, entry in report["portfolio"]["by_level"].items():
+        assert entry["evaluations"] >= 2 * entry["evaluated"], (level, entry)
+    # The pipeline candidate (one node more, so 0.01 lower) beat its parent on val but
+    # lost to the prompt sibling accepted first: shadowed, and the report says so.
+    shadowed = [c for entry in per_round for c in entry["candidates"] if c["shadowed"]]
+    assert shadowed and all(c["level"] == "pipeline" and c["val"] > c["parent_val"]
+                            for c in shadowed)
+    text = (loop.root / "report.md").read_text()
+    assert "## Portfolio" in text and "| shadowed |" in text
 
 
 def test_portfolio_refuses_a_second_candidate_of_one_level_and_asks_for_the_missing_one(tmp_path):
@@ -400,6 +412,12 @@ def test_a_strategy_may_ask_the_portfolio_for_one_level(tmp_path):
                 portfolio="prompt+pipeline")
     single = [r for r in model.requests if len(r.levels) == 1]
     assert single, [r.levels for r in model.requests]
+    # The settings-only merge round asks for that level alone: its candidates are not
+    # refused as a second prompt/knob change until the attempts run out.
+    assert loop.merges >= 1
+    # A merge edit sets a knob to the other parent's value (the scripted model patches).
+    assert not [r for r in loop.rejections if r.reasons[0].startswith("E-level")
+                and isinstance(r.edit, dict) and "value" in r.edit]
     for request in single:
         kind = re.search(r"edit_kind: (\w+)", request.decision).group(1)
         assert request.levels == [kind] and request.wanted == 1
@@ -459,13 +477,69 @@ def test_a_population_picker_is_refused_under_the_validation_gate(tmp_path):
              project=Path("."), model=ComboModel()).run()
 
 
-def test_hill_climb_picker_runs_under_the_validation_gate(tmp_path):
-    model = ComboModel()
-    loop = _run("default", tmp_path, model, parent_picker="hill_climb", val_gate=True)
-    assert {c.id for c in _children(loop)} & _gated(loop)
+def test_hill_climb_picker_edits_the_gates_current_candidate(tmp_path):
+    """Train and val disagree: ``fix:c5`` passes a train item and no val item, so its
+    child beats the seed on train and the gate rejects it (equal on val). Nothing is
+    kept, so the next step edits the gate's current candidate, the seed."""
+    def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
+        if request.index == 0:
+            return [{"edit": {"op": "set_knob", "name": "solve__system_prompt",
+                              "patch": [{"kind": "append", "content": " fix:c5"}]},
+                     "rationale": "train only"}]
+        return fixer(model, request)
+
+    model = ComboModel(script)
+    loop = _run("default", tmp_path, model, parent_picker="hill_climb", val_gate=True,
+                batch_size=1, epochs=3)
+    seed = loop.population[0]
+    train_only = next(c for c in loop.population if _fixed(c) == {"c5"})
+    assert (train_only.score or 0) > (seed.score or 0), "the toy does not disagree"
+    assert train_only.id in loop._gate_rejected and not loop.kept
+    assert model.requests[1].picked == seed.id, "edited the train leader, not the gate's"
+    assert all(c.parent == seed.id for c in _children(loop)[:2])
+
+
+def test_hill_climb_ranks_kept_candidates_by_validation_under_the_gate(tmp_path):
+    """A kept candidate with the better train score but the worse val score is not the
+    one hill_climb edits under the gate."""
+    from refactory_dsh.optim.base import ProposalContext
+
+    replies = [
+        {"edit": {"op": "set_knob", "name": "solve__system_prompt",  # train 3/6, val 1/4
+                  "value": SEED_PROMPT + " fix:c1 fix:c5 fix:c6"}, "rationale": "a"},
+        {"edit": {"op": "set_knob", "name": "solve__system_prompt",  # train 2/6, val 2/4
+                  "value": SEED_PROMPT + " fix:c1 fix:c2"}, "rationale": "b"},
+    ]
+
+    def script(model: ComboModel, request: Request) -> list[dict[str, Any]]:
+        return [replies[request.index]] if request.index < len(replies) else []
+
+    loop = _run("default", tmp_path, ComboModel(script), parent_picker="hill_climb",
+                val_gate=True, batch_size=1, epochs=3)
+    first = next(c for c in loop.population if _fixed(c) == {"c1", "c5", "c6"})
+    second = next(c for c in loop.population if _fixed(c) == {"c1", "c2"})
     gate = loop._gate()
-    assert all(r.picked == gate.current_id or r.picked in loop._gate_accepted
-               for r in model.requests)
+    assert first.id in loop._gate_accepted and gate.current_id == second.id
+    assert (first.score or 0) > (second.score or 0), "the kept one must lead on train"
+    loop.kept.append(first.id)
+    parents = loop._gated_parents()
+    assert {c.id for c in parents} == {first.id, second.id}
+    ctx = ProposalContext(val_scores=loop._val_scores())
+    assert loop.optimizer.picker.select(ctx, 1, parents)[0].id == second.id
+    assert loop.optimizer.picker.select(ProposalContext(), 1, parents)[0].id == first.id
+
+
+def test_a_strategy_named_parent_is_credited_to_the_strategy_not_the_picker(tmp_path):
+    model = ComboModel()
+    loop = _run("tree_search", tmp_path, model, parent_picker="map_elites", epochs=3)
+    decided = [r for r in model.requests if "action:" in r.decision]
+    assert decided
+    for request in decided:
+        assert "map_elites chose" not in request.decision
+        assert "not used this round: the strategy chose candidate" in request.decision
+        named = re.search(r"- parent: (\w+)", request.decision).group(1)
+        assert _described_prompt(request) == _fixed(next(
+            c for c in loop.population if c.id == named))
 
 
 # ── 3. map_elites keeps a structural child in its own shape group ──────────
@@ -508,6 +582,36 @@ def test_pipeline_shape_reads_agents_gates_forks_and_code():
     gated = dict(seed, graph={**seed["graph"], "edges": [
         *seed["graph"]["edges"], {"source": "solve", "target": "prep", "condition": "retry"}]})
     assert optim.pipeline_shape(gated)["gate"]
+
+
+def test_map_elites_separates_a_parallel_fork_from_the_same_agents_in_sequence():
+    """Same agent count, same size band: the fork is the only shape difference, and it
+    is a niche of its own."""
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_dsh.optim.policies import MapElitesSelector
+
+    seed = Combo().state_dict()
+    def agent(node_id: str) -> dict[str, Any]:
+        return {"id": node_id, "kind": "agent", "writes": [f"{node_id}.txt"],
+                "prompt_template": "Look at {{question}}"}
+    sequence = seed
+    for edit in ({"op": "insert_after", "target": "solve", "node": agent("one")},
+                 {"op": "insert_after", "target": "one", "node": agent("two")},
+                 {"op": "insert_after", "target": "two", "node": {
+                     "id": "tail", "kind": "op", "call": "combo_ops:finish",
+                     "produces": ["tail_done"]}}):
+        sequence = nn_edits.apply(edit, sequence)
+    forked = nn_edits.apply(PARALLEL, seed)
+    a, b = optim.pipeline_shape(sequence), optim.pipeline_shape(forked)
+    assert a["agents"] == b["agents"] == 3 and a["parallel"] != b["parallel"]
+    strong, weak = _scored(sequence, 0.9), _scored(forked, 0.1)
+    picker = MapElitesSelector(seed=0)
+    differ = [i for i, (x, y) in enumerate(zip(picker.features(strong), picker.features(weak)))
+              if x != y]
+    assert differ == [3], "only the parallel axis may tell them apart"
+    picker.add(strong)
+    picker.add(weak)
+    assert len(picker.cells) == 2 and weak in picker.cells.values()
 
 
 def test_map_elites_keeps_each_structural_child_in_its_own_group_and_edits_it_again(tmp_path):

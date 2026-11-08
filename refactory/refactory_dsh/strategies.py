@@ -344,6 +344,12 @@ class Reflective(Loop):
             # which the harness would refuse as `E-noop` and the batch slot would be
             # lost to a branch that could not do its job.
             return super().propose(run, parents, n)
+        # The merge writes settings only, so the round is a prompt/knob-level one; under
+        # the portfolio it then asks for that level alone instead of refusing the merge's
+        # second candidate (E-level) until the attempts run out.
+        self.strategy_decision = {**self.strategy_decision, "edit_kind": "prompt_knob"}
+        if self._levels_wanted:
+            self._levels_wanted = ["prompt_knob"]
         return [
             Proposal(
                 edit=edits[index % len(edits)],

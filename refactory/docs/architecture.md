@@ -946,9 +946,14 @@ proposer, asked to choose, rates its prompt change more confident nearly every t
 and asked for one candidate it rarely writes a structural one. So under the portfolio
 each round asks it for one candidate per edit level (`optim.base.EDIT_LEVELS`), the
 loop refuses a second candidate of a level already covered (`E-level`, asking again
-for the missing one), and both are evaluated and gated. The choice of level belongs to
-the search: a strategy that publishes `edit_kind` for a round gets that level only.
-The report counts the evaluations beyond `--batch-size`. The request's composition
+for the missing one), and both are evaluated and gated. The gate judges them in the
+order they were proposed, as it judges any batch: the first one it accepts becomes the
+current candidate, so the second must beat that, not its parent. A second candidate
+that beat its parent can therefore lose to its sibling; the report's Portfolio section
+shows each round's decisions and marks such a candidate shadowed. A strategy that
+publishes `edit_kind` for a round gets that level only (`reflective`'s settings-only
+merge does). The report counts what the candidates beyond `--batch-size` cost in
+evaluations, train and val runs both. The request's composition
 examples show one short example per composition (new agent, parallel fork, verdict
 loop, code op) so no single shape reads as the way to grow a pipeline.
 

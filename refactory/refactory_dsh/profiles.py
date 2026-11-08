@@ -461,6 +461,17 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
             "client_context": context}
 
 
+#: ``--help`` text for the settings that have it.
+SETTING_HELP = {
+    "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
+                     "map_elites) with --optimizer: the picker chooses the candidate each "
+                     "step edits, the optimizer writes the edits (default: none)",
+    "portfolio": "prompt+pipeline: each round asks the model proposer for one "
+                 "prompt/knob-level and one pipeline-level candidate and evaluates both, "
+                 "gated in that order (default: off)",
+}
+
+
 def add_arguments(parser: Any) -> None:
     """All launch surfaces parse this same optional configuration vocabulary."""
     for key, value in defaults().items():
@@ -470,7 +481,7 @@ def add_arguments(parser: Any) -> None:
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
         kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight") else str
-        parser.add_argument(flag, dest=key, type=kind, default=None)
+        parser.add_argument(flag, dest=key, type=kind, default=None, help=SETTING_HELP.get(key))
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")
     parser.add_argument("--allowed-ops", action="append", default=None, metavar="OP")

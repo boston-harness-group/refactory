@@ -228,12 +228,24 @@ class IslandsSelector(ParentSelector):
 
 
 class HillClimbSelector(ParentSelector):
-    """SRF `karpathy`: one candidate per round, from the best so far."""
+    """SRF `karpathy`: one candidate per round, from the best so far.
+
+    "Best" is what the run selects on: the validation gate's score under
+    ``val_gate`` (``ProposalContext.val_scores``), as the default loop's parent and
+    winner are; the train score otherwise.
+    """
 
     name = "hill_climb"
     policy = "the best so far"
 
     def select(self, ctx, n, parents):
+        val = getattr(ctx, "val_scores", None) or {}
+        if val:
+            # Ties on val go to the better train score, then the id.
+            ranked = sorted((c for c in parents if c.id in val),
+                            key=lambda c: (-val[c.id], -(c.score or 0.0), c.id))
+            if ranked:
+                return ranked[:1]
         ranked = self._by_score(parents)
         return ranked[:1] if ranked else []
 
