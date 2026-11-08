@@ -158,6 +158,7 @@ class AutoresearchOptimizer(Optimizer):
     """
 
     name = "autoresearch"
+    uses_model = True
 
     def __init__(self, client: Any, *, k: int = 3, system: str = "") -> None:
         super().__init__(k=k)
@@ -268,6 +269,11 @@ class AutoresearchOptimizer(Optimizer):
             raise
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
         parent_ids = {parent.id for parent in parents}
+        # A proposal that names no parent belongs to the pipeline the request showed
+        # ("The pipeline you may edit" is ``ctx.parent``'s). Left unset, the loop
+        # applied it to the first parent it was handed, which without the validation
+        # gate is the seed: edits written for the leader landed on the seed.
+        described = ctx.parent if ctx.parent in parent_ids else None
 
         proposals: list[Proposal] = []
         for raw in payload.get("proposals") or ():
@@ -283,7 +289,7 @@ class AutoresearchOptimizer(Optimizer):
                     rationale=str(raw.get("rationale", "") or ""),
                     prediction=str(raw.get("prediction", "") or ""),
                     confidence=_confidence(raw.get("confidence")),
-                    parent=parent if parent in parent_ids else None,
+                    parent=parent if parent in parent_ids else described,
                 )
             )
         proposals = proposals[: max(1, n)]

@@ -177,6 +177,14 @@ on purpose:
 - **`Optimizer`** — proposes. `propose()` returns `Proposal`s; the harness
   validates and evaluates them. It cannot run anything, so it cannot waste budget.
   Seven ship: `random`, `hill_climb`, `evolutionary`, `archive`, `islands`, `map_elites`, and `autoresearch` (which asks a model).
+  The five that choose parents are also **parent pickers**: `--parent-picker map_elites`
+  with `--optimizer autoresearch` pairs a picker (where to search) with a proposer (what
+  to write) as one optimizer (`optim.compose.PickedParent`). Each step the picker
+  chooses the candidate; the request the model reads describes that candidate's
+  pipeline and knobs, says who picked it and why, and every proposal is applied to it.
+  `map_elites` groups candidates by pipeline shape (`optim.pipeline_shape`: agent
+  steps, a gate or verdict loop, a parallel fork, a code node, size), so a structurally
+  new candidate is the best of its own group.
 - **`OuterLoop`** — owns the search. `run()` is `init -> Run -> strategy ->
   report`, and every step a strategy would change (`select_parents`, `propose`,
   `batch_size`, `accepts`, `update`, `should_stop`, `on_epoch_end`) is a method to
@@ -222,9 +230,9 @@ evaluates as SkillOpt does; only where edit ideas come from differs. Train rollo
 SkillOpt's per-epoch seed (`train_batch_seed`: `seed + epoch*1000 + 1`). Each candidate
 evaluated on train, one whose train run failed included, is rolled out on val and is
 accepted only when it beats the gate's current candidate there; that candidate is the
-parent, for every optimizer; the optimizers and strategies that need a population of
-parents (`archive`, `evolutionary`, `islands`, `map_elites`; `autoscientists`,
-`best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
+parent, for every optimizer; the optimizers, parent pickers and strategies that need
+a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`;
+`autoscientists`, `best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
 and with a test part `FinalEvaluation` runs, so the held-out audit compares the winner's
 val and test scores. The best on val among the accepted candidates a person has not
 rejected is the winner, in the report and for `adopt`. `--early-stop-patience N` and `--early-stop-at-full-val 1` add SkillOpt's early
@@ -918,13 +926,31 @@ promises more than it delivers.
   under full-suite contention while passing standalone; `hmr-config` is not in
   `processBoundTests` while its sibling `app-boot.spec.ts` is.
 
-**Not a gap, but worth knowing.** Four strategies — `research_then_optimize`,
-`staged_curriculum`, `staged_v1`, `autoscientists` — make a decision that is only
-readable by a proposer that reads `ProposalContext.strategy`. `random` does not read
-it, by definition: it samples the catalogue. So under `--optimizer random` those four
-behave as `default` does. That is the optimizer doing its job, not the strategy
-failing; a decision needs a reader, and a sampling proposer is not one. Pair them with
-`--optimizer autoresearch` to see the difference.
+**Not a gap, but worth knowing.** Several strategies — `research_then_optimize`,
+`staged_curriculum`, `staged_v1`, `tree_search`, `adaptive_meta`, `reflective` — make
+a decision that is only readable by a proposer that reads `ProposalContext.strategy`.
+The model proposer reads it: the request's "What this round is for" section shows the
+decision as data (its purpose, its reason, and every other key the strategy
+published), and it is absent when the strategy decided nothing, so the default loop's
+request is unchanged. `random` does not read it, by definition: it samples the
+catalogue, so under `--optimizer random` those strategies behave as `default` does.
+`reflective`'s mutate branch decides what kind of edit the evidence points to
+(`strategies.edit_kind_decision`): a pipeline-level change when the best and worst
+candidates differ in shape, or when every candidate has one shape and the last few
+prompt/knob edits stopped beating their parents; otherwise a prompt/knob-level change.
+`best_of_n` and `autoscientists` ask a model proposer for their N samples of the seed
+in one request; with `random` they keep sampling knob values.
+
+**The edit-level portfolio** (`--portfolio prompt+pipeline`, off by default). The model
+proposer, asked to choose, rates its prompt change more confident nearly every time,
+and asked for one candidate it rarely writes a structural one. So under the portfolio
+each round asks it for one candidate per edit level (`optim.base.EDIT_LEVELS`), the
+loop refuses a second candidate of a level already covered (`E-level`, asking again
+for the missing one), and both are evaluated and gated. The choice of level belongs to
+the search: a strategy that publishes `edit_kind` for a round gets that level only.
+The report counts the evaluations beyond `--batch-size`. The request's composition
+examples show one short example per composition (new agent, parallel fork, verdict
+loop, code op) so no single shape reads as the way to grow a pipeline.
 
 ## Why it looks like this
 

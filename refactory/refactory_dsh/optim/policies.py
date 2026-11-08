@@ -19,7 +19,9 @@ parents are proposers now.
 
 The base class here is shared so the five differ only in the choice they make. Each
 returns parents; the sampling of an edit against a chosen parent is the same for all
-of them and is written once.
+of them and is written once. Run alone (``--optimizer map_elites``) a policy samples
+random edits; paired with another proposer (``--parent-picker map_elites``, see
+:mod:`refactory_dsh.optim.compose`) it only picks, and the proposer writes.
 """
 
 from __future__ import annotations
@@ -30,6 +32,39 @@ from typing import Any, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim.base import Candidate, Optimizer, Proposal, ProposalContext
+
+
+def pipeline_shape(state: dict[str, Any] | None) -> dict[str, Any]:
+    """What a candidate's graph is made of, independent of its prompts and settings.
+
+    ``agents`` (how many model steps), ``gate`` (a gate node or a conditional edge,
+    i.e. a verdict loop or a branch), ``parallel`` (a fork), ``code`` (a node whose
+    Python an edit wrote, `refactory_dsh.snippet.is_code_node`) and ``nodes``. Read
+    from ``state["graph"]``; a state without a graph has every count at zero.
+    """
+    from refactory_dsh.snippet import is_code_node
+
+    graph = (state or {}).get("graph") or {}
+    nodes = graph.get("nodes") or {}
+    if not isinstance(nodes, dict):  # a hand-written state, not a mode's
+        nodes = {}
+    members = [node for node in nodes.values() if isinstance(node, dict)]
+    edges = [edge for edge in (graph.get("edges") or ()) if isinstance(edge, dict)]
+    return {
+        "nodes": len(members),
+        "agents": sum(1 for node in members if node.get("kind") == "agent"),
+        "gate": any(node.get("kind") == "gate" for node in members)
+        or any(edge.get("condition") for edge in edges),
+        "parallel": any(node.get("kind") == "fork" for node in members),
+        "code": any(is_code_node(node) for node in members),
+    }
+
+
+def shape_label(shape: dict[str, Any]) -> str:
+    """A shape in a few words, for a request or a report."""
+    parts = [f"{shape.get('agents', 0)} agent step(s)"]
+    parts += [name for name in ("gate", "parallel", "code") if shape.get(name)]
+    return ", ".join(parts) + f"; {shape.get('nodes', 0)} nodes"
 
 
 class ParentSelector(Optimizer):
@@ -89,6 +124,10 @@ class ParentSelector(Optimizer):
 
     def _by_score(self, candidates: Sequence[Candidate]) -> list[Candidate]:
         return sorted(candidates, key=lambda c: (c.score or 0.0), reverse=True)
+
+    def reason(self, candidate: Candidate) -> str:
+        """Why this policy chose ``candidate``, in a few words, for the request."""
+        return self.policy
 
 
 class ArchiveSelector(ParentSelector):
@@ -206,11 +245,18 @@ class MapElitesSelector(ParentSelector):
     competes only against the occupant of its own cell, so a weak candidate in an
     empty niche survives beside a strong one in a crowded niche, and selection can
     return something that is not the best.
+
+    The niches are pipeline shapes (:func:`pipeline_shape`): a structurally new
+    candidate -- another agent step, a verdict loop, a parallel fork, a code node --
+    is the best of its own group until something of the same shape beats it, so a
+    new structure is not lost to a prompt-tuned lineage that already scores higher.
     """
 
     name = "map_elites"
     policy = "a champion of its niche"
-    dims: tuple[int, ...] = (3, 3, 2)
+    #: Cells per axis of :meth:`features`: size, agent steps, gate, parallel, code,
+    #: step budget.
+    dims: tuple[int, ...] = (3, 4, 2, 2, 2, 3)
 
     def __init__(self, *, k: int = 3, seed: int = 0, explore: float = 0.3) -> None:
         super().__init__(k=k, seed=seed)
@@ -218,12 +264,11 @@ class MapElitesSelector(ParentSelector):
         self.cells: dict[tuple[int, ...], Candidate] = {}
 
     def features(self, candidate: Candidate) -> tuple[int, ...]:
-        """Which niche a candidate falls in: size, move kind, and step budget.
+        """Which niche a candidate falls in: its pipeline's shape, size and step budget.
 
-        Three axes because each is a different reason two candidates are not
-        interchangeable. A structural move and a settings move are different answers
-        even at the same score, and a graph that spends more steps is a different
-        kind of solution.
+        The shape axes (agent steps 0 / 1 / 2 / 3+, a gate or verdict loop, a parallel
+        fork, a code node) are what makes two pipelines different answers at the
+        same score. Size and step budget split a shape further.
 
         The nodes are at ``state["graph"]["nodes"]``, not ``state["nodes"]``. Reading
         the wrong path does not raise -- ``.get`` returns ``None`` and every
@@ -231,9 +276,9 @@ class MapElitesSelector(ParentSelector):
         hides: it looks like it is working and it is a single bucket.
         """
         state = candidate.state or {}
-        graph = state.get("graph") or {}
-        nodes = graph.get("nodes") or {}
-        if not isinstance(nodes, dict):  # a hand-written state, not a mode's
+        shape = pipeline_shape(state)
+        nodes = (state.get("graph") or {}).get("nodes") or {}
+        if not isinstance(nodes, dict):
             nodes = {}
         steps = 0
         for node in nodes.values():
@@ -243,8 +288,11 @@ class MapElitesSelector(ParentSelector):
             if isinstance(budget, int):
                 steps = max(steps, budget)
         return (
-            sum(1 for edge in (6, 10) if len(nodes) > edge),
-            1 if candidate.is_structural() else 0,
+            sum(1 for edge in (6, 10) if shape["nodes"] > edge),
+            sum(1 for edge in (0, 1, 2) if shape["agents"] > edge),
+            int(shape["gate"]),
+            int(shape["parallel"]),
+            int(shape["code"]),
             sum(1 for edge in (1, 3) if steps > edge),
         )
 
@@ -259,6 +307,11 @@ class MapElitesSelector(ParentSelector):
         for dim in self.dims:
             total *= dim
         return len(self.cells) / total
+
+    def reason(self, candidate: Candidate) -> str:
+        shape = shape_label(pipeline_shape(candidate.state))
+        return (f"{self.policy}: the best-scoring candidate of shape [{shape}], one of "
+                f"{len(self.cells)} shape group(s) held")
 
     def select(self, ctx, n, parents):
         for candidate in parents:

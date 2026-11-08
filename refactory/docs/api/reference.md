@@ -230,8 +230,23 @@ Optimizers: the ``torch.optim`` of the harness world.
 |---|---|---|
 | function | `create` | `(name: 'str', **kwargs: 'object') -> 'Optimizer'` |
 | function | `names` | `() -> 'list[str]'` |
+| function | `picker_names` | `() -> 'list[str]'` |
 
 - **`create`** — Build an optimizer by name, failing loud on an unknown one.
+- **`picker_names`** — The optimizers that choose parents, and so can be paired with a proposer
+
+
+<a id="refactory_dsh-optim-compose"></a>
+
+## `refactory_dsh.optim.compose`
+
+A parent picker paired with any proposer: where to search, and what to write.
+
+| kind | name | signature |
+|---|---|---|
+| class | `PickedParent` | `(picker: 'ParentSelector', proposer: 'Optimizer') -> 'None'` |
+
+- **`PickedParent`** — ``picker`` chooses the parent each step; ``proposer`` writes the edits.
 
 
 <a id="refactory_dsh-optim-policies"></a>
@@ -248,6 +263,8 @@ Optimizers whose distinguishing choice is *which parent* to breed from.
 | class | `IslandsSelector` | `(*, k: 'int' = 3, seed: 'int' = 0, count: 'int' = 3) -> 'None'` |
 | class | `MapElitesSelector` | `(*, k: 'int' = 3, seed: 'int' = 0, explore: 'float' = 0.3) -> 'None'` |
 | class | `ParentSelector` | `(*, k: 'int' = 3, seed: 'int' = 0) -> 'None'` |
+| function | `pipeline_shape` | `(state: 'dict[str, Any] \| None') -> 'dict[str, Any]'` |
+| function | `shape_label` | `(shape: 'dict[str, Any]') -> 'str'` |
 
 - **`ArchiveSelector`** — SRF `scs`: breed from the best of everything seen, not just this epoch.
 - **`EvolutionarySelector`** — SRF `evox`: a tournament, so a weaker member can still breed.
@@ -255,6 +272,8 @@ Optimizers whose distinguishing choice is *which parent* to breed from.
 - **`IslandsSelector`** — SRF `openevolve`: sub-populations whose lineages never cross.
 - **`MapElitesSelector`** — SRF's own optimizer (`srf/lab/map_elites.py`): a champion per niche.
 - **`ParentSelector`** — An optimizer that chooses parents by a policy, then samples an edit for each.
+- **`pipeline_shape`** — What a candidate's graph is made of, independent of its prompts and settings.
+- **`shape_label`** — A shape in a few words, for a request or a report.
 
 
 <a id="refactory_dsh-outerloop"></a>
@@ -381,6 +400,7 @@ The SRF strategies, as outer loops.
 | function | `available` | `(project: 'Path \| None' = None) -> 'list[str]'` |
 | function | `check_options` | `(name: 'str', options: 'dict[str, Any] \| None', project: 'Path \| None' = None) -> 'None'` |
 | function | `create` | `(name: 'str', mode_id: 'str', config: 'Any' = None, *, strategy_options: 'dict[str, Any] \| None' = None, **kwargs: 'Any') -> 'Loop'` |
+| function | `edit_kind_decision` | `(population: 'Sequence[Candidate]', *, stall: 'int' = 3) -> 'dict[str, Any]'` |
 | function | `names` | `() -> 'list[str]'` |
 | function | `package_strategies` | `(project: 'Path \| None' = None) -> 'dict[str, type[OuterLoop]]'` |
 | function | `register` | `(name: 'str', cls: 'type[OuterLoop]') -> 'None'` |
@@ -401,6 +421,7 @@ The SRF strategies, as outer loops.
 - **`available`** — Every selectable strategy: the library's own and the packages'.
 - **`check_options`** — Refuse strategy options the named strategy does not read.
 - **`create`** — Build a strategy by name, failing loud on an unknown one.
+- **`edit_kind_decision`** — What kind of edit the evidence points to: ``pipeline`` or ``prompt_knob``.
 - **`package_strategies`** — Strategies the discoverable packages contribute, by name.
 - **`register`** — Add a strategy without editing the library.
 
@@ -415,13 +436,13 @@ The optimizer loop, named like one.
 |---|---|---|
 | class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool' = False, train_minibatch: 'int' = 0, fresh_evidence: 'bool' = True, max_edits_per_proposal: 'int' = 4, allow_new_node_tools: 'bool' = False, allow_code_nodes: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>) -> None` |
+| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool' = False, train_minibatch: 'int' = 0, fresh_evidence: 'bool' = True, max_edits_per_proposal: 'int' = 4, allow_new_node_tools: 'bool' = False, allow_code_nodes: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '') -> None` |
 | class | `LoopError` | `` |
 | function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
-| function | `val_gate_refusal` | `(optimizer: 'str', strategy: 'str') -> 'str'` |
+| function | `val_gate_refusal` | `(optimizer: 'str', strategy: 'str', picker: 'str' = '') -> 'str'` |
 
 - **`EpochSummary`** — One epoch, as the report and the scheduler describe it.
 - **`Loop`** — The default outer loop: the eight steps over one mode.
@@ -431,7 +452,7 @@ The optimizer loop, named like one.
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
 - **`run`** — Build a loop and run it to its bound.
-- **`val_gate_refusal`** — Why ``val_gate`` cannot run with this optimizer or strategy; empty when it can.
+- **`val_gate_refusal`** — Why ``val_gate`` cannot run with this optimizer, parent picker or strategy;
 
 
 <a id="refactory_dsh-history"></a>

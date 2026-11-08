@@ -172,7 +172,8 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
     if result["val_gate"]:
         from refactory_dsh.loop import val_gate_refusal
-        refusal = val_gate_refusal(str(result.get("optimizer")), str(result.get("strategy")))
+        refusal = val_gate_refusal(str(result.get("optimizer")), str(result.get("strategy")),
+                                   str(result.get("parent_picker") or ""))
         if refusal:
             raise ProfileError(refusal)
     # max_items_in_flight: None or positive int
@@ -196,6 +197,23 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
         if result[key] not in choices:
             raise ProfileError(f"unknown {key}: {result[key]}")
+    picker = result.get("parent_picker") or ""
+    if picker:
+        if picker not in optim.picker_names():
+            raise ProfileError(f"unknown parent_picker: {picker}; known: {', '.join(optim.picker_names())}")
+        if result["optimizer"] in optim.picker_names():
+            raise ProfileError(
+                f"the {result['optimizer']} optimizer picks parents itself; pair the "
+                f"{picker} parent picker with a proposer (autoresearch or random)")
+    result["parent_picker"] = picker
+    from refactory_dsh.loop import PORTFOLIOS
+    portfolio = result.get("portfolio") or ""
+    if portfolio not in PORTFOLIOS:
+        raise ProfileError(f"unknown portfolio: {portfolio}; known: {', '.join(p for p in PORTFOLIOS if p)}")
+    if portfolio and result["optimizer"] != "autoresearch":
+        raise ProfileError(f"portfolio {portfolio} asks the model proposer for one candidate per "
+                           "edit level; use optimizer autoresearch")
+    result["portfolio"] = portfolio
     for key in ("knobs", "role_routes", "node_routes", "strategy_options"):
         if not isinstance(result[key], dict):
             raise ProfileError(f"{key} must be an object")
@@ -389,6 +407,11 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     # before the switch existed, so it still resumes.
     if evaluation_fields.get("allow_code_nodes", True) is True:
         evaluation_fields.pop("allow_code_nodes", None)
+    # And a run with no parent picker (the default) as one started before the setting.
+    if not evaluation_fields.get("parent_picker"):
+        evaluation_fields.pop("parent_picker", None)
+    if not evaluation_fields.get("portfolio"):
+        evaluation_fields.pop("portfolio", None)
     route_context = runtime_identity(settings, project, model_client=model_client, uses_models=settings["optimizer"] == "autoresearch" or any(n.get("kind") == "agent" for n in (nodes.values() if isinstance(nodes, dict) else nodes) if isinstance(n, dict)))
     context = {"mode": mode_id, "seed_state": digest(state), "implementation": hashlib.sha256(source.read_bytes()).hexdigest(), "dependencies": implementations, "routing": route_context,
                "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k != "termination"}),

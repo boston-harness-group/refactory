@@ -57,7 +57,9 @@ from refactory_dsh.optim import (
     RandomOptimizer,
 )
 from refactory_dsh.optim import create as create_optimizer
-from refactory_dsh.optim.base import DEFAULT_MAX_EDITS, proposal_refusal, summarise_reasons
+from refactory_dsh.optim.base import (
+    DEFAULT_MAX_EDITS, edit_level, proposal_refusal, summarise_reasons,
+)
 from refactory_dsh.outerloop import (
     FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
@@ -144,10 +146,17 @@ VAL_GATE_REFUSED_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites
 VAL_GATE_REFUSED_STRATEGIES = ("autoscientists", "best_of_n", "reflective")
 
 
-def val_gate_refusal(optimizer: str, strategy: str) -> str:
-    """Why ``val_gate`` cannot run with this optimizer or strategy; empty when it can."""
+#: ``LoopConfig.portfolio`` values: off, or one candidate per edit level.
+PORTFOLIOS = ("", "prompt+pipeline")
+
+
+def val_gate_refusal(optimizer: str, strategy: str, picker: str = "") -> str:
+    """Why ``val_gate`` cannot run with this optimizer, parent picker or strategy;
+    empty when it can."""
     if optimizer in VAL_GATE_REFUSED_OPTIMIZERS:
         what = f"the {optimizer} optimizer breeds from a population of parents"
+    elif picker in VAL_GATE_REFUSED_OPTIMIZERS:
+        what = f"the {picker} parent picker breeds from a population of parents"
     elif strategy in VAL_GATE_REFUSED_STRATEGIES:
         what = (f"the {strategy} strategy merges parents or selects among samples "
                 "outside the gate")
@@ -315,6 +324,20 @@ class LoopConfig:
     #: method as keyword arguments.  Set from ``--strategy-option`` on the
     #: CLI or directly from Python.
     strategy_options: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: A parent policy (``archive``, ``evolutionary``, ``islands``, ``hill_climb``,
+    #: ``map_elites``) that picks the candidate each step edits, while ``optimizer``
+    #: writes the edits (``optim.compose.PickedParent``). Empty (the default): the
+    #: optimizer alone, as before.
+    parent_picker: str = ""
+    #: ``prompt+pipeline``: each proposal round asks the model proposer for one
+    #: candidate per edit level -- its best prompt/knob-level change and its best
+    #: pipeline-level change -- and evaluates both, so the gate, not the model's
+    #: confidence, chooses between them. A strategy that decides one level for a
+    #: round (``strategy_decision["edit_kind"]``) gets that one only. A portfolio
+    #: round's batch is one candidate per level asked (it replaces ``batch_size``);
+    #: the report counts the evaluations beyond ``batch_size``. Empty (the default):
+    #: off.
+    portfolio: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -510,6 +533,29 @@ class Loop(OuterLoop):
             self.optimizer = create_optimizer(
                 self.config.optimizer, seed=self.config.seed, k=self.config.attempts
             )
+        if self.config.parent_picker:
+            from refactory_dsh.optim import PickedParent, ParentSelector
+            if isinstance(self.optimizer, (ParentSelector, PickedParent)):
+                raise LoopError(
+                    f"the {self.optimizer.name} optimizer picks parents itself, so it cannot "
+                    f"take the {self.config.parent_picker} parent picker; pair the picker "
+                    "with a proposer (--optimizer autoresearch or random)")
+            try:
+                picker = create_optimizer(self.config.parent_picker, seed=self.config.seed,
+                                          k=self.config.attempts)
+                self.optimizer = PickedParent(picker, self.optimizer)  # type: ignore[arg-type]
+            except ValueError as exc:
+                raise LoopError(str(exc)) from exc
+        if self.config.portfolio not in PORTFOLIOS:
+            raise LoopError(f"unknown portfolio {self.config.portfolio!r}; known: "
+                            f"{', '.join(p for p in PORTFOLIOS if p)}")
+        if self.config.portfolio and not getattr(self.optimizer, "uses_model", False):
+            raise LoopError(f"portfolio {self.config.portfolio} asks a model proposer for one "
+                            f"candidate per edit level; the {self.optimizer.name} optimizer "
+                            "asks no model (use --optimizer autoresearch)")
+        #: This round's edit levels (``portfolio``) and the ones already accepted.
+        self._levels_wanted: list[str] = []
+        self._levels_done: list[str] = []
         # The run's cap on edits per proposal, enforced where every proposal is applied.
         self.optimizer.max_edits = int(self.config.max_edits_per_proposal)
         # Whether edits may add code nodes, and what their code may never contain.
@@ -851,7 +897,8 @@ class Loop(OuterLoop):
                     "val_gate needs a parts manifest with a 'val' part (--parts); "
                     "give the run one, or turn val_gate off"
                 )
-            refusal = val_gate_refusal(self.optimizer.name, self.name)
+            picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
+            refusal = val_gate_refusal(self.optimizer.name, self.name, picker)
             if refusal:
                 raise LoopError(refusal)
         elif (self.config.train_minibatch
@@ -907,9 +954,8 @@ class Loop(OuterLoop):
         (``optim.random_optimizer.text_only``), and running it with tools is never a
         silent fallback."""
         from refactory_dsh.model import TOOL_POLICY_NONE_BACKENDS
-        from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
 
-        if not isinstance(self.optimizer, AutoresearchOptimizer) or self.model is None:
+        if not getattr(self.optimizer, "uses_model", False) or self.model is None:
             return
         route_for = getattr(self.model, "for_node", None)
         client = route_for("optimizer", role="optimizer") if callable(route_for) else self.model
@@ -1955,13 +2001,23 @@ class Loop(OuterLoop):
         # candidates and is overridable -- decides. Kept out of strategy_decision,
         # which reaches the proposal as the strategy's own choice.
         explicit = self.strategy_decision.get("parent")
+        # An optimizer that picks its own parent (a parent picker paired with a
+        # proposer) picks it here, before the request is built, so the request
+        # describes the candidate its proposals are applied to.
+        choose = getattr(self.optimizer, "choose_parent", None)
+        picked = None if explicit or not callable(choose) else choose(
+            ProposalContext(epoch=self.epoch, generation=self.generation,
+                            mode_name=self.mode_id, elite=int(self.config.elite)), parents)
         if explicit:
             self._editing_parent = str(explicit)
+        elif picked is not None:
+            self._editing_parent = picked.id
         else:
             selected = self.select_parents(1)
             self._editing_parent = selected[0].id if selected else None
         self._refresh_edited_records()
         before = len(self.rejections)
+        self._levels_wanted, self._levels_done = self._round_levels(), []
         self._proposal_attempt = 0
         proposals = self.propose(run, parents, self.batch_size(run))
         candidates = self.install(run, proposals, parents)
@@ -1985,6 +2041,7 @@ class Loop(OuterLoop):
                 "prediction": str(notes.get("prediction") or ""),
                 "confidence": float(notes.get("confidence") or 0.0),
                 "origin": "optimizer",
+                **({"level": notes["level"]} if notes.get("level") else {}),
                 "diagnosis": str(notes.get("diagnosis")
                                  or getattr(self.optimizer, "last_diagnosis", "") or ""),
                 "epoch": self.epoch,
@@ -2008,6 +2065,30 @@ class Loop(OuterLoop):
             children=[c.id for c in candidates],
         )
         return candidates, rejections
+
+    def _portfolio_report(self) -> dict[str, Any]:
+        """What ``portfolio`` cost and produced: candidates per edit level (proposed,
+        evaluated, kept by the validation gate) and the evaluations beyond
+        ``batch_size``, from the journaled proposal records."""
+        from refactory_dsh.optim.base import EDIT_LEVELS
+
+        by_id = {c.id: c for c in self.population}
+        records = [r for r in self.proposals.values() if r.get("level")]
+        by_level = {level: {"proposed": 0, "evaluated": 0, "kept": 0} for level in EDIT_LEVELS}
+        evaluated_by_epoch: dict[Any, int] = {}
+        for record in records:
+            entry = by_level.setdefault(str(record["level"]), {"proposed": 0, "evaluated": 0, "kept": 0})
+            entry["proposed"] += 1
+            candidate = by_id.get(record["id"])
+            if candidate is not None and candidate.evaluated:
+                entry["evaluated"] += 1
+                evaluated_by_epoch[record.get("epoch")] = evaluated_by_epoch.get(record.get("epoch"), 0) + 1
+            if self._gate_decision(record["id"]) in ("kept", "current"):
+                entry["kept"] += 1
+        base = int(self.config.batch_size)
+        return {"setting": self.config.portfolio, "batch_size": base,
+                "rounds": len({r.get("epoch") for r in records}), "by_level": by_level,
+                "extra_evaluations": sum(max(0, n - base) for n in evaluated_by_epoch.values())}
 
     def _write_analysis(self) -> None:
         diagnosis = str(getattr(self.optimizer, "last_diagnosis", "") or "")
@@ -2364,7 +2445,18 @@ class Loop(OuterLoop):
             return []
 
     def batch_size(self, run: Run) -> int:
-        return int(self.config.batch_size)
+        levels = self._round_levels()
+        return len(levels) if levels else int(self.config.batch_size)
+
+    def _round_levels(self) -> list[str]:
+        """The edit levels this round asks for under ``portfolio``: every level, or the
+        one a strategy decided for the round; none without a portfolio."""
+        from refactory_dsh.optim.base import EDIT_LEVELS
+
+        if not self.config.portfolio:
+            return []
+        kind = self.strategy_decision.get("edit_kind")
+        return [kind] if kind in EDIT_LEVELS else list(EDIT_LEVELS)
 
     def install(
         self, run: Run, proposals: Sequence[Proposal], parents: Sequence[Candidate]
@@ -2398,6 +2490,15 @@ class Loop(OuterLoop):
                 # a compound proposal is checked, and a refusal names the one.
                 refused = proposal_refusal(proposal, permitted=self.permitted_ops(),
                                            max_edits=self.config.max_edits_per_proposal)
+                level = edit_level(proposal.steps)
+                missing = [l for l in self._levels_wanted if l not in self._levels_done]
+                if not refused and self._levels_wanted and level not in missing:
+                    refused = [f"E-level: this round asks for one candidate per edit level "
+                               f"({', '.join(self._levels_wanted)}); this proposal is a {level} "
+                               f"change, which is "
+                               + ("already covered" if level in self._levels_done
+                                  else "not asked for")
+                               + (f"; still missing: {', '.join(missing)}" if missing else "")]
                 if refused:
                     self.rejections.append(Rejection(rounds, proposal.edit, refused))
                     continue
@@ -2425,13 +2526,16 @@ class Loop(OuterLoop):
                         continue
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
+                    if self._levels_wanted:
+                        self._levels_done.append(level)
                     # Its own words, for "Your earlier reasoning" in later requests.
                     # The diagnosis of the call that produced this proposal: a later
                     # retry in the same round replaces the optimizer's last one.
                     self._proposal_notes[outcome.id] = {
                         "rationale": proposal.rationale, "prediction": proposal.prediction,
                         "confidence": proposal.confidence,
-                        "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or "")}
+                        "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or ""),
+                        **({"level": level} if self._levels_wanted else {})}
             # Another response is useful only if a validation round remains.
             if len(accepted) >= wanted or len(self.rejections) == before or _attempt >= cap:
                 break
@@ -3160,6 +3264,7 @@ class Loop(OuterLoop):
             "proposer": proposer,
             "holdout": audit,
             "strategy_report": strategy_report,
+            **({"portfolio": self._portfolio_report()} if self.config.portfolio else {}),
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
@@ -3506,6 +3611,7 @@ class Loop(OuterLoop):
             _holdout_sentence(payload.get("holdout") or {}),
             "",
             *_strategy_report_section(payload.get("strategy_report") or {}),
+            *_portfolio_section(payload.get("portfolio") or {}),
             "## Leaderboard",
             "",
             _md_table(
@@ -3689,6 +3795,9 @@ class Loop(OuterLoop):
             score_is_item_mean=bool(self._score_is_item_mean),
             val_items=self._gate_val_items(),
             seed_knob_values=self._seed_knob_values(),
+            parent=self._edited_id(board),
+            edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
+            strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
         )
 
     def _seed_knob_values(self) -> dict[str, Any]:
@@ -4321,6 +4430,18 @@ def _holdout_line(audit: dict[str, Any]) -> str:
         + f" — {verdict} ({split})"
         + (f"; {audit['note']}" if audit.get("note") and audit.get("overfit") is False else "")
     )
+
+
+def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
+    if not portfolio:
+        return []
+    rows = [[level, entry["proposed"], entry["evaluated"], entry["kept"]]
+            for level, entry in portfolio["by_level"].items()]
+    return ["## Portfolio", "",
+            f"`{portfolio['setting']}`: {portfolio['rounds']} round(s) asked for one candidate "
+            f"per edit level; {portfolio['extra_evaluations']} evaluation(s) beyond the "
+            f"batch size of {portfolio['batch_size']}.", "",
+            _md_table(["level", "proposed", "evaluated", "kept by the gate"], rows), ""]
 
 
 def _strategy_report_section(report: dict[str, Any]) -> list[str]:
