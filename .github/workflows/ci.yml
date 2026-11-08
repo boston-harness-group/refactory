@@ -97,6 +97,18 @@ jobs:
       - name: Web profile acceptance
         run: pnpm run test:acceptance
 
+      # Code nodes run in a user-namespace sandbox (`refactory_dsh.snippet`). Ubuntu
+      # 24.04 restricts unprivileged user namespaces through AppArmor, which makes the
+      # sandbox unavailable and its tests skip; lifting the restriction here lets the
+      # suite exercise the sandbox. The probe line says whether it did.
+      - name: Allow the code-node sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          fi
+          uv run python -c "from refactory_dsh import snippet; print('code-node sandbox:', snippet.available())"
+
       # The Python suite (issue #272). It runs the tests the install just built and
       # fails the job on any failure. Tests that need an external tool or a model
       # credential are marked and skipped with a reason; the toolchain summary at
