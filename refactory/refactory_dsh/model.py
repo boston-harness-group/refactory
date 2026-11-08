@@ -343,6 +343,33 @@ def is_transport_failure(text: str) -> bool:
     return any(marker in lowered for marker in TRANSPORT_MARKERS)
 
 
+#: A worker failure in the teardown stage after the product CLI itself exited 0: the
+#: CLI finished, and DSH's cleanup after it (e.g. waiting for the worker's systemd
+#: scope to empty) failed, typically under load. The stage and the clean exit code
+#: must be in the same failure group (``(... stage: teardown; ...; exit code: 0)``),
+#: so a teardown failure after a nonzero exit, a teardown group with no exit code,
+#: or a failure in any other stage is not matched.
+_CLEAN_EXIT_TEARDOWN = re.compile(r"stage:\s*teardown;[^)]*exit code:\s*0(?!\d)", re.IGNORECASE)
+
+
+def is_clean_exit_teardown_failure(cause: str) -> bool:
+    """Whether a failure cause -- the one diagnostic line ``failure_cause`` picks, not
+    the whole stderr, which is mostly streamed reasoning -- is a worker teardown
+    failure after a clean CLI exit: an infrastructure failure, not a bad answer."""
+    return bool(_CLEAN_EXIT_TEARDOWN.search(cause or ""))
+
+
+def is_retryable_failure(stderr: str, *, tool_policy: str = "") -> bool:
+    """Whether ``DshModelClient.complete`` retries a failed completion: a transport
+    failure; or, for a session without tools (``tool_policy == "none"``), a teardown
+    failure after a clean CLI exit. A session with tools finished its work before
+    the teardown failed, so a replay would repeat it (commits, pushes): not retried.
+    Anything a model, key or prompt caused is not retried."""
+    if is_transport_failure(stderr):
+        return True
+    return tool_policy == "none" and is_clean_exit_teardown_failure(failure_cause(stderr))
+
+
 #: What the headless runner writes before it streams the model's reasoning.
 REASONING_HEADER = "dsh: reasoning:"
 
@@ -385,9 +412,13 @@ class DshModelClient:
     """One-shot completions through ``dsh --profile headless``.
 
     Implements ``factory.outer_loop.optimizers.ModelClient``. A completion that fails
-    on the wire is retried, up to ``attempts`` in all, with waits that double and add up
-    to ``retry_window_s`` (`retry_delays`); one that fails for any other reason is raised
-    straight away with the cause named. ``backoff_s`` is the schedule a saved worker spec
+    on the wire -- or, in a session without tools, in the worker's teardown after a
+    clean CLI exit (`is_retryable_failure`) -- is retried, up to ``attempts`` in all,
+    with waits that double and add up to ``retry_window_s`` (`retry_delays`); one that
+    fails for any other reason is raised straight away with the cause named. Retries
+    happen on the ``dsh`` backend, and on any backend for a session without tools; a
+    native session with tools makes one attempt (`retry_attempts`), since replaying it
+    could repeat real work. ``backoff_s`` is the schedule a saved worker spec
     or run configuration from before ``retry_window_s`` carries: when it is given, the
     first wait is ``backoff_s`` and each next one doubles, as it was then.
     """
@@ -532,11 +563,30 @@ class DshModelClient:
         if tool_policy not in ("", "none"):
             raise ValueError(f"invalid tool_policy {tool_policy!r}")
         self._tool_policy = tool_policy
-        self._attempts = max(1, int(attempts)) if self._worker_backend == "dsh" else 1
+        self._configured_attempts = max(1, int(attempts))
         self._backoff_s = None if backoff_s is None else max(0.0, float(backoff_s))
         self._retry_window_s = max(0.0, float(retry_window_s))
         self._cancellations: tuple[threading.Event, ...] = ()
         validate_route(self.route())
+
+    def retry_attempts(self) -> int:
+        """How many completions one ``complete`` call may make: the configured
+        ``attempts`` on the ``dsh`` backend, and on any backend for a session without
+        tools (``tool_policy == "none"``), whose replay has no side effects; 1 for a
+        native session with tools, whose replay could repeat real work."""
+        configured = max(1, int(getattr(self, "_configured_attempts", 1)))
+        if (getattr(self, "_worker_backend", "dsh") == "dsh"
+                or getattr(self, "_tool_policy", "") == "none"):
+            return configured
+        return 1
+
+    @property
+    def _attempts(self) -> int:
+        return self.retry_attempts()
+
+    @_attempts.setter
+    def _attempts(self, value: int) -> None:
+        self._configured_attempts = max(1, int(value))
 
     def route(self) -> dict[str, str]:
         result = {"worker_backend": self._worker_backend, "provider": self._provider,
@@ -638,7 +688,10 @@ class DshModelClient:
         return {
             "routes_resolved": True, "routing_provenance": copy.deepcopy(self._routing_provenance),
             "dsh_home": str(self._dsh_home), "provider": self._provider, "model": self._model,
-            "timeout_s": self._timeout_s, "attempts": self._attempts, "retry_window_s": self._retry_window_s,
+            "timeout_s": self._timeout_s,
+            # The configured count, so a client rebuilt from this context and given
+            # tool_policy "none" keeps its retries; `retry_attempts` applies the rule.
+            "attempts": getattr(self, "_configured_attempts", 1), "retry_window_s": self._retry_window_s,
             **({} if self._backoff_s is None else {"backoff_s": self._backoff_s}),
             "runtime_root": str(self._runtime_root), "dsh_cli": self._dsh_cli,
             "python_bin": str(self._python_bin),
@@ -888,6 +941,7 @@ class DshModelClient:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         last = ""
+        where = "on the wire"
         # A node's dispatch is one session whose deadline is never retried, so it
         # runs under the whole envelope `workers.lower_workflow` reserved for it —
         # attempts sessions plus overhead — rather than the per-completion
@@ -934,14 +988,20 @@ class DshModelClient:
                     # Name the limit: a reader, or an optimizer, cannot weigh a
                     # shorter answer against a larger cap without the number.
                     cause = f"{cause} ({limit} tokens)"
-                if not is_transport_failure(proc.stderr):
+                if not is_retryable_failure(proc.stderr,
+                                            tool_policy=getattr(self, "_tool_policy", "")):
                     # The model answered wrongly, the key is dead, the prompt is
                     # rejected: retrying spends two more completions on the same
-                    # answer. Fail now and keep the diagnosis accurate.
+                    # answer. Fail now and keep the diagnosis accurate. A transport
+                    # failure, or (without tools) a worker teardown failure after the
+                    # CLI exited 0, is infrastructure and is retried within the same
+                    # budget.
                     raise RuntimeError(
                         f"model completion failed (exit {proc.returncode}): {cause}"
                     )
                 last = cause or f"exit {proc.returncode}"
+                where = ("on the wire" if is_transport_failure(proc.stderr)
+                         else "in worker teardown after a clean exit")
             if attempt < self._attempts:
                 delay = delays[attempt - 1]
                 if not self._cancellations:
@@ -957,7 +1017,7 @@ class DshModelClient:
                         # are also observed within the bounded polling interval.
                         self._cancellations[-1].wait(min(remaining, 0.1))
         raise RuntimeError(
-            f"model completion failed on the wire {self._attempts} time(s); last cause: {last}"
+            f"model completion failed {where} {self._attempts} time(s); last cause: {last}"
         )
 
     def _inactivity_limit(self) -> float:
