@@ -732,6 +732,13 @@ def _answers(monkeypatch, *answers):  # type: ignore[no-untyped-def]
     return queue, waits
 
 
+def _no_tools():  # type: ignore[no-untyped-def]
+    from refactory_dsh.model import DshModelClient
+
+    # Only the dsh backend retries at all (other backends make one attempt).
+    return DshModelClient(worker_backend="dsh", provider="p", model="m").with_tool_policy("none")
+
+
 class _Failed:
     returncode = 1
     stdout = ""
@@ -746,30 +753,53 @@ class _Done:
     stderr = ""
 
 
-def test_a_teardown_failure_after_a_clean_exit_is_retried(monkeypatch):
-    """The CLI exited 0 and DSH's cleanup after it failed: the completion is retried
-    (same backoff as a transport failure) and the second attempt's answer returned."""
-    from refactory_dsh.model import DshModelClient
-
+def test_a_teardown_failure_after_a_clean_exit_is_retried_without_tools(monkeypatch):
+    """A session without tools whose CLI exited 0 and whose DSH cleanup then failed:
+    the completion is retried (same backoff as a transport failure) and the second
+    attempt's answer returned; if it keeps failing, the error does not call it a
+    wire failure."""
     queue, waits = _answers(monkeypatch, _Failed(f"dsh: reasoning:\nthinking\n{TEARDOWN}\n"),
                             _Done())
-    assert DshModelClient().complete("hello") == "done\n"
+    assert _no_tools().complete("hello") == "done\n"
     assert queue == [] and waits == pytest.approx([20.0])
+    _answers(monkeypatch, *[_Failed(TEARDOWN)] * 3)
+    with pytest.raises(RuntimeError) as raised:
+        _no_tools().complete("hello")
+    assert str(raised.value) == ("model completion failed in worker teardown after a clean "
+                                 f"exit 3 time(s); last cause: {TEARDOWN}")
+
+
+def test_a_teardown_failure_in_a_session_with_tools_is_not_retried(monkeypatch):
+    """A session with tools finished its work before the teardown failed: a replay
+    would repeat it, so it fails at once as before."""
+    from refactory_dsh.model import DshModelClient
+
+    for client in (DshModelClient(), DshModelClient(worker_backend="dsh", provider="p", model="m")):
+        queue, waits = _answers(monkeypatch, _Failed(TEARDOWN), _Done())
+        with pytest.raises(RuntimeError, match=r"model completion failed \(exit 1\): dsh: worker failed"):
+            client.complete("hello")
+        assert len(queue) == 1 and waits == []
 
 
 @pytest.mark.parametrize("stderr", [
     TEARDOWN.replace("exit code: 0", "exit code: 1"),
     TEARDOWN.replace("exit code: 0", "exit code: 01"),
     TEARDOWN.replace("stage: teardown", "stage: run"),
+    # "exit code: 0" in the streamed reasoning, the real diagnostic exit 1.
+    "dsh: reasoning:\nthe last command ended with exit code: 0\n"
+    + TEARDOWN.replace("exit code: 0", "exit code: 1"),
+    # A combined startup and teardown failure: the clean exit is the startup group's.
+    ("dsh: worker failed: subagent-claude-code: Product subagent failure (product: Claude "
+     "Code; stage: startup; category: unknown; exit code: 0); Product subagent failure "
+     "(product: Claude Code; stage: teardown; category: unknown)"),
 ])
 def test_other_teardown_or_stage_failures_are_not_retried(monkeypatch, stderr):
-    """A teardown failure after a nonzero CLI exit, or a clean exit failing in another
-    stage, fails at once with its cause."""
-    from refactory_dsh.model import DshModelClient
-
+    """A teardown failure after a nonzero CLI exit, a clean exit failing in another
+    stage, a clean exit mentioned only in the reasoning, or a teardown group without
+    an exit code: fails at once with its cause, even without tools."""
     queue, waits = _answers(monkeypatch, _Failed(stderr), _Done())
     with pytest.raises(RuntimeError, match=r"model completion failed \(exit 1\): dsh: worker failed"):
-        DshModelClient().complete("hello")
+        _no_tools().complete("hello")
     assert len(queue) == 1 and waits == []
 
 
@@ -777,9 +807,12 @@ def test_a_transport_failure_is_still_retried_and_the_predicates_stay_apart(monk
     from refactory_dsh.model import (DshModelClient, failure_cause, is_clean_exit_teardown_failure,
                                      is_retryable_failure, is_transport_failure)
 
-    queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: socket hang up"), _Done())
-    assert DshModelClient().complete("hello") == "done\n"
-    assert queue == [] and len(waits) == 1
+    for client in (DshModelClient(), _no_tools()):
+        queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: socket hang up"), _Done())
+        assert client.complete("hello") == "done\n"
+        assert queue == [] and len(waits) == 1
     assert not is_transport_failure(TEARDOWN), "a teardown failure is not called transport"
-    assert is_clean_exit_teardown_failure(TEARDOWN.upper()) and is_retryable_failure(TEARDOWN)
+    assert is_clean_exit_teardown_failure(TEARDOWN.upper())
+    assert is_retryable_failure(TEARDOWN, tool_policy="none")
+    assert not is_retryable_failure(TEARDOWN)
     assert failure_cause(f"noise\n{TEARDOWN}\n") == TEARDOWN
