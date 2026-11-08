@@ -92,6 +92,14 @@ class SkillOptLoop(OuterLoop):
     #: The patch step is a ``set_knob`` with a ``patch``; the slow update is a
     #: ``set_knob`` with a ``value``.
     required_ops = ("set_knob",)
+    #: The strategy options ``configure`` reads; any other is refused
+    #: (``strategies.check_options``), so a misspelled one is not silently ignored.
+    accepted_options = (
+        "analyst_edit_budget", "claude_backend_wrapper", "early_stop_at_full_val",
+        "early_stop_patience", "edit_budget_max", "edit_budget_min", "eval_test",
+        "group_size", "knob", "knobs", "max_epochs", "merge_batch_size", "patch_order",
+        "rollout_order", "seed", "slow_update_samples",
+    )
 
     # ── configure (overrides OuterLoop.configure) ─────────────────────────
 

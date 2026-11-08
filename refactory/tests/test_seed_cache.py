@@ -110,16 +110,28 @@ def test_search_settings_are_not_part_of_the_context(tmp_path):
         assert loop.population[0].raw_score == 0.25
 
 
-def test_a_different_item_set_is_evaluated(tmp_path):
+def test_a_different_item_set_stops_the_run(tmp_path):
+    """A part whose items differ from the cached ones is a cache that can never
+    apply: the run stops naming the part, instead of quietly measuring."""
     with _patch_mode(PartsProbe):
         cache = _source_run(tmp_path)
         other = _manifest(tmp_path, {**PARTS, "train": ["alpha", "beta"]}, name="other.json")
         loop = _loop(tmp_path / "reuse", other, seed_results=str(cache))
-        loop.init()
-        Run(_loop=loop).evaluate(loop.population[0])
-        assert loop.population[0].raw_score == 1.0
-        assert loop.rollouts == 2
-        assert not _events(tmp_path / "reuse", "seed_cache_hit")
+        with pytest.raises(LoopError, match=r"items of train \(4 cached, 2 in this run"):
+            loop.init()
+
+
+def test_another_seed_stops_the_run(tmp_path):
+    """A run whose seed is not the cache's candidate (other starting knobs, another
+    mode state) would never be served: it stops naming the candidate."""
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        data = json.loads(cache.read_text())
+        data["candidate"] = "000000000000"
+        cache.write_text(json.dumps(data))
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(cache))
+        with pytest.raises(LoopError, match="candidate"):
+            loop.init()
 
 
 def test_a_train_minibatch_is_evaluated(tmp_path):
@@ -129,6 +141,10 @@ def test_a_train_minibatch_is_evaluated(tmp_path):
         loop.init()
         Run(_loop=loop).evaluate(loop.population[0], items=["alpha"])
         assert loop.rollouts == 1
+        # The miss is journaled once, so the run says why the cache was not used.
+        Run(_loop=loop).evaluate(loop.population[0], items=["beta"])
+        misses = _events(tmp_path / "reuse", "seed_cache_miss")
+        assert [(m["part"], m["reason"]) for m in misses] == [("train", "other items")]
 
 
 def test_resume_remembers_which_parts_were_served(tmp_path):
@@ -158,3 +174,143 @@ def test_export_of_a_run_without_a_recorded_context_needs_the_inactivity_limit(t
                                     inactivity_s=recorded["model_inactivity_s"])
         assert rebuilt["score_context"] == recorded
         assert set(rebuilt["parts"]) == {"train", "val"}
+
+
+def test_repeats_export_and_reuse_every_trial(tmp_path):
+    """With repeats 3 every trial is exported and served (the cache was silently
+    unused for any repeats above 1, and the export collapsed the trials)."""
+    with _patch_mode(PartsProbe):
+        manifest = _manifest(tmp_path)
+        source = _loop(tmp_path / "source", manifest, repeats=3)
+        source.init()
+        Run(_loop=source).evaluate(source.population[0])
+        Run(_loop=source).evaluate(source.population[0], part="val")
+        cache = seed_cache.export(tmp_path / "source", project=Path("."))
+        assert sorted(cache["parts"]["train"]["items"]) == sorted(PARTS["train"])
+        assert [len(t["item_records"]) for t in cache["parts"]["train"]["trials"]] == [4, 4, 4]
+        assert len(cache["parts"]["val"]["trials"]) == 3
+        path = tmp_path / "seed-results.json"
+        path.write_text(json.dumps(cache))
+
+        loop = _loop(tmp_path / "reuse", manifest, repeats=3, seed_results=str(path))
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed)
+        Run(_loop=loop).evaluate(seed, part="val")
+        assert loop.rollouts == 0
+        assert seed.measurements["count"] == 3 and seed.measurements["cached_from"]
+        records = loop._train_item_records[seed.id]
+        assert sorted({r["repeat"] for r in records}) == [1, 2, 3] and len(records) == 12
+        # The later trials' run directories come along, as a live run keeps them.
+        assert (tmp_path / "reuse" / "runs" / seed.id / "trials" / "3").is_dir()
+        hits = _events(tmp_path / "reuse", "seed_cache_hit")
+        assert [(h["part"], h["trials"]) for h in hits] == [("train", 3), ("val", 3)]
+
+
+def test_a_cache_from_other_repeats_stops_the_run(tmp_path):
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), repeats=3, seed_results=str(cache))
+        with pytest.raises(LoopError, match="repeats"):
+            loop.init()
+
+
+# ── end to end, through the command line and a profile ──────────────────────
+
+from refactory_dsh import loop as loop_module, profiles  # noqa: E402
+
+
+def _main(tmp_path: Path, name: str, *argv: str, manifest: Path | None = None) -> tuple[int, Path]:
+    root = tmp_path / name
+    code = loop_module.main([MODE, "--project", str(tmp_path), "--runs-root", str(root),
+                             "--parts", str(manifest or tmp_path / "parts.json"), "--holdout", "0",
+                             "--seed", "3", *argv])
+    return code, root
+
+
+@pytest.fixture
+def exported(tmp_path, monkeypatch):
+    """Run A with the validation gate and three repeats, and its exported seed results."""
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    _manifest(tmp_path)
+    with _patch_mode(PartsProbe):
+        code, root = _main(tmp_path, "A", "--optimizer", "random", "--val-gate", "1",
+                           "--epochs", "1", "--batch-size", "1", "--repeats", "3")
+        assert code == 0
+        out = tmp_path / "seed-results.json"
+        assert seed_cache.main(["export", str(root), str(out), "--project", str(tmp_path)]) == 0
+        yield out
+
+
+@pytest.mark.parametrize("search", [
+    ["--optimizer", "hill_climb", "--epochs", "2"],
+    ["--optimizer", "random", "--val-gate", "1", "--epochs", "2", "--batch-size", "2"],
+    ["--optimizer", "random", "--strategy", "tree_search", "--epochs", "1"],
+])
+def test_runs_with_other_search_settings_reuse_the_seed_and_say_so(tmp_path, exported, search):
+    with _patch_mode(PartsProbe):
+        code, root = _main(tmp_path, "B", *search, "--repeats", "3", "--seed-results", str(exported))
+    assert code == 0
+    hits = _events(root, "seed_cache_hit")
+    assert hits and hits[0]["part"] == "train" and hits[0]["trials"] == 3
+    seed = hits[0]["id"]
+    candidate = json.loads((root / "runs" / seed / "candidate.json").read_text())
+    assert candidate["measurements"]["cached_from"].endswith("#train")
+    report = json.loads((root / "report.json").read_text())
+    assert report["seed_results"]["parts_reused"] == sorted(h["part"] for h in hits)
+    assert report["seed_results"]["source"] == str(tmp_path / "A")
+    assert "was reused from" in (root / "report.md").read_text()
+
+
+def test_a_profile_carries_the_seed_results(tmp_path, exported):
+    profiles.save(tmp_path, "reuse", {"settings": {
+        "optimizer": "random", "val_gate": True, "epochs": 1, "batch_size": 1, "repeats": 3,
+        "parts_manifest": str(tmp_path / "parts.json"), "seed_results": str(exported)}})
+    with _patch_mode(PartsProbe):
+        code, root = _main(tmp_path, "B", "--profile", "reuse")
+    assert code == 0
+    assert {h["part"] for h in _events(root, "seed_cache_hit")} == {"train", "val", "test"}
+
+
+def test_another_item_set_or_evaluator_is_refused_naming_it(tmp_path, exported, capsys):
+    other = _manifest(tmp_path, {**PARTS, "train": ["alpha", "beta", "gamma"], "val": ["delta"]},
+                      name="other.json")
+    with _patch_mode(PartsProbe):
+        code, root = _main(tmp_path, "C1", "--optimizer", "random", "--repeats", "3",
+                           "--seed-results", str(exported), manifest=other)
+        assert code == 2
+        assert "items of train" in capsys.readouterr().err
+        code, _ = _main(tmp_path, "C2", "--optimizer", "random", "--repeats", "3",
+                        "--evaluator", "dsh", "--seed-results", str(exported))
+        assert code == 2
+        assert "different score context (evaluator)" in capsys.readouterr().err
+
+
+def test_an_edited_mode_file_is_refused_naming_it(tmp_path, monkeypatch, capsys):
+    """The mode's own file is in the score context: editing it refuses the cache."""
+    import importlib
+    import sys
+
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    module_dir = tmp_path / "modes"
+    module_dir.mkdir()
+    source = module_dir / "edited_probe.py"
+    source.write_text("from test_parts import PartsProbe\n\n\nclass EditedProbe(PartsProbe):\n"
+                      "    name = 'edited_probe'\n")
+    monkeypatch.syspath_prepend(str(module_dir))
+    mode_class = importlib.import_module("edited_probe").EditedProbe
+    _manifest(tmp_path)
+    try:
+        with _patch_mode(mode_class):
+            code, root = _main(tmp_path, "A", "--optimizer", "random", "--epochs", "1")
+            assert code == 0
+            out = tmp_path / "seed-results.json"
+            assert seed_cache.main(["export", str(root), str(out), "--project", str(tmp_path)]) == 0
+            source.write_text(source.read_text() + "# an edit\n")
+            code, _ = _main(tmp_path, "C", "--optimizer", "random", "--epochs", "1",
+                            "--seed-results", str(out))
+        assert code == 2
+        err = capsys.readouterr().err
+        assert "implementation" in err and "package_files" in err
+    finally:
+        sys.modules.pop("edited_probe", None)

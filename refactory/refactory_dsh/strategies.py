@@ -545,6 +545,23 @@ def resolve(name: str, project: Path | None = None) -> type[OuterLoop]:
     raise ValueError(f"unknown strategy {name!r}; known: {known}")
 
 
+def check_options(name: str, options: dict[str, Any] | None, project: Path | None = None) -> None:
+    """Refuse strategy options the named strategy does not read.
+
+    A strategy lists the options it reads in ``accepted_options``; the library's
+    strategies read none. A strategy that leaves it unset (``None``) is not checked,
+    since nothing says what it reads.
+    """
+    accepted = getattr(resolve(name, project), "accepted_options", None)
+    if accepted is None or not options:
+        return
+    unknown = sorted(set(options) - set(accepted))
+    if unknown:
+        raise ValueError(
+            f"the {name} strategy has no option {', '.join(unknown)}; "
+            + (f"it reads {', '.join(sorted(accepted))}" if accepted else "it takes no strategy options"))
+
+
 def create(
     name: str,
     mode_id: str,
@@ -566,6 +583,7 @@ def create(
     """
     project = kwargs.get("project")
     cls = resolve(name, Path(project) if project is not None else None)
+    check_options(name, strategy_options, Path(project) if project is not None else None)
     model = kwargs.pop("model", None)
     if issubclass(cls, Loop):
         # A Loop subclass: construct directly, configure with options
