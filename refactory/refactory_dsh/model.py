@@ -343,6 +343,30 @@ def is_transport_failure(text: str) -> bool:
     return any(marker in lowered for marker in TRANSPORT_MARKERS)
 
 
+#: A worker failure in the teardown stage after the product CLI itself exited 0: the
+#: CLI finished, and DSH's cleanup after it (e.g. waiting for the worker's systemd
+#: scope to empty) failed, typically under load. Both parts must be present, so a
+#: teardown failure after a nonzero exit, or a failure in any other stage, is not
+#: matched.
+_TEARDOWN_STAGE = re.compile(r"stage:\s*teardown", re.IGNORECASE)
+_CLEAN_EXIT = re.compile(r"exit code:\s*0(?!\d)", re.IGNORECASE)
+
+
+def is_clean_exit_teardown_failure(text: str) -> bool:
+    """Whether a failed completion is a worker teardown failure after a clean CLI exit
+    (``stage: teardown`` and ``exit code: 0``): an infrastructure failure, not a bad
+    answer."""
+    text = text or ""
+    return bool(_TEARDOWN_STAGE.search(text) and _CLEAN_EXIT.search(text))
+
+
+def is_retryable_failure(text: str) -> bool:
+    """Whether ``DshModelClient.complete`` retries a failed completion: a transport
+    failure, or a teardown failure after a clean CLI exit. Anything a model, key or
+    prompt caused is not retried."""
+    return is_transport_failure(text) or is_clean_exit_teardown_failure(text)
+
+
 #: What the headless runner writes before it streams the model's reasoning.
 REASONING_HEADER = "dsh: reasoning:"
 
@@ -934,10 +958,12 @@ class DshModelClient:
                     # Name the limit: a reader, or an optimizer, cannot weigh a
                     # shorter answer against a larger cap without the number.
                     cause = f"{cause} ({limit} tokens)"
-                if not is_transport_failure(proc.stderr):
+                if not is_retryable_failure(proc.stderr):
                     # The model answered wrongly, the key is dead, the prompt is
                     # rejected: retrying spends two more completions on the same
-                    # answer. Fail now and keep the diagnosis accurate.
+                    # answer. Fail now and keep the diagnosis accurate. A transport
+                    # failure, or a worker teardown failure after the CLI exited 0,
+                    # is infrastructure and is retried within the same budget.
                     raise RuntimeError(
                         f"model completion failed (exit {proc.returncode}): {cause}"
                     )

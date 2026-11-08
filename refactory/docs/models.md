@@ -346,7 +346,11 @@ agent may already have written files or started tool work. Explicit transport
 failures retain their bounded retry policy: up to `attempts` completions (3 by
 default), with waits between them that double and add up to `retry_window_s` (60 s by
 default), so a network or DNS blip of up to about a minute does not fail the node
-(dm-218). A worker spec or run configuration saved before `retry_window_s` existed
+(dm-218). A worker teardown failure after a clean CLI exit (the failure text says
+`stage: teardown` and `exit code: 0`: the CLI finished, and DSH's cleanup after it
+failed, for example under load) is retried the same way, within the same attempts and
+window; a teardown failure after a nonzero exit, or a failure in any other stage, is
+not. A worker spec or run configuration saved before `retry_window_s` existed
 carries `backoff_s`, which keeps its old meaning: the first wait, doubling. On POSIX, a deadline or caller
 `KeyboardInterrupt` raised in the thread calling `complete()` sends one SIGTERM
 to the selected CLI and allows ten seconds for shutdown. The Python walker's
