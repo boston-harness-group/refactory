@@ -25,7 +25,10 @@ from .policies import (
     HillClimbSelector,
     IslandsSelector,
     MapElitesSelector,
+    ParentSelector,
+    pipeline_shape,
 )
+from .compose import PickedParent
 
 #: The optimizers the loop can select by name.
 REGISTRY: dict[str, type[Optimizer]] = {
@@ -41,6 +44,12 @@ REGISTRY: dict[str, type[Optimizer]] = {
 
 def names() -> list[str]:
     return sorted(REGISTRY)
+
+
+def picker_names() -> list[str]:
+    """The optimizers that choose parents, and so can be paired with a proposer
+    (``--parent-picker``)."""
+    return sorted(name for name, cls in REGISTRY.items() if issubclass(cls, ParentSelector))
 
 
 def create(name: str, **kwargs: object) -> Optimizer:
@@ -59,6 +68,7 @@ __all__ = [
     "AutoresearchOptimizer",
     "Candidate",
     "Optimizer",
+    "PickedParent",
     "Proposal",
     "ProposalContext",
     "RandomOptimizer",
@@ -67,4 +77,6 @@ __all__ = [
     "create",
     "extract_json",
     "names",
+    "picker_names",
+    "pipeline_shape",
 ]

@@ -620,6 +620,21 @@ class ProposalContext:
     #: machine that can sandbox them, `refactory_dsh.snippet.available`); only then does
     #: the request describe them.
     code_nodes: bool = False
+    #: The candidate whose pipeline "The pipeline you may edit" describes, and so the
+    #: one a proposal that names no parent is applied to (``Loop._edited_id``); ``None``
+    #: when not known.
+    parent: str | None = None
+    #: The outer loop's name (``Loop.name``), said beside its decision; empty for none.
+    strategy_name: str = ""
+    #: The edit levels this request asks for, one proposal each (``EDIT_LEVELS``;
+    #: ``LoopConfig.portfolio``, or one level a strategy decided); empty asks for none
+    #: in particular.
+    edit_levels: list[str] = field(default_factory=list)
+    #: The validation gate's score of each candidate it judged, by id, under the
+    #: default loop's ``val_gate``; empty otherwise. For a parent policy to rank by
+    #: what the gate ranks by (``HillClimbSelector``). Never rendered: the model's
+    #: request shows gate decisions, not val scores.
+    val_scores: dict[str, float] = field(default_factory=dict)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -630,6 +645,7 @@ class ProposalContext:
             f"Batch mean: {self.mean_score}.",
             "",
             *([self.steering, ""] if self.steering.strip() else []),
+            *_strategy_section(self.strategy, self.strategy_name),
             "## Parameters you may move",
             _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
                     "description"],
@@ -762,7 +778,66 @@ class ProposalContext:
         if self.max_edits > 1:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue,
                                                  proposals=self.proposals)]
+        if self.edit_levels:
+            sections += ["", *levels_instructions(self.edit_levels)]
         return "\n".join(sections)
+
+
+#: The edit levels a portfolio round asks for, one proposal each (``edit_level``).
+EDIT_LEVELS = ("prompt_knob", "pipeline")
+_LEVEL_TEXT = {
+    "prompt_knob": "a prompt/knob-level change: only `set_knob` edits (rewrite or patch a "
+                   "prompt, move a setting) on the current pipeline",
+    "pipeline": "a pipeline-level change: at least one structural operation (add, remove, "
+                "rewire, gate, loop or parallelise steps), with any knob moves it needs",
+}
+
+
+def edit_level(steps: Sequence[Any]) -> str:
+    """``prompt_knob`` when every edit is a ``set_knob``, else ``pipeline``."""
+    ops = [step.get("op") if isinstance(step, dict) else None for step in steps]
+    return "prompt_knob" if ops and all(op == "set_knob" for op in ops) else "pipeline"
+
+
+def levels_instructions(levels: Sequence[str]) -> list[str]:
+    """What the request asks for when it names edit levels."""
+    if len(levels) == 1:
+        return ["## The kind of change this round",
+                f"Propose exactly one update: {_LEVEL_TEXT.get(levels[0], levels[0])}."]
+    return ["## The kind of change this round",
+            f"Propose exactly {len(levels)} updates, one per level, each your best of its "
+            "kind:",
+            *[f"- {_LEVEL_TEXT.get(level, level)}" for level in levels],
+            "The search evaluates every one of them on validation and keeps what wins; do "
+            "not choose between them, and do not leave one out."]
+
+
+#: Keys of ``ProposalContext.strategy`` that are not a decision of the outer loop: the
+#: run's resolved search contract rides in the same dict and is not rendered here.
+_NOT_DECISIONS = ("search_contract",)
+#: Decision keys said first, as sentences, in this order.
+_DECISION_LEAD = ("purpose", "why")
+
+
+def _strategy_section(decision: Mapping[str, Any] | None, strategy: str = "") -> list[str]:
+    """What the outer loop decided for this round, as data: its purpose and reason
+    first, then every other key it published. Empty when it decided nothing (the
+    default loop), so a request without a decision is unchanged."""
+    shown = {key: value for key, value in (decision or {}).items()
+             if key not in _NOT_DECISIONS and value not in (None, "", [], {})}
+    if not shown:
+        return []
+    who = f"The search strategy (`{strategy}`)" if strategy else "The search strategy"
+    lines = ["## What this round is for",
+             f"{who} decided the following for this round. It decides where the search "
+             "goes; you decide what to write. Take it into account, and say in your "
+             "rationale if the evidence argues against it."]
+    for key in (*[k for k in _DECISION_LEAD if k in shown],
+                *[k for k in shown if k not in _DECISION_LEAD]):
+        value = shown[key]
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        lines.append(f"- {key}: {_bounded(text, 600)}")
+    return [*lines, ""]
 
 
 #: The catalogue kinds that change the pipeline's structure (``nn.edits.catalogue``).
@@ -866,8 +941,10 @@ def _composition_anchor(node_states: Sequence[dict[str, Any]], edges: Sequence[d
 def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                         edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                         code_nodes: bool = False) -> list[str]:
-    """The language's primitives and how they compose, with at most two short examples
-    built from this graph's own ids. Nothing when the run permits no structural op."""
+    """The language's primitives and how they compose, with one short example per
+    composition the run permits (a new agent, a code op, a verdict loop, a parallel
+    fork), built from this graph's own ids, so no one shape reads as the way to grow
+    the pipeline. Nothing when the run permits no structural op."""
     from refactory_dsh import snippet
 
     if not structural_ops(catalogue):
@@ -931,6 +1008,19 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     step = str(agent["id"])
     output = str((agent.get("writes") or ["output.txt"])[0])
     examples: list[tuple[str, list[dict[str, Any]]]] = []
+    if "insert_after" in ops:
+        extra = f"{step}_second"
+        examples.append((
+            f"A new agent step after `{step}`, reading its output as a fact:",
+            [{"op": "insert_after", "target": step,
+              "node": {"id": extra, "kind": "agent", "writes": [f"{extra}.txt"],
+                       "prompt_template": "<what this step does; put each fact it needs in double braces>"}}]))
+    if "parallel" in ops:
+        examples.append((
+            f"Two steps at once after `{step}` (a fork and a join):",
+            [{"op": "parallel", "target": step, "branches": [
+                {"id": f"{step}_{side}", "kind": "agent", "writes": [f"{step}_{side}.txt"],
+                 "prompt_template": f"<angle {side}>"} for side in ("a", "b")]}]))
     if {"loop", "insert_before"} <= ops:
         review = f"{step}_review"
         examples.append((
@@ -956,8 +1046,9 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                        "code": ("def main(inp):\n"
                                 f"    text = inp['files'].get({output!r}, '')\n"
                                 f"    return {{'facts': {{{fact!r}: text.strip()[-2000:]}}}}\n")}}]))
-    lines += ["", "Examples (built from this graph; compose your own the same way):"]
-    for title, bundle in examples[:2]:
+    lines += ["", "Examples, one per composition (built from this graph; none is the "
+                  "preferred shape -- compose your own the same way):"]
+    for title, bundle in examples:
         lines += [f"- {title}", "  " + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0])]
     return lines + [""]
 
@@ -1867,6 +1958,21 @@ class Optimizer:
     #: code node's code may contain (``E-secret``), or a function returning them (called
     #: only for a candidate with code). The loop sets it from its Task.
     grader_secrets: Any = frozenset()
+
+    #: Whether ``propose`` asks a model, so its calls must run on a route without tools
+    #: (``Loop._check_optimizer_route``) and a strategy may hand it the round's sampling.
+    uses_model: bool = False
+
+    def choose_parent(
+        self, ctx: "ProposalContext", parents: Sequence["Candidate"]
+    ) -> "Candidate | None":
+        """The candidate this step edits, when the optimizer picks it itself.
+
+        Asked once per optimizer step, before the request is built, so the request
+        describes the candidate the proposals are applied to. ``None`` (the default)
+        leaves the choice to the loop (``Loop.select_parents``).
+        """
+        return None
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         """Model-using optimizers override this to inherit the run's resources."""

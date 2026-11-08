@@ -46,6 +46,7 @@
     "refactory_dsh.openshell_backend",
     "refactory_dsh.optim",
     "refactory_dsh.optim.base",
+    "refactory_dsh.optim.compose",
     "refactory_dsh.optim.policies",
     "refactory_dsh.optim.random_optimizer",
     "refactory_dsh.outerloop",

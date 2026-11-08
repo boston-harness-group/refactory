@@ -46,6 +46,9 @@ def _parents() -> list:
     for index in range(6):
         state = registry.resolve(ROOT, MODE)[1]().state_dict()
         state["knobs"]["grid"]["value"] = 8 + index * 2
+        if index % 2:  # a second structure: one more agent step in the graph itself
+            state["graph"]["nodes"]["extra"] = {"id": "extra", "kind": "agent",
+                                                "prompt_template": "Look again."}
         candidate = Candidate.from_state(state, edits=[{"op": "add_node"}] if index % 2 else [])
         candidate.score = float(index)
         candidate.evaluated = True

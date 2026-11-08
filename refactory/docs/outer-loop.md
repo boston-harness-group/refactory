@@ -30,11 +30,12 @@ candidates the way the SkillOpt strategy does, using the same `ValidationGate` a
 differs. Without `--val-gate` nothing below applies.
 
 It follows SkillOpt's single line, where one current candidate is the only parent, so
-it refuses, before anything is rolled out, the optimizers that breed from a population
-of parents (`archive`, `evolutionary`, `islands`, `map_elites`) and the strategies that
-merge parents or pick among sibling samples outside the gate (`autoscientists`,
-`best_of_n`, `reflective`). Run those without `--val-gate`. The `random`, `autoresearch`
-and `hill_climb` optimizers run with it.
+it refuses, before anything is rolled out, the optimizers and parent pickers that breed
+from a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`) and
+the strategies that merge parents or pick among sibling samples outside the gate
+(`autoscientists`, `best_of_n`, `reflective`). Run those without `--val-gate`. The
+`random`, `autoresearch` and `hill_climb` optimizers run with it, and so does
+`--parent-picker hill_climb`.
 
 - **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
   (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.

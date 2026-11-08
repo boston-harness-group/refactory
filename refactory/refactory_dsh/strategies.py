@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from refactory_dsh.loop import Loop
-from refactory_dsh.optim import Candidate, Proposal
+from refactory_dsh.optim import Candidate, Proposal, pipeline_shape
+from refactory_dsh.optim.policies import shape_label
 from refactory_dsh.outerloop import OuterLoop, Run
 
 # ── the archives a strategy keeps ──────────────────────────────────────────
@@ -98,6 +99,92 @@ def _bin(value: int, edges: tuple[int, ...]) -> int:
     return sum(1 for edge in edges if value > edge)
 
 
+def _shape_key(candidate: Candidate) -> tuple[Any, ...]:
+    shape = pipeline_shape(candidate.state)
+    return (shape["agents"], shape["gate"], shape["parallel"], shape["code"])
+
+
+def _shape_text(candidates: Sequence[Candidate]) -> str:
+    seen: dict[tuple[Any, ...], str] = {}
+    for candidate in candidates:
+        shape = pipeline_shape(candidate.state)
+        seen.setdefault(_shape_key(candidate), shape_label(shape).split(";")[0])
+    return " | ".join(seen.values())
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _is_settings_only(candidate: Candidate) -> bool:
+    own = candidate.own_edits()
+    return bool(own) and all(edit.get("op") == "set_knob" for edit in own)
+
+
+#: How many prompt/knob-level children in a row must fail to beat their parents,
+#: with every candidate of one shape, before the evidence says to try structure.
+#: An evidence threshold, not a schedule: nothing turns structure on by the clock.
+SETTINGS_STALL = 3
+
+
+def edit_kind_decision(population: Sequence[Candidate],
+                       *, stall: int = SETTINGS_STALL) -> dict[str, Any]:
+    """What kind of edit the evidence points to: ``pipeline`` or ``prompt_knob``.
+
+    Compares the top third of the scored candidates with the bottom third by
+    pipeline shape (`optim.policies.pipeline_shape`) and score:
+
+    - winners and losers have **different shapes** -> a pipeline-level change, the
+      score follows structure;
+    - **one shape everywhere**, and the last ``stall`` prompt/knob children all
+      failed to beat their parents -> a pipeline-level change, settings have
+      stopped paying and structure is untested;
+    - otherwise -> a prompt/knob-level change: candidates of the same shape span
+      the range, so settings explain the differences.
+
+    Empty when fewer than two candidates are scored: no evidence, no decision.
+    """
+    scored = sorted((c for c in population if c.evaluated and c.score is not None),
+                    key=lambda c: (-(c.score or 0.0), c.id))
+    if len(scored) < 2:
+        return {}
+    k = max(1, len(scored) // 3)
+    top, bottom = scored[:k], scored[-k:]
+    top_keys = {_shape_key(c) for c in top}
+    bottom_keys = {_shape_key(c) for c in bottom}
+    means = (f"top {k} mean {_mean([c.score or 0.0 for c in top]):.4g}, "
+             f"bottom {k} mean {_mean([c.score or 0.0 for c in bottom]):.4g}")
+    pipeline = {"edit_kind": "pipeline",
+                "purpose": "this round: a pipeline-level change -- add, remove, rewire, "
+                           "gate or parallelise steps -- rather than another prompt or "
+                           "setting change"}
+    settings = {"edit_kind": "prompt_knob",
+                "purpose": "this round: a prompt/knob-level change -- rewrite or patch a "
+                           "prompt, move a setting -- on the current pipeline"}
+    if not top_keys & bottom_keys:
+        return {**pipeline, "why": (
+            f"the best candidates have shape [{_shape_text(top)}] and the worst have "
+            f"[{_shape_text(bottom)}] ({means}): the score follows the pipeline's shape")}
+    if len({_shape_key(c) for c in scored}) == 1:
+        by_id = {c.id: c for c in population}
+        recent = [c for c in population if c.evaluated and c.score is not None
+                  and c.parent in by_id and _is_settings_only(c)][-stall:]
+        stalled = len(recent) >= stall and all(
+            (c.score or 0.0) <= (by_id[c.parent].score or 0.0) for c in recent)
+        if stalled:
+            return {**pipeline, "why": (
+                f"the last {len(recent)} prompt/knob edits did not beat their parents, and "
+                f"every candidate so far has one shape [{_shape_text(scored)}], so the "
+                "scores say nothing yet about a different structure")}
+        return {**settings, "why": (
+            f"every candidate so far has one shape [{_shape_text(scored)}] and prompt/knob "
+            f"edits still move the score ({means})")}
+    return {**settings, "why": (
+        f"the best and the worst candidates share shape(s) [{_shape_text(top)}] "
+        f"({means}): candidates of one shape span the range, so prompts and settings "
+        "explain the differences")}
+
+
 class BestOfN(Loop):
     """SRF `best_of_n`: `Fork(N samples) → Join → select_best`.
 
@@ -109,8 +196,20 @@ class BestOfN(Loop):
     name = "best_of_n"
     width = 4
 
+    def batch_size(self, run: Run) -> int:
+        return int(self.width) if self.strategy_decision.get("samples") else super().batch_size(run)
+
     def strategy(self, run: Run) -> None:
         seed = run.seed()
+        if getattr(self.optimizer, "uses_model", False):
+            # A model proposer writes the N samples: one request, N proposals, all
+            # against the seed. The knob sampler below is the random proposer's way.
+            for candidate in _sample_from_optimizer(self, run, seed, self.width, (
+                    f"{self.width} independent variants of the seed; each is evaluated "
+                    "once and the best is kept, so make them different from each other")):
+                run.keep(run.evaluate(candidate))
+            run.stop("samples_exhausted")
+            return
         for index in range(self.width):
             if run.budget_left() <= 0:
                 break
@@ -145,6 +244,19 @@ class BestOfN(Loop):
 
     def update(self, run: Run, candidate: Candidate) -> None:
         """No archive: best-of-N is a single round, so keeping is enough."""
+
+
+def _sample_from_optimizer(loop: Loop, run: Run, seed: Candidate, width: int,
+                           purpose: str) -> list[Candidate]:
+    """``width`` candidates the loop's optimizer writes against ``seed``, refused ones
+    asked again with their reasons (``Loop.install``); the decision says what for."""
+    loop.strategy_decision = {"parent": seed.id, "samples": width, "purpose": purpose}
+    loop._editing_parent = seed.id
+    budget = max(0, min(width, run.budget_left()))
+    if not budget:
+        return []
+    proposals = loop.propose(run, [seed], budget)
+    return loop.install(run, proposals, [seed])[:budget]
 
 
 
@@ -190,8 +302,18 @@ class Reflective(Loop):
         else:
             self.mutations += 1
         run = run or Run(_loop=self)
-        self.strategy_decision = {"branch": branch}
-        run.log(f"branch={branch}")
+        if branch == "merge":
+            self.strategy_decision = {
+                "branch": "merge",
+                "purpose": "combine two good parents: one parent's pipeline with the "
+                           "other's settings"}
+        else:
+            # Reflection on the evidence: what kind of edit the scores point to.
+            self.strategy_decision = {"branch": "mutate",
+                                      **edit_kind_decision(self.population)}
+        run.log(f"branch={branch}"
+                + (f" edit_kind={self.strategy_decision['edit_kind']}"
+                   if self.strategy_decision.get("edit_kind") else ""))
         return super().epoch_step(run)
 
     def propose(
@@ -206,7 +328,10 @@ class Reflective(Loop):
         """
         if self.strategy_decision.get("branch") != "merge" or len(parents) < 2:
             return super().propose(run, parents, n)
-        left, right = parents[0], parents[1]
+        # The two best parents. ``parents`` is the population in the order it was
+        # made, so its first two were the seed and the first sweep candidate, whatever
+        # they scored.
+        left, right = sorted(parents, key=lambda c: (-(c.score or 0.0), c.id))[:2]
         edits = [
             {"op": "set_knob", "name": name, "value": entry["value"]}
             for name, entry in sorted((right.state.get("knobs") or {}).items())
@@ -219,6 +344,12 @@ class Reflective(Loop):
             # which the harness would refuse as `E-noop` and the batch slot would be
             # lost to a branch that could not do its job.
             return super().propose(run, parents, n)
+        # The merge writes settings only, so the round is a prompt/knob-level one; under
+        # the portfolio it then asks for that level alone instead of refusing the merge's
+        # second candidate (E-level) until the attempts run out.
+        self.strategy_decision = {**self.strategy_decision, "edit_kind": "prompt_knob"}
+        if self._levels_wanted:
+            self._levels_wanted = ["prompt_knob"]
         return [
             Proposal(
                 edit=edits[index % len(edits)],
@@ -292,8 +423,12 @@ class AdaptiveMeta(Loop):
             # the loop widens its own batch: the evidence says the current width is
             # not producing contrast, and asking for the same width again is the
             # definition of not adapting.
-            self.strategy_decision = ({"meta": True, "reason": "no progress since the last epoch"}
-                                      if meta else {"meta": False})
+            self.strategy_decision = ({
+                "meta": True, "reason": "no progress since the last epoch",
+                "purpose": "widen the search: this round evaluates more candidates, so "
+                           "make them differ from each other and from what was tried",
+                "why": f"the best score ({self._best}) has not improved since the last epoch",
+            } if meta else {"meta": False})
             run.log(f"meta={meta}")
             if not self.epoch_step(run):
                 run.stop("epochs")
@@ -334,9 +469,59 @@ class TreeSearch(Loop):
     def update(self, run: Run, candidate: Candidate) -> None:
         self.tree.add(candidate)
 
+    def epoch_step(self, run: Run | None = None) -> bool:
+        """Decide the action before the step, so the proposal reads it.
+
+        The action gate was a counter (``len(tree) % 3``) kept in an attribute, so
+        no proposal saw it and the strategy ran as ``default``. It decides from the
+        tree now, as AIDE's does, and publishes the action and the node it expands.
+        """
+        self._decided = False
+        # Last step's node is not this step's: the loop would refresh its records.
+        self.strategy_decision = {}
+        return super().epoch_step(run)
+
+    def _decide(self, parents: Sequence[Candidate]) -> Candidate | None:
+        """``debug`` the newest failed leaf, ``draft`` while nothing beats the seed,
+        else ``improve`` the leader."""
+        by_id = {c.id: c for c in self.population}
+        expanded = {c.parent for c in self.population if c.parent}
+        failed = [c for c in parents if c.evaluated and not c.exit_ok and c.id not in expanded]
+        leader = self.select_parents(1)
+        root = next((c for c in self.population if not c.parent), None)
+        if failed:
+            node, action = failed[-1], "debug"
+            why = (f"candidate {node.id} failed ({str(node.error or 'no score')[:200]}) and "
+                   "has not been expanded; fix what broke it")
+        elif root is not None and (not leader or leader[0].id == root.id):
+            node, action = root, "draft"
+            why = "nothing has beaten the seed yet; write a different first version of it"
+        elif leader:
+            node, action = leader[0], "improve"
+            why = (f"candidate {leader[0].id} leads with score {leader[0].score} at depth "
+                   f"{self.tree.depth(leader[0].id)} of the tree")
+        else:
+            return None
+        self.last_action = action
+        self.strategy_decision = {"action": action, "parent": node.id, "why": why,
+                                  "purpose": {"debug": "repair a failed candidate",
+                                              "draft": "a new draft from the seed",
+                                              "improve": "improve the best node"}[action]}
+        if node.id in by_id and node.id != self._editing_parent:
+            self._editing_parent = node.id
+            self._refresh_edited_records()
+        return node
+
     def propose(self, run: Run, parents: Sequence[Candidate], n: int) -> list[Proposal]:
-        parents = self.select_parents(1) or list(parents)
-        self.last_action = self.actions[len(self.tree.all()) % len(self.actions)]
+        pool = self._gated_parents() if self.config.val_gate else list(parents)
+        if not getattr(self, "_decided", False):
+            # First round of the step: decide, and rebuild the request around the node.
+            self._decided = True
+            node = self._decide(pool)
+        else:
+            node = next((c for c in self.population
+                         if c.id == self.strategy_decision.get("parent")), None)
+        parents = [node] if node is not None else (self.select_parents(1) or list(parents))
         return super().propose(run, parents, n)
 
 
@@ -351,6 +536,15 @@ class StagedCurriculum(Loop):
     requires_model = True
     stages = ("initial", "tuning", "creative", "ablation")
     per_stage = 2
+    #: What each stage asks of a proposal; a stage not listed is asked by its name.
+    purposes = {
+        "initial": "establish a working first improvement on the seed",
+        "tuning": "tune prompts and settings of the current pipeline",
+        "creative": "try something different: a new step, a different pipeline shape",
+        "ablation": "remove or simplify a part, to learn which parts carry the score",
+        "explore": "explore: try varied changes, structural ones included",
+        "exploit": "exploit: refine what scores best so far",
+    }
 
     def strategy(self, run: Run) -> None:
         """Run each stage in order, and **publish which stage is running**.
@@ -368,6 +562,8 @@ class StagedCurriculum(Loop):
                 "stage": stage,
                 "stage_index": index,
                 "stages": list(self.stages),
+                "purpose": f"stage {index + 1} of {len(self.stages)} ({stage}): "
+                           + self.purposes.get(stage, stage),
             }
             run.log(f"stage={stage}")
             for _ in range(self.per_stage):
@@ -398,7 +594,9 @@ class ResearchThenOptimize(Loop):
         self.research_note = self._research(run)
         # Published, not merely kept: a note in an attribute reaches no prompt and
         # so informs no proposal. This is what puts it in front of a proposer.
-        self.strategy_decision = {"research": self.research_note}
+        self.strategy_decision = {
+            "research": self.research_note,
+            "purpose": "use what the research phase found before the search started"}
         run.log(f"research={self.research_note!r}")
         if not self.epoch_step(run):
             run.stop("epochs")
@@ -421,10 +619,21 @@ class Autoscientists(Loop):
     width = 3
     requires_model = True
 
+    def batch_size(self, run: Run) -> int:
+        return int(self.width) if self.strategy_decision.get("samples") else super().batch_size(run)
+
     def strategy(self, run: Run) -> None:
         seed = run.seed()
         produced: list[Candidate] = []
-        for index in range(self.width):
+        if getattr(self.optimizer, "uses_model", False):
+            # A model proposer writes the N branches; the merge below sees them all.
+            produced = [run.keep(run.evaluate(candidate)) for candidate in
+                        _sample_from_optimizer(self, run, seed, self.width, (
+                            f"{self.width} independent lines of attack on the seed, one per "
+                            "scientist; a merge then combines the branches, so make each "
+                            "branch a different idea"))]
+        for index in range(0 if produced or getattr(self.optimizer, "uses_model", False)
+                           else self.width):
             if run.budget_left() <= 0:
                 break
             edit = BestOfN._variant(self, index, seed)  # the same N-sample shape
@@ -457,7 +666,9 @@ class Autoscientists(Loop):
         mine = best.state.get("knobs") or {}
         theirs = donor.state.get("knobs") or {}
         for name in sorted(mine):
-            if mine[name]["value"] != theirs[name]["value"]:
+            # A knob only one branch has (a structural branch's new step) is not one
+            # to cross over.
+            if name in theirs and mine[name]["value"] != theirs[name]["value"]:
                 return {"op": "set_knob", "name": name, "value": theirs[name]["value"]}
         return None
 
