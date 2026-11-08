@@ -90,7 +90,7 @@ A mode: a Python class whose architecture and parameters are serializable.
 | kind | name | signature |
 |---|---|---|
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>) -> None` |
+| class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, gate_exhausted: 'list[str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>) -> None` |
 | class | `StateError` | `` |
 | function | `graph_identity` | `(state: 'dict') -> 'dict'` |
 

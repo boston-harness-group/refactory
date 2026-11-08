@@ -77,6 +77,9 @@ class RunResult:
     halted: bool = False
     #: Each gate's last verdict, as the spine's checkpoint keeps them (`gate_verdicts`).
     gate_verdicts: dict[str, str] = field(default_factory=dict)
+    #: The gates whose last ``proceed`` came from running out of reloops (``on_exhausted:
+    #: continue``), not from a pass (`RunRecord.gate_exhausted`).
+    gate_exhausted: list[str] = field(default_factory=list)
     #: Per-item records from a data-node evaluation (F6).
     item_records: list[dict[str, Any]] = field(default_factory=list)
 

@@ -198,6 +198,9 @@ class Step:
     #: Why a gate gave its verdict, when it said: the same reason the spine reports
     #: under ``ran``, so a headless run explains a reloop as a driven one does.
     reason: str | None = None
+    #: A gate's ``proceed`` taken because it ran out of reloops (``on_exhausted:
+    #: continue``), not because the check passed.
+    exhausted: bool = False
 
 
 class RunContext:
@@ -1415,7 +1418,8 @@ class Executor:
                 break
             self.steps.append(
                 Step(node.id, node.kind, time.time() - step_started, verdict=verdict,
-                     reason=getattr(verdict, "reason", None) or None)
+                     reason=getattr(verdict, "reason", None) or None,
+                     exhausted=bool(getattr(verdict, "exhausted", False)))
             )
             if current is not None:
                 self._record(current)
@@ -1463,6 +1467,7 @@ class Executor:
             gate_stop=gate_stop_id,
             halted=halted,
             gate_verdicts=dict(self.record.gate_verdicts),
+            gate_exhausted=list(self.record.gate_exhausted),
             item_records=list(self._item_records),
         )
 
@@ -1557,7 +1562,8 @@ class Executor:
                 return f"{node.id}: {type(exc).__name__}: {exc}"
             self.steps.append(
                 Step(node.id, node.kind, time.time() - started, verdict=verdict,
-                     reason=getattr(verdict, "reason", None) or None)
+                     reason=getattr(verdict, "reason", None) or None,
+                     exhausted=bool(getattr(verdict, "exhausted", False)))
             )
         return None
 
@@ -2223,8 +2229,11 @@ class Executor:
             if exhausted == "continue":
                 # The item goes on with the last attempt: the gate's proceed edge.
                 onward = self.graph.exhaustion_exit(node.id)
-                self.record.gate(self.graph, node.id, PROCEED, target=onward, retry=False)
-                return onward, Verdict(PROCEED, reason=why)
+                self.record.gate(self.graph, node.id, PROCEED, target=onward, retry=False,
+                                 exhausted=True)
+                verdict_out = Verdict(PROCEED, reason=why)
+                verdict_out.exhausted = True
+                return onward, verdict_out
             self.record.gate(self.graph, node.id, "halt", target=None, retry=False)
             if exhausted == "fail_item":
                 # A failed node fails its item only (the data loop's failed-item record),

@@ -994,7 +994,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "would reloop once more than that, its `on_exhausted` decides: `continue` (the "
         "default inside the per-item pass) goes on along `proceed` with the last attempt, "
         "which is graded as it stands; `fail_item` fails that item only; `halt` ends the "
-        "whole run (no later item runs). The last step of the pass can be looped too: the "
+        "whole run (no later item runs). A gate with no forward `proceed` edge defaults to "
+        "`fail_item`. The last step of the pass can be looped too: the "
         "loop then adds a step after the gate to end the pass.",
     ]
     if "parallel" in ops:

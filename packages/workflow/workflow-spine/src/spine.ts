@@ -457,6 +457,11 @@ export class Spine {
   private skipProvenance: Map<string, { source: string; at: string }>
   private pendingSkipReceipts: Array<{ node: string; provenance: { source: string; at: string } }>
   private readonly gateVerdicts: Map<string, string>
+  /**
+   * Gates whose last `proceed` came from running out of reloops (`on_exhausted:
+   * continue`), not from a pass; kept beside `gateVerdicts` (`gate_exhausted`).
+   */
+  private readonly gateExhausted = new Set<string>()
   private readonly iterations: Record<string, number>
   private readonly feedback: Record<string, string>
   private readonly successors: Record<string, string>
@@ -579,6 +584,7 @@ export class Spine {
     for (const node of cycle) {
       this.completed = this.completed.filter(entry => entry !== node)
       this.gateVerdicts.delete(node)
+      this.gateExhausted.delete(node)
     }
   }
 
@@ -1128,6 +1134,7 @@ export class Spine {
     const record = (): void => {
       if (!this.completed.includes(gate)) this.completed.push(gate)
       this.gateVerdicts.set(gate, outcome)
+      this.gateExhausted.delete(gate)
       // A retry's feedback for this gate (a send-back onto `pick_corrections`, dm-226) was
       // for this visit; the gate has now decided, so later views stop repeating it.
       delete this.feedback[gate]
@@ -1226,6 +1233,7 @@ export class Spine {
       // The refused reloop is not spent: the gate used its cap, as on the walker.
       this.iterations[gate] = cap
       this.gateVerdicts.set(gate, PROCEED)
+      this.gateExhausted.add(gate)
       delete this.gateReasons[gate]
       this.halted = undefined
       this.splicePosition(gate, [onward])
@@ -1550,6 +1558,7 @@ export class Spine {
     }
     for (const id of affected) {
       this.gateVerdicts.delete(id)
+      this.gateExhausted.delete(id)
       if (!preserveIterations) delete this.iterations[id]
       delete this.feedback[id]
     }
@@ -1830,6 +1839,9 @@ export class Spine {
     for (const node of list(saved.pause_before)) this.pauseBoundaries.add(node)
     this.gateVerdicts.clear()
     for (const [id, verdict] of Object.entries(saved.gate_verdicts as Record<string, string>)) this.gateVerdicts.set(id, verdict)
+    this.gateExhausted.clear()
+    // Older checkpoints have none.
+    if (Array.isArray(saved.gate_exhausted)) for (const id of list(saved.gate_exhausted)) this.gateExhausted.add(id)
     Object.assign(this.iterations, saved.iterations)
     Object.assign(this.feedback, saved.feedback)
     for (const key of Object.keys(this.gateReasons)) delete this.gateReasons[key]
@@ -1884,6 +1896,7 @@ export class Spine {
       pending_skip_receipts: [...this.pendingSkipReceipts],
       pause_before: [...this.pauseBoundaries],
       gate_verdicts: Object.fromEntries(this.gateVerdicts),
+      ...(this.gateExhausted.size === 0 ? {} : { gate_exhausted: [...this.gateExhausted] }),
       iterations: { ...this.iterations },
       feedback: { ...this.feedback },
       gate_reasons: { ...this.gateReasons },

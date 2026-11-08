@@ -381,8 +381,8 @@ What the two share, rather than each doing its own way:
   the completed nodes and each gate's last verdict by the spine's rules
   (`nn/record.py`). A gate's verdict is the run's record, in the spine's checkpoint and
   the walker's progress record (and `RunResult.gate_verdicts`), never a fact; a gate out
-  of reloops is recorded `proceed` when its `on_exhausted` continues and `halt` otherwise,
-  on both. Each status file names its `runtime` (`walker`
+  of reloops is recorded `proceed` when its `on_exhausted` continues (and listed in
+  `gate_exhausted`, so it reads apart from a pass) and `halt` otherwise, on both. Each status file names its `runtime` (`walker`
   or `spine`) and `owner_pid`. A walked run has no checkpoint, so whether it is still
   alive is its progress's and its walking process's to say (`run_state.walked`,
   `run_state.owner_pid`): the worktree, artifact-name and console readers ask those, the

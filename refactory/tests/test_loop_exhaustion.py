@@ -150,7 +150,38 @@ def test_an_exhausted_loop_in_a_pass_scores_every_item_on_the_walker(tmp_path, p
     # One attempt plus its two reloops, and no more.
     assert _attempts(run, "3") == 3
     if parallelism == 1:
+        # The last item's proceed came from running out of reloops, and says so.
         assert result.gate_verdicts.get("check") == "proceed"
+        assert result.gate_exhausted == ["check"]
+
+
+def test_an_exhausted_proceed_is_recorded_apart_from_a_pass(tmp_path, monkeypatch):
+    """[walker] The gate's step and the run record mark a proceed taken on exhaustion
+    (``exhausted``), and a later proceed that passed clears it, as the spine's
+    ``gate_exhausted`` does; the mark survives the progress record."""
+    from refactory_dsh.nn.executor import Executor
+    from refactory_dsh.nn.record import RunRecord
+
+    walked: list[Executor] = []
+    run = Executor.run
+
+    def keep(self: Executor, **kw: Any) -> Any:
+        walked.append(self)
+        return run(self, **kw)
+
+    monkeypatch.setattr(Executor, "run", keep)
+    graph = _loop_graph()
+    result = _walker(graph, tmp_path / "run")
+    assert result.exit_ok, result.error
+    [executor] = walked
+    proceeds = [step.exhausted for step in executor.steps
+                if step.node == "check" and step.verdict == "proceed"]
+    # Items 0, 1 and 2 passed the check; item 3 ran out of reloops.
+    assert proceeds == [False, False, False, True]
+    assert RunRecord.from_progress(executor.record.to_progress()).gate_exhausted == ["check"]
+    executor.record.gate(graph, "check", "proceed", target="score", retry=False)
+    assert executor.record.gate_exhausted == []
+    assert "gate_exhausted" not in executor.record.to_progress()
 
 
 @pytest.mark.parametrize("in_fork", [False, True])

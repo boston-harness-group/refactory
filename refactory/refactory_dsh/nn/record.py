@@ -33,6 +33,9 @@ class RunRecord:
     completed: list[str] = field(default_factory=list)
     gate_verdicts: dict[str, str] = field(default_factory=dict)
     feedback: dict[str, str] = field(default_factory=dict)
+    #: The gates whose last ``proceed`` was not a pass but a reloop cap running out
+    #: (``on_exhausted: continue``), as the spine's checkpoint keeps them (`gate_exhausted`).
+    gate_exhausted: list[str] = field(default_factory=list)
 
     def complete(self, node: Node) -> None:
         """``node`` finished. An agent's feedback was for this visit, so it is spent."""
@@ -42,12 +45,17 @@ class RunRecord:
             self.feedback.pop(node.id, None)
 
     def gate(self, graph: Graph, gate: str, outcome: str, *, target: str | None, retry: bool,
-             reason: str = "") -> None:
+             reason: str = "", exhausted: bool = False) -> None:
         """``gate`` decided ``outcome``. A retry hands ``reason`` to ``target`` and
-        un-completes the nodes between the two, which run again."""
+        un-completes the nodes between the two, which run again. ``exhausted`` marks a
+        ``proceed`` the gate took because it ran out of reloops, not because it passed."""
         if gate not in self.completed:
             self.completed.append(gate)
         self.gate_verdicts[gate] = outcome.lower()
+        if exhausted and gate not in self.gate_exhausted:
+            self.gate_exhausted.append(gate)
+        elif not exhausted and gate in self.gate_exhausted:
+            self.gate_exhausted.remove(gate)
         # A retry's feedback for this gate was for this visit, as an agent's is (dm-226).
         self.feedback.pop(gate, None)
         if retry and target is not None:
@@ -97,6 +105,7 @@ class RunRecord:
         self.completed = [entry for entry in self.completed if entry not in cycle]
         for node in cycle:
             self.gate_verdicts.pop(node, None)
+        self.gate_exhausted = [gate for gate in self.gate_exhausted if gate not in cycle]
 
     def merge_branches(self, branches: list[RunRecord], members: list[set[str]]) -> None:
         """Fold in a fork's branch records once the branches are done.
@@ -113,6 +122,10 @@ class RunRecord:
             for gate, outcome in branch.gate_verdicts.items():
                 if gate in owned:
                     self.gate_verdicts[gate] = outcome
+                    if gate in branch.gate_exhausted and gate not in self.gate_exhausted:
+                        self.gate_exhausted.append(gate)
+                    elif gate not in branch.gate_exhausted and gate in self.gate_exhausted:
+                        self.gate_exhausted.remove(gate)
             for node in owned:
                 if node in branch.feedback:
                     self.feedback[node] = branch.feedback[node]
@@ -121,7 +134,8 @@ class RunRecord:
 
     def to_progress(self) -> dict[str, Any]:
         return {"completed": list(self.completed), "gate_verdicts": dict(self.gate_verdicts),
-                "feedback": dict(self.feedback)}
+                "feedback": dict(self.feedback),
+                **({"gate_exhausted": list(self.gate_exhausted)} if self.gate_exhausted else {})}
 
     @classmethod
     def from_progress(cls, record: dict[str, Any]) -> RunRecord:
@@ -129,12 +143,14 @@ class RunRecord:
         completed = record.get("completed")
         verdicts = record.get("gate_verdicts")
         feedback = record.get("feedback")
+        exhausted = record.get("gate_exhausted")
         return cls(
             completed=[str(node) for node in completed] if isinstance(completed, list) else [],
             gate_verdicts={str(key): str(value) for key, value in verdicts.items()}
             if isinstance(verdicts, dict) else {},
             feedback={str(key): str(value) for key, value in feedback.items()}
             if isinstance(feedback, dict) else {},
+            gate_exhausted=[str(gate) for gate in exhausted] if isinstance(exhausted, list) else [],
         )
 
     def write_status(self, workdir: Path, graph: Graph, status: str, nodes: list[str], *,

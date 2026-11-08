@@ -60,6 +60,8 @@ describe('a gate out of reloops', () => {
     expect(spine.isHalted()).toBe(false)
     expect(next.nodes?.map(node => node.id)).toEqual(['end'])
     expect(spine.state().gate_verdicts).toMatchObject({ check: 'proceed' })
+    // Recorded as exhausted, unlike a proceed that passed.
+    expect(spine.state().gate_exhausted).toEqual(['check'])
     // The refused reloop is not spent: the gate used its cap, as on the walker.
     expect(spine.state().iterations).toMatchObject({ check: 1 })
     spine.complete('end')
@@ -69,6 +71,8 @@ describe('a gate out of reloops', () => {
     spine.verdict('check', 'reloop', 'wrong')
     spine.complete('solve')
     spine.verdict('check', 'proceed')
+    // The second item's gate passed: nothing is recorded exhausted.
+    expect(spine.state()).not.toHaveProperty('gate_exhausted')
     spine.complete('end')
     expect(spine.endPass().nodes?.map(node => node.id)).toEqual(['after'])
   })
