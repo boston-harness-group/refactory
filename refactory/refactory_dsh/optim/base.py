@@ -1321,7 +1321,8 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0) -> list[st
             "`rejected` candidate was not shown better on validation; that is all a "
             "rejection says. " + resolution + "A rejected candidate is never kept, and its "
             "change must not be proposed again unchanged. When its train fixed/broken counts "
-            "against its parent were strongly positive, its direction may still be right: "
+            "against its parent (when shown below) were strongly positive, its direction may "
+            "still be right: "
             "you may build on its change or combine it with edits to other steps in the "
             "same failure path."]
 
@@ -1334,6 +1335,10 @@ EDIT_CHANGE_GRADED = 3
 #: Entries in "Your earlier reasoning", and how much of each text it keeps.
 REASONING_ENTRIES = 6
 REASONING_TEXT_CHARS = 600
+#: The full edits of the latest rejected candidate that fixed more train items than
+#: it broke, shown under "Your earlier reasoning" so it can be built on, at most this
+#: many characters.
+REJECTED_EDITS_CHARS = 4000
 
 
 def _by_item(records: Sequence[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -1423,14 +1428,18 @@ def _node_summary(node: Any) -> Any:
     return out
 
 
+#: Joins a diff's lines in a table cell, where a newline would become a space.
+DIFF_LINE_SEPARATOR = " ⏎ "
+
+
 def _text_diff(old: str, new: str) -> str:
-    """The changed lines of a text, unified-diff style without file headers."""
+    """The changed lines of a text, unified-diff style without the two file header
+    lines, joined with ``DIFF_LINE_SEPARATOR`` so line boundaries survive a table."""
     import difflib
 
-    lines = [line for line in difflib.unified_diff(old.splitlines(), new.splitlines(),
-                                                    lineterm="", n=0)
-             if not line.startswith(("---", "+++"))]
-    return "\n".join(lines) or "(no change)"
+    lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                      lineterm="", n=0))[2:]
+    return DIFF_LINE_SEPARATOR.join(lines) or "(no change)"
 
 
 def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
@@ -1550,6 +1559,18 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}"]
+    promising = [entry for entry in entries if entry.get("gate") == "rejected"
+                 and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)
+                 and entry["fixed"] > entry["broken"]]
+    if promising:
+        entry = promising[-1]
+        lines += ["", f"### Full edits of {entry.get('id')}, the latest rejected candidate that "
+                  f"fixed more train items than it broke ({entry['fixed']} fixed / "
+                  f"{entry['broken']} broken)",
+                  f"Shown whole up to {REJECTED_EDITS_CHARS} characters, so it can be built on "
+                  "or combined with edits to other steps; not to be re-proposed unchanged.",
+                  _bounded(describe_edits(entry.get("edit"), REJECTED_EDITS_CHARS),
+                           REJECTED_EDITS_CHARS)]
     return lines
 
 

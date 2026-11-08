@@ -224,3 +224,19 @@ def test_the_history_shows_edits_compactly_not_whole_values():
     unseeded = ProposalContext(history=rows[:1]).render()
     assert f"set_knob a__system_prompt = ({len(first)} chars)" in unseeded
     assert first not in unseeded
+
+
+def test_the_history_diff_keeps_lines_that_look_like_headers_and_separates_lines():
+    """A removed ``---`` line and an added ``++ c`` line are real diff lines, not file
+    headers; and the lines stay apart in the table cell."""
+    from refactory_dsh.optim.base import DIFF_LINE_SEPARATOR, compact_edits
+
+    old = "a\n---\nb"
+    new = "a\nb\n++ c"
+    text = compact_edits([{"op": "set_knob", "name": "k", "value": new}], {"k": old})
+    assert "----" in text and "+++ c" in text
+    assert DIFF_LINE_SEPARATOR + "----" in text and DIFF_LINE_SEPARATOR + "+++ c" in text
+    row = ProposalContext(history=[{"id": "c", "edits": [{"op": "set_knob", "name": "k",
+                                                          "value": new}]}],
+                          seed_knob_values={"k": old}).render()
+    assert DIFF_LINE_SEPARATOR + "----" in row
