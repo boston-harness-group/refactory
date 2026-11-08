@@ -139,6 +139,14 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         return "paused · waiting for a resume or a stop"
     if step == "control":
         return _control_line(record)
+    if step == "proposal_failed":
+        # Shown without --verbose: a round that never reached the model must not
+        # read as one that proposed nothing.
+        detail = " ".join(str(record.get("detail") or "").split())[:200]
+        return (
+            f"epoch {epoch} · proposal failed · {record.get('optimizer', '?')} · "
+            f"{record.get('error', '?')}" + (f": {detail}" if detail else "")
+        )
     if not verbose:
         return None
     fields = {key: value for key, value in record.items() if key not in _ENVELOPE}
