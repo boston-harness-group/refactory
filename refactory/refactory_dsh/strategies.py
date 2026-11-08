@@ -548,11 +548,11 @@ def resolve(name: str, project: Path | None = None) -> type[OuterLoop]:
 def check_options(name: str, options: dict[str, Any] | None, project: Path | None = None) -> None:
     """Refuse strategy options the named strategy does not read.
 
-    A strategy lists the options it reads in ``accepted_options``; the library's
-    strategies read none. A strategy that leaves it unset (``None``) is not checked,
-    since nothing says what it reads.
+    A strategy lists the options it reads in its own ``accepted_options``. One that
+    declares none itself, whatever its base class declares, is not checked, since
+    nothing says what it reads.
     """
-    accepted = getattr(resolve(name, project), "accepted_options", None)
+    accepted = vars(resolve(name, project)).get("accepted_options")
     if accepted is None or not options:
         return
     unknown = sorted(set(options) - set(accepted))

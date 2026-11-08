@@ -389,7 +389,8 @@ class Loop(OuterLoop):
     name = "default"
     _is_loop_infrastructure = True
     #: The strategy options this strategy reads (``strategies.check_options``): the
-    #: default loop and the library's strategies read none.
+    #: default loop reads none. Only a class's own declaration counts, so a subclass
+    #: that declares nothing is not checked.
     accepted_options: tuple[str, ...] | None = ()
 
     def bind_budget(self, budget: Any) -> None:
@@ -835,8 +836,7 @@ class Loop(OuterLoop):
                 seed_cache.check_applies(
                     self.config.seed_results, self._seed_cache, Candidate.from_state(seed_state).id,
                     {part: self._expected_item_ids(seed_state, part)[0]
-                     for part in (self._seed_cache.get("parts") or {})},
-                    train_sample=bool(self.config.train_minibatch))
+                     for part in (self._seed_cache.get("parts") or {})})
             except seed_cache.SeedCacheError as exc:
                 raise LoopError(str(exc)) from exc
         self._check_optimizer_route()
@@ -4466,7 +4466,8 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if previous.get("mode") != args.mode:
                 raise profiles.ProfileError("the resume directory belongs to another mode")
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
-            return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}), previous.get("resolved_profile") or {})
+            return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}),
+                                    previous.get("resolved_profile") or {}, overrides=overrides)
         return profiles.resolve(project, args.mode, name=args.profile,
                                 version=args.profile_version, overrides=overrides)
 

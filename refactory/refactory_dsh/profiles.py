@@ -79,7 +79,10 @@ def _type_problem(key: str, value: Any, hint: Any) -> str:
 
 def _check_types(settings: dict[str, Any]) -> None:
     """Refuse a setting whose value is not of its ``LoopConfig`` field's type, so a
-    string seed or a ``true`` repeat count is refused rather than carried into a run."""
+    string seed or a ``true`` repeat count is refused rather than carried into a run.
+
+    Values are checked, never rewritten: a switch given as 1 stays 1, because the
+    settings digest of a run started that way must not change on resume."""
     import dataclasses
     import typing
 
@@ -92,8 +95,6 @@ def _check_types(settings: dict[str, Any]) -> None:
         problem = _type_problem(field.name, settings[field.name], hints[field.name])
         if problem:
             raise ProfileError(f"{field.name} must be {problem}, not {settings[field.name]!r}")
-        if hints[field.name] is bool:
-            settings[field.name] = bool(settings[field.name])
 
 
 def normalize(settings: dict[str, Any]) -> dict[str, Any]:
@@ -317,7 +318,13 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     from refactory_dsh.nn import edits
     profile = recipe if recipe is not None else load(project, name, version) if name else {"settings": {}, "contract": {}}
     from refactory_dsh.worker_config import FIELDS, resolve as resolve_workers
-    chosen = {**profile["settings"], **(overrides or {})}
+    overrides = dict(overrides or {})
+    if (name and overrides.get("strategy") not in (None, profile["settings"].get("strategy"))
+            and "strategy_options" not in overrides and profile["settings"].get("strategy_options")):
+        # The profile's strategy options belong to the profile's strategy: a launch that
+        # names another strategy starts from none, and the snapshot records the drop.
+        overrides["strategy_options"] = {}
+    chosen = {**profile["settings"], **overrides}
     routing = None
     if recipe is None and validate_settings:
         routing = resolve_workers(project, {key: value for key, value in (overrides or {}).items() if key in FIELDS},
@@ -394,13 +401,17 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
             "evaluation_context": context, "context_hash": digest(context)}
 
 
-def refresh(project: Path, mode_id: str, settings: dict[str, Any], previous: dict[str, Any], *, model_client: Any = None) -> dict[str, Any]:
-    """Recheck source/input identity without relying on a still-existing recipe."""
+def refresh(project: Path, mode_id: str, settings: dict[str, Any], previous: dict[str, Any], *,
+            model_client: Any = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Recheck source/input identity without relying on a still-existing recipe.
+
+    ``overrides`` are the flags given on resume; they join the recorded overrides."""
     recipe = {"settings": {}, "contract": previous.get("contract") or {},
               "version": (previous.get("contract") or {}).get("version", 1)}
     result = resolve(project, mode_id, overrides=settings, recipe=recipe, validate_settings=False, model_client=model_client)
     result["profile"] = previous.get("profile")
-    result["overrides"] = previous.get("overrides")
+    result["overrides"] = ({**(previous.get("overrides") or {}), **overrides}
+                           if overrides else previous.get("overrides"))
     result["worker_configuration"] = previous.get("worker_configuration")
     return result
 

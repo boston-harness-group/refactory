@@ -974,7 +974,7 @@ Versioned search recipes and immutable, resolved run snapshots.
 | function | `list_profiles` | `(project: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `load` | `(project: 'Path', name: 'str', version: 'int \| None' = None) -> 'dict[str, Any]'` |
 | function | `normalize` | `(settings: 'dict[str, Any]') -> 'dict[str, Any]'` |
-| function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None) -> 'dict[str, Any]'` |
+| function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None, overrides: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
 | function | `resolve` | `(project: 'Path', mode_id: 'str', *, name: 'str' = '', version: 'int \| None' = None, overrides: 'dict[str, Any] \| None' = None, validate_settings: 'bool' = True, recipe: 'dict[str, Any] \| None' = None, model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `runtime_identity` | `(settings: 'dict[str, Any]', project: 'Path', *, uses_models: 'bool', model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `save` | `(project: 'Path', name: 'str', spec: 'dict[str, Any]') -> 'dict[str, Any]'` |

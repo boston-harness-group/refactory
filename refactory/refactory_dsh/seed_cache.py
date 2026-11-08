@@ -22,8 +22,9 @@ A cached result is used only when all of these hold:
 
 A mismatched context stops the run instead of quietly evaluating, so a cache
 that was meant to apply never silently doesn't. So does a run whose seed is not
-the cache's candidate, or whose whole part holds other items than the cache
-recorded (``check_applies``). Each cached part is served at most once per run; a
+the cache's candidate, or whose val or test part holds other items than the cache
+recorded (``check_applies``); other train items (a minibatch) are measured for real
+and journaled as ``seed_cache_miss``. Each cached part is served at most once per run; a
 later occasion of the same part is a fresh measurement and runs for real. Cached
 results don't count toward ``max_rollouts``.
 
@@ -110,14 +111,14 @@ def context_diff(ours: dict[str, Any], theirs: dict[str, Any]) -> list[str]:
 
 
 def check_applies(path: str | Path, cache: dict[str, Any], candidate: str,
-                  part_items: dict[str, set[str]], *, train_sample: bool = False) -> None:
+                  part_items: dict[str, set[str]]) -> None:
     """Refuse a cache that can never serve this run: another seed candidate, or a
-    part whose whole item set differs from the one recorded.
+    val or test part whose item set differs from the one recorded.
 
-    ``part_items`` holds each part's ids in this run. ``train_sample`` says the run
-    scores train minibatches, when the cached train items are one such sample: then
-    they need only lie inside this run's train part, and a different sample is
-    measured for real (``Loop._cached_measure`` journals the miss).
+    ``part_items`` holds each part's ids in this run. Train is not checked: the
+    seed's first train evaluation may be a minibatch, so other train items are
+    measured for real and journaled as ``seed_cache_miss`` while val and test are
+    still served.
     """
     differing = []
     if cache.get("candidate") != candidate:
@@ -125,7 +126,7 @@ def check_applies(path: str | Path, cache: dict[str, Any], candidate: str,
     for part, entry in sorted((cache.get("parts") or {}).items()):
         ours = part_items.get(part)
         cached = set(entry.get("items") or ())
-        if not ours or cached == ours or (part == "train" and train_sample and cached < ours):
+        if part == "train" or not ours or cached == ours:
             continue
         differing.append(f"items of {part} ({len(cached)} cached, {len(ours)} in this run, "
                          f"{len(cached ^ ours)} differ)")

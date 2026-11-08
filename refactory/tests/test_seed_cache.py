@@ -110,15 +110,33 @@ def test_search_settings_are_not_part_of_the_context(tmp_path):
         assert loop.population[0].raw_score == 0.25
 
 
-def test_a_different_item_set_stops_the_run(tmp_path):
-    """A part whose items differ from the cached ones is a cache that can never
-    apply: the run stops naming the part, instead of quietly measuring."""
+def test_a_different_val_item_set_stops_the_run(tmp_path):
+    """A val part whose items differ from the cached ones is a cache that can never
+    apply there: the run stops naming the part, instead of quietly measuring."""
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        other = _manifest(tmp_path, {**PARTS, "train": ["alpha", "beta", "gamma"], "val": ["delta"]},
+                          name="other.json")
+        loop = _loop(tmp_path / "reuse", other, seed_results=str(cache))
+        with pytest.raises(LoopError, match=r"items of val \(1 cached, 1 in this run, 2 differ"):
+            loop.init()
+
+
+def test_other_train_items_are_measured_and_val_still_reused(tmp_path):
+    """Train items other than the cached ones (a minibatch against the whole part)
+    are measured and journaled as a miss; val is still served."""
     with _patch_mode(PartsProbe):
         cache = _source_run(tmp_path)
         other = _manifest(tmp_path, {**PARTS, "train": ["alpha", "beta"]}, name="other.json")
         loop = _loop(tmp_path / "reuse", other, seed_results=str(cache))
-        with pytest.raises(LoopError, match=r"items of train \(4 cached, 2 in this run"):
-            loop.init()
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed)
+        Run(_loop=loop).evaluate(seed, part="val")
+        assert loop.rollouts == 2
+        misses = _events(tmp_path / "reuse", "seed_cache_miss")
+        assert [(m["part"], m["reason"]) for m in misses] == [("train", "other items")]
+        assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["val"]
 
 
 def test_another_seed_stops_the_run(tmp_path):
@@ -279,7 +297,7 @@ def test_another_item_set_or_evaluator_is_refused_naming_it(tmp_path, exported, 
         code, root = _main(tmp_path, "C1", "--optimizer", "random", "--repeats", "3",
                            "--seed-results", str(exported), manifest=other)
         assert code == 2
-        assert "items of train" in capsys.readouterr().err
+        assert "items of val" in capsys.readouterr().err
         code, _ = _main(tmp_path, "C2", "--optimizer", "random", "--repeats", "3",
                         "--evaluator", "dsh", "--seed-results", str(exported))
         assert code == 2

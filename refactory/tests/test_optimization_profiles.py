@@ -232,10 +232,67 @@ def test_an_unknown_or_mistyped_setting_is_refused_and_saves_nothing(project, sp
     assert not (project / profiles.PROFILE_ROOT / "bad").exists()
 
 
-def test_switches_given_as_0_or_1_are_recorded_as_booleans():
-    settings = profiles.normalize({"omit_steering": 1, "allow_code_nodes": 0, "val_gate": 0})
-    assert settings["omit_steering"] is True
-    assert settings["allow_code_nodes"] is False and settings["val_gate"] is False
+def test_a_switch_given_as_1_is_checked_but_kept_as_given():
+    """Rewriting 1 to true would change the settings digest of a run started with
+    `--omit-steering 1`, so it could not resume."""
+    settings = profiles.normalize({"omit_steering": 1})
+    assert settings["omit_steering"] == 1 and settings["omit_steering"] is not True
+    with pytest.raises(profiles.ProfileError, match="omit_steering must be true or false"):
+        profiles.normalize({"omit_steering": 2})
+
+
+def test_a_run_written_in_the_old_form_resumes_under_the_same_context_hash(project):
+    """A run started before this change (a switch stored as 1, a config without
+    strategy_options) resumes: its context hash is unchanged."""
+    code, root = _run(project, "old", "--optimizer", "random", "--epochs", "1", "--batch-size", "1",
+                      "--preset", "knob_only", "--omit-steering", "1")
+    assert code == 0
+    snapshot = _read(root, profiles.SNAPSHOT)
+    before = snapshot["context_hash"]
+    # Stored as given, as a run started before this change stored it.
+    assert snapshot["settings"]["omit_steering"] == 1 and snapshot["settings"]["omit_steering"] is not True
+    saved = _read(root, "config.json")
+    assert saved["omit_steering"] == 1 and saved["omit_steering"] is not True
+    saved.pop("strategy_options")
+    (root / "config.json").write_text(json.dumps(saved))
+    code = loop_module.main([MODE, "--project", str(project), "--runs-root", str(root),
+                             "--resume", "--epochs", "2"])
+    assert code == 0
+    journal = [json.loads(line) for line in (root / "journal.jsonl").read_text().splitlines()]
+    resumed = [r["resolved_profile"] for r in journal if r["event"] == "resume_configuration"]
+    assert resumed and resumed[-1]["context_hash"] == before
+    # The flag given on resume joins the recorded overrides.
+    assert resumed[-1]["overrides"] == {"epochs": 2}
+
+
+def test_another_strategy_drops_the_profiles_strategy_options(project, option_probe):
+    profiles.save(project, "options", {"settings": {
+        "optimizer": "random", "strategy": "option_probe", "epochs": 1, "batch_size": 1,
+        "edit_preset": "knob_only", "strategy_options": {"depth": 2}}})
+    code, root = _run(project, "run", "--profile", "options", "--strategy", "default")
+    assert code == 0
+    snapshot = _read(root, profiles.SNAPSHOT)
+    assert snapshot["settings"]["strategy"] == "default"
+    assert snapshot["settings"]["strategy_options"] == {}
+    assert snapshot["overrides"] == {"strategy": "default", "strategy_options": {}}
+
+
+def test_a_strategy_that_declares_no_options_is_not_checked(option_probe):
+    """Only a strategy's own accepted_options counts: a Loop subclass that declares
+    none is unchecked, not refused everything its base refuses."""
+
+    class Undeclared(Loop):
+        name = "undeclared_probe"
+
+    strategies.register(Undeclared.name, Undeclared)
+    try:
+        strategies.check_options("undeclared_probe", {"anything": 1})
+        with pytest.raises(ValueError, match="no option bogus"):
+            strategies.check_options("default", {"bogus": 1})
+        with pytest.raises(ValueError, match="no option bogus"):
+            strategies.check_options("option_probe", {"bogus": 1})
+    finally:
+        strategies.STRATEGIES.pop(Undeclared.name, None)
 
 
 def test_a_misspelled_flag_value_or_strategy_option_is_refused_at_launch(project, capsys):
