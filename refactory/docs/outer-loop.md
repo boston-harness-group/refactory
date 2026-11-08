@@ -543,41 +543,63 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
   `<id>__code` knob, the way a new agent gets `<id>__system_prompt`. So one edit adds the
   node and its code, and a later `set_knob` rewrites the code alone.
 - **Code gate** (`"evaluator": "refactory_dsh.snippet:gate"`, with `code`): `main(inp)`
-  returns `{"verdict": <one of the gate's out-edge conditions>, "reason": <text>}`.
+  returns `{"verdict": <one of the gate's out-edge conditions, or halt>, "reason": <text>}`.
 - **Verdict gate** (`"evaluator": "refactory_dsh.snippet:verdict"`, no code): the verdict
-  is the first word of the first line of the gate's first `required_reads` file, or else
-  of its first `inputs` fact. That is whatever an agent or a code op upstream wrote there.
-  It is matched against the out-edge conditions in any case, and the rest of the text is
-  the reason. This is how an agent decides a gate: a reviewer agent writes `proceed` or
-  `reloop`, followed by why.
+  is the first word of the gate's first `required_reads` file, or else of its first
+  `inputs` fact. That is whatever an agent or a code op upstream wrote there. Leading
+  markdown or quotes (`**`, `#`, `>`, `-`, `"`, `:`) are skipped. The word is matched
+  against the out-edge conditions in any case, and the rest of the text is the reason.
+  Only the first word counts: "Do not proceed" names no verdict, and neither does "I would
+  not proceed; reloop". A first word that is not an answer fails the node with an error
+  naming the answers; it never falls back to a default. This is how an agent decides a
+  gate: a reviewer agent writes `proceed` or `reloop`, followed by why.
+- **Answers a gate may give:** each out-edge condition (one word each), and `halt`. The
+  router (`route_verdict`, the spine's `Spine.verdict`) takes `halt` with no halt edge as
+  the end of the whole run, so a code or verdict gate may answer it too. `proceed` with no
+  proceed edge is not offered: the router would send it down an unconditional edge, and a
+  gate has none (V5).
 - **`parallel`** (a macro with fields `target` and `branches`): 2-8 new agent or op nodes
   run at once after `target`, between a fork and a join. The join leads on to target's old
   successor. Branches must write distinct files and set distinct facts; otherwise the edit
-  is refused before anything runs, and V16 holds the result. Any node after the join may
-  read every branch's outputs. Each branch gets its own knobs, as any new node does.
+  is refused before anything runs, and V16 holds the result. The successor's declarations
+  do not change, so nothing reads the branches' outputs until an edit says so: insert a
+  node after the join that reads their files or facts, or use a branch's fact as
+  `{{name}}` in a later step's prompt knob. Each branch gets its own knobs, as any new
+  node does. The fork and join ids (`<target>_fork`, `<target>_join`) avoid every node
+  and branch id.
 
 A reloop delivers the gate's reason to the step it sends control back to, as feedback.
 This is the existing `with_feedback` path, on both runtimes. The gate's `max_iterations`
-bounds how often a reloop can happen (V10). Each of the three callables is an ordinary
+bounds how often a reloop can happen (V10). A gate asked to reloop once more than that
+halts the whole run instead, on both runtimes, so no later item runs. Each of the three callables is an ordinary
 node callable, and both runtimes invoke it the same way: the spine through
 `python -m refactory_dsh.run`, the walker in its forkserver child. The node's declaration
 (code, inputs, labels) is built from the graph in one place (`lowering.snippet_spec`), so
 the two runtimes cannot disagree.
 
-**The sandbox.** A code node's code runs under these limits:
+**The sandbox.** The sandbox is the security boundary. A code node's code runs under
+these limits:
 
-- `unshare -Urnm`: its own user, network and mount namespaces, so no network.
-- An empty tmpfs over `/home`, `/root`, `/tmp`, `/var/tmp`, `/dev/shm`, `/run/user`,
-  `/mnt`, `/opt`, and the run and project directories wherever they are.
+- `unshare -Urnmp --fork --kill-child --mount-proc`: its own user, network, mount and PID
+  namespaces. There is no network, and a fresh `/proc` shows only the sandbox's own
+  processes, so no host command line or environment is readable.
+- `no_new_privs`, set before anything else runs.
+- An empty tmpfs over `/home`, `/root`, `/tmp`, `/var/tmp`, `/dev/shm`, `/run` (and
+  `/var/run`), `/var/lib`, `/mnt`, `/opt`, `/proc/sys`, and the run and project
+  directories wherever they are. So no service socket and no person's or run's file is
+  reachable.
 - `/usr/bin/python3 -I -S`: the standard library only.
 - JSON on stdin and stdout.
 - An environment of `PATH`, `HOME=/tmp` and the language settings only: no knob, no node
   manifest, no credential.
-- 512 MB of memory, 10 CPU seconds, 1 MB files and 10 s of wall time.
+- Limits of 512 MB of memory, 10 CPU seconds, 1 MB files and 32 processes. A limit that
+  cannot be set fails the node.
+- 10 s of wall time. After that the whole process group is killed, and the PID namespace
+  with it, so nothing the snippet started outlives it.
 
 The snippet never gets the context, the run directory, other facts or the knobs. The
 wrapper writes its outputs through the context, so declared writes and facts are still
-enforced.
+enforced. The host's `/etc` and `/usr` stay readable (the interpreter needs them).
 
 The sandbox fails closed. It is unavailable when `unshare` or the system Python is
 missing, or when the probe snippet does not run (`snippet.available()`). In that case a
@@ -586,16 +608,25 @@ refused `E-code-nodes`. A failed code op is retried once, as every op is: always
 spine, and on the walker when recovery is on. A snippet is pure, so the retry changes
 nothing but time.
 
-**Checks before anything runs.** V18 checks the code statically, without running it. The
+**Checks before anything runs.** V18 is defence in depth; the sandbox is the boundary.
+It checks the code statically, without running it. The
 code must parse, define `main` and be at most 4096 bytes. It may import only `re`,
 `json`, `math`, `collections`, `itertools`, `statistics`, `fractions`, `unicodedata` and
 `string`. It may not use `open`, `exec`, `eval`, `compile`, `__import__`,
 `getattr`/`setattr`/`delattr`, `globals`/`locals`/`vars`, or any dunder name or dunder
-attribute. `inputs` join V15 (each one is produced upstream on every path) and V17 (they
+attribute. Attribute names are allowlisted: the public methods of the builtin value types
+and of what the allowed modules hand out, plus those modules' public names. String
+formatting is refused (`format`, `format_map`, `string.Formatter`, `string.Template`),
+because it reaches attributes by name where the dunder ban cannot see it. `inputs` join V15 (each one is produced upstream on every path) and V17 (they
 count as consumed, so grader-derived inputs are refused). An edit whose code holds a value
 only the grader may see is refused `E-secret`, without echoing the value. Such a value is
-a train item's grader-only field, such as its answer (`task.grader_secrets`). This scan
-covers code only; scanning prompts is a follow-up.
+a train item's grader-only field, such as its answer (`task.grader_secrets`), and the
+comparison ignores case and whitespace. The scan is best effort: it catches a value
+pasted into code, not one rebuilt from pieces. It skips values under 8 characters, such
+as a single-letter choice label, because that would refuse ordinary code. The control
+that holds is that grader fields never reach a code node's inputs: V17 refuses
+grader-derived inputs, and items reach nodes without their grader fields. The scan covers
+code only; scanning prompts is a follow-up.
 
 **Turning it off.** Code nodes are on by default wherever the run permits structural
 edits. `--allow-code-nodes 0` (`LoopConfig.allow_code_nodes`) refuses every new code node

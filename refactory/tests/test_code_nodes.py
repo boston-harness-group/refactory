@@ -51,15 +51,17 @@ def _accepted(edits, **kwargs):
 
 class _Model(sf.ScriptedModel):
     """The fuzz harness's scripted model, with per-node answer sequences: a node named in
-    ``turns`` answers its list in order (the last one again once it runs out)."""
+    ``turns`` answers its list in order (the last one again once it runs out, or, with
+    ``cycle``, starting over -- as the spine drain answers a list)."""
 
-    def __init__(self, answers, node="", log=None, turns=None, counts=None):
+    def __init__(self, answers, node="", log=None, turns=None, counts=None, cycle=False):
         super().__init__(answers, node, log)
         self.turns = turns if turns is not None else {}
         self.counts = counts if counts is not None else {}
+        self.cycle = cycle
 
     def for_node(self, node_id, role=""):
-        return _Model(self.answers, node_id, self.log, self.turns, self.counts)
+        return _Model(self.answers, node_id, self.log, self.turns, self.counts, self.cycle)
 
     def complete(self, prompt, *, system="", **_):
         self.log.append((self.node, prompt, system))
@@ -67,12 +69,12 @@ class _Model(sf.ScriptedModel):
             index = self.counts.get(self.node, 0)
             self.counts[self.node] = index + 1
             seq = self.turns[self.node]
-            return seq[min(index, len(seq) - 1)]
+            return seq[index % len(seq)] if self.cycle else seq[min(index, len(seq) - 1)]
         return self.answers.get(self.node, "<answer>B</answer>")
 
 
-def _walk(state, tmp_path, *, turns=None):
-    model = _Model(sf._answers(sf._graph_of(state)), turns=turns or {})
+def _walk(state, tmp_path, *, turns=None, cycle=False):
+    model = _Model(sf._answers(sf._graph_of(state)), turns=turns or {}, cycle=cycle)
     result = sf.run_walker(sf.seeds()["livemath_skill_graph"], state, tmp_path / "walker", model)
     return result, model
 
@@ -348,12 +350,15 @@ def test_walker_agent_verdict_gate_relooops_with_the_critics_reason(tmp_path):
 
 @needs_sandbox
 def test_walker_a_critic_that_never_accepts_is_bounded_by_max_iterations(tmp_path):
+    """With max_iterations 1 the gate sends ``decide`` back once; asked to reloop again,
+    it halts the whole run (no later item runs). Mutation-checked: with max_iterations 2
+    this test fails (three decides)."""
     state = _accepted(CRITIC_LOOP)
+    assert sf._graph_of(state).nodes["check"].max_iterations == 1
     result, model = _walk(state, tmp_path, turns={"critic": ["reloop: again"]})
-    decides = _prompts(model, "decide")
-    critics = _prompts(model, "critic")
-    # max_iterations 1: each item is decided at most twice, then the gate halts that pass.
-    assert len(decides) == len(critics) and len(decides) % 2 == 0, (len(decides), result.error)
+    assert len(_prompts(model, "decide")) == 2 and len(_prompts(model, "critic")) == 2
+    assert result.halted and not result.exit_ok
+    assert "gate 'check' halted the run" in str(result.error)
 
 
 @needs_sandbox
@@ -418,8 +423,10 @@ def test_spine_runner_prints_a_verdict_gates_reason_then_its_label(tmp_path, mon
     lines = capsys.readouterr().out.strip().splitlines()
     assert lines[-1] == "reloop"
     assert "\n".join(lines[:-1]) == "show the elimination step\nand check B"
-    (tmp_path / "critic.txt").write_text("I am not sure")
-    assert run_mod.main([snippet.VERDICT]) == 1
+    for text in ("I am not sure", "Do not proceed", "I would not proceed; reloop"):
+        (tmp_path / "critic.txt").write_text(text)
+        assert run_mod.main([snippet.VERDICT]) == 1, text
+        assert "is none of its answers" in capsys.readouterr().err
 
 
 @needs_sandbox
@@ -439,6 +446,200 @@ def test_spine_runs_each_composition_as_the_walker_does(name, edits, monkeypatch
     assert _spine_agrees(state) == []
 
 
+# ── review fixes: verdicts, the switch, the sandbox ───────────────────────
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Do not proceed", None),
+    ("I would not proceed; reloop", None),
+    ("not sure. reloop", None),
+    ("**RELOOP** - show the step\nmore", ("reloop", "show the step\nmore")),
+    ("# Proceed: fine", ("proceed", "fine")),
+    ('"reloop" because B is wrong', ("reloop", "because B is wrong")),
+    ("> - proceed", ("proceed", "")),
+    ("halt: give up", ("halt", "give up")),
+])
+def test_a_verdict_is_the_first_word_only(text, expected):
+    assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
+
+
+@needs_sandbox
+def test_a_code_gate_may_halt_as_the_router_does(tmp_path):
+    halting = [{**CODE_GATE_LOOP[0], "gate": {**CODE_GATE_LOOP[0]["gate"],
+                "code": "def main(inp):\n    return {'verdict': 'HALT', 'reason': 'stop here'}\n"}}]
+    result, _model = _walk(_accepted(halting), tmp_path)
+    assert result.halted and "gate 'tagged' halted the run" in str(result.error)
+
+
+def test_the_switch_compares_code_nodes_by_content_not_id():
+    """With code nodes off, a code node under a seed node's id (remove_node, add_node) and
+    a rewritten seed code node are refused; an unchanged seed code node is not."""
+    refused = _propose([{"op": "bypass", "target": "notes_prompts"},
+                        {"op": "add_node", "position": {"after": "compare"},
+                         "node": {"id": "notes_prompts", "kind": "op", "call": snippet.RUN,
+                                  "reads": ["compare_notes.txt"],
+                                  "produces": ["precision_prompt", "hypotheses_prompt"],
+                                  "code": "def main(inp):\n    return {}\n"}}],
+                       allow_code_nodes=False)
+    assert isinstance(refused, list) and refused[0].startswith("E-code-nodes"), refused
+    seeded = _applier()
+    seeded.seed_state = _accepted([DIGEST])  # an author's seed with a code node
+    parent = Candidate.from_state(seeded.seed_state)
+    seeded.optimizer.allow_code_nodes = False
+    rewrite = seeded.attempt(parent, {"op": "set_knob", "name": "digest__code",
+                                      "value": "def main(inp):\n    return {'facts': {}}\n"},
+                             {parent.id})
+    assert isinstance(rewrite, list) and rewrite[0].startswith("E-code-nodes"), rewrite
+    other = seeded.attempt(parent, {"op": "set_knob", "name": "compare__system_prompt",
+                                    "value": "You compare."}, {parent.id})
+    assert not isinstance(other, list), other
+
+
+def test_parallel_fork_and_join_ids_avoid_the_branch_ids():
+    branches = [{**PARALLEL["branches"][0], "id": "compare_fork", "writes": ["f.txt"]},
+                {**PARALLEL["branches"][1], "id": "compare_join"}]
+    state = _accepted([{**PARALLEL, "branches": branches}])
+    graph = sf._graph_of(state)
+    fork = next(n for n in graph.nodes.values() if n.kind == "fork" and "compare_fork" in n.targets)
+    join = next(n for n in graph.nodes.values() if n.kind == "join" and "compare_fork" in n.sources)
+    assert {fork.id, join.id}.isdisjoint({"compare_fork", "compare_join"})
+
+
+def test_e_secret_is_case_and_whitespace_blind():
+    secret = "The Hidden  Correct choice"
+    code = "def main(inp):\n    return {'facts': {'compare_digest': 'the hidden   correct CHOICE'}}\n"
+    assert snippet.secret_in("the hidden correct\n  CHOICE", {secret})
+    refused = _propose([{**DIGEST, "node": {**DIGEST["node"], "code": code}}], secrets={secret})
+    assert refused and refused[0].startswith("E-secret"), refused
+
+
+def test_v17_refuses_a_verdict_gate_whose_source_is_grader_derived():
+    from refactory_dsh.nn import edits as edits_mod
+
+    applier = _applier()
+    edit = {"op": "insert_before", "target": "finish",
+            "node": {"id": "peek_gate", "kind": "gate", "evaluator": snippet.VERDICT,
+                     "inputs": ["item_scores"]}}
+    state = edits_mod.apply(edit, applier.seed_state)
+    issues = validate_state(state, grader_side=(*applier.protected, *applier.graders),
+                            graders=applier.graders)
+    assert any(i.code == "V17" and i.node == "peek_gate" for i in issues), issues
+
+
+@pytest.mark.parametrize("code", [
+    "def main(inp):\n    return '{0.__class__}'.format(inp)\n",
+    "def main(inp):\n    return '{x}'.format_map(inp)\n",
+    "import string\ndef main(inp):\n    return string.Formatter().format('{0}', 1)\n",
+    "def main(inp):\n    return inp.gi_frame\n",
+])
+def test_v18_allows_only_known_attributes(code):
+    assert any("attribute" in p for p in snippet.static_issues(code)), snippet.static_issues(code)
+
+
+def test_v18_lets_ordinary_code_through():
+    code = ("import re, json, collections\n"
+            "def main(inp):\n"
+            "    text = inp['files'].get('a.txt', '').strip().lower()\n"
+            "    words = collections.Counter(re.findall(r'\\w+', text)).most_common(3)\n"
+            "    return {'facts': {'top': json.dumps(words)}}\n")
+    assert snippet.static_issues(code) == []
+
+
+_PROBE = ("import os, json, resource\n"
+          "def main(inp):\n"
+          "    pids = sorted(int(p) for p in os.listdir('/proc') if p.isdigit())\n"
+          "    status = open('/proc/self/status').read()\n"
+          "    return {'pids': pids, 'run': os.listdir('/run'), 'varlib': os.listdir('/var/lib'),\n"
+          "            'sys': os.listdir('/proc/sys'),\n"
+          "            'nnp': [l for l in status.splitlines() if l.startswith('NoNewPrivs')],\n"
+          "            'nproc': resource.getrlimit(resource.RLIMIT_NPROC)}\n")
+
+
+@needs_sandbox
+def test_the_sandbox_shows_only_its_own_processes_and_no_host_sockets():
+    """A fresh /proc in a PID namespace (only the sandbox's own pids; no host cmdline or
+    environ to read), /run, /var/lib and /proc/sys empty, no_new_privs, a process cap."""
+    seen = snippet._sandboxed(_PROBE, {}, timeout_s=10, extra=())
+    assert seen["pids"] and max(seen["pids"]) < 10, seen["pids"]
+    assert seen["run"] == [] and seen["varlib"] == [] and seen["sys"] == []
+    assert seen["nnp"] == ["NoNewPrivs:\t1"]
+    assert seen["nproc"] == [snippet.NPROC, snippet.NPROC]
+
+
+def _host_processes(marker: str) -> list[str]:
+    import subprocess
+
+    found = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    return found.stdout.split()
+
+
+@needs_sandbox
+def test_the_sandbox_leaves_no_process_behind_after_a_timeout():
+    """A snippet that starts a sleeping child and then spins is killed at its wall clock,
+    and its child goes with it (PID namespace, process group)."""
+    marker = "3171.5"
+    code = ("import subprocess\n"
+            "def main(inp):\n"
+            f"    subprocess.Popen(['/bin/sleep', '{marker}'], start_new_session=True)\n"
+            "    while True:\n        pass\n")
+    with pytest.raises(snippet.SnippetError, match="over its 2 s limit"):
+        snippet._sandboxed(code, {}, timeout_s=2, extra=())
+    assert _host_processes(f"sleep {marker}") == []
+
+
+@needs_sandbox
+def test_the_sandbox_caps_its_process_count_and_cleans_up():
+    marker = "3172.5"
+    code = ("import subprocess\n"
+            "def main(inp):\n"
+            "    started = 0\n"
+            "    try:\n"
+            "        for _ in range(100):\n"
+            f"            subprocess.Popen(['/bin/sleep', '{marker}'])\n"
+            "            started += 1\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    return started\n")
+    started = snippet._sandboxed(code, {}, timeout_s=10, extra=())
+    assert 0 < started < snippet.NPROC
+    assert _host_processes(f"sleep {marker}") == []
+
+
+@needs_sandbox
+@needs_spine
+def test_spine_relooops_like_the_walker(monkeypatch, tmp_path):
+    """Spine and walker: the critic answers reloop, then proceed, for every item. Both
+    runtimes decide each item twice, hand the critic's reason to the second decide, and
+    end with the same item scores."""
+    from test_livemath_blocks import _spine
+
+    turns = {"critic": ["reloop: show the elimination step", "proceed: fine"]}
+    state = _accepted(CRITIC_LOOP)
+    walked, model = _walk(state, tmp_path, turns=turns, cycle=True)
+    assert walked.exit_ok, walked.error
+    walker_decides = _prompts(model, "decide")
+    record = tmp_path / "drain.jsonl"
+    monkeypatch.setenv("DRAIN_RECORD", str(record))
+    graph = sf._graph_of(state)
+    answers = {**sf._answers(graph), **turns}
+    with sf.livemath_fixture():
+        rc = _spine(graph, tmp_path / "spine", tmp_path, agent_responses=answers, mode_state=state)
+    assert rc == 0
+    sent = [json.loads(line) for line in record.read_text().splitlines()]
+    spine_decides = [entry for entry in sent if entry.get("node") == "decide"]
+    items = len(walked.facts["item_scores"])
+    assert len(walker_decides) == len(spine_decides) == 2 * items
+    # The walker hands the reason over in the redone step's prompt; the spine holds it as
+    # that step's feedback (what its worker is handed), with the gate's count at 1.
+    assert all("show the elimination step" not in p for p in walker_decides[0::2])
+    assert all("show the elimination step" in p for p in walker_decides[1::2])
+    assert all("feedback" not in e and not e.get("iterations") for e in spine_decides[0::2])
+    assert all(e.get("feedback") == "show the elimination step" and e["iterations"] == {"check": 1}
+               for e in spine_decides[1::2]), spine_decides[:2]
+    spine_facts = json.loads((tmp_path / "spine" / "facts.json").read_text())
+    assert sf._compared_facts(graph, walked.facts) == sf._compared_facts(graph, spine_facts)
+
+
 # ── the request ───────────────────────────────────────────────────────────
 
 
@@ -455,6 +656,8 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
                                         protected=applier.protected, code_nodes=False))
     for text in (on, off):
         assert snippet.VERDICT in text and "parallel" in text and "max_iterations" in text
+        assert "halts the whole run" in text and "single-word condition" in text
+        assert "insert a node after the join" in text
         assert '"target": "compare"' in text  # an example built from this graph's ids
     assert snippet.RUN in on and snippet.RUN not in off and snippet.GATE not in off
     assert composition_section([{"op": "set_knob", "kind": "knob", "fields": []}], nodes, edges) == []

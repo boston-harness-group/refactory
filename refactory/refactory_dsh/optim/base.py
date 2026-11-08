@@ -187,18 +187,42 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
     return reasons
 
 
+def _code_signatures(state: dict[str, Any]) -> dict[str, tuple[str, str, str]]:
+    """Each code node of a state (`refactory_dsh.snippet`) by id: its kind, the callable
+    it runs and the code it runs (its bound knob's value, as both runtimes read it)."""
+    from refactory_dsh import snippet
+    from refactory_dsh.nn.graph import Graph
+
+    try:
+        graph = Graph.from_state(state.get("graph") or {})
+    except Exception:  # noqa: BLE001 - an unreadable graph is the validator's to report
+        return {}
+    values = {name: (entry or {}).get("value") for name, entry in (state.get("knobs") or {}).items()}
+    out = {}
+    for node_id, node in graph.nodes.items():
+        if snippet.is_code_node(node):
+            try:
+                code = str(node.bound("code", values) or "")
+            except Exception:  # noqa: BLE001 - a bad binding is V14's to report
+                code = node.code
+            out[node_id] = (node.kind, node.call or node.evaluator, code)
+    return out
+
+
 def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, Any],
                         allowed: bool) -> list[str]:
-    """``E-code-nodes`` for each code node the search added (`refactory_dsh.snippet`)
+    """``E-code-nodes`` for each code node of the candidate (`refactory_dsh.snippet`) that
+    the seed does not have as the same code node -- same id, kind, callable and code --
     when the run does not allow code nodes (``LoopConfig.allow_code_nodes``) or this
-    machine cannot sandbox them (`snippet.available`). A seed's own code nodes are the
+    machine cannot sandbox them (`snippet.available`). Compared by content, not by id: a
+    proposal that removes a node and adds a code node under its id, or rewrites a seed
+    code node's code, is a new code node. The seed's own code nodes, unchanged, are the
     author's and are not held to it."""
     from refactory_dsh import snippet
 
-    seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
-    added = sorted(node_id for node_id, node in
-                   ((candidate_state.get("graph") or {}).get("nodes") or {}).items()
-                   if node_id not in seed_nodes and snippet.is_code_node(node))
+    seed = _code_signatures(seed_state)
+    added = sorted(node_id for node_id, signature in _code_signatures(candidate_state).items()
+                   if seed.get(node_id) != signature)
     if not added:
         return []
     if not allowed:
@@ -208,7 +232,8 @@ def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, A
         if ok:
             return []
         why = f"this machine cannot sandbox code nodes ({reason})"
-    return [f"E-code-nodes: new code node {node_id!r} is refused: {why}" for node_id in added]
+    return [f"E-code-nodes: code node {node_id!r} is new or changed and is refused: {why}"
+            for node_id in added]
 
 
 def _secret_refusals(candidate_state: dict[str, Any], secrets: Any) -> list[str]:
@@ -871,26 +896,34 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         ]
     lines += [
         "- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. "
+        "Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). "
         f"Any declared upstream output can be the verdict: with `\"evaluator\": "
-        f"\"{snippet.VERDICT}\"` the gate reads the first word of the first line of its "
-        "first `required_reads` file (or, with none, of its first `inputs` fact) -- whatever an "
-        "agent or a code op upstream wrote there -- and the rest of the text is the reason.",
+        f"\"{snippet.VERDICT}\"` the gate reads the first word of its first `required_reads` "
+        "file (or, with none, of its first `inputs` fact) -- whatever an agent or a code op "
+        "upstream wrote there; leading markdown or quotes are skipped -- and the rest of the "
+        "text is the reason. That first word must be one of the conditions (any case) or "
+        "`halt`, which ends the whole run; anything else fails the run, so tell the writer "
+        "to start with the word.",
     ]
     if code_nodes:
         lines.append(
             f"  With `\"evaluator\": \"{snippet.GATE}\"` and `code`, `main(inp)` returns "
-            "`{\"verdict\": <condition>, \"reason\": <text>}`.")
+            "`{\"verdict\": <condition or halt>, \"reason\": <text>}`.")
     lines += [
         "- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes "
         "one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old "
         "successor on `proceed`); a reloop hands the gate's reason to the step it goes back "
-        "to as feedback, and the gate's `max_iterations` bounds how often it may.",
+        "to as feedback, and the gate's `max_iterations` bounds how often it may. A gate that "
+        "would reloop once more than that halts the whole run instead (no later item runs), "
+        "so a loop's verdict should be able to settle within its bound.",
     ]
     if "parallel" in ops:
         lines.append(
             "- **fork**: the `parallel` operation runs 2-8 new steps at once between a fork "
-            "and a join after a step; branches write distinct files and facts, and any node "
-            "after the join may read them all.")
+            "and a join after a step; branches write distinct files and facts. Nothing reads "
+            "them until you say so: insert a node after the join that reads the branches' "
+            "files or facts, or use a branch's fact as `{{name}}` in a later step's prompt "
+            "knob.")
     anchor = _composition_anchor(node_states, edges, protected)
     if anchor is None or not ({"loop", "insert_before", "insert_after"} & ops):
         return lines + [""]

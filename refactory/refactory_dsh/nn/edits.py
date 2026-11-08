@@ -1171,10 +1171,21 @@ PARALLEL_BRANCH_KINDS = ("agent", "op")
 MAX_PARALLEL_BRANCHES = 8
 
 
-def _parallel_ids(graph: Graph, target: str) -> tuple[str, str]:
-    fork = _fresh_id(graph, f"{target}_fork")
-    join = _fresh_id(graph, f"{target}_join")
-    return fork, (join if join != fork else _fresh_id(graph, f"{target}_join_"))
+def _parallel_ids(graph: Graph, target: str, branch_ids: Sequence[str]) -> tuple[str, str]:
+    """Fresh ids for the fork and the join: used by no node and no branch."""
+    taken = set(graph.nodes) | set(branch_ids)
+
+    def fresh(base: str) -> str:
+        if base not in taken:
+            return base
+        for n in range(2, 1000):
+            if f"{base}{n}" not in taken:
+                return f"{base}{n}"
+        raise EditError(f"cannot find a free id based on {base!r}")
+
+    fork = fresh(f"{target}_fork")
+    taken.add(fork)
+    return fork, fresh(f"{target}_join")
 
 
 def _pre_parallel(edit: dict, state: State) -> str | None:
@@ -1225,7 +1236,7 @@ def _expand_parallel(edit: dict, state: State) -> list[dict]:
     target = str(edit["target"])
     branches = [dict(branch) for branch in edit["branches"]]
     ids = [str(branch["id"]) for branch in branches]
-    fork, join = _parallel_ids(graph, target)
+    fork, join = _parallel_ids(graph, target, ids)
     steps: list[dict] = [
         {"op": "add_node", "node": {"id": join, "kind": "join", "sources": ids},
          "position": {"after": target}},
@@ -1270,8 +1281,10 @@ _macro("loop", "Wrap a step in a gate that can send control back to it, so the s
        ("target", "gate"), _pre_loop, _expand_loop)
 _macro("parallel", "Run 2-8 new steps at once after an existing step: a fork after "
        "'target', each node of 'branches' (agent or op, distinct writes and facts) on its "
-       "own branch, then a join that leads on to target's old successor, which (or any later "
-       "node) may read every branch's outputs.",
+       "own branch, then a join that leads on to target's old successor. The successor's "
+       "declarations do not change: to use the branches' outputs, insert a node after the "
+       "join that reads their files or facts (or read a branch's fact as {{name}} in a "
+       "later node's prompt knob).",
        ("target", "branches"), _pre_parallel, _expand_parallel)
 
 

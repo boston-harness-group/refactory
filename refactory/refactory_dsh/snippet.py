@@ -23,15 +23,20 @@ The snippet never sees the context, the run directory, any other fact, the knobs
 the environment. A trusted wrapper (this module) writes its outputs through the
 context, so the declared writes and facts are still enforced.
 
-The snippet runs in :func:`execute`: a user, network and mount namespace
-(``unshare -Urnm``), empty tmpfs over every place a run or a person keeps files,
-the system Python in isolated mode with no site packages, JSON on stdin and stdout,
-resource limits and a wall clock. Nothing falls back to running unsandboxed: where
-the sandbox is not available (:func:`available`) a code node fails, and the request
-does not offer code nodes.
+The snippet runs in :func:`execute`, and the sandbox is the security boundary: user,
+network, mount and PID namespaces (``unshare -Urnmp --fork --kill-child
+--mount-proc``) under ``no_new_privs``; a fresh ``/proc`` showing only the sandbox's
+own processes, with ``/proc/sys`` hidden; empty tmpfs over every place a run, a
+person or a service keeps files or sockets (``/home``, ``/tmp``, ``/run``,
+``/var/lib`` ...); the system Python in isolated mode with no site packages; JSON on
+stdin and stdout; CPU, memory, file-size and process-count limits that fail closed;
+a wall clock, after which the whole process group is killed (and the PID namespace
+with it). Nothing falls back to running unsandboxed: where the sandbox is not
+available (:func:`available`) a code node fails, and the request does not offer code
+nodes.
 
-What the static check refuses (rule V18) is in :func:`static_issues`; it never
-executes the code.
+The static check (rule V18, :func:`static_issues`) is defence in depth: it never
+executes the code, and it refuses what pure computation on ``inp`` never needs.
 """
 
 from __future__ import annotations
@@ -59,6 +64,11 @@ MAX_CODE_BYTES = 4096
 #: The modules a snippet may import: pure, standard-library text and number tools.
 ALLOWED_IMPORTS = ("re", "json", "math", "collections", "itertools", "statistics",
                    "fractions", "unicodedata", "string")
+#: Attribute names a snippet may never use even where they exist: string formatting
+#: reaches attributes by name (``"{0.__class__}".format(x)``), which the dunder ban
+#: cannot see.
+DENIED_ATTRIBUTES = ("format", "format_map", "Formatter", "Template", "vformat",
+                     "get_field", "convert_field")
 #: The allowlist as every text that states it writes it (the rules, the request).
 ALLOWED_IMPORTS_TEXT = ", ".join(ALLOWED_IMPORTS)
 #: Names a snippet may not use at all: every way out of pure computation on ``inp``.
@@ -68,10 +78,11 @@ FORBIDDEN_NAMES = ("open", "__import__", "exec", "eval", "compile", "getattr", "
 
 #: The wall clock of one snippet, in seconds (well under any node's command timeout).
 WALL_S = 10
-#: Its CPU seconds, heap/address space and largest file.
+#: Its CPU seconds, heap/address space, largest file and most processes.
 CPU_S = 10
 MEMORY_MB = 512
 FILE_MB = 1
+NPROC = 32
 #: The most output a snippet may return, in bytes of JSON.
 MAX_OUTPUT_BYTES = 1_000_000
 
@@ -81,17 +92,23 @@ PYTHON = "/usr/bin/python3"
 
 #: Directories hidden behind an empty tmpfs: where people, runs and temporary files
 #: live. The run directory and the project are added when they are elsewhere.
-HIDDEN_ROOTS = ("/home", "/root", "/tmp", "/var/tmp", "/dev/shm", "/run/user", "/mnt",
-                "/media", "/srv", "/opt", "/workspace", "/new_data", "/data")
+HIDDEN_ROOTS = ("/home", "/root", "/tmp", "/var/tmp", "/dev/shm", "/run", "/var/run",
+                "/var/lib", "/mnt", "/media", "/srv", "/opt", "/workspace", "/new_data",
+                "/data", "/proc/sys")
 
-#: The exit code the sandbox's shell uses when it could not hide a directory.
+#: The exit codes the sandbox's shell uses when it could not hide a directory, and
+#: when it could not cap the process count.
 _MOUNT_FAILED = 97
+_NPROC_FAILED = 96
 
-#: The shell that sets the sandbox up, inside the new namespaces: hide each directory,
-#: then run the driver from the (empty) /tmp. Paths arrive as arguments, never in text.
+#: The shell that sets the sandbox up, inside the new namespaces (where it is PID 1,
+#: under a fresh /proc): cap the process count (here, where it counts this namespace's
+#: processes, not the user's on the host), hide each directory, then run the driver
+#: from the (empty) /tmp. Paths arrive as arguments, never in text.
 _SHELL = (
-    'py="$1"; drv="$2"; shift 2; '
-    'for d in "$@"; do mount -t tmpfs -o size=8m,mode=0755 tmpfs "$d" || exit 97; done; '
+    'py="$1"; drv="$2"; n="$3"; shift 3; '
+    'ulimit -u "$n" || exit 96; '
+    'for d in "$@"; do mount -n -t tmpfs -o size=8m,mode=0755 tmpfs "$d" || exit 97; done; '
     'cd /tmp || exit 97; '
     'exec "$py" -I -S -c "$drv"'
 )
@@ -153,11 +170,36 @@ def static_issues(code: Any) -> list[str]:
                 problems.append(f"uses {node.id!r}, which a code node may not")
         elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
             problems.append(f"reads the attribute {node.attr!r}; a code node uses no dunder attributes")
+        elif isinstance(node, ast.Attribute) and node.attr not in allowed_attributes():
+            problems.append(f"uses the attribute {node.attr!r}, which is not among the methods "
+                            "of str, bytes, list, dict, set, tuple, int, float and the allowed "
+                            "modules' public names (string formatting is refused)")
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             problems.append("declares global or nonlocal names")
         elif isinstance(node, (ast.AsyncFunctionDef, ast.Await, ast.AsyncFor, ast.AsyncWith)):
             problems.append("uses async code")
     return sorted(set(problems))
+
+
+@functools.lru_cache(maxsize=1)
+def allowed_attributes() -> frozenset:
+    """The attribute names a snippet may use: the public methods of the builtin value
+    types and of what the allowed modules hand out (match objects, patterns, counters,
+    fractions ...), and the allowed modules' public names, less
+    :data:`DENIED_ATTRIBUTES`. An allowlist, so a name nobody thought of is refused."""
+    import collections
+    import fractions
+    import importlib
+    import re as re_module
+
+    sources: list[Any] = [str, bytes, list, dict, set, frozenset, tuple, int, float, complex,
+                          bool, collections.Counter, collections.deque,
+                          collections.defaultdict, collections.OrderedDict,
+                          fractions.Fraction, type(re_module.compile("")),
+                          type(re_module.match("", ""))]
+    sources += [importlib.import_module(name) for name in ALLOWED_IMPORTS]
+    names = {name for source in sources for name in dir(source) if not name.startswith("_")}
+    return frozenset(names - set(DENIED_ATTRIBUTES))
 
 
 # ── the sandbox ───────────────────────────────────────────────────────────
@@ -174,9 +216,10 @@ def _environment() -> dict[str, str]:
 
 
 def _hidden(extra: tuple[str, ...] = ()) -> list[str]:
-    """The directories to hide: :data:`HIDDEN_ROOTS` that exist, and each extra path
-    (the run directory, the project, the current directory) that is not inside one."""
-    roots = [root for root in HIDDEN_ROOTS if os.path.isdir(root)]
+    """The directories to hide: :data:`HIDDEN_ROOTS` that exist (a link, such as
+    ``/var/run``, by what it points to), and each extra path (the run directory, the
+    project, the current directory) that is not inside one."""
+    roots = [os.path.realpath(root) for root in HIDDEN_ROOTS if os.path.isdir(root)]
     for path in extra:
         if not path:
             continue
@@ -193,30 +236,66 @@ def _hidden(extra: tuple[str, ...] = ()) -> list[str]:
 
 
 def _command(extra: tuple[str, ...]) -> list[str]:
-    return [shutil.which("unshare") or "unshare", "-Urnm", "--", "/bin/sh", "-c", _SHELL, "sh",
-            PYTHON, _DRIVER, *_hidden(extra)]
+    # /proc/sys is hidden after the fresh /proc is mounted, so it goes last.
+    hidden = [path for path in _hidden(extra) if path != "/proc/sys"] + ["/proc/sys"]
+    return [shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
+            "--mount-proc", "--", "/bin/sh", "-c", _SHELL, "sh", PYTHON, _DRIVER, str(NPROC),
+            *hidden]
+
+
+def _confine() -> None:  # pragma: no cover - runs in the forked child
+    """The child's preexec: its own session (so a timeout kills the whole group),
+    ``no_new_privs``, and the CPU, memory and file-size caps. Unlike `sandbox._limits`
+    it raises when a cap cannot be set: this sandbox fails closed."""
+    import ctypes
+    import resource
+
+    os.setsid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
+    for which, value in ((resource.RLIMIT_CPU, CPU_S), (resource.RLIMIT_FSIZE, FILE_MB << 20),
+                         (resource.RLIMIT_AS, MEMORY_MB << 20),
+                         (resource.RLIMIT_DATA, MEMORY_MB << 20)):
+        resource.setrlimit(which, (value, value))
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    import signal
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...]) -> Any:
-    from refactory_dsh.sandbox import _limits
-
     try:
         payload = json.dumps({"code": code, "inp": inp})
     except (TypeError, ValueError) as exc:
         raise SnippetError(f"the code node's input is not JSON: {exc}") from exc
     try:
-        proc = subprocess.run(
-            _command(extra), input=payload, capture_output=True, text=True,
-            timeout=timeout_s, env=_environment(), cwd="/",
-            preexec_fn=_limits(MEMORY_MB, CPU_S, FILE_MB),
+        proc = subprocess.Popen(
+            _command(extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=_environment(), cwd="/",
+            preexec_fn=_confine,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise SnippetError(f"the code ran over its {timeout_s:g} s limit") from exc
-    except OSError as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         raise SnippetError(f"the sandbox could not start: {exc}") from exc
-    if proc.returncode == _MOUNT_FAILED:
-        raise SnippetError("the sandbox could not hide the file system: "
-                           + (proc.stderr.strip().splitlines() or ["mount failed"])[-1])
+    try:
+        stdout, stderr = proc.communicate(payload, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
+        proc.communicate()
+        raise SnippetError(f"the code ran over its {timeout_s:g} s limit") from exc
+    finally:
+        # Whatever the snippet left running in its group goes with it.
+        _kill_group(proc)
+    proc = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    if proc.returncode in (_MOUNT_FAILED, _NPROC_FAILED):
+        what = "hide the file system" if proc.returncode == _MOUNT_FAILED else "cap its processes"
+        raise SnippetError(f"the sandbox could not {what}: "
+                           + (proc.stderr.strip().splitlines() or ["failed"])[-1])
     if len(proc.stdout) > MAX_OUTPUT_BYTES:
         raise SnippetError(f"the code returned more than {MAX_OUTPUT_BYTES} bytes")
     try:
@@ -327,14 +406,27 @@ def _hide(ctx: Any) -> tuple[str, ...]:
     return (str(ctx.workdir), os.environ.get("REFACTORY_PROJECT", ""), os.getcwd())
 
 
-def _label(found: dict[str, Any], label: Any, node_id: str) -> str:
+#: The verdict that ends the run with no edge for it, as the router takes it
+#: (`nn.executor.route_verdict`, the spine's ``Spine.verdict``): a code or verdict gate
+#: may answer it too. (``proceed`` with no proceed edge falls through to an
+#: unconditional edge, which a gate never has (V5), so it is not offered.)
+HALT = "halt"
+
+
+def answers(found: dict[str, Any]) -> list[str]:
+    """What a code or verdict gate may answer: its out-edge conditions, and ``halt``."""
     labels = list(found.get("labels") or ())
+    return labels + ([HALT] if HALT not in {label.lower() for label in labels} else [])
+
+
+def _label(found: dict[str, Any], label: Any, node_id: str) -> str:
+    known = answers(found)
     wanted = str(label or "").strip()
-    for known in labels:
-        if known.lower() == wanted.lower():
-            return known
+    for option in known:
+        if option.lower() == wanted.lower():
+            return option
     raise SnippetError(f"gate {node_id!r} answered {wanted!r}, which is not one of its "
-                       f"out-edge conditions {labels}")
+                       f"out-edge conditions or halt {known}")
 
 
 def run(ctx: Any) -> dict[str, Any]:
@@ -385,25 +477,27 @@ def gate(ctx: Any) -> Any:
                    reason=str(result.get("reason") or ""))
 
 
-#: A word of a verdict line: what a label can be.
-_WORD = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+#: What may come before a verdict's first word: markdown and quoting.
+_LEAD = " \t*#>-_`'\"“”‘’:([{"
+#: What ends the first word and may come after it before the reason.
+_WORD = re.compile(r"[^\s:;,.!?*`'\"“”‘’)\]}]+")
 
 
 def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
-    """``(label, reason)`` from a verdict text: the first label (any case) among the
-    words of its first non-empty line; the reason is what follows it on that line and
-    every later line. ``None`` when that line names no label."""
-    lines = str(text or "").strip().splitlines()
-    if not lines:
+    """``(label, reason)`` from a verdict text: its first word -- after leading markdown
+    or quotes (``**``, ``#``, ``-``, ``"``, ``:``) -- must be one of ``labels`` (any
+    case); the reason is the rest of the text. ``None`` when the first word is not a
+    label: "Do not proceed" names no verdict, rather than proceed."""
+    body = str(text or "").strip().lstrip(_LEAD)
+    match = _WORD.match(body)
+    if not match:
         return None
-    first, rest = lines[0], lines[1:]
     lower = {label.lower(): label for label in labels}
-    for match in _WORD.finditer(first):
-        if match.group(0).lower() in lower:
-            tail = first[match.end():].lstrip(" \t:-—*.)]")
-            reason = "\n".join([tail, *rest]).strip()
-            return lower[match.group(0).lower()], reason
-    return None
+    label = lower.get(match.group(0).lower())
+    if label is None:
+        return None
+    reason = body[match.end():].lstrip(" \t:;,.!?*`'\"“”‘’)]}-—").strip()
+    return label, reason
 
 
 def verdict(ctx: Any) -> Any:
@@ -417,7 +511,7 @@ def verdict(ctx: Any) -> Any:
     from refactory_dsh.nn import Verdict
 
     found = _spec(ctx)
-    labels = list(found.get("labels") or ())
+    labels = answers(found)
     reads = list(found.get("required_reads") or ())
     inputs = list(found.get("inputs") or ())
     if reads:
@@ -434,8 +528,8 @@ def verdict(ctx: Any) -> Any:
     parsed = parse_verdict(text, labels)
     if parsed is None:
         head = (text.strip().splitlines() or [""])[0][:200]
-        raise SnippetError(f"verdict gate {ctx.node_id!r}: the first line of {source} ({head!r}) "
-                           f"names none of its out-edge conditions {labels}")
+        raise SnippetError(f"verdict gate {ctx.node_id!r}: the first word of {source} ({head!r}) "
+                           f"is none of its answers {labels} (its out-edge conditions, or halt)")
     label, reason = parsed
     return Verdict(label, reason=reason)
 
@@ -443,9 +537,18 @@ def verdict(ctx: Any) -> Any:
 # ── the shared grader-secret scan (E-secret) ──────────────────────────────
 
 
+def _normal(text: str) -> str:
+    return " ".join(str(text).casefold().split())
+
+
 def secret_in(text: str, secrets: Any) -> str | None:
-    """The first grader secret ``text`` contains, or ``None``."""
+    """The first grader secret ``text`` contains, compared case- and whitespace-blind,
+    or ``None``. Best effort: it catches a value pasted into code, not one rebuilt from
+    pieces; the control that holds is that grader fields never reach a node's inputs
+    (V17 and the stripped item file)."""
+    haystack = _normal(text)
     for secret in sorted(secrets or (), key=lambda s: (-len(s), s)):
-        if secret and secret in text:
+        needle = _normal(secret)
+        if needle and needle in haystack:
             return secret
     return None

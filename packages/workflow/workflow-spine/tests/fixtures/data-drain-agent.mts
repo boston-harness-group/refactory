@@ -4,15 +4,20 @@
  * Usage: node --import tsx/esm data-drain-agent.mts <graph.json> <workdir> <python-bin> <timeoutMs> <responses.json>
  *
  * Like data-drain.mts but handles agent nodes: reads scripted responses from
- * <responses.json> (a map from node-id to response text) and calls wf_done
+ * <responses.json> (a map from node-id to response text, or to a list of texts the
+ * node answers in turn, starting over after the last) and calls wf_done
  * with the scripted response.  The agent delivery bridge (agentCommand)
  * records the exchange in the sidecar, just as the real spine path does.
  * An agent node that declares outputs gets the response written to each, in
  * the item's pass directory when one is running, as a worker would write them.
  *
  * With DRAIN_RECORD set to a file path, each agent delivery appends one JSON line
- * {node, prompt, system_prompt}: the prompt the spine rendered for the worker and
- * the system prompt it handed over, so a test can check what reached the worker.
+ * {node, prompt, system_prompt, keys}: the prompt the spine rendered for the worker,
+ * the system prompt it handed over and the node view's field names, so a test can check
+ * what reached the worker, plus `feedback` and `iterations`: the reloop feedback the
+ * live state holds for the node and the gates' iteration counts (`wf_state`, the run's
+ * and the running pass's), which a worker would be handed; and each step the runtime ran
+ * for the drain (`ran`) appends {ran: <the step as wf_next reported it>}.
  */
 import { spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -29,9 +34,18 @@ if (!graphFile || !workdir) {
 }
 const commandTimeoutMs = Number(timeoutArg ?? 10_000)
 const graph = JSON.parse(readFileSync(graphFile!, 'utf8'))
-const responses: Record<string, string> = responsesFile
+const responses: Record<string, string | string[]> = responsesFile
   ? JSON.parse(readFileSync(responsesFile, 'utf8'))
   : {}
+const turns: Record<string, number> = {}
+
+function responseFor(id: string): string {
+  const scripted = responses[id]
+  if (!Array.isArray(scripted)) return scripted ?? `scripted response for ${id}`
+  const turn = turns[id] ?? 0
+  turns[id] = turn + 1
+  return scripted[turn % scripted.length] ?? `scripted response for ${id}`
+}
 
 function runCommand(spec: { command: string; workdir?: string; env?: Record<string, string>; timeoutMs: number }) {
   return new Promise<{
@@ -100,6 +114,28 @@ async function call(name: string, input: unknown = {}) {
   return tool.execute(input, {} as never)
 }
 
+/** The live state's feedback for one node and its gates' iteration counts, from the
+ * run's state and the running pass's (whatever level holds them). */
+function liveFor(raw: unknown, id: string): { feedback?: string; iterations?: Record<string, number> } {
+  const live = typeof raw === 'string' ? JSON.parse(raw) : raw
+  const levels: Array<Record<string, unknown>> = []
+  const visit = (value: unknown) => {
+    if (value === null || typeof value !== 'object') return
+    const record = value as Record<string, unknown>
+    if ('feedback' in record || 'iterations' in record) levels.push(record)
+    for (const child of Object.values(record)) visit(child)
+  }
+  visit(live)
+  const out: { feedback?: string; iterations?: Record<string, number> } = {}
+  for (const level of levels) {
+    const feedback = (level.feedback as Record<string, string> | undefined)?.[id]
+    if (typeof feedback === 'string' && feedback !== '') out.feedback = feedback
+    const iterations = level.iterations as Record<string, number> | undefined
+    if (iterations && typeof iterations === 'object') out.iterations = { ...(out.iterations ?? {}), ...iterations }
+  }
+  return out
+}
+
 let status = 'unknown'
 for (let step = 0; step < 1000; step += 1) {
   const next = await call('wf_next') as {
@@ -108,6 +144,11 @@ for (let step = 0; step < 1000; step += 1) {
     item?: { pass_dir?: unknown }
   }
   status = next.status ?? 'unknown'
+  if (process.env.DRAIN_RECORD) {
+    for (const ran of ((next as { ran?: unknown[] }).ran ?? [])) {
+      appendFileSync(process.env.DRAIN_RECORD, JSON.stringify({ ran }) + '\n')
+    }
+  }
   if (status === 'done') break
   if (status === 'failed') {
     // A node failure inside a data-node pass is expected for error items.
@@ -119,10 +160,13 @@ for (let step = 0; step < 1000; step += 1) {
   for (const node of (next.nodes ?? [])) {
     if (node._type === 'AgentNode' || node._type === 'LLMNode') {
       // Provide the scripted response for agent nodes.
-      const response = responses[node.id] ?? `scripted response for ${node.id}`
+      const response = responseFor(node.id)
       if (process.env.DRAIN_RECORD) {
         appendFileSync(process.env.DRAIN_RECORD, JSON.stringify({
           node: node.id, prompt: node.prompt_template ?? '', system_prompt: node.system_prompt ?? '',
+          keys: Object.keys(node).sort(),
+          ...liveFor(await call('wf_state'), node.id),
+          ...((node as { feedback?: unknown }).feedback !== undefined ? { feedback: (node as { feedback?: unknown }).feedback } : {}),
         }) + '\n')
       }
       const base = typeof next.item?.pass_dir === 'string' ? next.item.pass_dir : workdir!
