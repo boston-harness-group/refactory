@@ -27,6 +27,17 @@ needs_sandbox = pytest.mark.skipif(not snippet.available()[0],
                                    reason=f"no code-node sandbox here: {snippet.available()[1]}")
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_assumed_where_no_code_runs(request, monkeypatch):
+    """Where the sandbox is unavailable, the tests that run code skip (``needs_sandbox``,
+    with the probe's reason) and every other test still runs: they validate, refuse or
+    lower proposals and never execute a snippet, so for them the probe's answer is assumed
+    yes -- otherwise each would stop at ``E-code-nodes``. The refusal itself is tested
+    with the probe forced to no (`test_without_the_sandbox_a_code_node_fails_closed`)."""
+    if not snippet.available()[0]:
+        monkeypatch.setattr(snippet, "_probe", lambda: (True, "assumed: this test runs no code"))
+
+
 # ── helpers ───────────────────────────────────────────────────────────────
 
 

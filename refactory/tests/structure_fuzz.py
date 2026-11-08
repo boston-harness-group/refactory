@@ -96,6 +96,13 @@ MAX_NODES = 28
 CONDITIONS = ("proceed", "reloop", "reject")
 #: How the walker says a gate's verdict has no edge (`nn.executor.route_verdict`).
 SCRIPTED_LABEL = "verdict 'proceed' is not one of"
+#: Whether this machine can sandbox code nodes (`snippet.available`). Without it every
+#: new code node is refused (``E-code-nodes``), so the generator writes none: the walks
+#: are then the ones they were before code nodes existed.
+CODE_NODES = snippet_calls.available()[0]
+#: The node kinds `EditGenerator.new_node` draws a fresh node from.
+NODE_KINDS_TO_GENERATE = (("op", "op", "agent", "agent", "gate", "fork", "join", "data")
+                          + (("code", "code_gate") if CODE_NODES else ()))
 #: The line every generated code meant to fail at run time carries.
 EXPECTED_FAILURE = "# expected to fail at run time"
 #: Code the generator writes that rule V18 must refuse, each with a marker the ``code``
@@ -1043,8 +1050,9 @@ class EditGenerator:
                 node["writes"] = [f"{node['id']}.txt"]
                 node["produces"] = [f"{node['id']}_fact"]
             return node
-        kind = kind or rng.choice(("op", "op", "agent", "agent", "gate", "fork", "join", "data",
-                                   "code", "code_gate"))
+        kind = kind or rng.choice(NODE_KINDS_TO_GENERATE)
+        if kind in ("code", "code_gate") and not CODE_NODES:
+            kind = "op" if kind == "code" else "gate"
         new_id = self.fresh_id(graph, kind)
         files, facts, ids = self._files(graph), self._facts(graph), sorted(graph.nodes) or [new_id]
         if kind == "op":
@@ -1295,10 +1303,12 @@ class EditGenerator:
                 return {"op": "reorder", "first": edge.source, "second": edge.target}
             return {"op": "reorder", "first": target, "second": rng.choice(ids)}
         if op == "loop":
-            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate")))
+            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate") if CODE_NODES
+                                                   else ("gate",)))
             return {"op": "loop", "target": target, "gate": gate}
         if op == "parallel":
-            branches = [self.new_node(state, rng.choice(("agent", "op", "code")))
+            branches = [self.new_node(state, rng.choice(("agent", "op", "code") if CODE_NODES
+                                                        else ("agent", "op")))
                         for _ in range(rng.choice((2, 2, 3)))]
             if rng.random() < 0.1:
                 # Two branches writing one file race: refused before anything runs.
