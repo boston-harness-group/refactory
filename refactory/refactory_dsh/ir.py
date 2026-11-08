@@ -158,6 +158,11 @@ class GateNode(Node):
     gate_prompt: str = ""
     max_iterations: int | None = None
     """Cap for this gate's reloop edge. ``None`` leaves the cap to the runtime."""
+    on_exhausted: Literal["continue", "fail_item"] | None = None
+    """What a reloop past the cap does instead of halting the run (`nn.Graph.on_exhausted`):
+    ``continue`` takes the gate's ``proceed`` edge, ``fail_item`` fails only the data-pass
+    item. ``None`` halts, and is left out of the serialized graph, so a graph whose gates
+    halt is byte-identical to one lowered before the field existed."""
 
 
 # ForkNode, JoinNode, DataNode need v2's Node base (which carries resource_role)
@@ -271,6 +276,8 @@ class Workflow(BaseModel):
                 d.pop("system_prompt", None)
             if "tool_policy" in d and d["tool_policy"] is None:
                 d.pop("tool_policy")
+            if "on_exhausted" in d and d["on_exhausted"] is None:
+                d.pop("on_exhausted")
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

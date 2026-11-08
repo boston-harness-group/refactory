@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .graph import Edge, Graph, GraphError, Node
+from .loops import LOOP_END_CALL
 
 State = dict[str, Any]
 
@@ -1160,8 +1161,6 @@ def _pre_loop(edit: dict, state: State) -> str | None:
     target = graph.nodes.get(edit.get("target"))
     if target is None:
         return f"no node {edit.get('target')!r} to loop over"
-    if not graph.out_edges(target.id):
-        return f"{target.id!r} has no out-edge, so there is nothing to loop back from"
     try:
         _sole_out_edge(graph, target.id)
     except EditError as exc:
@@ -1170,21 +1169,32 @@ def _pre_loop(edit: dict, state: State) -> str | None:
 
 
 def _expand_loop(edit: dict, state: State) -> list[dict]:
+    """``target -> gate``, ``gate -> target`` on ``reloop``, ``gate -> successor`` on
+    ``proceed``. A target with no out-edge -- the last step of a data pass, or of the
+    run -- first gets a no-op step after it (`LOOP_END_CALL`, as an ``insert_after``
+    adds it, so a pass's exit moves to it): the gate's ``proceed`` edge leads there, and
+    the pass still ends at a step that is not a gate (V12)."""
     graph = _graph(state)
     target = edit["target"]
     gate = dict(edit["gate"])
     successor = _sole_out_edge(graph, target)
-    steps: list[dict] = [
-        {"op": "add_node", "node": gate, "position": {"detached": True}}
-    ]
-    if successor is not None:
-        steps.append({"op": "remove_edge", "source": successor.source,
-                      "target": successor.target, "condition": successor.condition})
+    steps: list[dict] = []
+    onward = successor.target if successor is not None else None
+    if successor is None:
+        onward = _fresh_id(graph, f"{target}_done")
+        if onward == gate.get("id"):
+            onward = _fresh_id(graph, f"{target}_done_step")
+        steps.append({"op": "add_node", "position": {"after": target}, "node": {
+            "id": onward, "kind": "op", "call": LOOP_END_CALL, "score_effect": "none",
+            "notes": f"Ends what {target!r} ended, after the loop's gate {gate.get('id')!r}."}})
+        successor = Edge(target, onward)
+    steps.append({"op": "add_node", "node": gate, "position": {"detached": True}})
+    steps.append({"op": "remove_edge", "source": successor.source,
+                  "target": successor.target, "condition": successor.condition})
     steps.append({"op": "add_edge", "source": target, "target": gate["id"], "condition": None})
     steps.append({"op": "add_edge", "source": gate["id"], "target": target, "condition": "reloop"})
-    if successor is not None:
-        steps.append({"op": "add_edge", "source": gate["id"], "target": successor.target,
-                      "condition": "proceed"})
+    steps.append({"op": "add_edge", "source": gate["id"], "target": onward,
+                  "condition": "proceed"})
     return steps
 
 
@@ -1300,7 +1310,8 @@ _macro("reorder", "Swap two adjacent steps. Refused when the first produces what
        "the second reads.",
        ("first", "second"), _pre_reorder, _expand_reorder)
 _macro("loop", "Wrap a step in a gate that can send control back to it, so the step "
-       "gains a retry.",
+       "gains a retry. A step that is the last of its pass gets a no-op step after the "
+       "gate to end the pass.",
        ("target", "gate"), _pre_loop, _expand_loop)
 _macro("parallel", "Run 2-8 new steps at once after an existing step: a fork after "
        "'target', each node of 'branches' (agent or op, distinct writes and facts) on its "

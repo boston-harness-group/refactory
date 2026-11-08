@@ -46,6 +46,12 @@ export interface WorkflowNode {
   max_turns?: number
   /** `GateNode`: the cap for this gate's reloop edge. */
   max_iterations?: number
+  /**
+   * `GateNode`: what a reloop past the cap does instead of halting the run: `continue`
+   * takes the gate's `proceed` edge, `fail_item` fails only the data-pass item it is in.
+   * Absent halts. The lowering resolves it from the graph (`Graph.on_exhausted`).
+   */
+  on_exhausted?: 'continue' | 'fail_item'
   /** `FnNode` / `Study`: prose the driving agent follows when it runs the node. */
   content?: string
   /** `FnNode` / `Study`: the shell command the spine runs for the node. */

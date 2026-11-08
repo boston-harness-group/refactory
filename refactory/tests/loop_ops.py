@@ -718,3 +718,61 @@ def barrier_item(ctx: Any) -> dict[str, Any]:
         time.sleep(0.02)
     (barrier / f"through_{item_id}").write_text("1")
     return {"counted": item_id}
+
+
+# ── a check-and-retry loop that cannot settle every item (test_loop_exhaustion) ──
+
+#: The attempt at which each item's answer comes out right; item ``3`` never does.
+EXHAUST_SOLVES_AT = {"0": 1, "1": 2, "2": 1, "3": 99}
+
+
+def exhaust_solve(ctx: Any) -> dict[str, Any]:
+    """Attempt the item: ``answer.txt`` is ``right`` from its `EXHAUST_SOLVES_AT` attempt on."""
+    item_id = _current_id(ctx)
+    attempts = int(ctx.read_json("attempts.json", 0) or 0) + 1
+    ctx.write_json("attempts.json", attempts)
+    right = attempts >= EXHAUST_SOLVES_AT.get(item_id, 99)
+    ctx.write_text("answer.txt", "right" if right else f"wrong {attempts}")
+    return {}
+
+
+def exhaust_check(ctx: Any) -> Any:
+    """The checker gate: proceed on a right answer, else send the solver back with why."""
+    from refactory_dsh.nn import Verdict
+
+    answer = ctx.read_text("answer.txt").strip()
+    return "proceed" if answer == "right" else Verdict("reloop", reason=f"{answer} is not right")
+
+
+def exhaust_score(ctx: Any) -> dict[str, Any]:
+    """Grade the answer as it stands: 1.0 when right, 0.25 when wrong (a failed item is 0)."""
+    answer = ctx.read_text("answer.txt").strip()
+    ctx.write_json("item_result.json", {"score": 1.0 if answer == "right" else 0.25})
+    return {}
+
+
+class ExhaustTask(Task):
+    """Items ``0``-``3``, each scored from its pass's ``item_result.json``, else from its
+    ``answer.txt`` as `exhaust_score` grades it (a pass that ends at the solver)."""
+
+    name = "exhaust_task"
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        return [TaskInstance(id=str(i), metadata={}) for i in range(4)]
+
+    def setup(self, instance: TaskInstance, workspace: Any, **kw: Any) -> None:
+        pass
+
+    def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
+        import json
+        from pathlib import Path
+
+        result = Path(workspace) / "item_result.json"
+        answer = Path(workspace) / "answer.txt"
+        if result.exists():
+            score = float(json.loads(result.read_text())["score"])
+        elif answer.exists():
+            score = 1.0 if answer.read_text().strip() == "right" else 0.25
+        else:
+            return VerifyResult(passed=False, score=0.0, details="no answer")
+        return VerifyResult(passed=score >= 1.0, score=score)

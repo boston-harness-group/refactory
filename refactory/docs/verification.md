@@ -285,10 +285,14 @@ pass retains its materialized item across agent handoffs on both configured and
 interactive graphs; `Task.setup` runs once per item. A completed exit or terminal
 refusal is closed and graded before a public terminal status is returned, so refusal
 can contribute a failed grade without silently losing the remaining dataset. An explicit
-halt without a forward edge, or an exhausted reloop cap, instead stops the whole run:
-its interrupted pass remains inspectable, is not graded, and does not start the next
-item. The terminal response carries `halted` with the gate and reason, and the status
-file records `halted`.
+halt without a forward edge, or a reloop cap exhausted at a gate whose `on_exhausted` is
+`halt`, instead stops the whole run: its interrupted pass remains inspectable, is not
+graded, and does not start the next item. The terminal response carries `halted` with
+the gate and reason, and the status file records `halted`. A gate in a pass that does not
+declare `halt` ends only its item when its cap runs out: `continue` (the default) goes on
+along `proceed` and the item is graded as it stands, with the gate recorded in
+`gate_exhausted`; `fail_item` (the default when the gate has no forward `proceed` edge)
+grades the item failed through `end --failed`. Either way the next item starts.
 
 An active run still holds one exclusive claim. After completion or halt, its owner
 can inspect it until another successful `wf_open` replaces the claim; the next run

@@ -23,6 +23,7 @@ from refactory_dsh.nn.graph import GATE_KINDS, NODE_KINDS, GraphError, Node
 #: companion fields each needs; every other field is probed with a value of its type.
 _CONSTRAINED: dict[str, dict[str, Any]] = {
     "gate_kind": {"gate_kind": "user"},
+    "on_exhausted": {"on_exhausted": "continue"},
     "score_effect": {"score_effect": "none"},
     "resource_role": {"resource_role": "work"},
     "tool_policy": {"tool_policy": "none"},

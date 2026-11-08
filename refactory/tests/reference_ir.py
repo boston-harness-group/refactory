@@ -62,7 +62,7 @@ FIELD_SNAPSHOT: dict[str, frozenset[str]] = {
     "GateNode": frozenset({
         "id", "reads", "writes", "blocking", "resource_role",
         "evaluator_type", "evaluator_role", "evaluator_command",
-        "command_timeout_s", "gate_prompt", "max_iterations",
+        "command_timeout_s", "gate_prompt", "max_iterations", "on_exhausted",
     }),
     "ForkNode": frozenset({
         "id", "reads", "writes", "blocking", "resource_role",

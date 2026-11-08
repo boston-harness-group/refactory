@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
-from .graph import Edge, Graph, Node
+from .graph import PROCEED, Edge, Graph, Node
 from .loops import loop_edges
 from .mode import RunResult
 from .record import RunRecord
@@ -198,6 +198,9 @@ class Step:
     #: Why a gate gave its verdict, when it said: the same reason the spine reports
     #: under ``ran``, so a headless run explains a reloop as a driven one does.
     reason: str | None = None
+    #: A gate's ``proceed`` taken because it ran out of reloops (``on_exhausted:
+    #: continue``), not because the check passed.
+    exhausted: bool = False
 
 
 class RunContext:
@@ -1415,7 +1418,8 @@ class Executor:
                 break
             self.steps.append(
                 Step(node.id, node.kind, time.time() - step_started, verdict=verdict,
-                     reason=getattr(verdict, "reason", None) or None)
+                     reason=getattr(verdict, "reason", None) or None,
+                     exhausted=bool(getattr(verdict, "exhausted", False)))
             )
             if current is not None:
                 self._record(current)
@@ -1463,6 +1467,7 @@ class Executor:
             gate_stop=gate_stop_id,
             halted=halted,
             gate_verdicts=dict(self.record.gate_verdicts),
+            gate_exhausted=list(self.record.gate_exhausted),
             item_records=list(self._item_records),
         )
 
@@ -1505,7 +1510,7 @@ class Executor:
                 self.steps.append(Step(node.id, node.kind, 0.0))
                 self.record.complete(node)
                 try:
-                    error = run_fork(self, node)
+                    error = run_fork(self, node, iterations=visits)
                 except GateStop as exc:
                     return str(exc)
                 except HaltStop:
@@ -1557,7 +1562,8 @@ class Executor:
                 return f"{node.id}: {type(exc).__name__}: {exc}"
             self.steps.append(
                 Step(node.id, node.kind, time.time() - started, verdict=verdict,
-                     reason=getattr(verdict, "reason", None) or None)
+                     reason=getattr(verdict, "reason", None) or None,
+                     exhausted=bool(getattr(verdict, "exhausted", False)))
             )
         return None
 
@@ -2218,9 +2224,25 @@ class Executor:
         visits = self._gate_iterations if self._visits is None else self._visits
         _eff_mi = self._effective_max_iterations(node)
         if retry and visits.get(node.id, 0) + 1 > _eff_mi:
-            # Out of reloops: the spine records the gate halted and goes back over nothing
-            # (`Spine.verdict`); the retry itself is refused below (`_count_retry`).
+            # Out of reloops: the gate's `on_exhausted` decides, as `Spine.verdict` does.
+            exhausted = self.graph.on_exhausted(node.id)
+            if exhausted == "continue":
+                # The item goes on with the last attempt: the gate's proceed edge.
+                onward = self.graph.exhaustion_exit(node.id)
+                self.record.gate(self.graph, node.id, PROCEED, target=onward, retry=False,
+                                 exhausted=True)
+                verdict_out = Verdict(PROCEED, reason=why)
+                verdict_out.exhausted = True
+                return onward, verdict_out
             self.record.gate(self.graph, node.id, "halt", target=None, retry=False)
+            if exhausted == "fail_item":
+                # A failed node fails its item only (the data loop's failed-item record),
+                # inside a fork or not; the spine ends the item through `end --failed`.
+                raise ExecutionError(
+                    f"gate {node.id!r} reached its max_iterations of {_eff_mi} and its item "
+                    f"fails (on_exhausted: fail_item); last reason: {_clipped(why.strip())}")
+            # `halt`: the spine records the gate halted and goes back over nothing; the
+            # retry itself is refused below (`_count_retry`).
         else:
             self.record.gate(self.graph, node.id, verdict, target=selected.target, retry=retry,
                              reason=_clipped(why.strip()))

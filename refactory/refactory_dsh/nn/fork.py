@@ -128,8 +128,15 @@ def _branches(executor: Executor, fork: Node, barrier: str) -> list[list[Node]]:
     return branches
 
 
-def run_fork(executor: Executor, node: Node) -> str | None:
-    """Wait for all scheduled work; merge in target order; never join on failure."""
+def run_fork(executor: Executor, node: Node, *,
+             iterations: dict[str, int] | None = None) -> str | None:
+    """Wait for all scheduled work; merge in target order; never join on failure.
+
+    ``iterations`` is the reloop count of the walk the fork is in -- a data pass's own,
+    fresh for each item -- which its branches share; the run's when None. Without it a
+    gate in a fork inside a sequential pass would carry one item's reloops into the
+    next, where the spine starts every item's pass afresh (`Spine.endPass`).
+    """
     from .executor import ExecutionError
 
     edges = executor.graph.out_edges(node.id)
@@ -184,7 +191,7 @@ def run_fork(executor: Executor, node: Node) -> str | None:
     # arbitrary custom clients retain caller-thread serial execution.
     for _ in branches:
         child = clone_child_executor(
-            executor, branch_model, reserve_step=reserve,
+            executor, branch_model, reserve_step=reserve, gate_iterations=iterations,
         )
         children.append(child)
 
