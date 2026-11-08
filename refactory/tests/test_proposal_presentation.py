@@ -151,7 +151,12 @@ def test_the_template_names_no_task_or_domain():
              READER_SYSTEM, READER_ANSWER, AutoresearchOptimizer(object())._system,
              base.bundle_instructions(4, edits.catalogue("broad")),
              base.bundle_instructions(4, edits.catalogue("broad"), proposals=1)]
+    from refactory_dsh.snippet import ALLOWED_IMPORTS_TEXT
+
     for text in texts:
+        # The code-node import allowlist names the standard library's `math` module, a
+        # module name rather than domain vocabulary; it is the one place the word may be.
+        text = text.replace(ALLOWED_IMPORTS_TEXT, "")
         for word in DENYLIST:
             assert not re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE), (word, text[:200])
 

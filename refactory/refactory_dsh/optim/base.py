@@ -61,7 +61,9 @@ NODE_SPEC_TEXT_CHARS = 1200
 NODE_SPEC_TEXT_FLOOR = 200
 NODE_SPEC_SECTION_CHARS = 30000
 #: Edit fields that take a whole node object (``into`` takes a list of two).
-NODE_OBJECT_FIELDS = ("node", "into", "gate")
+NODE_OBJECT_FIELDS = ("node", "into", "gate", "branches")
+#: The fields among them that hold a list of node objects.
+NODE_LIST_FIELDS = ("into", "branches")
 
 
 def reason_code(reason: str) -> str:
@@ -182,6 +184,61 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
                 f"E-new-node-tools: new agent node {node_id!r} would run with tools; a node "
                 "an edit adds runs without tools (omit tool_policy, or set it to 'none') "
                 "unless the run allows tools for new nodes (allow_new_node_tools)")
+    return reasons
+
+
+def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, Any],
+                        allowed: bool) -> list[str]:
+    """``E-code-nodes`` for each code node the search added (`refactory_dsh.snippet`)
+    when the run does not allow code nodes (``LoopConfig.allow_code_nodes``) or this
+    machine cannot sandbox them (`snippet.available`). A seed's own code nodes are the
+    author's and are not held to it."""
+    from refactory_dsh import snippet
+
+    seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
+    added = sorted(node_id for node_id, node in
+                   ((candidate_state.get("graph") or {}).get("nodes") or {}).items()
+                   if node_id not in seed_nodes and snippet.is_code_node(node))
+    if not added:
+        return []
+    if not allowed:
+        why = "this run does not allow code nodes (allow_code_nodes is off)"
+    else:
+        ok, reason = snippet.available()
+        if ok:
+            return []
+        why = f"this machine cannot sandbox code nodes ({reason})"
+    return [f"E-code-nodes: new code node {node_id!r} is refused: {why}" for node_id in added]
+
+
+def _secret_refusals(candidate_state: dict[str, Any], secrets: Any) -> list[str]:
+    """``E-secret`` for each code node whose code holds a value only the grader may see
+    (a train item's grader-only field, e.g. its answer): code that carried the answers
+    would score them without solving anything. The value itself is never echoed."""
+    from refactory_dsh import snippet
+    from refactory_dsh.nn.graph import Graph
+
+    try:
+        graph = Graph.from_state(candidate_state.get("graph") or {})
+    except Exception:  # noqa: BLE001 - an unreadable graph is the validator's to report
+        return []
+    values = {name: (entry or {}).get("value") for name, entry in (candidate_state.get("knobs") or {}).items()}
+    reasons = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if not snippet.is_code_node(node) and not node.code:
+            continue
+        if callable(secrets):
+            # Loaded only once a candidate carries code: reading a Task's items costs.
+            secrets = secrets()
+        if not secrets:
+            return []
+        texts = [node.code, str(values.get(node.bound_knob("code")) or "")]
+        if any(snippet.secret_in(text, secrets) for text in texts if text):
+            reasons.append(
+                f"E-secret: the code of node {node_id!r} contains a value only the grader may "
+                "see (a train item's grader-only field, such as its answer); code may compute "
+                "from a node's inputs, never carry the answers")
     return reasons
 
 
@@ -534,6 +591,10 @@ class ProposalContext:
     #: history can show a ``set_knob`` as a diff against the value it replaced; empty
     #: when not known (the first change to a text knob then shows its length and head).
     seed_knob_values: dict[str, Any] = field(default_factory=dict)
+    #: Whether this run's edits may add code nodes (``LoopConfig.allow_code_nodes`` and a
+    #: machine that can sandbox them, `refactory_dsh.snippet.available`); only then does
+    #: the request describe them.
+    code_nodes: bool = False
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -594,6 +655,8 @@ class ProposalContext:
                     for c in self.catalogue]),
             "",
             *_blocks_section(self.insertable, self.catalogue),
+            *composition_section(self.catalogue, self.node_states, self.edges,
+                                 protected=self.protected, code_nodes=self.code_nodes),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
@@ -754,6 +817,116 @@ def _blocks_section(insertable: Sequence[dict[str, Any]],
             "Use these node objects verbatim in an edit that takes a node, changing nothing "
             "but their `id`, or write a node from the node schema above:",
             "```json", json.dumps(list(insertable), indent=2, default=str), "```", ""]
+
+
+def _composition_anchor(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                        protected: Sequence[str]) -> tuple[dict[str, Any], str] | None:
+    """An agent of this graph with one plain out-edge to a step that is not a gate,
+    and that out-edge's target: where the composition examples attach. ``None`` when
+    the graph has none."""
+    by_id = {str(state.get("id")): state for state in node_states}
+    for node_id in sorted(by_id):
+        state = by_id[node_id]
+        if state.get("kind") != "agent" or node_id in protected or not state.get("writes"):
+            continue
+        out = [edge for edge in edges if edge.get("source") == node_id]
+        if len(out) != 1 or out[0].get("condition") is not None:
+            continue
+        target = by_id.get(str(out[0].get("target"))) or {}
+        if target.get("kind") in ("agent", "op"):
+            return state, str(out[0].get("target"))
+    return None
+
+
+def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
+                        edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
+                        code_nodes: bool = False) -> list[str]:
+    """The language's primitives and how they compose, with at most two short examples
+    built from this graph's own ids. Nothing when the run permits no structural op."""
+    from refactory_dsh import snippet
+
+    if not structural_ops(catalogue):
+        return []
+    ops = {op.get("op") for op in catalogue}
+    lines = [
+        "## How nodes compose",
+        "The pipeline is made of four kinds of step, and any of them may be put anywhere the "
+        "rules above allow:",
+        "- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) "
+        "produced upstream; its reply is written to its first `writes` file and, when it "
+        "declares `produces`, also becomes that fact. A new agent runs without tools, so it "
+        "sees only its prompt: hand it what it needs as `{{facts}}`.",
+    ]
+    if code_nodes:
+        lines += [
+            f"- **code op**: `\"call\": \"{snippet.RUN}\"` with `code`, Python that defines "
+            "`main(inp)`. `inp` is `{\"files\": {each declared read that exists: its text}, "
+            "\"facts\": {each name in its `inputs`: its value}}`; `main` returns "
+            "`{\"facts\": {...}, \"files\": {...}}`, each one declared in its `produces` / "
+            "`writes`. It costs no model call. Limits: imports only these modules: "
+            f"{snippet.ALLOWED_IMPORTS_TEXT}; at most {snippet.MAX_CODE_BYTES} "
+            f"bytes, {snippet.WALL_S} s, no files, network, open/exec/eval or dunders (rule "
+            "V18). The code goes into the node's own `<id>__code` knob, which a later "
+            "`set_knob` rewrites.",
+        ]
+    lines += [
+        "- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. "
+        f"Any declared upstream output can be the verdict: with `\"evaluator\": "
+        f"\"{snippet.VERDICT}\"` the gate reads the first word of the first line of its "
+        "first `required_reads` file (or, with none, of its first `inputs` fact) -- whatever an "
+        "agent or a code op upstream wrote there -- and the rest of the text is the reason.",
+    ]
+    if code_nodes:
+        lines.append(
+            f"  With `\"evaluator\": \"{snippet.GATE}\"` and `code`, `main(inp)` returns "
+            "`{\"verdict\": <condition>, \"reason\": <text>}`.")
+    lines += [
+        "- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes "
+        "one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old "
+        "successor on `proceed`); a reloop hands the gate's reason to the step it goes back "
+        "to as feedback, and the gate's `max_iterations` bounds how often it may.",
+    ]
+    if "parallel" in ops:
+        lines.append(
+            "- **fork**: the `parallel` operation runs 2-8 new steps at once between a fork "
+            "and a join after a step; branches write distinct files and facts, and any node "
+            "after the join may read them all.")
+    anchor = _composition_anchor(node_states, edges, protected)
+    if anchor is None or not ({"loop", "insert_before", "insert_after"} & ops):
+        return lines + [""]
+    agent, successor = anchor
+    step = str(agent["id"])
+    output = str((agent.get("writes") or ["output.txt"])[0])
+    examples: list[tuple[str, list[dict[str, Any]]]] = []
+    if {"loop", "insert_before"} <= ops:
+        review = f"{step}_review"
+        examples.append((
+            f"An agent judges `{step}`'s work and sends it back with a reason (a verdict gate "
+            f"reading the reviewer's file; `{review}`'s prompt needs `{step}`'s output as a "
+            "fact -- a code op can turn the file into one):",
+            [{"op": "loop", "target": step,
+              "gate": {"id": f"{step}_check", "kind": "gate", "evaluator": snippet.VERDICT,
+                       "reads": [f"{review}.txt"], "required_reads": [f"{review}.txt"],
+                       "max_iterations": 2}},
+             {"op": "insert_before", "target": f"{step}_check",
+              "node": {"id": review, "kind": "agent", "writes": [f"{review}.txt"],
+                       "prompt_template": "<what to check, with the work as fact slots; "
+                                          "answer 'proceed' or 'reloop' first, then why>"}}]))
+    if code_nodes and "insert_after" in ops:
+        fact = f"{step}_digest"
+        examples.append((
+            f"A code op computes a fact from `{step}`'s file for `{successor}` or any later "
+            f"step to use as `{{{{{fact}}}}}`:",
+            [{"op": "insert_after", "target": step,
+              "node": {"id": fact, "kind": "op", "call": snippet.RUN, "reads": [output],
+                       "produces": [fact],
+                       "code": ("def main(inp):\n"
+                                f"    text = inp['files'].get({output!r}, '')\n"
+                                f"    return {{'facts': {{{fact!r}: text.strip()[-2000:]}}}}\n")}}]))
+    lines += ["", "Examples (built from this graph; compose your own the same way):"]
+    for title, bundle in examples[:2]:
+        lines += [f"- {title}", "  " + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0])]
+    return lines + [""]
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
@@ -1203,6 +1376,8 @@ def _edit_fields(fields: Sequence[str]) -> str:
     for name in fields:
         if name == "into":
             described.append("into: a list of two full node objects (see the node schemas above)")
+        elif name == "branches":
+            described.append("branches: a list of 2-8 full node objects (see the node schemas above)")
         elif name in NODE_OBJECT_FIELDS:
             described.append(f"{name}: a full node object (see the node schemas above)")
         else:
@@ -1473,7 +1648,7 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
             parts.append(f"set_knob {name} patch: "
                          + _bounded(json.dumps(edit["patch"], default=str)))
         else:
-            shown = {key: ([_node_summary(n) for n in value] if key == "into"
+            shown = {key: ([_node_summary(n) for n in value] if key in NODE_LIST_FIELDS
                            and isinstance(value, list) else _node_summary(value)
                            if key in NODE_OBJECT_FIELDS else value)
                      for key, value in edit.items()}
@@ -1646,6 +1821,16 @@ class Optimizer:
     #: The most edits one proposal may bundle (``Proposal.edits``); more is refused
     #: with ``E-too-many-edits``. The loop sets it from ``max_edits_per_proposal``.
     max_edits: int = DEFAULT_MAX_EDITS
+
+    #: Whether an edit may add a code node (`refactory_dsh.snippet`); one that does
+    #: otherwise is refused with ``E-code-nodes``. The loop sets it from
+    #: ``allow_code_nodes``.
+    allow_code_nodes: bool = True
+
+    #: Values only the grader may see (the train items' grader-only fields), which no
+    #: code node's code may contain (``E-secret``), or a function returning them (called
+    #: only for a candidate with code). The loop sets it from its Task.
+    grader_secrets: Any = frozenset()
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         """Model-using optimizers override this to inherit the run's resources."""
@@ -1880,6 +2065,13 @@ class Optimizer:
                                  allow_new_node_tools)
         if tooled:
             return tooled
+        coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,
+                                    bool(getattr(self, "allow_code_nodes", True)))
+        if coded:
+            return coded
+        leaked = _secret_refusals(state, getattr(self, "grader_secrets", ()))
+        if leaked:
+            return leaked
 
         fixed = frozen | set(guarded) | {name for name, value in parent.state.get("knobs", {}).items()
                                          if (value.get("spec") or {}).get("frozen")}

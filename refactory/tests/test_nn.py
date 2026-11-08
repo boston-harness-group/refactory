@@ -401,6 +401,9 @@ def test_every_macro_expands_to_primitives_only():
         "reorder": {"first": "mid", "second": "gate"},
         "loop": {"target": "mid",
                  "gate": {"id": "p6", "kind": "gate", "evaluator": "json:dumps"}},
+        "parallel": {"target": "start",
+                     "branches": [{"id": "p7", "kind": "op", "call": "json:dumps"},
+                                  {"id": "p8", "kind": "op", "call": "json:dumps"}]},
     }
     macros = [name for name in nn.edits.names() if nn.edits.is_macro(name)]
     assert sorted(macros) == sorted(samples)

@@ -218,7 +218,7 @@ A node consumes what its prompts read when rendered -- every `{{name}}` slot and
 name every `{% if %}`/`{% elif %}` condition tests (bare `name`, `name == '...'`,
 `name != '...'`: a condition tells the agent something about the value without printing
 it), in its prompts and in knob-bound fields -- its `feedback_keys`, its reads and its
-required_reads. The
+required_reads, and its `inputs` (the facts a code node or a verdict gate takes in). The
 grader side is the data nodes, the mode's protected nodes and its grader nodes; any
 other agent, op or gate consuming grader-derived data is refused `V17`, on every
 candidate and every shipped or created mode (`registry`, the creation sandbox). The rule
@@ -242,8 +242,11 @@ file in its working directory, the runtime's grading files included (`items.GRAD
 the runtime does not hide them from it, since modes such as `build` run tool-enabled
 agents inside a pass that need the working directory as it is); an agent an edit adds runs without
 tools (`E-new-node-tools`), so tools are only on agents the mode's author gave them,
-and those are trusted as the author's. An op's code may read facts it does not
-declare; ops are the mode's own code, and an edit cannot write one.
+and those are trusted as the author's. An author's op may read facts it does not
+declare; it is the mode's own code. A code node an edit adds is not: its code gets only
+its declared reads and `inputs`, sandboxed (see "Code nodes" below), so V17 sees
+everything it takes in. (Authored ops reading undeclared facts or files remain a known
+gap of V17, filed as a follow-up.)
 
 ## What the optimizer sees, and what it said
 
@@ -524,6 +527,90 @@ state is promised, on any graph shape:
   `E-protected`. A new node may still go in front of one. The optimizer's request lists
   them.
 
+### Code nodes, verdict gates and `parallel`: composing the four primitives
+
+The graph has four kinds of step: agents, code, gates and forks. An optimizer composes
+them freely through edits. Before this change, a new op or fn gate could only reuse a
+`module:function` that an existing node already named (V8). So an edit could not add code
+or a gate, and a 2-branch fork took about six edits against a default cap of four. Three
+generic callables in `refactory_dsh.snippet` and one macro close that gap:
+
+- **Code op** (`"call": "refactory_dsh.snippet:run"`, with `code`): Python that defines
+  `main(inp)`. `inp` is `{"files": {each declared read that exists: its text}, "facts":
+  {each name in its inputs: its value}}`. `main` returns `{"facts": {...}, "files":
+  {...}}`, and each one must be declared in the node's `produces` / `writes` (anything else
+  fails the node). An edit that adds a code op binds its code to the node's own
+  `<id>__code` knob, the way a new agent gets `<id>__system_prompt`. So one edit adds the
+  node and its code, and a later `set_knob` rewrites the code alone.
+- **Code gate** (`"evaluator": "refactory_dsh.snippet:gate"`, with `code`): `main(inp)`
+  returns `{"verdict": <one of the gate's out-edge conditions>, "reason": <text>}`.
+- **Verdict gate** (`"evaluator": "refactory_dsh.snippet:verdict"`, no code): the verdict
+  is the first word of the first line of the gate's first `required_reads` file, or else
+  of its first `inputs` fact. That is whatever an agent or a code op upstream wrote there.
+  It is matched against the out-edge conditions in any case, and the rest of the text is
+  the reason. This is how an agent decides a gate: a reviewer agent writes `proceed` or
+  `reloop`, followed by why.
+- **`parallel`** (a macro with fields `target` and `branches`): 2-8 new agent or op nodes
+  run at once after `target`, between a fork and a join. The join leads on to target's old
+  successor. Branches must write distinct files and set distinct facts; otherwise the edit
+  is refused before anything runs, and V16 holds the result. Any node after the join may
+  read every branch's outputs. Each branch gets its own knobs, as any new node does.
+
+A reloop delivers the gate's reason to the step it sends control back to, as feedback.
+This is the existing `with_feedback` path, on both runtimes. The gate's `max_iterations`
+bounds how often a reloop can happen (V10). Each of the three callables is an ordinary
+node callable, and both runtimes invoke it the same way: the spine through
+`python -m refactory_dsh.run`, the walker in its forkserver child. The node's declaration
+(code, inputs, labels) is built from the graph in one place (`lowering.snippet_spec`), so
+the two runtimes cannot disagree.
+
+**The sandbox.** A code node's code runs under these limits:
+
+- `unshare -Urnm`: its own user, network and mount namespaces, so no network.
+- An empty tmpfs over `/home`, `/root`, `/tmp`, `/var/tmp`, `/dev/shm`, `/run/user`,
+  `/mnt`, `/opt`, and the run and project directories wherever they are.
+- `/usr/bin/python3 -I -S`: the standard library only.
+- JSON on stdin and stdout.
+- An environment of `PATH`, `HOME=/tmp` and the language settings only: no knob, no node
+  manifest, no credential.
+- 512 MB of memory, 10 CPU seconds, 1 MB files and 10 s of wall time.
+
+The snippet never gets the context, the run directory, other facts or the knobs. The
+wrapper writes its outputs through the context, so declared writes and facts are still
+enforced.
+
+The sandbox fails closed. It is unavailable when `unshare` or the system Python is
+missing, or when the probe snippet does not run (`snippet.available()`). In that case a
+code node fails, the request does not describe code nodes, and an edit that adds one is
+refused `E-code-nodes`. A failed code op is retried once, as every op is: always on the
+spine, and on the walker when recovery is on. A snippet is pure, so the retry changes
+nothing but time.
+
+**Checks before anything runs.** V18 checks the code statically, without running it. The
+code must parse, define `main` and be at most 4096 bytes. It may import only `re`,
+`json`, `math`, `collections`, `itertools`, `statistics`, `fractions`, `unicodedata` and
+`string`. It may not use `open`, `exec`, `eval`, `compile`, `__import__`,
+`getattr`/`setattr`/`delattr`, `globals`/`locals`/`vars`, or any dunder name or dunder
+attribute. `inputs` join V15 (each one is produced upstream on every path) and V17 (they
+count as consumed, so grader-derived inputs are refused). An edit whose code holds a value
+only the grader may see is refused `E-secret`, without echoing the value. Such a value is
+a train item's grader-only field, such as its answer (`task.grader_secrets`). This scan
+covers code only; scanning prompts is a follow-up.
+
+**Turning it off.** Code nodes are on by default wherever the run permits structural
+edits. `--allow-code-nodes 0` (`LoopConfig.allow_code_nodes`) refuses every new code node
+with `E-code-nodes` and leaves code nodes out of the request. Verdict gates and `parallel`
+stay, because they run no optimizer-written code. A run that keeps the default produces
+the same digest as before, so it still resumes.
+
+**What the optimizer is told.** The request's "How nodes compose" section
+(`optim.base.composition_section`) describes the four kinds: what each reads and writes,
+how a gate gets its verdict, and how loops and forks are formed. It adds at most two short
+examples built from this graph's own ids: an agent-verdict loop around a step, and a code
+op that computes a fact for a later step. Code nodes appear in the section only when the
+run offers them. The section prescribes nothing: the examples are compositions, not a
+menu.
+
 ### The invariant harness
 
 `tests/structure_fuzz.py` checks those promises by generating random structure edits
@@ -543,7 +630,12 @@ attempt path, and every accepted state is checked two ways.
   not there is counted (`notes.op_read_absent`), not called a violation, since V6 lets an
   op read an optional file.
 - **Spec**, a second statement of the rules beside the validator: knob ownership,
-  dataflow, fork pairing, protected nodes and new agents' tools.
+  dataflow, fork pairing, protected nodes, new agents' tools and code nodes (each added
+  code node's code parses, defines `main`, carries no hostile template, and is bound to
+  its own knob). The generator writes benign code ops and code gates, hostile code that
+  V18 must refuse, and code that passes V18 and fails at run time on purpose (counted as
+  `notes.code_node_failed_at_run_time`); `parallel` is generated with 2-3 branches, some
+  racing on a file. A code op's facts are compared on both runtimes by the spine check.
 
 A violation is shrunk to the fewest edits that still show it and can be saved, with
 `structure_fuzz.save_case`, to `tests/fixtures/structure_fuzz/`; each case there replays
