@@ -379,6 +379,7 @@ The SRF strategies, as outer loops.
 | class | `TreeArchive` | `(members: 'list[Candidate]' = <factory>, parents: 'dict[str, str]' = <factory>, children: 'dict[str, list[str]]' = <factory>) -> None` |
 | class | `TreeSearch` | `(*args: 'Any', **kwargs: 'Any') -> 'None'` |
 | function | `available` | `(project: 'Path \| None' = None) -> 'list[str]'` |
+| function | `check_options` | `(name: 'str', options: 'dict[str, Any] \| None', project: 'Path \| None' = None) -> 'None'` |
 | function | `create` | `(name: 'str', mode_id: 'str', config: 'Any' = None, *, strategy_options: 'dict[str, Any] \| None' = None, **kwargs: 'Any') -> 'Loop'` |
 | function | `names` | `() -> 'list[str]'` |
 | function | `package_strategies` | `(project: 'Path \| None' = None) -> 'dict[str, type[OuterLoop]]'` |
@@ -398,6 +399,7 @@ The SRF strategies, as outer loops.
 - **`TreeArchive`** — A tree. A node's parent is the node it was expanded from.
 - **`TreeSearch`** — SRF `aide`: `policy → action_gate(draft|improve|debug) → tree_update`.
 - **`available`** — Every selectable strategy: the library's own and the packages'.
+- **`check_options`** — Refuse strategy options the named strategy does not read.
 - **`create`** — Build a strategy by name, failing loud on an unknown one.
 - **`package_strategies`** — Strategies the discoverable packages contribute, by name.
 - **`register`** — Add a strategy without editing the library.
@@ -966,18 +968,20 @@ Versioned search recipes and immutable, resolved run snapshots.
 |---|---|---|
 | class | `ProfileError` | `` |
 | function | `add_arguments` | `(parser: 'Any') -> 'None'` |
+| function | `cli_overrides` | `(args: 'Any') -> 'dict[str, Any]'` |
 | function | `defaults` | `() -> 'dict[str, Any]'` |
 | function | `digest` | `(value: 'Any') -> 'str'` |
 | function | `list_profiles` | `(project: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `load` | `(project: 'Path', name: 'str', version: 'int \| None' = None) -> 'dict[str, Any]'` |
 | function | `normalize` | `(settings: 'dict[str, Any]') -> 'dict[str, Any]'` |
-| function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None) -> 'dict[str, Any]'` |
+| function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None, overrides: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
 | function | `resolve` | `(project: 'Path', mode_id: 'str', *, name: 'str' = '', version: 'int \| None' = None, overrides: 'dict[str, Any] \| None' = None, validate_settings: 'bool' = True, recipe: 'dict[str, Any] \| None' = None, model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `runtime_identity` | `(settings: 'dict[str, Any]', project: 'Path', *, uses_models: 'bool', model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `save` | `(project: 'Path', name: 'str', spec: 'dict[str, Any]') -> 'dict[str, Any]'` |
 
 - **`ProfileError`** — A profile cannot be resolved without changing its declared contract.
 - **`add_arguments`** — All launch surfaces parse this same optional configuration vocabulary.
+- **`cli_overrides`** — The settings a command line gave explicitly, to override a profile's.
 - **`refresh`** — Recheck source/input identity without relying on a still-existing recipe.
 - **`runtime_identity`** — Read nonsecret effective configuration; this is not authentication evidence.
 - **`save`** — Save a new immutable version. Editing a recipe always creates a version.

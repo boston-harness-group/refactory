@@ -1928,8 +1928,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "profile-save":
             payload = profiles.save(project, args.name, args.spec)
         elif args.verb in ("start", "profile-resolve"):
-            settings = {key: value for key, value in vars(args).items()
-                        if (key in profiles.defaults() or key == "knob") and value is not None}
+            settings = profiles.cli_overrides(args)
             settings = {**(args.settings_json or {}), **settings}
             if args.verb == "profile-resolve":
                 payload = profiles.resolve(project, args.mode, name=args.profile,

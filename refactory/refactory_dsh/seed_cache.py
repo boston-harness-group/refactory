@@ -21,9 +21,15 @@ A cached result is used only when all of these hold:
   proposer's route are not in it.
 
 A mismatched context stops the run instead of quietly evaluating, so a cache
-that was meant to apply never silently doesn't. Each cached part is served at
-most once per run; a later occasion of the same part is a fresh measurement and
-runs for real. Cached results don't count toward ``max_rollouts``.
+that was meant to apply never silently doesn't. So does a run whose seed is not
+the cache's candidate, or whose val or test part holds other items than the cache
+recorded (``check_applies``); other train items (a minibatch) are measured for real
+and journaled as ``seed_cache_miss``. Each cached part is served at most once per run; a
+later occasion of the same part is a fresh measurement and runs for real. Cached
+results don't count toward ``max_rollouts``.
+
+With ``repeats`` above 1 every trial is exported and served: the score context
+holds ``repeats``, so a cache serves only a run measuring the same number of trials.
 """
 
 from __future__ import annotations
@@ -104,6 +110,32 @@ def context_diff(ours: dict[str, Any], theirs: dict[str, Any]) -> list[str]:
     return sorted(key for key in set(ours) | set(theirs) if ours.get(key) != theirs.get(key))
 
 
+def check_applies(path: str | Path, cache: dict[str, Any], candidate: str,
+                  part_items: dict[str, set[str]]) -> None:
+    """Refuse a cache that can never serve this run: another seed candidate, or a
+    val or test part whose item set differs from the one recorded.
+
+    ``part_items`` holds each part's ids in this run. Train is not checked: the
+    seed's first train evaluation may be a minibatch, so other train items are
+    measured for real and journaled as ``seed_cache_miss`` while val and test are
+    still served.
+    """
+    differing = []
+    if cache.get("candidate") != candidate:
+        differing.append(f"candidate (cached {cache.get('candidate')}, this run's seed {candidate})")
+    for part, entry in sorted((cache.get("parts") or {}).items()):
+        ours = part_items.get(part)
+        cached = set(entry.get("items") or ())
+        if part == "train" or not ours or cached == ours:
+            continue
+        differing.append(f"items of {part} ({len(cached)} cached, {len(ours)} in this run, "
+                         f"{len(cached ^ ours)} differ)")
+    if differing:
+        raise SeedCacheError(
+            f"{path} cannot serve this run: {'; '.join(differing)}. Drop --seed-results "
+            "or export it again from a run with this seed and these parts")
+
+
 def load(path: str | Path, context: dict[str, Any]) -> dict[str, Any]:
     """Read a seed-results file, and check it was made under ``context``."""
     try:
@@ -134,8 +166,26 @@ def _journal(run_dir: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _strip(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{k: v for k, v in record.items() if k != "repeat"} for record in records]
+def _trials(records: list[dict[str, Any]], measurements: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """Every trial of one complete measurement, with its own item records; None when
+    the measurement was incomplete. A record names its trial in ``repeat``."""
+    measurements = measurements or {}
+    trials = measurements.get("trials") or [{"trial": 1, "score": None}]
+    if measurements and not measurements.get("complete", True):
+        return None
+    by_trial: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        by_trial.setdefault(int(record.get("repeat") or 1), []).append(
+            {k: v for k, v in record.items() if k != "repeat"})
+    result = []
+    for index, trial in enumerate(trials, start=1):
+        number = int(trial.get("trial") or index)
+        if number not in by_trial or trial.get("exit_ok") is False:
+            return None
+        result.append({"score": trial.get("score"), "duration_s": trial.get("duration_s") or 0.0,
+                       "model_calls": trial.get("model_calls") or 0, "workdir": trial.get("workdir"),
+                       "item_records": by_trial[number]})
+    return result
 
 
 def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> dict[str, Any]:
@@ -174,15 +224,17 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
     parts: dict[str, Any] = {}
     train = next((r for r in journal if r.get("event") == "train_records" and r.get("id") == cid), None)
     score = next((r for r in journal if r.get("event") == "score" and r.get("id") == cid), None)
-    if train and score and score.get("exit_ok") and train.get("records"):
-        records = _strip(train["records"])
+    trials = (_trials(train["records"], score.get("measurements"))
+              if train and score and score.get("exit_ok") and train.get("records") else None)
+    if trials:
         parts["train"] = {
-            "items": sorted(str(r["id"]) for r in records),
+            "items": sorted({str(r["id"]) for trial in trials for r in trial["item_records"]}),
             "workdir": str(run_dir / "runs" / cid),
             "result": {"score": score.get("raw_score"), "exit_ok": True, "error": None,
                        "duration_s": score.get("duration_s") or 0.0,
                        "model_calls": score.get("model_calls") or 0,
-                       "facts": score.get("facts") or {}, "item_records": records},
+                       "facts": score.get("facts") or {}},
+            "trials": trials,
         }
     for part in ("val", "test"):
         result = next((r.get("result") or {} for r in journal
@@ -191,13 +243,18 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
         records_path = occasion / "item_records.json"
         if not result or not result.get("exit_ok") or not records_path.exists():
             continue
-        records = _strip(json.loads(records_path.read_text()))
+        measured = occasion / "measurements.json"
+        trials = _trials(json.loads(records_path.read_text()),
+                         json.loads(measured.read_text()) if measured.exists() else None)
+        if not trials:
+            continue
         parts[part] = {
-            "items": sorted(str(r["id"]) for r in records),
+            "items": sorted({str(r["id"]) for trial in trials for r in trial["item_records"]}),
             "workdir": str(occasion),
             "result": {"score": result.get("score"), "exit_ok": True, "error": None,
                        "duration_s": result.get("duration_s") or 0.0, "model_calls": 0,
-                       "facts": {}, "item_records": records},
+                       "facts": {}},
+            "trials": trials,
         }
     if not parts:
         raise SeedCacheError(f"{run_dir} has no complete seed result to export")

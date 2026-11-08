@@ -388,6 +388,10 @@ class Loop(OuterLoop):
 
     name = "default"
     _is_loop_infrastructure = True
+    #: The strategy options this strategy reads (``strategies.check_options``): the
+    #: default loop reads none. Only a class's own declaration counts, so a subclass
+    #: that declares nothing is not checked.
+    accepted_options: tuple[str, ...] | None = ()
 
     def bind_budget(self, budget: Any) -> None:
         """Share accounting even when a deterministic target has no model client."""
@@ -573,6 +577,9 @@ class Loop(OuterLoop):
         #: The loaded ``--seed-results`` file, and the parts it has already served.
         self._seed_cache: dict[str, Any] | None = None
         self._seed_cache_used: set[str] = set()
+        #: Parts the cache covers that its candidate was measured on for real,
+        #: because the evaluation asked for other items (a train minibatch).
+        self._seed_cache_missed: set[str] = set()
         #: The candidate the current optimizer step edits, recomputed on every
         #: ``optimizer_step`` (from ``select_parents(1)``, unless a strategy set
         #: ``strategy_decision["parent"]``). Loop-private: it decides whose train
@@ -822,6 +829,16 @@ class Loop(OuterLoop):
         )
         # Load the loop-level parts manifest if configured or already on disk.
         self._load_parts_manifest()
+        if self._seed_cache is not None:
+            # A cache that can never apply stops the run here, rather than every
+            # evaluation quietly measuring for real.
+            try:
+                seed_cache.check_applies(
+                    self.config.seed_results, self._seed_cache, Candidate.from_state(seed_state).id,
+                    {part: self._expected_item_ids(seed_state, part)[0]
+                     for part in (self._seed_cache.get("parts") or {})})
+            except seed_cache.SeedCacheError as exc:
+                raise LoopError(str(exc)) from exc
         self._check_optimizer_route()
         if self.config.val_gate:
             if self._custom_strategy is not None:
@@ -1500,7 +1517,26 @@ class Loop(OuterLoop):
         if cache is None or candidate.id != cache.get("candidate"):
             return None
         entry = (cache.get("parts") or {}).get(part)
-        if entry is None or self.config.repeats != 1 or set(entry.get("items") or ()) != expected_ids:
+        if entry is None:
+            return None
+        recorded = entry["result"]
+        # Every trial the cache holds; a file written before trials were exported
+        # holds one, with its records on the result.
+        trials = entry.get("trials") or [{"score": recorded["score"], "duration_s": recorded.get("duration_s"),
+                                          "model_calls": recorded.get("model_calls"),
+                                          "workdir": entry.get("workdir"),
+                                          "item_records": recorded.get("item_records") or []}]
+        if set(entry.get("items") or ()) != expected_ids or len(trials) != self.config.repeats:
+            # The cache's own candidate on a part it covers, measured on other items
+            # (a train minibatch): said once per part, so the run shows why the
+            # cache was not used.
+            with self._state_lock:
+                if part not in self._seed_cache_missed and part not in self._seed_cache_used:
+                    self._seed_cache_missed.add(part)
+                    reason = ("other items" if set(entry.get("items") or ()) != expected_ids
+                              else f"{len(trials)} cached trial(s), {self.config.repeats} requested")
+                    self._journal("seed_cache_miss", id=candidate.id, part=part, reason=reason,
+                                  cached_items=len(entry.get("items") or ()), items=len(expected_ids))
             return None
         # Claim the part under the state lock: concurrent evaluations
         # (``Run.evaluate_many``) must not both replay the same entry.
@@ -1508,27 +1544,39 @@ class Loop(OuterLoop):
             if part in self._seed_cache_used:
                 return None
             self._seed_cache_used.add(part)
+        ignore = shutil.ignore_patterns(
+            "occasions", "trials", task_module.MANIFEST, "subset.json", "measurements.json")
         source = Path(entry.get("workdir") or "")
         if source.is_dir():
-            shutil.copytree(source, workdir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
-                "occasions", "trials", task_module.MANIFEST, "subset.json", "measurements.json"))
-        recorded = entry["result"]
+            shutil.copytree(source, workdir, dirs_exist_ok=True, ignore=ignore)
+            for number in range(2, len(trials) + 1):
+                # Each later trial's run directory, where a live run keeps it.
+                if (source / "trials" / str(number)).is_dir():
+                    shutil.copytree(source / "trials" / str(number), workdir / "trials" / str(number),
+                                    dirs_exist_ok=True, ignore=ignore)
+        records = [{**record, "repeat": number}
+                   for number, trial in enumerate(trials, start=1) for record in trial["item_records"]]
         result = RunResult(
             exit_ok=True, score=float(recorded["score"]), error=None,
             duration_s=float(recorded.get("duration_s") or 0.0),
             model_calls=int(recorded.get("model_calls") or 0),
             facts=dict(recorded.get("facts") or {}),
-            item_records=[{**record, "repeat": 1} for record in recorded["item_records"]],
+            item_records=records,
             workdir=workdir,
         )
         origin = f"{cache.get('source')}#{part}"
-        summary = {"requested": 1, "count": 1, "successful": 1, "mean": result.score, "stdev": None,
-                   "min": result.score, "max": result.score, "complete": True,
-                   "trials": [{"trial": 1, "score": result.score, "exit_ok": True, "error": None,
-                               "duration_s": result.duration_s, "model_calls": result.model_calls,
+        scores = [float(t["score"]) if t.get("score") is not None else result.score for t in trials]
+        summary = {"requested": self.config.repeats, "count": len(trials), "successful": len(trials),
+                   "mean": result.score, "stdev": statistics.stdev(scores) if len(scores) > 1 else None,
+                   "min": min(scores), "max": max(scores), "complete": True,
+                   "trials": [{"trial": number, "score": score, "exit_ok": True, "error": None,
+                               "duration_s": float(trial.get("duration_s") or 0.0),
+                               "model_calls": int(trial.get("model_calls") or 0),
                                "required_contract": {"passed": True, "missing_artifacts": []},
-                               "tokens": None, "cost": None, "workdir": str(workdir),
-                               "workers": [], "cached_from": origin}],
+                               "tokens": None, "cost": None,
+                               "workdir": str(workdir if number == 1 else workdir / "trials" / str(number)),
+                               "workers": [], "cached_from": origin}
+                              for number, (trial, score) in enumerate(zip(trials, scores), start=1)],
                    "context_hash": self.config.resolved_profile.get("context_hash"),
                    "tokens": None, "cost": None, "cached_from": origin,
                    "interpretation": "recorded by an earlier run under the same score context"}
@@ -1536,7 +1584,7 @@ class Loop(OuterLoop):
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
         with self._state_lock:
             self._journal("seed_cache_hit", id=candidate.id, part=part, source=origin,
-                          items=len(result.item_records), score=result.score)
+                          items=len(result.item_records), trials=len(trials), score=result.score)
         return result, summary
 
     def _write_candidate(
@@ -3065,6 +3113,14 @@ class Loop(OuterLoop):
             "evaluations": self.evaluations,
             "measurements": self.measurements,
             "resolved_profile": self.config.resolved_profile,
+            # Which of the seed's first measurements were read from --seed-results
+            # instead of run, so a reader never mistakes a reused score for a fresh one.
+            "seed_results": ({"file": str(self.config.seed_results),
+                              "source": (self._seed_cache or {}).get("source"),
+                              "candidate": (self._seed_cache or {}).get("candidate"),
+                              "parts_reused": sorted(self._seed_cache_used),
+                              "parts_measured": sorted(self._seed_cache_missed - self._seed_cache_used)}
+                             if self.config.seed_results else None),
             "resources": self.budget.snapshot() if self.budget else None,
             "population": len(self.population),
             "unevaluated": self._unevaluated(),
@@ -3441,6 +3497,9 @@ class Loop(OuterLoop):
             f" (raw {payload['seed_raw_score']} → {payload['raw_best_score']}). "
             f"The compared score is the raw one minus "
             f"{payload['scoring']['parsimony']} per node of the candidate's graph.",
+            *(["", f"The seed's first measurement on {', '.join(payload['seed_results']['parts_reused'])} "
+               f"was reused from {payload['seed_results']['source']} (--seed-results), not run again."]
+              if (payload.get("seed_results") or {}).get("parts_reused") else []),
             "",
             "## Held-out audit",
             "",
@@ -4088,6 +4147,9 @@ class Loop(OuterLoop):
             elif event == "seed_cache_hit":
                 if record.get("part"):
                     self._seed_cache_used.add(str(record["part"]))
+            elif event == "seed_cache_miss":
+                if record.get("part"):
+                    self._seed_cache_missed.add(str(record["part"]))
 
         if not order:
             raise LoopError(f"{journal} holds no candidate, so there is nothing to resume")
@@ -4385,10 +4447,6 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
     parser.add_argument("--parts", default=None, dest="parts_manifest",
                         help="path to a parts.json manifest with train/val/test id lists")
     parser.add_argument("--resolved-config", default="", help="exact resolved snapshot prepared by the console")
-    parser.add_argument(
-        "--strategy-option", action="append", default=[], metavar="KEY=VALUE",
-        help="strategy-specific option as KEY=VALUE; may be repeated",
-    )
     args = parser.parse_args(argv)
     project = Path(args.project)
     from refactory_dsh.model import DshModelClient, ModelChoiceError, require_model_choice
@@ -4399,15 +4457,17 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if snapshot.get("mode") != args.mode:
                 raise profiles.ProfileError("resolved snapshot belongs to another mode")
             return snapshot
-        overrides = {key: value for key, value in vars(args).items()
-                     if (key in profiles.defaults() or key == "knob") and value is not None}
+        # `--parts`, `--strategy-option` and `--knob` are overrides like any other: a
+        # setting the command line leaves out keeps the profile's value.
+        overrides = profiles.cli_overrides(args)
         prior_path = Path(args.runs_root) / "config.json"
         if args.resume and not args.profile and prior_path.exists():
             previous = json.loads(prior_path.read_text())
             if previous.get("mode") != args.mode:
                 raise profiles.ProfileError("the resume directory belongs to another mode")
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
-            return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}), previous.get("resolved_profile") or {})
+            return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}),
+                                    previous.get("resolved_profile") or {}, overrides=overrides)
         return profiles.resolve(project, args.mode, name=args.profile,
                                 version=args.profile_version, overrides=overrides)
 
@@ -4433,18 +4493,9 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
                 gated = client(snapshot)
             model = gated
         settings = snapshot["settings"]
-        # Parse --strategy-option KEY=VALUE flags
-        strategy_opts: dict[str, Any] = {}
-        for pair in getattr(args, "strategy_option", []):
-            if "=" not in pair:
-                raise ValueError(f"--strategy-option requires KEY=VALUE, got {pair!r}")
-            key, _, raw = pair.partition("=")
-            strategy_opts[key.strip()] = _coerce_strategy_value(raw.strip())
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
-                                      "resume": args.resume, "resolved_profile": snapshot,
-                                      "parts_manifest": getattr(args, "parts_manifest", None),
-                                      "strategy_options": strategy_opts})
+                                      "resume": args.resume, "resolved_profile": snapshot})
     except ModelChoiceError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1

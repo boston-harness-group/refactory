@@ -35,6 +35,68 @@ def defaults() -> dict[str, Any]:
     return {k: v for k, v in LoopConfig().to_dict().items() if k not in RUNTIME_FIELDS}
 
 
+#: The list-valued command-line options that add to a mapping setting, one
+#: ``NAME=VALUE`` pair each, on top of what a saved profile already holds.
+PAIR_OPTIONS = {"knob": "knobs", "strategy_option": "strategy_options"}
+
+
+def cli_overrides(args: Any) -> dict[str, Any]:
+    """The settings a command line gave explicitly, to override a profile's.
+
+    Every launch surface reads its parsed arguments through this, so none of them
+    drops a setting a profile holds or adds one the command line left out."""
+    known = defaults()
+    return {key: value for key, value in vars(args).items()
+            if (key in known or key in PAIR_OPTIONS) and value is not None}
+
+
+def _type_problem(key: str, value: Any, hint: Any) -> str:
+    """Why ``value`` cannot be the setting ``key`` of type ``hint``; empty when it can."""
+    import types
+    import typing
+
+    origin, members = typing.get_origin(hint), typing.get_args(hint)
+    if origin in (typing.Union, types.UnionType):
+        problems = [_type_problem(key, value, member) for member in members]
+        return "" if any(not problem for problem in problems) else " or ".join(p for p in problems if p)
+    if hint is type(None):
+        return "" if value is None else "null"
+    if hint is bool:
+        # Switches arrive as 0 or 1 from the command line.
+        return "" if value in (True, False, 0, 1) and not isinstance(value, float) else "true or false"
+    if hint is int:
+        return "" if isinstance(value, int) and not isinstance(value, bool) else "an integer"
+    if hint is float:
+        return "" if isinstance(value, (int, float)) and not isinstance(value, bool) else "a number"
+    if hint is str:
+        return "" if isinstance(value, str) else "a string"
+    if origin is dict or hint is dict:
+        return "" if isinstance(value, dict) else "an object"
+    if origin is tuple or hint is tuple:
+        return "" if isinstance(value, (list, tuple)) else "an array"
+    return ""
+
+
+def _check_types(settings: dict[str, Any]) -> None:
+    """Refuse a setting whose value is not of its ``LoopConfig`` field's type, so a
+    string seed or a ``true`` repeat count is refused rather than carried into a run.
+
+    Values are checked, never rewritten: a switch given as 1 stays 1, because the
+    settings digest of a run started that way must not change on resume."""
+    import dataclasses
+    import typing
+
+    from refactory_dsh.loop import LoopConfig
+
+    hints = typing.get_type_hints(LoopConfig)
+    for field in dataclasses.fields(LoopConfig):
+        if field.name not in settings or field.name in RUNTIME_FIELDS:
+            continue
+        problem = _type_problem(field.name, settings[field.name], hints[field.name])
+        if problem:
+            raise ProfileError(f"{field.name} must be {problem}, not {settings[field.name]!r}")
+
+
 def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     from refactory_dsh import optim, strategies
     from refactory_dsh.nn.edits import PRESETS, catalogue, removed
@@ -42,19 +104,29 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     settings = dict(settings)
     if "preset" in settings:
         settings["edit_preset"] = settings.pop("preset")
-    if "knob" in settings:
-        knobs = dict(settings.get("knobs") or {})
-        for pair in settings.pop("knob") or ():
+    for option, target in PAIR_OPTIONS.items():
+        # `--knob NAME=VALUE` and `--strategy-option KEY=VALUE` add to the mapping a
+        # profile holds instead of replacing it.
+        if option not in settings:
+            continue
+        pairs = settings.pop(option) or ()
+        merged = dict(settings.get(target) or {})
+        for pair in pairs:
             name, separator, value = str(pair).partition("=")
             if not separator or not name.strip():
-                raise ProfileError("knob must be NAME=VALUE")
-            knobs[name.strip()] = value.strip()
-        settings["knobs"] = knobs
+                raise ProfileError(f"{option} must be NAME=VALUE, got {pair!r}")
+            if option == "strategy_option":
+                from refactory_dsh.loop import _coerce_strategy_value
+                merged[name.strip()] = _coerce_strategy_value(value.strip())
+            else:
+                merged[name.strip()] = value.strip()
+        settings[target] = merged
     result = defaults()
     unknown = set(settings) - set(result)
     if unknown:
         raise ProfileError(f"unknown search settings: {', '.join(sorted(unknown))}")
     result.update({key: value for key, value in settings.items() if value is not None})
+    _check_types(result)
     # A new recipe records its effective policy, rather than depending on a
     # future worker default. Explicit native defaults remain a distinct choice.
     result["permission_mode"] = result["permission_mode"] or "skip"
@@ -124,9 +196,13 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
                          ("worker_backend", ("dsh", "codex", "claude_code"))):
         if result[key] not in choices:
             raise ProfileError(f"unknown {key}: {result[key]}")
-    for key in ("knobs", "role_routes", "node_routes"):
+    for key in ("knobs", "role_routes", "node_routes", "strategy_options"):
         if not isinstance(result[key], dict):
             raise ProfileError(f"{key} must be an object")
+    try:
+        strategies.check_options(result["strategy"], result["strategy_options"])
+    except ValueError as error:
+        raise ProfileError(str(error)) from error
     from refactory_dsh.worker_config import validate_provider_config
     try:
         validate_provider_config(result.get("provider_config") or {}, origin="profile")
@@ -188,8 +264,15 @@ def list_profiles(project: Path) -> list[dict[str, Any]]:
 def save(project: Path, name: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Save a new immutable version. Editing a recipe always creates a version."""
     root = project / PROFILE_ROOT / _name(name)
-    root.mkdir(parents=True, exist_ok=True)
-    versions = [int(p.stem) for p in root.glob("*.json") if p.stem.isdigit()]
+    if not isinstance(spec, dict):
+        raise ProfileError("a profile spec is an object with settings and contract")
+    unknown = set(spec) - {"settings", "contract"}
+    if unknown:
+        # A misspelled section would otherwise save a profile of defaults.
+        raise ProfileError(f"unknown profile fields: {', '.join(sorted(unknown))}; "
+                           "a profile has settings and contract")
+    if not isinstance(spec.get("settings") or {}, dict) or not isinstance(spec.get("contract") or {}, dict):
+        raise ProfileError("a profile's settings and contract are objects")
     contract = dict(spec.get("contract") or {})
     unknown = set(contract) - {"objective", "required_artifacts", "selection_rule"}
     if unknown:
@@ -202,14 +285,22 @@ def save(project: Path, name: str, spec: dict[str, Any]) -> dict[str, Any]:
     from refactory_dsh.worker_config import resolve as resolve_workers
     supplied = spec.get("settings") or {}
     routing = resolve_workers(project, supplied)
-    profile = {"schema_version": SCHEMA_VERSION, "name": name, "version": max(versions, default=0) + 1,
+    profile = {"schema_version": SCHEMA_VERSION, "name": name, "version": 0,
                "settings": normalize({**supplied, **routing["settings"]}),
                "contract": {"objective": str(contract.get("objective") or "Maximize the mode's immutable score"),
                             "required_artifacts": required, "selection_rule": SELECTION_RULE}}
-    path = root / f"{profile['version']}.json"
-    with path.open("x") as handle:
-        json.dump(profile, handle, indent=2)
-    return profile
+    # Only a spec that validated creates the profile's directory, and a version is
+    # never overwritten: a concurrent save that took the number takes the next one.
+    root.mkdir(parents=True, exist_ok=True)
+    while True:
+        versions = [int(p.stem) for p in root.glob("*.json") if p.stem.isdigit()]
+        profile["version"] = max(versions, default=0) + 1
+        try:
+            with (root / f"{profile['version']}.json").open("x") as handle:
+                json.dump(profile, handle, indent=2)
+        except FileExistsError:
+            continue
+        return profile
 
 
 def load(project: Path, name: str, version: int | None = None) -> dict[str, Any]:
@@ -227,7 +318,13 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     from refactory_dsh.nn import edits
     profile = recipe if recipe is not None else load(project, name, version) if name else {"settings": {}, "contract": {}}
     from refactory_dsh.worker_config import FIELDS, resolve as resolve_workers
-    chosen = {**profile["settings"], **(overrides or {})}
+    overrides = dict(overrides or {})
+    if (name and overrides.get("strategy") not in (None, profile["settings"].get("strategy"))
+            and "strategy_options" not in overrides and profile["settings"].get("strategy_options")):
+        # The profile's strategy options belong to the profile's strategy: a launch that
+        # names another strategy starts from none, and the snapshot records the drop.
+        overrides["strategy_options"] = {}
+    chosen = {**profile["settings"], **overrides}
     routing = None
     if recipe is None and validate_settings:
         routing = resolve_workers(project, {key: value for key, value in (overrides or {}).items() if key in FIELDS},
@@ -297,17 +394,24 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
                "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k != "termination"}),
                "settings": digest(evaluation_fields)}
     return {"schema_version": SCHEMA_VERSION, "profile": {"name": name, "version": profile.get("version")} if name else None,
+            # What the launch changed on top of the saved profile, as given.
+            "overrides": dict(overrides or {}) if name else None,
             "mode": mode_id, "settings": settings, "contract": contract,
             "worker_configuration": routing,
             "evaluation_context": context, "context_hash": digest(context)}
 
 
-def refresh(project: Path, mode_id: str, settings: dict[str, Any], previous: dict[str, Any], *, model_client: Any = None) -> dict[str, Any]:
-    """Recheck source/input identity without relying on a still-existing recipe."""
+def refresh(project: Path, mode_id: str, settings: dict[str, Any], previous: dict[str, Any], *,
+            model_client: Any = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Recheck source/input identity without relying on a still-existing recipe.
+
+    ``overrides`` are the flags given on resume; they join the recorded overrides."""
     recipe = {"settings": {}, "contract": previous.get("contract") or {},
               "version": (previous.get("contract") or {}).get("version", 1)}
     result = resolve(project, mode_id, overrides=settings, recipe=recipe, validate_settings=False, model_client=model_client)
     result["profile"] = previous.get("profile")
+    result["overrides"] = ({**(previous.get("overrides") or {}), **overrides}
+                           if overrides else previous.get("overrides"))
     result["worker_configuration"] = previous.get("worker_configuration")
     return result
 
@@ -347,6 +451,9 @@ def add_arguments(parser: Any) -> None:
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")
     parser.add_argument("--allowed-ops", action="append", default=None, metavar="OP")
+    parser.add_argument("--strategy-option", action="append", default=None, metavar="KEY=VALUE",
+                        help="strategy-specific option as KEY=VALUE; may be repeated, and adds to "
+                             "a profile's strategy_options")
     for key in ("role_routes", "node_routes"):
         parser.add_argument("--" + key.replace("_", "-"), type=json.loads, default=None)
     parser.add_argument("--profile", default="")
