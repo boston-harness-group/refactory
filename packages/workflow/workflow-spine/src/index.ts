@@ -1600,7 +1600,8 @@ export function apply(ctx: Context, config: Config): void {
               if (failure === undefined) failure = outcome
               continue
             }
-            if (itemSpine.isHalted()) continue
+            // A halt, or a `fail_item` gate out of reloops, has ended the item's cursor.
+            if (itemSpine.isHalted() || itemSpine.itemFailure() !== undefined) continue
             if (outcome.verdict !== undefined) itemSpine.verdict(node.id, outcome.verdict, outcome.reason ?? '')
             else itemSpine.complete(node.id, outcome.missing === true ? { failed: true } : {})
           }
@@ -1609,6 +1610,10 @@ export function apply(ctx: Context, config: Config): void {
         if (failure !== undefined) {
           return await endFailed(index, failureTail(failure), failure.error?.includes('timed out') ? 'timeout' : undefined)
         }
+        // A gate out of reloops that fails its item (`on_exhausted: fail_item`): this
+        // item only, judged as a failed node's item is.
+        const exhausted = itemSpine.itemFailure()
+        if (exhausted !== undefined) return await endFailed(index, exhausted)
         const stop = itemSpine.haltOf()
         // A terminal branch short of the exit ('incomplete') still ends the item:
         // its Task judges the missing answer, as in a sequential pass.
@@ -1920,7 +1925,9 @@ export function apply(ctx: Context, config: Config): void {
       if (JSON.stringify(spine.passOf()) !== JSON.stringify(pass)) return {}
       const data = spine.view(pass.node)
       recordStatus(spine, workdir, 'executing')
-      const ended = await runDataCommand(shell, data, 'end', runner, pass.index)
+      // A gate out of reloops failed the item (`DataPass.failed`): judged as a failed
+      // node's item is, through `end --failed`, and the pass goes on to the next item.
+      const ended = await runDataCommand(shell, data, 'end', runner, pass.index, pass.failed)
       if (!ended.ok) {
         if (ended.error?.includes('timed out') || ended.error?.includes('was aborted')) {
           // End command timed out or was killed: run a fallback end --failed
@@ -2090,8 +2097,9 @@ export function apply(ctx: Context, config: Config): void {
         // verdict's is: without it the node the run goes back to, and the CEO,
         // see an empty string where the cause should be.
         // A halt inside a fork branch removes the cursor for peers that also
-        // completed: skip them so assertDue does not throw.
-        if (spine.isHalted()) continue
+        // completed: skip them so assertDue does not throw. So does a `fail_item` gate
+        // out of reloops, which ends its item's pass.
+        if (spine.isHalted() || spine.itemFailure() !== undefined) continue
         if (outcome.verdict !== undefined) spine.verdict(node.id, outcome.verdict, outcome.reason ?? '')
         else spine.complete(node.id, outcome.missing === true ? { failed: true } : {})
       }

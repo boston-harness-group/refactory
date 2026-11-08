@@ -38,7 +38,8 @@ RULES: dict[str, str] = {
     "V3": "the graph must have a terminal (a node with no out-edge)",
     "V4": "a non-gate node has at most one out-edge, and it carries no verdict",
     "V5": "a gate has at least two out-edges, each with its own condition, and no "
-          "unconditional out-edge; a code or verdict gate's conditions are single words "
+          "unconditional out-edge (one is 'proceed' when it declares on_exhausted "
+          "'continue'); a code or verdict gate's conditions are single words "
           "(no spaces or punctuation), as its answer is read as one word",
     "V6": "every file a node reads must be written by a node on a path from the "
           "start node to a terminal",
@@ -215,6 +216,15 @@ def validate(
                         "V5",
                         "a gate must not have an unconditional out-edge; "
                         "every edge out of a gate carries a verdict",
+                        node=node_id,
+                    )
+                )
+            if node.on_exhausted == "continue" and graph.exhaustion_exit(node_id) is None:
+                issues.append(
+                    Issue(
+                        "V5",
+                        "on_exhausted 'continue' takes the gate's 'proceed' out-edge, and "
+                        "this gate has none that leads on (rather than back)",
                         node=node_id,
                     )
                 )

@@ -255,6 +255,12 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 # A bound knob's value, as the walker reads it (`Node.bound`).
                 "max_iterations": node.bound("max_iterations", knob_values),
             }
+            # What a reloop past the cap does, resolved from the graph's shape as the
+            # walker resolves it (`Graph.on_exhausted`). `halt` is the spine's own
+            # default and is left out, so a graph whose gates all halt lowers as before.
+            _exhausted = graph.on_exhausted(node.id)
+            if _exhausted != "halt":
+                gate["on_exhausted"] = _exhausted
             # The author's note is the gate's question: for a `user` gate it is what
             # the person is shown, and an empty prompt would ask them to choose
             # between labels with no statement of what they are choosing about.

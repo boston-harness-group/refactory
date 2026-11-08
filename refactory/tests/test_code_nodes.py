@@ -361,11 +361,26 @@ def test_walker_agent_verdict_gate_relooops_with_the_critics_reason(tmp_path):
 
 @needs_sandbox
 def test_walker_a_critic_that_never_accepts_is_bounded_by_max_iterations(tmp_path):
-    """With max_iterations 1 the gate sends ``decide`` back once; asked to reloop again,
-    it halts the whole run (no later item runs). Mutation-checked: with max_iterations 2
-    this test fails (three decides)."""
+    """With max_iterations 1 the gate sends ``decide`` back once per item; asked to reloop
+    again, it goes on along ``proceed`` (the loop's undeclared ``on_exhausted`` in a pass),
+    so every item is graded with its last answer and the run is not halted.
+    Mutation-checked: with max_iterations 2 this test fails (three decides per item)."""
     state = _accepted(CRITIC_LOOP)
     assert sf._graph_of(state).nodes["check"].max_iterations == 1
+    result, model = _walk(state, tmp_path, turns={"critic": ["reloop: again"]})
+    assert result.exit_ok and not result.halted, result.error
+    items = len(result.facts["item_scores"])
+    assert items > 1
+    assert len(_prompts(model, "decide")) == 2 * items and len(_prompts(model, "critic")) == 2 * items
+
+
+@needs_sandbox
+def test_walker_a_critic_loop_that_declares_halt_halts_the_run(tmp_path):
+    """``on_exhausted: halt`` keeps the old behaviour: asked to reloop past its bound on the
+    first item, the gate halts the whole run (no later item runs)."""
+    loop = [dict(CRITIC_LOOP[0], gate={**CRITIC_LOOP[0]["gate"], "on_exhausted": "halt"}),
+            *CRITIC_LOOP[1:]]
+    state = _accepted(loop)
     result, model = _walk(state, tmp_path, turns={"critic": ["reloop: again"]})
     assert len(_prompts(model, "decide")) == 2 and len(_prompts(model, "critic")) == 2
     assert result.halted and not result.exit_ok
@@ -693,7 +708,9 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
                                         protected=applier.protected, code_nodes=False))
     for text in (on, off):
         assert snippet.VERDICT in text and "parallel" in text and "max_iterations" in text
-        assert "halts the whole run" in text and "single-word condition" in text
+        assert "single-word condition" in text
+        assert "`on_exhausted`" in text and "fails that item only" in text
+        assert "ends the whole run (no later item runs)" in text
         assert "insert a node after the join" in text
         assert '"target": "compare"' in text  # an example built from this graph's ids
     assert snippet.RUN in on and snippet.RUN not in off and snippet.GATE not in off

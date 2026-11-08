@@ -78,6 +78,12 @@ export interface DataPass {
   exit: string
   /** True once the exit completed: the pass is finished and awaits its verdict. */
   finished: boolean
+  /**
+   * Why the running item failed without finishing: a gate out of reloops whose
+   * `on_exhausted` is `fail_item`. The pass is then finished, and the runner judges
+   * the item through `end --failed` with this reason.
+   */
+  failed?: string
   /** The isolated pass directory for this item, set by the drain after command_begin. */
   passDir?: string
   /** Max concurrent items (from the data node). 1 is sequential. */
@@ -463,14 +469,19 @@ export class Spine {
   private readonly pauseBoundaries = new Set<string>()
   /** Per-item records collected during data-node passes (F6). */
   private _itemRecords: Array<Record<string, unknown>> = []
+  /** Whether this spine walks one item of a concurrent pass (`itemSpine`). */
+  private readonly item: boolean
+  /** Why this item spine's item failed (`DataPass.failed` for a sequential pass). */
+  private itemFailed: string | undefined
 
-  constructor(graph: WorkflowGraph, options?: { maxIterations?: number }) {
+  constructor(graph: WorkflowGraph, options?: { maxIterations?: number; item?: boolean }) {
     this.sourceGraph = JSON.stringify(graph)
     this.nodes = new Map(Object.entries(graph.nodes))
     this.edges = JSON.parse(JSON.stringify(graph.edges)) as WorkflowEdge[]
     this.workflow = graph.name
     this.projectDir = graph.project_dir ?? ''
     this.maxIterations = options?.maxIterations ?? DEFAULT_MAX_ITERATIONS
+    this.item = options?.item === true
     this.cursor = [graph.start_node]
     this.afters = new Map()
     this.completed = []
@@ -774,7 +785,7 @@ export class Spine {
     this.advanceSkipped()
     const pass = this.pass === undefined ? {} : { pass: { ...this.pass } }
     if (this.halted !== undefined || (this.cursor.length === 0 && this.pass === undefined)) {
-      if (this.halted === undefined) {
+      if (this.halted === undefined && this.itemFailed === undefined) {
         // Cursor drained without an explicit halt. Check whether any graph sink
         // was completed or skipped; with several sinks (alternative ends),
         // reaching any one is the end.
@@ -947,7 +958,7 @@ export class Spine {
     const pass = this.pass
     if (pass === undefined) throw new Error('no data pass is running')
     const { nodes, edges } = this.subgraphFor(pass.entry, pass.exit)
-    return new Spine({ name: `${pass.node}__item`, start_node: pass.entry, nodes, edges }, { maxIterations: this.maxIterations })
+    return new Spine({ name: `${pass.node}__item`, start_node: pass.entry, nodes, edges }, { maxIterations: this.maxIterations, item: true })
   }
 
   /** Why the run stopped short, when a gate halted it. */
@@ -1003,7 +1014,9 @@ export class Spine {
       // clearSkips=true so that skip entries added by abandonPass() for the
       // previous item do not carry over to the next item's pass body.
       this.invalidateNodes(this.descendants(pass.entry, pass.exit), true)
-      this.pass = { ...pass, index, finished: false }
+      // A failed item's reason was for that item only.
+      const { failed: _failed, ...rest } = pass
+      this.pass = { ...rest, index, finished: false }
       if (!this.cursor.includes(pass.entry)) this.cursor.push(pass.entry)
       this.log.push(`data ${pass.node}: item ${index + 1}/${pass.count}`)
       return this.next()
@@ -1135,6 +1148,8 @@ export class Spine {
       this.gateReasonSeq += 1
       this.gateReasons[gate] = { reason: feedback, at: this.gateReasonSeq }
       if (count > cap) {
+        const exhausted = this.exhausted(gate, cap, feedback)
+        if (exhausted !== undefined) return exhausted
         this.gateVerdicts.set(gate, HALT)
         this.halted = { gate, reason: 'max_iterations' }
         this.cursor = []
@@ -1189,6 +1204,65 @@ export class Spine {
       this.log.push(`gate ${gate}: ${outcome} -> ${target}`)
     }
     return this.next()
+  }
+
+  /**
+   * A gate out of reloops whose `on_exhausted` is not a halt: `continue` takes its
+   * `proceed` edge with the last attempt's output; `fail_item` ends only the item it is
+   * in -- this item spine's, or the sequential pass's (`DataPass.failed`). Undefined
+   * when the gate halts the run, as a gate without the field does. The walker does the
+   * same (`Executor._visit_gate`).
+   */
+  private exhausted(gate: string, cap: number, feedback: string): SpineNext | undefined {
+    const mode = this.nodes.get(gate)?.on_exhausted
+    // The proceed edge must lead on: one that is itself a retry would loop past the cap.
+    const proceed = mode === 'continue'
+      ? this.outgoing(gate).find(edge => edge.condition != null && label(edge.condition) === PROCEED)
+      : undefined
+    const onward = proceed !== undefined && !this.retryEdges().has(retryKey(gate, proceed.target, proceed.condition))
+      ? proceed.target
+      : undefined
+    if (onward !== undefined) {
+      // The refused reloop is not spent: the gate used its cap, as on the walker.
+      this.iterations[gate] = cap
+      this.gateVerdicts.set(gate, PROCEED)
+      delete this.gateReasons[gate]
+      this.halted = undefined
+      this.splicePosition(gate, [onward])
+      this.checkContainerDrained()
+      this.log.push(`gate ${gate}: max iterations -> ${PROCEED} -> ${onward}`)
+      return this.next()
+    }
+    if (mode !== 'fail_item') return undefined
+    const reason = `gate ${gate} reached its max_iterations of ${cap} and its item fails `
+      + `(on_exhausted: fail_item); last reason: ${feedback.slice(0, 2000)}`
+    if (this.item) {
+      this.iterations[gate] = cap
+      this.gateVerdicts.set(gate, HALT)
+      delete this.gateReasons[gate]
+      this.itemFailed = reason
+      this.cursor = []
+      this.afters = new Map()
+      this.log.push(`gate ${gate}: max iterations -> item failed`)
+      return this.next()
+    }
+    const pass = this.pass
+    if (pass === undefined || pass.finished || !this.descendants(pass.entry, pass.exit).has(gate)) return undefined
+    this.iterations[gate] = cap
+    this.gateVerdicts.set(gate, HALT)
+    delete this.gateReasons[gate]
+    this.abandonPass()
+    this.pass = { ...this.pass!, failed: reason }
+    this.log.push(`gate ${gate}: max iterations -> item ${pass.index} failed`)
+    return this.next()
+  }
+
+  /**
+   * Why the running item failed without finishing (a `fail_item` gate out of
+   * reloops), or undefined: this item spine's item, or the sequential pass's.
+   */
+  itemFailure(): string | undefined {
+    return this.item ? this.itemFailed : this.pass?.failed
   }
 
   /** Stop at a due gate without certifying an evaluator result or taking an edge. */

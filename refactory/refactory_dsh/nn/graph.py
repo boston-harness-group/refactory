@@ -22,6 +22,12 @@ NODE_KINDS = ("op", "agent", "gate", "fork", "join", "data")
 #: Who answers a gate: the evaluated function, a person, or the running agent.
 GATE_KINDS = ("fn", "user", "agent")
 
+#: What a gate does when a reloop would pass its ``max_iterations`` (`Node.on_exhausted`).
+ON_EXHAUSTED = ("continue", "fail_item", "halt")
+
+#: The gate out-edge an exhausted ``continue`` gate takes.
+PROCEED = "proceed"
+
 #: The failures an agent node may declare a retry on (`Node.retry`). Only a timeout: a
 #: session that ran out of time is the one failure a fresh, longer session can fix. A
 #: model that answered wrongly answers wrongly again, and a transport blip is already
@@ -146,6 +152,7 @@ _NODE_FIELDS = frozenset(
         "resource_role",
         "tools",
         "max_iterations",
+        "on_exhausted",
         "notes",
         "blocking",
         "score_effect",
@@ -244,6 +251,12 @@ class Node:
     tools: tuple[str, ...] = ()
     #: How many times a gate's retry edge may send control back to this node.
     max_iterations: int = 1
+    #: `gate`: what a reloop past ``max_iterations`` does instead: ``continue`` takes the
+    #: gate's ``proceed`` edge with the last attempt's output, ``fail_item`` fails only the
+    #: data-pass item the gate is in, ``halt`` halts the whole run. Empty (the default) is
+    #: ``continue`` inside a data pass (``fail_item`` when the gate has no ``proceed``
+    #: edge) and ``halt`` outside one (`Graph.on_exhausted`).
+    on_exhausted: str = ""
     #: Free text for readers; no effect on the run.
     notes: str = ""
     #: Carried to the lowered workflow as the node's blocking flag; leave it true unless you know otherwise.
@@ -410,6 +423,13 @@ class Node:
             raise GraphError(f"node {self.id!r} is not a join but declares sources")
         if self.max_iterations < 1:
             raise GraphError(f"node {self.id!r}: max_iterations must be >= 1")
+        if self.on_exhausted:
+            if self.kind != "gate":
+                raise GraphError(f"node {self.id!r} is not a gate but declares on_exhausted")
+            if self.on_exhausted not in ON_EXHAUSTED:
+                raise GraphError(
+                    f"node {self.id!r}: unknown on_exhausted {self.on_exhausted!r}; known: "
+                    f"{', '.join(ON_EXHAUSTED)} (or omit for the default)")
         if self.score_effect not in ("affects", "none"):
             raise GraphError(
                 f"node {self.id!r}: unknown score_effect {self.score_effect!r}; "
@@ -517,6 +537,7 @@ class Node:
             **({"resource_role": self.resource_role} if self.resource_role is not None else {}),
             "tools": list(self.tools),
             "max_iterations": self.max_iterations,
+            **({"on_exhausted": self.on_exhausted} if self.on_exhausted else {}),
             "notes": self.notes,
             "blocking": self.blocking,
             "score_effect": self.score_effect,
@@ -569,6 +590,7 @@ class Node:
             resource_role=state.get("resource_role"),
             tools=tuple(state.get("tools") or ()),
             max_iterations=int(state.get("max_iterations", 1)),
+            on_exhausted=str(state.get("on_exhausted") or ""),
             notes=str(state.get("notes", "")),
             blocking=bool(state.get("blocking", True)),
             score_effect=str(state.get("score_effect", "affects")),
@@ -804,6 +826,51 @@ class Graph:
             if inner.kind == "data" and inner.subgraph_entry:
                 stack.append(inner.subgraph_entry)
         return seen
+
+    def in_data_pass(self, node_id: str) -> bool:
+        """Whether ``node_id`` runs once per item, in some data node's pass (`data_body`)."""
+        return any(node_id in self.data_body(node.id)
+                   for node in self.nodes.values() if node.kind == "data")
+
+    def exhaustion_exit(self, gate_id: str) -> str | None:
+        """Where an exhausted ``continue`` gate goes: its ``proceed`` edge's target, when
+        that edge leads on rather than back (it is not one of the gate's retries)."""
+        from .loops import loop_edges
+
+        try:
+            retries = loop_edges(self)
+        except GraphError:
+            retries = set()
+        for edge in self.out_edges(gate_id):
+            if (edge.condition or "").strip().lower() == PROCEED and edge.key() not in retries:
+                return edge.target
+        return None
+
+    def on_exhausted(self, gate_id: str) -> str:
+        """What ``gate_id`` does when a reloop would pass its ``max_iterations``.
+
+        One of `ON_EXHAUSTED`, resolved from the graph's shape, so both runtimes act
+        the same: the walker reads it here and the lowering hands it to the spine.
+
+        - Declared ``on_exhausted`` wins, except that ``fail_item`` outside a data pass
+          has no item to fail and halts, and ``continue`` with no ``proceed`` edge has
+          nowhere to go and falls back as an undeclared gate does.
+        - Undeclared, inside a data pass: ``continue`` (the item goes on with its last
+          attempt and is graded as is), or ``fail_item`` with no ``proceed`` edge. A
+          loop that cannot settle an item ends that item, never its siblings or the run.
+        - Undeclared, outside a data pass: ``halt``, as before.
+        """
+        node = self.nodes[gate_id]
+        in_pass = self.in_data_pass(gate_id)
+        onward = self.exhaustion_exit(gate_id) is not None
+        declared = node.on_exhausted
+        if declared == "halt" or (declared == "continue" and onward):
+            return declared
+        if not in_pass:
+            return "halt"
+        if declared == "fail_item":
+            return declared
+        return "continue" if onward else "fail_item"
 
     def knob_consumers(self) -> dict[str, list[str]]:
         """Which nodes consume each knob, for the dead-knob check."""

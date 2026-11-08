@@ -990,9 +990,12 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "- **loop**: a gate's out-edge back to an earlier step. The `loop` operation makes "
         "one around a step (step -> gate; gate -> step on `reloop`, gate -> the step's old "
         "successor on `proceed`); a reloop hands the gate's reason to the step it goes back "
-        "to as feedback, and the gate's `max_iterations` bounds how often it may. A gate that "
-        "would reloop once more than that halts the whole run instead (no later item runs), "
-        "so a loop's verdict should be able to settle within its bound.",
+        "to as feedback, and the gate's `max_iterations` bounds how often it may. When a gate "
+        "would reloop once more than that, its `on_exhausted` decides: `continue` (the "
+        "default inside the per-item pass) goes on along `proceed` with the last attempt, "
+        "which is graded as it stands; `fail_item` fails that item only; `halt` ends the "
+        "whole run (no later item runs). The last step of the pass can be looped too: the "
+        "loop then adds a step after the gate to end the pass.",
     ]
     if "parallel" in ops:
         lines.append(
@@ -1030,7 +1033,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             [{"op": "loop", "target": step,
               "gate": {"id": f"{step}_check", "kind": "gate", "evaluator": snippet.VERDICT,
                        "reads": [f"{review}.txt"], "required_reads": [f"{review}.txt"],
-                       "max_iterations": 2}},
+                       "max_iterations": 2, "on_exhausted": "continue"}},
              {"op": "insert_before", "target": f"{step}_check",
               "node": {"id": review, "kind": "agent", "writes": [f"{review}.txt"],
                        "prompt_template": "<what to check, with the work as fact slots; "

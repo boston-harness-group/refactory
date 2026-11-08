@@ -89,7 +89,7 @@ optimizer's prompt via `rules_text()`.
 | `V2` | every node must be reachable from the start node |
 | `V3` | the graph must have a terminal (a node with no out-edge) |
 | `V4` | a non-gate node has at most one out-edge, and it carries no verdict |
-| `V5` | a gate has at least two out-edges, each with its own condition, and no unconditional one; a code or verdict gate's conditions are single words (no spaces or punctuation), as its answer is read as one word |
+| `V5` | a gate has at least two out-edges, each with its own condition, and no unconditional one (one is `proceed` when it declares `on_exhausted: continue`); a code or verdict gate's conditions are single words (no spaces or punctuation), as its answer is read as one word |
 | `V6` | every file a node reads must be written by a node on a path from start to a terminal (an agent's reads are held to every path by V15) |
 | `V7` | every knob a node consumes must be declared, and every declared knob must be consumed |
 | `V8` | every call and evaluator must resolve to a real callable |
@@ -381,7 +381,8 @@ What the two share, rather than each doing its own way:
   the completed nodes and each gate's last verdict by the spine's rules
   (`nn/record.py`). A gate's verdict is the run's record, in the spine's checkpoint and
   the walker's progress record (and `RunResult.gate_verdicts`), never a fact; a gate out
-  of reloops is recorded `halt` on both. Each status file names its `runtime` (`walker`
+  of reloops is recorded `proceed` when its `on_exhausted` continues and `halt` otherwise,
+  on both. Each status file names its `runtime` (`walker`
   or `spine`) and `owner_pid`. A walked run has no checkpoint, so whether it is still
   alive is its progress's and its walking process's to say (`run_state.walked`,
   `run_state.owner_pid`): the worktree, artifact-name and console readers ask those, the

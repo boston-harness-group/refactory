@@ -1,7 +1,19 @@
 """Derive retry transitions without assigning forward outcomes a retry cost."""
 from __future__ import annotations
 
+from typing import Any
+
 from .graph import Graph, GraphError
+
+#: The op a ``loop`` edit adds after its gate when the step it loops over was the last
+#: of its data pass (or of the run): the gate leaves by its ``proceed`` edge to this
+#: step, which ends the pass, since a pass may not end at a gate (V12).
+LOOP_END_CALL = "refactory_dsh.nn.loops:loop_end"
+
+
+def loop_end(ctx: Any) -> dict[str, Any]:
+    """`LOOP_END_CALL`: does nothing; it is where a loop at the end of a pass leaves."""
+    return {}
 
 
 def loop_edges(graph: Graph) -> set[tuple[str, str, str]]:

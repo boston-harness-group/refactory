@@ -574,7 +574,24 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
 A reloop delivers the gate's reason to the step it sends control back to, as feedback.
 This is the existing `with_feedback` path, on both runtimes. The gate's `max_iterations`
 bounds how often a reloop can happen (V10). A gate asked to reloop once more than that
-halts the whole run instead, on both runtimes, so no later item runs. Each of the three callables is an ordinary
+does what its `on_exhausted` says, the same on both runtimes (`Graph.on_exhausted`, which
+the lowering hands to the spine):
+
+- `continue` takes the gate's `proceed` edge, so the item goes on with its last attempt
+  and is graded as it stands. V5 refuses it on a gate with no `proceed` edge.
+- `fail_item` fails only the data-pass item the gate is in, as a failed node does: the
+  item gets a failed record and its siblings and the run go on.
+- `halt` halts the whole run, so no later item runs.
+
+Undeclared, a gate inside a data pass continues (or fails its item when it has no
+`proceed` edge), and a gate outside one halts, as before. Outside a pass there is no item,
+so `fail_item` halts there too. So a check-and-retry loop the optimizer adds can never
+stop the evaluation of a whole candidate; only a graph that declares `halt` does that.
+Design mode's gates are outside any pass, so they halt as before.
+
+`loop` also works on the last step of a pass (a step with no out-edge): it first adds a
+no-op step after it (`refactory_dsh.nn.loops:loop_end`, which becomes the pass's exit),
+and the gate's `proceed` edge leads there. Each of the three callables is an ordinary
 node callable, and both runtimes invoke it the same way: the spine through
 `python -m refactory_dsh.run`, the walker in its forkserver child. The node's declaration
 (code, inputs, labels) is built from the graph in one place (`lowering.snippet_spec`), so
