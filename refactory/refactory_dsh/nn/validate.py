@@ -38,7 +38,8 @@ RULES: dict[str, str] = {
     "V3": "the graph must have a terminal (a node with no out-edge)",
     "V4": "a non-gate node has at most one out-edge, and it carries no verdict",
     "V5": "a gate has at least two out-edges, each with its own condition, and no "
-          "unconditional out-edge",
+          "unconditional out-edge; a code or verdict gate's conditions are single words "
+          "(no spaces or punctuation), as its answer is read as one word",
     "V6": "every file a node reads must be written by a node on a path from the "
           "start node to a terminal",
     "V7": "every knob a node consumes must be declared, and every declared knob "
@@ -237,6 +238,7 @@ def validate(
             )
 
     issues.extend(gate_label_issues(graph))
+    issues.extend(answer_label_issues(graph))
 
     # V12 the nodes a fork, a join or a data node names.
     #
@@ -788,6 +790,26 @@ def fork_branch_conflicts(graph: Graph, knob_values: Mapping[str, Any]) -> list[
                 out.append((fork_id, f"fork {fork_id!r}: {conflict}"))
                 break
     return out
+
+
+def answer_label_issues(graph: Graph) -> list[Issue]:
+    """V5 for code and verdict gates (`refactory_dsh.snippet`): each out-edge condition is
+    a word their answer can be (`snippet.is_answer_word`), so the edit is refused here
+    rather than every run failing when the gate answers."""
+    from refactory_dsh import snippet
+
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind != "gate" or node.evaluator not in (snippet.GATE, snippet.VERDICT):
+            continue
+        bad = sorted(str(e.condition) for e in graph.out_edges(node_id)
+                     if e.condition is not None and not snippet.is_answer_word(e.condition))
+        if bad:
+            issues.append(Issue("V5", f"out-edge condition(s) {bad} cannot be this gate's answer: "
+                                "a code or verdict gate answers one word, so each condition is "
+                                "a single word with no spaces or punctuation", node=node_id))
+    return issues
 
 
 def gate_label_issues(graph: Graph) -> list[Issue]:

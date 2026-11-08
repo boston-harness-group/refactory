@@ -166,6 +166,7 @@ The validator: what makes architecture-in-the-state safe.
 | class | `Invariant` | `(name: 'str', description: 'str', check: 'Callable[[Graph, Mapping[str, Any]], str \| None]') -> None` |
 | class | `Issue` | `(code: 'str', message: 'str', node: 'str \| None' = None, knob: 'str \| None' = None) -> None` |
 | function | `agent_input_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
+| function | `answer_label_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `artifact_produced` | `(*paths: 'str', by: 'str') -> 'Invariant'` |
 | function | `available_inputs` | `(graph: 'Graph') -> 'dict[str, set[tuple[str, str]]]'` |
 | function | `code_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
@@ -193,6 +194,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
 - **`agent_input_issues`** — V15: required inputs are there on every path: an op's or a gate's
+- **`answer_label_issues`** — V5 for code and verdict gates (`refactory_dsh.snippet`): each out-edge condition is
 - **`artifact_produced`** — Keep a named artifact producer in the executable graph during search.
 - **`available_inputs`** — What is there when each node starts, on every path that reaches it.
 - **`code_issues`** — V18: a code node's code passes the static check (`snippet.static_issues`, which

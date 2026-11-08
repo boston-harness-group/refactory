@@ -536,6 +536,24 @@ def test_v18_allows_only_known_attributes(code):
     assert any("attribute" in p for p in snippet.static_issues(code)), snippet.static_issues(code)
 
 
+def test_v18_refuses_modules_reached_through_an_allowed_module():
+    for code in ("import re\ndef main(inp):\n    return re.enum\n",
+                 "import json\ndef main(inp):\n    return json.decoder\n",
+                 "import statistics\ndef main(inp):\n    return statistics.random.random()\n"):
+        assert any("attribute" in p for p in snippet.static_issues(code)), code
+    assert not any(isinstance(getattr(module, name, None), type(snippet))
+                   for module in map(__import__, snippet.ALLOWED_IMPORTS)
+                   for name in snippet.allowed_attributes())
+
+
+@pytest.mark.parametrize("label", ["needs work", "ok.", "*bold*", "proceed!"])
+def test_v5_refuses_a_code_or_verdict_gate_label_its_answer_cannot_be(label):
+    gate = {"op": "add_edge", "source": "check", "target": "extract_answer", "condition": label}
+    refused = _propose([*CRITIC_LOOP, gate])
+    assert any(r.startswith("V5") and "cannot be this gate's answer" in r for r in refused), refused
+    assert snippet.parse_verdict(f"{label} because", [label]) is None
+
+
 def test_v18_lets_ordinary_code_through():
     code = ("import re, json, collections\n"
             "def main(inp):\n"
@@ -566,6 +584,14 @@ def test_the_sandbox_shows_only_its_own_processes_and_no_host_sockets():
     assert seen["nproc"] == [snippet.NPROC, snippet.NPROC]
 
 
+def _marker() -> str:
+    """A sleep duration no other run uses, so a host-wide search finds only this test's
+    processes (never an earlier run's leftovers)."""
+    import random
+
+    return f"{random.randint(100000, 999999)}.{os.getpid()}"
+
+
 def _host_processes(marker: str) -> list[str]:
     import subprocess
 
@@ -577,7 +603,7 @@ def _host_processes(marker: str) -> list[str]:
 def test_the_sandbox_leaves_no_process_behind_after_a_timeout():
     """A snippet that starts a sleeping child and then spins is killed at its wall clock,
     and its child goes with it (PID namespace, process group)."""
-    marker = "3171.5"
+    marker = _marker()
     code = ("import subprocess\n"
             "def main(inp):\n"
             f"    subprocess.Popen(['/bin/sleep', '{marker}'], start_new_session=True)\n"
@@ -589,7 +615,7 @@ def test_the_sandbox_leaves_no_process_behind_after_a_timeout():
 
 @needs_sandbox
 def test_the_sandbox_caps_its_process_count_and_cleans_up():
-    marker = "3172.5"
+    marker = _marker()
     code = ("import subprocess\n"
             "def main(inp):\n"
             "    started = 0\n"

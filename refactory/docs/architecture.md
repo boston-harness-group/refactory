@@ -89,7 +89,7 @@ optimizer's prompt via `rules_text()`.
 | `V2` | every node must be reachable from the start node |
 | `V3` | the graph must have a terminal (a node with no out-edge) |
 | `V4` | a non-gate node has at most one out-edge, and it carries no verdict |
-| `V5` | a gate has at least two out-edges, each with its own condition, and no unconditional one |
+| `V5` | a gate has at least two out-edges, each with its own condition, and no unconditional one; a code or verdict gate's conditions are single words (no spaces or punctuation), as its answer is read as one word |
 | `V6` | every file a node reads must be written by a node on a path from start to a terminal (an agent's reads are held to every path by V15) |
 | `V7` | every knob a node consumes must be declared, and every declared knob must be consumed |
 | `V8` | every call and evaluator must resolve to a real callable |

@@ -17,7 +17,7 @@
  * what reached the worker, plus `feedback` and `iterations`: the reloop feedback the
  * live state holds for the node and the gates' iteration counts (`wf_state`, the run's
  * and the running pass's), which a worker would be handed; and each step the runtime ran
- * for the drain (`ran`) appends {ran: <the step as wf_next reported it>}.
+ * for the drain (`ran`) appends {node: <its id>, ran: <the step as wf_next reported it>}.
  */
 import { spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -145,8 +145,8 @@ for (let step = 0; step < 1000; step += 1) {
   }
   status = next.status ?? 'unknown'
   if (process.env.DRAIN_RECORD) {
-    for (const ran of ((next as { ran?: unknown[] }).ran ?? [])) {
-      appendFileSync(process.env.DRAIN_RECORD, JSON.stringify({ ran }) + '\n')
+    for (const ran of ((next as { ran?: Array<{ id?: string }> }).ran ?? [])) {
+      appendFileSync(process.env.DRAIN_RECORD, JSON.stringify({ node: ran?.id ?? '', ran }) + '\n')
     }
   }
   if (status === 'done') break

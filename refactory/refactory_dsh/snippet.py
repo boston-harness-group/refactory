@@ -89,6 +89,8 @@ MAX_OUTPUT_BYTES = 1_000_000
 #: The interpreter a snippet runs under: the system one, which lives outside every
 #: directory the sandbox hides (a project's virtualenv does not).
 PYTHON = "/usr/bin/python3"
+#: The shell that sets the sandbox up inside the namespaces.
+BASH = "/bin/bash"
 
 #: Directories hidden behind an empty tmpfs: where people, runs and temporary files
 #: live. The run directory and the project are added when they are elsewhere.
@@ -191,6 +193,7 @@ def allowed_attributes() -> frozenset:
     import fractions
     import importlib
     import re as re_module
+    import types
 
     sources: list[Any] = [str, bytes, list, dict, set, frozenset, tuple, int, float, complex,
                           bool, collections.Counter, collections.deque,
@@ -198,8 +201,13 @@ def allowed_attributes() -> frozenset:
                           fractions.Fraction, type(re_module.compile("")),
                           type(re_module.match("", ""))]
     sources += [importlib.import_module(name) for name in ALLOWED_IMPORTS]
+    # A module an allowed module happens to import (`re.enum`, `json.decoder`,
+    # `collections.abc`, `statistics.random` ...) is a way to reach modules the import
+    # allowlist refuses, so a name whose value is a module is never allowed.
     names = {name for source in sources for name in dir(source) if not name.startswith("_")}
-    return frozenset(names - set(DENIED_ATTRIBUTES))
+    modules = {name for source in sources for name in dir(source)
+               if isinstance(getattr(source, name, None), types.ModuleType)}
+    return frozenset(names - modules - set(DENIED_ATTRIBUTES))
 
 
 # ── the sandbox ───────────────────────────────────────────────────────────
@@ -238,8 +246,9 @@ def _hidden(extra: tuple[str, ...] = ()) -> list[str]:
 def _command(extra: tuple[str, ...]) -> list[str]:
     # /proc/sys is hidden after the fresh /proc is mounted, so it goes last.
     hidden = [path for path in _hidden(extra) if path != "/proc/sys"] + ["/proc/sys"]
+    # bash, not sh: `ulimit -u` is bash's (dash spells the process cap differently).
     return [shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
-            "--mount-proc", "--", "/bin/sh", "-c", _SHELL, "sh", PYTHON, _DRIVER, str(NPROC),
+            "--mount-proc", "--", BASH, "-c", _SHELL, "bash", PYTHON, _DRIVER, str(NPROC),
             *hidden]
 
 
@@ -314,8 +323,9 @@ def _probe() -> tuple[bool, str]:
         return False, f"code nodes need Linux namespaces; this is {sys.platform}"
     if shutil.which("unshare") is None:
         return False, "the unshare command is not installed"
-    if not os.path.exists(PYTHON):
-        return False, f"{PYTHON} does not exist"
+    for needed in (PYTHON, BASH):
+        if not os.path.exists(needed):
+            return False, f"{needed} does not exist"
     try:
         result = _sandboxed("def main(inp):\n    return inp['facts']['x'] + 1\n",
                             {"files": {}, "facts": {"x": 1}}, timeout_s=WALL_S, extra=())
@@ -481,6 +491,14 @@ def gate(ctx: Any) -> Any:
 _LEAD = " \t*#>-_`'\"“”‘’:([{"
 #: What ends the first word and may come after it before the reason.
 _WORD = re.compile(r"[^\s:;,.!?*`'\"“”‘’)\]}]+")
+
+
+def is_answer_word(label: Any) -> bool:
+    """Whether a gate label can be a code or verdict gate's answer: one word, as
+    :func:`parse_verdict` reads a first word (no space, no leading markdown or quotes, no
+    trailing punctuation). V5 refuses any other label on such a gate's out-edges."""
+    text = str(label or "")
+    return bool(text) and text[0] not in _LEAD and _WORD.fullmatch(text) is not None
 
 
 def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:

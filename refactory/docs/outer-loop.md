@@ -553,7 +553,9 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
   not proceed; reloop". A first word that is not an answer fails the node with an error
   naming the answers; it never falls back to a default. This is how an agent decides a
   gate: a reviewer agent writes `proceed` or `reloop`, followed by why.
-- **Answers a gate may give:** each out-edge condition (one word each), and `halt`. The
+- **Answers a gate may give:** each out-edge condition, and `halt`. V5 refuses a code or
+  verdict gate whose out-edge condition is not a single word (`needs work`, `ok.`), so the
+  edit is refused instead of every run failing when the gate answers. The
   router (`route_verdict`, the spine's `Spine.verdict`) takes `halt` with no halt edge as
   the end of the whole run, so a code or verdict gate may answer it too. `proceed` with no
   proceed edge is not offered: the router would send it down an unconditional edge, and a
@@ -615,7 +617,8 @@ code must parse, define `main` and be at most 4096 bytes. It may import only `re
 `string`. It may not use `open`, `exec`, `eval`, `compile`, `__import__`,
 `getattr`/`setattr`/`delattr`, `globals`/`locals`/`vars`, or any dunder name or dunder
 attribute. Attribute names are allowlisted: the public methods of the builtin value types
-and of what the allowed modules hand out, plus those modules' public names. String
+and of what the allowed modules hand out, plus those modules' public names that are not
+themselves modules (`re.enum`, `json.decoder` and `statistics.random` are refused). String
 formatting is refused (`format`, `format_map`, `string.Formatter`, `string.Template`),
 because it reaches attributes by name where the dunder ban cannot see it. `inputs` join V15 (each one is produced upstream on every path) and V17 (they
 count as consumed, so grader-derived inputs are refused). An edit whose code holds a value
