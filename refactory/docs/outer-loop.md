@@ -76,7 +76,11 @@ and `hill_climb` optimizers run with it.
   gradient's leaderboard) carries the gate's decision: `current` (the candidate it
   edits), `kept`, `rejected` or `not gated`. The per-knob attribution counts, for each
   value, how many of its candidates were kept, rejected or not yet gated. The request
-  says it edits the `current` candidate, and that a `rejected` one did not generalise.
+  says it edits the `current` candidate, and that a `rejected` one was not shown better
+  on validation (with the gate's resolution, one item = 1/N of the val score, when the
+  score is the items' mean); a rejected change is never re-proposed unchanged, but one
+  whose train fixed/broken counts were strongly positive may be built on or combined
+  with edits to other steps in the same failure path.
   The history's best is the best kept candidate. Val scores are never shown to it;
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
@@ -287,8 +291,9 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   quotes of at most 240 characters and 40 item ids, and the whole findings block at
   most 40% of the budget (`READER_*`). Then a
   table of every item: outcome, expected, predicted, the grader's reason, the error.
-  Then as many items in full as the rest of the budget holds, failures and passes
-  alternating. A reader call that fails is noted, with its items, and the proposal
+  Then as many items in full as the rest of the budget holds: first the items the
+  readers cited, one per pattern in turn (failure patterns first), so every pattern has
+  an item in full before any has a second; then failures and passes alternating. A reader call that fails is noted, with its items, and the proposal
   goes ahead with the findings it has. An optimizer that calls no reader gets the
   table and the items in full.
 - **Clipping.** Only an item longer than the whole budget on its own is clipped, head

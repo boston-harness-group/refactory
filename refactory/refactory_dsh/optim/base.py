@@ -521,6 +521,19 @@ class ProposalContext:
     #: Whether the score is the mean of the items' scores (``Loop`` checks every train
     #: evaluation); only then does the size cost line compare a node with one item.
     score_is_item_mean: bool = False
+    #: How many proposals this request asks for (``AutoresearchOptimizer`` sets it to
+    #: its ``n``); 0 when not said. With 1, only one candidate is evaluated, so the
+    #: bundling advice asks for one proposal covering the whole failure path instead
+    #: of separate proposals that would never run.
+    proposals: int = 0
+    #: How many validation items the gate's score is the mean of (``Loop``: the val
+    #: part's size, under ``val_gate`` when the score is the items' mean); 0 when not
+    #: known. The gate note then says what one validation item is worth.
+    val_items: int = 0
+    #: The seed's knob values (``Loop``: the population's root candidate), so the
+    #: history can show a ``set_knob`` as a diff against the value it replaced; empty
+    #: when not known (the first change to a text knob then shows its length and head).
+    seed_knob_values: dict[str, Any] = field(default_factory=dict)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -582,10 +595,10 @@ class ProposalContext:
             "",
             *_blocks_section(self.insertable, self.catalogue),
             "## Recent results",
-            *_gate_note(self.leaderboard, self.history),
+            *_gate_note(self.leaderboard, self.history, val_items=self.val_items),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
-                     json.dumps(c.get("edits"), default=str),
+                     compact_edits(c.get("edits"), self.seed_knob_values),
                      *([c.get("gate", "")] if _gate_column(self.leaderboard) else [])]
                     for c in self.leaderboard]),
             "",
@@ -625,7 +638,7 @@ class ProposalContext:
                 ["id", "parent", "score", "structural", "ok", "edits", *_gate_column(self.history)],
                 [
                     [c.get("id"), c.get("parent"), c.get("score"), c.get("structural"),
-                     c.get("exit_ok"), json.dumps(c.get("edits"), default=str),
+                     c.get("exit_ok"), compact_edits(c.get("edits"), self.seed_knob_values),
                      *([c.get("gate", "")] if _gate_column(self.history) else [])]
                     for c in self.history[-16:]
                 ],
@@ -659,7 +672,8 @@ class ProposalContext:
             self.catalogue, parsimony=self.parsimony,
             items=_item_count(self.item_records) if self.score_is_item_mean else 0)]
         if self.max_edits > 1:
-            sections += ["", bundle_instructions(self.max_edits, self.catalogue)]
+            sections += ["", bundle_instructions(self.max_edits, self.catalogue,
+                                                 proposals=self.proposals)]
         return "\n".join(sections)
 
 
@@ -815,20 +829,41 @@ def bundle_examples(catalogue: Sequence[dict[str, Any]]) -> list[list[dict[str, 
     return out
 
 
-def bundle_instructions(max_edits: int, catalogue: Sequence[dict[str, Any]] = ()) -> str:
-    """How a proposal bundles edits, said only when the run allows more than one."""
+def bundle_instructions(max_edits: int, catalogue: Sequence[dict[str, Any]] = (),
+                        proposals: int = 0) -> str:
+    """How a proposal bundles edits, said only when the run allows more than one.
+
+    When the request asks for a single proposal (``proposals == 1``) only one
+    candidate is evaluated, so an idea put in a separate proposal is never run, and
+    fixes that only work together would be split across rounds and each judged
+    alone: the advice is then to cover every step of the diagnosed failure path in
+    the one proposal. Otherwise separate ideas go in separate proposals."""
     example = json.dumps({"proposals": [{"edits": bundle,
                                          "rationale": "<why these changes only work together>",
                                          "prediction": "<expected effect on the score>",
                                          "confidence": 0.0} for bundle in bundle_examples(catalogue)]})
+    if proposals == 1:
+        scope = f"""\
+Only one proposal is asked for, so only one candidate is evaluated: an idea left for a
+separate proposal is not run this round. When your diagnosis traces a failure through
+several steps, make this one proposal's edits cover every step it names on that
+failure path (up to {max_edits} edits), so the fix is evaluated as a whole; changes that
+only work together each fail when tried alone."""
+    else:
+        scope = """\
+Bundle only what belongs to one idea: separate ideas go in separate proposals, so each
+is judged on its own."""
     return f"""\
 Bundling: when one fix needs coordinated changes -- several steps' prompts that have
 to agree, or a new node and the knob that feeds it -- one proposal may carry up to
 {max_edits} edits as an ordered list under "edits" instead of "edit". They are applied in
 order to the same parent, each to the state the one before it left, and the result is
 evaluated and judged once as one candidate; if any edit is refused, the whole proposal
-is, and the refusal names the edit. Bundle only what belongs to one idea: separate
-ideas go in separate proposals, so each is judged on its own. Example:
+is, and the refusal names the edit.
+
+{scope}
+
+Example:
 
 {example}"""
 
@@ -1033,6 +1068,47 @@ def trajectory_groups(records: Sequence[dict[str, Any]],
 _TABLE_CELL_CHARS = 200
 
 
+def _reader_patterns(findings: Sequence[dict[str, Any]] | None) -> list[tuple[str, dict[str, Any]]]:
+    """The readers' patterns the request shows, as ``(kind, pattern)`` in their order:
+    reader by reader, failure patterns then success patterns, at most
+    ``READER_PATTERNS`` per reader."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for found in findings or ():
+        shown = 0
+        for kind in ("failure_patterns", "success_patterns"):
+            for pattern in found.get(kind) or ():
+                if not isinstance(pattern, dict) or shown >= READER_PATTERNS:
+                    continue
+                shown += 1
+                out.append((kind, pattern))
+    return out
+
+
+def _cited_items(items: Sequence[dict[str, Any]],
+                 findings: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """The items the readers cited, in the order they are shown in full: one item per
+    pattern in turn (failure patterns before success patterns), so every pattern has
+    an item shown before any pattern has a second. Each item once; ids no item has
+    are skipped. Empty without findings."""
+    by_id = {str(record.get("id")): record for record in items}
+    patterns = sorted(_reader_patterns(findings), key=lambda pair: pair[0] != "failure_patterns")
+    queues = [iter([item for item in dict.fromkeys(str(i) for i in pattern.get("items") or ())
+                    if item in by_id]) for _kind, pattern in patterns]
+    chosen: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while queues:
+        still = []
+        for queue in queues:
+            for item in queue:
+                if item not in seen:
+                    seen.add(item)
+                    chosen.append(by_id[item])
+                    still.append(queue)
+                    break
+        queues = still
+    return chosen
+
+
 def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                   findings: Sequence[dict[str, Any]] | None = None,
                   failures: Sequence[dict[str, Any]] = ()) -> list[str]:
@@ -1041,7 +1117,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     When all of them fit ``budget`` in full, every item is shown in full here. When
     not, readers went through them in groups (``AutoresearchOptimizer``): their
     findings come first, then a table of every item, then as many items in full as
-    the rest of the budget holds. Train records only.
+    the rest of the budget holds: the items the readers cited first, one per pattern
+    in turn (``_cited_items``), then failures and passes alternating. Train records
+    only.
     """
     items = _ordered_items(records)
     if not items:
@@ -1066,22 +1144,16 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     else:
         lines += ["", "### What the readers found"]
         found_lines: list[str] = []
-        for found in findings:
-            shown = 0
-            for kind in ("failure_patterns", "success_patterns"):
-                for pattern in found.get(kind) or ():
-                    if not isinstance(pattern, dict) or shown >= READER_PATTERNS:
-                        continue
-                    shown += 1
-                    ids = [str(i) for i in pattern.get("items") or ()]
-                    id_text = ", ".join(ids[:READER_ITEM_IDS]) + (
-                        f" and {len(ids) - READER_ITEM_IDS} more" if len(ids) > READER_ITEM_IDS else "")
-                    quotes = [f'"{_clip(quote, READER_QUOTE_CHARS)}"'
-                              for quote in list(pattern.get("evidence") or ())[:READER_QUOTES]]
-                    found_lines.append(
-                        f"- [{kind.split('_')[0]}] {_clip(pattern.get('pattern', ''), READER_PATTERN_CHARS)} "
-                        f"(step `{_clip(pattern.get('step', 'unclear'), 60)}`; items {id_text}) "
-                        "-- evidence: " + " | ".join(quotes))
+        for kind, pattern in _reader_patterns(findings):
+            ids = [str(i) for i in pattern.get("items") or ()]
+            id_text = ", ".join(ids[:READER_ITEM_IDS]) + (
+                f" and {len(ids) - READER_ITEM_IDS} more" if len(ids) > READER_ITEM_IDS else "")
+            quotes = [f'"{_clip(quote, READER_QUOTE_CHARS)}"'
+                      for quote in list(pattern.get("evidence") or ())[:READER_QUOTES]]
+            found_lines.append(
+                f"- [{kind.split('_')[0]}] {_clip(pattern.get('pattern', ''), READER_PATTERN_CHARS)} "
+                f"(step `{_clip(pattern.get('step', 'unclear'), 60)}`; items {id_text}) "
+                "-- evidence: " + " | ".join(quotes))
         cap = int(budget * READER_FINDINGS_SHARE)
         used_findings = 0
         for index, line in enumerate(found_lines):
@@ -1108,8 +1180,15 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     passing = [r for r in items if r.get("passed")]
     interleaved = [r for pair in zip(failing, passing) for r in pair]
     interleaved += failing[len(passing):] + passing[len(failing):]
+    # The items behind the readers' patterns first, so the proposal call sees each
+    # pattern in full; then the rest by the rule above.
+    cited = _cited_items(items, findings)
+    if cited:
+        examples.append("The items the readers cited come first, one per pattern in turn, "
+                        "then the others.")
+    picked = {id(record) for record in cited}
     shown = 0
-    for record in interleaved:
+    for record in cited + [r for r in interleaved if id(r) not in picked]:
         block = _item_block(record, budget)
         if used + len("\n".join(examples)) + len(block) + 2 > budget:
             continue
@@ -1224,15 +1303,27 @@ def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
     return ["gate"] if any("gate" in row for row in rows) else []
 
 
-def _gate_note(*tables: Sequence[dict[str, Any]]) -> list[str]:
-    """What the gate column means, said once, when there is one."""
+def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0) -> list[str]:
+    """What the gate column means, said once, when there is one.
+
+    A rejection says only that the candidate was not shown better on validation; with
+    ``val_items`` (the validation items the gate's score is the mean of) the note says
+    what one item is worth, so a one-item loss is read as the gate's resolution."""
     if not any(_gate_column(rows) for rows in tables):
         return []
+    resolution = (f"The gate's score is the mean over {val_items} validation items, so one "
+                  f"item is 1/{val_items} = {1 / val_items:.3g} of it, and a rejection can come "
+                  "down to a single item. " if val_items > 0 else "")
     return ["This run has a validation gate: each candidate was also run on held-out "
-            "items, and the gate kept it only if it beat the current candidate there. "
-            "Scores here are train scores; held-out scores are never shown. You edit the "
-            "candidate marked `current`. A `rejected` candidate did not generalise, so do "
-            "not build on its change or propose it again."]
+            "items, and the gate kept it only if it scored strictly higher there than the "
+            "current candidate (an equal score is rejected). Scores here are train scores; "
+            "held-out scores are never shown. You edit the candidate marked `current`. A "
+            "`rejected` candidate was not shown better on validation; that is all a "
+            "rejection says. " + resolution + "A rejected candidate is never kept, and its "
+            "change must not be proposed again unchanged. When its train fixed/broken counts "
+            "against its parent were strongly positive, its direction may still be right: "
+            "you may build on its change or combine it with edits to other steps in the "
+            "same failure path."]
 
 
 #: The section comparing the last edit's child with its parent fits this many
@@ -1307,6 +1398,78 @@ def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS) -> str:
                          for key, value in edit.items() if key not in EDIT_NAMING_FIELDS)
         lines.append(f"{index}. {head}" + (f" -- {rest}" if rest else ""))
     return "\n".join(lines) if lines else "(none)"
+
+
+#: How much of one edit "What this run has already tried" shows: a ``set_knob``'s
+#: diff against the value it replaced, a patch's ops, a structural edit's fields.
+HISTORY_EDIT_CHARS = 600
+#: How much of a node's prompt a structural edit in that table shows.
+HISTORY_NODE_PROMPT_CHARS = 200
+_UNKNOWN = object()
+
+
+def _bounded(text: str, limit: int = HISTORY_EDIT_CHARS) -> str:
+    return text if len(text) <= limit else f"{text[:limit]}... ({len(text) - limit} more chars)"
+
+
+def _node_summary(node: Any) -> Any:
+    """A node object as the history shows it: id, kind and the head of its prompt."""
+    if not isinstance(node, dict):
+        return node
+    out = {key: node[key] for key in ("id", "kind") if key in node}
+    prompt = node.get("prompt_template") or node.get("system_prompt_template")
+    if prompt:
+        out["prompt"] = _bounded(str(prompt), HISTORY_NODE_PROMPT_CHARS)
+    return out
+
+
+def _text_diff(old: str, new: str) -> str:
+    """The changed lines of a text, unified-diff style without file headers."""
+    import difflib
+
+    lines = [line for line in difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                                    lineterm="", n=0)
+             if not line.startswith(("---", "+++"))]
+    return "\n".join(lines) or "(no change)"
+
+
+def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
+    """A candidate's edits (its whole lineage, oldest first) for the history table,
+    without whole values: each edit's op and what it names; a text ``set_knob`` as
+    old -> new length and a bounded diff against the value it replaced (the previous
+    ``set_knob`` of that knob in the lineage, else ``before``, the seed's values); a
+    patch's ops; a structural edit's fields with node objects summarised. Each edit is
+    at most ``HISTORY_EDIT_CHARS`` characters plus a "(N more chars)" marker. The
+    "Parameters you may move" table already shows the current values in full."""
+    values: dict[str, Any] = dict(before or {})
+    parts: list[str] = []
+    for edit in list(edits) if isinstance(edits, (list, tuple)) else [edits]:
+        if not isinstance(edit, dict):
+            parts.append(_bounded(json.dumps(edit, default=str)))
+            continue
+        op, name = edit.get("op"), edit.get("name")
+        if op == "set_knob" and "value" in edit:
+            new, old = edit["value"], values.get(name, _UNKNOWN)
+            values[name] = new
+            if isinstance(new, str) and isinstance(old, str):
+                parts.append(f"set_knob {name}: {len(old)} -> {len(new)} chars; diff: "
+                             + _bounded(_text_diff(old, new)))
+            elif isinstance(new, str):
+                parts.append(f"set_knob {name} = ({len(new)} chars) "
+                             + _bounded(json.dumps(new)))
+            else:
+                parts.append(f"set_knob {name} = " + _bounded(json.dumps(new, default=str)))
+        elif op == "set_knob" and "patch" in edit:
+            values[name] = _UNKNOWN  # the patched value is not tracked here
+            parts.append(f"set_knob {name} patch: "
+                         + _bounded(json.dumps(edit["patch"], default=str)))
+        else:
+            shown = {key: ([_node_summary(n) for n in value] if key == "into"
+                           and isinstance(value, list) else _node_summary(value)
+                           if key in NODE_OBJECT_FIELDS else value)
+                     for key, value in edit.items()}
+            parts.append(_bounded(json.dumps(shown, default=str)))
+    return "; ".join(parts) if parts else "(none)"
 
 
 def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:

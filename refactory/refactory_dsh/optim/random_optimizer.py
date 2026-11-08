@@ -249,6 +249,7 @@ class AutoresearchOptimizer(Optimizer):
         if len(groups) > 1:
             findings, failures = self._read(ctx, groups)
             ctx = replace(ctx, reader_findings=findings, reader_failures=failures)
+        ctx = replace(ctx, proposals=max(1, n))
         question = (
             f"{ctx.render()}\n\nPropose at most {max(1, n)} update(s). "
             "Reply with the JSON object described under 'Answer' and nothing else."
