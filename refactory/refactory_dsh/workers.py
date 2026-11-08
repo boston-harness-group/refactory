@@ -326,6 +326,10 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if not isinstance(node, AgentNode):
             continue
         selected = client.for_node(name, role=node.role.value)
+        # The node's tool policy is part of its client: a session without tools may
+        # retry on any backend (`DshModelClient.retry_attempts`), so its envelope
+        # below reserves every attempt.
+        selected = selected.with_tool_policy(getattr(node, "tool_policy", None) or "")
         if node.tool_policy == "none" and node.tools:
             raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
         if node.tools:
@@ -378,7 +382,7 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         # dispatched session runs under, computed once so the layers cannot
         # disagree about when a node's work ends (#307).
         from refactory_dsh.model import DEFAULT_TIMEOUT_S, NODE_DISPATCH_OVERHEAD_S, node_session_budget_s
-        attempts = max(1, int(selected_context.get('attempts') or 1))
+        attempts = selected.retry_attempts()
         per_completion = int(selected_context.get('timeout_s') or DEFAULT_TIMEOUT_S)
         if retry:
             # Every attempt's session -- the first under the node's bound, each retry

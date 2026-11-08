@@ -715,3 +715,227 @@ def test_a_run_whose_proposer_answered_does_not_claim_a_failure(tmp_path):
     assert "Did the proposer answer?" not in (root / "report.md").read_text(), (
         "a healthy run is claiming its proposer failed"
     )
+
+
+TEARDOWN = ("dsh: worker failed: subagent-claude-code: Product subagent failure (product: "
+            "Claude Code; stage: teardown; category: unknown; exit code: 0)")
+
+
+def _answers(monkeypatch, *answers):  # type: ignore[no-untyped-def]
+    from refactory_dsh import model
+    from refactory_dsh.model import DshModelClient
+
+    queue = list(answers)
+    waits: list[float] = []
+    monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: queue.pop(0))
+    monkeypatch.setattr(model.time, "sleep", waits.append)
+    return queue, waits
+
+
+def _no_tools():  # type: ignore[no-untyped-def]
+    from refactory_dsh.model import DshModelClient
+
+    # Only the dsh backend retries at all (other backends make one attempt).
+    return DshModelClient(worker_backend="dsh", provider="p", model="m").with_tool_policy("none")
+
+
+class _Failed:
+    returncode = 1
+    stdout = ""
+
+    def __init__(self, stderr: str) -> None:
+        self.stderr = stderr
+
+
+class _Done:
+    returncode = 0
+    stdout = "done\n"
+    stderr = ""
+
+
+def test_a_teardown_failure_after_a_clean_exit_is_retried_without_tools(monkeypatch):
+    """A session without tools whose CLI exited 0 and whose DSH cleanup then failed:
+    the completion is retried (same backoff as a transport failure) and the second
+    attempt's answer returned; if it keeps failing, the error does not call it a
+    wire failure."""
+    queue, waits = _answers(monkeypatch, _Failed(f"dsh: reasoning:\nthinking\n{TEARDOWN}\n"),
+                            _Done())
+    assert _no_tools().complete("hello") == "done\n"
+    assert queue == [] and waits == pytest.approx([20.0])
+    _answers(monkeypatch, *[_Failed(TEARDOWN)] * 3)
+    with pytest.raises(RuntimeError) as raised:
+        _no_tools().complete("hello")
+    assert str(raised.value) == ("model completion failed in worker teardown after a clean "
+                                 f"exit 3 time(s); last cause: {TEARDOWN}")
+
+
+def test_a_teardown_failure_in_a_session_with_tools_is_not_retried(monkeypatch):
+    """A session with tools finished its work before the teardown failed: a replay
+    would repeat it, so it fails at once as before."""
+    from refactory_dsh.model import DshModelClient
+
+    for client in (DshModelClient(), DshModelClient(worker_backend="dsh", provider="p", model="m")):
+        queue, waits = _answers(monkeypatch, _Failed(TEARDOWN), _Done())
+        with pytest.raises(RuntimeError, match=r"model completion failed \(exit 1\): dsh: worker failed"):
+            client.complete("hello")
+        assert len(queue) == 1 and waits == []
+
+
+@pytest.mark.parametrize("stderr", [
+    TEARDOWN.replace("exit code: 0", "exit code: 1"),
+    TEARDOWN.replace("exit code: 0", "exit code: 01"),
+    TEARDOWN.replace("stage: teardown", "stage: run"),
+    # "exit code: 0" in the streamed reasoning, the real diagnostic exit 1.
+    "dsh: reasoning:\nthe last command ended with exit code: 0\n"
+    + TEARDOWN.replace("exit code: 0", "exit code: 1"),
+    # A combined startup and teardown failure: the clean exit is the startup group's.
+    ("dsh: worker failed: subagent-claude-code: Product subagent failure (product: Claude "
+     "Code; stage: startup; category: unknown; exit code: 0); Product subagent failure "
+     "(product: Claude Code; stage: teardown; category: unknown)"),
+])
+def test_other_teardown_or_stage_failures_are_not_retried(monkeypatch, stderr):
+    """A teardown failure after a nonzero CLI exit, a clean exit failing in another
+    stage, a clean exit mentioned only in the reasoning, or a teardown group without
+    an exit code: fails at once with its cause, even without tools."""
+    queue, waits = _answers(monkeypatch, _Failed(stderr), _Done())
+    with pytest.raises(RuntimeError, match=r"model completion failed \(exit 1\): dsh: worker failed"):
+        _no_tools().complete("hello")
+    assert len(queue) == 1 and waits == []
+
+
+def test_a_transport_failure_is_still_retried_and_the_predicates_stay_apart(monkeypatch):
+    from refactory_dsh.model import (DshModelClient, failure_cause, is_clean_exit_teardown_failure,
+                                     is_retryable_failure, is_transport_failure)
+
+    for client in (DshModelClient(), _no_tools()):
+        queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: socket hang up"), _Done())
+        assert client.complete("hello") == "done\n"
+        assert queue == [] and len(waits) == 1
+    assert not is_transport_failure(TEARDOWN), "a teardown failure is not called transport"
+    assert is_clean_exit_teardown_failure(TEARDOWN.upper())
+    assert is_retryable_failure(TEARDOWN, tool_policy="none")
+    assert not is_retryable_failure(TEARDOWN)
+    assert failure_cause(f"noise\n{TEARDOWN}\n") == TEARDOWN
+
+
+def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monkeypatch):
+    """On a native backend (claude_code) a session without tools retries a transport
+    failure and a clean-exit teardown within the configured attempts; a session with
+    tools makes one attempt, as before. The configured count survives a context
+    round trip."""
+    from refactory_dsh.model import DshModelClient
+
+    native = DshModelClient(worker_backend="claude_code")
+    text = native.with_tool_policy("none")
+    assert native.retry_attempts() == 1 and text.retry_attempts() == 3
+    rebuilt = DshModelClient(**native.context()).with_tool_policy("none")
+    assert rebuilt.retry_attempts() == 3
+    for failure in (TEARDOWN, "dsh: TRANSPORT: socket hang up"):
+        queue, waits = _answers(monkeypatch, _Failed(failure), _Done())
+        assert text.complete("hello") == "done\n"
+        assert queue == [] and len(waits) == 1
+        queue, waits = _answers(monkeypatch, _Failed(failure), _Done())
+        with pytest.raises(RuntimeError, match="model completion failed"):
+            native.complete("hello")
+        assert len(queue) == 1 and waits == []
+
+
+def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, monkeypatch):
+    """The client a tool_policy "none" agent node calls is a no-tools client on both
+    runtimes, and so is the optimizer's: the walker (`GraphExecutor`, via for_node and
+    with_tool_policy), the spine (`workers.lower_workflow` writes the policy and the
+    node's attempts into the worker spec that `worker_node` rebuilds its client from),
+    and `text_only`. On a native backend each retries; the spine's envelope reserves
+    every attempt."""
+    import json
+
+    from refactory_dsh import workers
+    from refactory_dsh.ir import AgentNode, AgentRole, Workflow
+    from refactory_dsh.model import DEFAULT_TIMEOUT_S, DshModelClient, node_session_budget_s
+    from refactory_dsh.optim.random_optimizer import text_only
+
+    native = DshModelClient(worker_backend="claude_code")
+    assert text_only(native)._tool_policy == "none" and text_only(native).retry_attempts() == 3
+
+    def graph(policy):  # type: ignore[no-untyped-def]
+        node = AgentNode(id="answer", role=AgentRole.BUILDER, prompt_template="q",
+                         writes={"answer.txt"}, tool_policy=policy)
+        return Workflow(name="g", nodes={"answer": node}, edges=[], start_node="answer")
+
+    for policy, attempts in (("none", 3), (None, 1)):
+        lowered = workers.lower_workflow(graph(policy), tmp_path / str(policy), native.context())
+        node = lowered.nodes["answer"]
+        spec = json.loads(Path(node.dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
+        rebuilt = DshModelClient(**spec["model_context"]).for_node("answer", role="builder")
+        rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")  # as worker_node does
+        assert (rebuilt._tool_policy == "none") is (policy == "none")
+        assert rebuilt.retry_attempts() == attempts
+        assert node.command_timeout_s == node_session_budget_s(attempts, DEFAULT_TIMEOUT_S)
+
+    # The walker: the executor hands an agent node the for_node client with the node's
+    # tool policy applied.
+    from refactory_dsh.nn import executor as nn_executor
+
+    seen = {}
+
+    def ask(model, prompt, *, system, workdir):  # type: ignore[no-untyped-def]
+        seen["policy"], seen["attempts"] = model._tool_policy, model.retry_attempts()
+        return "A"
+
+    monkeypatch.setattr(nn_executor, "_ask_model", ask)
+    from refactory_dsh.nn.graph import Graph, Node
+
+    node = Node(id="answer", kind="agent", prompt_template="q", tool_policy="none",
+                writes=("answer.txt",))
+    walk = Graph()
+    walk.add(node)
+    walk.start = "answer"
+    executor = nn_executor.Executor(walk, nn_executor.RunContext(tmp_path / "walk", model=native))
+    import os
+
+    saved = dict(os.environ)  # the visit sets run variables; leave none behind
+    try:
+        executor._visit_agent(node)
+    except Exception:  # noqa: BLE001 - only the client the node asked with matters here
+        pass
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    assert seen == {"policy": "none", "attempts": 3}
+
+
+@pytest.mark.parametrize("run_route, node_route, attempts", [
+    # A dsh run with one node routed to claude_code (tools): that node's native session
+    # makes one attempt and gets one completion's time limit (it used to inherit dsh's 3).
+    ({"worker_backend": "dsh", "provider": "p", "model": "m"},
+     {"worker_backend": "claude_code"}, 1),
+    # A claude_code run with one node routed to dsh (tools): that node retries as a dsh
+    # run's nodes do, with the time limit for every attempt (it used to be held to 1).
+    ({"worker_backend": "claude_code"},
+     {"worker_backend": "dsh", "provider": "p", "model": "m"}, 3),
+])
+def test_a_mixed_route_node_gets_its_own_routes_attempts_and_time_limit(
+        tmp_path, run_route, node_route, attempts):
+    """The attempt count and the spine's time limit follow the node's own route, not
+    the run's default: on the spine (the lower_workflow spec, rebuilt as worker_node
+    does) and on the walker (the for_node client)."""
+    import json
+
+    from refactory_dsh import workers
+    from refactory_dsh.ir import AgentNode, AgentRole, Workflow
+    from refactory_dsh.model import DEFAULT_TIMEOUT_S, DshModelClient, node_session_budget_s
+
+    run = DshModelClient(**run_route, node_routes={"answer": node_route})
+    node = AgentNode(id="answer", role=AgentRole.BUILDER, prompt_template="q",
+                     writes={"answer.txt"})
+    graph = Workflow(name="g", nodes={"answer": node}, edges=[], start_node="answer")
+    lowered = workers.lower_workflow(graph, tmp_path, run.context()).nodes["answer"]
+    assert lowered.command_timeout_s == node_session_budget_s(attempts, DEFAULT_TIMEOUT_S)
+    spec = json.loads(Path(lowered.dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
+    rebuilt = DshModelClient(**spec["model_context"]).for_node("answer", role="builder")
+    rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")
+    assert rebuilt.route()["worker_backend"] == node_route["worker_backend"]
+    assert rebuilt.retry_attempts() == attempts
+    walker = run.for_node("answer", role="builder").with_tool_policy("")
+    assert walker.route()["worker_backend"] == node_route["worker_backend"]
+    assert walker.retry_attempts() == attempts
