@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import nn, snippet
+from refactory_dsh import events as run_events
 from refactory_dsh.loop import Loop, LoopConfig
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
@@ -166,7 +167,7 @@ class _Broken(Optimizer):
     name = "broken"
 
     def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
-        raise ValueError("cannot read the request")
+        raise ValueError("cannot read the request\nsecond line")
 
 
 def test_a_failed_proposal_round_is_in_the_progress_stream_and_the_report(tmp_path):
@@ -177,8 +178,13 @@ def test_a_failed_proposal_round_is_in_the_progress_stream_and_the_report(tmp_pa
     events = [json.loads(line) for line in (root / "progress.jsonl").read_text().splitlines()]
     failed = [e for e in events if e["step"] == "proposal_failed"]
     assert failed and failed[0]["error"] == "ValueError"
-    assert failed[0]["detail"] == "cannot read the request"
-    assert "- ValueError: cannot read the request" in (root / "report.md").read_text()
+    assert failed[0]["detail"] == "cannot read the request\nsecond line"
+    # One bullet per failure, even for a multi-line message.
+    assert "- ValueError: cannot read the request second line\n" in (root / "report.md").read_text()
+    # Shown by the default (non-verbose) printer, not only with --verbose.
+    line = run_events.render(failed[0])
+    assert line and "proposal failed" in line
+    assert "ValueError: cannot read the request second line" in line
 
 
 # ── the set_knob patch format ─────────────────────────────────────────────

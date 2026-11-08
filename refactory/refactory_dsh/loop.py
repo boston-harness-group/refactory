@@ -2310,7 +2310,8 @@ class Loop(OuterLoop):
             # round that never reached the model otherwise reads as one that did and
             # proposed nothing.
             self._progress("proposal_failed", optimizer=self.optimizer.name,
-                           parent=self._editing_parent, attempt=self._proposal_attempt,
+                           parent=self.strategy_decision.get("parent") or self._editing_parent,
+                           attempt=self._proposal_attempt,
                            error=type(exc).__name__, detail=str(exc)[:500])
             return []
 
@@ -3479,7 +3480,8 @@ class Loop(OuterLoop):
                     "",
                     payload["proposer"]["finding"],
                     "",
-                    *[f"- {failure[:300]}" for failure in payload["proposer"]["failures"]],
+                    *["- " + " ".join(failure.split())[:300]  # one bullet each, even multi-line
+                      for failure in payload["proposer"]["failures"]],
                     "",
                 ]
                 if payload["proposer"]["failure_count"]
