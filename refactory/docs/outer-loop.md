@@ -76,7 +76,13 @@ and `hill_climb` optimizers run with it.
   gradient's leaderboard) carries the gate's decision: `current` (the candidate it
   edits), `kept`, `rejected` or `not gated`. The per-knob attribution counts, for each
   value, how many of its candidates were kept, rejected or not yet gated. The request
-  says it edits the `current` candidate, and that a `rejected` one did not generalise.
+  says it edits the `current` candidate, and that a `rejected` one was not shown better
+  on validation (with the gate's resolution, one item = 1/N of the val score, when the
+  score is the items' mean); a rejected change is never re-proposed unchanged, but one
+  whose train fixed/broken counts (when shown) were strongly positive may be built on or
+  combined with edits to other steps in the same failure path. "Your earlier reasoning"
+  shows the full edits of the latest such rejected candidate (more fixed than broken),
+  up to 4000 characters (`REJECTED_EDITS_CHARS`).
   The history's best is the best kept candidate. Val scores are never shown to it;
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
@@ -167,14 +173,24 @@ sections at once; this is the default loop's equivalent.
 - **Cap.** `--max-edits-per-proposal` (default 4, SkillOpt's edit budget) caps the
   list; `1` is single edits only, as before.
 - **Who emits lists.** The `autoresearch` request says it may bundle up to N edits when a
-  fix needs coordinated changes, with a JSON example (not shown when N is 1). The random
+  fix needs coordinated changes, with a JSON example (not shown when N is 1). When it
+  asks for one proposal (one candidate per epoch), it asks that the proposal's edits
+  cover every step the diagnosis names on the failure path, since an idea left for a
+  separate proposal is never run; when it asks for several, separate ideas go in
+  separate proposals. The random
   and population optimizers emit single edits. A proposal with one `edit` works as
   before.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
   `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
   them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
   "What the last edit changed" and "Your earlier reasoning" list every edit, its op and
-  what it names whole and only long values clipped; a refused list is recorded as
+  what it names whole and only long values clipped. "Recent results" and "What this run
+  has already tried" show each candidate's lineage of edits compactly: a text
+  `set_knob` as old -> new length and a line diff against the value it replaced (the
+  previous edit to that knob, else the seed's value), lines joined with ` ⏎ `; a patch's
+  ops; a structural edit's fields with node objects as id, kind and the first 200
+  characters of the prompt; each edit at most 600 characters (`HISTORY_EDIT_CHARS`),
+  with "... (N more chars)" when cut. A refused list is recorded as
   `{"edits": [...]}`. The loop-as-a-graph path (`write_pending`/`read_pending`) carries
   `step_edits` and the edit reports.
 - **Attribution.** The per-knob attribution credits knob values by state: every knob's
@@ -287,8 +303,9 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   quotes of at most 240 characters and 40 item ids, and the whole findings block at
   most 40% of the budget (`READER_*`). Then a
   table of every item: outcome, expected, predicted, the grader's reason, the error.
-  Then as many items in full as the rest of the budget holds, failures and passes
-  alternating. A reader call that fails is noted, with its items, and the proposal
+  Then as many items in full as the rest of the budget holds: first the items the
+  readers cited, one per pattern in turn (failure patterns first), so every pattern has
+  an item in full before any has a second; then failures and passes alternating. A reader call that fails is noted, with its items, and the proposal
   goes ahead with the findings it has. An optimizer that calls no reader gets the
   table and the items in full.
 - **Clipping.** Only an item longer than the whole budget on its own is clipped, head

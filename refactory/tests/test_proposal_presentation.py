@@ -149,7 +149,94 @@ def test_the_template_names_no_task_or_domain():
     prompts: no benchmark or domain vocabulary."""
     texts = [_render("broad", max_edits=4, parsimony=0.01), _render("knob_only", max_edits=4),
              READER_SYSTEM, READER_ANSWER, AutoresearchOptimizer(object())._system,
-             base.bundle_instructions(4, edits.catalogue("broad"))]
+             base.bundle_instructions(4, edits.catalogue("broad")),
+             base.bundle_instructions(4, edits.catalogue("broad"), proposals=1)]
     for text in texts:
         for word in DENYLIST:
             assert not re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE), (word, text[:200])
+
+
+SEPARATE = "separate ideas go in separate proposals"
+WHOLE_PATH = "make this one proposal's edits cover every step it names on that\nfailure path (up to 4 edits)"
+
+
+def test_one_proposal_asks_to_cover_the_whole_failure_path():
+    """Asked for one proposal, only one candidate runs: the request asks for one
+    proposal covering every step of the diagnosed failure path, not separate ideas
+    that would never run. Asked for several (or not said), separate ideas stay
+    separate."""
+    one = _render("broad", max_edits=4, proposals=1)
+    assert WHOLE_PATH in one and "not run this round" in one
+    assert SEPARATE not in one
+    for text in (_render("broad", max_edits=4, proposals=3), _render("broad", max_edits=4)):
+        assert SEPARATE in text and "failure path" not in text
+    assert "Bundling" not in _render("broad", max_edits=1, proposals=1)
+
+
+@pytest.mark.parametrize("n, wording", [(1, WHOLE_PATH), (3, SEPARATE)])
+def test_the_optimizer_tells_the_request_how_many_proposals_it_asks_for(n, wording):
+    """``AutoresearchOptimizer.propose`` renders the request with its ``n``, so the
+    bundling advice matches "Propose at most n update(s)"."""
+    class Client:
+        prompts: list[str] = []
+
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            self.prompts.append(prompt)
+            return '{"diagnosis": "d", "proposals": []}'
+
+    client = Client()
+    AutoresearchOptimizer(client).propose(
+        ProposalContext(catalogue=edits.catalogue("broad"), max_edits=4), n, [])
+    (prompt,) = client.prompts
+    assert wording in prompt and f"Propose at most {n} update(s)" in prompt
+    assert (SEPARATE in prompt) is (n > 1)
+
+
+def test_the_history_shows_edits_compactly_not_whole_values():
+    """"What this run has already tried" shows a text set_knob as a length change
+    and a bounded diff against the value it replaced (the seed's, then the previous
+    edit's), never the whole new value; patches and node objects are bounded too;
+    the other columns are unchanged."""
+    seed = "\n".join(f"seed line {i} " + "s" * 80 for i in range(60))
+    first = seed.replace("seed line 7 ", "FIRST CHANGE ")
+    second = first + "\nSECOND ADDITION " + "z" * 3000
+    node = {"id": "n2", "kind": "agent", "prompt_template": "P" * 5000}
+    rows = [{"id": "c1", "parent": "c0", "score": 0.5, "structural": False, "exit_ok": True,
+             "edits": [{"op": "set_knob", "name": "a__system_prompt", "value": first}]},
+            {"id": "c2", "parent": "c1", "score": 0.6, "structural": True, "exit_ok": True,
+             "edits": [{"op": "set_knob", "name": "a__system_prompt", "value": first},
+                       {"op": "set_knob", "name": "a__system_prompt", "value": second},
+                       {"op": "insert_after", "target": "a", "node": node},
+                       {"op": "set_knob", "name": "b", "patch": [{"find": "x" * 2000}]}]}]
+    text = ProposalContext(history=rows, seed_knob_values={"a__system_prompt": seed}).render()
+    tried = text[text.index("## What this run has already tried"):]
+    assert first not in tried and "z" * 700 not in tried and "P" * 300 not in tried
+    assert "x" * 700 not in tried and "more chars)" in tried
+    assert f"set_knob a__system_prompt: {len(seed)} -> {len(first)} chars; diff:" in tried
+    assert "-seed line 7 " in tried and "+FIRST CHANGE " in tried
+    assert f"set_knob a__system_prompt: {len(first)} -> {len(second)} chars; diff:" in tried
+    assert "+SECOND ADDITION" in tried
+    assert '"node": {"id": "n2", "kind": "agent", "prompt": "PPP' in tried
+    assert "set_knob b patch:" in tried
+    row = next(line for line in tried.splitlines() if line.startswith("| c2 |"))
+    assert row.startswith("| c2 | c1 | 0.6 | true | true | ")
+    assert len(tried) < 4000
+    unseeded = ProposalContext(history=rows[:1]).render()
+    assert f"set_knob a__system_prompt = ({len(first)} chars)" in unseeded
+    assert first not in unseeded
+
+
+def test_the_history_diff_keeps_lines_that_look_like_headers_and_separates_lines():
+    """A removed ``---`` line and an added ``++ c`` line are real diff lines, not file
+    headers; and the lines stay apart in the table cell."""
+    from refactory_dsh.optim.base import DIFF_LINE_SEPARATOR, compact_edits
+
+    old = "a\n---\nb"
+    new = "a\nb\n++ c"
+    text = compact_edits([{"op": "set_knob", "name": "k", "value": new}], {"k": old})
+    assert "----" in text and "+++ c" in text
+    assert DIFF_LINE_SEPARATOR + "----" in text and DIFF_LINE_SEPARATOR + "+++ c" in text
+    row = ProposalContext(history=[{"id": "c", "edits": [{"op": "set_knob", "name": "k",
+                                                          "value": new}]}],
+                          seed_knob_values={"k": old}).render()
+    assert DIFF_LINE_SEPARATOR + "----" in row

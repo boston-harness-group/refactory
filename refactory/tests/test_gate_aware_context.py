@@ -3,8 +3,8 @@
 Every row the optimizer sees (recent results, the history, the gradient's
 leaderboard) and the per-knob attribution carry the gate's decision -- current, kept,
 rejected or not gated -- and the request says the current candidate is what it edits
-and a rejected one did not generalise. A duplicate proposal is told which candidate it
-repeats. Without ``val_gate`` nothing changes. Each test fails when the behaviour it
+and a rejected one was not shown better on validation. A duplicate proposal is told
+which candidate it repeats. Without ``val_gate`` nothing changes. Each test fails when the behaviour it
 names is reverted.
 """
 
@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from refactory_dsh.outerloop import ValidationGate
 
@@ -60,7 +62,8 @@ def test_rows_and_the_request_carry_the_gates_decision_and_no_val_score(tmp_path
     assert {row["gate"] for row in ctx.leaderboard} <= {"current", "kept"}
     text = ctx.render()
     assert "You edit the candidate marked `current`" in text
-    assert "A `rejected` candidate did not generalise" in text
+    assert "`rejected` candidate was not shown better on validation" in text
+    assert "did not generalise" not in text
     assert "| id | parent | score | structural | ok | edits | gate |" in text
     assert "| id | parent | score | structural | edits | gate |" in text
     row6 = next(line for line in text.splitlines()
@@ -316,3 +319,92 @@ def test_each_proposal_keeps_the_diagnosis_of_the_call_that_made_it(tmp_path, mo
 def test_the_comparison_heading_says_children(tmp_path, monkeypatch):
     _loop_, proposer = _run_reasoning(tmp_path, monkeypatch)
     assert "The latest children of the candidate you edit (its last batch)" in proposer.contexts[2].render()
+
+
+def test_the_gate_note_states_its_resolution_and_when_a_rejected_change_may_be_built_on():
+    """A rejection is "not shown better on validation", with what one validation item
+    is worth when the val size is known; a rejected change is never re-proposed
+    unchanged, but one with strongly positive train fixed/broken counts may be built
+    on or combined with edits to other steps of the same failure path."""
+    from refactory_dsh.optim import ProposalContext
+
+    rows = [{"id": "a", "parent": None, "score": 0.5, "gate": "current"},
+            {"id": "b", "parent": "a", "score": 0.6, "gate": "rejected"}]
+    known = ProposalContext(history=rows, leaderboard=rows[:1], val_items=25).render()
+    assert "`rejected` candidate was not shown better on validation" in known
+    assert ("the mean over 25 validation items, so one item is 1/25 = 0.04 of it, and a "
+            "rejection can come down to a single item") in known
+    assert "must not be proposed again unchanged" in known
+    assert ("When its train fixed/broken counts against its parent (when shown below) were "
+            "strongly positive, its direction may still be right: you may build on its change "
+            "or combine it with edits to other steps in the same failure path") in known
+    assert "did not generalise" not in known and "do not build on" not in known
+    unknown = ProposalContext(history=rows, leaderboard=rows[:1]).render()
+    assert "not shown better on validation" in unknown and "validation items, so one" not in unknown
+    assert "not shown better" not in ProposalContext(history=[{"id": "a", "score": 0.5}]).render()
+
+
+@pytest.mark.parametrize("mean", [False, True])
+def test_the_loop_hands_the_val_size_when_the_score_is_the_items_mean(tmp_path, monkeypatch, mean):
+    """Under ``val_gate`` the request gets the val part's size, but only when every
+    score is the items' mean; otherwise (and without ``val_gate``) none."""
+    from refactory_dsh.loop import Loop
+    from test_skillopt import VAL_IDS
+
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        result, summary = original(self, candidate, workdir, part, **kwargs)
+        scores = [r["score"] for r in result.item_records]
+        result.score = sum(scores) / len(scores) + (0.0 if mean else 0.05)
+        return result, summary
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    loop, proposer = _run(tmp_path / "gated", monkeypatch, [[(5, 7)], []], val_gate=True, epochs=2)
+    ctx = proposer.contexts[-1]
+    assert ctx.val_items == (len(VAL_IDS) if mean else 0)
+    assert (f"1/{len(VAL_IDS)}" in ctx.render()) is mean
+    loop, proposer = _run(tmp_path / "plain", monkeypatch, [[(5, 7)], []], epochs=2)
+    assert proposer.contexts[-1].val_items == 0
+
+
+def test_the_loop_hands_the_seeds_knob_values(tmp_path, monkeypatch):
+    """The history's set_knob diffs start from the seed's values, which the loop hands
+    over from the population's root candidate."""
+    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], []], epochs=2)
+    root = next(c for c in loop.population if not c.parent)
+    ctx = proposer.contexts[-1]
+    assert ctx.seed_knob_values and ctx.seed_knob_values == {
+        name: entry["value"] for name, entry in root.state["knobs"].items()}
+
+
+def test_the_latest_train_positive_rejected_candidate_is_shown_in_full():
+    """Under "Your earlier reasoning", the full edits of the most recent rejected
+    candidate with more fixed than broken train items, within the cap; not those of an
+    older one, nor of one that broke as many as it fixed."""
+    from refactory_dsh.optim import ProposalContext
+    from refactory_dsh.optim.base import REJECTED_EDITS_CHARS
+
+    def entry(cid, fixed, broken, value, gate="rejected"):
+        return {"id": cid, "epoch": 1, "gate": gate, "score": 0.5, "fixed": fixed,
+                "broken": broken, "rationale": "r", "prediction": "p", "diagnosis": "d",
+                "edit": [{"op": "set_knob", "name": "k", "value": value}]}
+
+    long = "HEAD " + "y" * 1500 + " TAIL"
+    entries = [entry("old", 5, 1, "OLDVALUE " + "o" * 900), entry("mine", 8, 1, long),
+               entry("even", 2, 2, "EVENVALUE " + "e" * 900),
+               entry("kept", 9, 0, "KEPTVALUE " + "k" * 900, gate="kept")]
+    text = ProposalContext(reasoning=entries).render()
+    section = text[text.index("## Your earlier reasoning"):]
+    full = section[section.index("### Full edits of"):]
+    assert full.startswith("### Full edits of mine, the latest rejected candidate that fixed "
+                           "more train items than it broke (8 fixed / 1 broken)")
+    assert long in full and "OLDVALUE" not in full and "EVENVALUE" not in full
+    assert "KEPTVALUE" not in full
+    huge = [entry("big", 3, 0, "Z" * 9000)]
+    big = ProposalContext(reasoning=huge).render()
+    block = big[big.index("### Full edits of big"):].split("\n## ", 1)[0]
+    assert "Z" * 9000 not in block and "more chars)" in block
+    assert len(block) < REJECTED_EDITS_CHARS + 600
+    none = [entry("x", 1, 3, "v"), entry("y", None, None, "w")]
+    assert "### Full edits of" not in ProposalContext(reasoning=none).render()

@@ -645,3 +645,46 @@ def test_a_failed_readers_error_is_clipped():
     text = "\n".join(_trajectories(records, findings=[], failures=[failure]))
     line = next(l for l in text.splitlines() if l.startswith("(Group 1"))
     assert "E" * 400 not in line and "could not be read" in line
+
+
+def _full(text: str) -> list[str]:
+    return _shown(text.split("### Some items in full", 1)[1])
+
+
+def test_items_the_readers_cited_are_shown_in_full_first_one_per_pattern():
+    """The items behind the readers' patterns are the ones shown in full, not the
+    first by id: one per pattern in turn (failure patterns first, an item already
+    shown is not shown twice), then the rest by the old rule; within the budget."""
+    from refactory_dsh.optim.base import TRAJECTORY_BUDGET
+
+    records = _sized_records()
+    findings = [
+        {"group": 1, "items": [],
+         "failure_patterns": [
+             {"pattern": "A", "step": "s", "items": ["w20", "w21"], "evidence": ["qa"]},
+             {"pattern": "B", "step": "s", "items": ["w23", "nope"], "evidence": ["qb"]}],
+         "success_patterns": [{"pattern": "S", "step": "s", "items": ["p09"], "evidence": ["qs"]}]},
+        {"group": 2, "items": [],
+         "failure_patterns": [{"pattern": "C", "step": "s", "items": ["w20", "w24"],
+                               "evidence": ["qc"]}],
+         "success_patterns": []},
+    ]
+    text = _render(records, reader_findings=findings)
+    full = _full(text)
+    expected = ["w20", "w23", "w24", "p09", "w21", "w00", "p00"]
+    assert len(full) >= 4, full  # setup: the budget holds an item per pattern
+    assert full == expected[:len(full)], full
+    assert "The items the readers cited come first" in text
+    assert len(_section(text)) <= TRAJECTORY_BUDGET
+
+
+def test_without_cited_items_the_items_in_full_keep_the_old_order():
+    """No findings, or findings that cite no known item: failures and passes
+    alternate by id, as before."""
+    records = _sized_records()
+    stray = [{"group": 1, "items": [], "success_patterns": [],
+              "failure_patterns": [{"pattern": "X", "items": ["nope"], "evidence": []}]}]
+    for text in (_render(records), _render(records, reader_findings=stray)):
+        full = _full(text)
+        assert full and full[:6] == ["w00", "p00", "w01", "p01", "w02", "p02"][:len(full)], full
+        assert "The items the readers cited come first" not in text

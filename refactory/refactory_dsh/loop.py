@@ -3575,7 +3575,26 @@ class Loop(OuterLoop):
             max_edits=int(self.config.max_edits_per_proposal),
             parsimony=float(self.config.parsimony),
             score_is_item_mean=bool(self._score_is_item_mean),
+            val_items=self._gate_val_items(),
+            seed_knob_values=self._seed_knob_values(),
         )
+
+    def _seed_knob_values(self) -> dict[str, Any]:
+        """The root candidate's knob values, which every candidate's edit lineage
+        starts from; empty before there is one."""
+        root = next((c for c in self.population if not c.parent), None)
+        knobs = (root.state or {}).get("knobs") if root is not None else None
+        return {str(name): entry.get("value") for name, entry in (knobs or {}).items()
+                if isinstance(entry, dict)}
+
+    def _gate_val_items(self) -> int:
+        """How many validation items the gate's score is the mean of, for the request's
+        gate note: the parts manifest's val part, under the default loop's
+        ``val_gate`` when every score so far is the items' mean; 0 otherwise."""
+        if (not self.config.val_gate or self._custom_strategy is not None
+                or not self._score_is_item_mean or self._parts_manifest is None):
+            return 0
+        return len(task_module.manifest_part_ids(self._parts_manifest, task_module.VAL) or ())
 
     def _edited_id(self, board: list[Candidate]) -> str | None:
         parent_id = self.strategy_decision.get("parent") or self._editing_parent
