@@ -242,6 +242,9 @@ class RunContext:
         self._declared_facts: tuple[str, ...] = ()
         self._produced: set[str] = set()
         self.writes_made: list[str] = []
+        #: A code or verdict node's declaration (`refactory_dsh.snippet.spec`): its code,
+        #: inputs and out-edge labels. ``None`` for every other node.
+        self.snippet: dict[str, Any] | None = None
 
     # ── knobs ──────────────────────────────────────────────────────────────
     def knob(self, name: str, default: Any = None) -> Any:
@@ -709,6 +712,7 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             ctx._declared = tuple(args_dict.get("writes", ()))
             ctx._declared_reads = tuple(args_dict.get("reads", ()))
             ctx._declared_facts = tuple(args_dict.get("produces", ()))
+            ctx.snippet = args_dict.get("snippet")
 
             # Open the same shared ledger the parent holds, so an op that records usage
             # is charged once, in this run (dm-173).
@@ -1746,6 +1750,11 @@ class Executor:
             "verdicts": dict(self.ctx.verdicts),
             "enforce_writes": self.ctx.enforce_writes,
         }
+        from refactory_dsh.lowering import needs_snippet_spec, snippet_spec
+
+        if needs_snippet_spec(node):
+            # A code or verdict node's declaration, as the lowering writes it for the spine.
+            args_dict["snippet"] = snippet_spec(self.graph, node, dict(self.ctx.knobs))
         # Forward the budget ledger path so the child process can open the
         # same shared RunBudget file (dm-173 / PC-2).
         if self.ctx.budget is not None:

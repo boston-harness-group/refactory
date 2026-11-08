@@ -159,6 +159,40 @@ def grader_outputs(ref: str) -> tuple[str, ...]:
     return tuple(str(name) for name in (getattr(cls, "grader_outputs", ()) or ()))
 
 
+def grader_secrets(state: dict[str, Any], *, part: str | None = None) -> set[str]:
+    """The values only the grader may see, for content search: for each data node's
+    Task, each item's grader-only field values (strings of 8+ characters, and the strings
+    inside a mapping or a list) that no node-visible field of the same item also holds.
+    ``part`` picks the items (``Task.instances(part=...)``); a Task that cannot be loaded
+    contributes nothing. The outer loop refuses code that contains one (``E-secret``)."""
+    from refactory_dsh.nn.graph import Graph
+
+    def strings(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value} if len(value) >= 8 else set()
+        if isinstance(value, dict):
+            return set().union(*(strings(v) for v in value.values())) if value else set()
+        if isinstance(value, (list, tuple)):
+            return set().union(*(strings(v) for v in value)) if value else set()
+        return set()
+
+    secrets: set[str] = set()
+    graph = Graph.from_state(state.get("graph") or {})
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    for ref in refs:
+        try:
+            task = load_task(ref)
+            instances = task.instances(part=part) if part else task.instances()
+        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
+            continue
+        hidden = set(getattr(task, "grader_fields", ()) or ())
+        for instance in instances:
+            visible = strings({k: v for k, v in instance.metadata.items() if k not in hidden})
+            for name in hidden:
+                secrets |= strings(instance.metadata.get(name)) - visible
+    return secrets
+
+
 def node_item(item: dict[str, Any], task: Task | None, knobs: dict[str, Any] | None) -> dict[str, Any]:
     """The item as the graph's nodes may read it: without the Task's grader-only fields.
 

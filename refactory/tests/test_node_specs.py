@@ -212,7 +212,8 @@ def test_the_schema_covers_every_kind_and_its_examples_are_valid_nodes():
     meanings = node_schema.field_meanings()
     assert all(meanings.get(f.name) for f in dataclasses.fields(Node)), "every field has a meaning"
     text = "\n".join(node_schema.render_schema())
-    assert "(rule V8), so a new op or fn-gate node can only reuse a callable" in text
+    assert "(rule V8), so a new op or fn-gate node reuses a callable an existing node" in text
+    assert "or is one of the generic ones in `refactory_dsh.snippet`" in text
     assert "`gate (user)`: required id, kind, gate_kind" in text
 
 

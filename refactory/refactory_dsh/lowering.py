@@ -88,6 +88,7 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """
     graph = Graph.from_state(state.get("graph") or {})
     optional_ids = _optional_node_ids(graph)
+    knob_values = {name: (entry or {}).get("value") for name, entry in (state.get("knobs") or {}).items()}
     declarations: dict[str, dict[str, Any]] = {}
     for node_id, node in graph.nodes.items():
         entry: dict[str, Any] = {
@@ -130,8 +131,31 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             # Where the node works, for a reader of the run directory; the worker spec
             # carries the same declaration to the node's dispatch.
             entry["workspace"] = dict(node.workspace)
+        if node.inputs:
+            entry["inputs"] = list(node.inputs)
+        if needs_snippet_spec(node):
+            # What a code or verdict node's callable needs beyond the context (its code,
+            # inputs, labels): the runner hands it over as the walker's child does.
+            entry["snippet"] = snippet_spec(graph, node, knob_values)
         declarations[node_id] = entry
     return declarations
+
+
+def needs_snippet_spec(node: Any) -> bool:
+    """Whether ``node`` runs a `refactory_dsh.snippet` callable (a code op, a code gate or
+    a verdict gate), which reads its declaration from the runtime."""
+    from refactory_dsh import snippet
+
+    target = node.call if node.kind == "op" else (node.evaluator if node.kind == "gate" else "")
+    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT)
+
+
+def snippet_spec(graph: Graph, node: Any, knob_values: dict[str, Any]) -> dict[str, Any]:
+    """A code or verdict node's declaration (`snippet.spec`), the same on both runtimes:
+    the walker builds it for its child, the lowering writes it for the spine's runner."""
+    from refactory_dsh import snippet
+
+    return snippet.spec(node, [edge.condition for edge in graph.out_edges(node.id)], knob_values)
 
 
 def write_declarations(state: dict[str, Any], workdir: Path) -> Path:

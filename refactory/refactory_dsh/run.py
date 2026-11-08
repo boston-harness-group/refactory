@@ -290,6 +290,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
                 result["optional"] = True
             if entry.get("required_reads"):
                 result["required_reads"] = list(entry["required_reads"])
+            if isinstance(entry.get("snippet"), dict):
+                result["snippet"] = dict(entry["snippet"])
             return result
     manifest = _manifest()
     if str(manifest.get("id")) == node_id:
@@ -356,6 +358,8 @@ def build_op_context(
     ctx._declared = tuple(declared["writes"])  # noqa: SLF001
     ctx._declared_reads = tuple(declared["reads"])  # noqa: SLF001
     ctx._declared_facts = tuple(declared["produces"])  # noqa: SLF001
+    # A code or verdict node's declaration (`refactory_dsh.snippet`), as the walker hands it.
+    ctx.snippet = declared.get("snippet")
     return ctx
 
 

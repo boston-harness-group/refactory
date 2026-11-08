@@ -19,7 +19,16 @@ invariants below, each a promise the optimizer's results depend on:
 - ``forks``     forks and joins are paired: a fork's one out-edge leads to its join,
                 every branch arrives there and nowhere else, and the join waits for
                 exactly the branch ends that lead to it;
-- ``protected`` the mode's protected nodes are as the seed declared them.
+- ``protected`` the mode's protected nodes are as the seed declared them;
+- ``code``      every code node (`refactory_dsh.snippet`) the edits added holds code that
+                parses, defines ``main`` and carries none of the hostile templates the
+                generator writes (a second statement of rule V18, never running it).
+
+Code nodes are generated too: benign code ops and code gates, and hostile code -- each
+refused by V18 (an import of ``os``, ``open``, a dunder, ``eval`` ...), or passing it and
+failing at run time in a defined way (raising, returning an undeclared fact or file),
+which the walker counts as a note. The ``spine`` invariant compares a code op's facts on
+both runtimes like any op's.
 
 With ``compound`` > 0 some steps of a walk are *compound proposals* (``Proposal.edits``):
 an ordered list of 2-4 mixed edits -- text ``set_knob`` (whole value or ``patch``),
@@ -64,11 +73,12 @@ from refactory_dsh.optim.base import (
 )
 
 import structure_fuzz_graphs as fg
+from refactory_dsh import snippet as snippet_calls
 
 HERE = Path(__file__).resolve().parent
 CORPUS = HERE / "fixtures" / "structure_fuzz"
 INVARIANTS = ("lowering", "walker", "spine", "grader", "slots", "required", "knobs", "dataflow",
-              "forks", "protected", "tools")
+              "forks", "protected", "tools", "code")
 #: Checks that run the real code (lowering, the walker, the spine) and look at what it
 #: did; the rest are spec checks, a second statement of the rules beside the validator.
 OBSERVED = ("lowering", "walker", "spine", "grader", "slots", "required")
@@ -86,6 +96,29 @@ MAX_NODES = 28
 CONDITIONS = ("proceed", "reloop", "reject")
 #: How the walker says a gate's verdict has no edge (`nn.executor.route_verdict`).
 SCRIPTED_LABEL = "verdict 'proceed' is not one of"
+#: Whether this machine can sandbox code nodes (`snippet.available`). Without it every
+#: new code node is refused (``E-code-nodes``), so the generator writes none: the walks
+#: are then the ones they were before code nodes existed.
+CODE_NODES = snippet_calls.available()[0]
+#: The node kinds `EditGenerator.new_node` draws a fresh node from.
+NODE_KINDS_TO_GENERATE = (("op", "op", "agent", "agent", "gate", "fork", "join", "data")
+                          + (("code", "code_gate") if CODE_NODES else ()))
+#: The line every generated code meant to fail at run time carries.
+EXPECTED_FAILURE = "# expected to fail at run time"
+#: Code the generator writes that rule V18 must refuse, each with a marker the ``code``
+#: invariant looks for in an accepted state.
+HOSTILE_STATIC = (
+    ("import os", "import os\ndef main(inp):\n    return {'facts': {}}\n"),
+    ("import socket", "import socket\ndef main(inp):\n    socket.create_connection(('1.1.1.1', 80))\n    return {}\n"),
+    ("open(", "def main(inp):\n    return {'facts': {}, 'files': {}, 'x': open('/etc/passwd').read()}\n"),
+    ("__class__", "def main(inp):\n    return inp.__class__.__mro__\n"),
+    ("eval(", "def main(inp):\n    return eval('1 + 1')\n"),
+    ("__import__", "def main(inp):\n    return __import__('os').getcwd()\n"),
+    ("getattr(", "def main(inp):\n    return getattr(inp, 'keys')\n"),
+    ("def mian", "def mian(inp):\n    return {}\n"),
+    ("def main(inp:", "def main(inp:\n    return {}\n"),
+)
+
 
 
 # ── seeds ─────────────────────────────────────────────────────────────────
@@ -254,6 +287,35 @@ def check_knobs(state: dict[str, Any]) -> list[Violation]:
         for knob in node.knobs:
             if knob not in declared:
                 out.append(Violation("knobs", f"{node.id} reads undeclared knob {knob}"))
+    return out
+
+
+def check_code(state: dict[str, Any]) -> list[Violation]:
+    """Spec check: every code node holds code that parses, defines ``main`` and carries
+    no hostile template's marker (read as both runtimes run it: its bound knob's value),
+    and binds its code to a knob of its own."""
+    import ast
+
+    from refactory_dsh import snippet
+
+    graph, values = _graph_of(state), _knob_values(state)
+    out: list[Violation] = []
+    for node in graph.nodes.values():
+        if not snippet.is_code_node(node):
+            continue
+        code = str(node.bound("code", values) or "")
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            out.append(Violation("code", f"code node {node.id} holds code that does not parse"))
+            continue
+        if not any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in tree.body):
+            out.append(Violation("code", f"code node {node.id} defines no main"))
+        for marker, _code in HOSTILE_STATIC:
+            if marker in code:
+                out.append(Violation("code", f"code node {node.id} holds hostile code ({marker})"))
+        if not node.bound_knob("code"):
+            out.append(Violation("code", f"code node {node.id} has no code knob of its own"))
     return out
 
 
@@ -645,32 +707,12 @@ def run_walker(seed: Seed, state: dict[str, Any], workdir: Path,
 
 
 def grader_secrets(seed: Seed, state: dict[str, Any]) -> set[str]:
-    """The values only the grader may see, for content search: each item's grader-only
-    field values (strings of 8+ characters, and the strings inside a mapping) that no
-    node-visible field of the same item also holds."""
-    from refactory_dsh.task import load_task
+    """The values only the grader may see, for content search (`task.grader_secrets`):
+    each item's grader-only field values that no node-visible field also holds."""
+    from refactory_dsh.task import grader_secrets as task_grader_secrets
 
-    def strings(value: Any) -> set[str]:
-        if isinstance(value, str):
-            return {value} if len(value) >= 8 else set()
-        if isinstance(value, dict):
-            return set().union(*(strings(v) for v in value.values())) if value else set()
-        if isinstance(value, (list, tuple)):
-            return set().union(*(strings(v) for v in value)) if value else set()
-        return set()
-
-    secrets: set[str] = set()
-    graph = _graph_of(state)
-    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
     with livemath_fixture() if seed.livemath else contextlib.nullcontext():
-        for ref in refs:
-            task = load_task(ref)
-            hidden = set(getattr(task, "grader_fields", ()) or ())
-            for instance in task.instances():
-                visible = strings({k: v for k, v in instance.metadata.items() if k not in hidden})
-                for name in hidden:
-                    secrets |= strings(instance.metadata.get(name)) - visible
-    return secrets
+        return task_grader_secrets(state)
 
 
 def _strings_in(value: Any) -> list[str]:
@@ -787,6 +829,12 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     side, side_files = _grader_side_writes(seed, state)
     seen = check_grader(grader_secrets(seed, state), hidden, workdir, model, grader_side=side,
                         grader_files=side_files) + check_slots(state, model)
+    if not result.exit_ok and any(EXPECTED_FAILURE in str(n.bound("code", _knob_values(state)) or "")
+                                  for n in graph.nodes.values()):
+        # Code that passes V18 and fails at run time on purpose (it raises, or returns an
+        # undeclared fact or file): the runtime refused it, which is the point.
+        NOTES["code_node_failed_at_run_time"] += 1
+        return seen, None
     if result.halted:
         # A halt is a defined ending: a gate out of reloops (the scripted evaluator always
         # answers proceed, which may be a loop's retry edge) or a halt verdict.
@@ -901,7 +949,7 @@ def check_static(seed_state: dict[str, Any], state: dict[str, Any],
                  protected: tuple[str, ...]) -> list[Violation]:
     return [*check_lowering(state), *check_knobs(state), *check_dataflow(state),
             *check_forks(state), *check_protected(seed_state, state, protected),
-            *check_tools(seed_state, state)]
+            *check_tools(seed_state, state), *check_code(state)]
 
 
 def check_state(applier: Applier, state: dict[str, Any], *, walker: bool = True,
@@ -1002,7 +1050,9 @@ class EditGenerator:
                 node["writes"] = [f"{node['id']}.txt"]
                 node["produces"] = [f"{node['id']}_fact"]
             return node
-        kind = kind or rng.choice(("op", "op", "agent", "agent", "gate", "fork", "join", "data"))
+        kind = kind or rng.choice(NODE_KINDS_TO_GENERATE)
+        if kind in ("code", "code_gate") and not CODE_NODES:
+            kind = "op" if kind == "code" else "gate"
         new_id = self.fresh_id(graph, kind)
         files, facts, ids = self._files(graph), self._facts(graph), sorted(graph.nodes) or [new_id]
         if kind == "op":
@@ -1022,6 +1072,14 @@ class EditGenerator:
                     "system_prompt_template": f"You are {new_id}.",
                     "writes": rng.choice(([f"{new_id}.txt"],) * 6 + ([], [f"{new_id}.txt", f"{new_id}.md"])),
                     "produces": [f"{new_id}_fact"]}
+        if kind == "code":
+            return self.code_node(state, new_id)
+        if kind == "code_gate":
+            return {"id": new_id, "kind": "gate", "evaluator": snippet_calls.GATE,
+                    "inputs": rng.sample(facts, k=min(len(facts), rng.choice((0, 1)))),
+                    "max_iterations": rng.choice((1, 2)),
+                    "code": ("def main(inp):\n    seen = sorted(inp['facts'])\n"
+                             "    return {'verdict': 'proceed', 'reason': 'saw ' + ', '.join(seen)}\n")}
         if kind == "gate":
             gate_kind = rng.choice(("fn", "fn", "user", "agent"))
             return {"id": new_id, "kind": "gate", "gate_kind": gate_kind,
@@ -1034,6 +1092,34 @@ class EditGenerator:
         return {"id": new_id, "kind": "data", "subgraph_entry": rng.choice(ids),
                 "subgraph_exit": rng.choice(ids), "task_ref": fg.TASK_REF,
                 "writes": ["current_item.json"], "produces": ["item_scores"]}
+
+    def code_node(self, state: dict[str, Any], new_id: str) -> dict[str, Any]:
+        """A code op: mostly benign (it summarises its input into a fact and a file),
+        sometimes hostile -- refused by V18, or failing at run time on purpose."""
+        rng, graph = self.rng, _graph_of(state)
+        files, facts = self._files(graph), self._facts(graph)
+        node = {"id": new_id, "kind": "op", "call": snippet_calls.RUN,
+                "reads": rng.sample(files, k=min(len(files), rng.choice((0, 1, 1)))),
+                "inputs": rng.sample(facts, k=min(len(facts), rng.choice((0, 1)))),
+                "writes": [f"{new_id}.txt"], "produces": [f"{new_id}_fact"]}
+        roll = rng.random()
+        if roll < 0.15:
+            node["code"] = rng.choice(HOSTILE_STATIC)[1]
+        elif roll < 0.25:
+            node["code"] = EXPECTED_FAILURE + "\n" + rng.choice((
+                "def main(inp):\n    raise ValueError('hostile')\n",
+                "def main(inp):\n    return {'facts': {'undeclared_fact': 1}}\n",
+                "def main(inp):\n    return {'files': {'../escape.txt': 'x'}}\n",
+                "def main(inp):\n    return 'not an object'\n",
+            ))
+        else:
+            node["code"] = (
+                "import json\n"
+                "def main(inp):\n"
+                "    text = json.dumps(inp, sort_keys=True, default=str)\n"
+                f"    return {{'facts': {{{new_id + '_fact'!r}: len(text)}},\n"
+                f"            'files': {{{new_id + '.txt'!r}: text[:200]}}}}\n")
+        return node
 
     def malformed(self, state: dict[str, Any]) -> Any:
         rng, graph = self.rng, _graph_of(state)
@@ -1217,8 +1303,17 @@ class EditGenerator:
                 return {"op": "reorder", "first": edge.source, "second": edge.target}
             return {"op": "reorder", "first": target, "second": rng.choice(ids)}
         if op == "loop":
-            gate = self.new_node(state, "gate")
+            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate") if CODE_NODES
+                                                   else ("gate",)))
             return {"op": "loop", "target": target, "gate": gate}
+        if op == "parallel":
+            branches = [self.new_node(state, rng.choice(("agent", "op", "code") if CODE_NODES
+                                                        else ("agent", "op")))
+                        for _ in range(rng.choice((2, 2, 3)))]
+            if rng.random() < 0.1:
+                # Two branches writing one file race: refused before anything runs.
+                branches[1]["writes"] = list(branches[0].get("writes") or ["clash.txt"])
+            return {"op": "parallel", "target": target, "branches": branches}
         raise AssertionError(f"unhandled op {op}")  # pragma: no cover - catalogue is closed
 
 

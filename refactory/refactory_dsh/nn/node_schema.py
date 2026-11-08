@@ -159,8 +159,9 @@ def render_schema() -> list[str]:
         "A node object, as `add_node`, `insert_after`, `insert_before`, `wrap`, `split` "
         "and `loop` take it, has these fields (generated from the node definition and "
         "its validator). `call` and `evaluator` must name an importable "
-        "`module:function` (rule V8), so a new op or fn-gate node can only reuse a "
-        "callable an existing node already names.",
+        "`module:function` (rule V8), so a new op or fn-gate node reuses a callable an "
+        "existing node already names, or is one of the generic ones in `refactory_dsh.snippet` "
+        "(a code op or gate, or a verdict gate; see \"How nodes compose\").",
         _md_table(["field", "type", "default", "kinds", "meaning"], rows),
         "",
     ]

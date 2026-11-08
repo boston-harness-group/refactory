@@ -616,8 +616,11 @@ def test_seeded_random_search_draws_same_ops_as_main():
     """
     import random as stdlib_random
 
-    assert sorted(edits.PRESETS["broad"]) == _BROAD_BEFORE_PATCH
-    assert sorted(edits.PRESETS["structure"]) == _BROAD_BEFORE_PATCH
+    # `parallel` came later and is never drawn (`edits._NOT_SAMPLED`), so the list the
+    # draw chooses from is still the one before the patch form.
+    for preset in ("broad", "structure"):
+        drawable = [op for op in edits.enabled(preset) if op not in edits._NOT_SAMPLED]
+        assert drawable == _BROAD_BEFORE_PATCH
 
     state = _state("hello world")
     state["knobs"]["n"] = {"value": 3, "spec": {"kind": "int", "default": 3, "lo": 0, "hi": 9}}

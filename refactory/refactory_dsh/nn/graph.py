@@ -169,6 +169,8 @@ _NODE_FIELDS = frozenset(
         "parallelism",
         "parallelism_knob",
         "field_bindings",
+        "code",
+        "inputs",
     }
 )
 
@@ -180,6 +182,7 @@ BINDABLE_FIELDS = frozenset({
     "prompt_template",
     "max_iterations",
     "parallelism",       # data nodes only; checked in V14
+    "code",              # code nodes (`refactory_dsh.snippet`) only; checked in V18
 })
 
 
@@ -322,6 +325,14 @@ class Node:
     #: the knob's value replaces this node's field when the graph runs.  Only
     #: fields in ``BINDABLE_FIELDS`` may be bound.  Generalises ``parallelism_knob``.
     field_bindings: tuple[tuple[str, str], ...] = ()
+    #: `op` or `gate` code node: the Python whose ``main(inp)`` it runs, sandboxed (rule V18).
+    #: Only with ``call``/``evaluator`` ``refactory_dsh.snippet:run`` or ``:gate``; an edit
+    #: that adds one binds it to the node's own ``<id>__code`` knob (`refactory_dsh.snippet`).
+    code: str = ""
+    #: `op` or `gate`: the run facts it reads (a code node gets them as ``inp["facts"]``,
+    #: a verdict gate reads its first one when it has no ``required_reads``). Each must be
+    #: produced upstream on every path to the node (V15); V17 holds them to the grader rule.
+    inputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.tool_policy is not None and self.tool_policy != "none":
@@ -388,6 +399,11 @@ class Node:
             if outside:
                 raise GraphError(
                     f"node {self.id!r}: required_reads {outside} are not among its reads")
+        if (self.code or self.inputs) and not (
+                self.kind == "op" or (self.kind == "gate" and self.gate_kind == "fn")):
+            raise GraphError(
+                f"node {self.id!r} is a {self.kind} and declares code or inputs; only an op or "
+                "an fn gate does")
         if self.kind != "fork" and self.targets:
             raise GraphError(f"node {self.id!r} is not a fork but declares targets")
         if self.kind != "join" and self.sources:
@@ -525,6 +541,8 @@ class Node:
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
             **({"tool_policy": self.tool_policy} if self.tool_policy is not None else {}),
             **({"field_bindings": [list(pair) for pair in self.field_bindings]} if self.field_bindings else {}),
+            **({"code": self.code} if self.code else {}),
+            **({"inputs": list(self.inputs)} if self.inputs else {}),
         }
 
     @classmethod
@@ -577,6 +595,8 @@ class Node:
             field_bindings=tuple(
                 tuple(pair) for pair in (state.get("field_bindings") or ())
             ),
+            code=str(state.get("code") or ""),
+            inputs=tuple(state.get("inputs") or ()),
         )
 
     def bound_knob(self, field_name: str) -> str:
@@ -601,7 +621,7 @@ class Node:
         if not knob_name or knobs.get(knob_name) is None:
             return getattr(self, field_name)
         value = knobs[knob_name]
-        if field_name in ("system_prompt_template", "prompt_template"):
+        if field_name in ("system_prompt_template", "prompt_template", "code"):
             return str(value)
         if isinstance(value, bool) or not isinstance(value, int):
             raise GraphError(
@@ -640,7 +660,7 @@ class Node:
             raise GraphError(f"node {self.id!r} has no field {field_name!r}")
         if field_name in ("knobs", "reads", "required_reads", "writes", "produces", "tools", "targets",
                           "optional_targets", "sources", "inline_items", "feedback_keys",
-                          "field_bindings") and isinstance(value, list) and field_name != "tool_policy":
+                          "field_bindings", "inputs") and isinstance(value, list) and field_name != "tool_policy":
             value = tuple(value)
         return replace(self, **{field_name: value})
 

@@ -299,6 +299,11 @@ class LoopConfig:
     #: agent node runs with ``tool_policy: none``, and one that asks for tools is
     #: refused (``E-new-node-tools``).
     allow_new_node_tools: bool = False
+    #: Whether an edit may add a code node: an op or a gate whose Python the optimizer
+    #: writes, run sandboxed (`refactory_dsh.snippet`). On by default; it takes effect
+    #: only where the run permits structural edits, and a machine that cannot sandbox
+    #: the code refuses code nodes either way (``E-code-nodes``).
+    allow_code_nodes: bool = True
     #: With ``val_gate``: stop after this many epochs in a row whose gating did not
     #: raise the best val score (SkillOpt's ``early_stop_patience``). 0 is off.
     early_stop_patience: int = 0
@@ -503,6 +508,9 @@ class Loop(OuterLoop):
             )
         # The run's cap on edits per proposal, enforced where every proposal is applied.
         self.optimizer.max_edits = int(self.config.max_edits_per_proposal)
+        # Whether edits may add code nodes, and what their code may never contain.
+        self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
+        self.optimizer.grader_secrets = self._grader_secrets
 
         # How a candidate is run, and therefore how it is scored. Built here from
         # this loop's own settings rather than switched on inside `_evaluate`, so a
@@ -640,6 +648,29 @@ class Loop(OuterLoop):
         custom strategy's own name, else the optimizer's (#493 G33)."""
         attached = getattr(self, "_custom_strategy", None)
         return str(attached.name) if attached is not None else self.optimizer.name
+
+    def _code_nodes_offered(self) -> bool:
+        """Whether the request describes code nodes: the run allows them and this
+        machine can sandbox them (`snippet.available`, probed once per process)."""
+        if not self.config.allow_code_nodes:
+            return False
+        from refactory_dsh import snippet
+
+        return snippet.available()[0]
+
+    def _grader_secrets(self) -> frozenset:
+        """The train items' grader-only values (`task.grader_secrets`), loaded once, the
+        first time a candidate carries code (``E-secret``)."""
+        cached = self.__dict__.get("_grader_secret_values")
+        if cached is None:
+            from refactory_dsh.task import TRAIN, grader_secrets
+
+            try:
+                cached = frozenset(grader_secrets(self.mode.state_dict(), part=TRAIN))
+            except Exception:  # noqa: BLE001 - a Task that cannot load has no items to leak
+                cached = frozenset()
+            self.__dict__["_grader_secret_values"] = cached
+        return cached
 
     def permitted_ops(self) -> list[str]:
         """The edit operations this run may apply.
@@ -933,6 +964,8 @@ class Loop(OuterLoop):
         if not wanted:
             return
         sampler = RandomOptimizer(seed=self.config.seed)
+        sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
+        sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
         insertable = [node.to_state() for node in self.mode.insertable()]
         rng = random.Random(f"{self.config.seed}:sweep")
@@ -3574,6 +3607,7 @@ class Loop(OuterLoop):
             reasoning=self._reasoning_entries(board),
             max_edits=int(self.config.max_edits_per_proposal),
             parsimony=float(self.config.parsimony),
+            code_nodes=self._code_nodes_offered(),
             score_is_item_mean=bool(self._score_is_item_mean),
             val_items=self._gate_val_items(),
             seed_knob_values=self._seed_knob_values(),

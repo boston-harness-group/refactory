@@ -195,7 +195,7 @@ def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
                 f"node {node_state.get('id')!r}: {key} holds a clipped text (it contains "
                 "'[... N characters omitted ...]'); write the text yourself or edit the "
                 "knob it is bound to, rather than copying a clipped one", code="E-node-text")
-        if _UNCLOSED_SLOT.search(value):
+        if key != "code" and _UNCLOSED_SLOT.search(value):  # code is Python, not a template
             raise EditError(
                 f"node {node_state.get('id')!r}: {key} opens a template slot '{{{{' that "
                 "is never closed with '}}'", code="E-node-text")
@@ -208,7 +208,9 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
     node's value (a copied agent running the original's system prompt). A new agent
     node with no system-prompt binding gets its own ``<id>__system_prompt`` knob, as
     a mode's agent nodes do when it is built (``Mode._auto_system_prompt_knobs``),
-    holding the system prompt the edit gave it.
+    holding the system prompt the edit gave it. A new code node (`refactory_dsh.snippet`)
+    with no code binding gets its own ``<id>__code`` knob holding its code, so one edit
+    adds the node and its code, and a later ``set_knob`` rewrites the code alone.
     """
     owners = {knob: owner.id for owner in graph.nodes.values()
               for _field, knob in owner.field_bindings}
@@ -222,17 +224,26 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
                 f"drop field_bindings (and the knob from its knobs) -- a new agent node gets "
                 f"its own {node.id}__system_prompt knob from its system_prompt_template",
                 code="E-binding")
-    if node.kind != "agent" or any(f == "system_prompt_template" for f, _ in node.field_bindings):
+    from refactory_dsh.snippet import is_code_node
+
+    if node.kind == "agent":
+        field_name, suffix, text, what = ("system_prompt_template", "system_prompt",
+                                          node.system_prompt_template, "system prompt")
+    elif is_code_node(node):
+        field_name, suffix, text, what = "code", "code", node.code, "code"
+    else:
+        return node, {}
+    if any(f == field_name for f, _ in node.field_bindings):
         return node, {}
     from .knob import Knob
 
-    name = f"{node.id}__system_prompt"
+    name = f"{node.id}__{suffix}"
     if name in (state.get("knobs") or {}):
         raise EditError(f"knob {name!r} already exists, so node {node.id!r} cannot get its own "
-                        "system-prompt knob; choose another node id", code="E-knob")
-    knob = Knob(node.system_prompt_template or "", "str", description=f"system prompt for {node.id}")
+                        f"{what} knob; choose another node id", code="E-knob")
+    knob = Knob(text or "", "str", description=f"{what} for {node.id}")
     node = replace(node, knobs=(*node.knobs, name),
-                   field_bindings=(*node.field_bindings, ("system_prompt_template", name)))
+                   field_bindings=(*node.field_bindings, (field_name, name)))
     return node, {name: {"value": knob.default, "spec": knob.spec()}}
 
 
@@ -1154,6 +1165,90 @@ def _expand_loop(edit: dict, state: State) -> list[dict]:
     return steps
 
 
+#: The node kinds a ``parallel`` branch may be: a step, not control flow.
+PARALLEL_BRANCH_KINDS = ("agent", "op")
+#: The most branches one ``parallel`` edit adds.
+MAX_PARALLEL_BRANCHES = 8
+
+
+def _parallel_ids(graph: Graph, target: str, branch_ids: Sequence[str]) -> tuple[str, str]:
+    """Fresh ids for the fork and the join: used by no node and no branch."""
+    taken = set(graph.nodes) | set(branch_ids)
+
+    def fresh(base: str) -> str:
+        if base not in taken:
+            return base
+        for n in range(2, 1000):
+            if f"{base}{n}" not in taken:
+                return f"{base}{n}"
+        raise EditError(f"cannot find a free id based on {base!r}")
+
+    fork = fresh(f"{target}_fork")
+    taken.add(fork)
+    return fork, fresh(f"{target}_join")
+
+
+def _pre_parallel(edit: dict, state: State) -> str | None:
+    graph = _graph(state)
+    target = graph.nodes.get(edit.get("target"))
+    if target is None:
+        return f"no node {edit.get('target')!r} to put parallel branches after"
+    if target.kind in ("gate", "fork") and graph.out_edges(target.id):
+        return (f"{target.id!r} is a {target.kind}; put the branches after a step with one "
+                "plain out-edge")
+    try:
+        _sole_out_edge(graph, target.id)
+    except EditError as exc:
+        return str(exc)
+    branches = edit.get("branches")
+    if not isinstance(branches, list) or not 2 <= len(branches) <= MAX_PARALLEL_BRANCHES:
+        return f"'branches' must be a list of 2 to {MAX_PARALLEL_BRANCHES} node objects"
+    ids: list[str] = []
+    writes: dict[str, str] = {}
+    facts: dict[str, str] = {}
+    for branch in branches:
+        if not isinstance(branch, dict) or not branch.get("id"):
+            return "each branch is a node object with an id"
+        node_id = str(branch["id"])
+        if branch.get("kind") not in PARALLEL_BRANCH_KINDS:
+            return (f"branch {node_id!r} is a {branch.get('kind')!r}; a branch is one of "
+                    f"{list(PARALLEL_BRANCH_KINDS)}")
+        if node_id in graph.nodes or node_id in ids:
+            return f"branch id {node_id!r} is already used"
+        ids.append(node_id)
+        # Branches run at once: two that wrote one file or set one fact would race (V16).
+        for name in branch.get("writes") or ():
+            if name in writes:
+                return f"branches {writes[name]!r} and {node_id!r} both write {name!r}"
+            writes[name] = node_id
+        for name in branch.get("produces") or ():
+            if name in facts:
+                return f"branches {facts[name]!r} and {node_id!r} both produce {name!r}"
+            facts[name] = node_id
+    return None
+
+
+def _expand_parallel(edit: dict, state: State) -> list[dict]:
+    """A fork after ``target``, each branch on its own, a join, then ``target``'s old
+    successor: ``target -> fork -> {branches} -> join -> successor``. Each branch is
+    added through ``add_node``, so it gets its own knobs as any new node does."""
+    graph = _graph(state)
+    target = str(edit["target"])
+    branches = [dict(branch) for branch in edit["branches"]]
+    ids = [str(branch["id"]) for branch in branches]
+    fork, join = _parallel_ids(graph, target, ids)
+    steps: list[dict] = [
+        {"op": "add_node", "node": {"id": join, "kind": "join", "sources": ids},
+         "position": {"after": target}},
+        {"op": "add_node", "node": {"id": fork, "kind": "fork", "targets": ids},
+         "position": {"after": target}},
+    ]
+    for branch in branches:
+        steps.append({"op": "add_node", "node": branch, "position": {"detached": True}})
+        steps.append({"op": "add_edge", "source": branch["id"], "target": join, "condition": None})
+    return steps
+
+
 def _fresh_id(graph: Graph, base: str) -> str:
     if base not in graph.nodes:
         return base
@@ -1184,6 +1279,13 @@ _macro("reorder", "Swap two adjacent steps. Refused when the first produces what
 _macro("loop", "Wrap a step in a gate that can send control back to it, so the step "
        "gains a retry.",
        ("target", "gate"), _pre_loop, _expand_loop)
+_macro("parallel", "Run 2-8 new steps at once after an existing step: a fork after "
+       "'target', each node of 'branches' (agent or op, distinct writes and facts) on its "
+       "own branch, then a join that leads on to target's old successor. The successor's "
+       "declarations do not change: to use the branches' outputs, insert a node after the "
+       "join that reads their files or facts (or read a branch's fact as {{name}} in a "
+       "later node's prompt knob).",
+       ("target", "branches"), _pre_parallel, _expand_parallel)
 
 
 PRESETS["broad"] = tuple(sorted(list(_PRIMITIVES) + list(_MACROS)))
@@ -1515,6 +1617,10 @@ def apply_many(edits: Iterable[dict], state: Mapping[str, Any]) -> State:
 
 
 # ── random sampling, for the random optimizer ──────────────────────────────
+#: Operations `random_edit` never draws.
+_NOT_SAMPLED = ("parallel",)
+
+
 def random_edit(
     state: Mapping[str, Any],
     *,
@@ -1541,7 +1647,10 @@ def random_edit(
         if not entry["spec"].get("frozen", False)
     ]
     node_ids = sorted(graph.nodes)
-    choices = enabled(preset)
+    # `parallel` takes 2-8 branch nodes with distinct writes, which a mode's insertable
+    # blocks do not give; it is left out of the draw (not merely skipped), so a seeded
+    # random search draws the same operations it did before `parallel` existed.
+    choices = [op for op in enabled(preset) if op not in _NOT_SAMPLED]
 
     for _ in range(40):
         op = rng.choice(choices)

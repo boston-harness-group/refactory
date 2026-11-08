@@ -255,6 +255,15 @@ def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 
+@pytest.mark.skipif(not __import__("refactory_dsh.snippet").snippet.available()[0],
+                    reason="no code-node sandbox here: new code nodes are refused before V18")
+def test_mutation_code_without_the_static_code_rule_is_caught(monkeypatch):
+    """With V18 off, the generator's hostile code gets into accepted states, and the
+    ``code`` invariant finds it without running it."""
+    monkeypatch.setattr(validate_mod, "code_issues", lambda graph, knobs: [])
+    _finds("code", seeds=("fuzz_dataflow", "livemath_skill_graph"))
+
+
 def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     """With V17 off, a node reading what grading produced (under whatever name) gets
     the grade, and the leak invariant finds it by content: the grader-only answers and

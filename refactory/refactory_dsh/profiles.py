@@ -84,6 +84,10 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("allow_new_node_tools") not in (True, False, 0, 1, None):
         raise ProfileError("allow_new_node_tools must be true or false (1 or 0 on the command line)")
     result["allow_new_node_tools"] = bool(result.get("allow_new_node_tools"))
+    # allow_code_nodes: a switch, on unless turned off; the command line passes 0 or 1.
+    if result.get("allow_code_nodes") not in (True, False, 0, 1, None):
+        raise ProfileError("allow_code_nodes must be true or false (1 or 0 on the command line)")
+    result["allow_code_nodes"] = result.get("allow_code_nodes") not in (False, 0)
     # fresh_evidence: a switch; the command line passes it as 0 or 1.
     if result.get("fresh_evidence") not in (True, False, 0, 1):
         raise ProfileError("fresh_evidence must be true or false (1 or 0 on the command line)")
@@ -284,6 +288,10 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
         evaluation_fields.pop("setting_sources", None)
+    # Likewise a run that leaves code nodes on (the default) digests as one started
+    # before the switch existed, so it still resumes.
+    if evaluation_fields.get("allow_code_nodes", True) is True:
+        evaluation_fields.pop("allow_code_nodes", None)
     route_context = runtime_identity(settings, project, model_client=model_client, uses_models=settings["optimizer"] == "autoresearch" or any(n.get("kind") == "agent" for n in (nodes.values() if isinstance(nodes, dict) else nodes) if isinstance(n, dict)))
     context = {"mode": mode_id, "seed_state": digest(state), "implementation": hashlib.sha256(source.read_bytes()).hexdigest(), "dependencies": implementations, "routing": route_context,
                "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k != "termination"}),

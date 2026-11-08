@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
+from refactory_dsh.snippet import ALLOWED_IMPORTS_TEXT, MAX_CODE_BYTES
+
 from .graph import Graph, Node
 from .knob import Knob, KnobError
 from .resolve import ResolutionError, resolve
@@ -36,7 +38,8 @@ RULES: dict[str, str] = {
     "V3": "the graph must have a terminal (a node with no out-edge)",
     "V4": "a non-gate node has at most one out-edge, and it carries no verdict",
     "V5": "a gate has at least two out-edges, each with its own condition, and no "
-          "unconditional out-edge",
+          "unconditional out-edge; a code or verdict gate's conditions are single words "
+          "(no spaces or punctuation), as its answer is read as one word",
     "V6": "every file a node reads must be written by a node on a path from the "
           "start node to a terminal",
     "V7": "every knob a node consumes must be declared, and every declared knob "
@@ -58,7 +61,8 @@ RULES: dict[str, str] = {
            "reaches it (a data pass's own files and facts stay inside the pass): an agent's "
            "reads and every {{name}} its prompts fill in (not a knob, not in its "
            "feedback_keys, not inside an {% if name %} on the same name), and an op's or a "
-           "gate's required_reads; a tool_policy 'none' agent declares exactly one write",
+           "gate's required_reads and inputs (facts); a tool_policy 'none' agent declares "
+           "exactly one write",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
@@ -69,9 +73,15 @@ RULES: dict[str, str] = {
            "Task declares its grader writes (Task.grader_outputs), everything a node the "
            "mode declares as grading writes or produces (Mode.grader_nodes), and whatever "
            "a node that consumes any of these writes or produces in turn -- whether "
-           "through a prompt slot or an {% if %} condition (bound fields included), feedback_keys, reads or "
-           "required_reads. The grader side is the data nodes, the mode's protected nodes "
+           "through a prompt slot or an {% if %} condition (bound fields included), feedback_keys, reads, "
+           "required_reads or inputs. The grader side is the data nodes, the mode's protected nodes "
            "and its grader nodes",
+    "V18": "a code node (call refactory_dsh.snippet:run, or evaluator refactory_dsh.snippet:gate) "
+           f"has code that parses, defines main(inp), is at most {MAX_CODE_BYTES} bytes, imports "
+           f"only these modules: {ALLOWED_IMPORTS_TEXT}; and uses no open, exec, eval, compile, __import__, getattr/setattr/delattr, "
+           "globals/locals/vars or dunder name or attribute; no other node carries code; a "
+           "verdict gate (evaluator refactory_dsh.snippet:verdict) reads its verdict from its "
+           "first required_reads file or, with none, its first inputs fact",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -228,6 +238,7 @@ def validate(
             )
 
     issues.extend(gate_label_issues(graph))
+    issues.extend(answer_label_issues(graph))
 
     # V12 the nodes a fork, a join or a data node names.
     #
@@ -305,6 +316,7 @@ def validate(
         "prompt_template": "str",
         "max_iterations": "int",
         "parallelism": "int",
+        "code": "str",
     }
 
     for node_id in sorted(graph.nodes):
@@ -448,6 +460,9 @@ def validate(
 
     for knob_name, message in _check_req(declared_knobs, values, allow_defaults=True):
         issues.append(Issue("V9", message, knob=knob_name))
+
+    # V18 code nodes: their code passes the static check; nothing else carries code.
+    issues.extend(code_issues(graph, knob_values))
 
     # V10: determine retry ownership before a candidate executes any work.
     from .loops import loop_edges
@@ -644,6 +659,7 @@ def available_inputs(graph: Graph) -> dict[str, set[tuple[str, str]]]:
     for node in graph.nodes.values():
         universe |= made(node)
         universe |= {("file", n) for n in node.reads}
+        universe |= {("fact", n) for n in node.inputs}
         universe |= {("fact", n) for f in ("prompt_template", "system_prompt_template")
                      for n in template_names(str(getattr(node, f) or ""))}
     joined = {join: forks[0] for join, forks in fork_joins(graph).items() if len(forks) == 1}
@@ -776,6 +792,26 @@ def fork_branch_conflicts(graph: Graph, knob_values: Mapping[str, Any]) -> list[
     return out
 
 
+def answer_label_issues(graph: Graph) -> list[Issue]:
+    """V5 for code and verdict gates (`refactory_dsh.snippet`): each out-edge condition is
+    a word their answer can be (`snippet.is_answer_word`), so the edit is refused here
+    rather than every run failing when the gate answers."""
+    from refactory_dsh import snippet
+
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind != "gate" or node.evaluator not in (snippet.GATE, snippet.VERDICT):
+            continue
+        bad = sorted(str(e.condition) for e in graph.out_edges(node_id)
+                     if e.condition is not None and not snippet.is_answer_word(e.condition))
+        if bad:
+            issues.append(Issue("V5", f"out-edge condition(s) {bad} cannot be this gate's answer: "
+                                "a code or verdict gate answers one word, so each condition is "
+                                "a single word with no spaces or punctuation", node=node_id))
+    return issues
+
+
 def gate_label_issues(graph: Graph) -> list[Issue]:
     """V5: no two out-edges of a gate carry the same verdict (compared as both runtimes
     route a verdict: trimmed, case-insensitively). A verdict names one edge; two leave the
@@ -814,12 +850,16 @@ def read_issues(graph: Graph) -> list[Issue]:
 
 def required_read_issues(graph: Graph) -> list[Issue]:
     """V15 for ops and gates: each of a node's ``required_reads`` is written upstream on
-    every path that reaches it; both runtimes refuse to run the node without one."""
+    every path that reaches it, as is each fact in its ``inputs``; both runtimes refuse
+    to run the node without a required read, and a code node's ``main`` would be handed
+    an input that is not there."""
     issues: list[Issue] = []
     available = available_inputs(graph)
     for node_id in sorted(graph.reachable()):
         node = graph.nodes.get(node_id)
-        if node is None or node.kind not in ("op", "gate") or not node.required_reads:
+        if node is None or node.kind not in ("op", "gate"):
+            continue
+        if not node.required_reads and not node.inputs:
             continue
         have = available.get(node_id, set())
         absent = sorted(name for name in node.required_reads if ("file", name) not in have)
@@ -828,6 +868,41 @@ def required_read_issues(graph: Graph) -> list[Issue]:
                 "V15", f"declares {absent} as required_reads, which some path to it does not "
                 "write first; both runtimes refuse to run it without them (a data pass's own "
                 "files stay inside its pass)", node=node_id))
+        unset = sorted(name for name in node.inputs if ("fact", name) not in have)
+        if unset:
+            issues.append(Issue(
+                "V15", f"declares {unset} as inputs, which some path to it does not produce "
+                "first (a data pass's own facts stay inside its pass)", node=node_id))
+    return issues
+
+
+def code_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
+    """V18: a code node's code passes the static check (`snippet.static_issues`, which
+    never runs it), read as both runtimes run it -- its bound knob's value; a node that
+    runs no code carries none; a verdict gate has a source to read its verdict from."""
+    from refactory_dsh import snippet
+
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        bound = node.bound_knob("code")
+        if snippet.is_code_node(node):
+            try:
+                code = node.bound("code", knob_values)
+            except Exception:  # a bad binding is V14's to report
+                code = node.code
+            for problem in snippet.static_issues(code):
+                issues.append(Issue("V18", f"code node: {problem}", node=node_id,
+                                    knob=bound or None))
+        elif node.code or bound:
+            issues.append(Issue(
+                "V18", "carries code but runs no code: only call "
+                f"{snippet.RUN!r} or evaluator {snippet.GATE!r} runs a node's code", node=node_id))
+        if node.kind == "gate" and node.evaluator == snippet.VERDICT \
+                and not node.required_reads and not node.inputs:
+            issues.append(Issue(
+                "V18", "a verdict gate reads its verdict from its first required_reads file or "
+                "its first inputs fact, and declares neither", node=node_id))
     return issues
 
 
@@ -876,9 +951,12 @@ def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]
     """Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
     slot and each name a ``{% if %}``/``{% elif %}`` condition tests, in its prompts and
     in every field bound to a knob (rendered with the knob values, guarded slots
-    included), its ``feedback_keys``, its reads and its required_reads."""
-    fields = {"prompt_template", "system_prompt_template"} | {f for f, _k in node.field_bindings}
-    facts: set[str] = set(node.feedback_keys)
+    included; a code node's code is Python, not a template), its ``feedback_keys``, its
+    ``inputs``, its reads and its required_reads."""
+    # A code node's code is Python, not a template: it takes in its ``inputs``.
+    fields = ({"prompt_template", "system_prompt_template"}
+              | {f for f, _k in node.field_bindings}) - {"code"}
+    facts: set[str] = set(node.feedback_keys) | set(node.inputs)
     for field_name in sorted(fields):
         try:
             text = node.bound(field_name, knob_values)
