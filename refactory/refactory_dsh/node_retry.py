@@ -89,13 +89,22 @@ class RetriesExhausted(RuntimeError):
         self.sessions = sessions
 
 
+def leaves_no_answer(error: BaseException) -> bool:
+    """Whether ``error`` leaves a data-pass step missing rather than failing its item:
+    its retries are spent (`RetriesExhausted`), or the model used its whole output
+    allowance without answering, which is the model failing the question and is not
+    retried unless the step opts in (``retry.on: ["output_limit"]``)."""
+    return isinstance(error, RetriesExhausted) or failure_kind(error) == "output_limit"
+
+
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
-    """Record why a step whose retries were spent has no answer (`MISSING_DIR`)."""
-    if not isinstance(error, RetriesExhausted):
+    """Record why a step left without an answer has none (`MISSING_DIR`)."""
+    if not leaves_no_answer(error):
         return
+    cause = error.cause if isinstance(error, RetriesExhausted) else "output_limit"
     target = Path(workdir) / MISSING_DIR / f"{node}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"cause": error.cause, "sessions": error.sessions,
+    target.write_text(json.dumps({"cause": cause, "sessions": getattr(error, "sessions", None),
                                   "error": str(error)[:2000]}) + "\n")
 
 
@@ -109,12 +118,13 @@ def failure_kind(error: BaseException) -> str | None:
     """The `nn.graph.RETRY_ON` failure ``error`` is, or None when it is none of them.
 
     A timeout is the model client's deadline (`model.CompletionTimeout`), or a timeout
-    another client reports the same way. A crash is a session the model client gave up
-    on without an answer (`model.CompletionFailed`): a worker or product failure, an
-    invalid result, the output limit, or a wire that kept failing -- but not a key,
-    model name or prompt the provider refuses (``setup``), which fails the same way
-    again. Cancellation, budget exhaustion, a refusal and a bad answer are neither, and
-    are never retried.
+    another client reports the same way. A crash is a session the worker or product
+    failed (`model.CompletionFailed` of kind ``worker``: an invalid result, a worker
+    error). ``output_limit`` is the model using its whole output allowance without
+    answering: the model's own failure on the question, retried only when a step opts in.
+    A wire that kept failing (``transport``) and a key, model name or prompt the provider
+    refuses (``setup``) are none of them: the next session would fail the same way.
+    Cancellation, budget exhaustion, a refusal and a bad answer are never retried.
     """
     from refactory_dsh.model import CompletionFailed, CompletionTimeout
 
@@ -125,12 +135,8 @@ def failure_kind(error: BaseException) -> str | None:
     if isinstance(error, CompletionFailed):
         # Only a product failure: a wire that kept failing (a proxy outage) or a request
         # the provider refuses would fail the next session the same way.
-        return "crash" if error.kind in CRASH_KINDS else None
+        return {"worker": "crash", "output_limit": "output_limit"}.get(error.kind)
     return None
-
-
-#: The `model.CompletionFailed` kinds a ``crash`` retry answers.
-CRASH_KINDS = ("output_limit", "worker")
 
 
 def _output_limit(error: BaseException) -> bool:
@@ -295,11 +301,17 @@ def deliver(
                     workspaces.collect(place, workdir, writes, final_response=output)
         except Exception as error:
             kind = failure_kind(error)
+            if started is not None and isinstance(error, RuntimeError):
+                # How many sessions ran, for the step's no-answer record (`record_spent`).
+                try:
+                    error.sessions = index + 1  # type: ignore[attr-defined]
+                except AttributeError:
+                    pass
             if started is None or rule is None or kind not in rule["on"]:
                 raise
             ran.append(int(round(time.monotonic() - started)))
             spent = ", then ".join(f"{seconds}s" for seconds in ran)
-            failed = "timed out" if kind == "timeout" else "crashed"
+            failed = {"timeout": "timed out", "output_limit": "ran out of output"}.get(kind, "crashed")
             its = "its declared retry" if kind == "timeout" else "its retry"
             if index + 1 >= tries:
                 raise RetriesExhausted(

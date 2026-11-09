@@ -488,37 +488,40 @@ outer-loop evaluations):
   added when it is seen to time out. A node without tools (`tool_policy: none`)
   may declare a retry too: its only effect is the reply the runtime captures.
 
-- **Crashed steps in a data pass.** `retry.on` may also name `crash`: a session
-  the model client gave up on without an answer because the product or worker
-  failed (`model.CompletionFailed` of kind `worker` or `output_limit`) — an
-  invalid result, or the output limit reached without an answer. A wire that kept
-  failing through the client's own attempts, or a provider error a product result
-  reports (a 429, an overload), is `transport`, and a key, model name or prompt
-  the provider refuses is `setup`: neither is a crash, and the item fails as
-  before. A product failure's free-text detail never decides whether the client
-  replays a session (`model.without_product_detail`). The client
-  itself never replays a crash, because the replay would run outside the node's
-  delivery bracket. An agent step in a data pass that may safely run again
-  (`outputs_only`, a workspace, or `tool_policy: none`) gets
+- **Crashed steps in a data pass.** `retry.on` may also name `crash` and
+  `output_limit`. A `crash` is a session the worker or product failed
+  (`model.CompletionFailed` of kind `worker`: an invalid result, a worker error).
+  `output_limit` is the model using its whole output allowance without answering:
+  the model failing the question, which the graph should fix (a prompt that commits
+  early, shorter attempts plus a check, a vote), so the runtime does not hide it by
+  default. A wire that kept failing through the client's own attempts, or a
+  provider error a product result reports (a 429, an overload), is `transport`,
+  and a key, model name or prompt the provider refuses is `setup`: neither is
+  retried, and the item fails as before. A product failure's free-text detail
+  never decides whether the client replays a session (`model.without_product_detail`).
+  The client itself never replays a crash, because the replay would run outside
+  the node's delivery bracket. An agent step in a data pass that may safely run
+  again (`outputs_only`, a workspace, or `tool_policy: none`) gets
   `{"on": ["crash"], "times": 2}` by default (`Graph.retry_rule`): each retry is a
-  fresh session under the same limit, recorded as a `node_retried` event, and
-  after the output limit its prompt says the last attempt ran out of room. A
-  timeout is not retried by default. When a data-pass step's retries are spent,
-  it is missing rather than failed (`Graph.missing_on_crash`): it is recorded in
-  `reviews/<step>-missing.txt` and the item's record (`missing_steps`), a gate
-  after it sees no answer and may reloop within its `max_iterations` and
-  `on_exhausted`, a fork's join sees that branch without one, and the item is
-  scored. When a later step cannot run because the missing step's output is
-  absent (a read of it fails, or it is a required input), the item has no answer:
-  score 0, no error, `missing_steps` naming the crashed step, its cause and
-  session count (`items.no_answer`). Ops that combine a fork's branches (LiveMath's
-  judge and skill-graph prompts) go on with the branches that answered. Scores and
-  seed caches carry `node_retry.SEMANTICS`, so evidence from before this rule is
-  not mixed in. The lowering hands the rule and `missing_on_crash` to the spine; the
-  worker records the step missing and the spine lets it fail and go on, as it
-  does a fork's optional target. `retry: {"times": 0}` turns it off. Outside a
-  data pass nothing is retried unless declared. Every session is a worker
-  receipt of its own, so retried sessions count in usage, cost and time.
+  fresh session under the same limit, recorded as a `node_retried` event. A step
+  that opts in to `output_limit` gets a retry whose prompt says the last attempt
+  ran out of room. A timeout is not retried by default. When a data-pass step's
+  retries are spent, or it runs out of output, it is missing rather than failed
+  (`Graph.missing_on_crash`, `node_retry.leaves_no_answer`): it is recorded in
+  `reviews/<step>-missing.txt` and the item's record (`missing_steps`, with cause
+  and session count), a gate after it sees no answer and may reloop within its
+  `max_iterations` and `on_exhausted`, a fork's join sees that branch without one,
+  and the item is scored. When a later step cannot run because the missing step's
+  output is absent (its error names one of that step's files or facts whole), the
+  item has no answer: score 0, no error (`items.no_answer`). Ops that combine a
+  fork's branches (LiveMath's judge and skill-graph prompts) go on with the
+  branches that answered. Scores and seed caches carry `node_retry.SEMANTICS`, so
+  evidence from before this rule is not mixed in. The lowering hands the rule and
+  `missing_on_crash` to the spine; the worker records the step missing and the
+  spine lets it fail and go on, as it does a fork's optional target.
+  `retry: {"times": 0}` turns it off. Outside a data pass nothing is retried
+  unless declared. Every session is a worker receipt of its own, so retried
+  sessions count in usage, cost and time.
 
 - **Fact restore.** Before each op attempt, `ctx.facts` is deep-copied. On
   failure, facts are restored from the snapshot before retry.

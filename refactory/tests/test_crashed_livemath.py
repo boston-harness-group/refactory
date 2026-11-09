@@ -28,8 +28,8 @@ ITEMS = 5  # the LiveMath fixture
 
 
 class _Crashing:
-    """A walker model keyed by node: the nodes in ``crash`` hit the output limit every
-    session; the others answer B. Calls and prompts are shared by every per-node copy."""
+    """A walker model keyed by node: the nodes in ``crash`` run out of output (the model's
+    own failure, not retried) every session; the others answer B. Calls and prompts are shared by every per-node copy."""
 
     def __init__(self, crash: set[str], log: list[tuple[str, str]] | None = None, node: str = ""):
         self.crash, self.log, self.node = crash, ([] if log is None else log), node
@@ -90,7 +90,8 @@ def _no_answer(records: list[dict], steps: set[str]) -> None:
         assert set(record["missing_steps"]) == steps
         assert record["fail_reason"].startswith("no answer: ")
         for info in record["missing_steps"].values():
-            assert info["sessions"] == SESSIONS
+            # Running out of output is not retried; a crash gets its fresh sessions first.
+            assert info["sessions"] == (1 if info["cause"] == "output_limit" else SESSIONS)
 
 
 def _answered(records: list[dict], missing: set[str]) -> None:
@@ -105,13 +106,13 @@ def _answered(records: list[dict], missing: set[str]) -> None:
 
 
 def test_judge_goes_on_with_the_attempt_that_answered(tmp_path, monkeypatch):
-    """[walker] solver_judge: solve_a hits the output limit through its retries; the judge
+    """[walker] solver_judge: solve_a runs out of output (not retried); the judge
     sees solve_b's attempt and a no-answer note for A, and every item is graded."""
     from refactory_packages.livemath.block_ops import NO_ATTEMPT
 
     records, model = _walk("solver_judge", {"solve_a"}, tmp_path, monkeypatch)
     _answered(records, {"solve_a"})
-    assert model.calls("solve_a") == ITEMS * SESSIONS and model.calls("judge") == ITEMS
+    assert model.calls("solve_a") == ITEMS and model.calls("judge") == ITEMS
     assert all(NO_ATTEMPT in prompt for prompt in model.prompts("judge"))
     assert records[0]["missing_steps"]["solve_a"]["cause"] == "output_limit"
 

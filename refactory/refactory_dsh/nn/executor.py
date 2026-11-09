@@ -1609,20 +1609,21 @@ class Executor:
         branch continues. A budget or build-loop stop, a timeout or an unknown outcome
         still fails it, as they do on the spine.
 
-        So is an agent step in a data pass whose retries are spent
-        (`Graph.missing_on_crash`, `node_retry.RetriesExhausted`): its item goes on
+        So is an agent step in a data pass whose retries are spent, or that ran out of
+        output without answering (`Graph.missing_on_crash`, `node_retry.leaves_no_answer`):
+        its item goes on
         without its answer, so a gate after it can reloop and a join sees the branch
         without one, as the spine's worker records it (``missing_on_crash``).
         """
         from refactory_dsh.budgets import BudgetExhausted
-        from refactory_dsh.node_retry import RetriesExhausted
+        from refactory_dsh.node_retry import leaves_no_answer
         from refactory_dsh.run import BuildLoopStop
 
         from .fork import _record_missing, _settle_missing
 
         optional = any(node.id in (fork.optional_targets or ())
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
-        spent = isinstance(exc, RetriesExhausted) and self.graph.missing_on_crash(node.id)
+        spent = leaves_no_answer(exc) and self.graph.missing_on_crash(node.id)
         if not (optional or spent) or node.kind not in ("op", "agent") or isinstance(
                 exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
             return False

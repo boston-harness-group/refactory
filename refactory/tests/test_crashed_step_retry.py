@@ -240,20 +240,53 @@ RUNTIMES = ["walker", pytest.param("spine", marks=needs_spine)]
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_crashed_step_is_retried_and_its_item_scored(tmp_path, runtime):
-    """[both runtimes] Item 0's first session hits the output limit; its retry, told it
-    ran out of room, answers. Every item is scored, and the retry is recorded and counted
-    (one worker receipt per session)."""
-    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
+    """[both runtimes] Item 0's first session fails in the product (an empty result); its
+    fresh retry answers. Every item is scored, and the retry is recorded and counted (one
+    worker receipt per session). No output-limit note: it was not the output limit."""
+    dsh = Scripted(tmp_path / "dsh", {"": [WORKER_CRASH, "right"]})
     scores, run = _run(runtime, _straight(), tmp_path, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls() == 5
-    first, second, *_ = dsh.prompts()
-    assert OUTPUT_LIMIT_NOTE not in first and OUTPUT_LIMIT_NOTE in second
+    assert not any(OUTPUT_LIMIT_NOTE in prompt for prompt in dsh.prompts())
     item = _pass(run, "0")
     [retried] = _events(item, RETRY_EVENT)
-    assert retried["reason"] == "crash" and "output limit" in retried["summary"]
-    assert "output limit reached after 128000 output tokens" in retried["error"]
+    assert retried["reason"] == "crash" and "crashed" in retried["summary"]
+    assert "category: invalid-result" in retried["error"]
     assert _sessions(item) == ["completed", "failed"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_output_limit_is_not_retried_and_leaves_no_answer(tmp_path, runtime):
+    """[both runtimes] Running out of output is the model failing the question: by default
+    it is not retried. The step has no answer (cause ``output_limit``, one session), the
+    item is graded without it, and its siblings are scored."""
+    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    assert _keys(scores) == [("0", False, 0.0, None), *RIGHT[1:]]
+    assert dsh.calls() == 4
+    item = _pass(run, "0")
+    assert _events(item, RETRY_EVENT) == []
+    [record] = [r for r in scores if str(r["id"]) == "0"]
+    assert record["missing_steps"]["solve"]["cause"] == "output_limit"
+    assert record["missing_steps"]["solve"]["sessions"] == 1
+    assert "output limit reached after 128000 output tokens" in record["missing_steps"]["solve"]["error"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_opted_in_output_limit_is_retried_and_told_it_ran_out_of_room(tmp_path, runtime):
+    """[both runtimes] A step that declares ``retry.on: ["output_limit"]`` gets a fresh
+    session after the output limit, and that session's prompt says the last one ran out of
+    room."""
+    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
+    scores, run = _run(runtime, _straight(retry={"on": ["crash", "output_limit"], "times": 2}),
+                       tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert dsh.calls() == 5
+    first, second, *rest = dsh.prompts()
+    assert OUTPUT_LIMIT_NOTE not in first and OUTPUT_LIMIT_NOTE in second
+    assert not any(OUTPUT_LIMIT_NOTE in prompt for prompt in rest)
+    [retried] = _events(_pass(run, "0"), RETRY_EVENT)
+    assert retried["reason"] == "output_limit" and "output limit" in retried["summary"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
@@ -280,8 +313,8 @@ def test_a_step_whose_retries_all_crash_is_missing_and_its_item_still_scored(tmp
 def test_a_crash_in_a_loop_is_an_attempt_its_gate_relooops_on(tmp_path, runtime):
     """[both runtimes] Item 0's solver crashes through its retries; the checker gate sees
     no answer and sends it back, and the next visit answers. The reloop's prompt carries the
-    gate's reason and not the output-limit note."""
-    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT] * (1 + PASS_RETRY_TIMES) + ["right"]})
+    gate's reason."""
+    dsh = Scripted(tmp_path / "dsh", {"": [WORKER_CRASH] * (1 + PASS_RETRY_TIMES) + ["right"]})
     scores, run = _run(runtime, _looped(), tmp_path, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls() == 1 + PASS_RETRY_TIMES + 4
@@ -290,6 +323,19 @@ def test_a_crash_in_a_loop_is_an_attempt_its_gate_relooops_on(tmp_path, runtime)
     # It answered on the reloop, so it is no longer missing.
     assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
     assert all("missing_steps" not in record for record in scores)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_output_limit_in_a_loop_is_recovered_by_the_gate(tmp_path, runtime):
+    """[both runtimes] The structure recovers what the runtime does not retry: item 0's
+    solver runs out of output, the checker gate sees no answer and sends it back, and the
+    second visit answers."""
+    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
+    scores, run = _run(runtime, _looped(), tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert dsh.calls() == 5
+    reloop = dsh.prompts()[1]
+    assert "there is no answer" in reloop and OUTPUT_LIMIT_NOTE not in reloop
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
@@ -391,8 +437,9 @@ def test_the_optimizer_sees_no_answer_items_apart_from_wrong_ones():
          "missing_steps": {"solve": {"cause": "output_limit", "sessions": 3, "error": "x"}}},
     ]
     text = "\n".join(_item_evidence(records))
-    assert "1 passed, 1 answered wrong, 1 had no answer (a step crashed), 0 failed" in text
-    assert "| 3 | solve | output_limit | 3 |" in text
+    assert "1 passed, 1 answered wrong, 1 had no answer (a step ran out of output or crashed), 0 failed" in text
+    assert "| 3 | solve | ran out of output without answering | 3 |" in text
+    assert "not a wrong answer" in text
 
 
 # ── outside a data pass: unchanged ──────────────────────────────────────────
@@ -489,7 +536,7 @@ def test_which_failures_are_crashes():
     assert failure_kind(CompletionFailed("model completion failed on the wire 3 time(s)",
                                          kind="transport")) is None
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="worker")) == "crash"
-    assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="output_limit")) == "crash"
+    assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="output_limit")) == "output_limit"
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="setup")) is None
     # A bare status code inside a token count is not an HTTP 429.
     from refactory_dsh.model import is_transport_failure
@@ -505,6 +552,8 @@ def test_the_optimizer_is_told_what_a_crash_does():
     nodes = [{"id": key, **value} for key, value in state["nodes"].items()]
     text = "\n".join(composition_section(nn_edits.catalogue(), nodes, state["edges"]))
     assert "**crashes**" in text and "fresh session" in text and "no answer" in text
+    assert "**running out of output**" in text and "model failing that question" in text
+    assert "It is not retried" in text and "vote" in text
 
 
 # ── the outer loop: a flaky candidate is still scored on every item ─────────

@@ -29,13 +29,14 @@ ON_EXHAUSTED = ("continue", "fail_item", "halt")
 PROCEED = "proceed"
 
 #: The failures an agent node may declare a retry on (`Node.retry`): ``timeout`` (the
-#: session ran out of time; each retry's limit is ``timeout_factor`` times the last) and
-#: ``crash`` (the session ended without an answer: a worker or product failure, an
-#: invalid result, the output limit, or a wire that kept failing through the model
-#: client's own attempts -- `model.CompletionFailed`). A model that answered wrongly
-#: answers wrongly again, and a key or model name the provider refuses fails the same
-#: way, so neither is retried (`node_retry.failure_kind`).
-RETRY_ON = ("crash", "timeout")
+#: session ran out of time; each retry's limit is ``timeout_factor`` times the last),
+#: ``crash`` (the worker or product failed: an invalid result, a worker error) and
+#: ``output_limit`` (the model used its whole output allowance without answering -- the
+#: model failing the question, which a graph should fix, so it is retried only when a
+#: step opts in). A model that answered wrongly answers wrongly again, and a wire that
+#: kept failing or a key the provider refuses fails the same way, so none of those is
+#: retried (`node_retry.failure_kind`).
+RETRY_ON = ("crash", "output_limit", "timeout")
 
 #: The most retries one node may declare, and the largest factor its limit may grow by
 #: per retry. A bound, so a declared rule cannot hold a run for an unbounded time.
@@ -335,10 +336,12 @@ class Node:
     #: "timeout_factor": 2}``: a session that times out is run once more, fresh, with
     #: twice its `timeout_s` (which a retry on timeout requires), inside the node's whole
     #: budget and the run's wall (`refactory_dsh.node_retry`); ``"crash"`` answers a
-    #: session that ended without an answer (a worker failure, the output limit).
+    #: worker or product failure, and ``"output_limit"`` a session that used its whole
+    #: output allowance without answering (opt-in only).
     #: None is the default: no retry, except that an agent step in a data pass gets 2
     #: fresh sessions on a crash (``{"on": ["crash"], "times": 2}``); a step in a data
-    #: pass whose retries are spent is missing rather than failed (`Graph.retry_rule`).
+    #: pass whose retries are spent, or that runs out of output, is missing rather than
+    #: failed (`Graph.retry_rule`).
     #: ``{"times": 0}`` turns every retry off. A rule
     #: the graph declares, on both runtimes, with or without a CEO.
     retry: dict[str, Any] | None = None
@@ -863,8 +866,10 @@ class Graph:
 
         - A declared ``retry`` wins; ``times: 0`` declares none.
         - Undeclared, an agent step in a data pass gets `PASS_RETRY_TIMES` fresh sessions
-          on a crash, when a retry is safe for it (`retry_safe`). When its retries (these,
-          or declared ones) are spent, the step is missing rather than failed (`Executor._missing_optional`, the
+          on a crash (a worker or product failure), when a retry is safe for it
+          (`retry_safe`). Running out of output without answering is the model's own
+          failure and is not retried by default. When its retries are spent, or it runs
+          out of output, the step is missing rather than failed (`Executor._missing_optional`, the
           spine's ``missing_on_crash``): a gate after it sees no answer and may reloop,
           a fork's join sees the branch without one, and the item goes on to be scored.
         - Undeclared, outside a data pass: none, as before.
@@ -879,8 +884,9 @@ class Graph:
         return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
 
     def missing_on_crash(self, node_id: str) -> bool:
-        """Whether ``node_id``, when its retries are spent, is missing rather than failed:
-        an agent step in a data pass with a retry rule (declared or the default)."""
+        """Whether ``node_id``, when its retries are spent or it runs out of output without
+        answering, is missing rather than failed: an agent step in a data pass with a
+        retry rule (declared or the default)."""
         return self.in_data_pass(node_id) and self.retry_rule(node_id) is not None
 
     def exhaustion_exit(self, gate_id: str) -> str | None:

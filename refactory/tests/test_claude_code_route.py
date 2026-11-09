@@ -237,7 +237,7 @@ CUT_OFF = ("API Error: Claude's response exceeded the 32000 output token maximum
            "this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.")
 
 
-def test_an_output_limit_says_so_on_the_record_and_is_a_crash(tmp_path, fake_sdk, monkeypatch):
+def test_an_output_limit_says_so_on_the_record(tmp_path, fake_sdk, monkeypatch):
     """A run Claude Code ends at its output cap was reported as a bare ``invalid-result``.
     The adapter now names the output limit and the tokens spent, the model client calls
     it an output limit, and the worker receipt and progress event carry the reason."""
@@ -252,7 +252,7 @@ def test_an_output_limit_says_so_on_the_record_and_is_a_crash(tmp_path, fake_sdk
     assert "output limit reached after 128000 output tokens" in message
     assert "capped at 32000 tokens" in message
     assert getattr(caught.value, "kind", None) == "output_limit"
-    assert failure_kind(caught.value) == "crash"
+    assert failure_kind(caught.value) == "output_limit"
     receipt = _receipt(workdir)
     assert receipt["state"] == "failed" and "output limit reached" in receipt["error"]
     events = [json.loads(line) for line in (workdir / ".refactory/events.jsonl").read_text().splitlines()]
