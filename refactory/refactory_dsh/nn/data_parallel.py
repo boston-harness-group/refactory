@@ -54,6 +54,10 @@ class _ItemResult:
     error: str | None = None
     #: A halt, gate stop or budget stop elsewhere ended this item before it finished.
     cancelled: bool = False
+    #: The item's pass ended in a failure (a deadline, a failed branch, an error), so its
+    #: steps' errors are the item's, not the run's -- also when its record is "no answer"
+    #: rather than an error (a step whose producer went missing could not run).
+    failed: bool = False
     child: Any = None
 
 
@@ -358,7 +362,7 @@ def run_data_concurrent(
                                           exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
                 if record is not None:
                     record["error_kind"] = "timeout"
-                finished = True
+                result.failed = finished = True
             except _BranchFailed as exc:
                 if cancelled.is_set():
                     # Stopped by another item's halt, gate or budget stop, not failed.
@@ -368,7 +372,7 @@ def run_data_concurrent(
                                           exchanges=list(child._item_exchanges),  # noqa: SLF001
                                           fail_reason=str(exc), pass_dir=pass_dir,
                                           outputs_of=child._outputs_of, **fields)  # noqa: SLF001
-                finished = True
+                result.failed = finished = True
             except Exception as exc:  # noqa: BLE001 - a failed item, as in the sequential loop
                 if cancelled.is_set():
                     result.cancelled = True
@@ -377,7 +381,7 @@ def run_data_concurrent(
                                           exchanges=list(child._item_exchanges),  # noqa: SLF001
                                           pass_dir=pass_dir, outputs_of=child._outputs_of,  # noqa: SLF001
                                           **fields)
-                finished = True
+                result.failed = finished = True
             else:
                 prediction: str | None = None
                 if verdict is not None:
@@ -442,7 +446,9 @@ def run_data_concurrent(
     for r in results:
         if r.child is not None:
             steps = len(r.child.steps)
-            if r.record is not None and r.record.get("error_text") is not None:
+            # Every step of a failed item, as the sequential loop sets them aside: its
+            # record says how it failed, and a "no answer" record has no error_text.
+            if r.failed:
                 outcome.failed_step_indices.update(range(step_base, step_base + steps))
             step_base += steps
             # The declared facts each finished pass changed, folded in item order

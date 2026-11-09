@@ -44,3 +44,18 @@ def pick_with_metadata(ctx: Any) -> dict[str, Any]:
     if str((ctx.read_json("current_item.json", {}) or {}).get("id")) == "0":
         ctx.read_text("metadata.txt")
     return {}
+
+
+def extract(ctx: Any) -> dict[str, Any]:
+    """Grade ``answer.txt``, which this step declares as a required input (the Countdown
+    seed's ``extract_answer``): it never runs without one."""
+    answer = ctx.read_text("answer.txt").strip()
+    ctx.write_json("item_result.json", {"score": 1.0 if answer == "right" else 0.25})
+    return {}
+
+
+def note_unless_first(ctx: Any) -> dict[str, Any]:
+    """Write ``notes.txt`` for the next step -- except, by a bug, on item ``0``."""
+    if str((ctx.read_json("current_item.json", {}) or {}).get("id")) != "0":
+        ctx.write_text("notes.txt", "noted\n")
+    return {}

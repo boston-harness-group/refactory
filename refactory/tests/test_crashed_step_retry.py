@@ -629,3 +629,163 @@ def test_outside_data_passes_the_shipped_modes_are_unchanged():
             assert not graph.missing_on_crash(node_id), (key, node_id)
     # The no-tools solvers of the outer-loop task modes get it.
     assert "livemath-solver" in defaulted
+
+
+# ── a step after a no-answer step: the item has no answer, the run goes on ──
+
+
+def _required(parallelism: int = 1, requires: tuple[str, ...] = ("answer.txt",)) -> nn.Graph:
+    """data -> [solve -> extract] -> report, where ``extract`` declares ``requires`` as
+    required inputs: the Countdown seed's shape."""
+    graph = nn.Graph()
+    graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="extract",
+                      writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref=TASK,
+                      parallelism=parallelism))
+    graph.add(_solver())
+    graph.add(nn.Node("extract", "op", call="crash_ops:extract", reads=requires,
+                      required_reads=requires, writes=("item_result.json",)))
+    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+    graph.connect("solve", "extract")
+    graph.connect("data", "report")
+    return graph
+
+
+@pytest.mark.parametrize("parallelism", [1, 2])
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_required_input_its_missing_step_never_made_ends_the_item_not_the_run(
+        tmp_path, runtime, parallelism):
+    """[both runtimes, one and several items at once] One item's solve runs out of output;
+    the next step declares ``answer.txt`` a required input, so it cannot run. That item has
+    no answer (scored 0, no error); the run still succeeds, and its score is passed/total.
+    Concurrent items once let that step's failure fail the whole run, so no candidate with
+    a no-answer item could be ranked."""
+    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
+    scores, _ = _run(runtime, _required(parallelism), tmp_path, dsh)
+    assert dsh.calls() == 4
+    [unanswered] = [r for r in scores if not r["passed"]]
+    assert (unanswered["score"], unanswered["error_kind"], unanswered["error_text"]) == (0.0, None, None)
+    assert unanswered["missing_steps"]["solve"]["cause"] == "output_limit"
+    assert unanswered["fail_reason"] == "no answer: solve reached its output limit without answering"
+    assert sorted((r["passed"], r["score"], r["error_kind"]) for r in scores) == [
+        (False, 0.0, None), *[(True, 1.0, None)] * 3]
+    assert sum(r["score"] for r in scores) / len(scores) == 0.75
+
+
+@pytest.mark.parametrize("parallelism", [1, 2])
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_required_input_nothing_went_missing_for_is_still_an_error(tmp_path, runtime, parallelism):
+    """[both runtimes] Every solve answers, but the step before ``extract`` fails to write
+    ``notes.txt``, which ``extract`` requires, on item 0: a bug, not a missing answer. That
+    item fails with the error; the others are scored."""
+    graph = nn.Graph()
+    graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="extract",
+                      writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref=TASK,
+                      parallelism=parallelism))
+    graph.add(_solver())
+    graph.add(nn.Node("note", "op", call="crash_ops:note_unless_first", reads=(CURRENT_ITEM,),
+                      writes=("notes.txt",)))
+    graph.add(nn.Node("extract", "op", call="crash_ops:extract", reads=("answer.txt", "notes.txt"),
+                      required_reads=("answer.txt", "notes.txt"), writes=("item_result.json",)))
+    graph.add(nn.Node("report", "op", call="loop_ops:noop"))
+    graph.connect("solve", "note")
+    graph.connect("note", "extract")
+    graph.connect("data", "report")
+    dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
+    scores, _ = _run(runtime, graph, tmp_path, dsh)
+    [buggy] = [r for r in scores if str(r["id"]) == "0"]
+    assert buggy["error_kind"] is not None and "notes.txt" in buggy["error_text"], buggy
+    assert "missing_steps" not in buggy
+    assert not str(buggy.get("fail_reason") or "").startswith("no answer")
+    assert _keys([r for r in scores if str(r["id"]) != "0"]) == RIGHT[1:]
+
+
+class _OutOfRoom:
+    """A walker model whose first session runs out of output, as the model client
+    reports it; every other session answers. Safe to share, so items run at once."""
+
+    thread_safe = True
+
+    def __init__(self) -> None:
+        import threading
+
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def complete(self, prompt: str, **_: Any) -> str:
+        from refactory_dsh.model import CompletionFailed
+
+        with self._lock:
+            self.calls += 1
+            first = self.calls == 1
+        if first:
+            raise CompletionFailed(f"model completion failed (exit 1): {OUTPUT_LIMIT}",
+                                   kind="output_limit")
+        return "right"
+
+    def for_node(self, node_id: str, role: str | None = None) -> "_OutOfRoom":
+        return self
+
+    def with_tool_policy(self, policy: str) -> "_OutOfRoom":
+        return self
+
+    def with_wall(self, seconds: Any) -> "_OutOfRoom":
+        return self
+
+    def route(self) -> dict[str, Any]:
+        return {"worker_backend": "dsh"}
+
+
+def test_an_outer_loop_ranks_and_exports_a_candidate_with_a_no_answer_item(tmp_path):
+    """[outer loop, walker, items at once] The seed's solve runs out of output on one train
+    item, and the next step requires its answer. The evaluation succeeds with that item
+    scored 0 (score passed/total), so the candidate can win, and its result exports as a
+    seed result."""
+    from refactory_dsh import seed_cache
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.outerloop import Run
+
+    from test_parts import TASK_REF, _patch_mode
+
+    class Required(nn.Mode):
+        name = "required_probe"
+
+        def build(self) -> nn.Graph:
+            graph = nn.Graph()
+            graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="extract",
+                              task_ref=TASK_REF, writes=(CURRENT_ITEM,), produces=("item_scores",),
+                              parallelism=2))
+            graph.add(_solver())
+            graph.add(nn.Node("extract", "op", call="crash_ops:extract", reads=("answer.txt",),
+                              required_reads=("answer.txt",), writes=("item_result.json",)))
+            graph.add(nn.Node("finish", "op", call="loop_ops:noop"))
+            graph.connect("solve", "extract")
+            graph.connect("data", "finish")
+            return graph
+
+        def score(self, run: nn.RunResult) -> float:
+            scores = [entry["score"] for entry in run.facts.get("item_scores", [])]
+            return sum(scores) / len(scores) if scores else 0.0
+
+    manifest = tmp_path / "parts.json"
+    manifest.write_text(json.dumps({"train": ["alpha", "beta", "gamma", "delta"],
+                                    "val": ["epsilon"], "test": ["zeta"]}))
+    root = tmp_path / "source"
+    with _patch_mode(Required):
+        loop = Loop("holdout_probe/probe", LoopConfig(
+            epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=root,
+            parts_manifest=str(manifest)), project=Path("."), model=_OutOfRoom())
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed)
+        Run(_loop=loop).evaluate(seed, part="val")
+        journal = [json.loads(line) for line in (root / "journal.jsonl").read_text().splitlines()]
+        [scored] = [r for r in journal if r.get("event") == "score" and r.get("id") == seed.id]
+        assert scored["exit_ok"] and scored["error"] is None, scored
+        assert scored["raw_score"] == 0.75
+        records = scored["facts"]["item_scores"]
+        assert "data_parallelism_effective" not in scored["facts"]  # the items ran at once
+        [unanswered] = [r for r in records if not r["passed"]]
+        assert unanswered["error_kind"] is None and unanswered["missing_steps"]["solve"]["cause"] == "output_limit"
+        cache = seed_cache.export(root, project=Path("."))
+        assert set(cache["parts"]) == {"train", "val"}
+        assert cache["parts"]["train"]["result"]["exit_ok"]
