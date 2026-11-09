@@ -496,6 +496,22 @@ def test_every_picker_hands_its_choice_to_the_model_and_the_edit_lands_there(tmp
     assert max(len(_fixed(c)) for c in _children(loop)) >= 2
 
 
+@pytest.mark.parametrize("picker", ["map_elites", ""])
+def test_an_ungated_run_scores_its_last_proposals(tmp_path, picker):
+    """Each epoch scores the batch the one before proposed, then proposes the next.
+    Without the validation gate the last epoch's proposals were never scored, so a run
+    of N epochs scored N-1 rounds; now they are scored before the run reports (as the
+    gate does), with no extra proposal round, and charged like any evaluation."""
+    model = ComboModel()
+    loop = _run("default", tmp_path, model, parent_picker=picker, epochs=3)
+    assert loop.bound == "epochs" and len(loop.epochs) == 3
+    last = loop.population[-1]  # the last epoch's proposal
+    assert last in _children(loop) and last.evaluated and last.exit_ok
+    assert loop._unevaluated() == []
+    assert loop.evaluations == len(loop.population)
+    assert loop.rollouts == sum(len(loop._train_item_records[c.id]) for c in loop.population)
+
+
 def test_a_population_picker_is_refused_under_the_validation_gate(tmp_path):
     with _combo_mode(), pytest.raises(LoopError, match="map_elites parent picker"):
         Loop("fake/combo", _config(tmp_path, val_gate=True, parent_picker="map_elites"),

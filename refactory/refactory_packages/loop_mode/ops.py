@@ -186,8 +186,15 @@ def scheduler(ctx: Any) -> dict[str, Any]:
 
 
 def report(ctx: Any) -> dict[str, Any]:
-    """Write the run's report — the visibility surface — and publish the score."""
+    """Score the last epoch's proposals, then write the run's report — the visibility
+    surface — and publish the score.
+
+    A run that ended on its epoch bound scores the batch its last epoch proposed
+    before it reports (``Loop.score_last_batch``), as the loop does when it runs
+    itself, so the graph spends and scores what the loop does.
+    """
     loop = _resumed(ctx)
+    loop.score_last_batch()
     payload = loop.report()
     return {
         "best": payload.get("best_score"),

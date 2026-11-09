@@ -308,23 +308,47 @@ def test_the_gradient_carries_knob_attribution_and_reasons(tmp_path):
     assert gradient["structural"]["accepted_ops"]
 
 
-def test_the_report_names_candidates_that_were_never_evaluated(default_run):
+def test_a_run_that_ends_on_its_epochs_scores_its_last_batch(default_run):
+    """Each epoch scores the batch the one before proposed, then proposes the next, so
+    the last epoch's batch is scored before the run reports, as under the validation
+    gate: none of it is paid for and dropped."""
+    root, report = default_run  # the default configuration runs two epochs
+    assert report["bound"] == "epochs"
+    assert report["unevaluated"] == []
+    assert report["evaluations"] == report["population"]
+
+
+def test_the_report_names_candidates_that_were_never_evaluated(tmp_path):
     """A batch proposed for an epoch that did not run must be named, not implied.
 
-    The pipeline proposes the next epoch's batch at the end of an epoch, so a run
-    stopped by the epoch bound holds candidates that were installed and never run.
-    The run reported `evaluations: 3` for a 2-epoch configuration without saying
-    which candidates that left out, and a model-driven round whose output was
-    dropped looked like a round that happened.
+    A run stopped by a bound other than its epochs (here the evaluation cap) holds
+    candidates that were installed and never run. The run reported `evaluations: 3`
+    for a 2-epoch configuration without saying which candidates that left out, and a
+    model-driven round whose output was dropped looked like a round that happened.
     """
-    root, report = default_run  # the default configuration runs two epochs
+    loop = Loop(MODE, _config(tmp_path, epochs=3, max_evaluations=4), project=Path("."))
+    report = loop.run()
+    assert report["bound"] == "evaluations"
     unevaluated = report["unevaluated"]
     assert unevaluated, "the final epoch's batch was dropped silently"
     assert len(unevaluated) == report["population"] - report["evaluations"]
     assert all(candidate["id"] not in unevaluated for candidate in report["leaderboard"])
-    markdown = (root / "report.md").read_text()
+    markdown = (tmp_path / "report.md").read_text()
     assert "never evaluated" in markdown, "the report.md does not say so"
     assert all(f"`{candidate}`" in markdown for candidate in unevaluated)
+
+
+def test_a_run_a_person_stops_leaves_its_last_batch_unscored(tmp_path, monkeypatch):
+    """Only a run that ends on its epochs scores the batch it proposed last: one a
+    person stopped spends nothing more, and the report names what was not run."""
+    from refactory_dsh.control import Control
+
+    monkeypatch.setattr(Loop, "on_epoch_end", lambda self, run: Control(self.root).request("stop"))
+    loop = Loop(MODE, _config(tmp_path, epochs=3), project=Path("."))
+    report = loop.run()
+    assert report["bound"] == "a person asked the run to stop"
+    assert len(loop.epochs) == 1
+    assert report["unevaluated"] and report["evaluations"] < report["population"]
 
 
 def test_the_scheduler_reports_the_evaluation_bound(tmp_path):

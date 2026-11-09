@@ -216,7 +216,8 @@ def test_repeats_measure_training_and_holdout_without_leaking_audit(tmp_path):
 
 def test_failed_trial_never_becomes_a_winner(tmp_path):
     with _patch_mode(_BoundedInt):
-        loop = Loop("fake/bounded", LoopConfig(epochs=1, batch_size=1, optimizer="random", repeats=3, runs_root=tmp_path), project=Path("."))
+        loop = Loop("fake/bounded", LoopConfig(epochs=1, batch_size=1, optimizer="random", repeats=3, runs_root=tmp_path,
+                                                         max_evaluations=1), project=Path("."))
         values = iter([RunResult(score=2), RunResult(score=0, exit_ok=False, error="control failure")])
         loop.evaluator = SimpleNamespace(evaluate=lambda *args: next(values))
         result = loop.run()
