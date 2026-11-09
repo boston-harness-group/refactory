@@ -17,8 +17,8 @@ PARTS = {"train": ["alpha", "beta", "gamma", "delta"], "val": ["epsilon"], "test
 
 
 def _loop(root: Path, manifest: Path, **config) -> Loop:
-    return Loop(MODE, LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1,
-                                 runs_root=root, parts_manifest=str(manifest), **config),
+    config = {"epochs": 1, "batch_size": 1, "optimizer": "random", "seed": 1, **config}
+    return Loop(MODE, LoopConfig(runs_root=root, parts_manifest=str(manifest), **config),
                 project=Path("."))
 
 
@@ -28,9 +28,9 @@ def _manifest(tmp_path: Path, parts=PARTS, name="parts.json") -> Path:
     return path
 
 
-def _source_run(tmp_path: Path) -> Path:
+def _source_run(tmp_path: Path, **config) -> Path:
     """A run whose seed was evaluated on train and val; returns its export."""
-    loop = _loop(tmp_path / "source", _manifest(tmp_path))
+    loop = _loop(tmp_path / "source", _manifest(tmp_path), **config)
     loop.init()
     run = Run(_loop=loop)
     run.evaluate(loop.population[0])
@@ -261,9 +261,9 @@ def exported(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("search", [
-    ["--optimizer", "hill_climb", "--epochs", "2"],
+    ["--optimizer", "hill_climb", "--val-gate", "1", "--epochs", "2"],
     ["--optimizer", "random", "--val-gate", "1", "--epochs", "2", "--batch-size", "2"],
-    ["--optimizer", "random", "--strategy", "tree_search", "--epochs", "1"],
+    ["--optimizer", "random", "--val-gate", "1", "--strategy", "tree_search", "--epochs", "1"],
 ])
 def test_runs_with_other_search_settings_reuse_the_seed_and_say_so(tmp_path, exported, search):
     with _patch_mode(PartsProbe):
@@ -351,3 +351,113 @@ def test_the_runtime_semantics_are_part_of_the_context(tmp_path, monkeypatch):
         after = profiles.resolve(tmp_path, MODE)
         assert before["evaluation_context"]["runtime_semantics"] == "an older runtime"
         assert before["context_hash"] != after["context_hash"]
+
+
+# ── the run's seed, and every setting that decides what an item scores ───────
+
+
+def test_a_seed_42_cache_is_refused_for_a_seed_43_run(tmp_path):
+    """A Task may shuffle an item by the run's seed (LiveMath's answer choices), so a
+    seed-42 export would serve a seed-43 run scores of other questions: refused, naming
+    the field."""
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path, seed=42)
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed=43, seed_results=str(cache))
+        with pytest.raises(LoopError, match=r"different score context \(seed\)"):
+            loop.init()
+
+
+def test_a_seed_42_cache_still_serves_runs_with_other_search_settings(tmp_path):
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path, seed=42)
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed=42, seed_results=str(cache),
+                     optimizer="random", strategy="tree_search", parent_picker="map_elites",
+                     epochs=5, batch_size=3)
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed)
+        Run(_loop=loop).evaluate(seed, part="val")
+        assert seed.raw_score == 0.25 and loop.rollouts == 0
+        assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["train", "val"]
+
+
+SEARCH_ONLY_CHANGES = {"strategy": "tree_search", "optimizer": "hill_climb", "val_gate": True,
+                       "portfolio": "prompt+pipeline", "parent_picker": "map_elites", "epochs": 9}
+
+
+@pytest.mark.parametrize("field", sorted(SEARCH_ONLY_CHANGES))
+def test_search_only_settings_leave_the_score_context_alone(field):
+    """#616's reuse across search settings: strategy, optimizer, val gate, portfolio,
+    parent picker and epochs do not decide what an item scores."""
+    from test_parts import PartsProbe as mode_class
+
+    base = LoopConfig(seed=42)
+    changed = LoopConfig(seed=42, **{field: SEARCH_ONLY_CHANGES[field]})
+    assert seed_cache.score_context(changed, mode_class) == seed_cache.score_context(base, mode_class)
+
+
+def test_every_loop_setting_is_in_the_score_context_or_left_out_for_a_reason():
+    """A new LoopConfig field has to be placed: in the score context, or left out with
+    the reason it cannot change what an item scores."""
+    import dataclasses
+
+    fields = {field.name for field in dataclasses.fields(LoopConfig)}
+    scored, left_out = set(seed_cache.SCORED_FIELDS), set(seed_cache.SEARCH_ONLY_FIELDS)
+    assert not scored & left_out
+    assert fields == scored | left_out, (sorted(fields - scored - left_out),
+                                         sorted((scored | left_out) - fields))
+    assert all(seed_cache.SEARCH_ONLY_FIELDS[field].strip() for field in left_out)
+
+
+SCORED_CHANGES = {"seed": 43, "provider_config": {"p": {"models": []}},
+                  "node_routes": {"solve": {"model": "m"}}, "role_routes": {"solver": {"model": "m"}},
+                  "evaluator": "dsh", "dsh_timeout_s": 60, "max_steps": 10, "repeats": 3,
+                  "intent": "answer the questions", "omit_steering": True}
+
+
+@pytest.mark.parametrize("field", seed_cache.SCORED_FIELDS)
+def test_each_scored_setting_changes_the_score_context_naming_it(field):
+    from test_parts import PartsProbe as mode_class
+
+    base = seed_cache.score_context(LoopConfig(seed=42), mode_class)
+    changed = seed_cache.score_context(
+        LoopConfig(**{"seed": 42, field: SCORED_CHANGES[field]}), mode_class)
+    assert seed_cache.context_diff(changed, base) == [field]
+
+
+def test_another_rollout_seed_measures_the_part_and_says_why(tmp_path):
+    """The cached part was measured with one rollout seed; an evaluation asking for
+    another (a gated run's per-epoch train seed against an ungated run's) runs for real
+    and is journaled as a miss, while a part asked for with the cached seed is served."""
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(cache))
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed, seed=1002)
+        Run(_loop=loop).evaluate(seed, part="val")
+        assert seed.raw_score == 1.0 and loop.rollouts == len(PARTS["train"])
+        misses = _events(tmp_path / "reuse", "seed_cache_miss")
+        assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 1002, cached None")]
+        assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["val"]
+
+
+def test_the_export_records_each_parts_rollout_seed(tmp_path, exported):
+    """Run A (seed 3, val gate) rolled its seed out on train with SkillOpt's epoch-1 seed
+    and on val and test with the run's own."""
+    cache = json.loads(exported.read_text())
+    assert cache["score_context"]["seed"] == 3
+    assert {part: entry["seed"] for part, entry in cache["parts"].items()} == {
+        "train": 1004, "val": 3, "test": 3}
+
+
+def test_an_ungated_run_measures_train_rather_than_reuse_a_gated_export(tmp_path, exported):
+    """Without the gate train rollouts use the run's seed, not the gated export's
+    per-epoch one, so train is measured for real and the miss says why."""
+    with _patch_mode(PartsProbe):
+        code, root = _main(tmp_path, "B", "--optimizer", "hill_climb", "--epochs", "1",
+                           "--repeats", "3", "--seed-results", str(exported))
+    assert code == 0
+    misses = _events(root, "seed_cache_miss")
+    assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 3, cached 1004")]
+    assert "train" not in {h["part"] for h in _events(root, "seed_cache_hit")}

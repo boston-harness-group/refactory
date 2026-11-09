@@ -740,6 +740,7 @@ class OuterLoop:
         self.init()
         run = Run(_loop=self)
         self.strategy(run)
+        self.finish_strategy(run)
         if run.stopped:
             self.bound = str(run.stopped)
         return self.report()
@@ -754,6 +755,11 @@ class OuterLoop:
         with no loop at all, a switch inside an iteration, a staged curriculum.
         """
         raise NotImplementedError
+
+    def finish_strategy(self, run: Run) -> None:
+        """What runs after ``strategy`` and before the report: nothing here. The default
+        loop scores the batch its last epoch proposed (``Loop.finish_strategy``), for
+        every built-in strategy, so none of them pays for a round it never scores."""
 
     def select_parents(self, n: int, *, by: str = "score") -> list[Candidate]:
         raise NotImplementedError

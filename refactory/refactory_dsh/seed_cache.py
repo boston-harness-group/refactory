@@ -14,11 +14,20 @@ A cached result is used only when all of these hold:
 * the part's item set is exactly the cached one;
 * the run's *score context* equals the cache's. That is everything that decides
   what an item scores, and nothing that only shapes the search: the mode, its
-  implementation and dependency hashes, the task's inputs, the task-model route
-  and provider configuration, the evaluator, the item timeout, the model client's
+  implementation and dependency hashes, the task's inputs, the run's ``seed`` (a
+  Task may shuffle an item by it, as LiveMath shuffles answer choices), the
+  task-model route and provider configuration, the evaluator, the item timeout and
+  step cap, what the task model is told of the run's intent, the model client's
   inactivity limit, and a hash of the mode's package files (which covers files a
-  task runs out of process, such as a grader). Epochs, strategy, budgets and the
-  proposer's route are not in it.
+  task runs out of process, such as a grader). Epochs, strategy, optimizer, parent
+  picker, portfolio, the validation gate, budgets and the proposer's route are not
+  in it. Every ``LoopConfig`` field is either in it (``SCORED_FIELDS``) or left out
+  for a stated reason (``SEARCH_ONLY_FIELDS``);
+* the rollout seed the evaluation asks for is the one the cached part was measured
+  with. A train rollout under ``val_gate`` uses SkillOpt's per-epoch seed rather
+  than the run's, so a cache from a gated run serves an ungated run's val and test
+  but not its train part, which is measured for real and journaled as
+  ``seed_cache_miss``.
 
 A mismatched context stops the run instead of quietly evaluating, so a cache
 that was meant to apply never silently doesn't. So does a run whose seed is not
@@ -47,6 +56,60 @@ FORMAT = 1
 CONTEXT_FILE = "score-context.json"
 #: Parts a cache may serve. The holdout audit always runs for real.
 PARTS = ("train", "val", "test")
+
+#: The ``LoopConfig`` fields that decide what an item scores, each read into the
+#: score context under its own name, so a cache from a run that set one differently
+#: is refused naming it.
+SCORED_FIELDS = (
+    # A Task may shuffle an item by it (LiveMath's answer choices); val and test
+    # rollouts use it, and train rollouts use it or SkillOpt's per-epoch seed derived
+    # from it (the rollout seed is also checked per part, see ``_cached_measure``).
+    "seed",
+    # Which model answers each node, and how the provider is called.
+    "provider_config", "node_routes", "role_routes",
+    # Which runtime runs an item, and its time and step caps.
+    "evaluator", "dsh_timeout_s", "max_steps",
+    # How many trials one measurement holds.
+    "repeats",
+    # The run's intent ledger is in every agent node's prompt unless steering is omitted.
+    "intent", "omit_steering",
+)
+
+#: The ``LoopConfig`` fields left out of the score context on purpose, and why. A
+#: field in neither tuple fails ``test_seed_cache``, so a new setting has to be placed.
+SEARCH_ONLY_FIELDS = {
+    **dict.fromkeys(
+        ("epochs", "batch_size", "elite", "attempts", "history_limit", "prior_runs",
+         "max_evaluations", "max_elapsed_s", "max_tokens", "validation_reserve_s",
+         "validation_reserve_tokens", "max_rollouts"),
+        "a search budget or batch shape: how much is searched, not what an item scores"),
+    **dict.fromkeys(
+        ("optimizer", "strategy", "strategy_options", "parent_picker", "portfolio",
+         "edit_preset", "allowed_ops", "frozen", "allow_new_node_tools", "allow_code_nodes",
+         "max_edits_per_proposal", "fresh_evidence", "early_stop_patience",
+         "early_stop_at_full_val"),
+        "decides what is proposed, re-scored or kept, not what the seed scores"),
+    "val_gate": ("decides what is kept; the train rollout seed it implies is checked "
+                 "per part instead (the cached part's seed against the rollout's)"),
+    "knobs": "folded into the seed's state, so into the candidate id the cache is checked on",
+    "holdout": "decides which items each part holds; the item sets are checked per part",
+    "parts_manifest": "decides which items each part holds; the item sets are checked per part",
+    "train_minibatch": "decides which train items are scored; a train item set other than "
+                       "the cached one is measured for real",
+    "parsimony": "taken off after the measurement: the cache holds the raw score",
+    "max_concurrent_evaluations": "how many evaluations run at once, not what they score",
+    "max_items_in_flight": "how many items run at once, not what they score",
+    **dict.fromkeys(
+        ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources"),
+        "the task model's route: in the context as the profile's resolved ``route``"),
+    "resolved_profile": "the source of the mode, implementation, inputs and route entries",
+    "seed_results": "the cache itself",
+    "memory_global_root": ("where a global memory lives; what it holds is state that changes "
+                           "between runs, not a setting a cache could match"),
+    **dict.fromkeys(
+        ("runs_root", "resume", "progress", "print_events", "verbose", "control_poll_s"),
+        "where and how the run is recorded or watched"),
+}
 
 
 class SeedCacheError(ValueError):
@@ -95,11 +158,7 @@ def score_context(config: Any, mode_class: type, *, inactivity_s: int | None = N
         "inputs": evaluation.get("inputs"),
         "route": routing.get("route"),
         "client_timeout_s": (routing.get("client_context") or {}).get("timeout_s"),
-        "provider_config": config.provider_config,
-        "node_routes": config.node_routes,
-        "evaluator": config.evaluator,
-        "dsh_timeout_s": config.dsh_timeout_s,
-        "repeats": config.repeats,
+        **{field: getattr(config, field) for field in SCORED_FIELDS},
         "model_inactivity_s": model.DEFAULT_INACTIVITY_S if inactivity_s is None else inactivity_s,
         "package_files": package_files_hash(mode_class),
         # How the runtime treats a crashed agent step (`node_retry.SEMANTICS`): a seed
@@ -232,6 +291,8 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
     if trials:
         parts["train"] = {
             "items": sorted({str(r["id"]) for trial in trials for r in trial["item_records"]}),
+            # The rollout seed it was measured with (a Task may shuffle an item by it).
+            "seed": score.get("seed"),
             "workdir": str(run_dir / "runs" / cid),
             "result": {"score": score.get("raw_score"), "exit_ok": True, "error": None,
                        "duration_s": score.get("duration_s") or 0.0,
@@ -240,8 +301,9 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
             "trials": trials,
         }
     for part in ("val", "test"):
-        result = next((r.get("result") or {} for r in journal
-                       if r.get("event") == "part_result" and r.get("id") == cid and r.get("part") == part), None)
+        event = next((r for r in journal
+                      if r.get("event") == "part_result" and r.get("id") == cid and r.get("part") == part), None)
+        result = (event.get("result") or {}) if event else None
         occasion = run_dir / "runs" / cid / "occasions" / f"{part}_0"
         records_path = occasion / "item_records.json"
         if not result or not result.get("exit_ok") or not records_path.exists():
@@ -253,6 +315,7 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
             continue
         parts[part] = {
             "items": sorted({str(r["id"]) for trial in trials for r in trial["item_records"]}),
+            "seed": event.get("seed"),
             "workdir": str(occasion),
             "result": {"score": result.get("score"), "exit_ok": True, "error": None,
                        "duration_s": result.get("duration_s") or 0.0, "model_calls": 0,

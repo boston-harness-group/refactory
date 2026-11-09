@@ -534,6 +534,9 @@ class StagedCurriculum(Loop):
 
     name = "staged_curriculum"
     requires_model = True
+    #: The curriculum is the schedule: finishing it is a normal end, and the batch its
+    #: last stage proposed is scored (``Loop.finish_strategy``).
+    normal_ends = ("epochs", "curriculum_complete")
     stages = ("initial", "tuning", "creative", "ablation")
     per_stage = 2
     #: What each stage asks of a proposal; a stage not listed is asked by its name.

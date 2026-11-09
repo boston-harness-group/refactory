@@ -50,7 +50,8 @@ def test_progress_records_one_line_per_candidate_evaluated(tmp_path):
     """An epoch can be an hour, so a per-epoch line is not progress."""
     root = _run(tmp_path)
     forward = [r for r in observe.progress(root) if r["step"] == "forward"]
-    assert len(forward) == 6, forward  # 2 epochs x batch_size 3
+    # 2 epochs x batch_size 3, then the 3 the last epoch proposed, scored before the report
+    assert len(forward) == 9, forward
     assert all(r["candidate"] for r in forward)
     assert all(r["of"] == 3 for r in forward)
 
@@ -232,7 +233,7 @@ def test_the_manifest_names_the_per_candidate_files(tmp_path):
     by_name = {e["name"]: e for e in observe.artifact_manifest(root)["artifacts"]}
     candidates = by_name["candidates"]
     assert candidates["exists"] is True
-    assert len(candidates["files"]) == 6
+    assert len(candidates["files"]) == 9  # every candidate the two epochs proposed ran
     assert all(Path(root / path).exists() for path in candidates["files"])
 
 

@@ -236,6 +236,29 @@ class KeepThenDie(OuterLoop):
         self.ids = list(state.get("ids") or [])
 
 
+class KeepsOneUnscored(OuterLoop):
+    """Score the seed, keep a child it never scores, and stop on its epochs."""
+
+    name = "keeps_one_unscored"
+    required_ops = ("set_knob",)
+
+    def strategy(self, run: Run) -> None:
+        seed = run.seed()
+        run.evaluate(seed, part="train")
+        run.keep(_set_skill(run, seed, "kept, never scored"))
+        run.stop("epochs")
+
+
+def test_a_custom_strategy_keeps_its_own_ending(tmp_path):
+    """The built-in strategies score their last batch (``Loop.finish_strategy``); a
+    custom strategy (SkillOpt's seam) owns its protocol, so nothing is scored for it."""
+    with _patch_mode(SkillProbe):
+        loop = _loop(tmp_path, KeepsOneUnscored())
+        report = loop.run()
+    assert report["bound"] == "epochs"
+    assert len(report["unevaluated"]) == 1 and report["evaluations"] == 1
+
+
 def test_a_kept_candidate_is_held_again_after_a_resume(tmp_path):
     with _patch_mode(SkillProbe):
         with pytest.raises(ProcessDied):
@@ -476,15 +499,17 @@ def test_val_gate_train_rollouts_use_skillopts_epoch_seed(tmp_path, monkeypatch)
 
 def test_without_val_gate_the_default_loop_is_unchanged(tmp_path, monkeypatch):
     """No val_gate: every train rollout uses the run's seed, the last epoch's
-    proposals stay unevaluated, and there is no post-training evaluation."""
+    proposals are scored before the run ends (as the gate's are), and there is no
+    post-training evaluation."""
     seeds = _record_train_seeds(monkeypatch)
     proposer = ScriptedLevels([[(5, 7)], [(7, 8)]])
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, epochs=2)
         loop.optimizer = proposer
         report = loop.run()
-    assert seeds == [(5, 7), (7, 7)]
-    assert [_level(c) for c in loop.population if not c.evaluated] == [8]
+    assert seeds == [(5, 7), (7, 7), (8, 7)]
+    assert [_level(c) for c in loop.population if not c.evaluated] == []
+    assert report["unevaluated"] == [] and report["evaluations"] == 3
     assert report["strategy_report"] == {}
     assert not _journal_events(loop, "final_evaluation")
     assert report["bound"] == "epochs"

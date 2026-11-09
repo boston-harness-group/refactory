@@ -1358,6 +1358,9 @@ class Loop(OuterLoop):
                 raw_score=candidate.raw_score,
                 nodes=nodes,
                 parsimony=self.config.parsimony,
+                # The rollout seed, so an export can say what its records were measured
+                # with (``seed_cache``).
+                seed=seed,
                 exit_ok=candidate.exit_ok,
                 error=candidate.error,
                 duration_s=candidate.duration_s,
@@ -1411,7 +1414,7 @@ class Loop(OuterLoop):
             self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
                 occasion_public
             )
-            self._journal("part_result", id=candidate.id, part=part,
+            self._journal("part_result", id=candidate.id, part=part, seed=seed,
                           result=occasion_public)
             if not measurements.get("cached_from"):
                 self.rollouts += len(result.item_records) or 1
@@ -1441,7 +1444,7 @@ class Loop(OuterLoop):
         if items is not None:
             expected_ids = set(str(i) for i in items)
 
-        cached = self._cached_measure(candidate, workdir, part, expected_ids)
+        cached = self._cached_measure(candidate, workdir, part, expected_ids, seed)
         if cached is not None:
             return cached
 
@@ -1549,11 +1552,14 @@ class Loop(OuterLoop):
 
     def _cached_measure(
         self, candidate: Candidate, workdir: Path, part: str, expected_ids: set[str],
+        seed: int | None = None,
     ) -> tuple[Any, dict[str, Any]] | None:
         """The ``--seed-results`` entry for this evaluation, if one applies.
 
-        Only the cache's own candidate, only on the exact item set it recorded,
-        and only once per part: a later occasion is a fresh measurement. The
+        Only the cache's own candidate, only on the exact item set it recorded and
+        with the rollout seed it was measured with (a Task may shuffle an item by it:
+        a gated run's train rollouts use SkillOpt's per-epoch seed, an ungated run's
+        the run's own), and only once per part: a later occasion is a fresh measurement. The
         recorded run directory is copied in, so an optimizer that reads a
         candidate's pass files finds them as if the evaluation had run here.
         """
@@ -1572,14 +1578,17 @@ class Loop(OuterLoop):
                                           "model_calls": recorded.get("model_calls"),
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
-        if set(entry.get("items") or ()) != expected_ids or len(trials) != self.config.repeats:
+        other_seed = entry.get("seed") != seed
+        if (set(entry.get("items") or ()) != expected_ids or other_seed
+                or len(trials) != self.config.repeats):
             # The cache's own candidate on a part it covers, measured on other items
-            # (a train minibatch): said once per part, so the run shows why the
-            # cache was not used.
+            # (a train minibatch) or with another rollout seed: said once per part, so
+            # the run shows why the cache was not used.
             with self._state_lock:
                 if part not in self._seed_cache_missed and part not in self._seed_cache_used:
                     self._seed_cache_missed.add(part)
                     reason = ("other items" if set(entry.get("items") or ()) != expected_ids
+                              else f"rollout seed {seed}, cached {entry.get('seed')}" if other_seed
                               else f"{len(trials)} cached trial(s), {self.config.repeats} requested")
                     self._journal("seed_cache_miss", id=candidate.id, part=part, reason=reason,
                                   cached_items=len(entry.get("items") or ()), items=len(expected_ids))
@@ -2592,8 +2601,48 @@ class Loop(OuterLoop):
         if self._custom_strategy is not None:
             return self._custom_strategy.strategy(run)
         self._search(run)
+
+    #: How this strategy's search ends normally, on its own epoch limit: the run then
+    #: scores the batch its last epoch proposed (``finish_strategy``). A strategy whose
+    #: schedule is its own (a curriculum) adds the reason it stops with.
+    normal_ends: tuple[str, ...] = ("epochs",)
+
+    def _ended(self, run: Run | None) -> str:
+        """Why the search ended: the bound the loop recorded, else the strategy's stop
+        reason (a strategy that drives its own epochs stops with ``"epochs"`` whatever
+        bound ended them)."""
+        return str(self.bound or (run.stopped if run is not None else "") or "")
+
+    def finish_strategy(self, run: Run) -> None:
+        """After any built-in strategy: score what the last epoch proposed, when the
+        search ended normally. Under ``val_gate`` that is ``_finish_gated_search`` (the
+        last proposals scored and gated, then the post-training evaluation); without
+        it, ``score_last_batch``. A custom strategy keeps its own ending."""
+        if self._custom_strategy is not None:
+            return
         if self.config.val_gate:
             self._finish_gated_search(run)
+        else:
+            self.score_last_batch(run)
+
+    def score_last_batch(self, run: Run | None = None) -> None:
+        """Without ``val_gate``: score the last epoch's proposals once the search ends
+        on its epoch bound, as ``_finish_gated_search`` does under the gate.
+
+        Each epoch scores the batch the one before proposed and then proposes the
+        next, so a run of N epochs makes N proposal rounds; without this the last
+        round was paid for and never scored. ``forward`` keeps the evaluation and
+        rollout caps and charges what it runs. After any other bound (a person's
+        stop, a spent evaluation, rollout, time or token budget) the proposals stay
+        unscored and the report names them.
+
+        Public because the loop is also a graph (``loop_mode``): its report node runs
+        this, so the graph scores what the loop scores.
+        """
+        if self.config.val_gate:
+            return
+        if self._ended(run) in self.normal_ends and self._unevaluated():
+            self.forward(epoch=self.epoch + 1)
 
     def _search(self, run: Run) -> None:
         """Epochs until a bound, a stop reason or a person's stop."""
@@ -2982,7 +3031,7 @@ class Loop(OuterLoop):
         more epochs evaluates again. A search that ended any other way is not
         scored further, and the evaluation records why it was skipped.
         """
-        ended = str(run.stopped or self.bound or "")
+        ended = self._ended(run)
         state = self._strategy_state
         if (state.get("final_evaluation") or {}).get("search_epoch") != self.epoch:
             state.pop("final_evaluation", None)
@@ -2995,7 +3044,7 @@ class Loop(OuterLoop):
 
         if final.result.get("status") == "done":
             return
-        if ended not in self._TRAINED:
+        if ended not in self._TRAINED + self.normal_ends:
             final.result = {"status": "skipped",
                             "reason": f"the search did not finish: it ended on {ended!r}"}
             save()
@@ -3120,9 +3169,10 @@ class Loop(OuterLoop):
     def _unevaluated(self) -> list[str]:
         """Candidates the run kept but never ran, because it stopped at its bound.
 
-        The pipeline proposes the next epoch's batch at the end of an epoch, so a run
-        that stops on the epoch bound holds one batch that was installed and never
-        evaluated. Named in the report so it cannot be read as "all of this ran", and
+        The pipeline proposes the next epoch's batch at the end of an epoch. A run that
+        ends normally (its epoch bound, or a strategy's own ``normal_ends``) scores that
+        batch before it reports (``finish_strategy``); one stopped by any other bound
+        holds a batch that was installed and never evaluated. Named in the report so it cannot be read as "all of this ran", and
         so a model-driven proposal round whose output was dropped is visible.
         """
         return [c.id for c in self.population if not c.evaluated]
