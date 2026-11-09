@@ -299,8 +299,10 @@ def test_frozen_and_protected_edits_later_in_a_list_are_named():
                 if (v.get("spec") or {}).get("kind") == "str" and not (v.get("spec") or {}).get("frozen"))
     refused = applier.attempt(live, {"edits": [{"op": "set_knob", "name": text, "value": "New."},
                                                {"op": "remove_node", "id": "finish"}]}, {live.id})
+    # A protected node is judged on what the edits leave together, so the refusal
+    # names the bundle, not one edit.
     assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
-    assert "[edit 2 of 2: remove_node]" in refused[0], refused
+    assert "[the 2 edits together]" in refused[0], refused
 
 
 @pytest.mark.parametrize("edits, dead", [
@@ -375,3 +377,112 @@ def test_grader_nodes_are_protected_and_grader_side_knobs_hold():
                                   mode.invariants(), True, (), [seed.id],
                                   protected=mode.edit_protected(), graders=mode.grader_nodes())
     assert isinstance(removed, list) and removed[0].startswith("E-protected"), removed
+
+
+# ── protected nodes are judged on what the bundle leaves ───────────────────
+
+
+def _replace_decide_prompt(connect: bool) -> dict[str, Any]:
+    """The bundle a replayed optimizer call wrote: remove LiveMath's decide_prompt op and
+    put a code op in its place that builds decide's prompt from the notes."""
+    from refactory_dsh import snippet
+
+    code = ("def main(inp):\n"
+            "    parts = [inp['facts'].get('user_prompt', '')]\n"
+            "    for name in ('compare_notes.txt', 'precision_notes.txt', 'hypotheses_notes.txt'):\n"
+            "        if inp['files'].get(name):\n"
+            "            parts.append(inp['files'][name])\n"
+            "    parts.append('Choose one option; answer inside <answer>X</answer>.')\n"
+            "    return {'facts': {'decide_prompt': '\\n\\n'.join(parts)}}\n")
+    node = {"id": "build_decide", "kind": "op", "call": snippet.RUN, "knobs": ["decide_task"],
+            "reads": ["compare_notes.txt", "precision_notes.txt", "hypotheses_notes.txt"],
+            "required_reads": ["compare_notes.txt"], "produces": ["decide_prompt"],
+            "inputs": ["user_prompt"], "code": code}
+    edits = [{"op": "remove_node", "id": "decide_prompt"},
+             {"op": "add_node", "node": node, "position": {"after": "step_join"}}]
+    if connect:
+        edits.append({"op": "add_edge", "source": "build_decide", "target": "decide"})
+    return {"edits": edits}
+
+
+@pytest.fixture
+def _code_nodes_allowed(monkeypatch):
+    """These proposals carry a code op and run nothing: the sandbox probe is assumed."""
+    from refactory_dsh import snippet
+
+    monkeypatch.setattr(snippet, "_probe", lambda: (True, "assumed: this test runs no code"))
+
+
+def test_a_step_replaced_in_place_is_judged_on_what_the_bundle_leaves(_code_nodes_allowed):
+    """Removing a step leaves the run, for one edit, able to finish without the protected
+    extract_answer; the bundle puts a code op in its place, and only its end state runs,
+    so it is accepted (it was refused at edit 1 when protection was checked per edit)."""
+    applier, seed = _livemath()
+    child = applier.attempt(seed, _replace_decide_prompt(connect=True), {seed.id})
+    assert isinstance(child, Candidate), child
+    nodes = child.state["graph"]["nodes"]
+    assert "decide_prompt" not in nodes and "build_decide" in nodes
+    assert {"source": "build_decide", "target": "decide"} in [
+        {k: e[k] for k in ("source", "target")} for e in child.state["graph"]["edges"]]
+    assert sf.check_state(applier, child.state, walker=False) == []
+
+
+def test_a_bundle_that_leaves_a_protected_node_skippable_is_still_refused(_code_nodes_allowed):
+    """The same bundle without the edge to decide ends the pass at the new op: a run can
+    finish without extract_answer, and the refusal names the bundle, not one edit."""
+    applier, seed = _livemath()
+    refused = applier.attempt(seed, _replace_decide_prompt(connect=False), {seed.id})
+    assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
+    assert "'extract_answer'" in refused[0] and "can finish without it" in refused[0], refused
+    assert "[the 2 edits together]" in refused[0] and "[edit " not in refused[0], refused
+
+
+class _Considering(Scripted):
+    """Says, with each proposal, what it weighed (an answer's optional ``considered``)."""
+
+    name = "scripted_considering"
+
+    def __init__(self, plan: list[list[Proposal]], considered: str) -> None:
+        super().__init__(plan)
+        self.considered = considered
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        # The first call's answer, then a later one's: a retry in the same round
+        # replaces the optimizer's last answer, never a proposal's own record.
+        first = not getattr(self, "contexts", [])
+        self.last_diagnosis = "level is too high"
+        self.last_considered = self.considered if first or not self.considered else "a later answer"
+        return super().propose(ctx, n, parents)
+
+
+@pytest.mark.parametrize("considered", ["a prompt change, a code step or the setting; the "
+                                        "setting is what the evidence names", ""])
+def test_what_an_answer_considered_is_journaled_reported_and_shown_back(tmp_path, monkeypatch,
+                                                                       considered):
+    """An answer's `considered` goes with its proposal: the proposal record and journal
+    (that answer's, though a retry in the round answers again), the report, and the next
+    request's earlier reasoning. An answer without one records none and the report has
+    no such section."""
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    refused = Proposal(edit={"op": "remove_node", "id": "finish"})  # E-policy: a retry follows
+    with _patch_mode(TwoLevels):
+        loop = _loop(tmp_path, epochs=2, batch_size=2)
+        loop.optimizer = _Considering([[Proposal(edit=_knob("level", 3)), refused], []],
+                                      considered)
+        loop.run()
+    child = next(c for c in loop.population if c.parent)
+    journaled = [r for r in _events(loop, "proposal") if r["id"] == child.id]
+    report = (loop.root / "report.md").read_text()
+    analysis = "\n".join(p.read_text() for p in (loop.root / "analysis").glob("*.md"))
+    later = loop.optimizer.contexts[-1].render()
+    if considered:
+        assert loop.proposals[child.id]["considered"] == considered
+        assert [r.get("considered") for r in journaled] == [considered]
+        assert "## What the optimizer weighed" in report and considered in report
+        assert "## Considered\n\n" in analysis
+        assert f"Considered that round: {considered}" in later
+    else:
+        assert "considered" not in loop.proposals[child.id] and journaled
+        assert all("considered" not in r for r in journaled)
+        assert "What the optimizer weighed" not in report and "## Considered" not in analysis
+        assert "Considered that round" not in later

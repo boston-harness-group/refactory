@@ -2065,6 +2065,10 @@ class Loop(OuterLoop):
                 **({"level": notes["level"]} if notes.get("level") else {}),
                 "diagnosis": str(notes.get("diagnosis")
                                  or getattr(self.optimizer, "last_diagnosis", "") or ""),
+                # The kinds of change the answer weighed, when it said (optional).
+                **({"considered": considered} if (considered := str(
+                    notes.get("considered")
+                    or getattr(self.optimizer, "last_considered", "") or "")) else {}),
                 "epoch": self.epoch,
             })
             # Journaled, so a resumed run still shows the optimizer its own reasoning.
@@ -2147,10 +2151,12 @@ class Loop(OuterLoop):
         diagnosis = str(getattr(self.optimizer, "last_diagnosis", "") or "")
         if not diagnosis:
             return
+        considered = str(getattr(self.optimizer, "last_considered", "") or "")
         path = self.root / "analysis" / f"generation-{self.generation}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             f"# Generation {self.generation} — {self.optimizer.name}\n\n{diagnosis}\n"
+            + (f"\n## Considered\n\n{considered}\n" if considered else "")
         )
 
     def _append_rejections(self, rejections: Sequence[Rejection]) -> None:
@@ -2588,6 +2594,7 @@ class Loop(OuterLoop):
                         "rationale": proposal.rationale, "prediction": proposal.prediction,
                         "confidence": proposal.confidence,
                         "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or ""),
+                        "considered": str(getattr(self.optimizer, "last_considered", "") or ""),
                         **({"level": level} if self._levels_wanted else {})}
             # Another response is useful only if a validation round remains.
             if len(accepted) >= wanted or len(self.rejections) == before or _attempt >= cap:
@@ -3822,6 +3829,7 @@ class Loop(OuterLoop):
                 ],
             ),
             "",
+            *_considered_lines(payload["proposal_outcomes"]),
             "## Lineage of the best",
             "",
             _md_table(
@@ -3995,6 +4003,7 @@ class Loop(OuterLoop):
                 "id": candidate.id, "epoch": record.get("epoch"),
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
+                "considered": record.get("considered"),
                 "gate": self._gate_decision(candidate.id), "score": candidate.score,
                 "same_seed": same,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
@@ -4497,6 +4506,20 @@ def node_count(state: dict[str, Any]) -> int:
     """How many nodes a candidate's graph holds, which is what the size cost counts."""
     graph = state.get("graph") or {}
     return len(graph.get("nodes") or {})
+
+
+def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
+    """The report's record of what the optimizer weighed for each accepted proposal (its
+    answer's optional ``considered``), so every round's choice of change can be audited;
+    nothing when no answer said."""
+    rows = [(p.get("id"), p.get("epoch"), " ".join(str(p["considered"]).split()))
+            for p in outcomes if p.get("considered")]
+    if not rows:
+        return []
+    return ["## What the optimizer weighed", "",
+            "The kinds of change each proposal's answer said it weighed, and why it chose "
+            "its own.", "",
+            *(f"- `{cid}` (epoch {epoch}): {text}" for cid, epoch, text in rows), ""]
 
 
 def _holdout_line(audit: dict[str, Any]) -> str:

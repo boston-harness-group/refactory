@@ -197,3 +197,77 @@ def test_the_prompt_refusals_include_the_invariant(tmp_path):
     assert not candidates
     reasons = [r for rejection in rejections for r in rejection.reasons]
     assert any(r.startswith("I:") for r in reasons), reasons
+
+
+# ── V20: a {{name}} in a knob is filled only where a runtime fills it ─────────
+
+
+@nn.fills_facts
+def filled_op(ctx):  # type: ignore[no-untyped-def]
+    """An op that renders the knobs it reads (resolved as ``test_integrity:filled_op``)."""
+    return {}
+
+
+def _knob_reader(node: nn.Node) -> nn.Graph:
+    """``a`` produces the fact ``a``; ``node`` reads the knob ``note`` after it."""
+    graph = nn.Graph()
+    graph.add(nn.Node("a", "op", call=f"{OPS}:write_best", writes=("a.json",), produces=("a",)))
+    graph.add(node)
+    graph.connect("a", node.id)
+    return graph
+
+
+def _v20(graph: nn.Graph, note: str, **kwargs) -> list[tuple[str, str, str]]:  # type: ignore[no-untyped-def]
+    issues = nn.validate(graph, {"note": note}, declared_knobs={"note": nn.Knob(note, "str")},
+                         **kwargs)
+    return [(i.code, i.node, i.knob) for i in issues if i.code == "V20"]
+
+
+@pytest.mark.parametrize("call, refused", [(f"{OPS}:write_best", True),
+                                           ("test_integrity:filled_op", False)])
+def test_a_slot_in_a_knob_an_op_pastes_as_written_is_refused(call, refused):
+    """An op reads its knob as it is unless its callable fills facts: a `{{fact}}` there
+    would reach the step as braces while the state looked valid, so it is refused."""
+    graph = _knob_reader(nn.Node("b", "op", call=call, produces=("done",), knobs=("note",)))
+    assert _v20(graph, "Use {{a}}.") == ([("V20", "b", "note")] if refused else [])
+    assert _v20(graph, "Use a.") == []
+    # Without resolving calls an op's callable is unknown, so it is not judged.
+    assert _v20(graph, "Use {{a}}.", resolve_calls=False) == []
+
+
+def test_a_slot_in_an_agents_prompt_knob_is_filled_and_an_unbound_one_is_not():
+    bound = nn.Node("ask", "agent", prompt_template="(the knob)", writes=("ask.txt",), tool_policy="none",
+                    field_bindings=(("prompt_template", "note"),), knobs=("note",))
+    assert _v20(_knob_reader(bound), "Use {{a}}.") == []
+    unbound = nn.Node("ask", "agent", prompt_template="Go.", writes=("ask.txt",),
+                      tool_policy="none", knobs=("note",))
+    assert _v20(_knob_reader(unbound), "Use {{a}}.") == [("V20", "ask", "note")]
+
+
+def test_every_shipped_mode_seed_passes_v20():
+    """No shipped mode's seed holds a slot in a knob nothing fills."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import refactory_dsh
+    import refactory_packages
+
+    modes = set()
+    for package in (refactory_packages, refactory_dsh):
+        for found in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+            try:
+                module = importlib.import_module(found.name)
+            except Exception:  # noqa: BLE001 - a module that does not import declares no mode here
+                continue
+            modes |= {cls for _, cls in inspect.getmembers(module, inspect.isclass)
+                      if issubclass(cls, nn.Mode) and cls is not nn.Mode
+                      and cls.__module__ == module.__name__}
+    assert len(modes) > 10
+    for cls in sorted(modes, key=lambda c: f"{c.__module__}.{c.__name__}"):
+        try:
+            state = cls().state_dict()
+        except Exception:  # noqa: BLE001 - a mode that needs arguments is not a seed here
+            continue
+        issues = nn.validate_state(state, resolve_calls=True)
+        assert not [str(i) for i in issues if i.code == "V20"], cls

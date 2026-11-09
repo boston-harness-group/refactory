@@ -723,3 +723,62 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
             assert not isinstance(outcome, list) or not any(
                 r.startswith(("E-op", "E-shape", "V1", "V2", "V3", "V4", "V5", "V10", "V12", "V16", "V18"))
                 for r in outcome), (example, outcome)
+
+
+def _composition(code_nodes: bool, state: dict | None = None) -> str:
+    from refactory_dsh.nn import edits as edits_mod
+    from refactory_dsh.optim.base import composition_section
+
+    applier = _applier()
+    state = state or applier.seed_state
+    nodes = [dict(s, id=node_id) for node_id, s in state["graph"]["nodes"].items()]
+    text_knobs = [name for name, entry in state["knobs"].items()
+                  if entry["spec"]["kind"] == "str"]
+    return "\n".join(composition_section(edits_mod.catalogue(), nodes, state["graph"]["edges"],
+                                         protected=applier.protected, code_nodes=code_nodes,
+                                         text_knobs=text_knobs))
+
+
+@pytest.mark.parametrize("code_nodes", [True, False])
+def test_the_request_says_agents_read_no_files_and_where_a_fact_is_filled_in(code_nodes):
+    """An agent cannot read a file: a file's text becomes a fact through an op (a code op
+    when the run allows them) or `produces`. A `{{fact}}` is filled in an agent's prompt
+    and system prompt knobs and, on this graph, in the task knobs its ops fill."""
+    text = _composition(code_nodes)
+    assert "cannot read a file" in text
+    assert ("a code op that reads the file and `produces` the fact" in text) is code_nodes
+    assert "or when the agent that writes the file declares `produces`" in text
+    filled = text[text.index("where `{{fact}}` is filled in"):]
+    filled = filled[:filled.index("\n")]
+    assert "`prompt_template`" in filled and "`<id>__task`" in filled
+    assert "`<id>__system_prompt`" in filled and "refused (V20)" in filled
+    for step in ("compare", "precision", "hypotheses", "decide"):
+        assert f"`{step}_task`" in filled, step
+    assert "`use_theorem`" not in filled, "a flag the same op reads holds no slot"
+    # With ops that paste their knobs as written, no knob is named.
+    state = json.loads(json.dumps(_applier().seed_state))
+    for node in state["graph"]["nodes"].values():
+        if str(node.get("call") or "").startswith("refactory_packages.livemath.skill_graph:"):
+            node["call"] = "loop_ops:write_best"
+    plain = _composition(code_nodes, state)
+    plain = plain[plain.index("where `{{fact}}` is filled in"):].split("\n")[0]
+    assert "_task`" not in plain.replace("`<id>__task`", "") and "fills facts" not in plain
+
+
+def test_the_code_op_example_computes_a_fact_from_the_file():
+    """The example code op derives something from the step's file (the lines stating a
+    conclusion), not a clipped copy of it; it passes the code check and runs."""
+    text = _composition(True)
+    example = next(json.loads(line) for line in text.splitlines()
+                   if line.startswith('  {"') and snippet.RUN in line)
+    node = example["node"]
+    assert snippet.static_issues(node["code"]) == []
+    assert "[-2000:]" not in node["code"]
+    [output] = node["reads"]
+    [fact] = node["produces"]
+    namespace: dict = {}
+    exec(node["code"], namespace)  # noqa: S102 - the example's own code, checked above
+    text_in = "We compare the options.\nTherefore the bound is sharp.\nUnrelated line."
+    assert namespace["main"]({"files": {output: text_in}, "facts": {}}) == {
+        "facts": {fact: "Therefore the bound is sharp."}}
+    assert namespace["main"]({"files": {}, "facts": {}}) == {"facts": {fact: "none"}}

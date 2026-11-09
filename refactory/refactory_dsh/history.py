@@ -13,6 +13,7 @@ still partly usable.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,17 @@ class RunVersionError(ValueError):
 #: How many candidates a summary keeps, so a prior cannot become a payload.
 DEFAULT_LIMIT = 40
 
+#: Wording that names a held-out part. A summary an optimizer reads states train facts
+#: only, so a text that mentions one of these is left out of it whole.
+_HELD_OUT = re.compile(r"(?i)(?<![a-z])(test|holdout|held[\s_-]*out)")
+
+
+def _train_only(text: Any) -> str:
+    """``text``, or empty when it mentions a held-out part (a strategy's free-text bound
+    such as "seed scored on train, val and test")."""
+    text = "" if text is None else str(text)
+    return "" if _HELD_OUT.search(text) else text
+
 
 @dataclass(frozen=True)
 class RunArchive:
@@ -58,12 +70,14 @@ class RunArchive:
     truncated: bool = False
 
     def summary(self) -> dict[str, Any]:
-        """The bounded form an optimizer prompt receives."""
+        """The bounded form an optimizer prompt receives: train facts only. Its scores are
+        train scores (`_from_report`), and a text that names a held-out part (test,
+        holdout) is left out, so no test number or test wording reaches the optimizer."""
         return {
             "path": str(self.path),
             "mode": self.mode,
             "optimizer": self.optimizer,
-            "bound": self.bound,
+            "bound": _train_only(self.bound),
             "evaluations": self.evaluations,
             "seed_score": self.seed_score,
             "best_score": self.best_score,
@@ -138,9 +152,11 @@ def _from_report(path: Path, report: dict[str, Any], *, limit: int) -> RunArchiv
         seed_score=_number(report.get("seed_score")),
         # A validation-gated run's report gives its winner's val score as best_score
         # (best_score_basis); an optimizer is never shown a held-out number, so the
-        # train score it reports beside it is carried forward instead.
+        # train score it reports beside it is carried forward instead. Any basis other
+        # than train (val, test, a holdout) is treated the same way.
         best_score=_number(report.get("best_train_score")
-                           if str(report.get("best_score_basis") or "").startswith("val")
+                           if str(report.get("best_score_basis") or "train").strip()
+                           .lower().split(":")[0] != "train"
                            else report.get("best_score")),
         candidates=tuple(board[:limit]),
         rejection_codes=dict(report.get("rejection_codes") or {}),

@@ -939,3 +939,61 @@ def test_a_mixed_route_node_gets_its_own_routes_attempts_and_time_limit(
     walker = run.for_node("answer", role="builder").with_tool_policy("")
     assert walker.route()["worker_backend"] == node_route["worker_backend"]
     assert walker.retry_attempts() == attempts
+
+
+# ── the answer's optional `considered` ────────────────────────────────────
+
+
+@pytest.mark.parametrize("considered, recorded", [
+    ('"a prompt change or a code step; the prompt, since the notes are fine"',
+     "a prompt change or a code step; the prompt, since the notes are fine"),
+    ('["a new agent step", "the setting: cheaper"]', "a new agent step\nthe setting: cheaper"),
+    ('{"code step": "no file to read"}', '{"code step": "no file to read"}'),
+    (None, ""),
+    ('""', ""),
+])
+def test_an_answer_may_say_what_it_considered_and_it_is_traced(tmp_path, considered, recorded):
+    """`considered` is optional and any shape is read: a string as it is, a list one entry
+    per line, an object as JSON. It is kept beside the diagnosis and in the call's trace;
+    an answer without it proposes exactly as before."""
+    import json
+
+    field = f'"considered": {considered}, ' if considered is not None else ""
+    answer = ('{"diagnosis": "the order is wrong", ' + field + '"proposals": ['
+              '{"edit": {"op": "set_knob", "name": "order", "value": "asc"}}]}')
+    mode = _mode()
+    optimizer = optim.AutoresearchOptimizer(FakeModel([answer]), k=1)
+    optimizer.trace_path = tmp_path / "trace.jsonl"
+    candidates, rejections = optimizer.propose_valid(
+        _context(mode), 1, parents=[Candidate.from_state(mode.state_dict())],
+        invariants=mode.invariants())
+    assert candidates and not rejections, [r.reasons for r in rejections]
+    assert optimizer.last_considered == recorded
+    [call] = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    assert call["considered"] == recorded and call["diagnosis"] == "the order is wrong"
+
+
+def test_considered_is_bounded():
+    from refactory_dsh.optim.base import CONSIDERED_CHARS, considered_text
+
+    long = considered_text("x" * (CONSIDERED_CHARS * 2))
+    assert len(long) == CONSIDERED_CHARS and long.endswith("…")
+
+
+def test_the_answer_format_offers_considered_as_optional_and_names_only_permitted_kinds():
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_dsh.optim.base import answer_instructions
+
+    full = answer_instructions(nn_edits.catalogue(), code_nodes=True)
+    line = next(l for l in full.splitlines() if '"considered"' in l)
+    assert "optional" in line and "why you chose yours" in line
+    for kind in ("a prompt or setting", "a new agent step", "a code step", "a gate or loop",
+                 "parallel steps"):
+        assert kind in line, kind
+    no_code = next(l for l in answer_instructions(nn_edits.catalogue()).splitlines()
+                   if '"considered"' in l)
+    assert "a code step" not in no_code and "a new agent step" in no_code
+    knobs_only = next(l for l in answer_instructions(
+        [op for op in nn_edits.catalogue() if op["op"] == "set_knob"], code_nodes=True
+    ).splitlines() if '"considered"' in l)
+    assert "(a prompt or setting)" in knobs_only

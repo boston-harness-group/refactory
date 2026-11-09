@@ -544,3 +544,71 @@ def test_spine_carries_the_system_prompt_and_task_knobs(tmp_path, monkeypatch):
             is_hyp = exchange["node"] == "hypotheses"
             assert message.endswith("\n\nHYP-TASK-MARKER") == is_hyp, exchange["node"]
             assert ("HYP-TASK-MARKER" in message) == is_hyp, exchange["node"]
+
+
+# ── a {{fact}} in a step's task knob ───────────────────────────────────────
+
+
+def _notes_dir(path: Path) -> Path:
+    """A work directory holding the three steps' notes, as decide_prompt reads them
+    (made-up text: no item is read)."""
+    path.mkdir(parents=True)
+    for name in ("compare_notes.txt", "precision_notes.txt", "hypotheses_notes.txt"):
+        (path / name).write_text(f"{name} body")
+    return path
+
+
+def test_a_fact_in_a_task_knob_reaches_its_step_on_both_runtimes(tmp_path, monkeypatch):
+    """A `{{name}}` in a step's task knob is filled from the run's facts, as an agent's
+    prompt is: the walker hands the op its facts, the spine's runner reads them from
+    facts.json and the knobs from the environment, and both send the filled text."""
+    from refactory_dsh import lowering
+    from refactory_dsh.run import FACTS, build_op_context, run_node
+    from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
+    from refactory_packages.livemath.skill_graph import SKILL_GRAPH_OPS, decide_prompt
+
+    state = _mode(decide_task="Weigh {{conclusions}} first.").state_dict()
+    knobs = {name: entry["value"] for name, entry in state["knobs"].items()}
+    facts = {"user_prompt": "THE QUESTION", "conclusions": "CONCLUSIONS-MARKER"}
+    walker_dir = _notes_dir(tmp_path / "walker")
+    walked = decide_prompt(build_op_context(walker_dir, "decide_prompt", knobs=knobs,
+                                            facts=facts))["decide_prompt"]
+    spine_dir = _notes_dir(tmp_path / "spine")
+    (spine_dir / FACTS).write_text(json.dumps(facts))
+    # What lowering writes for the spine: the node's declarations, keyed by id.
+    declared = spine_dir / lowering.DECLARATIONS
+    declared.parent.mkdir(parents=True, exist_ok=True)
+    node = _mode().graph().nodes["decide_prompt"]
+    declared.write_text(json.dumps({"decide_prompt": {
+        "reads": list(node.reads), "writes": list(node.writes),
+        "produces": list(node.produces)}}))
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    run_node(f"{SKILL_GRAPH_OPS}:decide_prompt", workdir=spine_dir, node_id="decide_prompt")
+    spun = json.loads((spine_dir / FACTS).read_text())["decide_prompt"]
+    assert walked == spun
+    message = unwrap_claude_backend_prompt(walked)
+    assert message.endswith("\n\nWeigh CONCLUSIONS-MARKER first."), message[-120:]
+    assert message.startswith("THE QUESTION") and "{{" not in message
+
+
+def test_a_task_knob_slot_is_held_to_what_is_produced_before_its_op():
+    """The ops that read the task knobs fill facts (`nn.fills_facts`), so a slot there is
+    one of the op's inputs: a fact produced before the op is accepted, one that is not is
+    refused (V15), no slot in them is refused as unfilled (V20), and the grader-side
+    check (V17) sees the slot as consumed."""
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.validate import consumed, validate_state
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    def issues(**knobs: str) -> list[tuple[str, str]]:
+        state = _mode(**knobs).state_dict()
+        return [(i.code, i.node) for i in validate_state(
+            state, invariants=SkillGraph().invariants(), resolve_calls=True)]
+
+    assert issues(decide_task="Reread {{user_prompt}} before you answer.") == []
+    assert issues(decide_task="Use {{ghost}}.") == [("V15", "decide_prompt")]
+    assert issues(compare_task="See {{decide_prompt}}.") == [("V15", "prepare")]
+    state = _mode(decide_task="Use {{ghost}}.").state_dict()
+    node = Graph.from_state(state["graph"]).nodes["decide_prompt"]
+    values = {name: entry["value"] for name, entry in state["knobs"].items()}
+    assert ("fact", "ghost") in consumed(node, values)

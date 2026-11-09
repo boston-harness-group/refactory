@@ -61,9 +61,9 @@ RULES: dict[str, str] = {
     "V15": "a node's required inputs must be produced upstream on every path that "
            "reaches it (a data pass's own files and facts stay inside the pass): an agent's "
            "reads and every {{name}} its prompts fill in (not a knob, not in its "
-           "feedback_keys, not inside an {% if name %} on the same name), and an op's or a "
-           "gate's required_reads and inputs (facts); a tool_policy 'none' agent declares "
-           "exactly one write",
+           "feedback_keys, not inside an {% if name %} on the same name), an op's or a "
+           "gate's required_reads and inputs (facts), and every {{name}} in a knob an op "
+           "that fills facts reads; a tool_policy 'none' agent declares exactly one write",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
@@ -87,6 +87,11 @@ RULES: dict[str, str] = {
            "a step whose every file is written again by a no-tools agent, on every path from "
            "it, before any node reads it or may read it (a Python op or gate, an agent with "
            "tools, a data pass) and before the run or its pass ends, does work nothing sees",
+    "V20": "a {{name}} slot in a knob is filled in only where a runtime fills it: in an "
+           "agent's prompt_template and system_prompt_template (so in the knobs bound to "
+           "them, such as <id>__task and <id>__system_prompt) and in a knob read by an op "
+           "that fills facts (marked nn.fills_facts); a slot in a knob any other node reads "
+           "would reach it as written, braces and all, so it is refused",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -408,6 +413,8 @@ def validate(
     issues.extend(read_issues(graph))
     issues.extend(agent_input_issues(graph, knob_values))
     issues.extend(required_read_issues(graph))
+    # V20 a {{name}} slot in a knob is somewhere a runtime fills it.
+    issues.extend(unfilled_slot_issues(graph, knob_values, resolve_calls=resolve_calls))
     issues.extend(overwritten_write_issues(graph))
 
     # V16 forks and joins are paired, and branches are independent.
@@ -533,6 +540,92 @@ def template_facts(node: Node, knob_values: Mapping[str, Any]) -> set[str]:
             text = getattr(node, field_name)
         names |= required_slots(str(text or ""))
     return names - set(knob_values) - set(node.feedback_keys)
+
+
+#: The fields both runtimes render as templates, filling each ``{{name}}`` slot.
+TEMPLATE_FIELDS = ("prompt_template", "system_prompt_template")
+
+
+def fills_facts(node: Node) -> bool | None:
+    """Whether an op or a gate's callable fills the ``{{name}}`` slots in the knobs it
+    reads (``nn.fills_facts``); ``None`` when its callable does not resolve here."""
+    target = node.call if node.kind == "op" else (node.evaluator if node.kind == "gate" else "")
+    if not target:
+        return False
+    return _marked(target)
+
+
+_MARKS: dict[str, bool | None] = {}
+
+
+def _marked(target: str) -> bool | None:
+    if target not in _MARKS:
+        try:
+            _MARKS[target] = bool(getattr(resolve(target), "fills_facts", False))
+        except Exception:  # an unresolvable call is V8's to report
+            _MARKS[target] = None
+    return _MARKS[target]
+
+
+def filled_knobs(node: Node) -> tuple[str, ...]:
+    """The knobs whose slots an op or gate fills: every knob it reads that is not bound
+    to its code, when its callable fills facts; none otherwise."""
+    if node.kind not in ("op", "gate") or not fills_facts(node):
+        return ()
+    code = {knob for field_name, knob in node.field_bindings if field_name == "code"}
+    return tuple(name for name in node.knobs if name not in code)
+
+
+def knob_slot_facts(node: Node, knob_values: Mapping[str, Any], *,
+                    guarded: bool = False) -> set[str]:
+    """The run facts the knobs an op fills (`filled_knobs`) take in: their ``{{name}}``
+    slots, less the knobs; with ``guarded`` every name they read, slots inside an
+    ``{% if %}`` on the same name and condition names included."""
+    names: set[str] = set()
+    for name in filled_knobs(node):
+        value = knob_values.get(name)
+        if isinstance(value, str):
+            names |= template_names(value) if guarded else required_slots(value)
+    return names - set(knob_values)
+
+
+def unfilled_slot_issues(graph: Graph, knob_values: Mapping[str, Any], *,
+                         resolve_calls: bool = True) -> list[Issue]:
+    """V20: a ``{{name}}`` slot in a knob is somewhere a runtime fills it.
+
+    An agent's template fields are rendered (so the knobs bound to them are), and an op
+    or gate marked ``nn.fills_facts`` renders the knobs it reads. Any other reader -- an
+    op that pastes its knob as it is, a gate, an agent reading an unbound knob -- sends
+    the braces as written, so the fact never arrives while the state looks valid. A
+    knob bound to a code node's code is Python, not a template. With ``resolve_calls``
+    off, an op whose callable is not resolved is not judged."""
+    issues: list[Issue] = []
+    for node_id in sorted(graph.reachable()):
+        node = graph.nodes.get(node_id)
+        if node is None:
+            continue
+        bound = {knob: field_name for field_name, knob in node.field_bindings}
+        filled = set(filled_knobs(node))
+        unknown = node.kind in ("op", "gate") and (not resolve_calls or fills_facts(node) is None)
+        for name in node.knobs:
+            value = knob_values.get(name)
+            if not isinstance(value, str) or name in filled or unknown:
+                continue
+            field_name = bound.get(name)
+            if field_name == "code" or (node.kind == "agent" and field_name in TEMPLATE_FIELDS):
+                continue
+            slots = sorted(set(_SLOT.findall(value)))
+            if not slots:
+                continue
+            shown = ", ".join(f"{{{{{slot}}}}}" for slot in slots[:4])
+            issues.append(Issue(
+                "V20", f"knob {name!r} holds {shown}, and this {node.kind} reads the knob as "
+                "written, so nothing fills the slot: the step would get the braces, not the "
+                "value. A {{fact}} is filled in an agent's prompt_template and "
+                "system_prompt_template (the <id>__task and <id>__system_prompt knobs) and in "
+                "a knob an op that fills facts reads; move it to one of those, or drop it",
+                node=node_id, knob=name))
+    return issues
 
 
 #: A ``{% if %}``/``{% elif %}``/``{% else %}``/``{% endif %}`` tag, as the renderer
@@ -1028,6 +1121,16 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
     available = available_inputs(graph)
     for node_id in sorted(graph.reachable()):
         node = graph.nodes.get(node_id)
+        if node is not None and node.kind in ("op", "gate"):
+            have = available.get(node_id, set())
+            missing = sorted(f"{{{{{name}}}}}" for name in knob_slot_facts(node, knob_values)
+                             if ("fact", name) not in have)
+            if missing:
+                issues.append(Issue(
+                    "V15", f"fills {', '.join(missing)} into the knobs it reads, which some "
+                    "path to it does not produce first; an optional one goes inside "
+                    "{% if name %}...{% endif %}", node=node_id))
+            continue
         if node is None or node.kind != "agent":
             continue
         if node.tool_policy == "none" and len(node.writes) != 1:
@@ -1072,6 +1175,8 @@ def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]
         except Exception:  # a bad binding is V14's to report
             text = getattr(node, field_name, "")
         facts |= template_names(str(text or ""))
+    # An op that fills facts takes in the slots of the knobs it reads.
+    facts |= knob_slot_facts(node, knob_values, guarded=True)
     facts -= set(knob_values)
     files = set(node.reads) | set(getattr(node, "required_reads", ()) or ())
     return {("fact", n) for n in facts} | {("file", n) for n in files}
