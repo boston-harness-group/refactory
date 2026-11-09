@@ -88,8 +88,9 @@ the strategies that merge parents or pick among sibling samples outside the gate
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
   carries that run's `best_train_score` instead (as for any `best_score_basis` other
-  than train), and a bound whose text names a held-out part ("seed scored on train,
-  val and test") is left out: no test or holdout number or wording reaches it.
+  than train), and a bound whose text names a held-out part (test, holdout, held-out,
+  hold out; "seed scored on train, val and test") is left out: no test or holdout
+  number or wording reaches it.
 - **What a person reads.** Each epoch's progress line says how many candidates the
   gate kept and rejected that epoch, with the val best and current scores, instead of
   a train-score "improved".
@@ -364,8 +365,10 @@ The edit layer enforces the same for every edit that adds a node (`add_node`,
   `prompt_template` and `system_prompt_template` (its `<id>__task` and
   `<id>__system_prompt` knobs) and in a knob an op marked `nn.fills_facts` reads, as
   LiveMath's skill graph marks the ops that read its `<step>_task` knobs; there a slot is
-  one of the op's inputs (V15, V17). A slot in any other knob would reach its reader as
-  written, so it is refused. The request names the knobs such ops read.
+  one of the op's inputs (V15, V17). A slot an edit adds to any other knob would reach
+  its reader as written, so it is refused. A slot the knob already held (a design brief
+  asking for a `{{name}}` renderer) is the author's or the user's text and is left be.
+  The request names the knobs such ops read.
 - **Lost writes (V19).** A no-tools agent or code op that sets no fact, whose every file
   a no-tools agent writes again on every path before any node reads or may read it (a
   Python op or gate, an agent with tools, a data pass), is refused.
@@ -556,8 +559,9 @@ state is promised, on any graph shape:
   `E-protected`. A new node may still go in front of one. A proposal's edits are judged
   together on the state they leave, so "remove a step, then put a code op in its place"
   is accepted even though the first edit alone would let a run skip a protected node;
-  a bundle that does leave one skippable is refused, naming the bundle
-  (`[the n edits together]`). The optimizer's request lists them.
+  a bundle that does leave one skippable is refused, naming the bundle and the edit
+  from which no later edit restores it (`[the n edits together; from edit k (op) on,
+  ...]`). The optimizer's request lists them.
 
 ### Code nodes, verdict gates and `parallel`: composing the four primitives
 

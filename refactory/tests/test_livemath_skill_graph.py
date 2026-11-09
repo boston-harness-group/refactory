@@ -608,6 +608,9 @@ def test_a_task_knob_slot_is_held_to_what_is_produced_before_its_op():
     assert issues(decide_task="Reread {{user_prompt}} before you answer.") == []
     assert issues(decide_task="Use {{ghost}}.") == [("V15", "decide_prompt")]
     assert issues(compare_task="See {{decide_prompt}}.") == [("V15", "prepare")]
+    # A grader-derived fact read only inside an {% if %} is still consumed (V17).
+    guarded = issues(decide_task="{% if item_scores %}{{item_scores}}{% endif %}")
+    assert ("V17", "decide_prompt") in guarded, guarded
     state = _mode(decide_task="Use {{ghost}}.").state_dict()
     node = Graph.from_state(state["graph"]).nodes["decide_prompt"]
     values = {name: entry["value"] for name, entry in state["knobs"].items()}

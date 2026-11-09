@@ -302,7 +302,7 @@ def test_frozen_and_protected_edits_later_in_a_list_are_named():
     # A protected node is judged on what the edits leave together, so the refusal
     # names the bundle, not one edit.
     assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
-    assert "[the 2 edits together]" in refused[0], refused
+    assert "[the 2 edits together; from edit 2 (remove_node) on" in refused[0], refused
 
 
 @pytest.mark.parametrize("edits, dead", [
@@ -434,7 +434,8 @@ def test_a_bundle_that_leaves_a_protected_node_skippable_is_still_refused(_code_
     refused = applier.attempt(seed, _replace_decide_prompt(connect=False), {seed.id})
     assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
     assert "'extract_answer'" in refused[0] and "can finish without it" in refused[0], refused
-    assert "[the 2 edits together]" in refused[0] and "[edit " not in refused[0], refused
+    assert "[the 2 edits together; from edit 1 (remove_node) on" in refused[0], refused
+    assert "[edit " not in refused[0], refused
 
 
 class _Considering(Scripted):
@@ -451,7 +452,7 @@ class _Considering(Scripted):
         # replaces the optimizer's last answer, never a proposal's own record.
         first = not getattr(self, "contexts", [])
         self.last_diagnosis = "level is too high"
-        self.last_considered = self.considered if first or not self.considered else "a later answer"
+        self.last_considered = self.considered if first else "a later answer"
         return super().propose(ctx, n, parents)
 
 
@@ -461,8 +462,8 @@ def test_what_an_answer_considered_is_journaled_reported_and_shown_back(tmp_path
                                                                        considered):
     """An answer's `considered` goes with its proposal: the proposal record and journal
     (that answer's, though a retry in the round answers again), the report, and the next
-    request's earlier reasoning. An answer without one records none and the report has
-    no such section."""
+    request's earlier reasoning. A proposal whose answer gave none records none -- not
+    the retry's -- and the report has no such section."""
     monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
     refused = Proposal(edit={"op": "remove_node", "id": "finish"})  # E-policy: a retry follows
     with _patch_mode(TwoLevels):
@@ -484,5 +485,16 @@ def test_what_an_answer_considered_is_journaled_reported_and_shown_back(tmp_path
     else:
         assert "considered" not in loop.proposals[child.id] and journaled
         assert all("considered" not in r for r in journaled)
-        assert "What the optimizer weighed" not in report and "## Considered" not in analysis
+        assert "What the optimizer weighed" not in report and "a later answer" not in report
         assert "Considered that round" not in later
+
+
+def test_e_protected_names_the_edit_no_later_edit_repairs(_code_nodes_allowed):
+    """A bundle that breaks a protected node at edit 1, mends it at edit 3 and breaks it
+    again at edit 4 is refused naming edit 4: from there on no edit restores it."""
+    applier, seed = _livemath()
+    bundle = _replace_decide_prompt(connect=True)
+    bundle["edits"].append({"op": "remove_edge", "source": "build_decide", "target": "decide"})
+    refused = applier.attempt(seed, bundle, {seed.id})
+    assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
+    assert "[the 4 edits together; from edit 4 (remove_edge) on" in refused[0], refused

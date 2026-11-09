@@ -2065,10 +2065,10 @@ class Loop(OuterLoop):
                 **({"level": notes["level"]} if notes.get("level") else {}),
                 "diagnosis": str(notes.get("diagnosis")
                                  or getattr(self.optimizer, "last_diagnosis", "") or ""),
-                # The kinds of change the answer weighed, when it said (optional).
-                **({"considered": considered} if (considered := str(
-                    notes.get("considered")
-                    or getattr(self.optimizer, "last_considered", "") or "")) else {}),
+                # The kinds of change its own answer weighed, when it said (optional);
+                # never the optimizer's latest, which may be a later retry's.
+                **({"considered": str(notes["considered"])} if notes.get("considered")
+                   else {}),
                 "epoch": self.epoch,
             })
             # Journaled, so a resumed run still shows the optimizer its own reasoning.

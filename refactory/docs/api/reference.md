@@ -167,16 +167,16 @@ The validator: what makes architecture-in-the-state safe.
 |---|---|---|
 | class | `Invariant` | `(name: 'str', description: 'str', check: 'Callable[[Graph, Mapping[str, Any]], str \| None]') -> None` |
 | class | `Issue` | `(code: 'str', message: 'str', node: 'str \| None' = None, knob: 'str \| None' = None) -> None` |
-| function | `agent_input_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
+| function | `agent_input_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'list[Issue]'` |
 | function | `answer_label_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `artifact_produced` | `(*paths: 'str', by: 'str') -> 'Invariant'` |
 | function | `available_inputs` | `(graph: 'Graph') -> 'dict[str, set[tuple[str, str]]]'` |
 | function | `code_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
-| function | `consumed` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[tuple[str, str]]'` |
+| function | `consumed` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
-| function | `filled_knobs` | `(node: 'Node') -> 'tuple[str, ...]'` |
-| function | `fills_facts` | `(node: 'Node') -> 'bool \| None'` |
+| function | `filled_knobs` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'tuple[str, ...]'` |
+| function | `fills_facts` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'bool \| None'` |
 | function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
 | function | `fork_branches` | `(graph: 'Graph', fork: 'Node', join: 'str \| None') -> 'list[set[str]]'` |
 | function | `fork_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[Issue]'` |
@@ -184,7 +184,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `gate_label_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `grader_derived` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `grader_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'list[Issue]'` |
-| function | `knob_slot_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, guarded: 'bool' = False) -> 'set[str]'` |
+| function | `knob_slot_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, guarded: 'bool' = False, resolve_calls: 'bool' = True) -> 'set[str]'` |
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `overwritten_write_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
@@ -194,9 +194,9 @@ The validator: what makes architecture-in-the-state safe.
 | function | `rules_text` | `() -> 'str'` |
 | function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
 | function | `template_names` | `(template: 'str') -> 'set[str]'` |
-| function | `unfilled_slot_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'list[Issue]'` |
-| function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = (), grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = ()) -> 'list[Issue]'` |
-| function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = ()) -> 'list[Issue]'` |
+| function | `unfilled_slot_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, baseline: 'Mapping[str, Any]', resolve_calls: 'bool' = True) -> 'list[Issue]'` |
+| function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = (), grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), baseline: 'Mapping[str, Any] \| None' = None) -> 'list[Issue]'` |
+| function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), baseline: 'Mapping[str, Any] \| None' = None) -> 'list[Issue]'` |
 
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
@@ -227,9 +227,9 @@ The validator: what makes architecture-in-the-state safe.
 - **`rules_text`** — The rules, as the optimizer prompt shows them.
 - **`template_facts`** — The run facts an agent's prompts fill in: their ``{{name}}`` slots, less the knobs
 - **`template_names`** — Every run value a template reads when rendered: its ``{{name}}`` slots and the
-- **`unfilled_slot_issues`** — V20: a ``{{name}}`` slot in a knob is somewhere a runtime fills it.
+- **`unfilled_slot_issues`** — V20: a ``{{name}}`` slot an edit adds to a knob is somewhere a runtime fills it.
 - **`validate`** — Every reason ``(graph, values)`` is not a runnable, scoreable mode.
-- **`validate_state`** — Validate a state dict without building a mode around it.
+- **`validate_state`** — Validate a state dict without building a mode around it. ``baseline`` is the
 
 
 <a id="refactory_dsh-optim"></a>

@@ -1475,7 +1475,7 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
         if len(edits) > 1 and candidate_id(after) == candidate_id(state):
             return index, state  # an edit of a bundle that changes nothing
         state = after
-    dead = (_dead_edit(edits, parent.state, state, applier.protected)
+    dead = (_dead_edit(edits, parent.state, state)
             if candidate_id(state) != parent.id else None)
     return dead, state
 

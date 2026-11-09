@@ -218,6 +218,8 @@ def test_a_strategy_that_proposes_only_duplicates_makes_no_progress_and_says_so(
     ("seed scored on train, val and test", "test: the final evaluation"),
     ("stopped before the holdout audit", "holdout"),
     ("held-out part exhausted", "val: the validation gate's score"),
+    ("hold-out audit skipped", "hold out"),
+    ("stopped at the hold out", "test"),
 ])
 def test_a_prior_run_shows_the_optimizer_no_test_or_holdout_information(tmp_path, bound, basis):
     """A previous run's summary states train facts only: a best score measured on any

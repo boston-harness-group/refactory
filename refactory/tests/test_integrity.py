@@ -217,9 +217,11 @@ def _knob_reader(node: nn.Node) -> nn.Graph:
     return graph
 
 
-def _v20(graph: nn.Graph, note: str, **kwargs) -> list[tuple[str, str, str]]:  # type: ignore[no-untyped-def]
+def _v20(graph: nn.Graph, note: str, before: str = "Use a.",  # type: ignore[no-untyped-def]
+         **kwargs) -> list[tuple[str, str, str]]:
+    """V20 for an edit that set ``note`` from ``before`` to ``note``."""
     issues = nn.validate(graph, {"note": note}, declared_knobs={"note": nn.Knob(note, "str")},
-                         **kwargs)
+                         baseline={"note": before}, **kwargs)
     return [(i.code, i.node, i.knob) for i in issues if i.code == "V20"]
 
 
@@ -231,6 +233,14 @@ def test_a_slot_in_a_knob_an_op_pastes_as_written_is_refused(call, refused):
     graph = _knob_reader(nn.Node("b", "op", call=call, produces=("done",), knobs=("note",)))
     assert _v20(graph, "Use {{a}}.") == ([("V20", "b", "note")] if refused else [])
     assert _v20(graph, "Use a.") == []
+    # Only a slot the edit added is judged: one the knob held before is its author's or
+    # its user's text, and without a baseline (a seed, a person's --knob) none is judged.
+    assert _v20(graph, "Use {{a}} again.", before="Use {{a}}.") == []
+    assert _v20(graph, "Use {{a}} and {{b}}.", before="Use {{a}}.") == (
+        [("V20", "b", "note")] if refused else [])
+    assert [i for i in nn.validate(graph, {"note": "Use {{a}}."},
+                                   declared_knobs={"note": nn.Knob("", "str")})
+            if i.code == "V20"] == []
     # Without resolving calls an op's callable is unknown, so it is not judged.
     assert _v20(graph, "Use {{a}}.", resolve_calls=False) == []
 
@@ -244,30 +254,26 @@ def test_a_slot_in_an_agents_prompt_knob_is_filled_and_an_unbound_one_is_not():
     assert _v20(_knob_reader(unbound), "Use {{a}}.") == [("V20", "ask", "note")]
 
 
-def test_every_shipped_mode_seed_passes_v20():
-    """No shipped mode's seed holds a slot in a knob nothing fills."""
-    import importlib
-    import inspect
-    import pkgutil
+def test_a_design_brief_with_braces_is_the_users_text_and_an_added_slot_is_refused():
+    """Design mode's prepare op pastes the user's brief as written. A brief asking for a
+    `{{name}}` renderer is the user's text: the seed is valid and an edit to another knob
+    leaves it be. A slot the search adds to it is refused (V20)."""
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_dsh.optim import Optimizer, Proposal
 
-    import refactory_dsh
-    import refactory_packages
+    brief = "Build a tiny mustache renderer that fills {{name}} placeholders."
+    seed = nn_edits.configure(DesignMode().state_dict(), "brief", brief)
+    assert not [str(i) for i in nn.validate_state(seed, resolve_calls=True) if i.code == "V20"]
+    parent = Candidate.from_state(seed)
 
-    modes = set()
-    for package in (refactory_packages, refactory_dsh):
-        for found in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
-            try:
-                module = importlib.import_module(found.name)
-            except Exception:  # noqa: BLE001 - a module that does not import declares no mode here
-                continue
-            modes |= {cls for _, cls in inspect.getmembers(module, inspect.isclass)
-                      if issubclass(cls, nn.Mode) and cls is not nn.Mode
-                      and cls.__module__ == module.__name__}
-    assert len(modes) > 10
-    for cls in sorted(modes, key=lambda c: f"{c.__module__}.{c.__name__}"):
-        try:
-            state = cls().state_dict()
-        except Exception:  # noqa: BLE001 - a mode that needs arguments is not a seed here
-            continue
-        issues = nn.validate_state(state, resolve_calls=True)
-        assert not [str(i) for i in issues if i.code == "V20"], cls
+    def attempt(value: str):  # type: ignore[no-untyped-def]
+        return Optimizer().attempt(Proposal(edit={"op": "set_knob", "name": "brief",
+                                                  "value": value}),
+                                   parent, (), True, (), [parent.id])
+
+    kept = attempt(brief + " Keep {{name}} literal.")
+    assert not (isinstance(kept, list) and any(r.startswith("V20") for r in kept)), kept
+    added = attempt(brief + " Use {{research_scope}}.")
+    assert isinstance(added, list) and any(
+        r.startswith("V20") and "{{research_scope}}" in r and "'brief'" in r for r in added), added

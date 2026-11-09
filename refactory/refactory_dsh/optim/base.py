@@ -357,11 +357,13 @@ def _grader_side_knobs(state: dict[str, Any], nodes: Sequence[str]) -> dict[str,
     return out
 
 
-def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any], result: dict[str, Any],
-               protected: Sequence[str] = ()) -> int | None:
+def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any],
+               result: dict[str, Any]) -> int | None:
     """The index of a compound proposal's first edit the result does not depend on: the
     other edits, applied without it, reach the same state (a later edit overwrote it or
-    undid it). ``None`` for a single edit, or when every edit counts."""
+    undid it). ``None`` for a single edit, or when every edit counts. Protected nodes need
+    no check here: a subset reaching the result's id reaches the result's graph and
+    knobs, which already passed it."""
     if len(steps) < 2:
         return None
     target = candidate_id(result)
@@ -373,12 +375,24 @@ def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any], result: d
                     state = nn_edits.apply(edit, state)
         except Exception:  # noqa: BLE001 - the others need this one: it counts
             continue
-        # Protected nodes are judged on what the edits leave, as for the whole bundle.
-        if protected and nn_edits.protected_violation(start, state, protected):
-            continue
         if candidate_id(state) == target:
             return index
     return None
+
+
+def _protected_culprit(steps: Sequence[dict[str, Any]], start: dict[str, Any],
+                       prefixes: Sequence[dict[str, Any]], protected: Sequence[str]) -> str:
+    """For a bundle whose end state breaks a protected node: the edit from which every
+    later state breaks it too (the one that did it and nothing after repaired it), named
+    beside the bundle. Empty for a single edit."""
+    if len(steps) < 2:
+        return ""
+    culprit = len(prefixes) - 1
+    while culprit > 0 and nn_edits.protected_violation(start, prefixes[culprit - 1], protected):
+        culprit -= 1
+    op = steps[culprit].get("op") if isinstance(steps[culprit], dict) else "?"
+    return (f" [the {len(steps)} edits together; from edit {culprit + 1} ({op}) on, "
+            "no later edit restores it]")
 
 
 def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = None,
@@ -2382,6 +2396,7 @@ class Optimizer:
         # a state where the run skips a protected node, and only the end state runs.
         state = parent.state
         edit_reports: list[dict[str, Any] | None] = []
+        prefixes: list[dict[str, Any]] = []  # the state after each edit, for E-protected
         for index, edit in enumerate(steps):
             if edit.get("op") == "set_knob" and edit.get("name") in frozen:
                 return [_at(f"E-frozen: knob {edit.get('name')!r} is frozen for this run",
@@ -2409,14 +2424,15 @@ class Optimizer:
                 return [_at(f"E-noop: {edit.get('op')} leaves the state as the edits before "
                             "it left it; drop it or change it", index, steps)]
             edit_reports.append(reports[0] if reports else None)
+            prefixes.append(state)
 
         violation = nn_edits.protected_violation(parent.state, state, protected)
         if violation:
-            return [f"E-protected: {violation}"
-                    + (f" [the {len(steps)} edits together]" if len(steps) > 1 else "")]
+            return [f"E-protected: {violation}" + _protected_culprit(steps, parent.state,
+                                                                      prefixes, protected)]
 
         # A bundle that changes nothing at all is refused below as one no-op.
-        dead = (_dead_edit(steps, parent.state, state, protected)
+        dead = (_dead_edit(steps, parent.state, state)
                 if candidate_id(state) != parent.id else None)
         if dead is not None:
             return [_at(f"E-noop: {steps[dead].get('op')} has no effect on the result: the "
@@ -2467,7 +2483,8 @@ class Optimizer:
             ]
 
         issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls,
-                                grader_side=(*protected, *graders), graders=tuple(graders))
+                                grader_side=(*protected, *graders), graders=tuple(graders),
+                                baseline=parent.state)
         if issues:
             return [str(issue) for issue in issues]
         unlowerable = _lowering_refusal(parent.state, state)

@@ -42,7 +42,7 @@ DEFAULT_LIMIT = 40
 
 #: Wording that names a held-out part. A summary an optimizer reads states train facts
 #: only, so a text that mentions one of these is left out of it whole.
-_HELD_OUT = re.compile(r"(?i)(?<![a-z])(test|holdout|held[\s_-]*out)")
+_HELD_OUT = re.compile(r"(?i)(?<![a-z])(test|h(?:o|e)ld[\s_-]*out)")
 
 
 def _train_only(text: Any) -> str:

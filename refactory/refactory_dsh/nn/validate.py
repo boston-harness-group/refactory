@@ -87,7 +87,7 @@ RULES: dict[str, str] = {
            "a step whose every file is written again by a no-tools agent, on every path from "
            "it, before any node reads it or may read it (a Python op or gate, an agent with "
            "tools, a data pass) and before the run or its pass ends, does work nothing sees",
-    "V20": "a {{name}} slot in a knob is filled in only where a runtime fills it: in an "
+    "V20": "a {{name}} slot an edit adds to a knob is filled in only where a runtime fills it: in an "
            "agent's prompt_template and system_prompt_template (so in the knobs bound to "
            "them, such as <id>__task and <id>__system_prompt) and in a knob read by an op "
            "that fills facts (marked nn.fills_facts); a slot in a knob any other node reads "
@@ -174,8 +174,12 @@ def validate(
     ports: tuple[Any, ...] = (),
     grader_side: Iterable[str] = (),
     graders: Iterable[str] = (),
+    baseline: Mapping[str, Any] | None = None,
 ) -> list[Issue]:
     """Every reason ``(graph, values)`` is not a runnable, scoreable mode.
+
+    ``baseline`` is the knob values an edit started from (its parent's): given, a
+    ``{{name}}`` slot the edit added where nothing fills it is refused (V20).
 
     ``grader_side`` names the nodes besides the data nodes that may consume
     grader-derived data (the mode's protected and grader nodes); ``graders`` the nodes
@@ -411,10 +415,12 @@ def validate(
     # V6 every read is written upstream; V15 an agent's inputs are there on every path.
     knob_values = dict(values)
     issues.extend(read_issues(graph))
-    issues.extend(agent_input_issues(graph, knob_values))
+    issues.extend(agent_input_issues(graph, knob_values, resolve_calls=resolve_calls))
     issues.extend(required_read_issues(graph))
-    # V20 a {{name}} slot in a knob is somewhere a runtime fills it.
-    issues.extend(unfilled_slot_issues(graph, knob_values, resolve_calls=resolve_calls))
+    # V20 a {{name}} slot an edit adds to a knob is somewhere a runtime fills it.
+    if baseline is not None:
+        issues.extend(unfilled_slot_issues(graph, knob_values, baseline=baseline,
+                                           resolve_calls=resolve_calls))
     issues.extend(overwritten_write_issues(graph))
 
     # V16 forks and joins are paired, and branches are independent.
@@ -546,43 +552,38 @@ def template_facts(node: Node, knob_values: Mapping[str, Any]) -> set[str]:
 TEMPLATE_FIELDS = ("prompt_template", "system_prompt_template")
 
 
-def fills_facts(node: Node) -> bool | None:
+def fills_facts(node: Node, *, resolve_calls: bool = True) -> bool | None:
     """Whether an op or a gate's callable fills the ``{{name}}`` slots in the knobs it
-    reads (``nn.fills_facts``); ``None`` when its callable does not resolve here."""
+    reads (``nn.fills_facts``); ``None`` when it is not known: its callable does not
+    resolve here, or ``resolve_calls`` is off. Read from the callable each time (no
+    cache), so a reloaded package's mark is the one seen."""
     target = node.call if node.kind == "op" else (node.evaluator if node.kind == "gate" else "")
     if not target:
         return False
-    return _marked(target)
+    if not resolve_calls:
+        return None
+    try:
+        return bool(getattr(resolve(target), "fills_facts", False))
+    except Exception:  # an unresolvable call is V8's to report
+        return None
 
 
-_MARKS: dict[str, bool | None] = {}
-
-
-def _marked(target: str) -> bool | None:
-    if target not in _MARKS:
-        try:
-            _MARKS[target] = bool(getattr(resolve(target), "fills_facts", False))
-        except Exception:  # an unresolvable call is V8's to report
-            _MARKS[target] = None
-    return _MARKS[target]
-
-
-def filled_knobs(node: Node) -> tuple[str, ...]:
+def filled_knobs(node: Node, *, resolve_calls: bool = True) -> tuple[str, ...]:
     """The knobs whose slots an op or gate fills: every knob it reads that is not bound
-    to its code, when its callable fills facts; none otherwise."""
-    if node.kind not in ("op", "gate") or not fills_facts(node):
+    to its code, when its callable fills facts; none otherwise (or when not known)."""
+    if node.kind not in ("op", "gate") or not fills_facts(node, resolve_calls=resolve_calls):
         return ()
     code = {knob for field_name, knob in node.field_bindings if field_name == "code"}
     return tuple(name for name in node.knobs if name not in code)
 
 
 def knob_slot_facts(node: Node, knob_values: Mapping[str, Any], *,
-                    guarded: bool = False) -> set[str]:
+                    guarded: bool = False, resolve_calls: bool = True) -> set[str]:
     """The run facts the knobs an op fills (`filled_knobs`) take in: their ``{{name}}``
     slots, less the knobs; with ``guarded`` every name they read, slots inside an
     ``{% if %}`` on the same name and condition names included."""
     names: set[str] = set()
-    for name in filled_knobs(node):
+    for name in filled_knobs(node, resolve_calls=resolve_calls):
         value = knob_values.get(name)
         if isinstance(value, str):
             names |= template_names(value) if guarded else required_slots(value)
@@ -590,23 +591,29 @@ def knob_slot_facts(node: Node, knob_values: Mapping[str, Any], *,
 
 
 def unfilled_slot_issues(graph: Graph, knob_values: Mapping[str, Any], *,
-                         resolve_calls: bool = True) -> list[Issue]:
-    """V20: a ``{{name}}`` slot in a knob is somewhere a runtime fills it.
+                         baseline: Mapping[str, Any], resolve_calls: bool = True) -> list[Issue]:
+    """V20: a ``{{name}}`` slot an edit adds to a knob is somewhere a runtime fills it.
 
     An agent's template fields are rendered (so the knobs bound to them are), and an op
     or gate marked ``nn.fills_facts`` renders the knobs it reads. Any other reader -- an
     op that pastes its knob as it is, a gate, an agent reading an unbound knob -- sends
     the braces as written, so the fact never arrives while the state looks valid. A
-    knob bound to a code node's code is Python, not a template. With ``resolve_calls``
-    off, an op whose callable is not resolved is not judged."""
+    knob bound to a code node's code is Python, not a template.
+
+    Only slots the edit added are judged: a slot ``baseline`` (the knob values the edit
+    started from) already held in the same knob is the author's or the user's text --
+    a design brief asking for a ``{{name}}`` renderer -- not a fact the search meant to
+    pass. With ``resolve_calls`` off, an op whose callable is not resolved is not
+    judged."""
     issues: list[Issue] = []
     for node_id in sorted(graph.reachable()):
         node = graph.nodes.get(node_id)
         if node is None:
             continue
         bound = {knob: field_name for field_name, knob in node.field_bindings}
-        filled = set(filled_knobs(node))
-        unknown = node.kind in ("op", "gate") and (not resolve_calls or fills_facts(node) is None)
+        filled = set(filled_knobs(node, resolve_calls=resolve_calls))
+        unknown = node.kind in ("op", "gate") and fills_facts(
+            node, resolve_calls=resolve_calls) is None
         for name in node.knobs:
             value = knob_values.get(name)
             if not isinstance(value, str) or name in filled or unknown:
@@ -614,12 +621,14 @@ def unfilled_slot_issues(graph: Graph, knob_values: Mapping[str, Any], *,
             field_name = bound.get(name)
             if field_name == "code" or (node.kind == "agent" and field_name in TEMPLATE_FIELDS):
                 continue
-            slots = sorted(set(_SLOT.findall(value)))
+            before = baseline.get(name)
+            slots = sorted(set(_SLOT.findall(value))
+                           - set(_SLOT.findall(before if isinstance(before, str) else "")))
             if not slots:
                 continue
             shown = ", ".join(f"{{{{{slot}}}}}" for slot in slots[:4])
             issues.append(Issue(
-                "V20", f"knob {name!r} holds {shown}, and this {node.kind} reads the knob as "
+                "V20", f"the edit puts {shown} in knob {name!r}, and this {node.kind} reads the knob as "
                 "written, so nothing fills the slot: the step would get the braces, not the "
                 "value. A {{fact}} is filled in an agent's prompt_template and "
                 "system_prompt_template (the <id>__task and <id>__system_prompt knobs) and in "
@@ -1108,7 +1117,8 @@ def code_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
     return issues
 
 
-def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Issue]:
+def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any], *,
+                       resolve_calls: bool = True) -> list[Issue]:
     """V15: required inputs are there on every path: an op's or a gate's
     ``required_reads``, and an agent's inputs -- its reads and its prompts' ``{{facts}}``.
 
@@ -1123,7 +1133,8 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any]) -> list[Iss
         node = graph.nodes.get(node_id)
         if node is not None and node.kind in ("op", "gate"):
             have = available.get(node_id, set())
-            missing = sorted(f"{{{{{name}}}}}" for name in knob_slot_facts(node, knob_values)
+            missing = sorted(f"{{{{{name}}}}}" for name in knob_slot_facts(
+                node, knob_values, resolve_calls=resolve_calls)
                              if ("fact", name) not in have)
             if missing:
                 issues.append(Issue(
@@ -1159,7 +1170,8 @@ def _made(node: Node) -> set[tuple[str, str]]:
     return {("file", n) for n in node.writes} | {("fact", n) for n in node.produces}
 
 
-def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]:
+def consumed(node: Node, knob_values: Mapping[str, Any], *,
+             resolve_calls: bool = True) -> set[tuple[str, str]]:
     """Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
     slot and each name a ``{% if %}``/``{% elif %}`` condition tests, in its prompts and
     in every field bound to a knob (rendered with the knob values, guarded slots
@@ -1176,7 +1188,7 @@ def consumed(node: Node, knob_values: Mapping[str, Any]) -> set[tuple[str, str]]
             text = getattr(node, field_name, "")
         facts |= template_names(str(text or ""))
     # An op that fills facts takes in the slots of the knobs it reads.
-    facts |= knob_slot_facts(node, knob_values, guarded=True)
+    facts |= knob_slot_facts(node, knob_values, guarded=True, resolve_calls=resolve_calls)
     facts -= set(knob_values)
     files = set(node.reads) | set(getattr(node, "required_reads", ()) or ())
     return {("fact", n) for n in facts} | {("file", n) for n in files}
@@ -1224,7 +1236,8 @@ def grader_derived(graph: Graph, knob_values: Mapping[str, Any], *,
     while changed:
         changed = False
         for node in graph.nodes.values():
-            if node.kind == "data" or not (consumed(node, knob_values) & derived):
+            if node.kind == "data" or not (
+                    consumed(node, knob_values, resolve_calls=resolve_tasks) & derived):
                 continue
             if not _made(node) <= derived:
                 derived |= _made(node)
@@ -1250,7 +1263,7 @@ def grader_issues(graph: Graph, knob_values: Mapping[str, Any], *,
     for node_id in sorted(graph.nodes):
         if node_id in side:
             continue
-        taken = consumed(graph.nodes[node_id], knob_values) & derived
+        taken = consumed(graph.nodes[node_id], knob_values, resolve_calls=resolve_tasks) & derived
         if taken:
             names = ", ".join(f"{{{{{n}}}}}" if kind == "fact" else f"file {n!r}"
                               for kind, n in sorted(taken))
@@ -1361,8 +1374,10 @@ def validate_state(
     resolve_calls: bool = True,
     grader_side: Iterable[str] = (),
     graders: Iterable[str] = (),
+    baseline: Mapping[str, Any] | None = None,
 ) -> list[Issue]:
-    """Validate a state dict without building a mode around it.
+    """Validate a state dict without building a mode around it. ``baseline`` is the
+    state an edit started from (`validate`'s V20).
 
     Everything the check needs is in the state, which is the point of putting the
     architecture there: a candidate can be judged before anything is run.
@@ -1390,6 +1405,9 @@ def validate_state(
         ports=tuple(ports),
         grader_side=grader_side,
         graders=graders,
+        baseline=(None if baseline is None else
+                  {name: entry.get("value") for name, entry in
+                   (baseline.get("knobs") or {}).items()}),
     )
 
 

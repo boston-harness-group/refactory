@@ -224,7 +224,7 @@ def test_mutation_knobs_without_own_system_prompts_is_caught(monkeypatch):
 
 def test_mutation_dataflow_without_the_read_rules_is_caught(monkeypatch):
     monkeypatch.setattr(validate_mod, "read_issues", lambda graph: [])
-    monkeypatch.setattr(validate_mod, "agent_input_issues", lambda graph, knobs: [])
+    monkeypatch.setattr(validate_mod, "agent_input_issues", lambda graph, knobs, **_: [])
     _finds("dataflow", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 
@@ -247,7 +247,7 @@ def test_mutation_grader_without_answer_free_items_is_caught(monkeypatch):
 
 
 def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
-    monkeypatch.setattr(validate_mod, "agent_input_issues", lambda graph, knobs: [])
+    monkeypatch.setattr(validate_mod, "agent_input_issues", lambda graph, knobs, **_: [])
     _finds("slots", seeds=("fuzz_dataflow", "fuzz_gates", "fuzz_multi_terminal"), walker=True)
 
 
