@@ -351,6 +351,27 @@ def test_a_run_a_person_stops_leaves_its_last_batch_unscored(tmp_path, monkeypat
     assert report["unevaluated"] and report["evaluations"] < report["population"]
 
 
+def test_a_budget_spent_in_the_last_epoch_leaves_the_last_batch_unscored(tmp_path, monkeypatch):
+    """Without the gate, a run whose token budget runs out during its last epoch stops
+    scoring there: the last batch stays unscored and named, the spent budget is the
+    bound, and no proposal is recorded as a failure the budget caused."""
+    from refactory_dsh.budgets import LEDGER, RunBudget
+
+    def spend(self, run):  # type: ignore[no-untyped-def]
+        # The probe: the last epoch's end spends the whole token budget.
+        if len(self.epochs) >= self.config.epochs:
+            self.budget.record_usage("probe", 10_000)
+
+    monkeypatch.setattr(Loop, "on_epoch_end", spend)
+    loop = Loop(MODE, _config(tmp_path, max_tokens=1_000), project=Path("."))
+    report = loop.run()
+    assert "token budget exhausted" in str(report["bound"])
+    assert report["unevaluated"], "the last batch was scored after the budget was spent"
+    failed = [c for c in loop.population if c.evaluated and "budget" in str(c.error or "")]
+    assert failed == [], [(c.id, c.error) for c in failed]
+    assert RunBudget.from_path(loop.root / LEDGER).snapshot()["exhausted"]
+
+
 def test_the_scheduler_reports_the_evaluation_bound(tmp_path):
     loop = Loop(MODE, _config(tmp_path, max_evaluations=2), project=Path("."))
     report = loop.run()

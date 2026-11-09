@@ -183,6 +183,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `grader_derived` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `grader_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'list[Issue]'` |
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
+| function | `overwritten_write_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `required_read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
@@ -211,6 +212,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`grader_derived`** — The provenance set: every ``("fact"|"file", name)`` that carries the grade.
 - **`grader_issues`** — V17: a node outside the grader side that consumes grader-derived data.
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
+- **`overwritten_write_issues`** — V19: a step whose every write is overwritten before anything reads it.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.
 - **`read_issues`** — V6: every read is produced by a node on a path the run can take.
 - **`required_read_issues`** — V15 for ops and gates: each of a node's ``required_reads`` is written upstream on

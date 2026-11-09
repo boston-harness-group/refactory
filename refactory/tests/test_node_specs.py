@@ -130,8 +130,10 @@ def test_an_inserted_copy_runs_its_own_prompt_on_its_own_knob(tmp_path, monkeypa
     state = nn_edits.apply({"op": "insert_after", "target": "compare", "node": copy},
                            SkillGraph().state_dict())
     assert state["knobs"]["verify__system_prompt"]["value"] == "VERIFY SYSTEM PROMPT"
+    # Its task text (prompt_template) is a knob of its own too, for a later set_knob.
+    assert state["knobs"]["verify__task"]["value"] == copy["prompt_template"]
     assert state["graph"]["nodes"]["verify"]["field_bindings"] == [
-        ["system_prompt_template", "verify__system_prompt"]]
+        ["system_prompt_template", "verify__system_prompt"], ["prompt_template", "verify__task"]]
     assert validate_state(state, invariants=SkillGraph().invariants(), resolve_calls=True) == []
     _patch_task(monkeypatch)
     model = _SystemLog()
@@ -155,10 +157,13 @@ def test_a_duplicate_gets_its_own_knob_at_the_originals_value():
     out = nn_edits.apply({"op": "duplicate", "target": "compare", "new_id": "compare2"}, state)
     assert out["knobs"]["compare2__system_prompt"]["value"] == "CURRENT COMPARE PROMPT"
     assert out["graph"]["nodes"]["compare2"]["field_bindings"] == [
-        ["system_prompt_template", "compare2__system_prompt"]]
+        ["system_prompt_template", "compare2__system_prompt"], ["prompt_template", "compare2__task"]]
     assert "compare__system_prompt" not in out["graph"]["nodes"]["compare2"]["knobs"]
     assert out["knobs"]["compare__system_prompt"] == state["knobs"]["compare__system_prompt"]
-    assert validate_state(out, invariants=SkillGraph().invariants(), resolve_calls=True) == []
+    # The copy writes compare's notes file again without reading it, so compare's own
+    # notes are lost (V19); that is the only thing the validator says.
+    issues = validate_state(out, invariants=SkillGraph().invariants(), resolve_calls=True)
+    assert [(i.code, i.node) for i in issues] == [("V19", "compare")]
 
 
 @pytest.mark.parametrize("text, reason", [
@@ -379,3 +384,30 @@ def test_the_spine_runs_an_added_agent_node(tmp_path):
     records = json.loads((tmp_path / "spine" / "item_records.json").read_text())
     assert records and all("verify" in [e.get("node") for e in r.get("exchanges") or ()]
                            for r in records)
+
+
+def test_a_new_agents_task_text_is_a_knob_the_next_round_can_move(tmp_path):
+    """A new agent's prompt_template is bound to its own `<id>__task` knob holding the
+    text the edit gave it, as its system prompt is to `<id>__system_prompt`: the next
+    round's request lists the knob, a set_knob moves it, and the run sends the new text.
+    Removing the node removes both knobs."""
+    from refactory_dsh.nn.graph import Graph
+
+    copy = _rendered_node(_prompt(tmp_path), "compare")
+    copy.update(id="verify", writes=["verify_notes.txt"], prompt_template="CHECK {{compare_prompt}}")
+    state = nn_edits.apply({"op": "insert_after", "target": "compare", "node": copy},
+                           SkillGraph().state_dict())
+    assert state["knobs"]["verify__task"]["value"] == "CHECK {{compare_prompt}}"
+    knobs = SkillGraph(state=state).describe()["knobs"]
+    assert "verify__task" in knobs and not knobs["verify__task"]["frozen"]
+    listed = ProposalContext(knobs=[{"name": n, **k} for n, k in knobs.items()]).render()
+    parameters = listed[listed.index("## Parameters you may move"):listed.index("## The pipeline")]
+    assert "| verify__task |" in parameters
+    moved = nn_edits.apply({"op": "set_knob", "name": "verify__task",
+                            "value": "RECHECK {{compare_prompt}}"}, state)
+    assert validate_state(moved, invariants=SkillGraph().invariants(), resolve_calls=True) == []
+    graph = Graph.from_state(moved["graph"])
+    assert graph.nodes["verify"].bound("prompt_template", {
+        n: e["value"] for n, e in moved["knobs"].items()}) == "RECHECK {{compare_prompt}}"
+    gone = nn_edits.apply({"op": "remove_node", "id": "verify"}, moved)
+    assert not [k for k in gone["knobs"] if k.startswith("verify__")]

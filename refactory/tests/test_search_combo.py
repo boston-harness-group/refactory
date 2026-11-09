@@ -920,6 +920,8 @@ def test_edit_kind_is_pipeline_when_winners_and_losers_differ_in_shape():
     decision = strategies.edit_kind_decision(population)
     assert decision["edit_kind"] == "pipeline"
     assert "1 agent step" in decision["why"] and "2 agent step" in decision["why"]
+    # Advice, not a requirement: code steps are named beside the other pipeline moves.
+    assert "add a code step that checks or extracts" in decision["purpose"]
 
 
 def test_edit_kind_is_prompt_knob_when_one_shape_spans_the_range():

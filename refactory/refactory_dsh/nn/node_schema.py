@@ -140,10 +140,20 @@ def _type_name(field: dataclasses.Field) -> str:
     return str(field.type).replace("typing.", "")
 
 
-def render_schema() -> list[str]:
-    """The node schemas as prompt text: one field table, then each kind."""
+#: The gate kind a person answers. A run with no person attached (an outer loop's
+#: candidates run headless, per item) cannot answer one: its walk stops at the gate.
+PERSON_GATE = "user"
+
+
+def render_schema(*, person_gates: bool = True) -> list[str]:
+    """The node schemas as prompt text: one field table, then each kind.
+
+    ``person_gates`` False leaves out the gate a person answers (``gate (user)``) and
+    says why: an optimizer whose candidates run with nobody to answer would only stop
+    its own runs with one."""
     meanings = field_meanings()
-    schema = node_schema()
+    schema = {name: entry for name, entry in node_schema().items()
+              if person_gates or name != f"gate ({PERSON_GATE})"}
     rows = []
     for field in _fields():
         kinds = [name for name, entry in schema.items()
@@ -163,6 +173,9 @@ def render_schema() -> list[str]:
         "`module:function` (rule V8), so a new op or fn-gate node reuses a callable an "
         "existing node already names, or is one of the generic ones in `refactory_dsh.snippet` "
         "(a code op or gate, or a verdict gate; see \"How nodes compose\").",
+        *([] if person_gates else [
+            f"No person answers a gate in this run's candidate runs, so `gate_kind` "
+            f"`{PERSON_GATE}` is not offered: such a gate would stop the run that reaches it."]),
         _md_table(["field", "type", "default", "kinds", "meaning"], rows),
         "",
     ]

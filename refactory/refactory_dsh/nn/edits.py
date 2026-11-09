@@ -208,11 +208,14 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
 
     A new node may not bind a knob another node binds: it would silently run that
     node's value (a copied agent running the original's system prompt). A new agent
-    node with no system-prompt binding gets its own ``<id>__system_prompt`` knob, as
-    a mode's agent nodes do when it is built (``Mode._auto_system_prompt_knobs``),
-    holding the system prompt the edit gave it. A new code node (`refactory_dsh.snippet`)
-    with no code binding gets its own ``<id>__code`` knob holding its code, so one edit
-    adds the node and its code, and a later ``set_knob`` rewrites the code alone.
+    node gets its own ``<id>__system_prompt`` knob for its system prompt, as a mode's
+    agent nodes do when it is built (``Mode._auto_system_prompt_knobs``), and its own
+    ``<id>__task`` knob for its ``prompt_template`` (its task text, as a seed graph's
+    ``<step>_task`` knobs hold theirs), each holding the text the edit gave it, so a
+    later round can ``set_knob`` either. A new code node (`refactory_dsh.snippet`) gets
+    its own ``<id>__code`` knob holding its code, so one edit adds the node and its code,
+    and a later ``set_knob`` rewrites the code alone. A field the node already binds
+    keeps its binding.
     """
     owners = {knob: owner.id for owner in graph.nodes.values()
               for _field, knob in owner.field_bindings}
@@ -224,29 +227,35 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
             raise EditError(
                 f"new node {node.id!r} binds knob {knob!r}, which node {other!r} {how}; "
                 f"drop field_bindings (and the knob from its knobs) -- a new agent node gets "
-                f"its own {node.id}__system_prompt knob from its system_prompt_template",
+                f"its own {node.id}__system_prompt and {node.id}__task knobs from its "
+                "system_prompt_template and prompt_template",
                 code="E-binding")
     from refactory_dsh.snippet import is_code_node
 
     if node.kind == "agent":
-        field_name, suffix, text, what = ("system_prompt_template", "system_prompt",
-                                          node.system_prompt_template, "system prompt")
+        wanted = [("system_prompt_template", "system_prompt", node.system_prompt_template,
+                   "system prompt"),
+                  ("prompt_template", "task", node.prompt_template, "task text (prompt)")]
     elif is_code_node(node):
-        field_name, suffix, text, what = "code", "code", node.code, "code"
+        wanted = [("code", "code", node.code, "code")]
     else:
-        return node, {}
-    if any(f == field_name for f, _ in node.field_bindings):
         return node, {}
     from .knob import Knob
 
-    name = f"{node.id}__{suffix}"
-    if name in (state.get("knobs") or {}):
-        raise EditError(f"knob {name!r} already exists, so node {node.id!r} cannot get its own "
-                        f"{what} knob; choose another node id", code="E-knob")
-    knob = Knob(text or "", "str", description=f"{what} for {node.id}")
-    node = replace(node, knobs=(*node.knobs, name),
-                   field_bindings=(*node.field_bindings, (field_name, name)))
-    return node, {name: {"value": knob.default, "spec": knob.spec()}}
+    bound = {f for f, _ in node.field_bindings}
+    declared: dict[str, Any] = {}
+    for field_name, suffix, text, what in wanted:
+        if field_name in bound:
+            continue
+        name = f"{node.id}__{suffix}"
+        if name in (state.get("knobs") or {}):
+            raise EditError(f"knob {name!r} already exists, so node {node.id!r} cannot get its "
+                            f"own {what} knob; choose another node id", code="E-knob")
+        knob = Knob(text or "", "str", description=f"{what} for {node.id}")
+        node = replace(node, knobs=(*node.knobs, name),
+                       field_bindings=(*node.field_bindings, (field_name, name)))
+        declared[name] = {"value": knob.default, "spec": knob.spec()}
+    return node, declared
 
 
 def _add_node(state: State, edit: dict) -> State:
@@ -1112,21 +1121,79 @@ def _expand_duplicate(edit: dict, state: State) -> list[dict]:
     return [*steps, {"op": "add_node", "node": node, "position": {"after": source.id}}]
 
 
+#: The node kinds ``split`` replaces, and the kinds it replaces them with: a step, not
+#: control flow (a gate's verdicts, a fork's branches, a join's wait or a data node's
+#: pass are not something two plain steps can carry).
+SPLIT_KINDS = ("agent", "op")
+
+
+def _split_orphans(graph: Graph, target: Node, into: Sequence[Mapping[str, Any]],
+                   declared: Iterable[str]) -> list[str]:
+    """Declared knobs only ``target`` consumes that are not its own (``<target>__...``, which go
+    with it) and that neither new step reads: removing ``target`` would leave them
+    declared and read by nothing (V7)."""
+    others = {name for node in graph.nodes.values() if node.id != target.id
+              for name in (*node.knobs, *(knob for _f, knob in node.field_bindings))}
+    others |= {str(name) for node in into for name in (node.get("knobs") or ())}
+    consumed = (*target.knobs, *(knob for _f, knob in target.field_bindings))
+    declared = set(declared)
+    return sorted({name for name in consumed if name in declared
+                   and not name.startswith(f"{target.id}__") and name not in others})
+
+
 def _pre_split(edit: dict, state: State) -> str | None:
     graph = _graph(state)
-    if edit.get("target") not in graph.nodes:
+    target = graph.nodes.get(edit.get("target"))
+    if target is None:
         return f"no node {edit.get('target')!r} to split"
     into = edit.get("into")
-    if not isinstance(into, list) or len(into) != 2:
+    if not isinstance(into, list) or len(into) != 2 or not all(isinstance(n, dict) for n in into):
         return "'into' must be exactly two node objects"
+    if target.kind not in SPLIT_KINDS:
+        return (f"{target.id!r} is a {target.kind}; split replaces a step ({' or '.join(SPLIT_KINDS)}) "
+                "with two, and two plain steps cannot carry a "
+                f"{target.kind}'s routing. Insert a step before or after it instead")
+    ids = [str(node.get("id") or "") for node in into]
+    for node, node_id in zip(into, ids):
+        if not node_id:
+            return "each node of 'into' needs an id"
+        if node.get("kind") not in SPLIT_KINDS:
+            return (f"{node_id!r} is a {node.get('kind')!r}; split's two steps are each one of "
+                    f"{list(SPLIT_KINDS)}")
+        if node_id in graph.nodes:
+            return f"node {node_id!r} already exists; give each new step a new id"
+    if ids[0] == ids[1]:
+        return f"the two new steps both have id {ids[0]!r}"
+    named = sorted(node.id for node in graph.nodes.values()
+                   if target.id in (*node.targets, *node.optional_targets, *node.sources))
+    if named:
+        return (f"{target.id!r} is named by {', '.join(repr(n) for n in named)} (a fork's branch "
+                "or a join's source), which a split would leave naming a removed node; insert "
+                "a step before or after it instead")
+    try:
+        _sole_out_edge(graph, target.id)
+    except EditError as exc:
+        return str(exc)
+    orphans = _split_orphans(graph, target, into, state.get("knobs") or {})
+    if orphans:
+        return (f"{target.id!r} is the only node reading knob(s) {orphans}, which a split "
+                "would leave read by nothing (rule V7); list them in a new step's `knobs`, or "
+                "insert a step before or after it instead")
     return None
 
 
 def _expand_split(edit: dict, state: State) -> list[dict]:
+    """``target`` replaced: its in-edges lead to the first new step (which takes over as
+    the start or a data pass's entry), first -> second, and the second takes its out-edge
+    (and a pass's exit); then ``target`` goes, with the knobs that were its own
+    (``remove_node``)."""
     first, second = edit["into"]
+    target = edit["target"]
     return [
-        {"op": "add_node", "node": first, "position": {"after": edit["target"]}},
-        {"op": "add_node", "node": second, "position": {"after": first["id"]}},
+        {"op": "add_node", "node": first, "position": {"before": target}},
+        {"op": "add_node", "node": second, "position": {"after": target}},
+        {"op": "remove_node", "id": target},
+        {"op": "add_edge", "source": first["id"], "target": second["id"], "condition": None},
     ]
 
 
@@ -1302,9 +1369,14 @@ _macro("wrap", "Put a new node on every out-edge of an existing node, so it sees
 _macro("bypass", "Remove a node and reconnect each predecessor to each successor.",
        ("target",), _pre_bypass, _expand_bypass)
 _macro("duplicate", "Insert a copy of a node directly after it; the copy gets its own "
-       "knobs (same current values) for every field the original binds to a knob.",
+       "knobs (same current values) for every field the original binds to a knob. The copy "
+       "writes the original's files, so a copy of a step without tools overwrites the "
+       "original's output before anything reads it (rule V19).",
        ("target", "new_id"), _pre_duplicate, _expand_duplicate)
-_macro("split", "Replace one step with two consecutive steps.",
+_macro("split", "Replace one step (an agent or op) with two consecutive new steps: the "
+       "first takes the step's in-edges, the second its out-edge, and the step and its own "
+       "`<id>__...` knobs are removed. The second step must write what the old step's "
+       "readers need.",
        ("target", "into"), _pre_split, _expand_split)
 _macro("reorder", "Swap two adjacent steps. Refused when the first produces what "
        "the second reads.",
@@ -1724,6 +1796,8 @@ def random_edit(
             first, second = rng.sample(templates, 2)
             first = dict(first, id=_fresh_id(graph, str(first.get("id") or "step")))
             second = dict(second, id=_fresh_id(graph, str(second.get("id") or "step")))
+            if second["id"] == first["id"]:
+                second["id"] = _fresh_id(graph, f"{first['id']}_2")
             edit = {"op": "split", "target": rng.choice(node_ids), "into": [first, second]}
         elif op == "reorder":
             pairs = [(e.source, e.target) for e in graph.edges if e.condition is None]

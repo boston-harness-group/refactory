@@ -160,7 +160,10 @@ def _livemath_state() -> dict[str, Any]:
 
 
 def test_inserting_after_the_exit_moves_the_exit():
-    state = nn_edits.apply({"op": "insert_after", "target": "solve", "node": _verify_node()},
+    # verify reads solve's answer before writing its own: one that did not would lose
+    # solve's work (V19).
+    verify = {**_verify_node(), "reads": ["answer.txt"]}
+    state = nn_edits.apply({"op": "insert_after", "target": "solve", "node": verify},
                            _livemath_state())
     graph = nn.Graph.from_state(state["graph"])
     assert graph.nodes["data"].subgraph_exit == "verify"
