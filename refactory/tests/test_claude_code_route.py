@@ -26,8 +26,10 @@ pytestmark = pytest.mark.skipif(not ADAPTER.exists() or shutil.which("node") is 
 
 _FAKE_SDK = textwrap.dedent("""\
     // Stands in for @anthropic-ai/claude-agent-sdk: records the query and answers once.
-    import { writeFileSync } from 'node:fs'
+    import { appendFileSync, writeFileSync } from 'node:fs'
     export function query({ prompt, options }) {
+      // FAKE_SDK_CALLS: one line per query, so a test can count the sessions started.
+      if (process.env.FAKE_SDK_CALLS) appendFileSync(process.env.FAKE_SDK_CALLS, 'query\\n')
       const child = options.spawnClaudeCodeProcess({
         command: process.execPath, args: ['-e', 'setTimeout(() => {}, 60000)'],
         cwd: options.cwd, env: options.env, signal: options.abortController.signal })
@@ -264,3 +266,23 @@ def test_another_error_result_says_what_it_was(tmp_path, fake_sdk, monkeypatch):
     message = str(caught.value)
     assert "category: invalid-result" in message
     assert "the result was an error after 12 output tokens: API Error: 529 overloaded" in message
+
+
+def test_a_rate_limited_result_never_replays_a_session_with_tools(tmp_path, fake_sdk, monkeypatch):
+    """The adapter's detail quotes the provider ("API Error: 429 ... rate_limit_error"):
+    through the real adapter, a session with tools runs once, and the failure is the
+    wire's (``transport``), not a crash a node's retry answers. (The dsh-backend case,
+    where the client could replay, is in test_crashed_step_retry.)"""
+    from refactory_dsh.node_retry import failure_kind
+
+    calls = tmp_path / "calls.txt"
+    monkeypatch.setenv("FAKE_SDK_CALLS", str(calls))
+    monkeypatch.setenv("FAKE_SDK_RESULT", _failed_result(
+        'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}', 0))
+    client = _client(tmp_path, attempts=3, retry_window_s=0).with_tool_policy("")
+    with pytest.raises(RuntimeError) as caught:
+        client.complete("Edit the file", workdir=tmp_path / "run")
+    assert calls.read_text().splitlines() == ["query"]
+    assert "rate_limit_error" in str(caught.value)
+    assert getattr(caught.value, "kind", None) == "transport"
+    assert failure_kind(caught.value) is None

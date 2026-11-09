@@ -378,20 +378,29 @@ SETUP_FAILURE_MARKERS = (
 )
 
 
+#: What a product failure's detail says when the provider, not the model, failed: the
+#: same wire failure a `TRANSPORT_MARKERS` line is, reported inside a product result.
+PROVIDER_FAILURE_MARKERS = ("overloaded", "connection error", "rate_limit", "api_error",
+                            "api error: 5")
+
+
 def failure_kind(cause: str) -> str:
     """What a failed completion's diagnostic line (`failure_cause`) says happened.
 
     ``output_limit``: the model used its whole output allowance without answering --
     the DSH runner's ``dsh: max-tokens:`` or the Claude Code adapter's
-    ``category: output-limit``. ``transport``, ``setup`` (`SETUP_FAILURE_MARKERS`), and
-    otherwise ``worker``: the worker or the product failed.
+    ``category: output-limit``. ``setup`` (`SETUP_FAILURE_MARKERS`): the next session
+    would be refused the same way. ``transport``: the wire or the provider failed, also
+    when a product result reports it (`PROVIDER_FAILURE_MARKERS`). Otherwise ``worker``:
+    the worker or the product failed. Only ``output_limit`` and ``worker`` are crashes a
+    node's retry answers (`node_retry.CRASH_KINDS`).
     """
     lowered = (cause or "").lower()
     if lowered.startswith("dsh: max-tokens:") or "category: output-limit" in lowered:
         return "output_limit"
     if any(marker in lowered for marker in SETUP_FAILURE_MARKERS):
         return "setup"
-    if is_transport_failure(lowered):
+    if is_transport_failure(lowered) or any(marker in lowered for marker in PROVIDER_FAILURE_MARKERS):
         return "transport"
     return "worker"
 
@@ -418,9 +427,24 @@ def is_retryable_failure(stderr: str, *, tool_policy: str = "") -> bool:
     failure after a clean CLI exit. A session with tools finished its work before
     the teardown failed, so a replay would repeat it (commits, pushes): not retried.
     Anything a model, key or prompt caused is not retried."""
-    if is_transport_failure(stderr):
+    if is_transport_failure(without_product_detail(stderr)):
         return True
     return tool_policy == "none" and is_clean_exit_teardown_failure(failure_cause(stderr))
+
+
+#: A product adapter's failure line: fixed facts in parentheses, then (since the Claude
+#: Code adapter names what happened) a free-text detail that may quote the provider.
+_PRODUCT_FAILURE = re.compile(r"(Product subagent failure \([^)]*\)):[^\n]*")
+
+
+def without_product_detail(text: str) -> str:
+    """``text`` with each product failure line cut to its fixed facts.
+
+    The detail can quote the provider ("API Error: 429 ... rate_limit_error"). It says
+    what happened, but it must never decide whether the client replays a session: a
+    session with tools has done real work, and only the fixed facts and the wire's own
+    errors decide that (`is_retryable_failure`)."""
+    return _PRODUCT_FAILURE.sub(r"\1", text or "")
 
 
 #: What the headless runner writes before it streams the model's reasoning.

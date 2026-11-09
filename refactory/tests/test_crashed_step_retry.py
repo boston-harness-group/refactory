@@ -60,11 +60,13 @@ OUTPUT_LIMIT = ("dsh: worker error: Product subagent failure (product: Claude Co
 WORKER_CRASH = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
                 "query-run; category: invalid-result; exit code: 1): the answer was empty")
 
-FAKE_DSH = '''import fcntl, json, pathlib, sys
+FAKE_DSH = '''import fcntl, json, os, pathlib, sys
 root = pathlib.Path({root!r})
 plans = json.loads((root / "plan.json").read_text())
 prompt = sys.stdin.read()
-key = next((key for key in plans if key and key in prompt), "")
+# A key may match the node's system prompt too, which the client hands over in env.
+seen = prompt + os.environ.get("REFACTORY_SYSTEM_PROMPT", "")
+key = next((key for key in plans if key and key in seen), "")
 with open(root / "lock", "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     counter = root / ("calls." + ("".join(c for c in key if c.isalnum()) or "all"))
@@ -267,7 +269,9 @@ def test_a_step_whose_retries_all_crash_is_missing_and_its_item_still_scored(tmp
     item = _pass(run, "0")
     assert "solve crashed 3 times" in (item / "reviews/solve-missing.txt").read_text()
     [record] = [r for r in scores if str(r["id"]) == "0"]
-    assert "solve crashed 3 times" in record["missing_steps"]["solve"]
+    assert record["missing_steps"]["solve"]["cause"] == "crash"
+    assert record["missing_steps"]["solve"]["sessions"] == 1 + PASS_RETRY_TIMES
+    assert "solve crashed 3 times" in record["missing_steps"]["solve"]["error"]
     assert len(_events(item, RETRY_EVENT)) == PASS_RETRY_TIMES
     assert _sessions(item) == ["failed"] * (1 + PASS_RETRY_TIMES)
 
@@ -314,6 +318,57 @@ def test_a_declared_times_zero_turns_the_default_off(tmp_path, runtime):
     assert (item, passed, score) == ("0", False, 0.0) and kind is not None
     assert rest == RIGHT[1:]
     assert dsh.calls() == 4
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_transport_failure_is_not_a_crash_and_still_fails_its_item(tmp_path, runtime):
+    """[both runtimes] A wire that keeps failing (a proxy outage) is not retried as a crash
+    and does not become a missing step: the item fails with an error, as before."""
+    dsh = Scripted(tmp_path / "dsh", {"": ["dsh: TRANSPORT: socket hang up", "right"]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    [(item, passed, score, kind), *rest] = _keys(scores)
+    assert (item, passed, score) == ("0", False, 0.0) and kind is not None
+    assert rest == RIGHT[1:]
+    assert dsh.calls() == 4
+    assert _events(_pass(run, "0"), RETRY_EVENT) == []
+    assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
+
+
+RATE_LIMITED = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
+                "query-run; category: invalid-result; exit code: 1): the result was an error "
+                'after 0 output tokens: API Error: 429 {"type":"error","error":{"type":'
+                '"rate_limit_error","message":"rate limited"}}')
+
+
+def test_a_product_detail_never_makes_the_client_replay_a_session_with_tools(tmp_path):
+    """The product failure's detail may quote the provider's 429. On the dsh backend, where
+    the client replays a transport failure, a session with tools must still run once:
+    only the fixed facts and the wire's own errors decide a replay."""
+    from refactory_dsh.model import is_retryable_failure
+
+    assert not is_retryable_failure(RATE_LIMITED, tool_policy="")
+    assert is_retryable_failure("dsh: TRANSPORT: 429 rate limit", tool_policy="")
+    dsh = Scripted(tmp_path / "dsh", {"": [RATE_LIMITED, "right"]})
+    client = DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(dsh.cli),
+                            attempts=3, retry_window_s=0, timeout_s=60).with_tool_policy("")
+    with pytest.raises(RuntimeError) as caught:
+        client.complete("Edit the file", workdir=tmp_path / "run")
+    assert dsh.calls() == 1
+    assert getattr(caught.value, "kind", None) == "transport"
+
+
+def test_the_optimizer_sees_no_answer_items_apart_from_wrong_ones():
+    from refactory_dsh.optim.base import _item_evidence
+
+    records = [
+        {"id": "1", "passed": True, "score": 1.0, "error_text": None},
+        {"id": "2", "passed": False, "score": 0.0, "error_text": None, "fail_reason": "B is wrong"},
+        {"id": "3", "passed": False, "score": 0.0, "error_text": None, "fail_reason": "no answer",
+         "missing_steps": {"solve": {"cause": "output_limit", "sessions": 3, "error": "x"}}},
+    ]
+    text = "\n".join(_item_evidence(records))
+    assert "1 passed, 1 answered wrong, 1 had no answer (a step crashed), 0 failed" in text
+    assert "| 3 | solve | output_limit | 3 |" in text
 
 
 # ── outside a data pass: unchanged ──────────────────────────────────────────
@@ -403,6 +458,12 @@ def test_which_failures_are_crashes():
     assert cause_kind(WORKER_CRASH) == "worker"
     assert cause_kind("dsh: provider error: 401 authentication failed") == "setup"
     assert cause_kind("TRANSPORT: socket hang up") == "transport"
+    # A provider failure a product result reports is the wire's, not a crash.
+    assert cause_kind("dsh: worker error: Product subagent failure (product: Claude Code; "
+                      "stage: query-run; category: invalid-result; exit code: 1): the result "
+                      "was an error after 0 output tokens: API Error: 529 overloaded") == "transport"
+    assert failure_kind(CompletionFailed("model completion failed on the wire 3 time(s)",
+                                         kind="transport")) is None
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="worker")) == "crash"
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="output_limit")) == "crash"
     assert failure_kind(CompletionFailed("model completion failed (exit 1): x", kind="setup")) is None

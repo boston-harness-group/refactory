@@ -396,6 +396,10 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             from refactory_dsh.node_retry import node_allowance_s
             if node.timeout is not None:
                 command_timeout_s = node_allowance_s(node.timeout, retry) + NODE_DISPATCH_OVERHEAD_S
+                if 'crash' in retry['on']:
+                    # A crashed session's retry is a new dispatch of its own: each one
+                    # gets the startup and shutdown time the first one has.
+                    command_timeout_s += int(retry['times']) * NODE_DISPATCH_OVERHEAD_S
             elif 'timeout' in retry['on']:
                 raise ValueError(f'worker node {name!r} declares a retry but no timeout')
             else:

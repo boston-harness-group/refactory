@@ -332,7 +332,7 @@ def load(project: Path, name: str, version: int | None = None) -> dict[str, Any]
 def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None = None,
             overrides: dict[str, Any] | None = None, validate_settings: bool = True,
             recipe: dict[str, Any] | None = None, model_client: Any = None) -> dict[str, Any]:
-    from refactory_dsh import registry
+    from refactory_dsh import node_retry, registry
     from refactory_dsh.nn import edits
     profile = recipe if recipe is not None else load(project, name, version) if name else {"settings": {}, "contract": {}}
     from refactory_dsh.worker_config import FIELDS, resolve as resolve_workers
@@ -415,7 +415,10 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     route_context = runtime_identity(settings, project, model_client=model_client, uses_models=settings["optimizer"] == "autoresearch" or any(n.get("kind") == "agent" for n in (nodes.values() if isinstance(nodes, dict) else nodes) if isinstance(n, dict)))
     context = {"mode": mode_id, "seed_state": digest(state), "implementation": hashlib.sha256(source.read_bytes()).hexdigest(), "dependencies": implementations, "routing": route_context,
                "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k != "termination"}),
-               "settings": digest(evaluation_fields)}
+               "settings": digest(evaluation_fields),
+               # How the runtime treats a crashed agent step: evidence from before a change
+               # to it is refused on resume rather than mixed in (`node_retry.SEMANTICS`).
+               "runtime_semantics": node_retry.SEMANTICS}
     return {"schema_version": SCHEMA_VERSION, "profile": {"name": name, "version": profile.get("version")} if name else None,
             # What the launch changed on top of the saved profile, as given.
             "overrides": dict(overrides or {}) if name else None,

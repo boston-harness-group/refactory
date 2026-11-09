@@ -226,10 +226,22 @@ def notes_prompts(ctx: Any) -> dict[str, Any]:
     }
 
 
+#: What decide is shown for a fork step that gave no notes (it crashed through its
+#: retries): the other step's notes still reach it.
+NO_NOTES = "(This step gave no notes: its session did not answer.)"
+
+
 def decide_prompt(ctx: Any) -> dict[str, Any]:
-    """decide's framed prompt: the question and all three steps' notes."""
-    message = decide_message(_question(ctx), *(ctx.read_text(NOTES[s][0]) for s in
-                                               ("compare", "precision", "hypotheses")),
+    """decide's framed prompt: the question and all three steps' notes.
+
+    precision and hypotheses run as a fork; one that did not answer is shown as
+    `NO_NOTES`. With neither, there is nothing to decide from, and the missing notes are
+    the error (the item then has no answer, `items.no_answer`)."""
+    fork = [NOTES[s][0] for s in ("precision", "hypotheses")]
+    if not any(ctx.exists(name) for name in fork):
+        raise FileNotFoundError(f"neither fork step wrote its notes: {', '.join(fork)}")
+    notes = [ctx.read_text(name) if ctx.exists(name) else NO_NOTES for name in fork]
+    message = decide_message(_question(ctx), ctx.read_text(NOTES["compare"][0]), *notes,
                              task=_task(ctx, "decide"))
     return {"decide_prompt": claude_backend_prompt(message)}
 
@@ -252,12 +264,14 @@ def extract_answer(ctx: Any) -> dict[str, Any]:
 
 
 def _op(node_id: str, fn: str, *, reads: tuple[str, ...], produces: tuple[str, ...],
-        knobs: tuple[str, ...] = ()) -> nn.Node:
-    """An op of this graph. Every one needs all its reads (the item, or the notes and the
-    answer the steps before it wrote), so they are all ``required_reads``: no edit may put
-    one where they are not written first."""
+        knobs: tuple[str, ...] = (), required: tuple[str, ...] | None = None) -> nn.Node:
+    """An op of this graph. It needs its reads (the item, or the notes and the answer the
+    steps before it wrote), so they are ``required_reads`` -- no edit may put one where
+    they are not written first -- except the fork's notes for decide_prompt, which goes on
+    with the step that answered (``required``)."""
     return nn.Node(node_id, "op", call=f"{SKILL_GRAPH_OPS}:{fn}", reads=reads,
-                   required_reads=reads, produces=produces, **({"knobs": knobs} if knobs else {}))
+                   required_reads=reads if required is None else required, produces=produces,
+                   **({"knobs": knobs} if knobs else {}))
 
 
 def _agent(step: str, writes: str, timeout_s: int) -> nn.Node:
@@ -341,6 +355,7 @@ class SkillGraph(nn.Mode):
             nn.Node("step_join", "join", sources=("precision", "hypotheses")),
             _op("decide_prompt", "decide_prompt",
                 reads=(compare_notes, precision_notes, hypotheses_notes),
+                required=(compare_notes,),
                 produces=("decide_prompt",), knobs=(task_knob("decide"),)),
             _agent("decide", "answer.txt", t),
             _op("extract_answer", "extract_answer", reads=("answer.txt", "current_item.json"),

@@ -1275,6 +1275,7 @@ class Executor:
                             item_id, None, error=RuntimeError(str(exc)),
                             exchanges=list(self._item_exchanges),
                             fail_reason=str(exc),
+                            pass_dir=_pass_dir, outputs_of=self._outputs_of,
                             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             metadata=metadata,
@@ -1292,6 +1293,7 @@ class Executor:
                         record = make_item_record(
                             item_id, None, error=exc,
                             exchanges=list(self._item_exchanges),
+                            pass_dir=_pass_dir, outputs_of=self._outputs_of,
                             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             metadata=metadata,
@@ -1592,6 +1594,11 @@ class Executor:
                 f"retry {verdict!r} was refused before dispatching {target!r}",
             )
 
+    def _outputs_of(self, step: str) -> tuple[str, ...]:
+        """The files and facts ``step`` makes (`items.no_answer`)."""
+        node = self.graph.nodes.get(step)
+        return (*node.writes, *node.produces) if node is not None else ()
+
     # ── retry wrapper ──────────────────────────────────────────────────────
     def _missing_optional(self, node: Node, exc: BaseException) -> bool:
         """Whether ``node``'s failure makes it missing rather than failing its branch.
@@ -1622,6 +1629,10 @@ class Executor:
         error = f"{type(exc).__name__}: {exc}"
         _record_missing(self.ctx.workdir, node.id, error)
         _settle_missing(self.ctx.workdir, [node], error)
+        if spent:
+            from refactory_dsh.node_retry import record_spent
+
+            record_spent(self.ctx.workdir, node.id, exc)
         return True
 
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:

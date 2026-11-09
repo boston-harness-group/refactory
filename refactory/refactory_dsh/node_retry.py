@@ -62,14 +62,47 @@ OUTPUT_LIMIT_NOTE = ("Note: your previous attempt at this step ran out of output
                      "answer well before the limit.")
 
 
+#: Where a step whose retries were spent records why, beside its
+#: ``reviews/<step>-missing.txt``: ``<step>.json`` with its cause and session count
+#: (`record_spent`, read by `items.missing_steps`).
+MISSING_DIR = ".refactory/missing"
+
+#: The runtime behaviour a score depends on beyond the mode's own code: since this
+#: marker, a crashed agent step in a data pass is retried and a spent one leaves its item
+#: without an answer. Scores and seed caches from before it are not comparable
+#: (`profiles.resolve`, `seed_cache.score_context`).
+SEMANTICS = "pass-crash-retry/1"
+
+
 class RetriesExhausted(RuntimeError):
     """A node's session timed out or crashed, and its retries are spent or refused.
 
-    ``kind`` is the `nn.graph.RETRY_ON` failure of the last attempt."""
+    ``kind`` is the `nn.graph.RETRY_ON` failure of the last attempt; ``cause`` says
+    more (``output_limit`` for a crash at the output limit); ``sessions`` is how many
+    sessions ran."""
 
-    def __init__(self, message: str, *, kind: str = "timeout") -> None:
+    def __init__(self, message: str, *, kind: str = "timeout", cause: str | None = None,
+                 sessions: int | None = None) -> None:
         super().__init__(message)
         self.kind = kind
+        self.cause = cause or kind
+        self.sessions = sessions
+
+
+def record_spent(workdir: Path, node: str, error: BaseException) -> None:
+    """Record why a step whose retries were spent has no answer (`MISSING_DIR`)."""
+    if not isinstance(error, RetriesExhausted):
+        return
+    target = Path(workdir) / MISSING_DIR / f"{node}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"cause": error.cause, "sessions": error.sessions,
+                                  "error": str(error)[:2000]}) + "\n")
+
+
+def clear_spent(workdir: Path, node: str) -> None:
+    """A step that answered after it went missing (a gate sent it back) is not missing."""
+    (Path(workdir) / "reviews" / f"{node}-missing.txt").unlink(missing_ok=True)
+    (Path(workdir) / MISSING_DIR / f"{node}.json").unlink(missing_ok=True)
 
 
 def failure_kind(error: BaseException) -> str | None:
@@ -90,8 +123,14 @@ def failure_kind(error: BaseException) -> str | None:
     if isinstance(error, RuntimeError) and str(error).startswith("model completion timed out"):
         return "timeout"
     if isinstance(error, CompletionFailed):
-        return None if error.kind == "setup" else "crash"
+        # Only a product failure: a wire that kept failing (a proxy outage) or a request
+        # the provider refuses would fail the next session the same way.
+        return "crash" if error.kind in CRASH_KINDS else None
     return None
+
+
+#: The `model.CompletionFailed` kinds a ``crash`` retry answers.
+CRASH_KINDS = ("output_limit", "worker")
 
 
 def _output_limit(error: BaseException) -> bool:
@@ -265,7 +304,9 @@ def deliver(
             if index + 1 >= tries:
                 raise RetriesExhausted(
                     f"{node} {failed} {_times(len(ran))} (after {spent}); {its} "
-                    f"is spent. Last error: {error}", kind=kind) from error
+                    f"is spent. Last error: {error}", kind=kind,
+                    cause="output_limit" if _output_limit(error) else kind,
+                    sessions=len(ran)) from error
             limit: int | None = None
             if walls:
                 # The retry's own limit, within what is left of the node's envelope (every
@@ -280,7 +321,9 @@ def deliver(
                     raise RetriesExhausted(
                         f"{node} {failed} (after {spent}) and {its} was not "
                         f"started: {max(0, limit)}s is left of the node's envelope and the "
-                        f"run's wall. Last error: {error}", kind=kind) from error
+                        f"run's wall. Last error: {error}", kind=kind,
+                        cause="output_limit" if _output_limit(error) else kind,
+                        sessions=len(ran)) from error
             if budget is not None:
                 budget.checkpoint()
             settle_for_retry(workdir, node, f"{failed} after {ran[-1]}s; retried by the "
@@ -295,6 +338,6 @@ def deliver(
         receipt = finish(workdir, node, final_response=output, capture_final=capture_final)
         # A step a gate sent back after it went missing has answered now: it is no
         # longer missing (`items.missing_steps`).
-        (workdir / "reviews" / f"{node}-missing.txt").unlink(missing_ok=True)
+        clear_spent(workdir, node)
         return output, receipt
     raise AssertionError("unreachable: every attempt returns or raises")  # pragma: no cover

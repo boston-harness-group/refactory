@@ -366,14 +366,17 @@ def run_data_concurrent(
                     return result
                 record = make_item_record(item_id, None, error=RuntimeError(str(exc)),
                                           exchanges=list(child._item_exchanges),  # noqa: SLF001
-                                          fail_reason=str(exc), **fields)
+                                          fail_reason=str(exc), pass_dir=pass_dir,
+                                          outputs_of=child._outputs_of, **fields)  # noqa: SLF001
                 finished = True
             except Exception as exc:  # noqa: BLE001 - a failed item, as in the sequential loop
                 if cancelled.is_set():
                     result.cancelled = True
                     return result
                 record = make_item_record(item_id, None, error=exc,
-                                          exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
+                                          exchanges=list(child._item_exchanges),  # noqa: SLF001
+                                          pass_dir=pass_dir, outputs_of=child._outputs_of,  # noqa: SLF001
+                                          **fields)
                 finished = True
             else:
                 prediction: str | None = None

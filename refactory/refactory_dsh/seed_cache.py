@@ -82,7 +82,7 @@ def score_context(config: Any, mode_class: type, *, inactivity_s: int | None = N
 
     ``inactivity_s`` defaults to the model client's limit in this process.
     """
-    from refactory_dsh import model
+    from refactory_dsh import model, node_retry
 
     profile = config.resolved_profile or {}
     evaluation = profile.get("evaluation_context") or {}
@@ -102,6 +102,9 @@ def score_context(config: Any, mode_class: type, *, inactivity_s: int | None = N
         "repeats": config.repeats,
         "model_inactivity_s": model.DEFAULT_INACTIVITY_S if inactivity_s is None else inactivity_s,
         "package_files": package_files_hash(mode_class),
+        # How the runtime treats a crashed agent step (`node_retry.SEMANTICS`): a seed
+        # scored before a change to it is not reused.
+        "runtime_semantics": node_retry.SEMANTICS,
     }
 
 

@@ -1034,10 +1034,11 @@ The per-item half of a data node, from the command line.
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `live_dir` | `(workdir: 'Path', node_id: 'str') -> 'Path'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
-| function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None, pass_dir: 'Path \| None' = None) -> 'dict[str, Any] \| None'` |
+| function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None, pass_dir: 'Path \| None' = None, outputs_of: 'Callable[[str], Iterable[str]] \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `mark_pass_complete` | `(pass_dir: 'Path', record: 'dict[str, Any] \| None' = None) -> 'None'` |
 | function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
-| function | `missing_steps` | `(pass_dir: 'Path') -> 'dict[str, str]'` |
+| function | `missing_steps` | `(pass_dir: 'Path') -> 'dict[str, dict[str, Any]]'` |
+| function | `no_answer` | `(pass_dir: 'Path', error_text: 'str', outputs_of: 'Callable[[str], Iterable[str]]') -> 'dict[str, dict[str, Any]]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
 | function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
@@ -1064,7 +1065,8 @@ The per-item half of a data node, from the command line.
 - **`make_item_record`** — Build a per-item record for one evaluated item.
 - **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
-- **`missing_steps`** — The steps a pass went on without, each with why: its ``reviews/<step>-missing.txt``,
+- **`missing_steps`** — The steps a pass went on without, each with why: ``cause`` (``output_limit``,
+- **`no_answer`** — The missing steps whose absent output is why a later step of the pass failed, or {}.
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
 - **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.
