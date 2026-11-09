@@ -1459,7 +1459,8 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
     """The index of the edit that fails on its own, and the state the edits reach when
     none does. As the attempt path checks them: every edit's shape and op first (not an
     object, not in the catalogue), then each in order against the state the ones before
-    it left (precheck, apply, and in a bundle an edit that changes nothing)."""
+    it left (precheck, apply, and in a bundle an edit that changes nothing). Protected
+    nodes are judged on the state the edits reach, not edit by edit."""
     state = parent.state
     for index, edit in enumerate(edits):
         if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
@@ -1468,13 +1469,13 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
         if nn_edits.precheck(edit, state):
             return index, state
         try:
-            after = nn_edits.apply(edit, state, protected=applier.protected)
+            after = nn_edits.apply(edit, state)
         except nn_edits.EditError:
             return index, state
         if len(edits) > 1 and candidate_id(after) == candidate_id(state):
             return index, state  # an edit of a bundle that changes nothing
         state = after
-    dead = (_dead_edit(edits, parent.state, state, applier.protected)
+    dead = (_dead_edit(edits, parent.state, state)
             if candidate_id(state) != parent.id else None)
     return dead, state
 

@@ -16,7 +16,8 @@ from typing import Any, Sequence
 from refactory_dsh.nn import edits as nn_edits
 
 from .base import (
-    READER_CONCURRENCY, Candidate, Optimizer, Proposal, ProposalContext, trajectory_groups,
+    READER_CONCURRENCY, Candidate, Optimizer, Proposal, ProposalContext, considered_text,
+    trajectory_groups,
 )
 
 def text_only(model: Any) -> Any:
@@ -268,6 +269,7 @@ class AutoresearchOptimizer(Optimizer):
             self.record_call(**call, reply=text, proposals=0, error=f"{type(exc).__name__}: {exc}")
             raise
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
+        self.last_considered = considered_text(payload.get("considered"))
         parent_ids = {parent.id for parent in parents}
         # A proposal that names no parent belongs to the pipeline the request showed
         # ("The pipeline you may edit" is ``ctx.parent``'s). Left unset, the loop
@@ -294,7 +296,8 @@ class AutoresearchOptimizer(Optimizer):
             )
         proposals = proposals[: max(1, n)]
         self.record_call(**call, reply=text, proposals=len(proposals),
-                         diagnosis=self.last_diagnosis, error=None)
+                         diagnosis=self.last_diagnosis, considered=self.last_considered,
+                         error=None)
         return proposals
 
 

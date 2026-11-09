@@ -66,6 +66,15 @@ class PickedParent(Optimizer):
         if "proposer" in self.__dict__:
             self.proposer.last_diagnosis = value
 
+    @property
+    def last_considered(self) -> str:  # type: ignore[override]
+        return str(getattr(self.proposer, "last_considered", "") or "")
+
+    @last_considered.setter
+    def last_considered(self, value: str) -> None:
+        if "proposer" in self.__dict__:
+            self.proposer.last_considered = value
+
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         self.proposer.bind_model(model, workdir=workdir)
 

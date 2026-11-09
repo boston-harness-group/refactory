@@ -422,6 +422,15 @@ def render(template: str, ctx: RunContext) -> str:
     return re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", replace, template)
 
 
+def fills_facts(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark an op that fills each ``{{name}}`` in the ``str`` knobs it reads (its node's
+    ``knobs``) from the run's facts and knobs, as an agent's prompt is filled
+    (:func:`render`). The validator reads the mark: a slot in such a knob is one of the
+    op's inputs (V15, V17), and a slot in a knob nothing fills is refused (V20)."""
+    fn.fills_facts = True  # type: ignore[attr-defined]
+    return fn
+
+
 def _eval_condition(expr: str, values: dict[str, Any]) -> bool:
     """Evaluate a simple conditional expression against *values*.
 

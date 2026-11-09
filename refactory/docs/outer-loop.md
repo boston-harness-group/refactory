@@ -87,7 +87,10 @@ the strategies that merge parents or pick among sibling samples outside the gate
   The history's best is the best kept candidate. Val scores are never shown to it;
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
-  carries that run's `best_train_score` instead.
+  carries that run's `best_train_score` instead (as for any `best_score_basis` other
+  than train), and a bound whose text names a held-out part (test, holdout, held-out,
+  hold out; "seed scored on train, val and test") is left out: no test or holdout
+  number or wording reaches it.
 - **What a person reads.** Each epoch's progress line says how many candidates the
   gate kept and rejected that epoch, with the val best and current scores, instead of
   a train-score "improved".
@@ -356,6 +359,20 @@ The edit layer enforces the same for every edit that adds a node (`add_node`,
   exit), and the step goes with its own knobs. It is refused for a gate, fork, join or
   data node, a fork branch or join source, and when it would leave a knob read by
   nothing.
+- **Where `{{fact}}` is filled in (V20).** An agent cannot read a file: a file's text
+  becomes a fact through a code op that reads it and `produces` the fact, or when the
+  agent writing it declares `produces`. A `{{fact}}` is filled in an agent's
+  `prompt_template` and `system_prompt_template` (its `<id>__task` and
+  `<id>__system_prompt` knobs) and in a knob an op marked `nn.fills_facts` reads, as
+  LiveMath's skill graph marks the ops that read its `<step>_task` knobs; there a slot is
+  one of the op's inputs (V15, V17). A slot an edit leaves in any other knob would reach
+  its reader as written, so it is refused -- whether the edit added the slot or removed
+  or rewired the step that filled it. It is judged by node, knob and slot against the
+  parent: a slot the parent already left unfilled at the same node and knob (a design
+  brief asking for a `{{name}}` renderer) is the author's or the user's text and is
+  left be. Seeds and knobs a person sets (`--knob`) are not judged by V20; a test holds
+  every shipped mode's seed to having no unfilled slot.
+  The request names the knobs such ops read.
 - **Lost writes (V19).** A no-tools agent or code op that sets no fact, whose every file
   a no-tools agent writes again on every path before any node reads or may read it (a
   Python op or gate, an agent with tools, a data pass), is refused.
@@ -399,10 +416,17 @@ optimizer, at no extra compute (train records only):
 - **Your earlier reasoning and what happened.** Up to 6 recent candidates: the line
   from the seed to the edited candidate, and the latest rejected children. Each shows
   the rationale and prediction the optimizer gave when proposing it, the round's
-  diagnosis, the gate's decision, its train score and its fixed and broken counts
-  against its parent. Texts are clipped to 600 characters. Each proposal keeps the
-  diagnosis of the call that produced it, and the proposals' own words are journaled,
-  so a resumed run keeps them.
+  diagnosis (and what that round's answer said it considered, when it did), the gate's
+  decision, its train score and its fixed and broken counts against its parent. Texts
+  are clipped to 600 characters. Each proposal keeps the diagnosis of the call that
+  produced it, and the proposals' own words are journaled, so a resumed run keeps them.
+- **What an answer considered.** The answer format has an optional, short
+  `considered`: the kinds of change the optimizer weighed for its diagnosis (only the
+  kinds the run permits are named) and why it chose its own. It asks for no particular
+  kind. When given (a string, a list or an object, kept to 1500 characters) it goes in
+  the call's trace line, the proposal's journal record, the round's
+  `analysis/generation-<n>.md` and the report's "What the optimizer weighed"; an answer
+  without it is read as before.
 
 A proposal refused as a duplicate (`E-duplicate`) is told which candidate it repeats
 (its id), so the retry can look it up and move on. This applies with or without the
@@ -411,7 +435,8 @@ gate.
 Every call the `autoresearch` optimizer makes is appended to
 `<run root>/optimizer_trace.jsonl` as it happens. Each line records the epoch, the
 generation, the proposal round, the system prompt, the prompt, the reply, how many
-proposals were parsed, the diagnosis, and the error for a call that failed. A resumed
+proposals were parsed, the diagnosis, what the answer considered, and the error for a
+call that failed. A resumed
 run appends to the file; a fresh run in the same directory starts it over, as it does
 the journal. A trace line that cannot be written (a full disk) is a warning; the
 proposals are kept. The other library optimizers call no model; SkillOpt records its own
@@ -535,8 +560,12 @@ state is promised, on any graph shape:
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
-  `E-protected`. A new node may still go in front of one. The optimizer's request lists
-  them.
+  `E-protected`. A new node may still go in front of one. A proposal's edits are judged
+  together on the state they leave, so "remove a step, then put a code op in its place"
+  is accepted even though the first edit alone would let a run skip a protected node;
+  a bundle that does leave one skippable is refused, naming the bundle and the edit
+  from which no later edit restores it (`[the n edits together; from edit k (op) on,
+  ...]`). The optimizer's request lists them.
 
 ### Code nodes, verdict gates and `parallel`: composing the four primitives
 

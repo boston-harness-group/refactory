@@ -357,11 +357,13 @@ def _grader_side_knobs(state: dict[str, Any], nodes: Sequence[str]) -> dict[str,
     return out
 
 
-def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any], result: dict[str, Any],
-               protected: Sequence[str] = ()) -> int | None:
+def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any],
+               result: dict[str, Any]) -> int | None:
     """The index of a compound proposal's first edit the result does not depend on: the
     other edits, applied without it, reach the same state (a later edit overwrote it or
-    undid it). ``None`` for a single edit, or when every edit counts."""
+    undid it). ``None`` for a single edit, or when every edit counts. Protected nodes need
+    no check here: a subset reaching the result's id reaches the result's graph and
+    knobs, which already passed it."""
     if len(steps) < 2:
         return None
     target = candidate_id(result)
@@ -370,12 +372,27 @@ def _dead_edit(steps: Sequence[dict[str, Any]], start: dict[str, Any], result: d
         try:
             for other, edit in enumerate(steps):
                 if other != index:
-                    state = nn_edits.apply(edit, state, protected=protected)
+                    state = nn_edits.apply(edit, state)
         except Exception:  # noqa: BLE001 - the others need this one: it counts
             continue
         if candidate_id(state) == target:
             return index
     return None
+
+
+def _protected_culprit(steps: Sequence[dict[str, Any]], start: dict[str, Any],
+                       prefixes: Sequence[dict[str, Any]], protected: Sequence[str]) -> str:
+    """For a bundle whose end state breaks a protected node: the edit from which every
+    later state breaks it too (the one that did it and nothing after repaired it), named
+    beside the bundle. Empty for a single edit."""
+    if len(steps) < 2:
+        return ""
+    culprit = len(prefixes) - 1
+    while culprit > 0 and nn_edits.protected_violation(start, prefixes[culprit - 1], protected):
+        culprit -= 1
+    op = steps[culprit].get("op") if isinstance(steps[culprit], dict) else "?"
+    return (f" [the {len(steps)} edits together; from edit {culprit + 1} ({op}) on, "
+            "no later edit restores it]")
 
 
 def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = None,
@@ -708,7 +725,9 @@ class ProposalContext:
             "",
             *_blocks_section(self.insertable, self.catalogue),
             *composition_section(self.catalogue, self.node_states, self.edges,
-                                 protected=self.protected, code_nodes=self.code_nodes),
+                                 protected=self.protected, code_nodes=self.code_nodes,
+                                 text_knobs=[k.get("name") for k in self.knobs
+                                             if k.get("kind") == "str"]),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
@@ -785,7 +804,8 @@ class ProposalContext:
             ]
         sections += ["", "## Answer", answer_instructions(
             self.catalogue, parsimony=self.parsimony,
-            items=_item_count(self.item_records) if self.score_is_item_mean else 0)]
+            items=_item_count(self.item_records) if self.score_is_item_mean else 0,
+            code_nodes=self.code_nodes)]
         if self.max_edits > 1:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue,
                                                  proposals=self.proposals)]
@@ -959,9 +979,29 @@ def _composition_anchor(node_states: Sequence[dict[str, Any]], edges: Sequence[d
     return None
 
 
+def _fact_filled_knobs(node_states: Sequence[dict[str, Any]],
+                       text_knobs: Iterable[str] | None = None) -> list[str]:
+    """The knobs an op that fills facts reads (`nn.fills_facts`): beside an agent's
+    templates, the only places a `{{fact}}` is filled in. Only text knobs, given
+    ``text_knobs`` (a flag the same op reads holds no slot)."""
+    from refactory_dsh.nn.graph import Node
+    from refactory_dsh.nn.validate import filled_knobs
+
+    names: set[str] = set()
+    for state in node_states:
+        try:
+            names.update(filled_knobs(Node.from_state(dict(state))))
+        except Exception:  # a node that does not read back is the validator's to report
+            continue
+    if text_knobs is not None:
+        names &= set(text_knobs)
+    return sorted(names)
+
+
 def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                         edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
-                        code_nodes: bool = False) -> list[str]:
+                        code_nodes: bool = False,
+                        text_knobs: Iterable[str] | None = None) -> list[str]:
     """The language's primitives and how they compose, with one short example per
     composition the run permits (a new agent, a code op, a verdict loop, a parallel
     fork), built from this graph's own ids, so no one shape reads as the way to grow
@@ -971,6 +1011,9 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     if not structural_ops(catalogue):
         return []
     ops = {op.get("op") for op in catalogue}
+    reader = ("a code op that reads the file and `produces` the fact" if code_nodes else
+              "an op that reads the file and `produces` the fact")
+    filled = _fact_filled_knobs(node_states, text_knobs)
     lines = [
         "## How nodes compose",
         "The pipeline is made of four kinds of step, and any of them may be put anywhere the "
@@ -978,7 +1021,15 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) "
         "produced upstream; its reply is written to its first `writes` file and, when it "
         "declares `produces`, also becomes that fact. A new agent runs without tools, so it "
-        "sees only its prompt: hand it what it needs as `{{facts}}`.",
+        "sees only its prompt and cannot read a file: hand it what it needs as `{{facts}}`. "
+        f"A file's text becomes a fact through {reader}, or when the agent that writes the "
+        "file declares `produces`.",
+        "- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its "
+        "`<id>__task` knob) and its system prompt (its `<id>__system_prompt` knob)"
+        + (f", and in {', '.join(f'`{name}`' for name in filled)}, which an op that fills "
+           "facts reads" if filled else "")
+        + ". Any other knob is read as written, so a `{{fact}}` there would never arrive "
+        "and is refused (V20).",
     ]
     if code_nodes:
         lines += [
@@ -1038,8 +1089,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             "- **fork**: the `parallel` operation runs 2-8 new steps at once between a fork "
             "and a join after a step; branches write distinct files and facts. Nothing reads "
             "them until you say so: insert a node after the join that reads the branches' "
-            "files or facts, or use a branch's fact as `{{name}}` in a later step's prompt "
-            "knob.")
+            "files or facts, or use a branch's fact as `{{name}}` where a later step fills "
+            "it in (above).")
     anchor = _composition_anchor(node_states, edges, protected)
     if anchor is None or not ({"loop", "insert_before", "insert_after"} & ops):
         return lines + [""]
@@ -1075,16 +1126,20 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                        "prompt_template": "<what to check, with the work as fact slots; "
                                           "answer 'proceed' or 'reloop' first, then why>"}}]))
     if code_nodes and "insert_after" in ops:
-        fact = f"{step}_digest"
+        fact = f"{step}_conclusions"
         examples.append((
-            f"A code op computes a fact from `{step}`'s file for `{successor}` or any later "
-            f"step to use as `{{{{{fact}}}}}`:",
+            f"A code op computes a fact from `{step}`'s file (here: the lines that state a "
+            f"conclusion), with no model call, for `{successor}` or any later agent to use "
+            f"as `{{{{{fact}}}}}`:",
             [{"op": "insert_after", "target": step,
               "node": {"id": fact, "kind": "op", "call": snippet.RUN, "reads": [output],
                        "produces": [fact],
-                       "code": ("def main(inp):\n"
+                       "code": ("import re\n"
+                                "def main(inp):\n"
                                 f"    text = inp['files'].get({output!r}, '')\n"
-                                f"    return {{'facts': {{{fact!r}: text.strip()[-2000:]}}}}\n")}}]))
+                                "    found = [line.strip() for line in text.splitlines()\n"
+                                "             if re.search(r'(?i)\\b(therefore|so|hence)\\b', line)]\n"
+                                f"    return {{'facts': {{{fact!r}: '\\n'.join(found[-5:]) or 'none'}}}}\n")}}]))
     lines += ["", "Examples, one per composition (built from this graph; none is the "
                   "preferred shape -- compose your own the same way):"]
     for title, bundle in examples:
@@ -1093,17 +1148,25 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
-                        items: int = 0) -> str:
+                        items: int = 0, code_nodes: bool = False) -> str:
     """The answer format and its rules, with examples for what this run permits.
 
     ``items`` is the number of train items when the raw score is known to be their
     mean (0 otherwise): only then does the size cost line compare a node with one item.
     """
     structural = structural_example(catalogue)
+    ops = {op.get("op") for op in catalogue}
+    kinds = ["a prompt or setting"] + ([] if structural is None else [
+        *(["a new agent step"] if ops & {"insert_after", "insert_before", "add_node"} else []),
+        *(["a code step"] if code_nodes else []),
+        *(["a gate or loop"] if "loop" in ops else []),
+        *(["parallel steps"] if "parallel" in ops else [])])
     lines = [
         "Write one JSON object and nothing else:",
         "",
         '{"diagnosis": "<what the evidence shows is limiting the score>",',
+        ' "considered": "<optional, short: the kinds of change you weighed for this '
+        f'diagnosis ({", ".join(kinds)}) and why you chose yours>",',
         ' "proposals": [{"edit": {"op": "<operation>", ...},',
         '                "rationale": "<why, citing the evidence>",',
         '                "prediction": "<expected effect on the score>",',
@@ -1212,6 +1275,27 @@ Example:
 #: each it quotes: enough to see a pattern, bounded so a large part stays a section.
 ITEM_EVIDENCE_ROWS = 6
 ITEM_EVIDENCE_CHARS = 240
+
+
+#: The most of an answer's ``considered`` kept in the journal, the trace and reports.
+CONSIDERED_CHARS = 1500
+
+
+def considered_text(value: Any) -> str:
+    """An answer's optional ``considered`` as one bounded text: a string as it is, a list
+    one entry per line, an object as JSON; empty when it is missing or empty. Never an
+    error: the field is optional, so a missing or odd one costs the proposal nothing."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (list, tuple)):
+        text = "\n".join(str(entry if not isinstance(entry, (dict, list)) else
+                              json.dumps(entry, default=str)) for entry in value)
+    elif isinstance(value, dict):
+        text = json.dumps(value, default=str)
+    else:
+        text = str(value)
+    text = text.strip()
+    return text if len(text) <= CONSIDERED_CHARS else text[: CONSIDERED_CHARS - 1] + "…"
 
 
 def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
@@ -2001,7 +2085,9 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
                   "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
-                  f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}"]
+                  f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
+                  *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]
+                    if entry.get("considered") else [])]
     promising = [entry for entry in entries if entry.get("gate") == "rejected"
                  and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)
                  and entry["fixed"] > entry["broken"]]
@@ -2148,6 +2234,9 @@ class Optimizer:
         self.k = max(1, int(k))
         self.rejections: list[Rejection] = []
         self.last_diagnosis: str = ""
+        #: The answer's optional ``considered``: the kinds of change it weighed and why it
+        #: chose its own, recorded beside the diagnosis so each round's choice can be read.
+        self.last_considered: str = ""
         #: Every round that failed to propose, with the reason. A failure here is
         #: not a crash -- a run should survive a model that is down -- but it is
         #: also not a search result, and the difference between "the model did not
@@ -2302,9 +2391,12 @@ class Optimizer:
         guarded = _grader_side_knobs(parent.state, (*protected, *graders))
         # A compound proposal's edits go through the same checks one by one, each
         # against the state the edits before it left; the combined state is then held
-        # to every rule below once, as one candidate.
+        # to every rule below once, as one candidate. Protected nodes are judged on that
+        # combined state too: "remove a step, then add one in its place" passes through
+        # a state where the run skips a protected node, and only the end state runs.
         state = parent.state
         edit_reports: list[dict[str, Any] | None] = []
+        prefixes: list[dict[str, Any]] = []  # the state after each edit, for E-protected
         for index, edit in enumerate(steps):
             if edit.get("op") == "set_knob" and edit.get("name") in frozen:
                 return [_at(f"E-frozen: knob {edit.get('name')!r} is frozen for this run",
@@ -2321,7 +2413,7 @@ class Optimizer:
                 return [_at(f"E-precondition: {reason}", index, steps)]
             reports: list[dict[str, Any]] = []
             try:
-                state = nn_edits.apply(edit, state, edit_reports=reports, protected=protected)
+                state = nn_edits.apply(edit, state, edit_reports=reports)
             except nn_edits.EditError as exc:
                 return [_at(f"{exc.code}: {exc}", index, steps)]
             except Exception as exc:  # an operator bug is reported, not swallowed
@@ -2332,9 +2424,15 @@ class Optimizer:
                 return [_at(f"E-noop: {edit.get('op')} leaves the state as the edits before "
                             "it left it; drop it or change it", index, steps)]
             edit_reports.append(reports[0] if reports else None)
+            prefixes.append(state)
+
+        violation = nn_edits.protected_violation(parent.state, state, protected)
+        if violation:
+            return [f"E-protected: {violation}" + _protected_culprit(steps, parent.state,
+                                                                      prefixes, protected)]
 
         # A bundle that changes nothing at all is refused below as one no-op.
-        dead = (_dead_edit(steps, parent.state, state, protected)
+        dead = (_dead_edit(steps, parent.state, state)
                 if candidate_id(state) != parent.id else None)
         if dead is not None:
             return [_at(f"E-noop: {steps[dead].get('op')} has no effect on the result: the "
@@ -2385,7 +2483,8 @@ class Optimizer:
             ]
 
         issues = validate_state(state, invariants=invariants, resolve_calls=resolve_calls,
-                                grader_side=(*protected, *graders), graders=tuple(graders))
+                                grader_side=(*protected, *graders), graders=tuple(graders),
+                                baseline=parent.state)
         if issues:
             return [str(issue) for issue in issues]
         unlowerable = _lowering_refusal(parent.state, state)

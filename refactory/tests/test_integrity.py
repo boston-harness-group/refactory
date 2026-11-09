@@ -197,3 +197,174 @@ def test_the_prompt_refusals_include_the_invariant(tmp_path):
     assert not candidates
     reasons = [r for rejection in rejections for r in rejection.reasons]
     assert any(r.startswith("I:") for r in reasons), reasons
+
+
+# ── V20: a {{name}} in a knob is filled only where a runtime fills it ─────────
+
+
+@nn.fills_facts
+def filled_op(ctx):  # type: ignore[no-untyped-def]
+    """An op that renders the knobs it reads (resolved as ``test_integrity:filled_op``)."""
+    return {}
+
+
+def _knob_reader(node: nn.Node) -> nn.Graph:
+    """``a`` produces the fact ``a``; ``node`` reads the knob ``note`` after it."""
+    graph = nn.Graph()
+    graph.add(nn.Node("a", "op", call=f"{OPS}:write_best", writes=("a.json",), produces=("a",)))
+    graph.add(node)
+    graph.connect("a", node.id)
+    return graph
+
+
+def _v20(graph: nn.Graph, note: str, before: str = "Use a.",  # type: ignore[no-untyped-def]
+         **kwargs) -> list[tuple[str, str, str]]:
+    """V20 for an edit that set ``note`` from ``before`` to ``note`` on the same graph."""
+    issues = nn.validate(graph, {"note": note}, declared_knobs={"note": nn.Knob(note, "str")},
+                         baseline=(graph, {"note": before}), **kwargs)
+    return [(i.code, i.node, i.knob) for i in issues if i.code == "V20"]
+
+
+@pytest.mark.parametrize("call, refused", [(f"{OPS}:write_best", True),
+                                           ("test_integrity:filled_op", False)])
+def test_a_slot_in_a_knob_an_op_pastes_as_written_is_refused(call, refused):
+    """An op reads its knob as it is unless its callable fills facts: a `{{fact}}` there
+    would reach the step as braces while the state looked valid, so it is refused."""
+    graph = _knob_reader(nn.Node("b", "op", call=call, produces=("done",), knobs=("note",)))
+    assert _v20(graph, "Use {{a}}.") == ([("V20", "b", "note")] if refused else [])
+    assert _v20(graph, "Use a.") == []
+    # Only a slot the edit added is judged: one the knob held before is its author's or
+    # its user's text, and without a baseline (a seed, a person's --knob) none is judged.
+    assert _v20(graph, "Use {{a}} again.", before="Use {{a}}.") == []
+    assert _v20(graph, "Use {{a}} and {{b}}.", before="Use {{a}}.") == (
+        [("V20", "b", "note")] if refused else [])
+    assert [i for i in nn.validate(graph, {"note": "Use {{a}}."},
+                                   declared_knobs={"note": nn.Knob("", "str")})
+            if i.code == "V20"] == []
+    # Without resolving calls an op's callable is unknown, so it is not judged.
+    assert _v20(graph, "Use {{a}}.", resolve_calls=False) == []
+
+
+def test_a_slot_in_an_agents_prompt_knob_is_filled_and_an_unbound_one_is_not():
+    bound = nn.Node("ask", "agent", prompt_template="(the knob)", writes=("ask.txt",), tool_policy="none",
+                    field_bindings=(("prompt_template", "note"),), knobs=("note",))
+    assert _v20(_knob_reader(bound), "Use {{a}}.") == []
+    unbound = nn.Node("ask", "agent", prompt_template="Go.", writes=("ask.txt",),
+                      tool_policy="none", knobs=("note",))
+    assert _v20(_knob_reader(unbound), "Use {{a}}.") == [("V20", "ask", "note")]
+
+
+def test_a_design_brief_with_braces_is_the_users_text_and_an_added_slot_is_refused():
+    """Design mode's prepare op pastes the user's brief as written. A brief asking for a
+    `{{name}}` renderer is the user's text: the seed is valid and an edit to another knob
+    leaves it be. A slot the search adds to it is refused (V20)."""
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_dsh.optim import Optimizer, Proposal
+
+    brief = "Build a tiny mustache renderer that fills {{name}} placeholders."
+    seed = nn_edits.configure(DesignMode().state_dict(), "brief", brief)
+    assert not [str(i) for i in nn.validate_state(seed, resolve_calls=True) if i.code == "V20"]
+    parent = Candidate.from_state(seed)
+
+    def attempt(value: str):  # type: ignore[no-untyped-def]
+        return Optimizer().attempt(Proposal(edit={"op": "set_knob", "name": "brief",
+                                                  "value": value}),
+                                   parent, (), True, (), [parent.id])
+
+    kept = attempt(brief + " Keep {{name}} literal.")
+    assert not (isinstance(kept, list) and any(r.startswith("V20") for r in kept)), kept
+    added = attempt(brief + " Use {{research_scope}}.")
+    assert isinstance(added, list) and any(
+        r.startswith("V20") and "{{research_scope}}" in r and "'brief'" in r for r in added), added
+
+
+def _edit_v20(before: nn.Graph, after: nn.Graph, values_before: dict, values_after: dict
+              ) -> list[tuple[str, str, str]]:
+    """V20 for an edit from ``(before, values_before)`` to ``(after, values_after)``."""
+    knobs = {name: nn.Knob("", "str") for name in values_after}
+    issues = nn.validate(after, values_after, declared_knobs=knobs,
+                         baseline=(before, values_before))
+    return [(i.code, i.node, i.knob) for i in issues if i.code == "V20"]
+
+
+def _agent(bound: bool) -> nn.Node:
+    return nn.Node("ask", "agent", prompt_template="Go.", writes=("ask.txt",), tool_policy="none",
+                   field_bindings=(("prompt_template", "note"),) if bound else (), knobs=("note",))
+
+
+def test_v20_judges_who_reads_the_knob_not_only_its_text():
+    """The same text is judged by its readers: unbinding the agent prompt that filled a
+    slot, or adding an op that pastes a slot-bearing knob, strands the slot and is
+    refused though the knob's text did not change."""
+    values = {"note": "Use {{a}}."}
+    assert _edit_v20(_knob_reader(_agent(True)), _knob_reader(_agent(False)),
+                     values, values) == [("V20", "ask", "note")]
+    added = _knob_reader(_agent(True))
+    added.add(nn.Node("paste", "op", call=f"{OPS}:write_best", produces=("pasted",),
+                      knobs=("note",)))
+    added.connect("ask", "paste")
+    assert _edit_v20(_knob_reader(_agent(True)), added, values, values) == [
+        ("V20", "paste", "note")]
+
+
+def test_v20_catches_a_slot_moved_or_renamed_into_a_pasted_knob():
+    """Moving a slot from a knob a fact-filling op reads to one an op pastes, or to a new
+    knob name the pasting op reads, is a new unfilled slot and refused; the slot the
+    parent already left in the same node and knob is not."""
+    def graph(pasted_knob: str) -> nn.Graph:
+        g = _knob_reader(nn.Node("fill", "op", call="test_integrity:filled_op",
+                                 produces=("filled",), knobs=("note",)))
+        g.add(nn.Node("paste", "op", call=f"{OPS}:write_best", produces=("pasted",),
+                      knobs=(pasted_knob,)))
+        g.connect("fill", "paste")
+        return g
+
+    before = {"note": "Use {{a}}.", "other": "plain"}
+    moved = {"note": "plain", "other": "Use {{a}}."}
+    assert _edit_v20(graph("other"), graph("other"), before, moved) == [
+        ("V20", "paste", "other")]
+    renamed = {"note": "Use {{a}}.", "renamed": "Use {{a}}."}
+    assert _edit_v20(graph("other"), graph("renamed"), before, renamed) == [
+        ("V20", "paste", "renamed")]
+    stays = {"note": "plain", "other": "Use {{a}}."}
+    assert _edit_v20(graph("other"), graph("other"), stays, stays) == []
+
+
+def test_every_shipped_mode_seed_leaves_no_slot_unfilled():
+    """V20 judges edits against their parent; this checks the parents everything starts
+    from: no shipped mode's seed holds a slot nothing fills (the check without a
+    baseline), so a package cannot silently ship one."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import refactory_dsh
+    import refactory_packages
+    from refactory_dsh.nn.validate import unfilled_slot_issues
+
+    modes = set()
+    for package in (refactory_packages, refactory_dsh):
+        for found in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+            try:
+                module = importlib.import_module(found.name)
+            except Exception:  # noqa: BLE001 - a module that does not import declares no mode here
+                continue
+            modes |= {cls for _, cls in inspect.getmembers(module, inspect.isclass)
+                      if issubclass(cls, nn.Mode) and cls is not nn.Mode
+                      and cls.__module__ == module.__name__}
+    checked = 0
+    for cls in sorted(modes, key=lambda c: f"{c.__module__}.{c.__name__}"):
+        try:
+            state = cls().state_dict()
+        except Exception:  # noqa: BLE001 - a mode that needs arguments is not a seed here
+            continue
+        graph = nn.Graph.from_state(state["graph"])
+        values = {name: entry["value"] for name, entry in state["knobs"].items()}
+        assert not [str(i) for i in unfilled_slot_issues(graph, values)], cls
+        checked += 1
+    assert checked > 10
+    # The check itself sees a seed slot an op pastes.
+    pasted = _knob_reader(nn.Node("b", "op", call=f"{OPS}:write_best", produces=("done",),
+                                  knobs=("note",)))
+    assert [i.node for i in unfilled_slot_issues(pasted, {"note": "Use {{a}}."})] == ["b"]

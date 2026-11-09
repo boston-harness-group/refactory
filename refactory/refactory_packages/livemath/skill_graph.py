@@ -38,7 +38,8 @@ Knobs: two open text knobs per step, one way to edit each piece of text.
   notes and no answer (``NOTES_FORMAT``).
 * ``<step>_task`` (``compare_task``, ...): the ``## Your Task`` text ending the
   step's user message; defaults are ``COMPARE_TASK`` ... ``DECIDE_TASK``. The
-  question and the earlier steps' notes are data, not knobs.
+  question and the earlier steps' notes are data, not knobs. A ``{{name}}`` in a
+  task knob is filled from the run's facts, as in an agent's prompt.
 
 Frozen: the ``max_completion_tokens`` / ``data_parallelism``
 run settings, as the baseline freezes them, and ``use_theorem`` / ``use_sketch``
@@ -185,13 +186,20 @@ def decide_message(question: str, compare_notes: str, precision_notes: str,
 
 
 def _task(ctx: Any, step: str) -> str:
-    """The step's task text: its ``<step>_task`` knob."""
-    return str(ctx.knob(task_knob(step), TASKS[step]))
+    """The step's task text: its ``<step>_task`` knob, with each ``{{name}}`` filled from
+    the run's facts and knobs as an agent's prompt is, so a fact a step the search adds
+    produces (a code op's, say) can reach this step's message. The ops that read these
+    knobs are marked ``nn.fills_facts``, so the validator holds the slots to what is
+    produced before them (V15) and keeps grader-derived data out (V17)."""
+    from refactory_dsh.nn.executor import render
+
+    return render(str(ctx.knob(task_knob(step), TASKS[step])), ctx)
 
 
 # ── ops ───────────────────────────────────────────────────────────────────
 
 
+@nn.fills_facts
 def prepare(ctx: Any) -> dict[str, Any]:
     """The item's question and choices, and compare's framed prompt.
 
@@ -215,6 +223,7 @@ def _question(ctx: Any) -> str:
     return str(ctx.facts.get("user_prompt") or "")
 
 
+@nn.fills_facts
 def notes_prompts(ctx: Any) -> dict[str, Any]:
     """precision's and hypotheses' framed prompts: the question and compare's notes."""
     notes = ctx.read_text(NOTES["compare"][0])
@@ -231,6 +240,7 @@ def notes_prompts(ctx: Any) -> dict[str, Any]:
 NO_NOTES = "(This step gave no notes: its session did not answer.)"
 
 
+@nn.fills_facts
 def decide_prompt(ctx: Any) -> dict[str, Any]:
     """decide's framed prompt: the question and all three steps' notes.
 

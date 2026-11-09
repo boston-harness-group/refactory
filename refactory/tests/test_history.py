@@ -7,6 +7,7 @@ run's own past, and previous runs, are readable objects.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -211,3 +212,42 @@ def test_a_strategy_that_proposes_only_duplicates_makes_no_progress_and_says_so(
         "a strategy proposing the same state repeatedly must be told why nothing "
         f"happened; codes were {report['rejection_codes']}"
     )
+
+
+@pytest.mark.parametrize("bound, basis", [
+    ("seed scored on train, val and test", "test: the final evaluation"),
+    ("stopped before the holdout audit", "holdout"),
+    ("held-out part exhausted", "val: the validation gate's score"),
+    ("hold-out audit skipped", "hold out"),
+    ("stopped at the hold out", "test"),
+])
+def test_a_prior_run_shows_the_optimizer_no_test_or_holdout_information(tmp_path, bound, basis):
+    """A previous run's summary states train facts only: a best score measured on any
+    other part is replaced by the run's train score, and a bound that names a held-out
+    part is left out. The request's "Previous runs" table carries neither."""
+    prior = tmp_path / "a-previous-run"
+    _run(prior)
+    report = json.loads((prior / "report.json").read_text())
+    report.update(bound=bound, best_score=0.987654, best_score_basis=basis,
+                  best_train_score=0.4321, holdout={"test": 0.876543})
+    (prior / "report.json").write_text(json.dumps(report))
+    [summary] = history.prior_summaries(tmp_path, exclude=tmp_path / "current")
+    assert summary["bound"] == "" and summary["best_score"] == 0.4321
+    loop = Loop(MODE, _config(tmp_path / "current"), project=Path("."))
+    loop.init()
+    prompt = loop._context().render()  # noqa: SLF001
+    section = prompt[prompt.index("## Previous runs of this mode"):]
+    section = section[:section.index("\n## ", 1)]
+    rows = [line for line in section.splitlines() if line.startswith("| ") and "---" not in line]
+    cells = [cell for row in rows[1:] for cell in row.strip("|").split("|")[1:]]
+    shown = " ".join(cells)
+    assert "0.4321" in shown, section
+    assert "0.987654" not in shown and "0.876543" not in shown
+    assert not re.search(r"(?i)test|holdout|held.out", shown), shown
+
+
+def test_a_train_bound_and_score_are_kept():
+    archive = history.RunArchive(path=Path("p"), bound="epochs", best_score=0.5)
+    assert archive.summary()["bound"] == "epochs"
+    assert history._train_only("evaluations") == "evaluations"  # noqa: SLF001
+    assert history._train_only("the latest contest") == "the latest contest"  # noqa: SLF001
