@@ -301,3 +301,26 @@ def test_the_pipeline_ask_names_code_steps_when_the_run_allows_them(code_nodes):
     text = "\n".join(base.levels_instructions(["prompt_knob", "pipeline"], code_nodes=code_nodes))
     assert ("add a code step that checks or extracts" in text) is code_nodes
     assert "loop or parallelise steps" in text
+
+
+def test_the_available_table_fits_its_limit_on_a_large_graph():
+    """A long pipeline's table is capped: cells name fewer facts and say how many more,
+    and rows are left out with a note before the section passes its limit. The advice
+    names an agent's declared reads, which are pasted into its prompt."""
+    from refactory_dsh import nn
+
+    graph = nn.Graph()
+    ids = [f"step{n:03d}" for n in range(300)]
+    for node_id in ids:
+        graph.add(nn.Node(node_id, "op", call="json:dumps", writes=(f"{node_id}_output_file.txt",),
+                          produces=(f"{node_id}_fact_with_a_long_name",)))
+    for a, b in zip(ids, ids[1:]):
+        graph.connect(a, b)
+    available = base.available_before(graph.to_state())
+    lines = base._available_section(available)
+    text = "\n".join(lines)
+    assert len(text) <= base.AVAILABLE_SECTION_CHARS
+    assert "more)" in text and "not listed" in text
+    assert "declared reads are pasted into its prompt" in lines[0]
+    small = "\n".join(base._available_section({"a": {"facts": ["f"], "files": ["x.txt"]}}))
+    assert "| a | f | x.txt |" in small

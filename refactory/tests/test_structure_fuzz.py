@@ -631,6 +631,17 @@ def test_split_refuses_to_leave_a_mode_knob_read_by_nothing():
     assert isinstance(out, sf.Candidate), out
 
 
+def test_split_refuses_a_step_whose_own_knob_is_frozen():
+    """A frozen knob keeps its value and declaration, so a split that would remove the
+    target's own frozen knob is refused up front, saying so."""
+    state = sf.seeds()["livemath_skill_graph"].state()
+    state["knobs"]["decide__system_prompt"]["spec"]["frozen"] = True
+    reason = edits_mod.precheck({"op": "split", "target": "decide", "into": [
+        _agent("draft", "{{decide_prompt}}", "draft.txt", produces=["draft"]),
+        _agent("final", "{{decide_prompt}} {{draft}}", "answer.txt")]}, state)
+    assert reason and "frozen knob(s) ['decide__system_prompt']" in reason, reason
+
+
 def test_v19_refuses_a_step_whose_output_is_overwritten_before_anyone_reads_it():
     """The audit's case: a new agent writing answer.txt in front of decide, which writes
     it again without reading it, on a straight path. V19 names the lost step."""
@@ -662,22 +673,89 @@ def test_v19_keeps_a_write_something_can_still_see(why, edit):
     assert not (isinstance(out, list) and any(r.startswith("V19") for r in out)), (why, out)
 
 
+_SNIPPET_GATE = "def main(inp):\n    return {'verdict': 'proceed', 'reason': 'ok'}\n"
+
+
+def _v19(nodes: list, edges: list) -> list[str]:
+    """The nodes V19 refuses in a graph built from ``nodes`` and ``edges``."""
+    graph = sf.fg._graph(nodes, edges)
+    return [issue.node for issue in validate_mod.overwritten_write_issues(graph)]
+
+
+def _code_gate(node_id: str, reads: tuple[str, ...] = ()) -> Any:
+    return sf.nn.Node(node_id, "gate", evaluator="refactory_dsh.snippet:gate",
+                      code=_SNIPPET_GATE, reads=reads, max_iterations=2)
+
+
 def test_v19_leaves_loops_forks_and_ends_alone():
-    """A step retried by a gate rewrites its file each pass; fork branches write their own
-    files; the last step's file is the run's output: none of them is refused."""
+    """A step retried by a gate that reads its file keeps it; one whose gate reads
+    something else loses it on every path (reloop: it rewrites it; proceed: the next
+    step does); fork branches and the shipped seeds are left alone."""
     for name, seed in sorted(sf.seeds().items()):
         issues = validate_mod.validate_state(seed.state(), invariants=seed.mode().invariants())
         assert not [i for i in issues if i.code == "V19"], name
-    graph = sf.fg._graph([
-        sf.fg.agent("work", "Do it", writes="work.txt"),
-        sf.fg.gate("again", "fn", max_iterations=2),
-        sf.fg.agent("final", "Finish", writes="work.txt"),
-    ], [("work", "again"), ("again", "work", "reloop"), ("again", "final", "proceed")])
-    issues = validate_mod.validate(graph, {}, declared_knobs={}, resolve_calls=False)
-    # On the reloop path work rewrites its own file, and on proceed final rewrites it:
-    # every path overwrites, so work's write is lost (V19), and final's is the output.
-    assert [(i.code, i.node) for i in issues if i.code == "V19"] == [("V19", "work")]
-    graph.nodes["again"] = sf.nn.Node("again", "gate", evaluator=sf.fg.PROCEED,
-                                      reads=("work.txt",), max_iterations=2)
-    issues = validate_mod.validate(graph, {}, declared_knobs={}, resolve_calls=False)
-    assert not [i for i in issues if i.code == "V19"]
+    edges = [("work", "again"), ("again", "work", "reloop"), ("again", "final", "proceed")]
+    work = sf.fg.agent("work", "Do it", writes="work.txt")
+    final = sf.fg.agent("final", "Finish", writes="work.txt")
+    assert _v19([work, _code_gate("again"), final], edges) == ["work"]
+    assert _v19([work, _code_gate("again", reads=("work.txt",)), final], edges) == []
+
+
+def test_v19_counts_an_agent_with_tools_as_a_possible_reader():
+    """An agent with tools may open any file, so a write before it is kept."""
+    tools = sf.nn.Node("look", "agent", prompt_template="Look around", writes=("look.txt",))
+    assert tools.tool_policy != "none"
+    nodes = [sf.fg.agent("first", "One", writes="x.txt"), tools,
+             sf.fg.agent("again", "Two", writes="x.txt")]
+    assert _v19(nodes, [("first", "look"), ("look", "again")]) == []
+    plain = sf.fg.agent("look", "Look", writes="look.txt")
+    assert _v19([nodes[0], plain, nodes[2]], [("first", "look"), ("look", "again")]) == ["first"]
+
+
+def test_v19_walks_a_forks_branches():
+    """A file read inside one branch and rewritten after the join is kept."""
+    nodes = [
+        sf.fg.agent("first", "One", writes="x.txt"),
+        sf.nn.Node("fork", "fork", targets=("left", "right")),
+        sf.fg.agent("left", "Use it", writes="left.txt", reads=("x.txt",)),
+        sf.fg.agent("right", "Other", writes="right.txt"),
+        sf.nn.Node("join", "join", sources=("left", "right")),
+        sf.fg.agent("again", "Two", writes="x.txt"),
+    ]
+    edges = [("first", "fork"), ("fork", "join"), ("left", "join"), ("right", "join"),
+             ("join", "again")]
+    assert _v19(nodes, edges) == []
+    nodes[2] = sf.fg.agent("left", "Ignore it", writes="left.txt")
+    assert _v19(nodes, edges) == ["first"]
+
+
+def test_v19_counts_a_data_pass_as_a_possible_reader():
+    nodes = [
+        sf.fg.agent("first", "One", writes="x.txt"),
+        sf.nn.Node("items", "data", subgraph_entry="solve", subgraph_exit="solve",
+                   task_ref=sf.fg.TASK_REF, writes=("current_item.json",)),
+        sf.fg.agent("solve", "Solve", writes="answer.txt"),
+        sf.fg.agent("again", "Two", writes="x.txt"),
+    ]
+    assert _v19(nodes, [("first", "items"), ("items", "again")]) == []
+
+
+def test_v19_counts_a_python_op_or_gate_as_a_possible_reader():
+    """Neither runtime checks a Python op's reads: one that declares none may still open
+    the file, so writer -> op -> rewriter is kept; likewise a Python gate."""
+    first, again = (sf.fg.agent("first", "One", writes="x.txt"),
+                    sf.fg.agent("again", "Two", writes="x.txt"))
+    assert _v19([first, sf.fg.op("mid"), again], [("first", "mid"), ("mid", "again")]) == []
+    other = sf.fg.agent("other", "Three", writes="x.txt")
+    edges = [("first", "mid"), ("mid", "again", "proceed"), ("mid", "other", "stop")]
+    assert _v19([first, sf.fg.gate("mid", "fn"), again, other], edges) == []
+    # A code gate reads only what it declares: both verdicts rewrite x.txt unread.
+    assert _v19([first, _code_gate("mid"), again, other], edges) == ["first"]
+
+
+def test_v19_does_not_count_a_code_op_as_a_certain_overwrite():
+    """A code op writes only the files its main returns, so it may leave the first write
+    in place: the write is kept."""
+    code = sf.nn.Node("again", "op", call="refactory_dsh.snippet:run", writes=("x.txt",),
+                      code="def main(inp):\n    return {'files': {}}\n")
+    assert _v19([sf.fg.agent("first", "One", writes="x.txt"), code], [("first", "again")]) == []

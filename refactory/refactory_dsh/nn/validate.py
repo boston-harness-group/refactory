@@ -84,8 +84,9 @@ RULES: dict[str, str] = {
            "verdict gate (evaluator refactory_dsh.snippet:verdict) reads its verdict from its "
            "first required_reads file or, with none, its first inputs fact",
     "V19": "a no-tools agent or a code op that sets no fact has a reader for what it writes: "
-           "a step whose every file is written again by another such step, on every path from "
-           "it, before any node reads it (or the run or its pass ends) does work nothing sees",
+           "a step whose every file is written again by a no-tools agent, on every path from "
+           "it, before any node reads it or may read it (a Python op or gate, an agent with "
+           "tools, a data pass) and before the run or its pass ends, does work nothing sees",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -891,9 +892,9 @@ def required_read_issues(graph: Graph) -> list[Issue]:
 
 
 def _replaces_its_writes(node: Node) -> bool:
-    """Whether a node writes its declared files whole, with no other effect: a no-tools
-    agent (its reply is its one write) or a code op (`main` returns the files). Any other
-    op or agent may append to a file, read one it does not declare, or act elsewhere."""
+    """Whether a node's whole effect is its declared outputs: a no-tools agent (its reply
+    is its one write) or a code op (`main` returns the files it writes). Any other op or
+    agent may append to a file, read one it does not declare, or act elsewhere."""
     from refactory_dsh import snippet
 
     if node.kind == "agent":
@@ -901,15 +902,34 @@ def _replaces_its_writes(node: Node) -> bool:
     return node.kind == "op" and snippet.is_code_node(node)
 
 
+def _reads_only_declared(node: Node) -> bool:
+    """Whether a node can read only the files it declares. A no-tools agent is handed its
+    declared reads; a code op or code/verdict gate its declared inputs. Any other op or
+    gate runs Python (or asks a person or an agent) that may open any file, since
+    neither runtime checks an op's reads; an agent with tools may too; a data node's
+    pass reads what is there."""
+    from refactory_dsh import snippet
+
+    if node.kind == "agent":
+        return node.tool_policy == "none"
+    if node.kind == "op":
+        return snippet.is_code_node(node)
+    if node.kind == "gate":
+        return node.gate_kind == "fn" and node.evaluator in (snippet.GATE, snippet.VERDICT)
+    return node.kind in ("fork", "join")
+
+
 def _overwriters(graph: Graph, node_id: str, name: str) -> list[str] | None:
     """The steps that write ``name`` again on every path from ``node_id`` before any node
     may read it, or ``None`` when some path may read it first.
 
-    A path may read it when it reaches a node declaring it in ``reads``, a node that can
-    read undeclared files (an agent with tools), a data node (its pass reads what is
-    there), a writer that may keep part of it (`_replaces_its_writes` false), or an end:
-    a node with no out-edge -- the run's or its pass's last step -- leaves the file as
-    the run's output. A fork's branches are walked as well as its join."""
+    A path may read it when it reaches a node declaring it in ``reads``, a node that may
+    read files it does not declare (`_reads_only_declared` false: a Python op or gate, an
+    agent with tools, a data node), or an end: a node with no out-edge -- the run's or
+    its pass's last step -- leaves the file as the run's output. Only a no-tools agent
+    writing it is a certain overwrite (its reply is the file); a code op writes only what
+    its ``main`` returns, so the walk goes on past one. A fork's branches are walked as
+    well as its join."""
     stack = [edge.target for edge in graph.out_edges(node_id)]
     if not stack:
         return None
@@ -923,11 +943,9 @@ def _overwriters(graph: Graph, node_id: str, name: str) -> list[str] | None:
         node = graph.nodes.get(current)
         if node is None or name in node.reads or name in node.required_reads:
             return None
-        if node.kind == "data" or (node.kind == "agent" and node.tool_policy != "none"):
+        if not _reads_only_declared(node):
             return None
-        if name in node.writes:
-            if not _replaces_its_writes(node):
-                return None
+        if name in node.writes and node.kind == "agent":
             writers.add(current)
             continue
         following = [edge.target for edge in graph.out_edges(current)]

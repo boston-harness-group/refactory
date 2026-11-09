@@ -1630,26 +1630,58 @@ def available_before(graph_state: Mapping[str, Any]) -> dict[str, dict[str, list
             for node_id in sorted(graph.reachable())}
 
 
+#: The most characters the "what each node has" table takes: past it, each cell lists
+#: fewer names (and says how many more), then rows are left out, last first, and named.
+AVAILABLE_SECTION_CHARS = 8000
+
+
 def _available_section(available: Mapping[str, Mapping[str, Sequence[str]]], *,
-                       code_nodes: bool = False) -> list[str]:
+                       code_nodes: bool = False,
+                       limit: int = AVAILABLE_SECTION_CHARS) -> list[str]:
     """What each node can use: the facts a `{{name}}` may name there, and the files already
-    written, with how a file's text becomes a fact. Nothing when not known."""
+    written, with how a file's text reaches a prompt. Fits ``limit``. Nothing when not
+    known."""
     if not available:
         return []
     how = ("a code op (`\"call\": \"refactory_dsh.snippet:run\"`) that reads the file and "
            "`produces` the fact" if code_nodes else "an op that reads the file and `produces` "
            "the fact")
-    return [
+    lead = (
         "What each node has before it runs (on every path that reaches it). A prompt's "
         "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
-        "not a fact, and `{{notes}}` does not read `notes.txt`. To put a file's text in a "
-        f"prompt, insert {how} before the node, or have the agent that writes the file "
-        "declare `produces`, which makes its reply that fact too.",
-        _table(["node", "facts available", "files written before it"],
-               [[node_id, ", ".join(entry.get("facts") or ()) or "-",
-                 ", ".join(entry.get("files") or ()) or "-"]
-                for node_id, entry in sorted(available.items())]),
-    ]
+        "not a fact, and `{{notes}}` does not read `notes.txt`. The simplest way to give an "
+        "agent without tools a file's text is to list the file in its `reads`: its declared "
+        "reads are pasted into its prompt. To use the text as a `{{name}}`, insert "
+        f"{how} before the node, or have the agent that writes the file declare `produces`, "
+        "which makes its reply that fact too.")
+
+    def cell(names: Sequence[str], keep: int | None) -> str:
+        names = list(names or ())
+        if not names:
+            return "-"
+        if keep is None or len(names) <= keep:
+            return ", ".join(names)
+        return ", ".join(names[:keep]) + f" (+{len(names) - keep} more)"
+
+    def table(rows: Sequence[tuple[str, Mapping[str, Sequence[str]]]], keep: int | None) -> str:
+        return _table(["node", "facts available", "files written before it"],
+                      [[node_id, cell(entry.get("facts"), keep), cell(entry.get("files"), keep)]
+                       for node_id, entry in rows])
+
+    rows = sorted(available.items())
+    room = max(0, limit - len(lead))
+    for keep in (None, 12, 6, 3, 1, 0):
+        text = table(rows, keep)
+        if len(text) <= room:
+            return [lead, text]
+    while rows:
+        left = len(available) - len(rows)
+        note = f"({left} node(s) not listed to stay within {limit} characters)" if left else ""
+        text = table(rows, 0)
+        if len(text) + len(note) + 1 <= room:
+            return [lead, text, *([note] if note else [])]
+        rows = rows[:-1]
+    return [lead, f"({len(available)} node(s) not listed to stay within {limit} characters)"]
 
 
 def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC_TEXT_CHARS,

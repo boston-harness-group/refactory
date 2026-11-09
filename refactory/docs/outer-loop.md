@@ -357,7 +357,8 @@ The edit layer enforces the same for every edit that adds a node (`add_node`,
   data node, a fork branch or join source, and when it would leave a knob read by
   nothing.
 - **Lost writes (V19).** A no-tools agent or code op that sets no fact, whose every file
-  is written again on every path before any node reads it, is refused.
+  a no-tools agent writes again on every path before any node reads or may read it (a
+  Python op or gate, an agent with tools, a data pass), is refused.
 - **Text checks.** A node text carrying the clip marker
   (`[... N characters omitted ...]`), or a `{{` never closed by `}}`, is refused
   (`E-node-text`). JSON braces in a prompt are fine.

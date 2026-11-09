@@ -1174,7 +1174,16 @@ def _pre_split(edit: dict, state: State) -> str | None:
         _sole_out_edge(graph, target.id)
     except EditError as exc:
         return str(exc)
-    orphans = _split_orphans(graph, target, into, state.get("knobs") or {})
+    knobs = state.get("knobs") or {}
+    frozen = sorted({name for name in (*target.knobs, *(k for _f, k in target.field_bindings))
+                    if name.startswith(f"{target.id}__")
+                    and set(graph.knob_consumers().get(name, ())) <= {target.id}
+                    and ((knobs.get(name) or {}).get("spec") or {}).get("frozen")})
+    if frozen:
+        return (f"{target.id!r} owns the frozen knob(s) {frozen}, which a split would remove "
+                "with it; a frozen knob keeps its value and declaration, so split another step "
+                "or insert one before or after it")
+    orphans = _split_orphans(graph, target, into, knobs)
     if orphans:
         return (f"{target.id!r} is the only node reading knob(s) {orphans}, which a split "
                 "would leave read by nothing (rule V7); list them in a new step's `knobs`, or "
