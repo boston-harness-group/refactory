@@ -156,8 +156,10 @@ def edit_kind_decision(population: Sequence[Candidate],
              f"bottom {k} mean {_mean([c.score or 0.0 for c in bottom]):.4g}")
     pipeline = {"edit_kind": "pipeline",
                 "purpose": "this round: a pipeline-level change -- add, remove, rewire, "
-                           "gate or parallelise steps -- rather than another prompt or "
-                           "setting change"}
+                           "gate or parallelise steps, or (where the run allows code steps) "
+                           "add a code step that checks or extracts something "
+                           "deterministically -- rather than another prompt or setting "
+                           "change"}
     settings = {"edit_kind": "prompt_knob",
                 "purpose": "this round: a prompt/knob-level change -- rewrite or patch a "
                            "prompt, move a setting -- on the current pipeline"}

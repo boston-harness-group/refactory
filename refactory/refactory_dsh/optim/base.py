@@ -635,6 +635,15 @@ class ProposalContext:
     #: what the gate ranks by (``HillClimbSelector``). Never rendered: the model's
     #: request shows gate decisions, not val scores.
     val_scores: dict[str, float] = field(default_factory=dict)
+    #: What is there before each node of the edited graph, on every path that reaches
+    #: it (`available_before`): ``{node: {"facts": [...], "files": [...]}}``. Rendered
+    #: under "The pipeline you may edit", so a prompt's ``{{name}}`` names a fact that
+    #: exists there (rule V15) rather than a file name; empty says nothing.
+    available: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    #: Whether a person answers gates while this run's candidates run. An outer loop's
+    #: candidates run headless, so the default leaves the person-answered gate kind out
+    #: of the node schemas (`node_schema.render_schema`).
+    person_gates: bool = False
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -666,10 +675,12 @@ class ProposalContext:
             "Edges:",
             _table(["source", "target", "condition"],
                    [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
+            *_available_section(self.available, code_nodes=self.code_nodes),
             "",
             *_node_specs(self.node_states, text_chars=self.node_spec_text_chars,
                          section_chars=self.node_spec_section_chars,
-                         knob_values={k.get("name"): k.get("value") for k in self.knobs}),
+                         knob_values={k.get("name"): k.get("value") for k in self.knobs},
+                         person_gates=self.person_gates),
             "",
             "## What the author says is worth doing",
             self.guidance or "(the mode's author offered no guidance)",
@@ -779,7 +790,7 @@ class ProposalContext:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue,
                                                  proposals=self.proposals)]
         if self.edit_levels:
-            sections += ["", *levels_instructions(self.edit_levels)]
+            sections += ["", *levels_instructions(self.edit_levels, code_nodes=self.code_nodes)]
         return "\n".join(sections)
 
 
@@ -789,7 +800,7 @@ _LEVEL_TEXT = {
     "prompt_knob": "a prompt/knob-level change: only `set_knob` edits (rewrite or patch a "
                    "prompt, move a setting) on the current pipeline",
     "pipeline": "a pipeline-level change: at least one structural operation (add, remove, "
-                "rewire, gate, loop or parallelise steps), with any knob moves it needs",
+                "rewire, gate, loop or parallelise steps{code}), with any knob moves it needs",
 }
 
 
@@ -799,15 +810,25 @@ def edit_level(steps: Sequence[Any]) -> str:
     return "prompt_knob" if ops and all(op == "set_knob" for op in ops) else "pipeline"
 
 
-def levels_instructions(levels: Sequence[str]) -> list[str]:
-    """What the request asks for when it names edit levels."""
+#: What a pipeline-level ask adds when the run allows code steps (``code_nodes``).
+_CODE_STEP_TEXT = (", or add a code step that checks or extracts something "
+                   "deterministically, at no model call")
+
+
+def _level_text(level: str, code_nodes: bool) -> str:
+    return _LEVEL_TEXT.get(level, level).replace("{code}", _CODE_STEP_TEXT if code_nodes else "")
+
+
+def levels_instructions(levels: Sequence[str], *, code_nodes: bool = False) -> list[str]:
+    """What the request asks for when it names edit levels; the pipeline level names code
+    steps among its moves when the run allows them (``code_nodes``)."""
     if len(levels) == 1:
         return ["## The kind of change this round",
-                f"Propose exactly one update: {_LEVEL_TEXT.get(levels[0], levels[0])}."]
+                f"Propose exactly one update: {_level_text(levels[0], code_nodes)}."]
     return ["## The kind of change this round",
             f"Propose exactly {len(levels)} updates, one per level, each your best of its "
             "kind:",
-            *[f"- {_LEVEL_TEXT.get(level, level)}" for level in levels],
+            *[f"- {_level_text(level, code_nodes)}" for level in levels],
             "The search evaluates every one of them on validation and keeps what wins; do "
             "not choose between them, and do not leave one out."]
 
@@ -1101,7 +1122,8 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
             "copy of a node's JSON, with a new id). For example:",
             "  " + json.dumps(structural),
             "  A new agent node gets its own `<new step id>__system_prompt` knob holding its "
-            "system prompt.",
+            "system prompt and `<new step id>__task` knob holding its `prompt_template`, so a "
+            "later round can rewrite either with `set_knob`.",
         ]
     else:
         lines.append("- This run permits parameter moves only.")
@@ -1591,9 +1613,81 @@ def _node_spec(state: dict[str, Any], limit: int,
     return "\n".join(lines + notes)
 
 
+def available_before(graph_state: Mapping[str, Any]) -> dict[str, dict[str, list[str]]]:
+    """For each node a run can reach, the facts and files there before it starts on every
+    path that reaches it (`nn.validate.available_inputs`, the sets rule V15 checks
+    against); empty when the graph does not parse."""
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.validate import available_inputs
+
+    try:
+        graph = Graph.from_state(dict(graph_state))
+    except Exception:  # a broken graph is the validator's to report
+        return {}
+    have = available_inputs(graph)
+    return {node_id: {"facts": sorted(n for k, n in have.get(node_id, ()) if k == "fact"),
+                      "files": sorted(n for k, n in have.get(node_id, ()) if k == "file")}
+            for node_id in sorted(graph.reachable())}
+
+
+#: The most characters the "what each node has" table takes: past it, each cell lists
+#: fewer names (and says how many more), then rows are left out, last first, and named.
+AVAILABLE_SECTION_CHARS = 8000
+
+
+def _available_section(available: Mapping[str, Mapping[str, Sequence[str]]], *,
+                       code_nodes: bool = False,
+                       limit: int = AVAILABLE_SECTION_CHARS) -> list[str]:
+    """What each node can use: the facts a `{{name}}` may name there, and the files already
+    written, with how a file's text reaches a prompt. Fits ``limit``. Nothing when not
+    known."""
+    if not available:
+        return []
+    how = ("a code op (`\"call\": \"refactory_dsh.snippet:run\"`) that reads the file and "
+           "`produces` the fact" if code_nodes else "an op that reads the file and `produces` "
+           "the fact")
+    lead = (
+        "What each node has before it runs (on every path that reaches it). A prompt's "
+        "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
+        "not a fact, and `{{notes}}` does not read `notes.txt`. The simplest way to give an "
+        "agent without tools a file's text is to list the file in its `reads`: its declared "
+        "reads are pasted into its prompt. To use the text as a `{{name}}`, insert "
+        f"{how} before the node, or have the agent that writes the file declare `produces`, "
+        "which makes its reply that fact too.")
+
+    def cell(names: Sequence[str], keep: int | None) -> str:
+        names = list(names or ())
+        if not names:
+            return "-"
+        if keep is None or len(names) <= keep:
+            return ", ".join(names)
+        return ", ".join(names[:keep]) + f" (+{len(names) - keep} more)"
+
+    def table(rows: Sequence[tuple[str, Mapping[str, Sequence[str]]]], keep: int | None) -> str:
+        return _table(["node", "facts available", "files written before it"],
+                      [[node_id, cell(entry.get("facts"), keep), cell(entry.get("files"), keep)]
+                       for node_id, entry in rows])
+
+    rows = sorted(available.items())
+    room = max(0, limit - len(lead))
+    for keep in (None, 12, 6, 3, 1, 0):
+        text = table(rows, keep)
+        if len(text) <= room:
+            return [lead, text]
+    while rows:
+        left = len(available) - len(rows)
+        note = f"({left} node(s) not listed to stay within {limit} characters)" if left else ""
+        text = table(rows, 0)
+        if len(text) + len(note) + 1 <= room:
+            return [lead, text, *([note] if note else [])]
+        rows = rows[:-1]
+    return [lead, f"({len(available)} node(s) not listed to stay within {limit} characters)"]
+
+
 def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC_TEXT_CHARS,
                 section_chars: int = NODE_SPEC_SECTION_CHARS,
-                knob_values: Mapping[str, Any] | None = None) -> list[str]:
+                knob_values: Mapping[str, Any] | None = None,
+                person_gates: bool = True) -> list[str]:
     """Each node of the edited graph in full, then the generated node schemas.
 
     A structure edit (``add_node``, ``insert_after``, ``split``, ...) needs a whole
@@ -1606,7 +1700,7 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
 
     if not states:
         return []
-    schema = render_schema()
+    schema = render_schema(person_gates=person_gates)
     ordered = sorted(states, key=lambda s: str(s.get("id")))
 
     def section(chosen: Sequence[dict[str, Any]], limit: int) -> list[str]:
@@ -1615,7 +1709,8 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
                  "(prompt, reads, writes, produces, knobs), and use it as the `node` of an "
                  "`add_node`, `insert_after`, `insert_before` or `wrap` edit. Knob bindings "
                  "are left out of these copies: a new agent node gets its own "
-                 "`<id>__system_prompt` knob holding its `system_prompt_template`, and a "
+                 "`<id>__system_prompt` knob holding its `system_prompt_template` and its own "
+                 "`<id>__task` knob holding its `prompt_template`, and a "
                  "new node may not bind another node's knob. A clipped text (marked "
                  "`[... N characters omitted ...]`) must not be copied: write your own, or "
                  "edit the knob; an edit carrying the marker is refused."]

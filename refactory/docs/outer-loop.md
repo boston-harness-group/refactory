@@ -347,8 +347,18 @@ The edit layer enforces the same for every edit that adds a node (`add_node`,
 
 - **No shared knobs.** A new node may not bind a knob another node binds or reads
   (`E-binding`), so a copy cannot silently run the original's prompt.
-- **Own prompt knob.** A new agent node gets its own `<id>__system_prompt` knob holding
-  its `system_prompt_template`, as a mode's agent nodes get one when it is built.
+- **Own prompt knobs.** A new agent node gets its own `<id>__system_prompt` knob holding
+  its `system_prompt_template`, as a mode's agent nodes get one when it is built, and its
+  own `<id>__task` knob holding its `prompt_template`, so a later round can `set_knob`
+  either.
+- **Split replaces.** `split` replaces an agent or op with two new steps: the first takes
+  its in-edges (and the start, or a pass's entry), the second its out-edge (and a pass's
+  exit), and the step goes with its own knobs. It is refused for a gate, fork, join or
+  data node, a fork branch or join source, and when it would leave a knob read by
+  nothing.
+- **Lost writes (V19).** A no-tools agent or code op that sets no fact, whose every file
+  a no-tools agent writes again on every path before any node reads or may read it (a
+  Python op or gate, an agent with tools, a data pass), is refused.
 - **Text checks.** A node text carrying the clip marker
   (`[... N characters omitted ...]`), or a `{{` never closed by `}}`, is refused
   (`E-node-text`). JSON braces in a prompt are fine.

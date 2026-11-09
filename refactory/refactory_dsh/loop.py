@@ -58,7 +58,7 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    DEFAULT_MAX_EDITS, edit_level, proposal_refusal, summarise_reasons,
+    DEFAULT_MAX_EDITS, available_before, edit_level, proposal_refusal, summarise_reasons,
 )
 from refactory_dsh.outerloop import (
     FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
@@ -1091,7 +1091,12 @@ class Loop(OuterLoop):
         """Evaluate every candidate in the batch that has not run yet.
 
         ``epoch`` (default: the current one) picks the train seed under ``val_gate``.
+        The time and token budgets are checked before each candidate: once one is spent
+        the rest stay unscored (the report names them) and the spent budget is the run's
+        bound, rather than a measurement refused by it being recorded as a failure.
         """
+        from refactory_dsh.budgets import BudgetExhausted
+
         batch = [candidate for candidate in self.population if not candidate.evaluated]
         seed = self._train_seed(self.epoch if epoch is None else epoch)
         for index, candidate in enumerate(batch):
@@ -1099,6 +1104,12 @@ class Loop(OuterLoop):
                 break
             if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
                 break
+            if self.budget:
+                try:
+                    self.budget.checkpoint("work" if self._owns_resource_budget else None)
+                except BudgetExhausted as exc:
+                    self.bound = str(exc)
+                    break
             items = self._minibatch(self.epoch if epoch is None else epoch)
             self._evaluate(candidate, seed=seed, items=items)
             if items is not None or self._fresh_evidence():
@@ -3841,6 +3852,10 @@ class Loop(OuterLoop):
             nodes=described["nodes"],
             edges=described["edges"],
             node_states=described.get("node_states", []),
+            # What each node has before it, so a prompt names a fact that is there.
+            available=described.get("available", {}),
+            # Candidates run headless: no person answers a gate while they run.
+            person_gates=False,
             leaderboard=[self._row(c) for c in board],
             history=self._history(),
             tried=self._tried(),
@@ -4010,7 +4025,8 @@ class Loop(OuterLoop):
             whole = mode.state_dict()
             nodes = (whole.get("graph") or {}).get("nodes") or {}
             return {**mode.describe(), "node_states": [dict(state) for state in nodes.values()],
-                    "knob_states": dict(whole.get("knobs") or {})}
+                    "knob_states": dict(whole.get("knobs") or {}),
+                    "available": available_before(whole.get("graph") or {})}
 
         if parent is None:
             return described(self.mode), ""

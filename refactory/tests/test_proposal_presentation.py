@@ -246,3 +246,81 @@ def test_the_history_diff_keeps_lines_that_look_like_headers_and_separates_lines
                                                           "value": new}]}],
                           seed_knob_values={"k": old}).render()
     assert DIFF_LINE_SEPARATOR + "----" in row
+
+
+# ── what each node has before it; no person-answered gate without a person ─────
+
+
+def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
+    """On the LiveMath graph, decide has decide_prompt as a fact and compare's notes only
+    as a file; the request says a file name is not a fact and a code op makes one."""
+    state = sf.seeds()["livemath_skill_graph"].state()
+    available = base.available_before(state["graph"])
+    assert "decide_prompt" in available["decide"]["facts"]
+    assert "compare_notes" not in available["decide"]["facts"]
+    assert "compare_notes.txt" in available["decide"]["files"]
+    assert "compare_prompt" in available["compare"]["facts"]
+    assert "decide_prompt" not in available["compare"]["facts"]
+    text = _render(available=available, code_nodes=True)
+    pipeline = text[text.index("## The pipeline you may edit"):text.index("### Each node")
+                    if "### Each node" in text else text.index("## What the author says")]
+    row = next(line for line in pipeline.splitlines() if line.startswith("| decide |"))
+    assert "decide_prompt" in row and "compare_notes.txt" in row
+    assert "a file's name is not a fact" in pipeline and "snippet:run" in pipeline
+    plain = _render(available=available, code_nodes=False)
+    plain = plain[plain.index("## The pipeline you may edit"):plain.index("## What the author says")]
+    assert "a file's name is not a fact" in plain and "snippet:run" not in plain
+    assert "facts available" not in _render()
+
+
+def test_the_schema_offers_no_person_answered_gate_to_a_run_without_a_person(tmp_path):
+    """The outer loop's request (its candidates run headless) leaves gate (user) out of
+    the node schemas and says why; with a person attached it is offered."""
+    from refactory_dsh.loop import Loop
+    from test_skillopt import _patch_mode
+    from test_val_gate import LevelProbe, _loop
+
+    nodes = [{"id": "a", "kind": "agent", "prompt_template": "x", "writes": ["a.txt"]}]
+    without = _render(node_states=nodes)
+    assert "`gate (user)`" not in without and "`gate (fn)`" in without
+    assert "`gate_kind` `user` is not offered" in without
+    with_person = _render(node_states=nodes, person_gates=True)
+    assert "`gate (user)`" in with_person and "is not offered" not in with_person
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=1)
+        loop.init()
+        context = loop._context()
+    assert context.person_gates is False
+    assert "current_item.json" in context.available["work"]["files"]
+    assert "`gate (user)`" not in context.render()
+    assert isinstance(loop, Loop)
+
+
+@pytest.mark.parametrize("code_nodes", [True, False])
+def test_the_pipeline_ask_names_code_steps_when_the_run_allows_them(code_nodes):
+    text = "\n".join(base.levels_instructions(["prompt_knob", "pipeline"], code_nodes=code_nodes))
+    assert ("add a code step that checks or extracts" in text) is code_nodes
+    assert "loop or parallelise steps" in text
+
+
+def test_the_available_table_fits_its_limit_on_a_large_graph():
+    """A long pipeline's table is capped: cells name fewer facts and say how many more,
+    and rows are left out with a note before the section passes its limit. The advice
+    names an agent's declared reads, which are pasted into its prompt."""
+    from refactory_dsh import nn
+
+    graph = nn.Graph()
+    ids = [f"step{n:03d}" for n in range(300)]
+    for node_id in ids:
+        graph.add(nn.Node(node_id, "op", call="json:dumps", writes=(f"{node_id}_output_file.txt",),
+                          produces=(f"{node_id}_fact_with_a_long_name",)))
+    for a, b in zip(ids, ids[1:]):
+        graph.connect(a, b)
+    available = base.available_before(graph.to_state())
+    lines = base._available_section(available)
+    text = "\n".join(lines)
+    assert len(text) <= base.AVAILABLE_SECTION_CHARS
+    assert "more)" in text and "not listed" in text
+    assert "declared reads are pasted into its prompt" in lines[0]
+    small = "\n".join(base._available_section({"a": {"facts": ["f"], "files": ["x.txt"]}}))
+    assert "| a | f | x.txt |" in small

@@ -23,6 +23,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -517,3 +518,244 @@ def test_livemath_ops_require_their_reads_and_the_optimizer_sees_it():
     assert sf._rendered_copy(state, "extract_answer")["required_reads"] == [
         "answer.txt", "current_item.json"]
     assert "required_reads" in "\n".join(render_schema())
+
+
+# ── split replaces its step; V19 refuses a write nothing reads ───────────
+
+
+def _split(seed_name: str, target: str, first: dict, second: dict) -> tuple[sf.Applier, Any]:
+    applier = sf.Applier(sf.seeds()[seed_name])
+    parent = sf.Candidate.from_state(applier.seed_state)
+    return applier, applier.attempt(parent, {"op": "split", "target": target,
+                                             "into": [first, second]}, {parent.id})
+
+
+def _agent(node_id: str, prompt: str, writes: str, **extra: Any) -> dict:
+    return {"id": node_id, "kind": "agent", "prompt_template": prompt,
+            "system_prompt_template": f"You are {node_id}.", "writes": [writes], **extra}
+
+
+def _writers(graph, name: str) -> list[str]:
+    return sorted(n.id for n in graph.nodes.values() if name in n.writes)
+
+
+def test_split_replaces_its_step_on_the_livemath_graph():
+    """decide becomes draft -> final: decide and its own knobs are gone, decide_prompt
+    leads to draft, draft to final, final to extract_answer, and answer.txt has one
+    writer; the result is sound on the walker (every static invariant too)."""
+    applier, out = _split(
+        "livemath_skill_graph", "decide",
+        _agent("draft", "{{decide_prompt}}", "draft.txt", produces=["draft"]),
+        _agent("final", "{{decide_prompt}}\n\nA draft answer: {{draft}}", "answer.txt"))
+    assert isinstance(out, sf.Candidate), out
+    graph = sf._graph_of(out.state)
+    assert "decide" not in graph.nodes
+    assert [e.target for e in graph.out_edges("decide_prompt")] == ["draft"]
+    assert [e.target for e in graph.out_edges("draft")] == ["final"]
+    assert [e.target for e in graph.out_edges("final")] == ["extract_answer"]
+    assert not any("decide" in (e.source, e.target) for e in graph.edges)
+    assert _writers(graph, "answer.txt") == ["final"]
+    assert not [k for k in out.state["knobs"] if k.startswith("decide__")]
+    assert {"draft__system_prompt", "draft__task", "final__system_prompt",
+            "final__task"} <= set(out.state["knobs"])
+    assert sf.check_state(applier, out.state, walker=True) == []
+
+
+@pytest.mark.parametrize("seed_name, target, writes, expected", [
+    # The start node: the first new step becomes the start.
+    ("fuzz_dataflow", "load", "raw.txt", {"start": "a", "in": [], "out": ["clean"]}),
+    # A data pass's last step: the second new step becomes the pass's exit.
+    ("fuzz_data_pass", "solve", "answer.txt", {"in": ["read_item"], "out": ["check"]}),
+    # A step a gate reloops to: the reloop edge leads to the first new step.
+    ("fuzz_gate_loop", "work", "work.txt", {"in": ["prepare", "review"], "out": ["review"]}),
+])
+def test_split_rewires_any_graph_shape(seed_name, target, writes, expected):
+    applier = sf.Applier(sf.seeds()[seed_name])
+    seed_graph = sf._graph_of(applier.seed_state)
+    old = seed_graph.nodes[target]
+    produces = list(old.produces)
+    first = {"id": "a", "kind": "op", "call": old.call or sf.fg.STEP, "writes": ["a.txt"]} \
+        if old.kind == "op" else _agent("a", old.prompt_template, "a.txt", produces=["a_fact"])
+    second = ({"id": "b", "kind": "op", "call": old.call, "reads": ["a.txt"], "writes": [writes],
+               "produces": produces} if old.kind == "op"
+              else _agent("b", old.prompt_template + " {{a_fact}}", writes))
+    _applier, out = _split(seed_name, target, first, second)
+    assert isinstance(out, sf.Candidate), out
+    graph = sf._graph_of(out.state)
+    assert target not in graph.nodes
+    assert sorted(e.source for e in graph.in_edges("a")) == expected["in"]
+    assert [e.target for e in graph.out_edges("a")] == ["b"]
+    assert [e.target for e in graph.out_edges("b")] == expected["out"]
+    if "start" in expected:
+        assert graph.start == expected["start"]
+    reloop = [e for e in graph.in_edges("a") if e.condition]
+    assert all(e.condition == "reloop" for e in reloop)
+    assert _writers(graph, writes) == ["b"]
+    if seed_name == "fuzz_data_pass":
+        assert graph.nodes["items"].subgraph_exit == "check"  # check stays the exit
+    assert sf.check_state(applier, out.state, walker=True) == []
+
+
+@needs_spine
+def test_a_split_graph_runs_alike_on_the_walker_and_the_spine():
+    applier, out = _split(
+        "fuzz_data_pass", "solve",
+        _agent("think", "Think about {{question}}", "think.txt", produces=["thoughts"]),
+        _agent("answer", "Solve {{question}} using {{thoughts}}", "answer.txt"))
+    assert isinstance(out, sf.Candidate), out
+    assert sf.spine_eligible(out.state)
+    assert sf.check_state(applier, out.state, walker=True, spine=True) == []
+
+
+@pytest.mark.parametrize("seed_name, target, why", [
+    ("fuzz_gates", "check", "is a gate"),
+    ("fuzz_fork_join", "split", "is a fork"),
+    ("fuzz_fork_join", "left", "a fork's branch or a join's source"),
+    ("fuzz_data_pass", "items", "is a data"),
+])
+def test_split_refuses_a_node_whose_routing_two_steps_cannot_carry(seed_name, target, why):
+    _applier, out = _split(seed_name, target, _agent("a", "x", "a.txt", produces=["f"]),
+                           _agent("b", "{{f}}", "b.txt"))
+    assert isinstance(out, list) and out[0].startswith("E-precondition") and why in out[0], out
+
+
+def test_split_refuses_to_leave_a_mode_knob_read_by_nothing():
+    """depth is read by clean alone: a split of clean must hand it to a new step."""
+    first = {"id": "a", "kind": "op", "call": sf.fg.STEP, "reads": ["raw.txt"],
+             "writes": ["a.txt"]}
+    second = {"id": "b", "kind": "op", "call": sf.fg.STEP, "reads": ["a.txt"],
+              "writes": ["clean.txt"], "produces": ["cleaned"]}
+    _applier, out = _split("fuzz_dataflow", "clean", first, second)
+    assert isinstance(out, list) and "knob(s) ['depth']" in out[0], out
+    _applier, out = _split("fuzz_dataflow", "clean", {**first, "knobs": ["depth"]}, second)
+    assert isinstance(out, sf.Candidate), out
+
+
+def test_split_refuses_a_step_whose_own_knob_is_frozen():
+    """A frozen knob keeps its value and declaration, so a split that would remove the
+    target's own frozen knob is refused up front, saying so."""
+    state = sf.seeds()["livemath_skill_graph"].state()
+    state["knobs"]["decide__system_prompt"]["spec"]["frozen"] = True
+    reason = edits_mod.precheck({"op": "split", "target": "decide", "into": [
+        _agent("draft", "{{decide_prompt}}", "draft.txt", produces=["draft"]),
+        _agent("final", "{{decide_prompt}} {{draft}}", "answer.txt")]}, state)
+    assert reason and "frozen knob(s) ['decide__system_prompt']" in reason, reason
+
+
+def test_v19_refuses_a_step_whose_output_is_overwritten_before_anyone_reads_it():
+    """The audit's case: a new agent writing answer.txt in front of decide, which writes
+    it again without reading it, on a straight path. V19 names the lost step."""
+    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    parent = sf.Candidate.from_state(applier.seed_state)
+    early = _agent("early", "{{decide_prompt}}", "answer.txt")
+    out = applier.attempt(parent, {"op": "insert_before", "target": "decide", "node": early},
+                          {parent.id})
+    assert isinstance(out, list) and any(r.startswith("V19 [early]") and "'decide'" in r
+                                         for r in out), out
+
+
+@pytest.mark.parametrize("why, edit", [
+    # A reader in between: the op reads the first answer before decide rewrites it.
+    ("a reader in between", [
+        {"op": "insert_before", "target": "decide", "node": _agent("early", "{{decide_prompt}}",
+                                                                    "answer.txt")},
+        {"op": "insert_before", "target": "decide", "node": _agent(
+            "peek", "Check the first answer.", "peek.txt", reads=["answer.txt"])}]),
+    # A fact: the early step's reply is also a fact a later prompt can use.
+    ("the reply is a fact", [
+        {"op": "insert_before", "target": "decide", "node": _agent(
+            "early", "{{decide_prompt}}", "answer.txt", produces=["early_answer"])}]),
+])
+def test_v19_keeps_a_write_something_can_still_see(why, edit):
+    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    parent = sf.Candidate.from_state(applier.seed_state)
+    out = applier.attempt(parent, {"edits": edit} if len(edit) > 1 else edit[0], {parent.id})
+    assert not (isinstance(out, list) and any(r.startswith("V19") for r in out)), (why, out)
+
+
+_SNIPPET_GATE = "def main(inp):\n    return {'verdict': 'proceed', 'reason': 'ok'}\n"
+
+
+def _v19(nodes: list, edges: list) -> list[str]:
+    """The nodes V19 refuses in a graph built from ``nodes`` and ``edges``."""
+    graph = sf.fg._graph(nodes, edges)
+    return [issue.node for issue in validate_mod.overwritten_write_issues(graph)]
+
+
+def _code_gate(node_id: str, reads: tuple[str, ...] = ()) -> Any:
+    return sf.nn.Node(node_id, "gate", evaluator="refactory_dsh.snippet:gate",
+                      code=_SNIPPET_GATE, reads=reads, max_iterations=2)
+
+
+def test_v19_leaves_loops_forks_and_ends_alone():
+    """A step retried by a gate that reads its file keeps it; one whose gate reads
+    something else loses it on every path (reloop: it rewrites it; proceed: the next
+    step does); fork branches and the shipped seeds are left alone."""
+    for name, seed in sorted(sf.seeds().items()):
+        issues = validate_mod.validate_state(seed.state(), invariants=seed.mode().invariants())
+        assert not [i for i in issues if i.code == "V19"], name
+    edges = [("work", "again"), ("again", "work", "reloop"), ("again", "final", "proceed")]
+    work = sf.fg.agent("work", "Do it", writes="work.txt")
+    final = sf.fg.agent("final", "Finish", writes="work.txt")
+    assert _v19([work, _code_gate("again"), final], edges) == ["work"]
+    assert _v19([work, _code_gate("again", reads=("work.txt",)), final], edges) == []
+
+
+def test_v19_counts_an_agent_with_tools_as_a_possible_reader():
+    """An agent with tools may open any file, so a write before it is kept."""
+    tools = sf.nn.Node("look", "agent", prompt_template="Look around", writes=("look.txt",))
+    assert tools.tool_policy != "none"
+    nodes = [sf.fg.agent("first", "One", writes="x.txt"), tools,
+             sf.fg.agent("again", "Two", writes="x.txt")]
+    assert _v19(nodes, [("first", "look"), ("look", "again")]) == []
+    plain = sf.fg.agent("look", "Look", writes="look.txt")
+    assert _v19([nodes[0], plain, nodes[2]], [("first", "look"), ("look", "again")]) == ["first"]
+
+
+def test_v19_walks_a_forks_branches():
+    """A file read inside one branch and rewritten after the join is kept."""
+    nodes = [
+        sf.fg.agent("first", "One", writes="x.txt"),
+        sf.nn.Node("fork", "fork", targets=("left", "right")),
+        sf.fg.agent("left", "Use it", writes="left.txt", reads=("x.txt",)),
+        sf.fg.agent("right", "Other", writes="right.txt"),
+        sf.nn.Node("join", "join", sources=("left", "right")),
+        sf.fg.agent("again", "Two", writes="x.txt"),
+    ]
+    edges = [("first", "fork"), ("fork", "join"), ("left", "join"), ("right", "join"),
+             ("join", "again")]
+    assert _v19(nodes, edges) == []
+    nodes[2] = sf.fg.agent("left", "Ignore it", writes="left.txt")
+    assert _v19(nodes, edges) == ["first"]
+
+
+def test_v19_counts_a_data_pass_as_a_possible_reader():
+    nodes = [
+        sf.fg.agent("first", "One", writes="x.txt"),
+        sf.nn.Node("items", "data", subgraph_entry="solve", subgraph_exit="solve",
+                   task_ref=sf.fg.TASK_REF, writes=("current_item.json",)),
+        sf.fg.agent("solve", "Solve", writes="answer.txt"),
+        sf.fg.agent("again", "Two", writes="x.txt"),
+    ]
+    assert _v19(nodes, [("first", "items"), ("items", "again")]) == []
+
+
+def test_v19_counts_a_python_op_or_gate_as_a_possible_reader():
+    """Neither runtime checks a Python op's reads: one that declares none may still open
+    the file, so writer -> op -> rewriter is kept; likewise a Python gate."""
+    first, again = (sf.fg.agent("first", "One", writes="x.txt"),
+                    sf.fg.agent("again", "Two", writes="x.txt"))
+    assert _v19([first, sf.fg.op("mid"), again], [("first", "mid"), ("mid", "again")]) == []
+    other = sf.fg.agent("other", "Three", writes="x.txt")
+    edges = [("first", "mid"), ("mid", "again", "proceed"), ("mid", "other", "stop")]
+    assert _v19([first, sf.fg.gate("mid", "fn"), again, other], edges) == []
+    # A code gate reads only what it declares: both verdicts rewrite x.txt unread.
+    assert _v19([first, _code_gate("mid"), again, other], edges) == ["first"]
+
+
+def test_v19_does_not_count_a_code_op_as_a_certain_overwrite():
+    """A code op writes only the files its main returns, so it may leave the first write
+    in place: the write is kept."""
+    code = sf.nn.Node("again", "op", call="refactory_dsh.snippet:run", writes=("x.txt",),
+                      code="def main(inp):\n    return {'files': {}}\n")
+    assert _v19([sf.fg.agent("first", "One", writes="x.txt"), code], [("first", "again")]) == []

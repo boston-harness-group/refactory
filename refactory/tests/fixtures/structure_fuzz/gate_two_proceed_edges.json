@@ -2,24 +2,16 @@
   "seed": "fuzz_gate_loop",
   "edits": [
     {
-      "op": "duplicate",
-      "target": "work"
-    },
-    {
       "op": "add_edge",
       "source": "review",
       "target": "prepare",
       "condition": "proceed"
-    },
-    {
-      "op": "set_knob",
-      "name": "work_copy__system_prompt",
-      "value": "You are the work step.\nAlso, edit 2."
     }
   ],
   "found": [
     "spine: the spine drain ended with rc=1"
   ],
   "fixed_by": "V5: each verdict names one edge (the spine refused the graph)",
-  "refused_with": "V5"
+  "refused_with": "V5",
+  "note": "the duplicate of 'work' and its knob edit were dropped from the edits: a copy writing work.txt again before anything reads it is refused by V19 first, and this case is about two proceed edges (V5)"
 }

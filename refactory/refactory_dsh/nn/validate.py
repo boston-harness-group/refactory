@@ -83,6 +83,10 @@ RULES: dict[str, str] = {
            "globals/locals/vars or dunder name or attribute; no other node carries code; a "
            "verdict gate (evaluator refactory_dsh.snippet:verdict) reads its verdict from its "
            "first required_reads file or, with none, its first inputs fact",
+    "V19": "a no-tools agent or a code op that sets no fact has a reader for what it writes: "
+           "a step whose every file is written again by a no-tools agent, on every path from "
+           "it, before any node reads it or may read it (a Python op or gate, an agent with "
+           "tools, a data pass) and before the run or its pass ends, does work nothing sees",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
@@ -404,6 +408,7 @@ def validate(
     issues.extend(read_issues(graph))
     issues.extend(agent_input_issues(graph, knob_values))
     issues.extend(required_read_issues(graph))
+    issues.extend(overwritten_write_issues(graph))
 
     # V16 forks and joins are paired, and branches are independent.
     issues.extend(fork_issues(graph, knob_values))
@@ -883,6 +888,100 @@ def required_read_issues(graph: Graph) -> list[Issue]:
             issues.append(Issue(
                 "V15", f"declares {unset} as inputs, which some path to it does not produce "
                 "first (a data pass's own facts stay inside its pass)", node=node_id))
+    return issues
+
+
+def _replaces_its_writes(node: Node) -> bool:
+    """Whether a node's whole effect is its declared outputs: a no-tools agent (its reply
+    is its one write) or a code op (`main` returns the files it writes). Any other op or
+    agent may append to a file, read one it does not declare, or act elsewhere."""
+    from refactory_dsh import snippet
+
+    if node.kind == "agent":
+        return node.tool_policy == "none"
+    return node.kind == "op" and snippet.is_code_node(node)
+
+
+def _reads_only_declared(node: Node) -> bool:
+    """Whether a node can read only the files it declares. A no-tools agent is handed its
+    declared reads; a code op or code/verdict gate its declared inputs. Any other op or
+    gate runs Python (or asks a person or an agent) that may open any file, since
+    neither runtime checks an op's reads; an agent with tools may too; a data node's
+    pass reads what is there."""
+    from refactory_dsh import snippet
+
+    if node.kind == "agent":
+        return node.tool_policy == "none"
+    if node.kind == "op":
+        return snippet.is_code_node(node)
+    if node.kind == "gate":
+        return node.gate_kind == "fn" and node.evaluator in (snippet.GATE, snippet.VERDICT)
+    return node.kind in ("fork", "join")
+
+
+def _overwriters(graph: Graph, node_id: str, name: str) -> list[str] | None:
+    """The steps that write ``name`` again on every path from ``node_id`` before any node
+    may read it, or ``None`` when some path may read it first.
+
+    A path may read it when it reaches a node declaring it in ``reads``, a node that may
+    read files it does not declare (`_reads_only_declared` false: a Python op or gate, an
+    agent with tools, a data node), or an end: a node with no out-edge -- the run's or
+    its pass's last step -- leaves the file as the run's output. Only a no-tools agent
+    writing it is a certain overwrite (its reply is the file); a code op writes only what
+    its ``main`` returns, so the walk goes on past one. A fork's branches are walked as
+    well as its join."""
+    stack = [edge.target for edge in graph.out_edges(node_id)]
+    if not stack:
+        return None
+    seen: set[str] = set()
+    writers: set[str] = set()
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        node = graph.nodes.get(current)
+        if node is None or name in node.reads or name in node.required_reads:
+            return None
+        if not _reads_only_declared(node):
+            return None
+        if name in node.writes and node.kind == "agent":
+            writers.add(current)
+            continue
+        following = [edge.target for edge in graph.out_edges(current)]
+        if node.kind == "fork":
+            following += [*node.targets, *node.optional_targets]
+        if not following:
+            return None
+        stack.extend(following)
+    return sorted(writers)
+
+
+def overwritten_write_issues(graph: Graph) -> list[Issue]:
+    """V19: a step whose every write is overwritten before anything reads it.
+
+    Only a step whose whole effect is its declared outputs is judged (a no-tools agent or
+    a code op, `_replaces_its_writes`) and only one that sets no fact; a loop that
+    rewrites its file on each pass, a reader in between, or a path to the end keeps it."""
+    issues: list[Issue] = []
+    for node_id in sorted(graph.reachable()):
+        node = graph.nodes.get(node_id)
+        if node is None or not node.writes or node.produces or not _replaces_its_writes(node):
+            continue
+        lost: dict[str, list[str]] = {}
+        for name in node.writes:
+            writers = _overwriters(graph, node_id, name)
+            if writers is None:
+                break
+            lost[name] = writers
+        else:
+            detail = "; ".join(f"{name!r} by {', '.join(repr(w) for w in writers)}"
+                               for name, writers in sorted(lost.items()))
+            issues.append(Issue(
+                "V19", f"everything it writes is written again before any node reads it "
+                f"({detail}), on every path from it, so its work is lost; have a later step "
+                "read it (`reads`), make its reply a fact (`produces`), write another file, "
+                "or remove one of the two", node=node_id))
     return issues
 
 
