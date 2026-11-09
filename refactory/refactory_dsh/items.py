@@ -489,10 +489,19 @@ def no_answer(pass_dir: Path, error_text: str,
     no answer rather than an error, on either runtime: the walker's error and the spine
     worker's stderr both carry the name."""
     missing = missing_steps(pass_dir)
-    names = {step: {name for name in outputs_of(step) if name} for step in missing}
-    if any(name in error_text for outputs in names.values() for name in outputs):
+    names = {name for step in missing for name in outputs_of(step) if name}
+    if any(_names(error_text, name) for name in names):
         return missing
     return {}
+
+
+def _names(text: str, name: str) -> bool:
+    """Whether ``text`` names ``name`` whole: as a path's last part or a word of its own,
+    so ``a.txt`` is not found in ``metadata.txt`` nor ``answer.txt`` in
+    ``draft_answer.txt``."""
+    import re
+
+    return re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", text) is not None
 
 
 def source_override(workdir: Path, node_id: str) -> dict[str, Any]:

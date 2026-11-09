@@ -149,7 +149,7 @@ def _looped() -> nn.Graph:
     return graph
 
 
-def _forked() -> nn.Graph:
+def _forked(pick: str = "crash_ops:pick", reads: tuple[str, ...] = ()) -> nn.Graph:
     """data -> [entry -> fork (a, b) -> join -> pick] -> report: two attempts, one pick."""
     graph = nn.Graph()
     graph.add(_data("entry", "pick"))
@@ -158,7 +158,7 @@ def _forked() -> nn.Graph:
     graph.add(_solver("a", "Angle A.", "a.txt"))
     graph.add(_solver("b", "Angle B.", "b.txt"))
     graph.add(nn.Node("join", "join", sources=("a", "b")))
-    graph.add(nn.Node("pick", "op", call="crash_ops:pick", reads=("a.txt", "b.txt"),
+    graph.add(nn.Node("pick", "op", call=pick, reads=("a.txt", "b.txt", *reads),
                       writes=("item_result.json",)))
     graph.add(nn.Node("report", "op", call="loop_ops:noop"))
     graph.connect("entry", "fork")
@@ -306,6 +306,30 @@ def test_a_crashed_fork_branch_does_not_sink_its_sibling(tmp_path, runtime):
         assert json.loads((_pass(run, item) / "item_result.json").read_text())["answered"] == 1
         assert (_pass(run, item) / "reviews/a-missing.txt").exists()
     assert all(set(record["missing_steps"]) == {"a"} for record in scores)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_genuine_error_after_a_missing_step_is_still_an_error(tmp_path, runtime):
+    """[both runtimes] Branch ``a`` (``a.txt``) goes missing, and the pick then fails on its
+    own bug, reading ``metadata.txt``. That error names no output of ``a`` -- ``a.txt`` is
+    only a substring of ``metadata.txt`` -- so the item fails with it, not "no answer"."""
+    dsh = Scripted(tmp_path / "dsh", {"Angle A.": [WORKER_CRASH], "Angle B.": ["right"], "": ["?"]})
+    scores, _ = _run(runtime, _forked("crash_ops:pick_with_metadata", (CURRENT_ITEM,)), tmp_path, dsh)
+    [buggy] = [r for r in scores if str(r["id"]) == "0"]
+    assert buggy["error_kind"] is not None and "metadata.txt" in buggy["error_text"], buggy
+    assert not str(buggy.get("fail_reason") or "").startswith("no answer")
+    # The other items, with the same branch missing, are graded from b's answer.
+    assert _keys([r for r in scores if str(r["id"]) != "0"]) == RIGHT[1:]
+
+
+def test_a_missing_output_is_named_only_whole():
+    from refactory_dsh.items import _names
+
+    assert _names("FileNotFoundError: [Errno 2] No such file: '/tmp/p/a.txt'", "a.txt")
+    assert _names("required input is missing: a.txt", "a.txt")
+    assert not _names("No such file: '/tmp/p/metadata.txt'", "a.txt")
+    assert not _names("No such file: 'draft_answer.txt'", "answer.txt")
+    assert not _names("No such file: 'answer_a.txt'", "answer_a")
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)

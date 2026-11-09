@@ -35,3 +35,12 @@ def pick(ctx: Any) -> dict[str, Any]:
     ctx.write_json("item_result.json", {"score": 1.0 if "right" in answers else 0.0,
                                         "answered": sum(1 for answer in answers if answer)})
     return {}
+
+
+def pick_with_metadata(ctx: Any) -> dict[str, Any]:
+    """`pick`, then, on item ``0``, a genuine bug: it reads ``metadata.txt``, which nothing
+    writes."""
+    pick(ctx)
+    if str((ctx.read_json("current_item.json", {}) or {}).get("id")) == "0":
+        ctx.read_text("metadata.txt")
+    return {}
