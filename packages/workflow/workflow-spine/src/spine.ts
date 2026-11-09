@@ -1039,8 +1039,9 @@ export class Spine {
 
   /**
    * Mark a non-gate node complete and advance. `failed` records an optional node that
-   * failed (a fork's `optional_targets`): it is logged `failed`, not `completed`, and
-   * its branch goes on with its next node, as the walker records and continues it.
+   * failed (a fork's `optional_targets`, or a data-pass agent whose retries are spent,
+   * `missing_on_crash`): it is logged `failed`, not `completed`, and its branch goes on
+   * with its next node, as the walker records and continues it.
    */
   complete(node: string, { failed = false }: { failed?: boolean } = {}): SpineNext {
     this.assertDue(node)
@@ -1048,9 +1049,13 @@ export class Spine {
     return this.completeDue(node, failed)
   }
 
-  /** The nodes some fork names in its `optional_targets`. */
+  /** The nodes that may fail and go on: a fork's `optional_targets`, and `missing_on_crash` agents. */
   private optionalNodes(): Set<string> {
-    return new Set([...this.nodes.values()].flatMap(body => body.optional_targets ?? []))
+    const bodies = [...this.nodes.values()]
+    return new Set([
+      ...bodies.flatMap(body => body.optional_targets ?? []),
+      ...bodies.filter(body => body.missing_on_crash === true).map(body => body.id),
+    ])
   }
 
   /** Completion after public admission, or the runner closing its admitted pass. */

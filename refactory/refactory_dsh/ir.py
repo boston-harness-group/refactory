@@ -119,6 +119,10 @@ class AgentNode(Node):
     #: is no retry, and is left out of the serialized graph, so a graph that declares
     #: none is byte-identical to one lowered before the field existed.
     retry: dict[str, Any] | None = None
+    #: True for an agent step in a data pass whose spent retries leave it missing rather
+    #: than failed (`nn.graph.Graph.missing_on_crash`): its worker records it missing and
+    #: the spine lets it fail and go on. None is left out of the serialized graph.
+    missing_on_crash: bool | None = None
     #: Where the node works (`nn.graph.workspace_declaration`'s canonical form). None is
     #: the run directory, and is left out of the serialized graph, so a graph that
     #: declares no workspace is byte-identical to one lowered before the field existed.
@@ -270,6 +274,8 @@ class Workflow(BaseModel):
                 d.pop("dispatch_command", None)
             if "retry" in d and d["retry"] is None:
                 d.pop("retry")
+            if "missing_on_crash" in d and d["missing_on_crash"] is None:
+                d.pop("missing_on_crash")
             if "workspace" in d and d["workspace"] is None:
                 d.pop("workspace")
             if not d.get("system_prompt"):

@@ -54,6 +54,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `GraphError` | `` |
 | class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = ()) -> None` |
 | function | `retry_declaration` | `(value: 'Any') -> 'dict[str, Any] \| None'` |
+| function | `retry_safe` | `(node: "'Node'") -> 'bool'` |
 | function | `workspace_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
 
 - **`Edge`** — One connection between two nodes, and the verdict that selects it.
@@ -61,6 +62,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 - **`GraphError`** — A graph could not be built or read from its serialized form.
 - **`Node`** — One step of a mode.
 - **`retry_declaration`** — A retry declaration in its one canonical form, or None for no retry.
+- **`retry_safe`** — Whether running ``node`` again in a fresh session cannot start from what a failed
 - **`workspace_declaration`** — A workspace declaration in its one canonical form, or None for ``none``.
 
 
@@ -485,7 +487,7 @@ The workflow IR this package owns and lowers a mode state into.
 | kind | name | signature |
 |---|---|---|
 | class | `AgentConfig` | `(*, role: refactory_dsh.ir.AgentRole, model: str, timeout: int = 600) -> None` |
-| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', system_prompt: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, retry: dict[str, typing.Any] \| None = None, workspace: dict[str, str] \| None = None, tool_policy: str \| None = None) -> None` |
+| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', system_prompt: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, retry: dict[str, typing.Any] \| None = None, missing_on_crash: bool \| None = None, workspace: dict[str, str] \| None = None, tool_policy: str \| None = None) -> None` |
 | class | `AgentRole` | `(*values)` |
 | class | `ArtifactCheck` | `(*, path: str, must_exist: bool = True, min_size: int = 0, must_contain: list[str] = <factory>) -> None` |
 | class | `DataItem` | `(*, id: str, path: str \| None = None, metadata: dict[str, typing.Any] = <factory>, prompt: str = '') -> None` |
@@ -1032,9 +1034,11 @@ The per-item half of a data node, from the command line.
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `live_dir` | `(workdir: 'Path', node_id: 'str') -> 'Path'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
-| function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None) -> 'dict[str, Any] \| None'` |
+| function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None, pass_dir: 'Path \| None' = None, outputs_of: 'Callable[[str], Iterable[str]] \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `mark_pass_complete` | `(pass_dir: 'Path', record: 'dict[str, Any] \| None' = None) -> 'None'` |
 | function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
+| function | `missing_steps` | `(pass_dir: 'Path') -> 'dict[str, dict[str, Any]]'` |
+| function | `no_answer` | `(pass_dir: 'Path', error_text: 'str', outputs_of: 'Callable[[str], Iterable[str]]') -> 'dict[str, dict[str, Any]]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
 | function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
@@ -1061,6 +1065,8 @@ The per-item half of a data node, from the command line.
 - **`make_item_record`** — Build a per-item record for one evaluated item.
 - **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
+- **`missing_steps`** — The steps a pass went on without, each with why: ``cause`` (``output_limit``,
+- **`no_answer`** — The missing steps whose absent output is why a later step of the pass failed, or {}.
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
 - **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.

@@ -28,16 +28,29 @@ ON_EXHAUSTED = ("continue", "fail_item", "halt")
 #: The gate out-edge an exhausted ``continue`` gate takes.
 PROCEED = "proceed"
 
-#: The failures an agent node may declare a retry on (`Node.retry`). Only a timeout: a
-#: session that ran out of time is the one failure a fresh, longer session can fix. A
-#: model that answered wrongly answers wrongly again, and a transport blip is already
-#: retried inside the model client (`model.DEFAULT_ATTEMPTS`).
-RETRY_ON = ("timeout",)
+#: The failures an agent node may declare a retry on (`Node.retry`): ``timeout`` (the
+#: session ran out of time; each retry's limit is ``timeout_factor`` times the last),
+#: ``crash`` (the worker or product failed: an invalid result, a worker error) and
+#: ``output_limit`` (the model used its whole output allowance without answering -- the
+#: model failing the question, which a graph should fix, so it is retried only when a
+#: step opts in). A model that answered wrongly answers wrongly again, and a wire that
+#: kept failing or a key the provider refuses fails the same way, so none of those is
+#: retried (`node_retry.failure_kind`).
+RETRY_ON = ("crash", "output_limit", "timeout")
 
 #: The most retries one node may declare, and the largest factor its limit may grow by
 #: per retry. A bound, so a declared rule cannot hold a run for an unbounded time.
 MAX_RETRY_TIMES = 3
 MAX_TIMEOUT_FACTOR = 10
+
+#: How many fresh sessions an agent step in a data pass gets, by default, when its
+#: session crashes: two, so a step that crashes a third of the time is left unanswered
+#: for about one item in thirty, and the item's time stays bounded at three sessions. An
+#: agent's crash used to end its item; the item is the unit an optimizer is scored on,
+#: so one flaky session cost a whole item's score (`Graph.retry_rule`). A timeout is not
+#: retried by default: a node's `timeout_s` is a bound its author chose, and three
+#: sessions under it would triple the item's wall without saying so.
+PASS_RETRY_TIMES = 2
 
 
 def retry_declaration(value: Any) -> dict[str, Any] | None:
@@ -46,9 +59,10 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
     A mapping of ``on`` (the failures it answers, from `RETRY_ON`), ``times`` (how many
     retries) and ``timeout_factor`` (how much longer each retry's session limit is than
     the last one's). Unset keys take ``on: ["timeout"]``, ``times: 1`` and
-    ``timeout_factor: 2``. Canonical -- ``on`` sorted, a whole factor an integer -- so a
-    rule written two ways serializes, and therefore identifies a candidate, one way.
-    Raises ``ValueError`` saying what is wrong.
+    ``timeout_factor: 2``. ``times: 0`` declares no retry at all, which turns off the
+    default a data pass gives its agent steps (`Graph.retry_rule`). Canonical -- ``on``
+    sorted, a whole factor an integer -- so a rule written two ways serializes, and
+    therefore identifies a candidate, one way. Raises ``ValueError`` saying what is wrong.
     """
     if value is None:
         return None
@@ -64,9 +78,9 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
     if strange:
         raise ValueError(f"a retry can answer {list(RETRY_ON)} only; unknown: {strange}")
     times = value.get("times", 1)
-    if isinstance(times, bool) or not isinstance(times, int) or not 1 <= times <= MAX_RETRY_TIMES:
-        raise ValueError(f"a retry's 'times' is a whole number from 1 to {MAX_RETRY_TIMES}, "
-                         f"not {times!r}")
+    if isinstance(times, bool) or not isinstance(times, int) or not 0 <= times <= MAX_RETRY_TIMES:
+        raise ValueError(f"a retry's 'times' is a whole number from 0 (no retry) to "
+                         f"{MAX_RETRY_TIMES}, not {times!r}")
     factor = value.get("timeout_factor", 2)
     if (isinstance(factor, bool) or not isinstance(factor, (int, float))
             or not 1 <= factor <= MAX_TIMEOUT_FACTOR):
@@ -75,6 +89,13 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
     if float(factor).is_integer():
         factor = int(factor)
     return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor}
+
+def retry_safe(node: "Node") -> bool:
+    """Whether running ``node`` again in a fresh session cannot start from what a failed
+    session left: its only effect is its own declared report files (``outputs_only``),
+    each attempt gets a fresh workspace, or it has no tools at all (``tool_policy:
+    none``), so its only effect is the reply the runtime captures."""
+    return bool(node.outputs_only or node.workspace is not None or node.tool_policy == "none")
 
 #: Where an agent node works (`Node.workspace`). ``none`` is the run directory, as
 #: every node had before workspaces; ``scratch`` is a fresh empty folder per dispatch;
@@ -313,9 +334,16 @@ class Node:
     #: `agent`: what the runtime does when the node's session fails, in its canonical
     #: form (`retry_declaration`), e.g. ``{"on": ["timeout"], "times": 1,
     #: "timeout_factor": 2}``: a session that times out is run once more, fresh, with
-    #: twice its `timeout_s` (which a retry requires), inside the node's whole budget
-    #: and the run's wall (`refactory_dsh.node_retry`). None is no retry, as before. A
-    #: rule the graph declares, on both runtimes, with or without a CEO.
+    #: twice its `timeout_s` (which a retry on timeout requires), inside the node's whole
+    #: budget and the run's wall (`refactory_dsh.node_retry`); ``"crash"`` answers a
+    #: worker or product failure, and ``"output_limit"`` a session that used its whole
+    #: output allowance without answering (opt-in only).
+    #: None is the default: no retry, except that an agent step in a data pass gets 2
+    #: fresh sessions on a crash (``{"on": ["crash"], "times": 2}``); a step in a data
+    #: pass whose retries are spent, or that runs out of output, is missing rather than
+    #: failed (`Graph.retry_rule`).
+    #: ``{"times": 0}`` turns every retry off. A rule
+    #: the graph declares, on both runtimes, with or without a CEO.
     retry: dict[str, Any] | None = None
     #: `agent`: the node's only effect is its declared writes, its own report files --
     #: a reviewer, a judge, a researcher -- never the run's worktree or the target. Only
@@ -490,11 +518,12 @@ class Node:
                 self.retry = retry_declaration(self.retry)
             except ValueError as exc:
                 raise GraphError(f"node {self.id!r}: {exc}") from exc
-            if self.timeout_s is None:
+            retries = self.retry["times"] > 0
+            if retries and "timeout" in self.retry["on"] and self.timeout_s is None:
                 raise GraphError(
-                    f"node {self.id!r} declares a retry but no timeout_s: a retry's limit is "
-                    "its timeout_factor times the node's own bound, so the node needs one")
-            if not self.outputs_only and self.workspace is None:
+                    f"node {self.id!r} declares a retry on timeout but no timeout_s: a retry's "
+                    "limit is its timeout_factor times the node's own bound, so the node needs one")
+            if retries and not retry_safe(self):
                 # A node that may change the run's worktree or the target cannot simply
                 # run again: the second session would start from what the first left.
                 # A node with a workspace is safe: each attempt gets a fresh workspace
@@ -508,8 +537,8 @@ class Node:
                     f"node {self.id!r} declares a retry but may change shared state (the "
                     "run's worktree or the target), so a second session would start from "
                     "whatever the first one left. Only a node whose outputs are its own "
-                    "declared report files may retry: declare outputs_only=True or give "
-                    "it a workspace")
+                    "declared report files may retry: declare outputs_only=True, give "
+                    "it a workspace, or give it no tools (tool_policy='none')")
     @property
     def resource_phase(self) -> str | None:
         """Explicit resource scope, with the historical validator fallback."""
@@ -831,6 +860,34 @@ class Graph:
         """Whether ``node_id`` runs once per item, in some data node's pass (`data_body`)."""
         return any(node_id in self.data_body(node.id)
                    for node in self.nodes.values() if node.kind == "data")
+
+    def retry_rule(self, node_id: str) -> dict[str, Any] | None:
+        """The retry rule ``node_id`` runs under, on both runtimes; None for none.
+
+        - A declared ``retry`` wins; ``times: 0`` declares none.
+        - Undeclared, an agent step in a data pass gets `PASS_RETRY_TIMES` fresh sessions
+          on a crash (a worker or product failure), when a retry is safe for it
+          (`retry_safe`). Running out of output without answering is the model's own
+          failure and is not retried by default. When its retries are spent, or it runs
+          out of output, the step is missing rather than failed (`Executor._missing_optional`, the
+          spine's ``missing_on_crash``): a gate after it sees no answer and may reloop,
+          a fork's join sees the branch without one, and the item goes on to be scored.
+        - Undeclared, outside a data pass: none, as before.
+        """
+        node = self.nodes[node_id]
+        if node.kind != "agent":
+            return None
+        if node.retry is not None:
+            return node.retry if node.retry["times"] > 0 else None
+        if not self.in_data_pass(node_id) or not retry_safe(node):
+            return None
+        return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
+
+    def missing_on_crash(self, node_id: str) -> bool:
+        """Whether ``node_id``, when its retries are spent or it runs out of output without
+        answering, is missing rather than failed: an agent step in a data pass with a
+        retry rule (declared or the default)."""
+        return self.in_data_pass(node_id) and self.retry_rule(node_id) is not None
 
     def exhaustion_exit(self, gate_id: str) -> str | None:
         """Where an exhausted ``continue`` gate goes: its ``proceed`` edge's target, when

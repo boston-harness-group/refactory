@@ -39,6 +39,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -372,6 +373,8 @@ def make_item_record(
     label_text: str | None = None,
     fail_reason: str | None = None,
     metadata: dict[str, Any] | None = None,
+    pass_dir: Path | None = None,
+    outputs_of: Callable[[str], Iterable[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Build a per-item record for one evaluated item.
 
@@ -394,6 +397,21 @@ def make_item_record(
         "fail_reason": fail_reason,
         "metadata": dict(metadata or {}),
     }
+    if error is not None and pass_dir is not None and outputs_of is not None:
+        unanswered = no_answer(pass_dir, str(error), outputs_of)
+        if unanswered:
+            # A later step could not run because a step that crashed through its
+            # retries left no output: the item has no answer, scored 0 and not an error.
+            return {
+                "id": item_id,
+                "passed": False,
+                "score": 0.0,
+                "error_text": None,
+                "error_kind": None,
+                **{**base, "fail_reason": "no answer: " + "; ".join(
+                    f"{step} {_spent_phrase(info)}" for step, info in unanswered.items())},
+                "missing_steps": unanswered,
+            }
     if error is not None:
         return {
             "id": item_id,
@@ -405,6 +423,7 @@ def make_item_record(
         }
     if verdict is None:
         return None
+    missing = missing_steps(pass_dir) if pass_dir is not None else {}
     return {
         "id": item_id,
         "passed": verdict.passed,
@@ -412,7 +431,77 @@ def make_item_record(
         "error_text": None,
         "error_kind": None,
         **base,
+        # A step the item went on without (a crashed step whose retries were spent, an
+        # optional branch that failed), so a reader sees why its answer is missing.
+        **({"missing_steps": missing} if missing else {}),
     }
+
+
+def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
+    """The steps a pass went on without, each with why: ``cause`` (``output_limit``,
+    ``crash``, ``timeout``; ``failed`` for an optional branch), ``sessions`` (how many ran,
+    when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
+    write (`nn.fork._record_missing`, `worker_node.main`), and the step's
+    `node_retry.record_spent` record."""
+    from refactory_dsh.node_retry import MISSING_DIR
+
+    reviews = Path(pass_dir) / "reviews"
+    found: dict[str, dict[str, Any]] = {}
+    for path in sorted(reviews.glob("*-missing.txt")) if reviews.is_dir() else ():
+        step = path.name[: -len("-missing.txt")]
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            continue
+        info: dict[str, Any] = {"cause": "failed", "sessions": None, "error": text[:2000]}
+        spent = Path(pass_dir) / MISSING_DIR / f"{step}.json"
+        try:
+            info.update({key: value for key, value in json.loads(spent.read_text()).items()
+                         if key in ("cause", "sessions", "error")})
+        except (OSError, ValueError):
+            pass
+        found[step] = info
+    return found
+
+
+def _declared_outputs(workdir: Path, step: str) -> list[str]:
+    """The files and facts ``step`` declares, from the run's declarations (the spine)."""
+    from refactory_dsh.run import declarations
+
+    found = declarations(Path(workdir), step)
+    return [*found.get("writes", ()), *found.get("produces", ())]
+
+
+def _spent_phrase(info: dict[str, Any]) -> str:
+    cause = {"output_limit": "reached its output limit without answering",
+             "timeout": "timed out", "crash": "crashed"}.get(str(info.get("cause")), "failed")
+    sessions = info.get("sessions")
+    return f"{cause}" + (f" in all {sessions} sessions" if isinstance(sessions, int) and sessions > 1 else "")
+
+
+def no_answer(pass_dir: Path, error_text: str,
+              outputs_of: Callable[[str], Iterable[str]]) -> dict[str, dict[str, Any]]:
+    """The missing steps whose absent output is why a later step of the pass failed, or {}.
+
+    A step is missing when its retries were spent (or an optional branch failed). When a
+    later step then fails over a file or fact only the missing step would have made --
+    a read of it, a required input, a template -- the failure names it, and the item has
+    no answer rather than an error, on either runtime: the walker's error and the spine
+    worker's stderr both carry the name."""
+    missing = missing_steps(pass_dir)
+    names = {name for step in missing for name in outputs_of(step) if name}
+    if any(_names(error_text, name) for name in names):
+        return missing
+    return {}
+
+
+def _names(text: str, name: str) -> bool:
+    """Whether ``text`` names ``name`` whole: as a path's last part or a word of its own,
+    so ``a.txt`` is not found in ``metadata.txt`` nor ``answer.txt`` in
+    ``draft_answer.txt``."""
+    import re
+
+    return re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", text) is not None
 
 
 def source_override(workdir: Path, node_id: str) -> dict[str, Any]:
@@ -845,9 +934,10 @@ def command_end(
             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
             fail_reason=failed_reason,
             metadata=metadata,
+            pass_dir=pass_dir, outputs_of=lambda step: _declared_outputs(workdir, step),
         )
         if record is not None:
-            if failed_kind is not None:
+            if failed_kind is not None and record.get("error_kind") is not None:
                 record["error_kind"] = failed_kind
             # Guard: skip writing a second item_scores record when
             # command_begin's setup-failure handler already wrote one for
@@ -861,11 +951,13 @@ def command_end(
                     # actual exception class (e.g. ValueError), not
                     # RuntimeError from the end --failed wrapper.
                     record = existing
-        # Track failed count in pass state (locked for concurrent items).
-        _locked_pass_state_update(
-            workdir, node.id,
-            lambda ps: ps.__setitem__("failed", ps.get("failed", 0) + 1),
-        )
+        # Track failed count in pass state (locked for concurrent items). An item with no
+        # answer (`no_answer`) is graded, not failed, as the walker counts it.
+        if record is None or record.get("error_text") is not None:
+            _locked_pass_state_update(
+                workdir, node.id,
+                lambda ps: ps.__setitem__("failed", ps.get("failed", 0) + 1),
+            )
         # Merge declared produces from the pass directory to the run directory.
         _merge_unless_concurrent(workdir, pass_dir, node.produces, concurrent)
         mark_pass_complete(pass_dir, record)
@@ -939,6 +1031,7 @@ def command_end(
         label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
         fail_reason=verdict.details if not verdict.passed and verdict.details else None,
         metadata=metadata,
+        pass_dir=pass_dir,
     )
     if record is not None and SCORES_FACT in node.produces:
         _write_facts(workdir, SCORES_FACT, [record])

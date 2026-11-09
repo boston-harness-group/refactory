@@ -510,8 +510,10 @@ def test_livemath_ops_require_their_reads_and_the_optimizer_sees_it():
 
     state = sf.seeds()["livemath_skill_graph"].state()
     nodes = state["graph"]["nodes"]
-    for op in ("prepare", "notes_prompts", "decide_prompt", "extract_answer"):
+    for op in ("prepare", "notes_prompts", "extract_answer"):
         assert nodes[op]["required_reads"] == nodes[op]["reads"], op
+    # decide_prompt goes on with the fork step that answered: only compare's notes are required.
+    assert nodes["decide_prompt"]["required_reads"] == ["compare_notes.txt"]
     assert sf._rendered_copy(state, "extract_answer")["required_reads"] == [
         "answer.txt", "current_item.json"]
     assert "required_reads" in "\n".join(render_schema())

@@ -68,6 +68,12 @@ export interface WorkflowNode {
   targets?: string[]
   /** `ForkNode`: targets whose failure does not fail the fork. */
   optional_targets?: string[]
+  /**
+   * `AgentNode` in a data pass: when its crash or timeout retries are spent, its worker
+   * records it missing rather than failed, and the item goes on without its answer
+   * (Python's `Graph.missing_on_crash`), as a fork's optional target does.
+   */
+  missing_on_crash?: boolean
   /** `JoinNode`: the branch exits this barrier waits for. */
   sources?: string[]
   /** `AgentNode`: the annotation that lets a director hot-plug its planned children. */

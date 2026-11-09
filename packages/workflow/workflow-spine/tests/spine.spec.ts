@@ -1672,6 +1672,27 @@ describe('a fork whose branches differ in length (nested fork, optional node)', 
   })
 })
 
+describe('a data-pass agent whose crash retries are spent (missing_on_crash)', () => {
+  const graph: WorkflowGraph = {
+    name: 'crashed',
+    start_node: 'solve',
+    nodes: {
+      solve: { _type: 'AgentNode', id: 'solve', role: 'solver', missing_on_crash: true, reads: [], writes: ['answer.txt'] },
+      other: { _type: 'AgentNode', id: 'other', role: 'solver', reads: [], writes: ['other.txt'] },
+      check: { _type: 'FnNode', id: 'check', command: 'run check', reads: [], writes: [] },
+    },
+    edges: [{ source: 'solve', target: 'other' }, { source: 'other', target: 'check' }],
+  } as WorkflowGraph
+
+  it('may fail and go on, recorded failed; an agent without the flag may not', () => {
+    const spine = new Spine(graph)
+    spine.complete('solve', { failed: true })
+    expect(ids(spine)).toEqual(['other'])
+    expect(spine.state().log).toContain('failed solve')
+    expect(() => spine.complete('other', { failed: true })).toThrow(/not optional/)
+  })
+})
+
 describe('fork inside a data pass', () => {
   it('walks fork→branches→join inside each item pass', () => {
     const spine = new Spine(forkInsideData.graph)

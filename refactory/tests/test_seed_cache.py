@@ -332,3 +332,22 @@ def test_an_edited_mode_file_is_refused_naming_it(tmp_path, monkeypatch, capsys)
         assert "implementation" in err and "package_files" in err
     finally:
         sys.modules.pop("edited_probe", None)
+
+
+def test_the_runtime_semantics_are_part_of_the_context(tmp_path, monkeypatch):
+    """A seed scored before a change to how the runtime treats a crashed step (a crash
+    retried, a spent one leaving no answer) is not reused (`node_retry.SEMANTICS`); nor is
+    a run's evidence resumed across one (`profiles.resolve`)."""
+    from refactory_dsh import node_retry, profiles
+
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        monkeypatch.setattr(node_retry, "SEMANTICS", "an older runtime")
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(cache))
+        with pytest.raises(LoopError, match="runtime_semantics"):
+            loop.init()
+        before = profiles.resolve(tmp_path, MODE)
+        monkeypatch.setattr(node_retry, "SEMANTICS", "pass-crash-retry/1")
+        after = profiles.resolve(tmp_path, MODE)
+        assert before["evaluation_context"]["runtime_semantics"] == "an older runtime"
+        assert before["context_hash"] != after["context_hash"]

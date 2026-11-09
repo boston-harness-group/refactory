@@ -260,12 +260,20 @@ def main() -> int:
             print(json.dumps({'node': receipt['node'], 'status': receipt['status']}))
             return 0
         except Exception as error:
-            if spec.get('optional'):
+            from refactory_dsh.node_retry import leaves_no_answer
+            # An optional fork branch is missing on any failure; an agent step in a data
+            # pass only when its retries are spent or it ran out of output without
+            # answering (`missing_on_crash`).
+            if spec.get('optional') or (spec.get('missing_on_crash')
+                                        and leaves_no_answer(error)):
                 node_id = spec.get('node_id', 'unknown')
                 reviews_dir = workdir / 'reviews'
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f'{node_id}-missing.txt').write_text(
                     f'{type(error).__name__}: {error}\n')
+                if spec.get('missing_on_crash'):
+                    from refactory_dsh.node_retry import record_spent
+                    record_spent(workdir, node_id, error)
                 # dm-232: settle the pending delivery marker at the point
                 # the branch is recorded missing, so it never goes stale.
                 try:

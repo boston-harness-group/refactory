@@ -68,10 +68,21 @@ def verify_prompt(ctx: Any) -> dict[str, Any]:
     return {"verify_prompt": claude_backend_prompt(message)}
 
 
+#: What the judge is shown for a fork attempt that gave no answer (it crashed through
+#: its retries): the other attempt still reaches it.
+NO_ATTEMPT = "(This attempt gave no answer: its session did not answer.)"
+
+
 def judge_prompt(ctx: Any) -> dict[str, Any]:
-    """The judge node's framed prompt: question and both fork branches' answers."""
-    message = judge_message(_question(ctx), ctx.read_text("attempt_a.txt"),
-                            ctx.read_text("attempt_b.txt"))
+    """The judge node's framed prompt: question and both fork branches' answers.
+
+    A branch that did not answer is shown as `NO_ATTEMPT`; with neither there is nothing
+    to judge, and the missing attempts are the error (the item has no answer)."""
+    names = ("attempt_a.txt", "attempt_b.txt")
+    if not any(ctx.exists(name) for name in names):
+        raise FileNotFoundError(f"neither attempt was written: {', '.join(names)}")
+    attempts = [ctx.read_text(name) if ctx.exists(name) else NO_ATTEMPT for name in names]
+    message = judge_message(_question(ctx), *attempts)
     return {"judge_prompt": claude_backend_prompt(message)}
 
 

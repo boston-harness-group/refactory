@@ -997,6 +997,20 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "whole run (no later item runs). A gate with no forward `proceed` edge defaults to "
         "`fail_item`. The last step of the pass can be looped too: the "
         "loop then adds a step after the gate to end the pass.",
+        "- **running out of output**: a model call that uses its whole output allowance "
+        "without answering is the model failing that question. It is not retried: the step "
+        "has no answer, and the item goes on without it (a gate after it sees no answer and "
+        "may reloop; a fork's join sees that branch without one; a code op's `inp['files']` "
+        "holds only the files that exist; an item left with nothing to grade scores 0). "
+        "Address it in the graph: a prompt that commits to an answer early and keeps its "
+        "working short, shorter attempts plus a check that sends a step back, or several "
+        "attempts and a vote.",
+        "- **crashes**: when the worker or product fails (not the model's own output), an "
+        "agent step in the per-item pass that is safe to rerun (no tools, its own report "
+        "files only, or a workspace) is run again in a fresh session, up to 2 more times; "
+        "if every session crashes it has no answer, as above. A timeout and a failure of the "
+        "connection to the model are not retried and still fail the item. Retried sessions "
+        "count toward the item's time and cost.",
     ]
     if "parallel" in ops:
         lines.append(
@@ -1183,6 +1197,15 @@ def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+#: How the optimizer is told why a step gave no answer (`items.missing_steps` causes).
+NO_ANSWER_CAUSES = {
+    "output_limit": "ran out of output without answering",
+    "crash": "crashed in every session",
+    "timeout": "timed out",
+    "failed": "failed (optional branch)",
+}
+
+
 def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     """How the candidate being edited did item by item, on its train part.
 
@@ -1194,15 +1217,34 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     """
     errored = [r for r in records if r.get("error_text")]
     passed = [r for r in records if not r.get("error_text") and r.get("passed")]
-    wrong = [r for r in records if not r.get("error_text") and not r.get("passed")]
+    unanswered = [r for r in records if not r.get("error_text") and not r.get("passed")
+                  and r.get("missing_steps")]
+    wrong = [r for r in records if not r.get("error_text") and not r.get("passed")
+             and not r.get("missing_steps")]
     scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
     mean = f", mean score {sum(scores) / len(scores):.3g}" if scores else ""
     lines = [
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
-        f"wrong, {len(errored)} failed with an error{mean}. An error is the item's "
-        "run failing (its cause is below), not a wrong answer.",
+        f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output or "
+                      "crashed), " if unanswered else "")
+        + f"{len(errored)} failed with an error{mean}. An error is the item's run failing "
+        "(its cause is below), not a wrong answer.",
     ]
+    if unanswered:
+        rows = [[r.get("id"), step, NO_ANSWER_CAUSES.get(str(info.get("cause")), info.get("cause")),
+                 info.get("sessions")]
+                for r in unanswered for step, info in sorted((r.get("missing_steps") or {}).items())
+                if isinstance(info, dict)]
+        lines += [
+            "",
+            "No answer -- not a wrong answer: a step gave none, so the item was graded "
+            "without it. Running out of output is the model's own failure on the question "
+            "and is not retried; a crash is the worker's, retried in fresh sessions first:",
+            _table(["item", "step", "cause", "sessions"], rows[:ITEM_EVIDENCE_ROWS]),
+        ]
+        if len(rows) > ITEM_EVIDENCE_ROWS:
+            lines.append(f"({len(rows) - ITEM_EVIDENCE_ROWS} more not shown)")
     if errored:
         causes: dict[str, list[str]] = {}
         for record in errored:

@@ -1275,6 +1275,7 @@ class Executor:
                             item_id, None, error=RuntimeError(str(exc)),
                             exchanges=list(self._item_exchanges),
                             fail_reason=str(exc),
+                            pass_dir=_pass_dir, outputs_of=self._outputs_of,
                             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             metadata=metadata,
@@ -1292,6 +1293,7 @@ class Executor:
                         record = make_item_record(
                             item_id, None, error=exc,
                             exchanges=list(self._item_exchanges),
+                            pass_dir=_pass_dir, outputs_of=self._outputs_of,
                             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             metadata=metadata,
@@ -1326,6 +1328,7 @@ class Executor:
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
                             metadata=metadata,
+                            pass_dir=_pass_dir,
                         )
                         if record is not None:
                             scores.append(record)
@@ -1591,6 +1594,11 @@ class Executor:
                 f"retry {verdict!r} was refused before dispatching {target!r}",
             )
 
+    def _outputs_of(self, step: str) -> tuple[str, ...]:
+        """The files and facts ``step`` makes (`items.no_answer`)."""
+        node = self.graph.nodes.get(step)
+        return (*node.writes, *node.produces) if node is not None else ()
+
     # ── retry wrapper ──────────────────────────────────────────────────────
     def _missing_optional(self, node: Node, exc: BaseException) -> bool:
         """Whether ``node``'s failure makes it missing rather than failing its branch.
@@ -1600,20 +1608,32 @@ class Executor:
         its delivery marker settled), as the spine's runner and worker record it, and its
         branch continues. A budget or build-loop stop, a timeout or an unknown outcome
         still fails it, as they do on the spine.
+
+        So is an agent step in a data pass whose retries are spent, or that ran out of
+        output without answering (`Graph.missing_on_crash`, `node_retry.leaves_no_answer`):
+        its item goes on
+        without its answer, so a gate after it can reloop and a join sees the branch
+        without one, as the spine's worker records it (``missing_on_crash``).
         """
         from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.node_retry import leaves_no_answer
         from refactory_dsh.run import BuildLoopStop
 
         from .fork import _record_missing, _settle_missing
 
         optional = any(node.id in (fork.optional_targets or ())
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
-        if not optional or node.kind not in ("op", "agent") or isinstance(
+        spent = leaves_no_answer(exc) and self.graph.missing_on_crash(node.id)
+        if not (optional or spent) or node.kind not in ("op", "agent") or isinstance(
                 exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
             return False
         error = f"{type(exc).__name__}: {exc}"
         _record_missing(self.ctx.workdir, node.id, error)
         _settle_missing(self.ctx.workdir, [node], error)
+        if spent:
+            from refactory_dsh.node_retry import record_spent
+
+            record_spent(self.ctx.workdir, node.id, exc)
         return True
 
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:
@@ -2113,7 +2133,7 @@ class Executor:
             output, _receipt = deliver(
                 self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
                 reads=list(node.reads), client=client, ask=ask,
-                capture_final=_capture_final, rule=node.retry,
+                capture_final=_capture_final, rule=self.graph.retry_rule(node.id),
                 timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
                 tool_policy=tool_policy)
         finally:

@@ -40,6 +40,23 @@ class CompletionTimeout(RuntimeError):
     ``timeout`` gets a fresh session instead (`refactory_dsh.node_retry`)."""
 
 
+class CompletionFailed(RuntimeError):
+    """A model session ended without an answer, and the client did not replay it.
+
+    ``kind`` says what happened (`failure_kind`): ``output_limit`` (the model used its
+    whole output allowance without answering), ``transport`` (the wire kept failing
+    through every attempt), ``setup`` (a key, a model name or a prompt the provider
+    refuses: the next session fails the same way) or ``worker`` (the worker or the
+    product failed). In a data pass the runtime gives a crashed agent step a fresh
+    session (`refactory_dsh.node_retry`, ``retry.on: ["crash"]``); the message is the
+    same ``model completion failed ...`` text as before.
+    """
+
+    def __init__(self, message: str, *, kind: str = "worker") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 class InactivityTimeout(subprocess.TimeoutExpired):
     """The session showed no model output and ran no tool command for ``inactive_s``."""
 
@@ -338,9 +355,54 @@ TRANSPORT_MARKERS = (
 
 
 def is_transport_failure(text: str) -> bool:
-    """Whether a failed completion was a transport failure rather than a bad answer."""
+    """Whether a failed completion was a transport failure rather than a bad answer.
+
+    A bare status code counts only as a number of its own: "after 142903 output tokens"
+    is not an HTTP 429."""
     lowered = (text or "").lower()
-    return any(marker in lowered for marker in TRANSPORT_MARKERS)
+    return any(re.search(rf"(?<!\d){marker}(?!\d)", lowered) if marker.isdigit() else marker in lowered
+               for marker in TRANSPORT_MARKERS)
+
+
+#: What a failure says when the next session would fail the same way: a key, a model
+#: name or a prompt the provider refuses. Such a failure is never a crash to retry.
+SETUP_FAILURE_MARKERS = (
+    "authentication",
+    "unauthorized",
+    "invalid api key",
+    "invalid x-api-key",
+    "permission_error",
+    "not_found_error",
+    "model not found",
+    "prompt is too long",
+)
+
+
+#: What a product failure's detail says when the provider, not the model, failed: the
+#: same wire failure a `TRANSPORT_MARKERS` line is, reported inside a product result.
+PROVIDER_FAILURE_MARKERS = ("overloaded", "connection error", "rate_limit", "api_error",
+                            "api error: 5")
+
+
+def failure_kind(cause: str) -> str:
+    """What a failed completion's diagnostic line (`failure_cause`) says happened.
+
+    ``output_limit``: the model used its whole output allowance without answering --
+    the DSH runner's ``dsh: max-tokens:`` or the Claude Code adapter's
+    ``category: output-limit``. ``setup`` (`SETUP_FAILURE_MARKERS`): the next session
+    would be refused the same way. ``transport``: the wire or the provider failed, also
+    when a product result reports it (`PROVIDER_FAILURE_MARKERS`). Otherwise ``worker``:
+    the worker or the product failed. Only ``output_limit`` and ``worker`` are crashes a
+    node's retry answers (`node_retry.CRASH_KINDS`).
+    """
+    lowered = (cause or "").lower()
+    if lowered.startswith("dsh: max-tokens:") or "category: output-limit" in lowered:
+        return "output_limit"
+    if any(marker in lowered for marker in SETUP_FAILURE_MARKERS):
+        return "setup"
+    if is_transport_failure(lowered) or any(marker in lowered for marker in PROVIDER_FAILURE_MARKERS):
+        return "transport"
+    return "worker"
 
 
 #: A worker failure in the teardown stage after the product CLI itself exited 0: the
@@ -365,9 +427,24 @@ def is_retryable_failure(stderr: str, *, tool_policy: str = "") -> bool:
     failure after a clean CLI exit. A session with tools finished its work before
     the teardown failed, so a replay would repeat it (commits, pushes): not retried.
     Anything a model, key or prompt caused is not retried."""
-    if is_transport_failure(stderr):
+    if is_transport_failure(without_product_detail(stderr)):
         return True
     return tool_policy == "none" and is_clean_exit_teardown_failure(failure_cause(stderr))
+
+
+#: A product adapter's failure line: fixed facts in parentheses, then (since the Claude
+#: Code adapter names what happened) a free-text detail that may quote the provider.
+_PRODUCT_FAILURE = re.compile(r"(Product subagent failure \([^)]*\)):[^\n]*")
+
+
+def without_product_detail(text: str) -> str:
+    """``text`` with each product failure line cut to its fixed facts.
+
+    The detail can quote the provider ("API Error: 429 ... rate_limit_error"). It says
+    what happened, but it must never decide whether the client replays a session: a
+    session with tools has done real work, and only the fixed facts and the wire's own
+    errors decide that (`is_retryable_failure`)."""
+    return _PRODUCT_FAILURE.sub(r"\1", text or "")
 
 
 #: What the headless runner writes before it streams the model's reasoning.
@@ -995,10 +1072,13 @@ class DshModelClient:
                     # answer. Fail now and keep the diagnosis accurate. A transport
                     # failure, or (without tools) a worker teardown failure after the
                     # CLI exited 0, is infrastructure and is retried within the same
-                    # budget.
-                    raise RuntimeError(
-                        f"model completion failed (exit {proc.returncode}): {cause}"
-                    )
+                    # budget. A crashed session (a worker failure, an output limit) is
+                    # not replayed here either: a replay would run outside the node's
+                    # delivery bracket, unrecorded, with the same prompt. A node's retry
+                    # rule runs it again as a fresh, recorded session (`node_retry`).
+                    raise CompletionFailed(
+                        f"model completion failed (exit {proc.returncode}): {cause}",
+                        kind=failure_kind(cause))
                 last = cause or f"exit {proc.returncode}"
                 where = ("on the wire" if is_transport_failure(proc.stderr)
                          else "in worker teardown after a clean exit")
@@ -1016,9 +1096,9 @@ class DshModelClient:
                         # The innermost event wakes immediately; inherited scopes
                         # are also observed within the bounded polling interval.
                         self._cancellations[-1].wait(min(remaining, 0.1))
-        raise RuntimeError(
-            f"model completion failed {where} {self._attempts} time(s); last cause: {last}"
-        )
+        raise CompletionFailed(
+            f"model completion failed {where} {self._attempts} time(s); last cause: {last}",
+            kind="transport" if where == "on the wire" else "worker")
 
     def _inactivity_limit(self) -> float:
         """The inactivity limit for this session: node sessions on DSH only, else 0 (off)."""
