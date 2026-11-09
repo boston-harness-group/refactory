@@ -364,10 +364,15 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if is_optional:
             payload['optional'] = True
         retry = getattr(node, 'retry', None)
+        if retry and int(retry.get('times', 0)) <= 0:
+            retry = None
         if retry:
-            # The worker runs the node's declared retry (`node_retry.deliver`), inside the
+            # The worker runs the node's retry rule (`node_retry.deliver`), inside the
             # envelope reserved for all its attempts below.
             payload['retry'] = retry
+        if getattr(node, 'missing_on_crash', None):
+            # Spent retries leave the step missing, not failed (`worker_node.main`).
+            payload['missing_on_crash'] = True
         if node.workspace:
             # Only when declared, so the spec of a node without one -- named by its
             # hash -- is the bytes it was before workspaces.
@@ -389,9 +394,14 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             # longer by its factor -- plus the one dispatch overhead,
             # so the retry runs inside the command the spine started.
             from refactory_dsh.node_retry import node_allowance_s
-            if node.timeout is None:
+            if node.timeout is not None:
+                command_timeout_s = node_allowance_s(node.timeout, retry) + NODE_DISPATCH_OVERHEAD_S
+            elif 'timeout' in retry['on']:
                 raise ValueError(f'worker node {name!r} declares a retry but no timeout')
-            command_timeout_s = node_allowance_s(node.timeout, retry) + NODE_DISPATCH_OVERHEAD_S
+            else:
+                # A crash retry with no node bound runs each session under the route's
+                # envelope, so the dispatch reserves one per attempt.
+                command_timeout_s = (1 + int(retry['times'])) * node_session_budget_s(attempts, per_completion)
         elif node.timeout is not None:
             # The session inside stops at the node's own bound; the dispatch keeps
             # the overhead a derived envelope has, so the session ends first.

@@ -45,9 +45,11 @@ _FAKE_SDK = textwrap.dedent("""\
         close() { child.kill?.() },
         async *[Symbol.asyncIterator]() {
           yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
-          yield { type: 'result', subtype: 'success', is_error: false, result: 'PINEAPPLE',
-                  modelUsage: { 'fake-claude': { inputTokens: 3, outputTokens: 1,
-                                                  cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }
+          // FAKE_SDK_RESULT: the result message to end with, as when Claude Code fails.
+          yield process.env.FAKE_SDK_RESULT ? JSON.parse(process.env.FAKE_SDK_RESULT)
+            : { type: 'result', subtype: 'success', is_error: false, result: 'PINEAPPLE',
+                modelUsage: { 'fake-claude': { inputTokens: 3, outputTokens: 1,
+                                                cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }
         },
       }
     }
@@ -218,3 +220,47 @@ def test_tools_the_sdk_reports_despite_no_tools_are_not_recorded_as_enforced(tmp
     assert receipt["enforced_tool_policy"] is None
     assert receipt["tools_permitted"] == ["Bash"]
     assert receipt["tool_observation_available"] is True
+
+
+def _failed_result(text: str, output_tokens: int) -> str:
+    return json.dumps({"type": "result", "subtype": "success", "is_error": True, "result": text,
+                       "modelUsage": {"fake-claude": {"inputTokens": 900, "outputTokens": output_tokens,
+                                                      "cacheReadInputTokens": 0,
+                                                      "cacheCreationInputTokens": 0}}})
+
+
+#: The notice Claude Code ends a run with when a response is cut off at its output cap
+#: and its own resumptions are spent (`claude` 0.3.263, apiError "max_output_tokens").
+CUT_OFF = ("API Error: Claude's response exceeded the 32000 output token maximum. To configure "
+           "this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.")
+
+
+def test_an_output_limit_says_so_on_the_record_and_is_a_crash(tmp_path, fake_sdk, monkeypatch):
+    """A run Claude Code ends at its output cap was reported as a bare ``invalid-result``.
+    The adapter now names the output limit and the tokens spent, the model client calls
+    it an output limit, and the worker receipt and progress event carry the reason."""
+    from refactory_dsh.node_retry import failure_kind
+
+    monkeypatch.setenv("FAKE_SDK_RESULT", _failed_result(CUT_OFF, 128000))
+    workdir = tmp_path / "run"
+    with pytest.raises(RuntimeError) as caught:
+        _client(tmp_path).with_tool_policy("none").complete("Solve it", workdir=workdir)
+    message = str(caught.value)
+    assert "category: output-limit" in message
+    assert "output limit reached after 128000 output tokens" in message
+    assert "capped at 32000 tokens" in message
+    assert getattr(caught.value, "kind", None) == "output_limit"
+    assert failure_kind(caught.value) == "crash"
+    receipt = _receipt(workdir)
+    assert receipt["state"] == "failed" and "output limit reached" in receipt["error"]
+    events = [json.loads(line) for line in (workdir / ".refactory/events.jsonl").read_text().splitlines()]
+    assert any("output limit reached" in (event.get("summary") or "") for event in events)
+
+
+def test_another_error_result_says_what_it_was(tmp_path, fake_sdk, monkeypatch):
+    monkeypatch.setenv("FAKE_SDK_RESULT", _failed_result("API Error: 529 overloaded", 12))
+    with pytest.raises(RuntimeError) as caught:
+        _client(tmp_path).with_tool_policy("none").complete("Solve it", workdir=tmp_path / "run")
+    message = str(caught.value)
+    assert "category: invalid-result" in message
+    assert "the result was an error after 12 output tokens: API Error: 529 overloaded" in message

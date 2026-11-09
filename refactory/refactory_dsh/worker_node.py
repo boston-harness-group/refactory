@@ -260,7 +260,11 @@ def main() -> int:
             print(json.dumps({'node': receipt['node'], 'status': receipt['status']}))
             return 0
         except Exception as error:
-            if spec.get('optional'):
+            from refactory_dsh.node_retry import RetriesExhausted
+            # An optional fork branch is missing on any failure; an agent step in a data
+            # pass only when its crash or timeout retries are spent (`missing_on_crash`).
+            if spec.get('optional') or (spec.get('missing_on_crash')
+                                        and isinstance(error, RetriesExhausted)):
                 node_id = spec.get('node_id', 'unknown')
                 reviews_dir = workdir / 'reviews'
                 reviews_dir.mkdir(parents=True, exist_ok=True)

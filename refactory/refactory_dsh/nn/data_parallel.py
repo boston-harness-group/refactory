@@ -389,6 +389,7 @@ def run_data_concurrent(
                     exchanges=list(child._item_exchanges),  # noqa: SLF001
                     prediction=prediction,
                     fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
+                    pass_dir=pass_dir,
                     **fields,
                 )
                 finished = True

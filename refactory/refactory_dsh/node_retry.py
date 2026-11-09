@@ -1,14 +1,18 @@
-"""Declared recovery for agent nodes: a timed-out session gets one fresh, longer one.
+"""Recovery for agent nodes: a timed-out or crashed session gets a fresh one.
 
 The rule lives in the graph (`Node.retry`, canonicalized by
-`nn.graph.retry_declaration`), never in a CEO's judgment, so an automatic headless run
+`nn.graph.retry_declaration`, or the default an agent step in a data pass gets:
+`nn.graph.Graph.retry_rule`), never in a CEO's judgment, so an automatic headless run
 recovers the same way a supervised one does. Both runtimes run it through
 :func:`deliver`: the walker from `Executor._visit_agent`, the spine from the worker every
 dispatched agent node runs (`worker_node.execute`). The spine reserves the node's whole
 envelope for it when it lowers the graph (`workers.lower_workflow`, with
 :func:`node_allowance_s`), so the retry runs inside the one command the spine started.
 
-A retry needs the node's own `timeout_s`, which each retry's limit multiplies.
+A retry on ``timeout`` needs the node's own `timeout_s`, which each retry's limit
+multiplies. A retry on ``crash`` runs under the node's limit, or the route's when it has
+none. A retry after the output limit tells the model its last attempt ran out of room
+(`OUTPUT_LIMIT_NOTE`).
 
 An attempt goes through the delivery bracket like any other (`agent_delivery.begin` and
 `finish`, which carry the target guard). A timed-out attempt is settled before the next
@@ -50,24 +54,48 @@ MIN_RETRY_WALL_S = 30
 ENVELOPE_SLACK_S = 300
 
 
+#: What a retry after the output limit adds to the node's prompt: the model used its
+#: whole output allowance without answering, and a fresh session with the same prompt
+#: tends to do so again.
+OUTPUT_LIMIT_NOTE = ("Note: your previous attempt at this step ran out of output room "
+                     "before it gave an answer. Keep your working short and commit to an "
+                     "answer well before the limit.")
+
+
 class RetriesExhausted(RuntimeError):
-    """A node's session timed out, and its declared retries are spent or refused."""
+    """A node's session timed out or crashed, and its retries are spent or refused.
+
+    ``kind`` is the `nn.graph.RETRY_ON` failure of the last attempt."""
+
+    def __init__(self, message: str, *, kind: str = "timeout") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def failure_kind(error: BaseException) -> str | None:
     """The `nn.graph.RETRY_ON` failure ``error`` is, or None when it is none of them.
 
     A timeout is the model client's deadline (`model.CompletionTimeout`), or a timeout
-    another client reports the same way. Cancellation, budget exhaustion, a refusal and a
-    bad answer are not timeouts, and are never retried.
+    another client reports the same way. A crash is a session the model client gave up
+    on without an answer (`model.CompletionFailed`): a worker or product failure, an
+    invalid result, the output limit, or a wire that kept failing -- but not a key,
+    model name or prompt the provider refuses (``setup``), which fails the same way
+    again. Cancellation, budget exhaustion, a refusal and a bad answer are neither, and
+    are never retried.
     """
-    from refactory_dsh.model import CompletionTimeout
+    from refactory_dsh.model import CompletionFailed, CompletionTimeout
 
     if isinstance(error, (CompletionTimeout, subprocess.TimeoutExpired)):
         return "timeout"
     if isinstance(error, RuntimeError) and str(error).startswith("model completion timed out"):
         return "timeout"
+    if isinstance(error, CompletionFailed):
+        return None if error.kind == "setup" else "crash"
     return None
+
+
+def _output_limit(error: BaseException) -> bool:
+    return getattr(error, "kind", None) == "output_limit"
 
 
 def attempt_walls(base_s: int, rule: dict[str, Any]) -> list[int]:
@@ -107,7 +135,7 @@ def _worktree_state(workdir: Path) -> dict[str, Any] | None:
 
 
 def settle_for_retry(workdir: Path, node: str, reason: str, *,
-                     worktree: dict[str, Any] | None = None) -> None:
+                     worktree: dict[str, Any] | None = None, failed: str = "timed out") -> None:
     """Close a timed-out attempt's delivery bracket so the next attempt starts clean.
 
     The target guard judges the attempt first: one that changed the target is refused
@@ -134,21 +162,29 @@ def settle_for_retry(workdir: Path, node: str, reason: str, *,
         changed = [phrase for path, before in worktree.items()
                    for phrase in target_guard._compare(before, now.get(path, before))]  # noqa: SLF001
         if changed:
-            raise RetriesExhausted(f"{node} timed out and was not retried: the run's worktree "
-                                   f"changed while it ran ({'; '.join(changed)})")
+            raise RetriesExhausted(f"{node} {failed} and was not retried: the run's worktree "
+                                   f"changed while it ran ({'; '.join(changed)})",
+                                   kind="timeout" if failed == "timed out" else "crash")
     agent_delivery.invalidate(Path(workdir).resolve(), [node], reason)
 
 
 def _record_retry(workdir: Path, node: str, *, attempt: int, tries: int, waited_s: int,
-                  wall_s: int, error: BaseException) -> None:
+                  wall_s: int | None, error: BaseException, kind: str = "timeout") -> None:
     from refactory_dsh.live import emit
 
-    limit = f"{wall_s}s"
-    emit(workdir, RETRY_EVENT, node_id=node, state="retrying", reason="timeout",
-         attempt=attempt, attempts=tries, after_s=waited_s, wall_s=wall_s,
+    if kind == "timeout":
+        what = f"timed out after {waited_s}s"
+    elif _output_limit(error):
+        what = f"reached its output limit without answering after {waited_s}s"
+    else:
+        what = f"crashed after {waited_s}s"
+    limit = f" and {wall_s}s" if wall_s is not None else ""
+    emit(workdir, RETRY_EVENT, node_id=node, state="retrying", reason=kind,
+         attempt=attempt, attempts=tries, after_s=waited_s,
+         **({"wall_s": wall_s} if wall_s is not None else {}),
          error=str(error)[:500],
-         summary=f"{node} timed out after {waited_s}s; retrying it with a fresh session "
-                 f"and {limit} (attempt {attempt} of {tries})")
+         summary=f"{node} {what}; retrying it with a fresh session{limit} "
+                 f"(attempt {attempt} of {tries})")
 
 
 def retries(workdir: Path) -> dict[str, int]:
@@ -184,29 +220,33 @@ def deliver(
     it the node works in the run directory. ``ask(client, prompt, place)`` makes one
     completion, where ``place`` is that workspace or None. Collection happens before
     the delivery bracket closes. ``timeout_s`` is the node's own bound,
-    which a rule multiplies. Returns the answer and the delivery receipt. With no rule,
-    or a failure the rule does not answer, the first failure is raised unchanged. When
-    the last allowed attempt times out too, :class:`RetriesExhausted` says how long each
-    session ran.
+    which a rule multiplies; a rule that answers only crashes needs none, and its
+    retries run under the client's own limit. Returns the answer and the delivery
+    receipt. With no rule, or a failure the rule does not answer, the first failure is
+    raised unchanged. When the last allowed attempt fails too,
+    :class:`RetriesExhausted` says how long each session ran.
     """
     from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import begin, finish
 
     workdir = Path(workdir)
-    if rule and timeout_s is None:
+    if rule and int(rule["times"]) <= 0:
+        rule = None
+    if rule and timeout_s is None and "timeout" in rule["on"]:
         raise ValueError(f"{node} declares a retry but no timeout_s for it to multiply")
     tries = 1 + (int(rule["times"]) if rule else 0)
-    walls = attempt_walls(int(timeout_s), rule) if rule else []
-    #: How long each timed-out session actually ran: what the failure reports, and what
+    walls = attempt_walls(int(timeout_s), rule) if rule and timeout_s is not None else []
+    #: How long each failed session actually ran: what the failure reports, and what
     #: the node's envelope is charged with.
     ran: list[int] = []
     attempt_client = client
+    attempt_prompt = prompt
     for index in range(tries):
         worktree = _worktree_state(workdir) if rule else None
         started = None
         try:
             with workspace(index > 0) if workspace is not None else nullcontext(None) as place:
-                delivery = begin(workdir, node, prompt, list(writes), reads=list(reads),
+                delivery = begin(workdir, node, attempt_prompt, list(writes), reads=list(reads),
                                  model_context=_context(attempt_client),
                                  **({"workspace": place.describe()} if place is not None else {}),
                                  tool_policy=tool_policy)
@@ -215,35 +255,46 @@ def deliver(
                 if place is not None:
                     workspaces.collect(place, workdir, writes, final_response=output)
         except Exception as error:
-            if started is None or rule is None or failure_kind(error) not in rule["on"]:
+            kind = failure_kind(error)
+            if started is None or rule is None or kind not in rule["on"]:
                 raise
             ran.append(int(round(time.monotonic() - started)))
             spent = ", then ".join(f"{seconds}s" for seconds in ran)
+            failed = "timed out" if kind == "timeout" else "crashed"
+            its = "its declared retry" if kind == "timeout" else "its retry"
             if index + 1 >= tries:
                 raise RetriesExhausted(
-                    f"{node} timed out {_times(len(ran))} (after {spent}); its declared "
-                    f"retry is spent. Last error: {error}") from error
-            # The retry's own limit, within what is left of the node's envelope (every
-            # attempt's limit plus some of the dispatch overhead) and of the run's wall.
-            declared = walls[index + 1]
-            bounds = [declared, sum(walls) + ENVELOPE_SLACK_S - sum(ran)]
-            remaining = budget.remaining_s() if budget is not None else None
-            if remaining is not None:
-                bounds.append(remaining)
-            limit = int(min(bounds))
-            if limit < min(MIN_RETRY_WALL_S, declared):
-                raise RetriesExhausted(
-                    f"{node} timed out (after {spent}) and its declared retry was not "
-                    f"started: {max(0, limit)}s is left of the node's envelope and the "
-                    f"run's wall. Last error: {error}") from error
+                    f"{node} {failed} {_times(len(ran))} (after {spent}); {its} "
+                    f"is spent. Last error: {error}", kind=kind) from error
+            limit: int | None = None
+            if walls:
+                # The retry's own limit, within what is left of the node's envelope (every
+                # attempt's limit plus some of the dispatch overhead) and of the run's wall.
+                declared = walls[index + 1]
+                bounds = [declared, sum(walls) + ENVELOPE_SLACK_S - sum(ran)]
+                remaining = budget.remaining_s() if budget is not None else None
+                if remaining is not None:
+                    bounds.append(remaining)
+                limit = int(min(bounds))
+                if limit < min(MIN_RETRY_WALL_S, declared):
+                    raise RetriesExhausted(
+                        f"{node} {failed} (after {spent}) and {its} was not "
+                        f"started: {max(0, limit)}s is left of the node's envelope and the "
+                        f"run's wall. Last error: {error}", kind=kind) from error
             if budget is not None:
                 budget.checkpoint()
-            settle_for_retry(workdir, node, f"timed out after {ran[-1]}s; retried by the "
-                                            "node's declared rule", worktree=worktree)
+            settle_for_retry(workdir, node, f"{failed} after {ran[-1]}s; retried by the "
+                                            "node's retry rule", worktree=worktree, failed=failed)
             _record_retry(workdir, node, attempt=index + 2, tries=tries, waited_s=ran[-1],
-                          wall_s=limit, error=error)
-            attempt_client = _with_wall(client, limit)
+                          wall_s=limit, error=error, kind=kind)
+            attempt_client = _with_wall(client, limit) if limit is not None else client
+            # A session that used its whole output allowance tends to do so again on the
+            # same prompt; the retry is told, and the note is not carried further.
+            attempt_prompt = f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}" if _output_limit(error) else prompt
             continue
         receipt = finish(workdir, node, final_response=output, capture_final=capture_final)
+        # A step a gate sent back after it went missing has answered now: it is no
+        # longer missing (`items.missing_steps`).
+        (workdir / "reviews" / f"{node}-missing.txt").unlink(missing_ok=True)
         return output, receipt
     raise AssertionError("unreachable: every attempt returns or raises")  # pragma: no cover

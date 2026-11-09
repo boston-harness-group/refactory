@@ -1,8 +1,76 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd537db3950d 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..372ec716758e4aa39305a0e85d1b3e1fc5dc88fe 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -231,15 +231,40 @@ function successfulResult(message) {
+@@ -147,7 +147,8 @@ function failureDiagnostic(facts) {
+ 	if (exitCode !== null && exitCode !== void 0) fields.push(`exit code: ${exitCode}`);
+ 	const signal = facts.outcome?.signal;
+ 	if (signal !== null && signal !== void 0) fields.push(`signal: ${signal}`);
+-	return `Product subagent failure (${fields.join("; ")})`;
++	const head = `Product subagent failure (${fields.join("; ")})`;
++	return typeof facts.detail === "string" && facts.detail.length > 0 ? `${head}: ${facts.detail}` : head;
+ }
+ var ClaudeCodeFailure = class extends Error {
+ 	facts;
+@@ -217,12 +218,53 @@ function successfulResult(message) {
+ 			category
+ 		}, detail === void 0 || detail.length === 0 ? void 0 : new Error(detail));
+ 	}
+-	if (message.is_error || message.result.trim().length === 0) throw new ClaudeCodeFailure({
+-		stage: "query-run",
+-		category: "invalid-result"
+-	});
++	if (message.is_error || message.result.trim().length === 0) throw new ClaudeCodeFailure(resultFailureFacts(message));
+ 	return message.result;
+ }
++/** The output tokens a result reports: its per-model usage summed, else its own usage. */
++function resultOutputTokens(message) {
++	const models = message.modelUsage && typeof message.modelUsage === "object" ? Object.values(message.modelUsage) : [];
++	const counts = models.map((usage) => usage?.outputTokens);
++	if (counts.length && counts.every((value) => Number.isSafeInteger(value) && value >= 0)) return counts.reduce((sum, value) => sum + value, 0);
++	const own = message.usage?.output_tokens;
++	return Number.isSafeInteger(own) && own >= 0 ? own : void 0;
++}
++/**
++* Say what an unusable successful result was. Claude Code reports a response cut off
++* at its output token cap -- after resuming it a few times -- as a successful result
++* with `is_error` set and its own fixed notice as the text; the notice names the cap.
++* @param message - a result whose subtype is success but which is no answer.
++* @returns failure facts whose category and detail name what happened.
++*/
++function resultFailureFacts(message) {
++	const text = typeof message.result === "string" ? message.result.trim() : "";
++	const tokens = resultOutputTokens(message);
++	const after = tokens === void 0 ? "" : ` after ${tokens} output tokens`;
++	const cap = /exceeded the (\d+) output token maximum/.exec(text);
++	if (message.is_error && cap) return {
++		stage: "query-run",
++		category: "output-limit",
++		detail: `output limit reached${after}: each response is capped at ${cap[1]} tokens and the model had not answered when Claude Code stopped resuming it`
++	};
++	if (message.is_error && /context window limit/.test(text)) return {
++		stage: "query-run",
++		category: "context-limit",
++		detail: `context window full${after}`
++	};
++	if (message.is_error) {
++		const line = text.split("\n")[0] ?? "";
++		return {
++			stage: "query-run",
++			category: "invalid-result",
++			detail: `the result was an error${after}${line ? `: ${line.length > 200 ? `${line.slice(0, 200)}...` : line}` : ""}`
++		};
++	}
++	return {
++		stage: "query-run",
++		category: "invalid-result",
++		detail: `the answer was empty${after}`
++	};
++}
+ /**
+ * Consume the complete SDK stream and require one strict success plus normal
+ * iterator completion.
+@@ -231,20 +273,46 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -44,7 +112,14 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd53
  		answer = successfulResult(message);
  	}
  	if (answer === void 0) throw new ClaudeCodeFailure({
-@@ -295,14 +320,21 @@ async function disposeClaudeCodeChild(query, child) {
+ 		stage: "query-run",
+-		category: "invalid-result"
++		category: "invalid-result",
++		detail: "the query ended without a result"
+ 	});
+ 	return {
+ 		output: [{
+@@ -295,14 +363,21 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -71,7 +146,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd53
  		persistSession: false,
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
-@@ -327,8 +359,26 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +402,26 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -99,7 +174,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd53
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -358,6 +408,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +451,7 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -107,7 +182,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd53
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,9 +426,15 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,9 +469,15 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -124,7 +199,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd53
  		});
  		if (child === void 0 || childProcessFailure === void 0) throw new Error("subagent-claude-code: official SDK did not publish a controllable Claude Code process");
  		if (isAborted(controller.signal)) throw new Error("subagent-claude-code: request was aborted before SDK startup");
-@@ -434,7 +491,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +534,7 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -133,7 +208,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..21b6369a65423277f233ba266ecefd53
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -529,6 +586,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +629,9 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

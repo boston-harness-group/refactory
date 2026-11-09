@@ -248,8 +248,9 @@ def _make_route_client():
 #: lower to exactly these bytes. F14 changed it once: the lowered graph lists every
 #: knob, and the solve node's system prompt is now a (frozen) knob, so the knob
 #: table gains ``solve__system_prompt``. The solve node's prompts are unchanged. The
-#: shakedown fixes changed it again: ``use_theorem`` and ``use_sketch`` are frozen.
-BASELINE_SNAPSHOT_SHA256 = "af4237ef71f92339d95e1cb71625cabe019b523f68fc2bab7dd4f1b85f3ecf86"
+#: shakedown fixes changed it again: ``use_theorem`` and ``use_sketch`` are frozen. The
+#: solve node now carries the data pass's crash retry and ``missing_on_crash``.
+BASELINE_SNAPSHOT_SHA256 = "3ae6391a181fb45c9ccb0ab0c090fe1e1ea9ed8db86bcc30a736cdc4bf61ede1"
 
 
 @pytest.mark.parametrize("explicit", [False, True])

@@ -173,8 +173,9 @@ Each dispatched agent node's spine limit is computed by
 `command_timeout_s` overrides the spine's global `commandTimeoutMs`, so a
 `--model-timeout` larger than the profile's default does not get silently cut. A node
 that declares a retry (`Node.retry`) reserves every attempt instead: its own `timeout_s`
-(which a retry requires), each retry's limit `timeout_factor` times the last, and one
-600 s overhead.
+(which a retry on timeout requires), each retry's limit `timeout_factor` times the last,
+and one 600 s overhead. A crash retry on a node without `timeout_s` (the default an agent
+step in a data pass gets, `architecture.md`) reserves one route envelope per session.
 
 The value is saved in `model_context` (as the `timeout_s` key) in
 `run-config.json`, and inherited by nested workers via `REFACTORY_WORKER_CONTEXT`.
@@ -360,7 +361,12 @@ attempts and window: the failure's diagnostic line has
 `stage: teardown; ...; exit code: 0` in one group (the CLI finished, and DSH's cleanup
 after it failed, for example under load). A session with tools is not retried for it,
 because its work (files, commits, pushes) is already done and a replay would repeat it;
-nor is a teardown failure after a nonzero exit, or a failure in any other stage. A worker spec or run configuration saved before `retry_window_s` existed
+nor is a teardown failure after a nonzero exit, or a failure in any other stage. Any other
+failure the client does not replay is raised as `CompletionFailed`, whose `kind` says what
+happened: `output_limit` (`dsh: max-tokens:`, or Claude Code's `category: output-limit`,
+which names the tokens spent and the per-response cap), `setup` (a key, model name or prompt
+the provider refuses), `transport` or `worker`. A node's retry rule may answer it as a
+`crash` with a fresh session (`architecture.md`). A worker spec or run configuration saved before `retry_window_s` existed
 carries `backoff_s`, which keeps its old meaning: the first wait, doubling. On POSIX, a deadline or caller
 `KeyboardInterrupt` raised in the thread calling `complete()` sends one SIGTERM
 to the selected CLI and allows ten seconds for shutdown. The Python walker's

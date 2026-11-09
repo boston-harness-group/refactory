@@ -73,6 +73,14 @@
       "timeout": 1800,
       "max_iterations": 1,
       "post_checks": [],
+      "retry": {
+        "on": [
+          "crash"
+        ],
+        "times": 2,
+        "timeout_factor": 1
+      },
+      "missing_on_crash": true,
       "tool_policy": "none",
       "_type": "AgentNode"
     },
@@ -91,6 +99,14 @@
       "timeout": 1800,
       "max_iterations": 1,
       "post_checks": [],
+      "retry": {
+        "on": [
+          "crash"
+        ],
+        "times": 2,
+        "timeout_factor": 1
+      },
+      "missing_on_crash": true,
       "tool_policy": "none",
       "_type": "AgentNode"
     }

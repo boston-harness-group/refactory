@@ -372,6 +372,7 @@ def make_item_record(
     label_text: str | None = None,
     fail_reason: str | None = None,
     metadata: dict[str, Any] | None = None,
+    pass_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Build a per-item record for one evaluated item.
 
@@ -405,6 +406,7 @@ def make_item_record(
         }
     if verdict is None:
         return None
+    missing = missing_steps(pass_dir) if pass_dir is not None else {}
     return {
         "id": item_id,
         "passed": verdict.passed,
@@ -412,7 +414,24 @@ def make_item_record(
         "error_text": None,
         "error_kind": None,
         **base,
+        # A step the item went on without (a crashed step whose retries were spent, an
+        # optional branch that failed), so a reader sees why its answer is missing.
+        **({"missing_steps": missing} if missing else {}),
     }
+
+
+def missing_steps(pass_dir: Path) -> dict[str, str]:
+    """The steps a pass went on without, each with why: its ``reviews/<step>-missing.txt``,
+    which both runtimes write (`nn.fork._record_missing`, `worker_node.main`)."""
+    reviews = Path(pass_dir) / "reviews"
+    found: dict[str, str] = {}
+    for path in sorted(reviews.glob("*-missing.txt")) if reviews.is_dir() else ():
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            continue
+        found[path.name[: -len("-missing.txt")]] = text[:500]
+    return found
 
 
 def source_override(workdir: Path, node_id: str) -> dict[str, Any]:
@@ -939,6 +958,7 @@ def command_end(
         label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
         fail_reason=verdict.details if not verdict.passed and verdict.details else None,
         metadata=metadata,
+        pass_dir=pass_dir,
     )
     if record is not None and SCORES_FACT in node.produces:
         _write_facts(workdir, SCORES_FACT, [record])

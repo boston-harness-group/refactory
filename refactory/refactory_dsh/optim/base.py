@@ -997,6 +997,13 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "whole run (no later item runs). A gate with no forward `proceed` edge defaults to "
         "`fail_item`. The last step of the pass can be looped too: the "
         "loop then adds a step after the gate to end the pass.",
+        "- **crashes**: an agent step in the per-item pass whose session crashes (a worker "
+        "failure, or the output limit reached without an answer) is run again in a fresh "
+        "session, up to 2 more times; after the output limit the retry is told to keep its "
+        "working short. A timeout is not retried. If every session crashes, the step has no answer and the "
+        "item goes on: a gate after it sees no answer and may reloop, a fork's join sees that "
+        "branch without one, and the item is graded as it stands. Retried sessions count "
+        "toward the item's time and cost.",
     ]
     if "parallel" in ops:
         lines.append(

@@ -461,7 +461,7 @@ outer-loop evaluations):
 - **FnNode-only retry.** An op node (`kind="op"`) that raises gets one retry.
   Gates (`kind="gate"`) are timed but never retried (their reloop mechanism via
   `max_iterations` is the graph-level retry). An agent node is retried only by
-  its own declared rule (`Node.retry`, below), on both runtimes;
+  its retry rule (`Node.retry`, or a data pass's default, below), on both runtimes;
   `DshModelClient` has its own transport retry with exponential backoff. Fork,
   join, and data nodes are structural.
 
@@ -485,7 +485,30 @@ outer-loop evaluations):
   timed-out attempt during which the run's worktree changed is not retried
   (another branch of its fork may have written there). Design mode
   declares it on the verifier only, the one agent seen to time out; a node is
-  added when it is seen to time out.
+  added when it is seen to time out. A node without tools (`tool_policy: none`)
+  may declare a retry too: its only effect is the reply the runtime captures.
+
+- **Crashed steps in a data pass.** `retry.on` may also name `crash`: a session
+  the model client gave up on without an answer (`model.CompletionFailed`) — a
+  worker or product failure, an invalid result, the output limit reached without
+  an answer, or a wire that kept failing through the client's own attempts; a
+  key, model name or prompt the provider refuses is not a crash. The client
+  itself never replays a crash, because the replay would run outside the node's
+  delivery bracket. An agent step in a data pass that may safely run again
+  (`outputs_only`, a workspace, or `tool_policy: none`) gets
+  `{"on": ["crash"], "times": 2}` by default (`Graph.retry_rule`): each retry is a
+  fresh session under the same limit, recorded as a `node_retried` event, and
+  after the output limit its prompt says the last attempt ran out of room. A
+  timeout is not retried by default. When a data-pass step's retries are spent,
+  it is missing rather than failed (`Graph.missing_on_crash`): it is recorded in
+  `reviews/<step>-missing.txt` and the item's record (`missing_steps`), a gate
+  after it sees no answer and may reloop within its `max_iterations` and
+  `on_exhausted`, a fork's join sees that branch without one, and the item is
+  scored. The lowering hands the rule and `missing_on_crash` to the spine; the
+  worker records the step missing and the spine lets it fail and go on, as it
+  does a fork's optional target. `retry: {"times": 0}` turns it off. Outside a
+  data pass nothing is retried unless declared. Every session is a worker
+  receipt of its own, so retried sessions count in usage, cost and time.
 
 - **Fact restore.** Before each op attempt, `ctx.facts` is deep-copied. On
   failure, facts are restored from the snapshot before retry.

@@ -403,8 +403,10 @@ def test_the_declaration_has_one_canonical_form():
     assert retry_declaration({}) == RULE
     assert retry_declaration({"timeout_factor": 2.0}) == RULE
     assert retry_declaration(None) is None
+    # times 0 declares no retry, turning off a data pass's default.
+    assert retry_declaration({"times": 0})["times"] == 0
     for bad, says in [({"on": ["error"]}, "unknown"), ({"on": "timeout"}, "non-empty list"),
-                      ({"times": 0}, "times"), ({"times": 4}, "times"), ({"times": True}, "times"),
+                      ({"times": -1}, "times"), ({"times": 4}, "times"), ({"times": True}, "times"),
                       ({"timeout_factor": 0.5}, "timeout_factor"), ({"wait": 1}, "unknown"),
                       ("timeout", "mapping")]:
         with pytest.raises(ValueError, match=says):

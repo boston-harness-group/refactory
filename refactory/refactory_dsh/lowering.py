@@ -125,8 +125,14 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["required_reads"] = sorted(node.required_reads)
         if node.feedback_keys:
             entry["feedback_keys"] = list(node.feedback_keys)
-        if node.retry is not None:
+        rule = graph.retry_rule(node_id)
+        if rule is not None:
+            # The rule the node runs under: declared, or a data pass's default.
+            entry["retry"] = {**rule, "on": list(rule["on"])}
+        elif node.retry is not None:
             entry["retry"] = {**node.retry, "on": list(node.retry["on"])}
+        if graph.missing_on_crash(node_id):
+            entry["missing_on_crash"] = True
         if node.workspace is not None:
             # Where the node works, for a reader of the run directory; the worker spec
             # carries the same declaration to the node's dispatch.
@@ -325,11 +331,15 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 # dispatched session this bound and the command it plus the dispatch
                 # overhead; the walker gives its model client the same bound.
                 **({"timeout": node.timeout_s} if node.timeout_s is not None else {}),
-                # The node's declared recovery: `workers.lower_workflow` reserves the
-                # spine's envelope for every attempt and hands the rule to the worker,
-                # which runs it (`node_retry.deliver`), as the walker does.
-                **({"retry": {**node.retry, "on": list(node.retry["on"])}}
-                   if node.retry is not None else {}),
+                # The node's recovery, declared or a data pass's default
+                # (`Graph.retry_rule`): `workers.lower_workflow` reserves the spine's
+                # envelope for every attempt and hands the rule to the worker, which
+                # runs it (`node_retry.deliver`), as the walker does.
+                **({"retry": {**rule, "on": list(rule["on"])}}
+                   if (rule := graph.retry_rule(node_id)) is not None else {}),
+                # Spent retries leave the step missing, not failed: the worker records
+                # it so and the spine lets it fail and go on, as the walker does.
+                **({"missing_on_crash": True} if graph.missing_on_crash(node_id) else {}),
                 # Where the node works. Only a dispatched worker can give it one
                 # (`workers.lower_workflow` refuses it on the CEO-subagent route).
                 **({"workspace": dict(node.workspace)} if node.workspace is not None else {}),

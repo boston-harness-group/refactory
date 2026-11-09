@@ -1326,6 +1326,7 @@ class Executor:
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
                             fail_reason=verdict.details if verdict is not None and not verdict.passed and verdict.details else None,
                             metadata=metadata,
+                            pass_dir=_pass_dir,
                         )
                         if record is not None:
                             scores.append(record)
@@ -1600,15 +1601,22 @@ class Executor:
         its delivery marker settled), as the spine's runner and worker record it, and its
         branch continues. A budget or build-loop stop, a timeout or an unknown outcome
         still fails it, as they do on the spine.
+
+        So is an agent step in a data pass whose retries are spent
+        (`Graph.missing_on_crash`, `node_retry.RetriesExhausted`): its item goes on
+        without its answer, so a gate after it can reloop and a join sees the branch
+        without one, as the spine's worker records it (``missing_on_crash``).
         """
         from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.node_retry import RetriesExhausted
         from refactory_dsh.run import BuildLoopStop
 
         from .fork import _record_missing, _settle_missing
 
         optional = any(node.id in (fork.optional_targets or ())
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
-        if not optional or node.kind not in ("op", "agent") or isinstance(
+        spent = isinstance(exc, RetriesExhausted) and self.graph.missing_on_crash(node.id)
+        if not (optional or spent) or node.kind not in ("op", "agent") or isinstance(
                 exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
             return False
         error = f"{type(exc).__name__}: {exc}"
@@ -2113,7 +2121,7 @@ class Executor:
             output, _receipt = deliver(
                 self.ctx.workdir, node.id, prompt=prompt, writes=list(node.writes),
                 reads=list(node.reads), client=client, ask=ask,
-                capture_final=_capture_final, rule=node.retry,
+                capture_final=_capture_final, rule=self.graph.retry_rule(node.id),
                 timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
                 tool_policy=tool_policy)
         finally:
