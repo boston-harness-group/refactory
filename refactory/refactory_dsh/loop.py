@@ -2601,6 +2601,25 @@ class Loop(OuterLoop):
         if self._custom_strategy is not None:
             return self._custom_strategy.strategy(run)
         self._search(run)
+
+    #: How this strategy's search ends normally, on its own epoch limit: the run then
+    #: scores the batch its last epoch proposed (``finish_strategy``). A strategy whose
+    #: schedule is its own (a curriculum) adds the reason it stops with.
+    normal_ends: tuple[str, ...] = ("epochs",)
+
+    def _ended(self, run: Run | None) -> str:
+        """Why the search ended: the bound the loop recorded, else the strategy's stop
+        reason (a strategy that drives its own epochs stops with ``"epochs"`` whatever
+        bound ended them)."""
+        return str(self.bound or (run.stopped if run is not None else "") or "")
+
+    def finish_strategy(self, run: Run) -> None:
+        """After any built-in strategy: score what the last epoch proposed, when the
+        search ended normally. Under ``val_gate`` that is ``_finish_gated_search`` (the
+        last proposals scored and gated, then the post-training evaluation); without
+        it, ``score_last_batch``. A custom strategy keeps its own ending."""
+        if self._custom_strategy is not None:
+            return
         if self.config.val_gate:
             self._finish_gated_search(run)
         else:
@@ -2622,8 +2641,7 @@ class Loop(OuterLoop):
         """
         if self.config.val_gate:
             return
-        ended = str((run.stopped if run is not None else "") or self.bound or "")
-        if ended == "epochs" and self._unevaluated():
+        if self._ended(run) in self.normal_ends and self._unevaluated():
             self.forward(epoch=self.epoch + 1)
 
     def _search(self, run: Run) -> None:
@@ -3013,7 +3031,7 @@ class Loop(OuterLoop):
         more epochs evaluates again. A search that ended any other way is not
         scored further, and the evaluation records why it was skipped.
         """
-        ended = str(run.stopped or self.bound or "")
+        ended = self._ended(run)
         state = self._strategy_state
         if (state.get("final_evaluation") or {}).get("search_epoch") != self.epoch:
             state.pop("final_evaluation", None)
@@ -3026,7 +3044,7 @@ class Loop(OuterLoop):
 
         if final.result.get("status") == "done":
             return
-        if ended not in self._TRAINED:
+        if ended not in self._TRAINED + self.normal_ends:
             final.result = {"status": "skipped",
                             "reason": f"the search did not finish: it ended on {ended!r}"}
             save()
@@ -3152,9 +3170,9 @@ class Loop(OuterLoop):
         """Candidates the run kept but never ran, because it stopped at its bound.
 
         The pipeline proposes the next epoch's batch at the end of an epoch. A run that
-        ends on its epoch bound scores that batch before it reports; one stopped by any
-        other bound (or a strategy that drives its own epochs) holds a batch that was
-        installed and never evaluated. Named in the report so it cannot be read as "all of this ran", and
+        ends normally (its epoch bound, or a strategy's own ``normal_ends``) scores that
+        batch before it reports (``finish_strategy``); one stopped by any other bound
+        holds a batch that was installed and never evaluated. Named in the report so it cannot be read as "all of this ran", and
         so a model-driven proposal round whose output was dropped is visible.
         """
         return [c.id for c in self.population if not c.evaluated]

@@ -512,6 +512,69 @@ def test_an_ungated_run_scores_its_last_proposals(tmp_path, picker):
     assert loop.rollouts == sum(len(loop._train_item_records[c.id]) for c in loop.population)
 
 
+@pytest.mark.parametrize("name", strategies.names())
+def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, name):
+    """Every strategy, ungated: a search that ends on its epoch limit scores what its
+    last epoch proposed (strategies that drive their own epochs -- reflective,
+    adaptive_meta, the curricula -- used to leave it), and each evaluation is counted."""
+    model = ComboModel()
+    loop = _run(name, tmp_path, model, epochs=4)
+    assert loop.optimizer.proposal_failures == []
+    if loop.epochs:
+        assert loop.epochs[-1].accepted, f"{name}: the last epoch proposed nothing to score"
+    assert all(c.evaluated for c in _children(loop)), f"{name} left a proposal unscored"
+    unscored = set(loop._unevaluated())
+    if name in ("best_of_n", "autoscientists"):
+        # One round of samples against the seed, no epochs: the seed and the starting
+        # sweep it does not evaluate stay unscored, as before; nothing it proposed does.
+        sweep = {cid for cid, record in loop.proposals.items()
+                 if record.get("origin") == "seed_population"}
+        assert unscored <= sweep | {loop.population[0].id}
+    else:
+        assert unscored == set(), f"{name} left its last round unscored"
+    assert loop.evaluations == len(loop.population) - len(unscored)
+    assert loop.rollouts == sum(len(loop._train_item_records[c.id])
+                                for c in loop.population if c.evaluated)
+
+
+@pytest.mark.parametrize("name", GATED_STRATEGIES)
+def test_no_strategy_leaves_its_last_round_ungated(tmp_path, name):
+    """Every strategy the gate runs with: the last epoch's proposals are scored and
+    judged by the gate before the run reports, as the default loop's are."""
+    model = ComboModel()
+    loop = _run(name, tmp_path, model, val_gate=True, epochs=4)
+    assert loop.epochs[-1].accepted, f"{name}: the last epoch proposed nothing to score"
+    assert loop._unevaluated() == [], f"{name} left its last round unscored"
+    assert {c.id for c in loop.population} == _gated(loop), f"{name} left a candidate ungated"
+
+
+def test_a_strategy_stopped_by_another_bound_is_not_finished(tmp_path):
+    """adaptive_meta drives its own epochs and stops with "epochs" whatever ended them;
+    the loop's recorded bound decides, so a run the evaluation cap ended skips the
+    post-training evaluation instead of spending it."""
+    model = ComboModel()
+    loop = _run("adaptive_meta", tmp_path, model, val_gate=True, epochs=6, max_evaluations=5)
+    assert len(loop.epochs) < 6 and loop.evaluations >= 5
+    final = loop._strategy_state.get("final_evaluation") or {}
+    assert (final.get("final_eval") or {}).get("status") == "skipped", final
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_a_finished_curriculum_scores_its_last_stage(tmp_path, gated):
+    """A curriculum that runs out of stages before the epoch limit ends normally too
+    (``curriculum_complete``): its last stage's batch is scored (and, under the gate,
+    judged)."""
+    model = ComboModel()
+    loop = _run("staged_v1", tmp_path, model, epochs=20, val_gate=gated)
+    assert loop.bound == "curriculum_complete" and len(loop.epochs) == 4
+    assert loop.epochs[-1].accepted
+    assert loop._unevaluated() == []
+    if gated:
+        assert {c.id for c in loop.population} == _gated(loop)
+    else:
+        assert loop.evaluations == len(loop.population)
+
+
 def test_a_population_picker_is_refused_under_the_validation_gate(tmp_path):
     with _combo_mode(), pytest.raises(LoopError, match="map_elites parent picker"):
         Loop("fake/combo", _config(tmp_path, val_gate=True, parent_picker="map_elites"),

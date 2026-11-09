@@ -236,6 +236,29 @@ class KeepThenDie(OuterLoop):
         self.ids = list(state.get("ids") or [])
 
 
+class KeepsOneUnscored(OuterLoop):
+    """Score the seed, keep a child it never scores, and stop on its epochs."""
+
+    name = "keeps_one_unscored"
+    required_ops = ("set_knob",)
+
+    def strategy(self, run: Run) -> None:
+        seed = run.seed()
+        run.evaluate(seed, part="train")
+        run.keep(_set_skill(run, seed, "kept, never scored"))
+        run.stop("epochs")
+
+
+def test_a_custom_strategy_keeps_its_own_ending(tmp_path):
+    """The built-in strategies score their last batch (``Loop.finish_strategy``); a
+    custom strategy (SkillOpt's seam) owns its protocol, so nothing is scored for it."""
+    with _patch_mode(SkillProbe):
+        loop = _loop(tmp_path, KeepsOneUnscored())
+        report = loop.run()
+    assert report["bound"] == "epochs"
+    assert len(report["unevaluated"]) == 1 and report["evaluations"] == 1
+
+
 def test_a_kept_candidate_is_held_again_after_a_resume(tmp_path):
     with _patch_mode(SkillProbe):
         with pytest.raises(ProcessDied):

@@ -235,9 +235,12 @@ a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`;
 `autoscientists`, `best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
 and with a test part `FinalEvaluation` runs, so the held-out audit compares the winner's
 val and test scores. The best on val among the accepted candidates a person has not
-rejected is the winner, in the report and for `adopt`. Without the gate the default loop
-also scores the last epoch's proposals when the run ends on its epoch bound, so a run of
-N epochs scores all N proposal rounds. `--early-stop-patience N` and `--early-stop-at-full-val 1` add SkillOpt's early
+rejected is the winner, in the report and for `adopt`. Without the gate every built-in strategy
+also scores the last epoch's proposals when the run ends normally (its epoch bound, or a
+curriculum's last stage), so a run of N epochs scores all N proposal rounds; strategies
+that drive their own epochs (`reflective`, `adaptive_meta`, the curricula) included.
+Under the gate those strategies now get the same ending as the default loop: the last
+proposals gated, then `FinalEvaluation`. `--early-stop-patience N` and `--early-stop-at-full-val 1` add SkillOpt's early
 stop (see [outer-loop.md](outer-loop.md)). SkillOpt (`refactory_packages/skillopt`)
 is built from the same pieces plus `SkillOptProposer`, its optimizer steps (analysts,
 failure-first merge, ranked edit budget, patch, slow update, meta skill) as a part
