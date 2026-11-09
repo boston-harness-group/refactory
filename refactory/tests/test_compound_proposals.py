@@ -498,3 +498,18 @@ def test_e_protected_names_the_edit_no_later_edit_repairs(_code_nodes_allowed):
     refused = applier.attempt(seed, bundle, {seed.id})
     assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
     assert "[the 4 edits together; from edit 4 (remove_edge) on" in refused[0], refused
+
+
+def test_a_slot_stranded_by_a_later_round_is_refused(_code_nodes_allowed):
+    """Round 1 puts a fact in decide_task, which decide_prompt fills (accepted). Round 2
+    replaces decide_prompt with a code op that reads decide_task as written: the slot
+    the parent filled would now reach decide as braces, so V20 refuses it."""
+    applier, seed = _livemath()
+    value = seed.state["knobs"]["decide_task"]["value"] + " Recall {{user_prompt}}."
+    child = applier.attempt(seed, {"op": "set_knob", "name": "decide_task", "value": value},
+                            {seed.id})
+    assert isinstance(child, Candidate), child
+    refused = applier.attempt(child, _replace_decide_prompt(connect=True), {seed.id, child.id})
+    assert isinstance(refused, list) and any(
+        r.startswith("V20") and "'decide_task'" in r and "{{user_prompt}}" in r
+        for r in refused), refused

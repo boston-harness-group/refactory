@@ -365,9 +365,13 @@ The edit layer enforces the same for every edit that adds a node (`add_node`,
   `prompt_template` and `system_prompt_template` (its `<id>__task` and
   `<id>__system_prompt` knobs) and in a knob an op marked `nn.fills_facts` reads, as
   LiveMath's skill graph marks the ops that read its `<step>_task` knobs; there a slot is
-  one of the op's inputs (V15, V17). A slot an edit adds to any other knob would reach
-  its reader as written, so it is refused. A slot the knob already held (a design brief
-  asking for a `{{name}}` renderer) is the author's or the user's text and is left be.
+  one of the op's inputs (V15, V17). A slot an edit leaves in any other knob would reach
+  its reader as written, so it is refused -- whether the edit added the slot or removed
+  or rewired the step that filled it. It is judged by node, knob and slot against the
+  parent: a slot the parent already left unfilled at the same node and knob (a design
+  brief asking for a `{{name}}` renderer) is the author's or the user's text and is
+  left be. Seeds and knobs a person sets (`--knob`) are not judged by V20; a test holds
+  every shipped mode's seed to having no unfilled slot.
   The request names the knobs such ops read.
 - **Lost writes (V19).** A no-tools agent or code op that sets no fact, whose every file
   a no-tools agent writes again on every path before any node reads or may read it (a

@@ -615,3 +615,19 @@ def test_a_task_knob_slot_is_held_to_what_is_produced_before_its_op():
     node = Graph.from_state(state["graph"]).nodes["decide_prompt"]
     values = {name: entry["value"] for name, entry in state["knobs"].items()}
     assert ("fact", "ghost") in consumed(node, values)
+
+
+def test_v17_follows_resolve_calls_for_a_task_knob_slot():
+    """A grader fact in a task knob is consumed by the op that fills it only when that
+    op's callable is resolved; with calls not resolved the mark is unknown, so neither
+    the op nor what it makes counts as grader-derived through the knob."""
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.validate import grader_issues
+
+    state = _mode(decide_task="{% if item_scores %}{{item_scores}}{% endif %}").state_dict()
+    graph = Graph.from_state(state["graph"])
+    values = {name: entry["value"] for name, entry in state["knobs"].items()}
+    resolved = {i.node for i in grader_issues(graph, values, resolve_tasks=True)}
+    assert {"decide_prompt", "decide"} <= resolved, resolved
+    unresolved = {i.node for i in grader_issues(graph, values, resolve_tasks=False)}
+    assert not {"decide_prompt", "decide"} & unresolved, unresolved
