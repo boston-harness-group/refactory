@@ -487,8 +487,10 @@ class Run:
                     loop.evaluations -= unreserve
 
         # ── re-raise the first error ──────────────────────────────────────
-        # Evaluation errors take priority over on_result errors.
-        first_error = next((e for e in errors if e is not None), None)
+        # Evaluation errors take priority over on_result errors, and a real failure
+        # over a budget stop, so a crash is never reported as a clean budget stop.
+        first_error = next((e for e in errors if e is not None and not isinstance(e, BudgetStopped)),
+                           next((e for e in errors if e is not None), None))
         first_on_result_error = next((e for e in on_result_errors if e is not None), None)
         error_to_raise = first_error or first_on_result_error
         if error_to_raise is not None:

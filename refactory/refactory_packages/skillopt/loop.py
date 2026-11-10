@@ -54,7 +54,7 @@ import hashlib
 import warnings
 from typing import Any
 
-from refactory_dsh.budgets import RESERVE_RETAINED
+from refactory_dsh.budgets import RESERVE_RETAINED, BudgetExhausted
 from refactory_dsh.optim import Candidate
 from refactory_dsh.outerloop import (
     BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate,
@@ -306,6 +306,9 @@ class SkillOptLoop(OuterLoop):
             except BudgetStopped as exc:
                 # A time or token budget stopped an evaluation: training ends on it.
                 run.stop(exc.reason)
+            except BudgetExhausted as exc:
+                # ...or a model call (the proposer's) met the spent budget.
+                run.stop(str(exc))
             self._train_stop = run.stopped or ""
         # Stopped at the validation reserve's line: the reserve is kept for this.
         reserved = str(run.stopped or "").endswith(RESERVE_RETAINED)

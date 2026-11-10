@@ -628,3 +628,75 @@ def test_a_partial_prefetch_wave_leaves_the_rest_to_the_in_order_gate(tmp_path, 
                         epochs=2, batch_size=4, max_concurrent_evaluations=2)
     assert sorted(refused) == [1, 1, 2], refused
     assert loop._gate_rejected == []
+
+
+@pytest.mark.parametrize("reserve", [False, True])
+def test_skillopt_whose_proposer_meets_the_spent_budget_ends_with_a_reason(tmp_path, reserve):
+    """The budget line crossed during the proposer's model call (a plain
+    BudgetExhausted, not a stopped evaluation): training ends on it, and the
+    post-training evaluation runs on the reserve when the line was the reserve's,
+    else is recorded as skipped with that reason."""
+    from refactory_dsh.budgets import BudgetExhausted
+    from test_skillopt import _Ending, _run_loop, _write_parts
+
+    reason = "elapsed-time budget exhausted" + (RESERVE_RETAINED if reserve else "")
+    overrides = {"parts_manifest": str(_write_parts(tmp_path / "parts", test=True)),
+                 "max_elapsed_s": 3600, "validation_reserve_s": 60}
+    _strategy, report = _run_loop(tmp_path, client=_Ending(BudgetExhausted(reason)),
+                                  config_overrides=overrides, skillopt_options={"max_epochs": 3})
+    final = report["strategy_report"]
+    assert report["bound"] == reason
+    if reserve:
+        assert final["test_eval"] == "done", final
+    else:
+        assert final["test_eval"] == "skipped" and reason in final["test_eval_reason"], final
+
+
+def test_a_crash_beside_a_budget_stop_is_raised_as_the_crash(tmp_path, monkeypatch, one_seed):
+    """evaluate_many with one evaluation the budget stopped and one that crashed
+    raises the crash, whichever came first."""
+    from refactory_dsh.outerloop import BudgetStopped, EvalRequest, Run
+
+    def evaluate(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        if _level(candidate) == 1:
+            raise BudgetStopped("stopped", reason="elapsed-time budget exhausted")
+        time.sleep(0.2)
+        raise ZeroDivisionError("a real failure")
+
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, max_concurrent_evaluations=2)
+        loop.init()
+        seed = loop.population[0]
+        children = [Candidate.from_state({**seed.state, "knobs": {**seed.state["knobs"],
+                                          "level": {**seed.state["knobs"]["level"], "value": level}}})
+                    for level in (1, 2)]
+        monkeypatch.setattr(Loop, "_evaluate", evaluate)
+        with pytest.raises(ZeroDivisionError):
+            Run(_loop=loop).evaluate_many([EvalRequest(candidate=c) for c in children])
+
+
+def test_a_budget_stopped_strategy_still_runs_its_own_ending(tmp_path, monkeypatch):
+    """A built-in-style strategy (a Loop subclass) whose evaluation the time budget
+    stops: the search ends on the budget and its finish_strategy runs, once."""
+    from refactory_dsh.loop import LoopConfig
+    from test_skillopt import MODE_ID, _write_parts
+
+    class Ending(Loop):
+        finished = 0
+
+        def strategy(self, run):  # type: ignore[no-untyped-def]
+            for _ in range(5):
+                run.evaluate(run.seed())
+
+        def finish_strategy(self, run):  # type: ignore[no-untyped-def]
+            type(self).finished += 1
+
+    _slow_train(monkeypatch, 1.2)
+    config = LoopConfig(epochs=2, batch_size=1, optimizer="random", seed=7, runs_root=tmp_path / "run",
+                        allowed_ops=("set_knob",), max_evaluations=60, holdout=0.0, max_elapsed_s=1,
+                        parts_manifest=str(_write_parts(tmp_path, test=True)))
+    with _patch_mode(LevelProbe):
+        loop = Ending(MODE_ID, config, project=Path("."))
+        report = loop.run()
+    assert Ending.finished == 1
+    assert "elapsed-time budget exhausted" in str(report["bound"])
