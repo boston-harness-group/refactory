@@ -293,7 +293,11 @@ def test_exhausted_trial_stays_incomplete_and_unselectable(tmp_path):
         report = loop.run()
     assert report["best"] is None and report["exit_ok"] is False
     assert report["resources"]["tokens"] == 6
-    assert report["failed_candidates"][0]["measurements"]["count"] == 2
+    # The budget cut it after 2 of 3 trials: unevaluated (for a resume), not failed.
+    assert report["failed_candidates"] == [] and report["unevaluated"]
+    stopped = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text().splitlines()
+               if json.loads(line).get("event") == "budget_stopped"]
+    assert [event["measurements"]["count"] for event in stopped] == [2]
 
 
 def test_resume_refreshes_context_instead_of_trusting_old_snapshot(tmp_path):

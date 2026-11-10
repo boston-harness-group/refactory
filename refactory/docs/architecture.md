@@ -236,7 +236,9 @@ parent, for every optimizer; the optimizers, parent pickers and strategies that 
 a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`;
 `autoscientists`, `best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
 and with a test part `FinalEvaluation` runs, so the held-out audit compares the winner's
-val and test scores. The best on val among the accepted candidates a person has not
+val and test scores. A round's train evaluations run concurrently, then its val
+rollouts, up to `--max-concurrent-evaluations` at once under the run-wide item limit;
+the gate's decisions are still taken in population order. The best on val among the accepted candidates a person has not
 rejected is the winner, in the report and for `adopt`. Without the gate every built-in strategy
 also scores the last epoch's proposals when the run ends normally (its epoch bound, or a
 curriculum's last stage), so a run of N epochs scores all N proposal rounds; strategies

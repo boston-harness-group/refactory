@@ -159,7 +159,7 @@ installed copy.
 | `--elite <n>` | how many parents each round proposes against | 3 |
 | `--max-evaluations <n>` | a hard ceiling on evaluated candidates | 64 |
 | `--max-rollouts <n>` | per-item budget: how many item-level evaluations the run may perform | unlimited |
-| `--max-concurrent-evaluations <n>` | how many evaluations run at once in evaluate_many | 4 |
+| `--max-concurrent-evaluations <n>` | how many evaluations run at once in evaluate_many and in each round of the default loop (its train evaluations, then its val-gate rollouts); 1 runs them one at a time | 4 |
 | `--max-items-in-flight <n>` | run-wide cap on items evaluated concurrently across all concurrent evaluations; when unset, uses the mode's data_parallelism | the mode's data_parallelism |
 | `--holdout <fraction>` | the share of a Task's items kept out of the search and used to audit the winner afterwards; one item cannot be split, which the audit records. With `--parts-manifest` the audit runs the manifest's val items instead (none, or `--holdout 0`: no holdout) and never its test items | 0.3 |
 | `--parsimony <cost>` | what each node of a candidate's graph costs its score: the search compares `raw_score − parsimony × nodes` | 0.01 |
@@ -172,7 +172,7 @@ installed copy.
 | `--effort <value>` / `--setting-sources <list>` | the workers' reasoning effort; claude_code workers' Claude Code settings sources (`none` or a comma list of `user`, `project`, `local`) | the backend's default |
 | `--role-routes <JSON>` / `--node-routes <JSON>` | route overrides; node takes precedence over role, then run | empty |
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | shared limits for proposals, trials, nested work and final validation | unlimited |
-| `--validation-reserve-s <n>` / `--validation-reserve-tokens <n>` | part of the shared allocation reserved for validation | 0 |
+| `--validation-reserve-s <n>` / `--validation-reserve-tokens <n>` | part of the shared allocation reserved for validation: the holdout audit and the end-of-run val/test scoring (`FinalEvaluation`); a gated search stopped at the reserve still runs that scoring | 0 |
 | `--resume` | continue a compatible saved search and retain consumed resources | off |
 | `--strategy-option KEY=VALUE` | strategy-specific option passed to the strategy's `configure()`; may be repeated. `--strategy skillopt` takes SkillOpt's settings (`max_epochs`, `early_stop_patience`, `seed`, …), `knob` (the text knob it optimizes, `skill` by default), `knobs` (several open text knobs, comma-separated, that SkillOpt sees as one document of sections; see `docs/outer-loop.md`) and `eval_test`: after training it evaluates the initial, best and final skills on the parts manifest's test part, as SkillOpt does, when the manifest has one; `eval_test=false` skips that. The scores are in the report's `strategy_report` | none |
 | `--max-steps <n>` | step ceiling for one inner run, enforced by the executor | 2000 |

@@ -37,9 +37,10 @@ val check and test rollouts). The default loop uses the gate with ``val_gate``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 import structlog
 
@@ -60,6 +61,22 @@ class EvalRequest:
 
 class OuterLoopError(RuntimeError):
     """A search cannot proceed. Always names what is wrong."""
+
+
+class BudgetStopped(OuterLoopError):
+    """A time or token budget refused or cut an evaluation before it finished.
+
+    Nothing is decided from it: a train evaluation leaves its candidate
+    unevaluated, and a val rollout (flagged ``budget_stopped`` in its occasion) is
+    no val score, so a gate leaves the candidate unjudged. A resume with more
+    budget scores it again. The run's bound is the spent budget: ``reason`` holds the
+    budget's own reason (e.g. ``elapsed-time budget exhausted``), which a strategy
+    stops with (``Run.stop``).
+    """
+
+    def __init__(self, message: str, *, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason or message
 
 
 def train_batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
@@ -195,6 +212,19 @@ class Run:
             )
         loop._evaluate_part(candidate, part, None, seed)  # noqa: SLF001
         return candidate
+
+    @contextmanager
+    def final_scoring(self) -> Iterator[None]:
+        """Score inside it in the budget's ``final_validation`` phase: the end-of-run
+        val and test scoring (``FinalEvaluation``) may spend ``validation_reserve_s``
+        and ``validation_reserve_tokens``, which the search's own work leaves alone."""
+        loop = self._loop
+        before = getattr(loop, "_final_scoring", False)
+        loop._final_scoring = True  # noqa: SLF001 - the harness owns the budget phase
+        try:
+            yield
+        finally:
+            loop._final_scoring = before  # noqa: SLF001
 
     # ── concurrent evaluation ──────────────────────────────────────────────
     def evaluate_many(
@@ -457,8 +487,10 @@ class Run:
                     loop.evaluations -= unreserve
 
         # ── re-raise the first error ──────────────────────────────────────
-        # Evaluation errors take priority over on_result errors.
-        first_error = next((e for e in errors if e is not None), None)
+        # Evaluation errors take priority over on_result errors, and a real failure
+        # over a budget stop, so a crash is never reported as a clean budget stop.
+        first_error = next((e for e in errors if e is not None and not isinstance(e, BudgetStopped)),
+                           next((e for e in errors if e is not None), None))
         first_on_result_error = next((e for e in on_result_errors if e is not None), None)
         error_to_raise = first_error or first_on_result_error
         if error_to_raise is not None:
@@ -493,7 +525,8 @@ class Run:
             raise OuterLoopError(f"part_scores covers 'val' and 'test', not {part!r}")
         results = self._loop._part_results.get(candidate.id, {}).get(part, [])  # noqa: SLF001
         return [
-            {k: v for k, v in occ.items() if k in ("part", "occasion", "score", "exit_ok", "error", "duration_s")}
+            {k: v for k, v in occ.items()
+             if k in ("part", "occasion", "score", "exit_ok", "error", "duration_s", "budget_stopped")}
             for occ in results
         ]
 
@@ -563,6 +596,16 @@ class Run:
         return self._loop.select_parents(n, by=by)
 
     def budget_left(self) -> int:
+        """Evaluations the search may still start: none once the evaluation, rollout,
+        elapsed-time or token budget is spent (a refused evaluation counts nothing, so
+        a strategy looping on this count must see the time and token budgets here)."""
+        budget = getattr(self._loop, "budget", None)
+        if budget is not None:
+            from refactory_dsh.budgets import BudgetExhausted
+            try:
+                budget.checkpoint()
+            except BudgetExhausted:
+                return 0
         left = max(0, self._loop.config.max_evaluations - self._loop.evaluations)
         if hasattr(self._loop, 'rollouts') and getattr(self._loop.config, 'max_rollouts', None) is not None:
             rollout_left = max(0, self._loop.config.max_rollouts - self._loop.rollouts)
@@ -739,7 +782,12 @@ class OuterLoop:
         """
         self.init()
         run = Run(_loop=self)
-        self.strategy(run)
+        try:
+            self.strategy(run)
+        except BudgetStopped as exc:
+            # A strategy's evaluation the time or token budget stopped: the search
+            # ends on that budget and the strategy's own ending (finish_strategy) runs.
+            run.stop(exc.reason)
         self.finish_strategy(run)
         if run.stopped:
             self.bound = str(run.stopped)
@@ -869,16 +917,21 @@ class ValidationGate:
 
     @staticmethod
     def val_score(run: Run, candidate: Candidate) -> float:
-        """A candidate's val score: its first val rollout's, 0.0 when that failed."""
-        scores = run.val_scores(candidate)
+        """A candidate's val score: its first val rollout's, 0.0 when that failed. A
+        rollout a budget stopped (``budget_stopped``) is not a val score and is skipped."""
+        scores = [s for s in run.val_scores(candidate) if not s.get("budget_stopped")]
         raw = scores[0].get("score") if scores else None
         return float(raw) if raw is not None else 0.0
 
     def start(self, run: Run, candidate: Candidate) -> float:
-        """Roll the starting candidate out on val; it becomes current and best."""
-        run.evaluate(candidate, part="val", seed=self.seed)
-        score = self.val_score(run, candidate)
-        self.cache[candidate.id] = score
+        """Roll the starting candidate out on val, unless its val score is cached
+        (``prefetch``); it becomes current and best."""
+        if candidate.id in self.cache:
+            score = self.cache[candidate.id]
+        else:
+            run.evaluate(candidate, part="val", seed=self.seed)
+            score = self.val_score(run, candidate)
+            self.cache[candidate.id] = score
         self.current_id = self.best_id = candidate.id
         self.current_score = self.best_score = score
         return score
@@ -891,6 +944,27 @@ class ValidationGate:
         score = self.val_score(run, candidate)
         self.cache[candidate.id] = score
         return score, False
+
+    def prefetch(self, run: Run, candidates: Sequence[Candidate]) -> None:
+        """Roll the candidates not yet cached out on val at once (``Run.evaluate_many``)
+        and cache each score, so ``start``, ``score`` and ``judge`` reuse it.
+
+        Fewer than two to roll out, or a batch the harness refuses
+        (``OuterLoopError``), rolls nothing: the in-order calls roll them out, and
+        refuse, as before. A rollout that finished is cached even when another raised.
+        """
+        todo = list({c.id: c for c in candidates if c.id not in self.cache}.values())
+        if len(todo) < 2:
+            return
+
+        def cache(_index: int, candidate: Candidate) -> None:
+            self.cache[candidate.id] = self.val_score(run, candidate)
+
+        try:
+            run.evaluate_many([EvalRequest(candidate=c, part="val", seed=self.seed) for c in todo],
+                              on_result=cache)
+        except OuterLoopError:
+            return
 
     def judge(self, run: Run, candidate: Candidate, *, against: Candidate | None = None) -> Verdict:
         """Score ``candidate`` on val and accept it only if it beats the incumbent.
@@ -1004,7 +1078,12 @@ class FinalEvaluation:
         save()
 
     def run(self, run: Run, gate: ValidationGate, *, seed: int | None, save: Callable[[], None]) -> None:
-        """Run the pending phases; see the class docstring."""
+        """Run the pending phases; see the class docstring. They are the run's final
+        scoring, so they may spend the budget's validation reserve (``Run.final_scoring``)."""
+        with run.final_scoring():
+            self._run(run, gate, seed=seed, save=save)
+
+    def _run(self, run: Run, gate: ValidationGate, *, seed: int | None, save: Callable[[], None]) -> None:
         if not self.completed:
             self.result, self.traced = {}, set()
         result = self.result
