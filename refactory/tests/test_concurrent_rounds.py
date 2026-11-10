@@ -122,14 +122,35 @@ def _progress(loop: Loop, step: str) -> list[dict[str, Any]]:
 
 
 def _slow_and_val_by_level(monkeypatch: Any) -> None:
-    """A higher level finishes its train evaluation first; val scores level / 10."""
-    original = Loop._evaluate
+    """Every wave of train evaluations finishes in reverse request order (each waits
+    for the ones after it, by events, not sleeps); val scores level / 10."""
+    from refactory_dsh.outerloop import Run
 
-    def slow(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
-        time.sleep(0.05 * (9 - _level(candidate)))
-        return original(self, candidate, **kwargs)
+    waves: dict[str, list[str]] = {}
+    done: dict[str, threading.Event] = {}
+    lock = threading.Lock()
+    original_many, original = Run.evaluate_many, Loop._evaluate
 
-    monkeypatch.setattr(Loop, "_evaluate", slow)
+    def many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+        ids = [r.candidate.id for r in requests if r.part == "train"]
+        with lock:
+            for cid in ids:
+                waves[cid], done[cid] = ids, threading.Event()
+        return original_many(self, requests, on_result=on_result)
+
+    def evaluate(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        with lock:
+            wave = waves.pop(candidate.id, None)
+        for later in (wave or [])[wave.index(candidate.id) + 1:] if wave else []:
+            assert done[later].wait(timeout=60), "a later evaluation of the wave never finished"
+        try:
+            return original(self, candidate, **kwargs)
+        finally:
+            if wave:
+                done[candidate.id].set()
+
+    monkeypatch.setattr(Run, "evaluate_many", many)
+    monkeypatch.setattr(Loop, "_evaluate", evaluate)
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
 
 
@@ -190,33 +211,56 @@ class _TwoAtOnce(LevelProbe):
 
 
 def test_the_speedup_needs_room_in_the_item_limit(tmp_path, monkeypatch, one_seed):
-    """Wall clock of a round of four children (8 train items each, 50 ms an item, a
-    data node two items wide). One at a time, and four at once under the default
-    item limit (the seed's parallelism, 2: a run-wide cap, #580's), take about as
-    long; with max_items_in_flight 8 (2 x 4) the four run side by side, ~4x faster."""
+    """A round of four children (8 train items each, a data node two items wide).
+    One at a time, and four at once under the default item limit (the seed's
+    parallelism, 2: a run-wide cap, #580's), never have more than 2 items in flight,
+    so four at once is no faster; with max_items_in_flight 8 (2 x 4) the four
+    children's items run side by side: 8 of them meet at once. Counted, not timed,
+    so the result does not depend on the machine's speed."""
     from test_skillopt import SkillTask
     from test_val_gate import ScriptedLevels
 
     verify = SkillTask.verify
+    lock = threading.Lock()
+    state = {"in_flight": 0, "peak": 0, "arrived": 0}
+    meet = threading.Barrier(8, timeout=20)
+    label = ""
 
-    def slow(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
-        if part == "train":
-            time.sleep(0.05)
-        return verify(self, instance, workspace, part=part, seed=seed)
+    def counted(self, instance, workspace, *, part=None, seed=None):  # type: ignore[no-untyped-def]
+        with lock:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            state["arrived"] += 1
+            first_eight = state["arrived"] <= 8
+        try:
+            if part == "train" and label == "raised limit" and first_eight and round_two["on"]:
+                meet.wait()  # eight items of four children in flight together
+            else:
+                time.sleep(0.01)
+            return verify(self, instance, workspace, part=part, seed=seed)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
 
-    monkeypatch.setattr(SkillTask, "verify", slow)
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
+    round_two = {"on": False}
     forward = Loop.forward
-    took: dict[str, float] = {}
 
-    def timed(self, **kwargs):  # type: ignore[no-untyped-def]
-        start = time.monotonic()
+    def marked(self, **kwargs):  # type: ignore[no-untyped-def]
+        # Count only the round of four children.
+        children = len([c for c in self.population if not c.evaluated]) == 4
+        with lock:
+            state.update(in_flight=0, peak=0, arrived=0)
+        round_two["on"] = children
         count = forward(self, **kwargs)
-        if count == 4:
-            took[label] = time.monotonic() - start
+        if children:
+            peaks[label] = state["peak"]
+        round_two["on"] = False
         return count
 
-    monkeypatch.setattr(Loop, "forward", timed)
+    monkeypatch.setattr(SkillTask, "verify", counted)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
+    monkeypatch.setattr(Loop, "forward", marked)
+    peaks: dict[str, int] = {}
     for label, extra in (("serial", {"max_concurrent_evaluations": 1}),
                          ("default limit", {"max_concurrent_evaluations": 4}),
                          ("raised limit", {"max_concurrent_evaluations": 4, "max_items_in_flight": 8})):
@@ -225,9 +269,7 @@ def test_the_speedup_needs_room_in_the_item_limit(tmp_path, monkeypatch, one_see
                          batch_size=4, **extra)
             loop.optimizer = ScriptedLevels([[(5, 1), (5, 2), (5, 3), (5, 4)], []])
             loop.run()
-    print("round wall clock (s):", {k: round(v, 2) for k, v in took.items()})
-    assert took["default limit"] > 0.7 * took["serial"], took
-    assert took["raised limit"] < 0.5 * took["serial"], took
+    assert peaks == {"serial": 2, "default limit": 2, "raised limit": 8}, peaks
 
 
 def test_a_rollout_cap_starts_only_what_one_at_a_time_would(tmp_path, monkeypatch, one_seed):
@@ -288,16 +330,19 @@ def test_a_budget_stopped_evaluation_leaves_the_candidate_for_a_resume(tmp_path,
     from refactory_dsh.evaluators import WalkerEvaluator
     from test_val_gate import ScriptedLevels
 
+    clock = _Clock(monkeypatch)
+    walked = threading.Barrier(4, timeout=60)
     original = WalkerEvaluator.evaluate
     slow = {"on": True}
 
     def evaluate(self, mode, state, workdir, **kwargs):  # type: ignore[no-untyped-def]
         child = int(state["knobs"]["level"]["value"]) != 5 and "occasions" not in str(workdir)
         if slow["on"] and child and cut == "train":
-            time.sleep(3)  # before the walk: its first node meets the spent budget
+            clock.advance(3)  # before the walk: its nodes meet the spent budget
         result = original(self, mode, state, workdir, **kwargs)
         if slow["on"] and child and cut == "val":
-            time.sleep(3)  # after the walk: the run finishes, past the limit
+            walked.wait()  # every child's walk has finished, inside the limit
+            clock.advance(3)  # ...and each run ends past it
         return result
 
     monkeypatch.setattr(WalkerEvaluator, "evaluate", evaluate)
@@ -508,18 +553,39 @@ def test_the_spine_runs_a_rounds_train_evaluations_at_once_with_the_same_scores(
     assert not any(slots for _s, _e, slots in spans[1])
 
 
+class _Clock:
+    """The budget's clock (``refactory_dsh.budgets.time``): it moves only when a test
+    advances it, so a time budget runs out where the test says, whatever the
+    machine's speed."""
+
+    def __init__(self, monkeypatch: Any) -> None:
+        import types
+
+        from refactory_dsh import budgets
+
+        self.now = 1_000_000.0
+        self._lock = threading.Lock()
+        monkeypatch.setattr(budgets, "time", types.SimpleNamespace(time=lambda: self.now))
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self.now += seconds
+
+
 def _slow_train(monkeypatch: Any, seconds: float) -> dict[str, bool]:
-    """Every train run (not a val/test occasion) takes ``seconds`` more, after its
-    walk, so it finishes past a short time limit; returns a switch."""
+    """Every train run (not a val/test occasion) takes ``seconds`` more on the
+    budget's clock (``_Clock``), after its walk, so it finishes past a short time
+    limit; returns a switch."""
     from refactory_dsh.evaluators import WalkerEvaluator
 
+    clock = _Clock(monkeypatch)
     original = WalkerEvaluator.evaluate
     switch = {"on": True}
 
     def evaluate(self, mode, state, workdir, **kwargs):  # type: ignore[no-untyped-def]
         result = original(self, mode, state, workdir, **kwargs)
         if switch["on"] and "occasions" not in str(workdir):
-            time.sleep(seconds)
+            clock.advance(seconds)
         return result
 
     monkeypatch.setattr(WalkerEvaluator, "evaluate", evaluate)
