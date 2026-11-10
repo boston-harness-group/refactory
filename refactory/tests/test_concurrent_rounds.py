@@ -506,3 +506,125 @@ def test_the_spine_runs_a_rounds_train_evaluations_at_once_with_the_same_scores(
     assert all(slots for _s, _e, slots in wide), "every concurrent spine run shares the slot directory"
     assert any(later[0] < earlier[1] for earlier, later in zip(wide, wide[1:])), "the spine runs overlapped"
     assert not any(slots for _s, _e, slots in spans[1])
+
+
+def _slow_train(monkeypatch: Any, seconds: float) -> dict[str, bool]:
+    """Every train run (not a val/test occasion) takes ``seconds`` more, after its
+    walk, so it finishes past a short time limit; returns a switch."""
+    from refactory_dsh.evaluators import WalkerEvaluator
+
+    original = WalkerEvaluator.evaluate
+    switch = {"on": True}
+
+    def evaluate(self, mode, state, workdir, **kwargs):  # type: ignore[no-untyped-def]
+        result = original(self, mode, state, workdir, **kwargs)
+        if switch["on"] and "occasions" not in str(workdir):
+            time.sleep(seconds)
+        return result
+
+    monkeypatch.setattr(WalkerEvaluator, "evaluate", evaluate)
+    return switch
+
+
+def test_budget_left_is_zero_once_the_time_budget_is_spent(tmp_path, monkeypatch):
+    """A strategy that loops on budget_left() and skips refused evaluations stops
+    once the time budget is spent: a refused evaluation counts nothing, so the time
+    budget has to show in budget_left()."""
+    from refactory_dsh.outerloop import OuterLoop, OuterLoopError
+
+    class Spinner(OuterLoop):
+        name = "spinner"
+        required_ops = ("set_knob",)
+
+        def configure(self, **options: Any) -> None:
+            self.attempts = 0
+
+        def strategy(self, run):  # type: ignore[no-untyped-def]
+            while run.budget_left() > 0 and self.attempts < 40:
+                self.attempts += 1
+                try:
+                    run.evaluate(run.seed())
+                except OuterLoopError:
+                    continue
+
+    _slow_train(monkeypatch, 1.2)
+    spinner = Spinner()
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, strategy=spinner, max_elapsed_s=1, max_evaluations=5)
+        report = loop.run()
+    assert spinner.attempts == 1, spinner.attempts
+    assert "elapsed-time budget exhausted" in str(report["bound"])
+
+
+@pytest.mark.parametrize("reserve", [0, 4])
+def test_skillopt_stopped_by_the_time_budget_says_so_or_scores_on_the_reserve(tmp_path, monkeypatch, reserve):
+    """SkillOpt whose training a time budget stops: without a reserve the
+    post-training evaluation is skipped with the budget as its reason; stopped at
+    the reserve's line, it still runs on the reserve."""
+    from test_skillopt import _run_loop, _write_parts
+
+    _slow_train(monkeypatch, 0.6)
+    parts = _write_parts(tmp_path / "parts", test=True)
+    overrides = {"parts_manifest": str(parts), "max_elapsed_s": 6 if reserve else 1.5,
+                 "validation_reserve_s": reserve}
+    _strategy, report = _run_loop(tmp_path, config_overrides=overrides)
+    final = report["strategy_report"]
+    assert "elapsed-time budget exhausted" in str(report["bound"])
+    if reserve:
+        assert final["test_eval"] == "done", final
+    else:
+        assert final["test_eval"] == "skipped", final
+        assert "elapsed-time budget exhausted" in final["test_eval_reason"]
+
+
+def test_the_prefetched_val_scores_survive_a_kill_before_the_decisions(tmp_path, monkeypatch, one_seed):
+    """A run killed after the round's val rollouts and before the gate's decisions
+    has their scores journaled, so the resume rolls none of them out again."""
+    from test_val_gate import ScriptedLevels
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
+    judge = ValidationGate.judge
+
+    def killed(self, run, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        raise KeyboardInterrupt("killed before the decisions")
+
+    monkeypatch.setattr(ValidationGate, "judge", killed)
+    settings = dict(val_gate=True, batch_size=2)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=2, **settings)
+        loop.optimizer = ScriptedLevels([[(5, 6), (5, 7)], []])
+        with pytest.raises(KeyboardInterrupt):
+            loop.run()
+    rolled = [r["id"] for r in _journal_events(loop, "part_result") if r["part"] == "val"]
+    assert len(rolled) == 3, "setup: the seed's and both children's val rollouts"
+
+    monkeypatch.setattr(ValidationGate, "judge", judge)
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=2, resume=True, **settings)
+        resumed.optimizer = ScriptedLevels([[]])
+        resumed.run()
+    again = [r["id"] for r in _journal_events(resumed, "part_result") if r["part"] == "val"]
+    assert again[:3] == rolled and sorted(again[3:]) == [], "no val rollout again"
+    assert len(resumed._gate_accepted) == 3
+
+
+def test_a_partial_prefetch_wave_leaves_the_rest_to_the_in_order_gate(tmp_path, monkeypatch, one_seed):
+    """Two at once, four children whose val rollouts the budget refuses: the first
+    wave comes back partial, so no further wave starts; the in-order gate tries the
+    first child once more, is refused, and stops. Nothing is judged."""
+    from refactory_dsh.outerloop import BudgetStopped
+
+    original = Loop._evaluate_part
+    refused: list[int] = []
+
+    def evaluate_part(self, candidate, part, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if part == "val" and _level(candidate) != 5:
+            refused.append(_level(candidate))
+            raise BudgetStopped("refused", reason="elapsed-time budget exhausted")
+        return original(self, candidate, part, *args, **kwargs)
+
+    monkeypatch.setattr(Loop, "_evaluate_part", evaluate_part)
+    loop, _, _ = _gated(tmp_path, monkeypatch, [[(5, 1), (5, 2), (5, 3), (5, 4)], []],
+                        epochs=2, batch_size=4, max_concurrent_evaluations=2)
+    assert sorted(refused) == [1, 1, 2], refused
+    assert loop._gate_rejected == []

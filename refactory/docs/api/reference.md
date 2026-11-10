@@ -298,7 +298,7 @@ The two extension points: what proposes, and what runs the search.
 
 | kind | name | signature |
 |---|---|---|
-| class | `BudgetStopped` | `` |
+| class | `BudgetStopped` | `(message: 'str', *, reason: 'str' = '') -> 'None'` |
 | class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None) -> None` |
 | class | `FinalEvaluation` | `(*, record: 'Callable[..., Any] \| None' = None, label: 'str' = 'outer loop') -> 'None'` |
 | class | `OuterLoop` | `()` |

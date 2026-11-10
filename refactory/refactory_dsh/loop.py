@@ -1458,7 +1458,8 @@ class Loop(OuterLoop):
             self._journal("budget_stopped", id=candidate.id, part=part, error=result.error,
                           measurements=measurements)
             self._journal("rollouts", rollouts=self.rollouts)
-        raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} evaluation: {result.error}")
+        raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} evaluation: {result.error}",
+                            reason=self.bound or str(result.error or ""))
 
     def _evaluate_part(
         self, candidate: Candidate, part: str,
@@ -1516,7 +1517,8 @@ class Loop(OuterLoop):
             (workdir / "item_records.json").write_text(
                 json.dumps(result.item_records, indent=2, default=str))
         if measurements.get("budget_stopped"):
-            raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} rollout: {result.error}")
+            raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} rollout: {result.error}",
+                                reason=self.bound or str(result.error or ""))
 
     def _measure(
         self, candidate: Candidate, workdir: Path, part: str, *,

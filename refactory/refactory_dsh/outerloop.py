@@ -69,8 +69,14 @@ class BudgetStopped(OuterLoopError):
     Nothing is decided from it: a train evaluation leaves its candidate
     unevaluated, and a val rollout (flagged ``budget_stopped`` in its occasion) is
     no val score, so a gate leaves the candidate unjudged. A resume with more
-    budget scores it again. The run's bound is the spent budget.
+    budget scores it again. The run's bound is the spent budget: ``reason`` holds the
+    budget's own reason (e.g. ``elapsed-time budget exhausted``), which a strategy
+    stops with (``Run.stop``).
     """
+
+    def __init__(self, message: str, *, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason or message
 
 
 def train_batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
@@ -588,6 +594,16 @@ class Run:
         return self._loop.select_parents(n, by=by)
 
     def budget_left(self) -> int:
+        """Evaluations the search may still start: none once the evaluation, rollout,
+        elapsed-time or token budget is spent (a refused evaluation counts nothing, so
+        a strategy looping on this count must see the time and token budgets here)."""
+        budget = getattr(self._loop, "budget", None)
+        if budget is not None:
+            from refactory_dsh.budgets import BudgetExhausted
+            try:
+                budget.checkpoint()
+            except BudgetExhausted:
+                return 0
         left = max(0, self._loop.config.max_evaluations - self._loop.evaluations)
         if hasattr(self._loop, 'rollouts') and getattr(self._loop.config, 'max_rollouts', None) is not None:
             rollout_left = max(0, self._loop.config.max_rollouts - self._loop.rollouts)
@@ -764,7 +780,12 @@ class OuterLoop:
         """
         self.init()
         run = Run(_loop=self)
-        self.strategy(run)
+        try:
+            self.strategy(run)
+        except BudgetStopped as exc:
+            # A strategy's evaluation the time or token budget stopped: the search
+            # ends on that budget and the strategy's own ending (finish_strategy) runs.
+            run.stop(exc.reason)
         self.finish_strategy(run)
         if run.stopped:
             self.bound = str(run.stopped)
