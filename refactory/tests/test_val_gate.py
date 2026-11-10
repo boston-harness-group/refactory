@@ -319,15 +319,17 @@ def test_hill_climb_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
     nothing again."""
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
     val_rollouts: list[str] = []
-    original = Run.evaluate
+    original = Loop._evaluate_part
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    # Every val rollout, whichever Run call made it (a round's are rolled out
+    # together through evaluate_many).
+    def evaluate_part(self, candidate, part, items, seed, **kwargs):  # type: ignore[no-untyped-def]
         if part == "val":
             assert seed == 7
             val_rollouts.append(candidate.id)
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part, items, seed, **kwargs)
 
-    monkeypatch.setattr(Run, "evaluate", evaluate)
+    monkeypatch.setattr(Loop, "_evaluate_part", evaluate_part)
     overrides = dict(optimizer="hill_climb", val_gate=True, epochs=3, batch_size=3)
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, **overrides)

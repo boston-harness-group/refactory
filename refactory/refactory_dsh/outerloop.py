@@ -37,9 +37,10 @@ val check and test rollouts). The default loop uses the gate with ``val_gate``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 import structlog
 
@@ -195,6 +196,19 @@ class Run:
             )
         loop._evaluate_part(candidate, part, None, seed)  # noqa: SLF001
         return candidate
+
+    @contextmanager
+    def final_scoring(self) -> Iterator[None]:
+        """Score inside it in the budget's ``final_validation`` phase: the end-of-run
+        val and test scoring (``FinalEvaluation``) may spend ``validation_reserve_s``
+        and ``validation_reserve_tokens``, which the search's own work leaves alone."""
+        loop = self._loop
+        before = getattr(loop, "_final_scoring", False)
+        loop._final_scoring = True  # noqa: SLF001 - the harness owns the budget phase
+        try:
+            yield
+        finally:
+            loop._final_scoring = before  # noqa: SLF001
 
     # ── concurrent evaluation ──────────────────────────────────────────────
     def evaluate_many(
@@ -875,10 +889,14 @@ class ValidationGate:
         return float(raw) if raw is not None else 0.0
 
     def start(self, run: Run, candidate: Candidate) -> float:
-        """Roll the starting candidate out on val; it becomes current and best."""
-        run.evaluate(candidate, part="val", seed=self.seed)
-        score = self.val_score(run, candidate)
-        self.cache[candidate.id] = score
+        """Roll the starting candidate out on val, unless its val score is cached
+        (``prefetch``); it becomes current and best."""
+        if candidate.id in self.cache:
+            score = self.cache[candidate.id]
+        else:
+            run.evaluate(candidate, part="val", seed=self.seed)
+            score = self.val_score(run, candidate)
+            self.cache[candidate.id] = score
         self.current_id = self.best_id = candidate.id
         self.current_score = self.best_score = score
         return score
@@ -891,6 +909,27 @@ class ValidationGate:
         score = self.val_score(run, candidate)
         self.cache[candidate.id] = score
         return score, False
+
+    def prefetch(self, run: Run, candidates: Sequence[Candidate]) -> None:
+        """Roll the candidates not yet cached out on val at once (``Run.evaluate_many``)
+        and cache each score, so ``start``, ``score`` and ``judge`` reuse it.
+
+        Fewer than two to roll out, or a batch the harness refuses
+        (``OuterLoopError``), rolls nothing: the in-order calls roll them out, and
+        refuse, as before. A rollout that finished is cached even when another raised.
+        """
+        todo = list({c.id: c for c in candidates if c.id not in self.cache}.values())
+        if len(todo) < 2:
+            return
+
+        def cache(_index: int, candidate: Candidate) -> None:
+            self.cache[candidate.id] = self.val_score(run, candidate)
+
+        try:
+            run.evaluate_many([EvalRequest(candidate=c, part="val", seed=self.seed) for c in todo],
+                              on_result=cache)
+        except OuterLoopError:
+            return
 
     def judge(self, run: Run, candidate: Candidate, *, against: Candidate | None = None) -> Verdict:
         """Score ``candidate`` on val and accept it only if it beats the incumbent.
@@ -1004,7 +1043,12 @@ class FinalEvaluation:
         save()
 
     def run(self, run: Run, gate: ValidationGate, *, seed: int | None, save: Callable[[], None]) -> None:
-        """Run the pending phases; see the class docstring."""
+        """Run the pending phases; see the class docstring. They are the run's final
+        scoring, so they may spend the budget's validation reserve (``Run.final_scoring``)."""
+        with run.final_scoring():
+            self._run(run, gate, seed=seed, save=save)
+
+    def _run(self, run: Run, gate: ValidationGate, *, seed: int | None, save: Callable[[], None]) -> None:
         if not self.completed:
             self.result, self.traced = {}, set()
         result = self.result

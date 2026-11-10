@@ -23,6 +23,11 @@ LEDGER = Path(".refactory/resource-usage.json")
 ENV_LEDGER = "REFACTORY_BUDGET_LEDGER"
 
 
+#: What a work-phase stop adds to its reason when a validation reserve is held back:
+#: the search ended there so the final scoring (``final_validation``) can spend it.
+RESERVE_RETAINED = " (final validation reserve retained)"
+
+
 class BudgetExhausted(RuntimeError):
     """Required work did not fit; no success or validation is implied."""
 
@@ -259,12 +264,12 @@ class RunBudget:
             time_limit = limits.get("max_elapsed_s")
             token_limit = limits.get("max_tokens")
             if time_limit is not None and summary["elapsed_s"] >= time_limit - (limits.get("validation_reserve_s", 0) if work else 0):
-                reason = "elapsed-time budget exhausted" + (" (final validation reserve retained)" if work and limits.get("validation_reserve_s") else "")
+                reason = "elapsed-time budget exhausted" + (RESERVE_RETAINED if work and limits.get("validation_reserve_s") else "")
             if token_limit is not None:
                 if state.get("workers") and summary["token_status"] == "unavailable":
                     reason = "token usage unavailable; token-limited work cannot continue"
                 elif summary["known_tokens"] >= token_limit - (limits.get("validation_reserve_tokens", 0) if work else 0):
-                    reason = "token budget exhausted" + (" (final validation reserve retained)" if work and limits.get("validation_reserve_tokens") else "")
+                    reason = "token budget exhausted" + (RESERVE_RETAINED if work and limits.get("validation_reserve_tokens") else "")
             state["exhausted"] = reason is not None
             state["reason"] = reason
         if reason:

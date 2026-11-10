@@ -61,7 +61,7 @@ from refactory_dsh.optim.base import (
     DEFAULT_MAX_EDITS, available_before, edit_level, proposal_refusal, summarise_reasons,
 )
 from refactory_dsh.outerloop import (
-    FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
+    EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
 from refactory_dsh.paths import project_root
 
@@ -260,7 +260,9 @@ class LoopConfig:
     validation_reserve_s: float = 0
     validation_reserve_tokens: int = 0
     max_rollouts: int | None = None
-    #: How many evaluations run at once in evaluate_many. Default 4.
+    #: How many evaluations run at once: in evaluate_many, and in the default loop's
+    #: rounds (a round's train evaluations, then its val-gate rollouts). 1 runs them
+    #: one at a time. Default 4.
     max_concurrent_evaluations: int = 4
     #: Run-wide cap on items evaluated concurrently across all concurrent
     #: evaluations.  ``None`` means use the mode's data_parallelism.
@@ -504,6 +506,9 @@ class Loop(OuterLoop):
         self.holdout_measurements: dict[str, Any] = {}
         self.budget: Any = None
         self._owns_resource_budget = False
+        #: Set while the end-of-run scoring runs (``Run.final_scoring``): its
+        #: measurements are in the ``final_validation`` phase and may spend the reserve.
+        self._final_scoring = False
         # One printer for the run: a caller that asked for events sees them while
         # the search goes, and a library caller prints nothing at all.
         self._printer = events.Printer(verbose=self.config.verbose) if self.config.print_events else None
@@ -1091,15 +1096,25 @@ class Loop(OuterLoop):
         """Evaluate every candidate in the batch that has not run yet.
 
         ``epoch`` (default: the current one) picks the train seed under ``val_gate``.
-        The time and token budgets are checked before each candidate: once one is spent
-        the rest stay unscored (the report names them) and the spent budget is the run's
-        bound, rather than a measurement refused by it being recorded as a failure.
+        The time and token budgets are checked before each wave of candidates: once one
+        is spent the rest stay unscored (the report names them) and the spent budget is
+        the run's bound, rather than a measurement refused by it being recorded as a
+        failure.
+
+        The candidates are independent, so up to ``max_concurrent_evaluations`` of them
+        run at once (``Run.evaluate_many``, under the run-wide item limit). A wave holds
+        only candidates the one-after-another order would also have started: the
+        evaluation budget and, with ``max_rollouts``, the most rollouts each can add
+        decide its size, so the same candidates are scored, with the same items and
+        seed. ``max_concurrent_evaluations`` 1 runs them one at a time, as before.
         """
         from refactory_dsh.budgets import BudgetExhausted
 
         batch = [candidate for candidate in self.population if not candidate.evaluated]
-        seed = self._train_seed(self.epoch if epoch is None else epoch)
-        for index, candidate in enumerate(batch):
+        at = self.epoch if epoch is None else epoch
+        seed = self._train_seed(at)
+        index = 0
+        while index < len(batch):
             if self.evaluations >= self.config.max_evaluations:
                 break
             if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
@@ -1110,30 +1125,67 @@ class Loop(OuterLoop):
                 except BudgetExhausted as exc:
                     self.bound = str(exc)
                     break
-            items = self._minibatch(self.epoch if epoch is None else epoch)
-            self._evaluate(candidate, seed=seed, items=items)
-            if items is not None or self._fresh_evidence():
-                # Which epoch's sample and seed its records come from, so the proposal
-                # step re-scores it only when they are another epoch's.
-                self._records_epoch[candidate.id] = self.epoch if epoch is None else epoch
-                self._records_by_epoch.setdefault(candidate.id, {})[
-                    self._records_epoch[candidate.id]] = list(
-                        self._train_item_records.get(candidate.id, []))
-                self._journal("train_records_epoch", id=candidate.id,
-                              epoch=self._records_epoch[candidate.id])
-            self._progress(
-                "forward",
-                candidate=candidate.id,
-                index=index,
-                of=len(batch),
-                score=candidate.score,
-                exit_ok=candidate.exit_ok,
-                error=candidate.error,
-                duration_s=candidate.duration_s,
-            )
+            items = self._minibatch(at)
+            each = len(items) if items is not None else len(self._train_ids())
+            size = self._wave_size(min(len(batch) - index,
+                                       self.config.max_evaluations - self.evaluations), each)
+            wave = batch[index:index + size]
+            if len(wave) == 1:
+                self._evaluate(wave[0], seed=seed, items=items)
+                self._forwarded(wave[0], index, len(batch), at, items)
+            else:
+                start = index
+                Run(_loop=self).evaluate_many(
+                    [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed)
+                     for candidate in wave],
+                    on_result=lambda position, candidate: self._forwarded(
+                        candidate, start + position, len(batch), at, items),
+                )
+            index += len(wave)
             if self.budget and self.budget.snapshot().get("exhausted"):
                 break
         return len(batch)
+
+    def _wave_size(self, wanted: int, items_each: int) -> int:
+        """How many of the next ``wanted`` evaluations may run at once (at least one).
+
+        At most ``max_concurrent_evaluations``. With ``max_rollouts`` set, only as many
+        as the one-after-another order would also start: each is counted at the most
+        rollouts it can add (its items times ``repeats``), and the wave also fits
+        ``evaluate_many``'s own rollout check; a single evaluation runs alone, as before.
+        """
+        size = max(1, min(wanted, int(self.config.max_concurrent_evaluations or 1)))
+        cap = self.config.max_rollouts
+        if cap is None:
+            return size
+        each = max(int(items_each), 1)
+        count = 0
+        while (count < size and self.rollouts + count * each * self.config.repeats < cap
+               and self.rollouts + (count + 1) * each <= cap):
+            count += 1
+        return max(count, 1)
+
+    def _forwarded(self, candidate: Candidate, index: int, of: int, epoch: int,
+                   items: list[str] | None) -> None:
+        """What ``forward`` records after one candidate's train evaluation."""
+        if items is not None or self._fresh_evidence():
+            # Which epoch's sample and seed its records come from, so the proposal
+            # step re-scores it only when they are another epoch's.
+            with self._state_lock:
+                self._records_epoch[candidate.id] = epoch
+                self._records_by_epoch.setdefault(candidate.id, {})[epoch] = list(
+                    self._train_item_records.get(candidate.id, []))
+                self._journal("train_records_epoch", id=candidate.id, epoch=epoch)
+        self._progress(
+            "forward",
+            candidate=candidate.id,
+            index=index,
+            of=of,
+            score=candidate.score,
+            exit_ok=candidate.exit_ok,
+            error=candidate.error,
+            duration_s=candidate.duration_s,
+        )
 
     def _train_seed(self, epoch: int) -> int:
         """The seed a train rollout in ``epoch`` uses.
@@ -1476,7 +1528,8 @@ class Loop(OuterLoop):
             before = self.budget.snapshot() if self.budget else {}
             try:
                 if self.budget:
-                    self.budget.checkpoint(("final_validation" if part == task_module.HOLDOUT else "work")
+                    final = part == task_module.HOLDOUT or getattr(self, "_final_scoring", False)
+                    self.budget.checkpoint(("final_validation" if final else "work")
                                            if self._owns_resource_budget else None)
                 with self.budget.retain_validation_reserve() if self.budget else nullcontext():
                     eval_kwargs: dict[str, Any] = {}
@@ -2923,11 +2976,16 @@ class Loop(OuterLoop):
 
         With ``batch_size`` > 1 the decisions depend on the batch's order: a
         candidate accepted earlier in the batch raises the bar for the ones after
-        it. SkillOpt gates one candidate per epoch, so it has no equivalent.
+        it. SkillOpt gates one candidate per epoch, so it has no equivalent. The val
+        rollouts do not: they are rolled out first, up to ``max_concurrent_evaluations``
+        at once (``_prefetch_val``), and the decisions are then taken in order from
+        the gate's cache.
         """
         gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
-        for candidate in [c for c in self.population if c.evaluated and c.id not in judged]:
+        pending = [c for c in self.population if c.evaluated and c.id not in judged]
+        self._prefetch_val(run, gate, pending)
+        for candidate in pending:
             try:
                 if gate.best_id is None:
                     gate.start(run, candidate)
@@ -2941,6 +2999,29 @@ class Loop(OuterLoop):
             (self._gate_accepted if accepted else self._gate_rejected).append(candidate.id)
             self._store_gate_state()
             self._save_strategy_state()
+
+    def _prefetch_val(self, run: Run, gate: ValidationGate, pending: Sequence[Candidate]) -> None:
+        """Roll the candidates the gate will judge out on val, in waves of up to
+        ``max_concurrent_evaluations`` (``ValidationGate.prefetch``), so the in-order
+        decisions read cached scores. Each val rollout depends only on its candidate
+        and the run's seed, so the scores are the ones the decisions would have rolled.
+
+        A wave holds only rollouts the in-order gating would also have made (with
+        ``max_rollouts``, see ``_wave_size``); whatever it leaves, or a wave that did
+        not score every candidate, is rolled out by the decisions, one at a time.
+        """
+        manifest = self._parts_manifest or {}
+        each = len(manifest.get(task_module.VAL) or ())
+        todo = [c for c in pending if c.id not in gate.cache]
+        while len(todo) > 1:
+            size = self._wave_size(len(todo), each)
+            if size < 2 or (self.config.max_rollouts is not None
+                            and self.rollouts >= self.config.max_rollouts):
+                return
+            wave, todo = todo[:size], todo[size:]
+            gate.prefetch(run, wave)
+            if any(c.id not in gate.cache for c in wave):
+                return
 
     def best_score_fields(self, winner: Candidate) -> dict[str, Any]:
         """The report's ``best_score`` for ``winner``: with ``val_gate`` its val score,
@@ -3046,10 +3127,16 @@ class Loop(OuterLoop):
         ``FinalEvaluation`` runs: the final candidate's val check, then the seed,
         the best and the final candidate on test with the run seed. Each phase is
         saved, so a resumed run continues where it stopped; a search resumed with
-        more epochs evaluates again. A search that ended any other way is not
-        scored further, and the evaluation records why it was skipped.
+        more epochs evaluates again. A search stopped by a time or token budget that
+        held a validation reserve back (``validation_reserve_s``/``_tokens``) leaves
+        its last proposals unscored and runs the final evaluation on the reserve. A
+        search that ended any other way is not scored further, and the evaluation
+        records why it was skipped.
         """
+        from refactory_dsh.budgets import RESERVE_RETAINED
+
         ended = self._ended(run)
+        reserved = ended.endswith(RESERVE_RETAINED)
         state = self._strategy_state
         if (state.get("final_evaluation") or {}).get("search_epoch") != self.epoch:
             state.pop("final_evaluation", None)
@@ -3062,12 +3149,12 @@ class Loop(OuterLoop):
 
         if final.result.get("status") == "done":
             return
-        if ended not in self._TRAINED + self.normal_ends:
+        if ended not in self._TRAINED + self.normal_ends and not reserved:
             final.result = {"status": "skipped",
                             "reason": f"the search did not finish: it ended on {ended!r}"}
             save()
             return
-        if self._unevaluated():
+        if self._unevaluated() and not reserved:
             self.forward(epoch=self.epoch + 1)
             self._gate_population(run)
         if not run.has_part(task_module.TEST):
@@ -3525,7 +3612,10 @@ class Loop(OuterLoop):
                 "val": val_score,
                 "test": test_score,
                 "winner": winner.id,
-                "note": "val or test score is missing",
+                "note": self._missing_part_note(
+                    [(part, parts[-1]) for part, parts, score in
+                     (("val", val_parts, val_score), ("test", test_parts, test_score))
+                     if score is None]),
             }
 
         # The gap the optimization added: the winner's val-test gap minus the seed's on
@@ -3568,6 +3658,30 @@ class Loop(OuterLoop):
         added = gap - seed_gap
         audit.update(added_gap=added, overfit=added > OVERFIT_THRESHOLD)
         return audit
+
+    def _missing_part_note(self, missing: Sequence[tuple[str, dict[str, Any]]]) -> str:
+        """Why the winner's val or test score is missing: the part and its cause, and,
+        when a time or token budget ran out during it, which budget and the reserve
+        that keeps the end-of-run scoring its time."""
+        causes = []
+        for part, occasion in missing:
+            error = str(occasion.get("error") or "")
+            if "elapsed-time budget exhausted" in error:
+                cause = (f"the elapsed-time budget (max_elapsed_s {self.config.max_elapsed_s:g}s) "
+                         f"ran out during the winner's {part} scoring"
+                         if self.config.max_elapsed_s else
+                         f"the elapsed-time budget ran out during the winner's {part} scoring")
+                if not self.config.validation_reserve_s:
+                    cause += "; validation_reserve_s keeps time for the end-of-run scoring"
+            elif "token budget exhausted" in error:
+                cause = f"the token budget ran out during the winner's {part} scoring"
+                if not self.config.validation_reserve_tokens:
+                    cause += "; validation_reserve_tokens keeps tokens for the end-of-run scoring"
+            else:
+                cause = f"the winner's {part} scoring failed" + (f": {error}" if error else "")
+            causes.append(cause)
+        parts = " and ".join(part for part, _ in missing)
+        return f"{parts} score is missing: " + "; ".join(causes)
 
     def _holdout_score(self, winner: Candidate) -> tuple[float | None, str]:
         """Run the winner on the held-out part, in a directory of its own.
