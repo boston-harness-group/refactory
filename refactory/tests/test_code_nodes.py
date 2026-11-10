@@ -449,10 +449,19 @@ def test_spine_runner_prints_a_verdict_gates_reason_then_its_label(tmp_path, mon
     lines = capsys.readouterr().out.strip().splitlines()
     assert lines[-1] == "reloop"
     assert "\n".join(lines[:-1]) == "show the elimination step\nand check B"
+    (tmp_path / "critic.txt").write_text("Looking at this carefully: the step holds.\n\nproceed")
+    assert run_mod.main([snippet.VERDICT]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines == ["Looking at this carefully: the step holds.", "proceed"]
     for text in ("I am not sure", "Do not proceed", "I would not proceed; reloop"):
         (tmp_path / "critic.txt").write_text(text)
         assert run_mod.main([snippet.VERDICT]) == 1, text
-        assert "is none of its answers" in capsys.readouterr().err
+        assert "is one of its answers" in capsys.readouterr().err
+    (tmp_path / "critic.txt").write_text("Looking at this carefully: fine.\nNo obvious omission.")
+    assert run_mod.main([snippet.VERDICT]) == 1
+    err = capsys.readouterr().err
+    assert "neither the first word of file 'critic.txt' ('Looking'" in err, err
+    assert "nor its last line ('No obvious omission.')" in err, err
 
 
 @needs_sandbox
@@ -485,8 +494,60 @@ def test_spine_runs_each_composition_as_the_walker_does(name, edits, monkeypatch
     ("> - proceed", ("proceed", "")),
     ("halt: give up", ("halt", "give up")),
 ])
-def test_a_verdict_is_the_first_word_only(text, expected):
+def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
     assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    # Reason first, verdict alone on the last line (the LiveMath B-s42 meta-review shape).
+    ("Looking at this carefully: the steps hold.\nNo obvious omission.\n\nproceed",
+     ("proceed", "Looking at this carefully: the steps hold.\nNo obvious omission.")),
+    ("The algebra checks out.\n\nproceed.", ("proceed", "The algebra checks out.")),
+    ("The algebra checks out.\n**proceed**", ("proceed", "The algebra checks out.")),
+    ("Step 2 skips a case.\n> reloop — show the elimination step",
+     ("reloop", "Step 2 skips a case.\nshow the elimination step")),
+    ("Step 2 skips a case.\nRELOOP: show it", ("reloop", "Step 2 skips a case.\nshow it")),
+    ("Step 2 skips a case.\n- reloop - show it", ("reloop", "Step 2 skips a case.\nshow it")),
+    ("It holds.\nproceed. Nothing to add.", ("proceed", "It holds.\nNothing to add.")),
+    ("Nothing can fix this.\n\nhalt", ("halt", "Nothing can fix this.")),
+    # The first word wins over a different last-line word.
+    ("proceed: fine\n\nreloop", ("proceed", "fine\n\nreloop")),
+    # Nothing between the first word and the last line is read; a last line counts only
+    # as the word alone or the word then a separator.
+    ("The verdict is proceed, mostly.\nI checked every step.", None),
+    ("I checked it.\nproceed\nThat is all.", None),
+    ("I checked it.\nreloop if unsure", None),
+    ("I checked it.\nproceed, because it holds", None),
+    ("I checked it.\nproceed! it holds", None),
+    ("I checked it.\nVerdict: proceed", None),
+    ("I checked it.\nproceeding", None),
+    ("", None),
+])
+def test_a_verdict_may_stand_alone_on_the_last_line(text, expected):
+    assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
+
+
+@needs_sandbox
+def test_walker_a_verdict_on_the_critics_last_line_routes_and_hands_on_its_reason(tmp_path):
+    """Walker: a critic that reasons first and puts the word alone on its last line
+    reloops with its reasoning as the reason, then accepts; no item fails."""
+    state = _accepted(CRITIC_LOOP)
+    result, model = _walk(state, tmp_path, turns={
+        "critic": ["Looking at this carefully: step 2 skips the elimination.\n\nreloop",
+                   "Checked again: it holds.\n**proceed**"]})
+    assert result.exit_ok, result.error
+    decides = _prompts(model, "decide")
+    assert "step 2 skips the elimination" not in decides[0]
+    assert "step 2 skips the elimination" in decides[1]
+    assert len(decides) == len(result.facts["item_scores"]) + 1
+
+
+@needs_sandbox
+def test_walker_halt_on_the_critics_last_line_halts_the_run(tmp_path):
+    result, model = _walk(_accepted(CRITIC_LOOP), tmp_path, turns={
+        "critic": ["No answer here can be repaired.\n\nhalt"]})
+    assert result.halted and "gate 'check' halted the run" in str(result.error)
+    assert len(_prompts(model, "critic")) == 1
 
 
 @needs_sandbox
@@ -709,6 +770,8 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
     for text in (on, off):
         assert snippet.VERDICT in text and "parallel" in text and "max_iterations" in text
         assert "single-word condition" in text
+        assert ("anything else fails that item's run, so tell the writer to start with "
+                "the word or put it alone on the last line") in " ".join(text.split())
         assert "`on_exhausted`" in text and "fails that item only" in text
         assert "ends the whole run (no later item runs)" in text
         assert "insert a node after the join" in text

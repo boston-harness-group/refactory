@@ -15,7 +15,8 @@ child), so the two cannot disagree about what a code node does:
   the label one of the gate's out-edge conditions;
 - :data:`VERDICT` (``gate``, no code): the verdict is the first word of a declared
   upstream output -- the gate's first ``required_reads`` file, else its first
-  ``inputs`` fact -- written by an agent or a code node; the rest is the reason.
+  ``inputs`` fact -- written by an agent or a code node, or else the word alone on its
+  last line (:func:`parse_verdict`); the rest is the reason.
 
 ``inp`` is ``{"files": {read name: text}, "facts": {input name: value}}``: the
 node's declared reads that exist, and its declared ``inputs`` facts that are set.
@@ -491,30 +492,69 @@ def gate(ctx: Any) -> Any:
 _LEAD = " \t*#>-_`'\"“”‘’:([{"
 #: What ends the first word and may come after it before the reason.
 _WORD = re.compile(r"[^\s:;,.!?*`'\"“”‘’)\]}]+")
+#: What may close a last line's verdict word: markdown and quoting (``**proceed**``).
+_CLOSE = " \t*_`'\"“”‘’)]}"
+#: What may follow a last line's verdict word, alone: trailing punctuation.
+_TRAIL = _CLOSE + ".,;:!?"
+#: What separates a last line's verdict word from its reason (``reloop: show B``).
+_SEP = ":—–-."
+#: What a reason starts after, once its verdict word is read.
+_REASON_LEAD = " \t:;,.!?*`'\"“”‘’)]}-—–"
 
 
 def is_answer_word(label: Any) -> bool:
     """Whether a gate label can be a code or verdict gate's answer: one word, as
-    :func:`parse_verdict` reads a first word (no space, no leading markdown or quotes, no
-    trailing punctuation). V5 refuses any other label on such a gate's out-edges."""
+    :func:`parse_verdict` reads a first word or a last line's word (no space, no leading
+    markdown or quotes, no trailing punctuation). V5 refuses any other label on such a
+    gate's out-edges."""
     text = str(label or "")
     return bool(text) and text[0] not in _LEAD and _WORD.fullmatch(text) is not None
 
 
-def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
-    """``(label, reason)`` from a verdict text: its first word -- after leading markdown
-    or quotes (``**``, ``#``, ``-``, ``"``, ``:``) -- must be one of ``labels`` (any
-    case); the reason is the rest of the text. ``None`` when the first word is not a
-    label: "Do not proceed" names no verdict, rather than proceed."""
-    body = str(text or "").strip().lstrip(_LEAD)
+def _lead_word(line: str) -> tuple[str, str]:
+    """``(word, rest)``: a text's first word after leading markdown or quotes, and what
+    follows it; ``("", text)`` when it starts with no word."""
+    body = line.strip().lstrip(_LEAD)
     match = _WORD.match(body)
-    if not match:
-        return None
+    return (match.group(0), body[match.end():]) if match else ("", body)
+
+
+def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
+    """``(label, reason)`` from a verdict text, matched against ``labels`` in any case.
+
+    1. Its first word -- after leading markdown or quotes (``**``, ``#``, ``-``, ``"``,
+       ``:``) -- when that is a label; the reason is the rest of the text.
+    2. Otherwise its last non-empty line, when that (after the same leading markdown or
+       quotes) is a label alone, with at most closing markdown and trailing punctuation
+       (``proceed.``, ``**proceed**``), or a label then a separator (``:``, ``—``,
+       ``-``, ``.``) and more (``> reloop — show B``): the standard "reason first,
+       verdict last" review. The reason is the text before that line, then what follows
+       the separator.
+
+    ``None`` otherwise -- nothing between the first word and the last line is read:
+    "Do not proceed" names no verdict, rather than proceed, and neither does a last line
+    "reloop the check if unsure"."""
     lower = {label.lower(): label for label in labels}
-    label = lower.get(match.group(0).lower())
+    body = str(text or "").strip()
+    word, rest = _lead_word(body)
+    label = lower.get(word.lower())
+    if label is not None:
+        return label, rest.lstrip(_REASON_LEAD).strip()
+    lines = body.splitlines()
+    if not lines:
+        return None
+    word, rest = _lead_word(lines[-1])
+    label = lower.get(word.lower())
     if label is None:
         return None
-    reason = body[match.end():].lstrip(" \t:;,.!?*`'\"“”‘’)]}-—").strip()
+    rest = rest.lstrip(_CLOSE)
+    if rest.strip(_TRAIL):
+        if rest[0] not in _SEP:
+            return None
+        rest = rest.lstrip(_REASON_LEAD).strip()
+    else:
+        rest = ""
+    reason = "\n".join(part for part in ("\n".join(lines[:-1]).strip(), rest) if part)
     return label, reason
 
 
@@ -522,9 +562,10 @@ def verdict(ctx: Any) -> Any:
     """The verdict gate: route on a declared upstream output, run no code.
 
     The source is the gate's first ``required_reads`` file, else its first ``inputs``
-    fact -- whatever an agent or a code node upstream wrote there. Its first line names
-    the verdict (one of the gate's out-edge conditions); the rest is the reason, which
-    a reloop hands to the step it sends control back to.
+    fact -- whatever an agent or a code node upstream wrote there. Its first word, or
+    else the word alone on its last line (:func:`parse_verdict`), names the verdict (one
+    of the gate's out-edge conditions, or halt); the rest is the reason, which a reloop
+    hands to the step it sends control back to.
     """
     from refactory_dsh.nn import Verdict
 
@@ -545,9 +586,12 @@ def verdict(ctx: Any) -> Any:
                            "inputs, so it has nothing to read its verdict from")
     parsed = parse_verdict(text, labels)
     if parsed is None:
-        head = (text.strip().splitlines() or [""])[0][:200]
-        raise SnippetError(f"verdict gate {ctx.node_id!r}: the first word of {source} ({head!r}) "
-                           f"is none of its answers {labels} (its out-edge conditions, or halt)")
+        lines = text.strip().splitlines() or [""]
+        raise SnippetError(f"verdict gate {ctx.node_id!r}: neither the first word of {source} "
+                           f"({_lead_word(lines[0])[0]!r}, in its first line {lines[0][:200]!r}) "
+                           f"nor its last line ({lines[-1][-200:]!r}) is one of its answers "
+                           f"{labels} (its out-edge conditions, or halt); the writer starts the "
+                           "text with the answer, or puts it alone on the last line")
     label, reason = parsed
     return Verdict(label, reason=reason)
 

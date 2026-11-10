@@ -412,13 +412,18 @@ optimizer, at no extra compute (train records only):
   far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); the rest go in a table. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
-  noise. Without a parent (the seed) or without shared items, it says so.
+  noise. Without a parent (the seed) or without shared items, it says so. When some of
+  the child's train items failed with an error (the item's run failed, not a wrong
+  answer), it counts them by kind and the node that raised them, with the first message
+  of each kind (300 characters, `ITEM_ERROR_CHARS`). An errored item the parent also got
+  wrong is neither fixed nor broken, so without this a structural child that fails for a
+  mechanical reason would look like one that just scored worse.
 - **Your earlier reasoning and what happened.** Up to 6 recent candidates: the line
   from the seed to the edited candidate, and the latest rejected children. Each shows
   the rationale and prediction the optimizer gave when proposing it, the round's
   diagnosis (and what that round's answer said it considered, when it did), the gate's
-  decision, its train score and its fixed and broken counts against its parent. Texts
-  are clipped to 600 characters. Each proposal keeps the diagnosis of the call that
+  decision, its train score and its fixed and broken counts against its parent, and its
+  train item errors counted the same way. Texts are clipped to 600 characters. Each proposal keeps the diagnosis of the call that
   produced it, and the proposals' own words are journaled, so a resumed run keeps them.
 - **What an answer considered.** The answer format has an optional, short
   `considered`: the kinds of change the optimizer weighed for its diagnosis (only the
@@ -585,14 +590,21 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
 - **Code gate** (`"evaluator": "refactory_dsh.snippet:gate"`, with `code`): `main(inp)`
   returns `{"verdict": <one of the gate's out-edge conditions, or halt>, "reason": <text>}`.
 - **Verdict gate** (`"evaluator": "refactory_dsh.snippet:verdict"`, no code): the verdict
-  is the first word of the gate's first `required_reads` file, or else of its first
-  `inputs` fact. That is whatever an agent or a code op upstream wrote there. Leading
-  markdown or quotes (`**`, `#`, `>`, `-`, `"`, `:`) are skipped. The word is matched
-  against the out-edge conditions in any case, and the rest of the text is the reason.
-  Only the first word counts: "Do not proceed" names no verdict, and neither does "I would
-  not proceed; reloop". A first word that is not an answer fails the node with an error
-  naming the answers; it never falls back to a default. This is how an agent decides a
-  gate: a reviewer agent writes `proceed` or `reloop`, followed by why.
+  is read from the gate's first `required_reads` file, or else its first `inputs` fact.
+  That is whatever an agent or a code op upstream wrote there. Leading markdown or quotes
+  (`**`, `#`, `>`, `-`, `"`, `:`) are skipped, and the word is matched against the
+  out-edge conditions in any case. The verdict is the text's first word when that is an
+  answer, and the rest of the text is the reason. Otherwise it is the last non-empty
+  line, when that line is an answer alone (`proceed`, `proceed.`, `**proceed**`) or an
+  answer then `:`, `—`, `-` or `.` and more (`> reloop — show the step`); the reason is
+  the text before that line, then what follows the separator. That is the usual "reason
+  first, verdict last" review. Nothing in between is read: "Do not proceed" names no
+  verdict, and neither does "I would not proceed; reloop", nor a last line "reloop if
+  unsure". When neither the first word nor the last line is an answer, the node fails with
+  an error naming both and the answers; it never falls back to a default (in an outer-loop
+  run, that item's run fails). This is how an agent decides a gate: a reviewer
+  agent writes `proceed` or `reloop`, followed by why, or its review and then the word on
+  the last line.
 - **Answers a gate may give:** each out-edge condition, and `halt`. V5 refuses a code or
   verdict gate whose out-edge condition is not a single word (`needs work`, `ok.`), so the
   edit is refused instead of every run failing when the gate answers. The
