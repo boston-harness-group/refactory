@@ -243,6 +243,27 @@ function failureDetailOf(stderr: string): string {
   return `${head}\n…\n${tail}`
 }
 
+/** How much of a failed item's error its record keeps, as the walker's `make_item_record`. */
+const ITEM_ERROR_TEXT = 4_096
+
+/**
+ * A failed pass-body node's error as its item record keeps it, in the walker's shape
+ * (`<node>: <Type>: <message>`, `nn.executor`), so the optimizer can name the node and
+ * the error on either runtime: the node id, then the node runner's own account after
+ * its `--- refactory failure ---` marker (printed once, without the stderr copy before
+ * it), or the stderr tail when it printed none.
+ */
+function nodeErrorText(failure: CommandFailure): string {
+  const marker = '--- refactory failure ---'
+  const stderr = failure.stderr ?? ''
+  const at = stderr.lastIndexOf(marker)
+  const detail = at === -1 ? '' : stderr.slice(at + marker.length).trim()
+  const text = detail || (at === -1 ? stderr : stderr.slice(0, at).trim()) || failure.error
+    || `failed with exit code ${String(failure.exitCode)}`
+  const prefix = failure.nodeId ? `${failure.nodeId}: ` : ''
+  return prefix + text.slice(-(ITEM_ERROR_TEXT - prefix.length))
+}
+
 /**
  * What asking a person at a user gate came to: a verdict with any feedback; text
  * that is no answer, which leaves the gate due for the CEO to reply to; or nothing,
@@ -1608,7 +1629,7 @@ export function apply(ctx: Context, config: Config): void {
           if (failure !== undefined) break
         }
         if (failure !== undefined) {
-          return await endFailed(index, failureTail(failure), failure.error?.includes('timed out') ? 'timeout' : undefined)
+          return await endFailed(index, nodeErrorText(failure), failure.error?.includes('timed out') ? 'timeout' : undefined)
         }
         // A gate out of reloops that fails its item (`on_exhausted: fail_item`): this
         // item only, judged as a failed node's item is.
@@ -2127,8 +2148,8 @@ export function apply(ctx: Context, config: Config): void {
           spine.abandonPass()
           // Run end command with --failed so the Python side skips verify and
           // writes a failure record directly, matching the walker's behavior.
-          // Pass the real stderr tail so error_text matches the walker's message.
-          const reason = stderrTail(failure)
+          // The node's id and its own error, so error_text matches the walker's message.
+          const reason = nodeErrorText(failure)
           const failedKind = failure.error?.includes('timed out') ? 'timeout' : undefined
           const ended = await runDataCommand(shell, data, 'end', runner, activePass.index, reason, failedKind)
           if (!ended.ok) {

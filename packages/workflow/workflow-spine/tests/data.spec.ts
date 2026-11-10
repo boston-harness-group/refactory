@@ -1248,9 +1248,16 @@ describe('abandonPass primitive (Correction 1)', () => {
 })
 
 describe('spine error_text and stderr tail (Ask 5)', () => {
-  it('spine error_text contains stderr tail', async () => {
+  it.each([
+    ['a stderr tail', 'work failed for item a', 'work: work failed for item a', undefined],
+    // The node runner's shape (refactory_dsh.run.main): the error, the marker, then its
+    // own account. The record keeps the account once, after the node's id, as the walker.
+    ['the node runner failure text',
+      'WARNING: slow\nSnippetError: verdict gate check: no answer\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\n',
+      'work: SnippetError: verdict gate check: no answer', '--- refactory failure ---'],
+  ])('spine error_text names the failed node and its error: %s', async (_label, stderrText, expected, absent) => {
     // Ask 5: when a subgraph node's stderr says "work failed for item a",
-    // the end --failed command receives that text.
+    // the end --failed command receives that text, after the node's id.
     const workdir = scratch()
     const log: string[] = []
     const items = [{ id: 'a' }, { id: 'b' }]
@@ -1275,7 +1282,7 @@ describe('spine error_text and stderr tail (Ask 5)', () => {
               return {
                 exitCode: 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
                 stdout: { text: '', truncated: false },
-                stderr: { text: 'work failed for item a', truncated: false },
+                stderr: { text: stderrText, truncated: false },
               }
             }
           }
@@ -1302,7 +1309,9 @@ describe('spine error_text and stderr tail (Ask 5)', () => {
     // The end --failed command should have received the stderr tail
     const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
     expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
-    // The stderr tail "work failed for item a" should appear in the --failed argument
-    expect(endFailedCmds[0]).toContain('work failed for item a')
+    // The node's id and its error appear in the --failed argument
+    expect(endFailedCmds[0]).toContain(expected)
+    if (absent !== undefined) expect(endFailedCmds[0]).not.toContain(absent)
+    expect(endFailedCmds[0]!.split('SnippetError').length).toBeLessThanOrEqual(2)
   })
 })

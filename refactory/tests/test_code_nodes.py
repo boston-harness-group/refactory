@@ -456,7 +456,12 @@ def test_spine_runner_prints_a_verdict_gates_reason_then_its_label(tmp_path, mon
     for text in ("I am not sure", "Do not proceed", "I would not proceed; reloop"):
         (tmp_path / "critic.txt").write_text(text)
         assert run_mod.main([snippet.VERDICT]) == 1, text
-        assert "is one of its answers" in capsys.readouterr().err
+        assert f"nor its last line ({text!r}) is one of its answers" in capsys.readouterr().err
+    (tmp_path / "critic.txt").write_text("Proceed with caution: step 2 is thin.\n\nreloop")
+    assert run_mod.main([snippet.VERDICT]) == 1
+    err = capsys.readouterr().err
+    assert ("verdict gate 'check': file 'critic.txt' names two verdicts: 'proceed' as its "
+            "first word and 'reloop' alone on its last line") in err, err
     (tmp_path / "critic.txt").write_text("Looking at this carefully: fine.\nNo obvious omission.")
     assert run_mod.main([snippet.VERDICT]) == 1
     err = capsys.readouterr().err
@@ -507,11 +512,23 @@ def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
     ("Step 2 skips a case.\n> reloop — show the elimination step",
      ("reloop", "Step 2 skips a case.\nshow the elimination step")),
     ("Step 2 skips a case.\nRELOOP: show it", ("reloop", "Step 2 skips a case.\nshow it")),
-    ("Step 2 skips a case.\n- reloop - show it", ("reloop", "Step 2 skips a case.\nshow it")),
+    ("Step 2 skips a case.\n– reloop – show it", None),
+    ("Step 2 skips a case.\nreloop – show it", ("reloop", "Step 2 skips a case.\nshow it")),
+    ("Review.\r\n\r\nproceed\r\n", ("proceed", "Review.")),
+    # Same word in both places: that word.
+    ("proceed: fine\n\nproceed", ("proceed", "fine\n\nproceed")),
     ("It holds.\nproceed. Nothing to add.", ("proceed", "It holds.\nNothing to add.")),
     ("Nothing can fix this.\n\nhalt", ("halt", "Nothing can fix this.")),
-    # The first word wins over a different last-line word.
-    ("proceed: fine\n\nreloop", ("proceed", "fine\n\nreloop")),
+    # A first-word verdict with a last line that is not a bare answer is the first word.
+    ("proceed: fine\n\nreloop if step 2 were wrong", ("proceed", "fine\n\nreloop if step 2 were wrong")),
+    ("proceed: fine\n\nreloop: no need", ("proceed", "fine\n\nreloop: no need")),
+    # A list item on the last line is one option, not a verdict.
+    ("Assessment:\n- Reloop: not needed\n- Halt: no", None),
+    ("Options:\n- proceed\n- reloop\n- halt", None),
+    ("Options:\n1. proceed\n2. reloop", None),
+    ("proceed: fine. Options were:\n- reloop", ("proceed", "fine. Options were:\n- reloop")),
+    # A verdict inside a code fence is not read (the last line is the fence).
+    ("Review.\n```\nproceed\n```", None),
     # Nothing between the first word and the last line is read; a last line counts only
     # as the word alone or the word then a separator.
     ("The verdict is proceed, mostly.\nI checked every step.", None),
@@ -525,6 +542,19 @@ def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
 ])
 def test_a_verdict_may_stand_alone_on_the_last_line(text, expected):
     assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
+
+
+@pytest.mark.parametrize("text, first, last", [
+    ("Proceed with caution: step 2 is thin.\n\nreloop", "proceed", "reloop"),
+    ("Halt? No. The steps hold.\n\nproceed", "halt", "proceed"),
+    ("reloop: show B\n\n**proceed**.", "reloop", "proceed"),
+])
+def test_a_first_word_and_a_bare_last_line_that_differ_are_refused(text, first, last):
+    """Two different verdicts in one text: neither is picked (no first-word halt of the
+    whole run on "Halt? No.")."""
+    with pytest.raises(snippet.SnippetError, match=f"names two verdicts: '{first}' as its "
+                       f"first word and '{last}' alone on its last line"):
+        snippet.parse_verdict(text, ["proceed", "reloop", "halt"])
 
 
 @needs_sandbox
@@ -770,8 +800,11 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
     for text in (on, off):
         assert snippet.VERDICT in text and "parallel" in text and "max_iterations" in text
         assert "single-word condition" in text
-        assert ("anything else fails that item's run, so tell the writer to start with "
-                "the word or put it alone on the last line") in " ".join(text.split())
+        flat = " ".join(text.split())
+        assert "`:`, `—`, `–`, `-` or `.`" in flat
+        assert ("Anything else fails that item's run, and so does a first word and a last "
+                "line that name different verdicts, so tell the writer to start with the "
+                "word or put it alone on the last line") in flat
         assert "`on_exhausted`" in text and "fails that item only" in text
         assert "ends the whole run (no later item runs)" in text
         assert "insert a node after the join" in text

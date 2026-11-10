@@ -13,10 +13,12 @@ child), so the two cannot disagree about what a code node does:
 - :data:`RUN` (``op``): ``main(inp)`` returns ``{"facts": {...}, "files": {...}}``;
 - :data:`GATE` (``gate``): ``main(inp)`` returns ``{"verdict": label, "reason": text}``,
   the label one of the gate's out-edge conditions;
-- :data:`VERDICT` (``gate``, no code): the verdict is the first word of a declared
-  upstream output -- the gate's first ``required_reads`` file, else its first
-  ``inputs`` fact -- written by an agent or a code node, or else the word alone on its
-  last line (:func:`parse_verdict`); the rest is the reason.
+- :data:`VERDICT` (``gate``, no code): the verdict is read from a declared upstream
+  output -- the gate's first ``required_reads`` file, else its first ``inputs`` fact --
+  written by an agent or a code node: its first word, or else its last line when that
+  is the word alone or the word then a separator (``:``, ``—``, ``–``, ``-``, ``.``) and
+  more; the rest is the reason. A first word and a bare last-line word that name
+  different verdicts fail the gate (:func:`parse_verdict`).
 
 ``inp`` is ``{"files": {read name: text}, "facts": {input name: value}}``: the
 node's declared reads that exist, and its declared ``inputs`` facts that are set.
@@ -500,6 +502,9 @@ _TRAIL = _CLOSE + ".,;:!?"
 _SEP = ":—–-."
 #: What a reason starts after, once its verdict word is read.
 _REASON_LEAD = " \t:;,.!?*`'\"“”‘’)]}-—–"
+#: A list item's marker: a last line that is a list item is one entry among several
+#: ("- Halt: no", "1. proceed"), not a verdict.
+_BULLET = re.compile(r"(?:[-*+•]|\d+[.)])\s")
 
 
 def is_answer_word(label: Any) -> bool:
@@ -519,42 +524,61 @@ def _lead_word(line: str) -> tuple[str, str]:
     return (match.group(0), body[match.end():]) if match else ("", body)
 
 
+def _last_line_verdict(line: str, lower: dict[str, str]) -> tuple[str, str, bool] | None:
+    """``(label, tail, bare)`` when a text's last line names a verdict: a label alone,
+    with at most closing markdown and trailing punctuation (``bare``), or a label then a
+    separator and the ``tail``. ``None`` for anything else, a list item included."""
+    stripped = line.strip().lstrip(" \t>")
+    if _BULLET.match(stripped):
+        return None
+    word, rest = _lead_word(stripped)
+    label = lower.get(word.lower())
+    if label is None:
+        return None
+    rest = rest.lstrip(_CLOSE)
+    if not rest.strip(_TRAIL):
+        return label, "", True
+    if rest[0] not in _SEP:
+        return None
+    return label, rest.lstrip(_REASON_LEAD).strip(), False
+
+
 def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
     """``(label, reason)`` from a verdict text, matched against ``labels`` in any case.
 
     1. Its first word -- after leading markdown or quotes (``**``, ``#``, ``-``, ``"``,
        ``:``) -- when that is a label; the reason is the rest of the text.
-    2. Otherwise its last non-empty line, when that (after the same leading markdown or
-       quotes) is a label alone, with at most closing markdown and trailing punctuation
+    2. Otherwise its last non-empty line, when that (after leading markdown or quotes)
+       is a label alone, with at most closing markdown and trailing punctuation
        (``proceed.``, ``**proceed**``), or a label then a separator (``:``, ``—``,
-       ``-``, ``.``) and more (``> reloop — show B``): the standard "reason first,
-       verdict last" review. The reason is the text before that line, then what follows
-       the separator.
+       ``–``, ``-``, ``.``) and more (``> reloop — show B``): the standard "reason
+       first, verdict last" review. The reason is the text before that line, then what
+       follows the separator. A last line that is a list item (``- Halt: no``) or a
+       code fence is not a verdict.
 
     ``None`` otherwise -- nothing between the first word and the last line is read:
     "Do not proceed" names no verdict, rather than proceed, and neither does a last line
-    "reloop the check if unsure"."""
+    "reloop the check if unsure". Raises :class:`SnippetError` when the first word is a
+    label and the last line is a different label alone ("Halt? No. ...\n\nproceed"):
+    the text names two verdicts, and neither is picked."""
     lower = {label.lower(): label for label in labels}
     body = str(text or "").strip()
+    lines = body.splitlines()
     word, rest = _lead_word(body)
     label = lower.get(word.lower())
     if label is not None:
+        last = _last_line_verdict(lines[-1], lower) if len(lines) > 1 else None
+        if last is not None and last[2] and last[0] != label:
+            raise SnippetError(f"names two verdicts: {label!r} as its first word and "
+                               f"{last[0]!r} alone on its last line")
         return label, rest.lstrip(_REASON_LEAD).strip()
-    lines = body.splitlines()
     if not lines:
         return None
-    word, rest = _lead_word(lines[-1])
-    label = lower.get(word.lower())
-    if label is None:
+    last = _last_line_verdict(lines[-1], lower)
+    if last is None:
         return None
-    rest = rest.lstrip(_CLOSE)
-    if rest.strip(_TRAIL):
-        if rest[0] not in _SEP:
-            return None
-        rest = rest.lstrip(_REASON_LEAD).strip()
-    else:
-        rest = ""
-    reason = "\n".join(part for part in ("\n".join(lines[:-1]).strip(), rest) if part)
+    label, tail, _bare = last
+    reason = "\n".join(part for part in ("\n".join(lines[:-1]).strip(), tail) if part)
     return label, reason
 
 
@@ -565,7 +589,8 @@ def verdict(ctx: Any) -> Any:
     fact -- whatever an agent or a code node upstream wrote there. Its first word, or
     else the word alone on its last line (:func:`parse_verdict`), names the verdict (one
     of the gate's out-edge conditions, or halt); the rest is the reason, which a reloop
-    hands to the step it sends control back to.
+    hands to the step it sends control back to. A text naming two different verdicts
+    fails the gate.
     """
     from refactory_dsh.nn import Verdict
 
@@ -584,7 +609,11 @@ def verdict(ctx: Any) -> Any:
     else:
         raise SnippetError(f"verdict gate {ctx.node_id!r} declares no required_reads and no "
                            "inputs, so it has nothing to read its verdict from")
-    parsed = parse_verdict(text, labels)
+    try:
+        parsed = parse_verdict(text, labels)
+    except SnippetError as exc:
+        raise SnippetError(f"verdict gate {ctx.node_id!r}: {source} {exc}; the writer names "
+                           f"one of its answers {labels}") from None
     if parsed is None:
         lines = text.strip().splitlines() or [""]
         raise SnippetError(f"verdict gate {ctx.node_id!r}: neither the first word of {source} "

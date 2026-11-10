@@ -1620,6 +1620,16 @@ def test_fork_inside_data_two_runtimes(tmp_path, parallelism, branch_b):
     _assert_same_merged_facts(walker.facts, spine)
     failed = [(r["id"], r["error_kind"]) for r in spine["item_scores"] if r.get("error_kind")]
     assert failed == ([("0", "RuntimeError")] if expected[0][1] == 0.0 else [])
+    # The optimizer's account of the failed item is the same on both runtimes: the
+    # branch node that raised, its own kind and message (`optim.base.item_errors`).
+    from refactory_dsh.optim.base import item_errors
+
+    def errors(records: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+        return [(e["kind"], e["node"], e["count"], e["first"]) for e in item_errors(records)]
+
+    assert errors(spine["item_scores"]) == errors(walker.facts["item_scores"])
+    assert errors(spine["item_scores"]) == (
+        [("ValueError", "branch_b", 1, "deliberate branch failure")] if expected[0][1] == 0.0 else [])
 
 
 @_needs_spine

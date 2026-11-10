@@ -1051,11 +1051,12 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         f"\"{snippet.VERDICT}\"` the gate reads the verdict from its first `required_reads` "
         "file (or, with none, its first `inputs` fact) -- whatever an agent or a code op "
         "upstream wrote there: its first word, or else its last line when that is the word "
-        "alone or the word then `:`, `-` or `.` and more (leading markdown or quotes are "
-        "skipped) -- and the rest of the text is the reason. The word must be one of the "
-        "conditions (any case) or `halt`, which ends the whole run; anything else fails "
-        "that item's run, so tell the writer to start with the word or put it alone on the "
-        "last line.",
+        "alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or "
+        "quotes are skipped; a list item or a code fence is not read) -- and the rest of "
+        "the text is the reason. The word must be one of the conditions (any case) or "
+        "`halt`, which ends the whole run. Anything else fails that item's run, and so does "
+        "a first word and a last line that name different verdicts, so tell the writer to "
+        "start with the word or put it alone on the last line.",
     ]
     if code_nodes:
         lines.append(
@@ -1888,9 +1889,43 @@ def _score_of(record: dict[str, Any]) -> float | None:
 
 #: How much of the first error of each kind a summary of a candidate's item errors keeps.
 ITEM_ERROR_CHARS = 300
-#: An item error as a node's failure reaches the record on both runtimes:
-#: ``<node>: <ExceptionClass>: <message>`` (``nn.executor``, wrapped in a RuntimeError).
-_NODE_ERROR = re.compile(r"(?P<node>[A-Za-z_][\w.-]*): (?P<kind>[A-Z]\w*): (?P<message>.*)", re.S)
+#: One ``<name>: `` step of an item error's ``<node>: <Kind>: ...`` chain.
+_ERROR_STEP = re.compile(r"([A-Za-z_][\w.-]*): ")
+#: A name in that chain that is an exception class, not a node id.
+_ERROR_KIND = re.compile(r"[A-Z][A-Za-z0-9_]*(?:Error|Exception|Timeout|Expired|Exit|Interrupt"
+                         r"|Stop|Failure|Iteration|Warning)")
+#: What the node runner (``refactory_dsh.run.FAILURE_MARKER``) prints before its own
+#: account of a failure, after the same text on stderr.
+_FAILURE_MARKER = "--- refactory failure ---"
+
+
+def _error_origin(text: str) -> tuple[str, str, str]:
+    """``(node, kind, message)`` of an item error, as both runtimes record a failed
+    node: ``<node>: <Kind>: <message>`` (the walker's ``nn.executor``; the spine prefixes
+    the node runner's failure text with the node id). A fork nests its branch's error
+    (``fork1: RuntimeError: inner: SnippetError: y``), so the innermost node and kind
+    are the origin. A message that starts with a kind has no node (``ValueError:
+    Expected: 3`` is a ValueError); one that starts with a name and no kind is that
+    node's (``decide: worker: timed out``). Empty node or kind when the text names none.
+    """
+    if _FAILURE_MARKER in text:  # a raw stderr tail: the runner's own account, once
+        before, _, after = text.rpartition(_FAILURE_MARKER)
+        text = after.strip() or before.strip()
+    node = kind = ""
+    pos = 0
+    while step := _ERROR_STEP.match(text, pos):
+        name = step.group(1)
+        if _ERROR_KIND.fullmatch(name):
+            kind, pos = name, step.end()
+            continue
+        then = _ERROR_STEP.match(text, step.end())
+        if then and _ERROR_KIND.fullmatch(then.group(1)):
+            node, kind, pos = name, then.group(1), then.end()
+        elif pos == 0:
+            node, pos = name, step.end()
+        else:
+            break
+    return node, kind, text[pos:]
 
 
 def item_errors(records: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -1899,18 +1934,15 @@ def item_errors(records: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]
     "count", "item", "first"}``, with the first such item and its message (clipped to
     ``ITEM_ERROR_CHARS``). Kind and node come from the error's ``<node>: <Error>:
     <message>`` text when it has that shape (so a node's ``SnippetError`` wrapped in a
-    ``RuntimeError`` counts as a ``SnippetError`` at that node), else the record's
-    ``error_kind`` and no node."""
+    ``RuntimeError`` counts as a ``SnippetError`` at that node; see :func:`_error_origin`),
+    else the record's ``error_kind``."""
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for record in records or ():
         text = str(record.get("error_text") or "").strip()
         if not text:
             continue
-        match = _NODE_ERROR.match(text)
-        if match:
-            kind, node, message = match["kind"], match["node"], match["message"]
-        else:
-            kind, node, message = str(record.get("error_kind") or "error"), "", text
+        node, kind, message = _error_origin(text)
+        kind = kind or str(record.get("error_kind") or "error")
         group = groups.setdefault((kind, node), {
             "kind": kind, "node": node, "count": 0, "item": str(record.get("id", "")),
             "first": _clip(message, ITEM_ERROR_CHARS)})

@@ -415,7 +415,9 @@ optimizer, at no extra compute (train records only):
   noise. Without a parent (the seed) or without shared items, it says so. When some of
   the child's train items failed with an error (the item's run failed, not a wrong
   answer), it counts them by kind and the node that raised them, with the first message
-  of each kind (300 characters, `ITEM_ERROR_CHARS`). An errored item the parent also got
+  of each kind (300 characters, `ITEM_ERROR_CHARS`). Both runtimes record a failed node's
+  error as `<node>: <Kind>: <message>` (the spine takes the node runner's own account,
+  after its failure marker), and a fork's nested error counts at its innermost node. An errored item the parent also got
   wrong is neither fixed nor broken, so without this a structural child that fails for a
   mechanical reason would look like one that just scored worse.
 - **Your earlier reasoning and what happened.** Up to 6 recent candidates: the line
@@ -596,13 +598,16 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
   out-edge conditions in any case. The verdict is the text's first word when that is an
   answer, and the rest of the text is the reason. Otherwise it is the last non-empty
   line, when that line is an answer alone (`proceed`, `proceed.`, `**proceed**`) or an
-  answer then `:`, `—`, `-` or `.` and more (`> reloop — show the step`); the reason is
-  the text before that line, then what follows the separator. That is the usual "reason
-  first, verdict last" review. Nothing in between is read: "Do not proceed" names no
-  verdict, and neither does "I would not proceed; reloop", nor a last line "reloop if
-  unsure". When neither the first word nor the last line is an answer, the node fails with
-  an error naming both and the answers; it never falls back to a default (in an outer-loop
-  run, that item's run fails). This is how an agent decides a gate: a reviewer
+  answer then `:`, `—`, `–`, `-` or `.` and more (`> reloop — show the step`); the reason
+  is the text before that line, then what follows the separator. That is the usual
+  "reason first, verdict last" review. Nothing in between is read: "Do not proceed" names
+  no verdict, and neither does "I would not proceed; reloop", nor a last line "reloop if
+  unsure". A last line that is a list item (`- Halt: no`, `1. proceed`) or a code fence
+  (a verdict inside a fenced block) is not read either. When neither the first word nor
+  the last line is an answer, the node fails with an error naming both and the answers;
+  it never falls back to a default (in an outer-loop run, that item's run fails). So does
+  a text whose first word and bare last line name different verdicts ("Halt? No.
+  ...", then `proceed` alone): neither is picked. This is how an agent decides a gate: a reviewer
   agent writes `proceed` or `reloop`, followed by why, or its review and then the word on
   the last line.
 - **Answers a gate may give:** each out-edge condition, and `halt`. V5 refuses a code or

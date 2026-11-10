@@ -440,6 +440,61 @@ def test_item_errors_count_each_kind_at_its_node_with_its_first_message():
     assert item_errors([{"id": "a", "passed": False, "score": 0.0}]) == []
 
 
+@pytest.mark.parametrize("text, origin", [
+    # The walker's shape, and a fork's nesting of its branch's error.
+    ("meta_gate: SnippetError: verdict gate 'meta_gate': x",
+     ("SnippetError", "meta_gate", "verdict gate 'meta_gate': x")),
+    ("fork1: RuntimeError: inner: SnippetError: y", ("SnippetError", "inner", "y")),
+    ("fork1: RuntimeError: branch_b: ValueError: deliberate branch failure",
+     ("ValueError", "branch_b", "deliberate branch failure")),
+    # A message that starts with its kind names no node, whatever colons follow.
+    ("ValueError: Expected: 3 got 4", ("ValueError", "", "Expected: 3 got 4")),
+    ("RuntimeError: branch_b: ValueError: x", ("ValueError", "branch_b", "x")),
+    # A node's failure with no exception kind: the node, and the record's kind.
+    ("decide: worker: model completion timed out", ("timeout", "decide", "worker: model completion timed out")),
+    ("dsh run failed (exit 1): boom", ("timeout", "", "dsh run failed (exit 1): boom")),
+    # A raw stderr tail from the node runner (`refactory_dsh.run.main`): the text after
+    # its marker, once; the warning and the first copy before it are dropped.
+    ("WARNING: slow\nSnippetError: verdict gate 'g': bad\n--- refactory failure ---\n"
+     "SnippetError: verdict gate 'g': bad", ("SnippetError", "", "verdict gate 'g': bad")),
+    ("g: SnippetError: verdict gate 'g': bad\n--- refactory failure ---\n", ("SnippetError", "g", "verdict gate 'g': bad")),
+])
+def test_an_item_errors_node_and_kind_are_its_innermost(text, origin):
+    from refactory_dsh.optim.base import item_errors
+
+    (error,) = item_errors([_errored("t1", text, kind="timeout")])
+    assert (error["kind"], error["node"], error["first"]) == origin
+
+
+def test_the_spine_runners_failure_text_is_attributed_to_its_node(tmp_path, monkeypatch, capsys):
+    """The spine records a failed node's error as its id, then the node runner's text
+    after its failure marker (`workflow-spine` `nodeErrorText`). Made here from the real
+    runner's stderr for a verdict gate that cannot read its answer."""
+    import json as json_mod
+
+    from refactory_dsh import lowering, run as run_mod, snippet
+    from refactory_dsh.optim.base import _FAILURE_MARKER, item_errors
+    from refactory_dsh.run import FAILURE_MARKER
+    from test_code_nodes import CRITIC_LOOP, _accepted
+
+    assert _FAILURE_MARKER == FAILURE_MARKER
+    lowering.write_declarations(_accepted(CRITIC_LOOP), tmp_path)
+    (tmp_path / "critic.txt").write_text("Looking at this carefully: fine.\nNo obvious omission.")
+    monkeypatch.setenv("DSH_WORKFLOW_NODE", json_mod.dumps({"id": "check", "type": "gate"}))
+    monkeypatch.setenv("REFACTORY_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+    assert run_mod.main([snippet.VERDICT]) == 1
+    stderr = capsys.readouterr().err
+    assert FAILURE_MARKER in stderr and stderr.count("SnippetError") == 2, "setup: the runner's shape"
+    spine_text = "check: " + stderr.rpartition(FAILURE_MARKER)[2].strip()
+    for text in (spine_text, stderr):
+        (error,) = item_errors([_errored("t1", text)])
+        assert error["kind"] == "SnippetError"
+        assert error["first"].startswith("verdict gate 'check': neither the first word"), error
+        assert FAILURE_MARKER not in error["first"]
+    assert item_errors([_errored("t1", spine_text)])[0]["node"] == "check"
+
+
 def test_the_last_edit_section_shows_a_childs_item_errors():
     """A child whose errored items were wrong in the parent too is neither fixed nor
     broken, so before this its errors never reached the request."""
