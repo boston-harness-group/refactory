@@ -63,6 +63,16 @@ class OuterLoopError(RuntimeError):
     """A search cannot proceed. Always names what is wrong."""
 
 
+class BudgetStopped(OuterLoopError):
+    """A time or token budget refused or cut an evaluation before it finished.
+
+    Nothing is decided from it: a train evaluation leaves its candidate
+    unevaluated, and a val rollout (flagged ``budget_stopped`` in its occasion) is
+    no val score, so a gate leaves the candidate unjudged. A resume with more
+    budget scores it again. The run's bound is the spent budget.
+    """
+
+
 def train_batch_seed(seed: int, epoch: int, batch_idx: int = 0) -> int:
     """SkillOpt's train-batch seed: ``seed + epoch*1000 + batch_idx + 1``.
 
@@ -507,7 +517,8 @@ class Run:
             raise OuterLoopError(f"part_scores covers 'val' and 'test', not {part!r}")
         results = self._loop._part_results.get(candidate.id, {}).get(part, [])  # noqa: SLF001
         return [
-            {k: v for k, v in occ.items() if k in ("part", "occasion", "score", "exit_ok", "error", "duration_s")}
+            {k: v for k, v in occ.items()
+             if k in ("part", "occasion", "score", "exit_ok", "error", "duration_s", "budget_stopped")}
             for occ in results
         ]
 
@@ -883,8 +894,9 @@ class ValidationGate:
 
     @staticmethod
     def val_score(run: Run, candidate: Candidate) -> float:
-        """A candidate's val score: its first val rollout's, 0.0 when that failed."""
-        scores = run.val_scores(candidate)
+        """A candidate's val score: its first val rollout's, 0.0 when that failed. A
+        rollout a budget stopped (``budget_stopped``) is not a val score and is skipped."""
+        scores = [s for s in run.val_scores(candidate) if not s.get("budget_stopped")]
         raw = scores[0].get("score") if scores else None
         return float(raw) if raw is not None else 0.0
 

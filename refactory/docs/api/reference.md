@@ -298,6 +298,7 @@ The two extension points: what proposes, and what runs the search.
 
 | kind | name | signature |
 |---|---|---|
+| class | `BudgetStopped` | `` |
 | class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None) -> None` |
 | class | `FinalEvaluation` | `(*, record: 'Callable[..., Any] \| None' = None, label: 'str' = 'outer loop') -> 'None'` |
 | class | `OuterLoop` | `()` |
@@ -308,6 +309,7 @@ The two extension points: what proposes, and what runs the search.
 | function | `run_strategy` | `(loop: 'Any') -> 'dict[str, Any]'` |
 | function | `train_batch_seed` | `(seed: 'int', epoch: 'int', batch_idx: 'int' = 0) -> 'int'` |
 
+- **`BudgetStopped`** — A time or token budget refused or cut an evaluation before it finished.
 - **`EvalRequest`** — One evaluation request for :meth:`Run.evaluate_many`.
 - **`FinalEvaluation`** — After a search: the final candidate's val check, then three test rollouts.
 - **`OuterLoop`** — Base class for a custom strategy — the **custom strategy seam**.

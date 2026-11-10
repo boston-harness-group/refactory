@@ -245,6 +245,93 @@ def test_a_rollout_cap_starts_only_what_one_at_a_time_would(tmp_path, monkeypatc
     assert results[1][0] == [5, 6, 7]
 
 
+def test_an_evaluation_budget_spent_mid_round_scores_what_one_at_a_time_does(tmp_path, monkeypatch, one_seed):
+    """max_evaluations runs out inside a round of four: four at once scores the same
+    two children as one at a time, and the run ends on the evaluation budget."""
+    plan = [[(5, 1), (5, 2), (5, 3), (5, 4)], []]
+    results = {}
+    for width in (1, 4):
+        loop, _, report = _gated(tmp_path / str(width), monkeypatch, plan, epochs=2, batch_size=4,
+                                 max_evaluations=3, max_concurrent_evaluations=width)
+        results[width] = (sorted(_level(c) for c in loop.population if c.evaluated),
+                          loop.evaluations, report["bound"])
+    assert results[4] == results[1]
+    assert results[1][0] == [1, 2, 5]
+
+
+def test_a_rollout_cap_inside_the_val_prefetch_decides_as_one_at_a_time(tmp_path, monkeypatch, one_seed):
+    """repeats 2 (8 train and 4 val items: 16 and 8 rollouts each): the cap falls
+    where evaluate_many would take all three val rollouts at once but one at a time
+    starts only two. Four at once rolls out and judges the same two."""
+    n_train, n_val, repeats = len(TRAIN_IDS), len(VAL_IDS), 2
+    before_val = (n_train + n_val) * repeats + 3 * n_train * repeats  # seed, then 3 children on train
+    cap = before_val + 3 * n_val + 2  # three fit evaluate_many's count; the third would not start
+    plan = [[(5, 1), (5, 2), (5, 3)], []]
+    results = {}
+    for width in (1, 4):
+        loop, _, _ = _gated(tmp_path / str(width), monkeypatch, plan, epochs=2, batch_size=3,
+                            repeats=repeats, max_rollouts=cap, max_concurrent_evaluations=width)
+        vals = sorted(r["id"] for r in _journal_events(loop, "part_result") if r["part"] == "val")
+        results[width] = (vals, list(loop._gate_accepted), list(loop._gate_rejected), loop.rollouts)
+    assert results[4] == results[1]
+    assert len(results[1][1]) + len(results[1][2]) == 3, "setup: the seed and two children judged"
+
+
+@pytest.mark.parametrize("cut", ["val", "train"])
+def test_a_budget_stopped_evaluation_leaves_the_candidate_for_a_resume(tmp_path, monkeypatch, one_seed, cut):
+    """The review's probe: max_elapsed_s 2 and four children whose train runs take
+    3 s, four at once. ``val``: the train runs finish past the limit (the last wave
+    may overshoot) and their val rollouts are refused by the spent budget.
+    ``train``: the budget cuts the train runs themselves. Either way no child is
+    recorded as scored or gate-rejected from a refused evaluation, and a resume with
+    more time judges all four on their real val scores."""
+    from refactory_dsh.evaluators import WalkerEvaluator
+    from test_val_gate import ScriptedLevels
+
+    original = WalkerEvaluator.evaluate
+    slow = {"on": True}
+
+    def evaluate(self, mode, state, workdir, **kwargs):  # type: ignore[no-untyped-def]
+        child = int(state["knobs"]["level"]["value"]) != 5 and "occasions" not in str(workdir)
+        if slow["on"] and child and cut == "train":
+            time.sleep(3)  # before the walk: its first node meets the spent budget
+        result = original(self, mode, state, workdir, **kwargs)
+        if slow["on"] and child and cut == "val":
+            time.sleep(3)  # after the walk: the run finishes, past the limit
+        return result
+
+    monkeypatch.setattr(WalkerEvaluator, "evaluate", evaluate)
+    settings = dict(val_gate=True, batch_size=4, max_concurrent_evaluations=4)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=2, max_elapsed_s=2, **settings)
+        loop.optimizer = ScriptedLevels([[(5, 1), (5, 2), (5, 3), (5, 4)], []])
+        loop.run()
+    children = [c for c in loop.population if _level(c) != 5]
+    ids = {c.id for c in children}
+    assert all(c.evaluated for c in children) == (cut == "val")
+    assert loop._gate_rejected == [] and loop._gate_accepted == [loop.population[0].id]
+    stopped = {r["id"] for r in _journal_events(loop, "budget_stopped")}
+    stopped |= {r["id"] for r in _journal_events(loop, "part_result")
+                if r["result"].get("budget_stopped")}
+    assert stopped == ids
+    if cut == "train":
+        assert not ids & {r["id"] for r in _journal_events(loop, "score")}
+        assert loop.evaluations == 1
+    saved = [r["state"]["val_gate"] for r in _journal_events(loop, "strategy_state")
+             if "val_gate" in r.get("state", {})][-1]
+    assert saved["rejected"] == [], "no budget-refused candidate is journaled as rejected"
+
+    slow["on"] = False
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=3, max_elapsed_s=600, resume=True, **settings)
+        resumed.optimizer = ScriptedLevels([[]])
+        resumed.run()
+    gate = resumed._gate()
+    assert set(resumed._gate_accepted + resumed._gate_rejected) >= ids
+    assert {_level(c): gate.cache[c.id] for c in children} == pytest.approx(
+        {level: 1 - level / 10 for level in (1, 2, 3, 4)}), "judged on real val scores, not 0"
+
+
 def test_the_wave_size_counts_repeats_and_the_cap():
     """A wave holds only evaluations that would start one after another (each at its
     most rollouts, items times repeats) and that evaluate_many accepts together."""

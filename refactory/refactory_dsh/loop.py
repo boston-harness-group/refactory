@@ -61,7 +61,7 @@ from refactory_dsh.optim.base import (
     DEFAULT_MAX_EDITS, available_before, edit_level, proposal_refusal, summarise_reasons,
 )
 from refactory_dsh.outerloop import (
-    EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
+    BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
 from refactory_dsh.paths import project_root
 
@@ -458,8 +458,10 @@ class Loop(OuterLoop):
             try:
                 try:
                     result = super().run()
-                except BudgetExhausted as exc:
-                    self.bound = str(exc)
+                except (BudgetExhausted, BudgetStopped) as exc:
+                    # BudgetStopped: a strategy's evaluation the budget stopped
+                    # (``Run.evaluate``); the bound is the budget _measure recorded.
+                    self.bound = self.bound or str(exc)
                     self._journal("bound", bound=self.bound)
                     result = self.report()
                 # A same-bound resume stops before the scheduler. Persist that
@@ -1107,6 +1109,11 @@ class Loop(OuterLoop):
         evaluation budget and, with ``max_rollouts``, the most rollouts each can add
         decide its size, so the same candidates are scored, with the same items and
         seed. ``max_concurrent_evaluations`` 1 runs them one at a time, as before.
+
+        Under an elapsed-time or token budget the budget is checked before each wave,
+        so the last wave may finish up to one wave of evaluations past the limit (one
+        at a time overshoots by one evaluation). A candidate whose evaluation the
+        budget refused or cut (``BudgetStopped``) stays unevaluated, for a resume.
         """
         from refactory_dsh.budgets import BudgetExhausted
 
@@ -1130,17 +1137,21 @@ class Loop(OuterLoop):
             size = self._wave_size(min(len(batch) - index,
                                        self.config.max_evaluations - self.evaluations), each)
             wave = batch[index:index + size]
-            if len(wave) == 1:
-                self._evaluate(wave[0], seed=seed, items=items)
-                self._forwarded(wave[0], index, len(batch), at, items)
-            else:
-                start = index
-                Run(_loop=self).evaluate_many(
-                    [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed)
-                     for candidate in wave],
-                    on_result=lambda position, candidate: self._forwarded(
-                        candidate, start + position, len(batch), at, items),
-                )
+            try:
+                if len(wave) == 1:
+                    self._evaluate(wave[0], seed=seed, items=items)
+                    self._forwarded(wave[0], index, len(batch), at, items)
+                else:
+                    start = index
+                    Run(_loop=self).evaluate_many(
+                        [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed)
+                         for candidate in wave],
+                        on_result=lambda position, candidate: self._forwarded(
+                            candidate, start + position, len(batch), at, items),
+                    )
+            except BudgetStopped as exc:
+                self.bound = self.bound or str(exc)
+                break
             index += len(wave)
             if self.budget and self.budget.snapshot().get("exhausted"):
                 break
@@ -1386,6 +1397,8 @@ class Loop(OuterLoop):
             candidate, workdir, task_module.TRAIN, seed=seed, items=items,
             item_gate=item_gate, item_slots=item_slots, stop_event=stop_event,
         )
+        if measurements.get("budget_stopped"):
+            self._budget_stopped(candidate, task_module.TRAIN, result, measurements)
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
         item_scores = [float(r["score"]) for r in result.item_records
@@ -1395,7 +1408,8 @@ class Loop(OuterLoop):
             # when it equals the mean of the item scores, every time.
             mean = math.isclose(sum(item_scores) / len(item_scores), float(result.score),
                                 rel_tol=1e-9, abs_tol=1e-9)
-            self._score_is_item_mean = mean and self._score_is_item_mean is not False
+            with self._state_lock:
+                self._score_is_item_mean = mean and self._score_is_item_mean is not False
         candidate.score = result.score - self.config.parsimony * nodes if result.exit_ok else None
         candidate.mean_score = candidate.raw_score
         candidate.measurements = measurements
@@ -1432,6 +1446,19 @@ class Loop(OuterLoop):
                 measurements=measurements,
             )
             self._write_candidate(candidate, workdir, mode=mode)
+
+    def _budget_stopped(self, candidate: Candidate, part: str, result: Any,
+                        measurements: dict[str, Any]) -> None:
+        """A train evaluation a time or token budget refused or cut: what it ran counts
+        toward rollouts and is journaled (``budget_stopped``), but the candidate stays
+        unevaluated, so a resume with more budget scores it. Raises ``BudgetStopped``."""
+        with self._state_lock:
+            if not measurements.get("cached_from"):
+                self.rollouts += len(result.item_records)
+            self._journal("budget_stopped", id=candidate.id, part=part, error=result.error,
+                          measurements=measurements)
+            self._journal("rollouts", rollouts=self.rollouts)
+        raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} evaluation: {result.error}")
 
     def _evaluate_part(
         self, candidate: Candidate, part: str,
@@ -1472,6 +1499,9 @@ class Loop(OuterLoop):
             "score": result.score if result.exit_ok else None,
             "exit_ok": result.exit_ok, "error": result.error,
             "duration_s": result.duration_s,
+            # A rollout a time or token budget refused or cut: no score of the
+            # candidate's (``ValidationGate.val_score`` skips it).
+            **({"budget_stopped": True} if measurements.get("budget_stopped") else {}),
         }
         with self._state_lock:
             self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
@@ -1485,6 +1515,8 @@ class Loop(OuterLoop):
         if result.item_records:
             (workdir / "item_records.json").write_text(
                 json.dumps(result.item_records, indent=2, default=str))
+        if measurements.get("budget_stopped"):
+            raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} rollout: {result.error}")
 
     def _measure(
         self, candidate: Candidate, workdir: Path, part: str, *,
@@ -1512,6 +1544,7 @@ class Loop(OuterLoop):
             return cached
 
         trials = []
+        budget_cut = False  # a time or token budget refused or cut a trial
         all_item_records: list[dict[str, Any]] = []  # accumulate across repeats
         last = RunResult(exit_ok=False, error="no measurement completed")
         required = (self.config.resolved_profile.get("contract") or {}).get("required_artifacts", [])
@@ -1551,6 +1584,7 @@ class Loop(OuterLoop):
             except BudgetExhausted as exc:
                 last = RunResult(exit_ok=False, error=str(exc))
                 self.bound = str(exc)
+                budget_cut = True
                 break
             after = self.budget.snapshot() if self.budget else {}
             budget_exhausted_after_trial = False
@@ -1588,9 +1622,12 @@ class Loop(OuterLoop):
             # gradings of one item read as a duplicate.
             all_item_records.extend({**record, "repeat": index + 1} for record in result.item_records)
             last = result
+            if budget_exhausted_after_trial and not result.exit_ok:
+                budget_cut = True  # the budget ran out inside the trial and ended it
             if not result.exit_ok:
                 break
             if budget_exhausted_after_trial:
+                budget_cut = budget_cut or len(trials) < self.config.repeats
                 break
         scores = [t["score"] for t in trials if t["score"] is not None]
         complete = len(trials) == self.config.repeats and all(t["exit_ok"] for t in trials)
@@ -1602,6 +1639,8 @@ class Loop(OuterLoop):
                    "tokens": sum(t["tokens"] for t in trials) if trials and all(isinstance(t["tokens"], (int, float)) for t in trials) else None,
                    "cost": sum(t["cost"] for t in trials) if trials and all(isinstance(t["cost"], (int, float)) for t in trials) else None,
                    "interpretation": "observed sample mean; improvement is not a statistical proof"}
+        if budget_cut and not complete:
+            summary["budget_stopped"] = True
         last.score = float(summary["mean"] or 0) if complete else 0.0
         last.exit_ok = complete
         last.duration_s = sum(t["duration_s"] for t in trials)
@@ -2984,7 +3023,12 @@ class Loop(OuterLoop):
         gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
         pending = [c for c in self.population if c.evaluated and c.id not in judged]
+        cached = len(gate.cache)
         self._prefetch_val(run, gate, pending)
+        if len(gate.cache) != cached:
+            # Journaled now, so a run killed before the decisions rolls none again.
+            self._store_gate_state()
+            self._save_strategy_state()
         for candidate in pending:
             try:
                 if gate.best_id is None:

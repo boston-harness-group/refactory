@@ -1,4 +1,5 @@
 """A nested search and its validators consume the enclosing allocation."""
+import json
 from pathlib import Path
 
 import child_patches
@@ -55,7 +56,12 @@ def test_candidate_validator_keeps_holdout_reserve_and_stays_ineligible(tmp_path
                     max_tokens=2, validation_reserve_tokens=1, runs_root=tmp_path), project=Path('.'))
         report = loop.run()
     assert report['best'] is None and report['exit_ok'] is False
-    assert 'reserve retained' in report['failed_candidates'][0]['error']
+    # The budget cut the candidate's run: it is not scored as a failure but left
+    # unevaluated (named in the report) for a resume with more budget.
+    assert report['failed_candidates'] == [] and report['unevaluated']
+    stopped = [json.loads(line) for line in (tmp_path / 'journal.jsonl').read_text().splitlines()
+               if json.loads(line).get('event') == 'budget_stopped']
+    assert len(stopped) == 1 and 'reserve retained' in stopped[0]['error']
     assert not list((tmp_path / 'runs').rglob('validated.txt'))
     assert loop.budget.snapshot()['tokens'] == 1
 
