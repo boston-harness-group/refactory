@@ -502,8 +502,9 @@ def test_every_strategy_selects_on_val_scores_test_only_at_the_end_and_hides_val
     """Every built-in strategy under the gate with pool: it ends normally, the final
     evaluation runs, its winner is the incumbent, no test rollout happens before the
     final scoring, and no proposer prompt holds a val score."""
-    # Six decimals, so a val score is told from a timing or a train score in the prompt.
-    val = {level: round(0.613137 + level * 0.003711, 6) for level in range(100)}
+    # Every val score ends in ...137 (six decimals), so it is told from a timing (four
+    # decimals) or a train score in the prompt.
+    val = {level: round(0.600137 + level * 0.003, 6) for level in range(100)}
     monkeypatch.setattr(ValidationGate, "val_score",
                         staticmethod(lambda run, cand: val[_level(cand)]))
     monkeypatch.setattr(FitProbe, "TRAIN", {level: 0.2 + level / 1000 for level in range(100)})
