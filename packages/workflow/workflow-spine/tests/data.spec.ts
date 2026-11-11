@@ -1255,7 +1255,7 @@ describe('spine error_text and stderr tail (Ask 5)', () => {
     // stderr tail follows unchanged.
     ['the node runner failure text',
       'loading notes.txt\nSnippetError: verdict gate check: no answer\nits last line: x\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\nits last line: x\n',
-      'work: SnippetError: verdict gate check: no answer\nloading notes.txt\nSnippetError: verdict gate check: no answer\nits last line: x\n--- refactory failure ---\n'],
+      'work: SnippetError: verdict gate check: no answer\nloading notes.txt\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\nits last line: x'],
     // A dispatched agent's worker: the error line, not the log line after it; a timed-out
     // model call is a CompletionTimeout, as the walker names it.
     ['a worker timeout',

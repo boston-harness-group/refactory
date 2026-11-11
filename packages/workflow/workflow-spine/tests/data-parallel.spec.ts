@@ -470,7 +470,9 @@ describe('data-parallel: a failed body node in its item record', () => {
     const record = await failedRecord(parallelism, failOn('i1', stderr, false))
     const text = String(record.error_text)
     expect(text.split('\n')[0]).toBe('work: SnippetError: verdict gate check: no answer')
-    expect(text.slice(text.indexOf('\n') + 1).trimEnd()).toBe(stderr.trimEnd())
+    // The stderr tail, without the runner's copy of its account before the marker.
+    expect(text.slice(text.indexOf('\n') + 1).trimEnd())
+      .toBe('loading notes.txt\n--- refactory failure ---\nSnippetError: verdict gate check: no answer')
   }, 60_000)
 
   it.each([[1], [4]])('finds no answer from a file named only before the marker (parallelism %i)', async (parallelism) => {

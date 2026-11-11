@@ -259,10 +259,27 @@ const COMPLETION_TIMEOUT_TEXT = 'model completion timed out'
  * as before (log lines and file names included, which `items.no_answer` reads).
  */
 function nodeErrorText(failure: CommandFailure): string {
-  const tail = (failure.stderr || failure.error || `failed with exit code ${String(failure.exitCode)}`)
-    .slice(-ITEM_ERROR_TAIL)
+  const tail = withoutAccountCopy((failure.stderr || failure.error
+    || `failed with exit code ${String(failure.exitCode)}`).slice(-ITEM_ERROR_TAIL))
   if (!failure.nodeId) return tail
   return `${failure.nodeId}: ${nodeErrorLine(tail)}`.slice(0, ITEM_ERROR_LINE) + `\n${tail}`
+}
+
+/**
+ * A node runner's stderr without the copy of its failure account it printed before its
+ * `--- refactory failure ---` marker (`refactory_dsh.run.main` prints the error, the
+ * marker, then the same account): every other line is kept. A different text before the
+ * marker (a long error's full message, whose account is clipped) is kept too.
+ */
+function withoutAccountCopy(stderr: string): string {
+  const marker = '--- refactory failure ---'
+  const at = stderr.lastIndexOf(marker)
+  if (at === -1) return stderr
+  const account = stderr.slice(at + marker.length).trim()
+  const before = stderr.slice(0, at).trimEnd()
+  if (account === '' || !before.endsWith(account)) return stderr
+  const kept = before.slice(0, before.length - account.length)
+  return `${kept}${kept === '' || kept.endsWith('\n') ? '' : '\n'}${stderr.slice(at)}`
 }
 
 /**

@@ -457,6 +457,11 @@ def test_spine_runner_prints_a_verdict_gates_reason_then_its_label(tmp_path, mon
         (tmp_path / "critic.txt").write_text(text)
         assert run_mod.main([snippet.VERDICT]) == 1, text
         assert f"nor its last line ({text!r}) is one of its answers" in capsys.readouterr().err
+    (tmp_path / "critic.txt").write_text("- proceed\n- reloop")
+    assert run_mod.main([snippet.VERDICT]) == 1
+    err = capsys.readouterr().err
+    assert ("file 'critic.txt' names no verdict: its first line ('- proceed') is a list item, "
+            "not a verdict, and its last line ('- reloop') is a list item") in err, err
     (tmp_path / "critic.txt").write_text("Proceed with caution: step 2 is thin.\n\nreloop")
     assert run_mod.main([snippet.VERDICT]) == 1
     err = capsys.readouterr().err

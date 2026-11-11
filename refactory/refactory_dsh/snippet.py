@@ -524,14 +524,18 @@ def _lead_word(line: str) -> tuple[str, str]:
     return (match.group(0), body[match.end():]) if match else ("", body)
 
 
+def _list_item(line: str) -> bool:
+    """Whether a line is a list item (after any quoting), which is never a verdict."""
+    return _BULLET.match(line.strip().lstrip(" \t>")) is not None
+
+
 def _last_line_verdict(line: str, lower: dict[str, str]) -> tuple[str, str, bool] | None:
     """``(label, tail, bare)`` when a text's last line names a verdict: a label alone,
     with at most closing markdown and trailing punctuation (``bare``), or a label then a
     separator and the ``tail``. ``None`` for anything else, a list item included."""
-    stripped = line.strip().lstrip(" \t>")
-    if _BULLET.match(stripped):
+    if _list_item(line):
         return None
-    word, rest = _lead_word(stripped)
+    word, rest = _lead_word(line.strip().lstrip(" \t>"))
     label = lower.get(word.lower())
     if label is None:
         return None
@@ -567,7 +571,7 @@ def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
     lower = {label.lower(): label for label in labels}
     body = str(text or "").strip()
     lines = body.splitlines()
-    listed = bool(lines) and _BULLET.match(lines[0].strip().lstrip(" \t>")) is not None
+    listed = bool(lines) and _list_item(lines[0])
     word, rest = ("", body) if listed else _lead_word(body)
     label = lower.get(word.lower())
     if label is not None:
@@ -620,6 +624,17 @@ def verdict(ctx: Any) -> Any:
                            f"one of its answers {labels}") from None
     if parsed is None:
         lines = text.strip().splitlines() or [""]
+        if _list_item(lines[0]) or _list_item(lines[-1]):
+            first = (f"its first line ({lines[0][:200]!r}) is a list item, not a verdict"
+                     if _list_item(lines[0]) else
+                     f"its first word ({_lead_word(lines[0])[0]!r}) is none of its answers")
+            last = (f"its last line ({lines[-1][-200:]!r}) is a list item, not a verdict"
+                    if _list_item(lines[-1]) else
+                    f"its last line ({lines[-1][-200:]!r}) is none of its answers")
+            raise SnippetError(f"verdict gate {ctx.node_id!r}: {source} names no verdict: {first}, "
+                               f"and {last} {labels} (its out-edge conditions, or halt); the "
+                               "writer starts the text with the answer, or puts it alone on the "
+                               "last line")
         raise SnippetError(f"verdict gate {ctx.node_id!r}: neither the first word of {source} "
                            f"({_lead_word(lines[0])[0]!r}, in its first line {lines[0][:200]!r}) "
                            f"nor its last line ({lines[-1][-200:]!r}) is one of its answers "
