@@ -987,6 +987,7 @@ class Loop(OuterLoop):
                               reason="explicit search resume")
             self._write_state()
             self._progress("init", resumed=True, population=len(self.population),
+                           **({"warning": self.selection_warning} if self.selection_warning else {}),
                            epochs=self.config.epochs, batch_size=self.config.batch_size,
                            optimizer=self.search_name())
             return
@@ -1003,6 +1004,8 @@ class Loop(OuterLoop):
         self._write_state()
         self._progress(
             "init",
+            # The run's events say it (the command line prints them): no val items.
+            **({"warning": self.selection_warning} if self.selection_warning else {}),
             resumed=False,
             population=len(self.population),
             epochs=self.config.epochs,
@@ -1033,10 +1036,6 @@ class Loop(OuterLoop):
         if not has_val:
             self.selection_warning = NO_VALIDATION
             Run(_loop=self).log(f"warning: {NO_VALIDATION}")
-            # The run's events (printed by the command line, not for a library caller).
-            self._progress("warning", warning=NO_VALIDATION,
-                           detail="give the run a parts manifest with a val part to select "
-                                  "on validation")
 
     def _manifest_val_ids(self) -> list[str]:
         """The val ids of the parts manifest this run will load (``parts_manifest``, else

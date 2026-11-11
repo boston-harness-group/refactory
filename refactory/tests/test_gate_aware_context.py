@@ -40,7 +40,9 @@ def _run(tmp_path: Path, monkeypatch: Any, plan: list[list[tuple[int, int]]], **
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
     proposer = Recording(plan)
     with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, **{"epochs": 3, **overrides})
+        # Without val_gate given, the run selects on train (the manifest has val items,
+        # which would otherwise turn the gate on).
+        loop = _loop(tmp_path, **{"epochs": 3, "val_gate": False, **overrides})
         loop.optimizer = proposer
         loop.run()
     return loop, proposer

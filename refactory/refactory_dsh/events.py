@@ -62,6 +62,7 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
             f"{record.get('epochs', '?')} epoch(s) x {record.get('batch_size', '?')} · "
             f"population {record.get('population', '?')}"
             + (" · resumed" if record.get("resumed") else "")
+            + (f" · warning: {record['warning']}" if record.get("warning") else "")
         )
     if step == "forward":
         where = f"{record.get('index', '?')}/{record.get('of', '?')}"
@@ -139,10 +140,6 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         return "paused · waiting for a resume or a stop"
     if step == "control":
         return _control_line(record)
-    if step == "warning":
-        # Shown without --verbose: a run that cannot do what is expected says so.
-        return f"warning · {record.get('warning', '')}" + (
-            f" ({record['detail']})" if record.get("detail") else "")
     if step == "proposal_failed":
         # Shown without --verbose: a round that never reached the model must not
         # read as one that proposed nothing.

@@ -255,7 +255,7 @@ def test_a_run_without_val_items_selects_on_train_and_warns(tmp_path, where):
     assert NO_VALIDATION in (loop.root / "strategy.log").read_text()
     assert NO_VALIDATION in (loop.root / "report.md").read_text()
     steps = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
-    assert any(s.get("step") == "warning" and s.get("warning") == NO_VALIDATION for s in steps)
+    assert any(s.get("step") == "init" and s.get("warning") == NO_VALIDATION for s in steps)
     if where == "no manifest":
         assert report["holdout"]["split"] == "holdout" and report["holdout"]["independent"]
 
