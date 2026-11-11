@@ -416,8 +416,8 @@ def test_a_product_detail_never_makes_the_client_replay_a_session_with_tools(tmp
     only the fixed facts and the wire's own errors decide a replay."""
     from refactory_dsh.model import is_retryable_failure
 
-    assert not is_retryable_failure(RATE_LIMITED, tool_policy="")
-    assert is_retryable_failure("dsh: TRANSPORT: 429 rate limit", tool_policy="")
+    assert not is_retryable_failure(RATE_LIMITED)
+    assert is_retryable_failure("dsh: TRANSPORT: 429 rate limit")
     dsh = Scripted(tmp_path / "dsh", {"": [RATE_LIMITED, "right"]})
     client = DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(dsh.cli),
                             attempts=3, retry_window_s=0, timeout_s=60).with_tool_policy("")

@@ -355,13 +355,24 @@ own route, not the run's default, on both runtimes: in a `dsh` run, a node route
 `claude_code` with tools makes one attempt and the spine gives it one completion's
 time limit (1800 + 600 s by default; it used to inherit the run's 3 attempts and
 3 x 1800 + 600 s); in a `claude_code` run, a node routed to `dsh` gets 3 attempts and
-3 x 1800 + 600 s, as in a `dsh` run (it used to be held to one attempt and 2400 s). In a session without tools, a
-worker teardown failure after a clean CLI exit is retried the same way, within the same
-attempts and window: the failure's diagnostic line has
-`stage: teardown; ...; exit code: 0` in one group (the CLI finished, and DSH's cleanup
-after it failed, for example under load). A session with tools is not retried for it,
-because its work (files, commits, pushes) is already done and a replay would repeat it;
-nor is a teardown failure after a nonzero exit, or a failure in any other stage. Any other
+3 x 1800 + 600 s, as in a `dsh` run (it used to be held to one attempt and 2400 s). Each
+retry is recorded as a `model_call_retried` event with its cause, the attempt number and
+the discarded attempt's usage, and the worker receipt adds up the usage of every session
+under it (`usage` is the total, `session_usage` the last session's own, and
+`earlier_sessions` keeps each earlier session's ids and usage). A node with a wall has
+one deadline on every backend, `claude_code` and `codex` included: its retries spend what
+remains of it rather than a fresh `timeout_s` each.
+
+A worker whose cleanup fails after it answered keeps its answer. The worker bridge exits
+0 when the answer is on stdout and only the cleanup failed (for example waiting for the
+worker's process scope to empty under load), printing
+`dsh: worker teardown failed after its answer: ...`; the client also keeps the answer when
+a runtime exits 1 with a teardown failure after a clean CLI exit (`stage: teardown; ...;
+exit code: 0` in one group) and the answer on stdout. Either way it records a
+`worker_teardown_failed` warning event and does not ask again, with or without tools: it
+used to re-ask a session without tools, discarding a finished answer. A teardown failure
+with no answer, after a nonzero exit, or after the worker stopped without completing, is
+not kept and not retried. Any other
 failure the client does not replay is raised as `CompletionFailed`, whose `kind` says what
 happened: `output_limit` (`dsh: max-tokens:`, or Claude Code's `category: output-limit`,
 which names the tokens spent and the per-response cap), `setup` (a key, model name or prompt

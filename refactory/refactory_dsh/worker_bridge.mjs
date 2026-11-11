@@ -2,6 +2,11 @@
 import { randomUUID } from 'node:crypto'
 
 export const name = 'refactory-worker-bridge'
+/**
+ * What the bridge prints when cleanup fails after the answer is already on stdout
+ * (`model.TEARDOWN_WARNING`): a warning, not a failure, so the client keeps the answer.
+ */
+const TEARDOWN_WARNING = 'dsh: worker teardown failed after its answer:'
 export const inject = ['agents', 'subagents', 'headlessStartup']
 export function apply(ctx) {
   const controller = new AbortController()
@@ -44,9 +49,19 @@ export function apply(ctx) {
       if (result.stopReason !== 'completed') {
         process.stderr.write(`dsh: worker ${result.stopReason}: ${result.diagnostic ?? 'no diagnostic'}\n`)
       }
-      await owned.dispose()
+      // The answer is written: cleanup that fails now (e.g. waiting for the worker's
+      // process scope to empty, under load) cannot change it, so it is a warning and the
+      // exit says what the worker did, not what its cleanup did. Re-asking the model
+      // would discard a finished answer and repeat any work a tool session did.
+      const finished = owned
       owned = undefined
-      await handle.dispose()
+      for (const dispose of [() => finished.dispose(), () => handle.dispose()]) {
+        try {
+          await dispose()
+        } catch (error) {
+          process.stderr.write(`${TEARDOWN_WARNING} ${error instanceof Error ? error.message : String(error)}\n`)
+        }
+      }
       ctx.get('appExit')(result.stopReason === 'completed' ? 0 : 1)
     } catch (error) {
       await owned?.dispose()

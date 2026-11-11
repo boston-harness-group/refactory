@@ -421,15 +421,40 @@ def is_clean_exit_teardown_failure(cause: str) -> bool:
     return bool(_CLEAN_EXIT_TEARDOWN.search(cause or ""))
 
 
-def is_retryable_failure(stderr: str, *, tool_policy: str = "") -> bool:
+#: The line the worker bridge (`worker_bridge.mjs`) prints when its cleanup fails after
+#: the answer is on stdout; it then exits as the worker did, 0 for a completed answer.
+TEARDOWN_WARNING = "dsh: worker teardown failed after its answer:"
+
+#: The live event a kept answer whose worker cleanup failed records (a warning).
+TEARDOWN_EVENT = "worker_teardown_failed"
+#: The live event every completion the client re-asks records.
+RETRY_EVENT = "model_call_retried"
+
+
+def teardown_warning(stderr: str) -> str:
+    """The bridge's warning that cleanup failed after the answer, or ``""``."""
+    return next((line.strip() for line in (stderr or "").splitlines()
+                 if line.startswith(TEARDOWN_WARNING)), "")
+
+
+def answered_before_teardown(stdout: str, stderr: str) -> bool:
+    """Whether a failed completion is a finished answer whose cleanup failed: stdout holds
+    the answer, the failure is a teardown after a clean CLI exit, and the worker reported
+    no other stop (``dsh: worker cancelled: ...``). The bridge itself exits 0 then
+    (`TEARDOWN_WARNING`); this keeps the answer from a runtime that does not."""
+    if not (stdout or "").strip() or not is_clean_exit_teardown_failure(failure_cause(stderr)):
+        return False
+    return not any(line.startswith("dsh: worker ") and not is_clean_exit_teardown_failure(line)
+                   and not line.startswith(TEARDOWN_WARNING)
+                   for line in (stderr or "").splitlines())
+
+
+def is_retryable_failure(stderr: str) -> bool:
     """Whether ``DshModelClient.complete`` retries a failed completion: a transport
-    failure; or, for a session without tools (``tool_policy == "none"``), a teardown
-    failure after a clean CLI exit. A session with tools finished its work before
-    the teardown failed, so a replay would repeat it (commits, pushes): not retried.
-    Anything a model, key or prompt caused is not retried."""
-    if is_transport_failure(without_product_detail(stderr)):
-        return True
-    return tool_policy == "none" and is_clean_exit_teardown_failure(failure_cause(stderr))
+    failure only. A worker that answered and then failed to clean up keeps its answer
+    (`answered_before_teardown`), and anything a model, key or prompt caused is not
+    retried."""
+    return is_transport_failure(without_product_detail(stderr))
 
 
 #: A product adapter's failure line: fixed facts in parentheses, then (since the Claude
@@ -489,8 +514,9 @@ class DshModelClient:
     """One-shot completions through ``dsh --profile headless``.
 
     Implements ``factory.outer_loop.optimizers.ModelClient``. A completion that fails
-    on the wire -- or, in a session without tools, in the worker's teardown after a
-    clean CLI exit (`is_retryable_failure`) -- is retried, up to ``attempts`` in all,
+    on the wire (`is_retryable_failure`) is retried, up to ``attempts`` in all, and each
+    retry is recorded (`RETRY_EVENT`); a worker whose cleanup failed after it answered
+    keeps its answer, with a warning (`TEARDOWN_EVENT`). Retries come
     with waits that double and add up to ``retry_window_s`` (`retry_delays`); one that
     fails for any other reason is raised straight away with the cause named. Retries
     happen on the ``dsh`` backend, and on any backend for a session without tools; a
@@ -1018,7 +1044,6 @@ class DshModelClient:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         last = ""
-        where = "on the wire"
         # A node's dispatch is one session whose deadline is never retried, so it
         # runs under the whole envelope `workers.lower_workflow` reserved for it —
         # attempts sessions plus overhead — rather than the per-completion
@@ -1031,9 +1056,12 @@ class DshModelClient:
         else:
             budget_s = self._timeout_s
             stop_at = None
+        # A node with a wall has one deadline on every backend: its retries spend what
+        # remains of it, so a node never outlives its wall by a fresh `timeout_s` each.
         wall = getattr(self, "_node_wall_s", None)
-        if wall is not None and (wall < budget_s or getattr(self, "_node_wall_exact", False)):
-            budget_s = wall
+        if wall is not None:
+            if wall < budget_s or getattr(self, "_node_wall_exact", False):
+                budget_s = wall
             stop_at = time.monotonic() + budget_s
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
                   else [self._backoff_s * 2 ** index for index in range(self._attempts - 1)])
@@ -1059,19 +1087,25 @@ class DshModelClient:
             else:
                 self._raise_if_cancelled()
                 if proc.returncode == 0:
+                    if warning := teardown_warning(proc.stderr):
+                        self._record_teardown(run_dir, warning)
                     return proc.stdout
                 cause = failure_cause(proc.stderr)
+                if answered_before_teardown(proc.stdout, proc.stderr):
+                    # The worker answered and only its cleanup failed: the answer is
+                    # the node's. Re-asking would discard it, and repeat a tool
+                    # session's work.
+                    self._record_teardown(run_dir, cause)
+                    return proc.stdout
                 if cause.startswith("dsh: max-tokens:") and (limit := self.output_limit()):
                     # Name the limit: a reader, or an optimizer, cannot weigh a
                     # shorter answer against a larger cap without the number.
                     cause = f"{cause} ({limit} tokens)"
-                if not is_retryable_failure(proc.stderr,
-                                            tool_policy=getattr(self, "_tool_policy", "")):
+                if not is_retryable_failure(proc.stderr):
                     # The model answered wrongly, the key is dead, the prompt is
                     # rejected: retrying spends two more completions on the same
                     # answer. Fail now and keep the diagnosis accurate. A transport
-                    # failure, or (without tools) a worker teardown failure after the
-                    # CLI exited 0, is infrastructure and is retried within the same
+                    # failure is infrastructure and is retried within the same
                     # budget. A crashed session (a worker failure, an output limit) is
                     # not replayed here either: a replay would run outside the node's
                     # delivery bracket, unrecorded, with the same prompt. A node's retry
@@ -1080,9 +1114,8 @@ class DshModelClient:
                         f"model completion failed (exit {proc.returncode}): {cause}",
                         kind=failure_kind(cause))
                 last = cause or f"exit {proc.returncode}"
-                where = ("on the wire" if is_transport_failure(proc.stderr)
-                         else "in worker teardown after a clean exit")
             if attempt < self._attempts:
+                self._record_retry(run_dir, attempt, last)
                 delay = delays[attempt - 1]
                 if not self._cancellations:
                     time.sleep(delay)
@@ -1097,8 +1130,41 @@ class DshModelClient:
                         # are also observed within the bounded polling interval.
                         self._cancellations[-1].wait(min(remaining, 0.1))
         raise CompletionFailed(
-            f"model completion failed {where} {self._attempts} time(s); last cause: {last}",
-            kind="transport" if where == "on the wire" else "worker")
+            f"model completion failed on the wire {self._attempts} time(s); last cause: {last}",
+            kind="transport")
+
+    def _receipt(self) -> dict[str, Any]:
+        try:
+            return json.loads(self._worker_receipt.read_text()) if self._worker_receipt else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _emit(self, run_dir: Path, kind: str, **fields: Any) -> None:
+        """Record one live event in the run directory; a record that cannot be written
+        never fails the completion it describes."""
+        from refactory_dsh.live import emit
+
+        try:
+            emit(run_dir, kind, node_id=self._node_id or "",
+                 worker_id=self._receipt().get("worker_id"), **fields)
+        except OSError:
+            pass
+
+    def _record_teardown(self, run_dir: Path, detail: str) -> None:
+        who = self._node_id or "a model call"
+        self._emit(run_dir, TEARDOWN_EVENT, state="warning", error=detail[:500],
+                   summary=f"{who}: the worker's cleanup failed after it answered; the answer is kept")
+
+    def _record_retry(self, run_dir: Path, attempt: int, cause: str) -> None:
+        """A completion the client is about to ask again: why, which attempt failed, and
+        what the discarded attempt cost (the worker observer's ``session_usage``)."""
+        receipt = self._receipt()
+        usage = receipt.get("session_usage") or receipt.get("usage")
+        who = self._node_id or "a model call"
+        self._emit(run_dir, RETRY_EVENT, state="retrying", cause=cause[:500], attempt=attempt,
+                   attempts=self._attempts, usage=usage,
+                   summary=f"{who}: attempt {attempt} of {self._attempts} failed on the wire; "
+                           "asking again")
 
     def _inactivity_limit(self) -> float:
         """The inactivity limit for this session: node sessions on DSH only, else 0 (off)."""

@@ -741,44 +741,78 @@ def _no_tools():  # type: ignore[no-untyped-def]
 
 class _Failed:
     returncode = 1
-    stdout = ""
 
-    def __init__(self, stderr: str) -> None:
+    def __init__(self, stderr: str, stdout: str = "") -> None:
         self.stderr = stderr
+        self.stdout = stdout
 
 
 class _Done:
     returncode = 0
     stdout = "done\n"
-    stderr = ""
+
+    def __init__(self, stderr: str = "") -> None:
+        self.stderr = stderr
 
 
-def test_a_teardown_failure_after_a_clean_exit_is_retried_without_tools(monkeypatch):
-    """A session without tools whose CLI exited 0 and whose DSH cleanup then failed:
-    the completion is retried (same backoff as a transport failure) and the second
-    attempt's answer returned; if it keeps failing, the error does not call it a
-    wire failure."""
-    queue, waits = _answers(monkeypatch, _Failed(f"dsh: reasoning:\nthinking\n{TEARDOWN}\n"),
-                            _Done())
-    assert _no_tools().complete("hello") == "done\n"
-    assert queue == [] and waits == pytest.approx([20.0])
-    _answers(monkeypatch, *[_Failed(TEARDOWN)] * 3)
-    with pytest.raises(RuntimeError) as raised:
-        _no_tools().complete("hello")
-    assert str(raised.value) == ("model completion failed in worker teardown after a clean "
-                                 f"exit 3 time(s); last cause: {TEARDOWN}")
+def _events(run: Path, kind: str) -> list[dict]:
+    import json
+
+    path = run / ".refactory/events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [row for row in rows if row.get("kind") == kind]
 
 
-def test_a_teardown_failure_in_a_session_with_tools_is_not_retried(monkeypatch):
-    """A session with tools finished its work before the teardown failed: a replay
-    would repeat it, so it fails at once as before."""
-    from refactory_dsh.model import DshModelClient
+def test_an_answer_whose_worker_cleanup_failed_is_kept_with_a_warning(monkeypatch, tmp_path):
+    """A worker that answered and whose cleanup then failed: the answer is the
+    completion's, it is not asked again, and a warning is recorded. Both shapes: the
+    bridge's exit 0 with its warning line, and a runtime's exit 1 with the clean-exit
+    teardown failure and the answer on stdout. With tools and without."""
+    from refactory_dsh.model import TEARDOWN_EVENT, TEARDOWN_WARNING, DshModelClient
 
-    for client in (DshModelClient(), DshModelClient(worker_backend="dsh", provider="p", model="m")):
-        queue, waits = _answers(monkeypatch, _Failed(TEARDOWN), _Done())
-        with pytest.raises(RuntimeError, match=r"model completion failed \(exit 1\): dsh: worker failed"):
-            client.complete("hello")
+    clients = (_no_tools(), DshModelClient(worker_backend="dsh", provider="p", model="m"))
+    shapes = (_Done(stderr=f"{TEARDOWN_WARNING} the worker scope did not empty\n"),
+              _Failed(f"dsh: reasoning:\nthinking\n{TEARDOWN}\n", stdout="done\n"))
+    for number, (client, proc) in enumerate((c, p) for c in clients for p in shapes):
+        run = tmp_path / f"run{number}"
+        queue, waits = _answers(monkeypatch, proc, _Done())
+        assert client.complete("hello", workdir=run) == "done\n"
         assert len(queue) == 1 and waits == []
+        [event] = _events(run, TEARDOWN_EVENT)
+        assert event["state"] == "warning" and "the answer is kept" in event["summary"]
+        assert "teardown" in event["error"]
+
+
+@pytest.mark.parametrize("stdout, stderr", [
+    ("", TEARDOWN),
+    # The worker stopped without completing before its cleanup failed: no answer.
+    ("partial\n", f"dsh: worker cancelled: stopped\n{TEARDOWN}"),
+])
+def test_a_teardown_failure_without_an_answer_fails_at_once(monkeypatch, tmp_path, stdout, stderr):
+    from refactory_dsh.model import TEARDOWN_EVENT
+
+    queue, waits = _answers(monkeypatch, _Failed(stderr, stdout=stdout), _Done())
+    with pytest.raises(RuntimeError, match=r"model completion failed \(exit 1\): dsh: worker") as raised:
+        _no_tools().complete("hello", workdir=tmp_path / "run")
+    assert raised.value.kind == "worker"
+    assert len(queue) == 1 and waits == []
+    assert _events(tmp_path / "run", TEARDOWN_EVENT) == []
+
+
+def test_each_retry_on_the_wire_is_recorded(monkeypatch, tmp_path):
+    """The client still re-asks after a wire failure; each retry is a recorded event
+    with its cause and attempt."""
+    from refactory_dsh.model import RETRY_EVENT
+
+    run = tmp_path / "run"
+    queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: socket hang up"),
+                            _Failed("dsh: TRANSPORT: ECONNRESET"), _Done())
+    assert _no_tools().complete("hello", workdir=run) == "done\n"
+    assert queue == [] and len(waits) == 2
+    events = _events(run, RETRY_EVENT)
+    assert [(e["attempt"], e["attempts"], e["cause"]) for e in events] == [
+        (1, 3, "dsh: TRANSPORT: socket hang up"), (2, 3, "dsh: TRANSPORT: ECONNRESET")]
+    assert all(e["state"] == "retrying" for e in events)
 
 
 @pytest.mark.parametrize("stderr", [
@@ -813,16 +847,14 @@ def test_a_transport_failure_is_still_retried_and_the_predicates_stay_apart(monk
         assert queue == [] and len(waits) == 1
     assert not is_transport_failure(TEARDOWN), "a teardown failure is not called transport"
     assert is_clean_exit_teardown_failure(TEARDOWN.upper())
-    assert is_retryable_failure(TEARDOWN, tool_policy="none")
-    assert not is_retryable_failure(TEARDOWN)
+    assert not is_retryable_failure(TEARDOWN), "a teardown failure is never re-asked"
     assert failure_cause(f"noise\n{TEARDOWN}\n") == TEARDOWN
 
 
 def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monkeypatch):
     """On a native backend (claude_code) a session without tools retries a transport
-    failure and a clean-exit teardown within the configured attempts; a session with
-    tools makes one attempt, as before. The configured count survives a context
-    round trip."""
+    failure within the configured attempts; a session with tools makes one attempt, as
+    before. The configured count survives a context round trip."""
     from refactory_dsh.model import DshModelClient
 
     native = DshModelClient(worker_backend="claude_code")
@@ -830,7 +862,7 @@ def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monk
     assert native.retry_attempts() == 1 and text.retry_attempts() == 3
     rebuilt = DshModelClient(**native.context()).with_tool_policy("none")
     assert rebuilt.retry_attempts() == 3
-    for failure in (TEARDOWN, "dsh: TRANSPORT: socket hang up"):
+    for failure in ("dsh: TRANSPORT: socket hang up",):
         queue, waits = _answers(monkeypatch, _Failed(failure), _Done())
         assert text.complete("hello") == "done\n"
         assert queue == [] and len(waits) == 1
