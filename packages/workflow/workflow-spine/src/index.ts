@@ -243,6 +243,63 @@ function failureDetailOf(stderr: string): string {
   return `${head}\n…\n${tail}`
 }
 
+/** How much of a failed node's stderr its item record keeps (the tail). */
+const ITEM_ERROR_TAIL = 4_096
+/** How long the line naming the failed node and its error may be (`items.ERROR_TEXT_CHARS`). */
+const ITEM_ERROR_LINE = 512
+/** What a dispatched agent's worker prints before its error (`worker_node.main`). */
+const WORKER_PREFIX = 'worker: '
+/** A model call that timed out, as `items.COMPLETION_TIMEOUT_TEXT` reads it. */
+const COMPLETION_TIMEOUT_TEXT = 'model completion timed out'
+
+/**
+ * A failed pass-body node's error as its item record keeps it: a first line in the
+ * walker's shape, `<node>: <Kind>: <message>` (`nn.executor`), so the optimizer names
+ * the node and the error the same on either runtime, then the node's stderr tail exactly
+ * as before (log lines and file names included, which `items.no_answer` reads).
+ */
+function nodeErrorText(failure: CommandFailure): string {
+  const tail = withoutAccountCopy((failure.stderr || failure.error
+    || `failed with exit code ${String(failure.exitCode)}`).slice(-ITEM_ERROR_TAIL))
+  if (!failure.nodeId) return tail
+  return `${failure.nodeId}: ${nodeErrorLine(tail)}`.slice(0, ITEM_ERROR_LINE) + `\n${tail}`
+}
+
+/**
+ * A node runner's stderr without the copy of its failure account it printed before its
+ * `--- refactory failure ---` marker (`refactory_dsh.run.main` prints the error, the
+ * marker, then the same account): every other line is kept. A different text before the
+ * marker (a long error's full message, whose account is clipped) is kept too.
+ */
+function withoutAccountCopy(stderr: string): string {
+  const marker = '--- refactory failure ---'
+  const at = stderr.lastIndexOf(marker)
+  if (at === -1) return stderr
+  const account = stderr.slice(at + marker.length).trim()
+  const before = stderr.slice(0, at).trimEnd()
+  if (account === '' || !before.endsWith(account)) return stderr
+  const kept = before.slice(0, before.length - account.length)
+  return `${kept}${kept === '' || kept.endsWith('\n') ? '' : '\n'}${stderr.slice(at)}`
+}
+
+/**
+ * The line of a failed node's stderr that says what failed, as `<Kind>: <message>` when
+ * it can: the node runner's own account after its `--- refactory failure ---` marker
+ * (`refactory_dsh.run.main`); else a dispatched agent's worker error (a model call that
+ * timed out is a `CompletionTimeout`, as the walker names it); else the last line.
+ */
+function nodeErrorLine(stderr: string): string {
+  const marker = '--- refactory failure ---'
+  const lines = (text: string): string[] => text.split('\n').map(line => line.trim()).filter(line => line !== '')
+  const at = stderr.lastIndexOf(marker)
+  const account = at === -1 ? [] : lines(stderr.slice(at + marker.length))
+  if (account.length > 0) return account[0]!
+  const before = lines(at === -1 ? stderr : stderr.slice(0, at))
+  const worker = [...before].reverse().find(line => line.startsWith(WORKER_PREFIX))
+  const line = worker !== undefined ? worker.slice(WORKER_PREFIX.length) : (before.at(-1) ?? '')
+  return line.startsWith(COMPLETION_TIMEOUT_TEXT) ? `CompletionTimeout: ${line}` : line
+}
+
 /**
  * What asking a person at a user gate came to: a verdict with any feedback; text
  * that is no answer, which leaves the gate due for the CEO to reply to; or nothing,
@@ -1608,7 +1665,7 @@ export function apply(ctx: Context, config: Config): void {
           if (failure !== undefined) break
         }
         if (failure !== undefined) {
-          return await endFailed(index, failureTail(failure), failure.error?.includes('timed out') ? 'timeout' : undefined)
+          return await endFailed(index, nodeErrorText(failure), failure.error?.includes('timed out') ? 'timeout' : undefined)
         }
         // A gate out of reloops that fails its item (`on_exhausted: fail_item`): this
         // item only, judged as a failed node's item is.
@@ -2127,8 +2184,8 @@ export function apply(ctx: Context, config: Config): void {
           spine.abandonPass()
           // Run end command with --failed so the Python side skips verify and
           // writes a failure record directly, matching the walker's behavior.
-          // Pass the real stderr tail so error_text matches the walker's message.
-          const reason = stderrTail(failure)
+          // The node's id and its own error, so error_text matches the walker's message.
+          const reason = nodeErrorText(failure)
           const failedKind = failure.error?.includes('timed out') ? 'timeout' : undefined
           const ended = await runDataCommand(shell, data, 'end', runner, activePass.index, reason, failedKind)
           if (!ended.ok) {

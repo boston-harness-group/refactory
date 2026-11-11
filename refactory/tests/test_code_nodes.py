@@ -449,10 +449,29 @@ def test_spine_runner_prints_a_verdict_gates_reason_then_its_label(tmp_path, mon
     lines = capsys.readouterr().out.strip().splitlines()
     assert lines[-1] == "reloop"
     assert "\n".join(lines[:-1]) == "show the elimination step\nand check B"
+    (tmp_path / "critic.txt").write_text("Looking at this carefully: the step holds.\n\nproceed")
+    assert run_mod.main([snippet.VERDICT]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines == ["Looking at this carefully: the step holds.", "proceed"]
     for text in ("I am not sure", "Do not proceed", "I would not proceed; reloop"):
         (tmp_path / "critic.txt").write_text(text)
         assert run_mod.main([snippet.VERDICT]) == 1, text
-        assert "is none of its answers" in capsys.readouterr().err
+        assert f"nor its last line ({text!r}) is one of its answers" in capsys.readouterr().err
+    (tmp_path / "critic.txt").write_text("- proceed\n- reloop")
+    assert run_mod.main([snippet.VERDICT]) == 1
+    err = capsys.readouterr().err
+    assert ("file 'critic.txt' names no verdict: its first line ('- proceed') is a list item, "
+            "not a verdict, and its last line ('- reloop') is a list item") in err, err
+    (tmp_path / "critic.txt").write_text("Proceed with caution: step 2 is thin.\n\nreloop")
+    assert run_mod.main([snippet.VERDICT]) == 1
+    err = capsys.readouterr().err
+    assert ("verdict gate 'check': file 'critic.txt' names two verdicts: 'proceed' as its "
+            "first word and 'reloop' on its last line") in err, err
+    (tmp_path / "critic.txt").write_text("Looking at this carefully: fine.\nNo obvious omission.")
+    assert run_mod.main([snippet.VERDICT]) == 1
+    err = capsys.readouterr().err
+    assert "neither the first word of file 'critic.txt' ('Looking'" in err, err
+    assert "nor its last line ('No obvious omission.')" in err, err
 
 
 @needs_sandbox
@@ -482,11 +501,95 @@ def test_spine_runs_each_composition_as_the_walker_does(name, edits, monkeypatch
     ("**RELOOP** - show the step\nmore", ("reloop", "show the step\nmore")),
     ("# Proceed: fine", ("proceed", "fine")),
     ('"reloop" because B is wrong', ("reloop", "because B is wrong")),
-    ("> - proceed", ("proceed", "")),
+    # A list item is never a verdict, on the first line as on the last.
+    ("> - proceed", None),
+    ("- Reloop: not needed\n- Halt: no", None),
+    ("1. proceed\n2. reloop", None),
+    ("-proceed", ("proceed", "")),
     ("halt: give up", ("halt", "give up")),
 ])
-def test_a_verdict_is_the_first_word_only(text, expected):
+def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
     assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    # Reason first, verdict alone on the last line (the LiveMath B-s42 meta-review shape).
+    ("Looking at this carefully: the steps hold.\nNo obvious omission.\n\nproceed",
+     ("proceed", "Looking at this carefully: the steps hold.\nNo obvious omission.")),
+    ("The algebra checks out.\n\nproceed.", ("proceed", "The algebra checks out.")),
+    ("The algebra checks out.\n**proceed**", ("proceed", "The algebra checks out.")),
+    ("Step 2 skips a case.\n> reloop — show the elimination step",
+     ("reloop", "Step 2 skips a case.\nshow the elimination step")),
+    ("Step 2 skips a case.\nRELOOP: show it", ("reloop", "Step 2 skips a case.\nshow it")),
+    ("Step 2 skips a case.\n– reloop – show it", None),
+    ("Step 2 skips a case.\nreloop – show it", ("reloop", "Step 2 skips a case.\nshow it")),
+    ("Review.\r\n\r\nproceed\r\n", ("proceed", "Review.")),
+    # Same word in both places: that word.
+    ("proceed: fine\n\nproceed", ("proceed", "fine\n\nproceed")),
+    ("It holds.\nproceed. Nothing to add.", ("proceed", "It holds.\nNothing to add.")),
+    ("Nothing can fix this.\n\nhalt", ("halt", "Nothing can fix this.")),
+    # A first-word verdict with a last line that is not a bare answer is the first word.
+    ("proceed: fine\n\nreloop if step 2 were wrong", ("proceed", "fine\n\nreloop if step 2 were wrong")),
+    # A list item on the last line is one option, not a verdict.
+    ("Assessment:\n- Reloop: not needed\n- Halt: no", None),
+    ("Options:\n- proceed\n- reloop\n- halt", None),
+    ("Options:\n1. proceed\n2. reloop", None),
+    ("proceed: fine. Options were:\n- reloop", ("proceed", "fine. Options were:\n- reloop")),
+    # A verdict inside a code fence is not read (the last line is the fence).
+    ("Review.\n```\nproceed\n```", None),
+    # Nothing between the first word and the last line is read; a last line counts only
+    # as the word alone or the word then a separator.
+    ("The verdict is proceed, mostly.\nI checked every step.", None),
+    ("I checked it.\nproceed\nThat is all.", None),
+    ("I checked it.\nreloop if unsure", None),
+    ("I checked it.\nproceed, because it holds", None),
+    ("I checked it.\nproceed! it holds", None),
+    ("I checked it.\nVerdict: proceed", None),
+    ("I checked it.\nproceeding", None),
+    ("", None),
+])
+def test_a_verdict_may_stand_alone_on_the_last_line(text, expected):
+    assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
+
+
+@pytest.mark.parametrize("text, first, last", [
+    ("Proceed with caution: step 2 is thin.\n\nreloop", "proceed", "reloop"),
+    ("Halt? No. The steps hold.\n\nproceed", "halt", "proceed"),
+    ("reloop: show B\n\n**proceed**.", "reloop", "proceed"),
+    # With a reason after the last-line word too.
+    ("Halt? No, the steps hold.\n\nproceed — nothing to fix", "halt", "proceed"),
+    ("Proceed with caution: step 2 is thin.\n\nreloop — show step 2", "proceed", "reloop"),
+    ("proceed: fine\n\nreloop: no need", "proceed", "reloop"),
+])
+def test_a_first_word_and_a_bare_last_line_that_differ_are_refused(text, first, last):
+    """Two different verdicts in one text: neither is picked (no first-word halt of the
+    whole run on "Halt? No.")."""
+    with pytest.raises(snippet.SnippetError, match=f"names two verdicts: '{first}' as its "
+                       f"first word and '{last}' on its last line"):
+        snippet.parse_verdict(text, ["proceed", "reloop", "halt"])
+
+
+@needs_sandbox
+def test_walker_a_verdict_on_the_critics_last_line_routes_and_hands_on_its_reason(tmp_path):
+    """Walker: a critic that reasons first and puts the word alone on its last line
+    reloops with its reasoning as the reason, then accepts; no item fails."""
+    state = _accepted(CRITIC_LOOP)
+    result, model = _walk(state, tmp_path, turns={
+        "critic": ["Looking at this carefully: step 2 skips the elimination.\n\nreloop",
+                   "Checked again: it holds.\n**proceed**"]})
+    assert result.exit_ok, result.error
+    decides = _prompts(model, "decide")
+    assert "step 2 skips the elimination" not in decides[0]
+    assert "step 2 skips the elimination" in decides[1]
+    assert len(decides) == len(result.facts["item_scores"]) + 1
+
+
+@needs_sandbox
+def test_walker_halt_on_the_critics_last_line_halts_the_run(tmp_path):
+    result, model = _walk(_accepted(CRITIC_LOOP), tmp_path, turns={
+        "critic": ["No answer here can be repaired.\n\nhalt"]})
+    assert result.halted and "gate 'check' halted the run" in str(result.error)
+    assert len(_prompts(model, "critic")) == 1
 
 
 @needs_sandbox
@@ -709,6 +812,11 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
     for text in (on, off):
         assert snippet.VERDICT in text and "parallel" in text and "max_iterations" in text
         assert "single-word condition" in text
+        flat = " ".join(text.split())
+        assert "`:`, `—`, `–`, `-` or `.`" in flat
+        assert ("Anything else fails that item's run, and so does a first word and a last "
+                "line that name different verdicts, so tell the writer to start with the "
+                "word or put it alone on the last line") in flat
         assert "`on_exhausted`" in text and "fails that item only" in text
         assert "ends the whole run (no later item runs)" in text
         assert "insert a node after the join" in text

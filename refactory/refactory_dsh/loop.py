@@ -4135,8 +4135,8 @@ class Loop(OuterLoop):
     def _reasoning_entries(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """The optimizer's own reasoning about recent candidates -- the line from the
         seed to the edited candidate, and the latest refused children -- beside what
-        happened to each. Train scores and gate decisions only."""
-        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change
+        happened to each. Train scores, train item errors and gate decisions only."""
+        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, item_errors
 
         by_id = {c.id: c for c in self.population}
         line: list[Candidate] = []
@@ -4157,7 +4157,9 @@ class Loop(OuterLoop):
             parent = by_id.get(candidate.parent or "")
             parent_records, same = (self._records_like(parent.id, candidate.id)
                                     if parent is not None else ([], None))
-            change = (edit_change(parent_records, self._train_item_records.get(candidate.id))
+            records = (list(self._train_item_records.get(candidate.id) or ())
+                       if candidate.evaluated else [])
+            change = (edit_change(parent_records, records)
                       if parent is not None and candidate.evaluated else None)
             entries.append({
                 "id": candidate.id, "epoch": record.get("epoch"),
@@ -4168,6 +4170,7 @@ class Loop(OuterLoop):
                 "same_seed": same,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
                 "broken": len(change["broken"]) if change and change["shared"] else None,
+                "errors": item_errors(records), "items": len(records),
             })
         return entries
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -1047,12 +1048,15 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. "
         "Give each out-edge a single-word condition (`proceed`, `reloop`, `revise` ...). "
         f"Any declared upstream output can be the verdict: with `\"evaluator\": "
-        f"\"{snippet.VERDICT}\"` the gate reads the first word of its first `required_reads` "
-        "file (or, with none, of its first `inputs` fact) -- whatever an agent or a code op "
-        "upstream wrote there; leading markdown or quotes are skipped -- and the rest of the "
-        "text is the reason. That first word must be one of the conditions (any case) or "
-        "`halt`, which ends the whole run; anything else fails the run, so tell the writer "
-        "to start with the word.",
+        f"\"{snippet.VERDICT}\"` the gate reads the verdict from its first `required_reads` "
+        "file (or, with none, its first `inputs` fact) -- whatever an agent or a code op "
+        "upstream wrote there: its first word, or else its last line when that is the word "
+        "alone or the word then `:`, `—`, `–`, `-` or `.` and more (leading markdown or "
+        "quotes are skipped; a list item or a code fence is not read) -- and the rest of "
+        "the text is the reason. The word must be one of the conditions (any case) or "
+        "`halt`, which ends the whole run. Anything else fails that item's run, and so does "
+        "a first word and a last line that name different verdicts, so tell the writer to "
+        "start with the word or put it alone on the last line.",
     ]
     if code_nodes:
         lines.append(
@@ -1883,6 +1887,95 @@ def _score_of(record: dict[str, Any]) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+#: How much of the first error of each kind a summary of a candidate's item errors keeps.
+ITEM_ERROR_CHARS = 300
+#: One ``<name>: `` step of an item error's ``<node>: <Kind>: ...`` chain.
+_ERROR_STEP = re.compile(r"([A-Za-z_][\w.-]*): ")
+#: A name in that chain that is an exception class, not a node id.
+_ERROR_KIND = re.compile(r"[A-Z][A-Za-z0-9_]*(?:Error|Exception|Timeout|Expired|Exit|Interrupt"
+                         r"|Stop|Failure|Iteration|Warning)")
+#: What the node runner (``refactory_dsh.run.FAILURE_MARKER``) prints before its own
+#: account of a failure, after the same text on stderr.
+_FAILURE_MARKER = "--- refactory failure ---"
+
+
+def _error_origin(text: str) -> tuple[str, str, str]:
+    """``(node, kind, message)`` of an item error, read from its first line, where both
+    runtimes say what failed: ``<node>: <Kind>: <message>`` (the walker's
+    ``nn.executor``; the spine's ``nodeErrorText`` puts that line before the node's
+    stderr tail). A fork nests its branch's error (``fork1: RuntimeError: inner:
+    SnippetError: y``), so the innermost node and kind are the origin. A message that
+    starts with a kind has no node (``ValueError: Expected: 3`` is a ValueError); one
+    that starts with a name and no kind is that node's (``decide: worker failed``). A
+    raw stderr tail with the node runner's failure marker and no such line (an older
+    spine record) is read from the runner's own account after the marker. Empty node or
+    kind when the text names none.
+    """
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    node, kind, message = _error_line(lines[0] if lines else "")
+    if not kind and _FAILURE_MARKER in lines:
+        account = lines[len(lines) - 1 - lines[::-1].index(_FAILURE_MARKER) + 1:]
+        if account:
+            node, kind, message = _error_line(account[0])
+    return node, kind, message
+
+
+def _error_line(text: str) -> tuple[str, str, str]:
+    """``(node, kind, message)`` of one ``<node>: <Kind>: <message>`` line."""
+    node = kind = ""
+    pos = 0
+    while step := _ERROR_STEP.match(text, pos):
+        name = step.group(1)
+        if _ERROR_KIND.fullmatch(name):
+            kind, pos = name, step.end()
+            continue
+        then = _ERROR_STEP.match(text, step.end())
+        if then and _ERROR_KIND.fullmatch(then.group(1)):
+            node, kind, pos = name, then.group(1), then.end()
+        elif pos == 0:
+            node, pos = name, step.end()
+        else:
+            break
+    return node, kind, text[pos:]
+
+
+def item_errors(records: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """A candidate's item errors -- items whose run failed, not wrong answers -- counted
+    by kind and the node that raised them, most frequent first: ``{"kind", "node",
+    "count", "item", "first"}``, with the first such item and its message (clipped to
+    ``ITEM_ERROR_CHARS``). Kind and node come from the error's ``<node>: <Error>:
+    <message>`` text when it has that shape (so a node's ``SnippetError`` wrapped in a
+    ``RuntimeError`` counts as a ``SnippetError`` at that node; see :func:`_error_origin`),
+    else the record's ``error_kind``."""
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records or ():
+        text = str(record.get("error_text") or "").strip()
+        if not text:
+            continue
+        node, kind, message = _error_origin(text)
+        kind = kind or str(record.get("error_kind") or "error")
+        group = groups.setdefault((kind, node), {
+            "kind": kind, "node": node, "count": 0, "item": str(record.get("id", "")),
+            "first": _clip(message, ITEM_ERROR_CHARS)})
+        group["count"] += 1
+    return sorted(groups.values(), key=lambda group: -group["count"])
+
+
+def _item_error_lines(errors: Sequence[dict[str, Any]], items: int) -> list[str]:
+    """A candidate's item errors (``item_errors``) as a request shows them; none when
+    it had none."""
+    if not errors:
+        return []
+    total = sum(int(error["count"]) for error in errors)
+    lines = [f"Item errors: {total} of {items} train item(s) failed with an error -- the "
+             "item's run failed, so it scored 0; not a wrong answer:"]
+    for error in errors:
+        where = f" at node {error['node']}" if error["node"] else ""
+        lines.append(f"- {error['count']} x {error['kind']}{where}; first (item "
+                     f"{error['item']}): {error['first']}")
+    return lines
+
+
 def edit_change(parent_records: Sequence[dict[str, Any]] | None,
                 child_records: Sequence[dict[str, Any]] | None) -> dict[str, Any]:
     """How a child did against its parent, item by item, on the train items both
@@ -2029,6 +2122,8 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
         if pair.get("same_seed") is False:
             lines.append("Parent and child were scored in different epochs, with different "
                          "seeds: some changes below may be run-to-run noise.")
+        child_records = list(pair.get("child_records") or ())
+        lines += _item_error_lines(item_errors(child_records), len(child_records))
         if not pair.get("parent"):
             lines.append("This candidate has no parent (it is the seed), so there is nothing "
                          "to compare.")
@@ -2068,7 +2163,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
 
 def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
     """'Your earlier reasoning': what the optimizer said about recent candidates,
-    beside what happened to them."""
+    beside what happened to them, with each one's item errors (``item_errors``)."""
     if not entries:
         return []
     lines = ["## Your earlier reasoning and what happened",
@@ -2082,6 +2177,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
              + (" (scored with different seeds)" if entry.get("same_seed") is False else "")
              if entry.get("fixed") is not None else "")) if part)
         lines += ["", f"### {entry.get('id')} (proposed in epoch {entry.get('epoch', '?')}) -- {outcome}",
+                  *_item_error_lines(entry.get("errors") or (), int(entry.get("items") or 0)),
                   "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",

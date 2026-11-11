@@ -346,6 +346,12 @@ def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
 COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 
 
+#: How much of a failed item's error its record keeps: the spine's 4096-character stderr
+#: tail, after the one line (at most 512 characters) that names the failed node and its
+#: error (`workflow-spine` ``nodeErrorText``).
+ERROR_TEXT_CHARS = 4096 + 512 + 1
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
 
@@ -417,7 +423,7 @@ def make_item_record(
             "id": item_id,
             "passed": False,
             "score": 0.0,
-            "error_text": str(error)[:4096],
+            "error_text": str(error)[:ERROR_TEXT_CHARS],
             "error_kind": error_kind(error),
             **base,
         }
