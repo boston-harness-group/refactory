@@ -418,7 +418,8 @@ optimizer, at no extra compute (train records only):
   of each kind (300 characters, `ITEM_ERROR_CHARS`). Both runtimes start a failed node's
   error with the line `<node>: <Kind>: <message>`, which is what is read (the spine
   takes it from the node runner's own account after its failure marker, or from a
-  worker's error line, and keeps the node's stderr tail below it as before); a fork's
+  worker's error line, and keeps the node's stderr tail below it, less the runner's
+  stderr copy of that account); a fork's
   nested error counts at its innermost node. An errored item the parent also got
   wrong is neither fixed nor broken, so without this a structural child that fails for a
   mechanical reason would look like one that just scored worse.
