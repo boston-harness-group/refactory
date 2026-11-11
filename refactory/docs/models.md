@@ -372,7 +372,11 @@ exit code: 0` in one group) and the answer on stdout. Either way it records a
 `worker_teardown_failed` warning event and does not ask again, with or without tools: it
 used to re-ask a session without tools, discarding a finished answer. A teardown failure
 with no answer, after a nonzero exit, or after the worker stopped without completing, is
-not kept and not retried. Any other
+not kept and not retried. A completion whose deadline passed and whose runtime then did
+not finish shutting down is still a timeout (`CompletionTimeout`, error kind `timeout`):
+the shutdown failure is appended to its message and recorded as a
+`model_shutdown_unconfirmed` warning event, and a node's retry rule does not rerun it,
+since its tools may still be running. Any other
 failure the client does not replay is raised as `CompletionFailed`, whose `kind` says what
 happened: `output_limit` (`dsh: max-tokens:`, or Claude Code's `category: output-limit`,
 which names the tokens spent and the per-response cap), `setup` (a key, model name or prompt

@@ -23,7 +23,10 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import model as model_mod
-from refactory_dsh.model import RETRY_EVENT, TEARDOWN_EVENT, TEARDOWN_WARNING, DshModelClient
+from refactory_dsh.model import (RETRY_EVENT, SHUTDOWN_EVENT, TEARDOWN_EVENT, TEARDOWN_WARNING,
+                                 DshModelClient)
+from refactory_dsh.node_retry import RETRY_EVENT as NODE_RETRY_EVENT
+from refactory_dsh.optim.base import item_errors
 from test_crashed_step_retry import RIGHT, RUNTIMES, _events, _keys, _pass, _run, _sessions, _straight
 
 HERE = Path(__file__).resolve().parent
@@ -36,7 +39,7 @@ needs_node = pytest.mark.skipif(NODE is None, reason="needs Node")
 TEARDOWN = ("dsh: worker failed: subagent-claude-code: Product subagent failure (product: "
             "Claude Code; stage: teardown; category: unknown; exit code: 0)")
 
-FAKE = """import fcntl, json, pathlib, subprocess, sys
+FAKE = """import fcntl, json, pathlib, signal, subprocess, sys, time
 root = pathlib.Path({root!r})
 plan = json.loads((root / "plan.json").read_text())
 sys.stdin.read()
@@ -46,6 +49,10 @@ with open(root / "lock", "w") as lock:
     calls = json.loads(counter.read_text()) if counter.exists() else 0
     counter.write_text(json.dumps(calls + 1))
 step = plan[calls] if calls < len(plan) else plan[-1]
+if step.get("hang"):
+    # Outlive the deadline, then ignore the shutdown request.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(step["hang"])
 if step.get("usage") is not None:
     subprocess.run([{node!r}, {driver!r}, {observer!r}, "session-" + str(calls), str(step["usage"])],
                    check=True)
@@ -201,3 +208,44 @@ def test_the_bridge_still_exits_1_for_a_worker_that_did_not_complete(tmp_path):
 
 def test_the_bridge_and_the_client_name_the_same_warning():
     assert f"const TEARDOWN_WARNING = '{TEARDOWN_WARNING}'" in (PACKAGE / "worker_bridge.mjs").read_text()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_timeout_whose_shutdown_hangs_is_still_a_timeout(tmp_path, runtime, monkeypatch):
+    """[both runtimes] Item 0's session outlives its 2 s limit and then ignores the
+    shutdown request (forced exit, cleanup unconfirmed). The item is a timeout -- error
+    kind ``timeout``, a ``CompletionTimeout`` at ``solve`` whose message says it timed
+    out and carries the shutdown failure -- with a warning recorded; it is not retried.
+    The other items answer."""
+    from refactory_dsh import owned_process
+
+    monkeypatch.setattr(owned_process, "SHUTDOWN_GRACE_S", 1)  # the walker's; the spine's is 10 s
+    dsh = Fake(tmp_path / "dsh", [{"hang": 30}, {"out": "right"}])
+    scores, run = _run(runtime, _straight(timeout_s=2), tmp_path, dsh)
+    by_id = {str(record["id"]): record for record in scores}
+    assert [by_id[item]["passed"] for item in "123"] == [True, True, True]
+    timed_out = by_id["0"]
+    assert timed_out["error_kind"] == "timeout"
+    assert "model completion timed out after 2s" in timed_out["error_text"]
+    assert "did not finish shutdown" in timed_out["error_text"]
+    [error] = item_errors([timed_out])
+    assert (error["kind"], error["node"]) == ("CompletionTimeout", "solve")
+    assert error["first"].startswith("model completion timed out")
+    directory = _pass(run, "0")
+    [warning] = _events(directory, SHUTDOWN_EVENT)
+    assert warning["state"] == "warning" and "did not finish shutdown" in warning["error"]
+    assert _events(directory, NODE_RETRY_EVENT) == []
+    assert dsh.calls() == 4
+
+
+def test_a_timeout_with_unconfirmed_cleanup_is_never_a_retried_timeout():
+    from refactory_dsh.model import CompletionTimeout
+    from refactory_dsh.node_retry import failure_kind
+
+    plain = CompletionTimeout("model completion timed out after 2s; requested runtime shutdown")
+    assert failure_kind(plain) == "timeout"
+    hung = CompletionTimeout("model completion timed out after 2s; requested runtime shutdown; "
+                             "model runtime did not finish shutdown within 10s; forced exit; "
+                             "child cleanup unconfirmed; not retried")
+    hung.cleanup_unconfirmed = True  # type: ignore[attr-defined]
+    assert failure_kind(hung) is None

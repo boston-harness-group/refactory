@@ -429,6 +429,9 @@ TEARDOWN_WARNING = "dsh: worker teardown failed after its answer:"
 TEARDOWN_EVENT = "worker_teardown_failed"
 #: The live event every completion the client re-asks records.
 RETRY_EVENT = "model_call_retried"
+#: The live event a timed-out completion records when its runtime then did not finish
+#: shutting down (a warning: the completion is still a timeout).
+SHUTDOWN_EVENT = "model_shutdown_unconfirmed"
 
 
 def teardown_warning(stderr: str) -> str:
@@ -1071,19 +1074,30 @@ class DshModelClient:
             try:
                 proc = self._run_completion(cmd, run_dir, stop_at, budget_s, task=task, target_workdir=target_workdir)
             except subprocess.TimeoutExpired as exc:
+                # The deadline passed first, so this is a timeout even when the runtime
+                # then failed to shut down: that failure is the timeout's detail and a
+                # recorded warning, and the error still says it timed out.
+                unconfirmed = getattr(exc, "shutdown_failure", "")
+                if unconfirmed:
+                    who = self._node_id or "a model call"
+                    self._emit(run_dir, SHUTDOWN_EVENT, state="warning", error=unconfirmed[:500],
+                               summary=f"{who}: timed out, and its runtime did not finish shutting "
+                                       "down; child cleanup unconfirmed")
+                detail = f"; {unconfirmed}" if unconfirmed else ""
                 if isinstance(exc, InactivityTimeout):
-                    raise CompletionTimeout(
+                    error = CompletionTimeout(
                         f"model completion timed out after {int(exc.inactive_s)}s of inactivity "
                         "(no model output and no running tool command); requested runtime "
-                        "shutdown; the client does not replay a deadline"
-                    ) from exc
-                # A tool-using completion may already have changed its workdir.
-                # A deadline is not a transport failure: replaying the prompt can
-                # duplicate real work even after its subprocesses have shut down.
-                raise CompletionTimeout(
-                    f"model completion timed out after {budget_s}s; "
-                    "requested runtime shutdown; the client does not replay a deadline"
-                ) from exc
+                        f"shutdown; the client does not replay a deadline{detail}")
+                else:
+                    # A tool-using completion may already have changed its workdir.
+                    # A deadline is not a transport failure: replaying the prompt can
+                    # duplicate real work even after its subprocesses have shut down.
+                    error = CompletionTimeout(
+                        f"model completion timed out after {budget_s}s; "
+                        f"requested runtime shutdown; the client does not replay a deadline{detail}")
+                error.cleanup_unconfirmed = bool(unconfirmed)  # type: ignore[attr-defined]
+                raise error from exc
             else:
                 self._raise_if_cancelled()
                 if proc.returncode == 0:
@@ -1252,10 +1266,18 @@ class DshModelClient:
                             # is no stdin input to resend, and the deadline never resets.
                             if time.monotonic() >= deadline:
                                 raise
-                except BaseException:
+                except BaseException as error:
                     # Direct interruption or the fork's cooperative event both use the
                     # runtime-owned cleanup before propagating failure.
-                    shutdown(proc)
+                    try:
+                        shutdown(proc)
+                    except RuntimeError as unconfirmed:
+                        if not isinstance(error, subprocess.TimeoutExpired):
+                            raise
+                        # The deadline had already passed: the call timed out, and a
+                        # shutdown that then hangs does not change that. The timeout
+                        # goes on, carrying the shutdown failure (`_complete`).
+                        error.shutdown_failure = str(unconfirmed)  # type: ignore[attr-defined]
                     raise
                 return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
             finally:
