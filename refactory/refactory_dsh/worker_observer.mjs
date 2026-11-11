@@ -8,6 +8,34 @@ export function apply(ctx) {
   const path = process.env.REFACTORY_WORKER_RECEIPT
   if (!path) return
   const initial = JSON.parse(readFileSync(path, 'utf8'))
+  // A client retry runs a fresh worker process under the same receipt. The sessions
+  // before this one keep their record (`earlier_sessions`) and their tokens count:
+  // `usage` is the receipt's total across sessions, `session_usage` this session's own.
+  const earlier = [...(initial.earlier_sessions ?? [])]
+  // The last session's own usage: its session_usage, or nothing when it reported none.
+  // Only a receipt no session of this observer has written yet holds it in `usage`.
+  const lastUsage = 'session_usage' in initial ? initial.session_usage : (earlier.length ? null : initial.usage ?? null)
+  if (ranBefore(initial, lastUsage)) {
+    earlier.push({
+      backend_session_id: initial.backend_session_id ?? null, runtime_session_id: initial.runtime_session_id ?? null,
+      product_session_id: initial.product_session_id ?? null, stop_reason: initial.stop_reason ?? null,
+      usage: lastUsage,
+    })
+  }
+  const earlierTokens = earlier.reduce((sum, session) => sum + tokensOf(session.usage), 0)
+  /** This session's usage with the earlier sessions' tokens added. */
+  function combined(own) {
+    if (earlier.length === 0 || own == null) return own
+    return {
+      ...own,
+      tokens: Number.isSafeInteger(own.tokens) ? own.tokens + earlierTokens : own.tokens,
+      ...(own.known_tokens != null ? { known_tokens: own.known_tokens + earlierTokens } : {}),
+      earlier_sessions_tokens: earlierTokens, sessions: earlier.length + 1,
+    }
+  }
+  function totals(own) {
+    return { usage: combined(own), session_usage: own }
+  }
   const sessions = new Map()
   let rootSessionId
   const streams = new Map()
@@ -56,7 +84,10 @@ export function apply(ctx) {
     adapter: '@deepseek-ai/dsh-subagent', adapter_version: dshVersion,
     version: backend === 'dsh' ? dshVersion : null, installed_product_version: productVersion,
     version_kind: backend === 'claude_code' ? 'agent-sdk' : 'runtime', source: 'installed-package' }
-  save({ runtime })
+  // A new session starts with none of the last one's ids or usage, so a session that
+  // ends before reporting is not counted again as the one before it.
+  save({ runtime, ...(earlier.length ? { earlier_sessions: earlier, session_usage: null, backend_session_id: null,
+    runtime_session_id: null, product_session_id: null, stop_reason: null } : {}) })
   ctx.on('refactory/worker-metadata', (parentId, metadata) => {
     if (backend !== 'dsh') {
       if (metadata.actual_route?.worker_backend === backend) {
@@ -64,14 +95,15 @@ export function apply(ctx) {
         runtime.version = productVersion
         runtime.source = 'started-pinned-provider'
       }
-      save({ ...metadata, runtime }, 'metadata', 'Native worker route or usage observed')
+      save({ ...metadata, ...(metadata.usage ? totals(metadata.usage) : {}), runtime }, 'metadata',
+        'Native worker route or usage observed')
       return
     }
     // A native descendant's model/usage is not the DSH coordinator's route or
     // complete usage total. Retain the observation with its delegating parent.
     incompleteNestedUsage = true
     nativeObservations.push({ parent_session_id: parentId, ...metadata })
-    save({ native_observations: nativeObservations, usage: usage() }, 'metadata', 'Delegated native usage is incomplete')
+    save({ native_observations: nativeObservations, ...totals(usage()) }, 'metadata', 'Delegated native usage is incomplete')
   })
   ctx.on('agent/request', async ({ agent }, next) => {
     if (backend !== 'dsh') throw new Error(`External ${backend} worker cannot dispatch a DSH model request; check the worker-driver composition`)
@@ -117,7 +149,7 @@ export function apply(ctx) {
     const current = streams.get(agent.session.id)
     if (!current?.usage) {
       incompleteNestedUsage = true
-      save({ usage: usage() }, 'usage', 'A completed request did not report token usage')
+      save(totals(usage()), 'usage', 'A completed request did not report token usage')
       streams.delete(agent.session.id)
       return
     }
@@ -125,21 +157,33 @@ export function apply(ctx) {
     const total = measured.totalTokens ?? (measured.inputTokens + measured.outputTokens + (measured.cacheReadTokens ?? 0) + (measured.cacheWriteTokens ?? 0))
     if (!Number.isSafeInteger(total) || total < 0) {
       incompleteNestedUsage = true
-      save({ usage: usage() }, 'usage', 'A completed request reported incomplete token usage')
+      save(totals(usage()), 'usage', 'A completed request reported incomplete token usage')
       streams.delete(agent.session.id)
       return
     }
     lastDelta = total
     calls.push({ session_id: agent.session.id, tokens: total })
-    save({ usage: usage() },
+    save(totals(usage()),
       'usage', `Measured ${total} tokens`)
     lastDelta = null
     streams.delete(agent.session.id)
   })
   ctx.on('subagent/start', info => {
     if (backend === 'dsh' && !info.local) incompleteNestedUsage = true
-    save({ backend_session_id: info.id, ...(incompleteNestedUsage ? { usage: usage() } : {}) },
+    save({ backend_session_id: info.id, ...(incompleteNestedUsage ? totals(usage()) : {}) },
       'running', `Worker accepted by ${info.provider}`)
   })
   ctx.on('subagent/end', info => save({ stop_reason: info.stopReason }, info.stopReason, `Worker ${info.stopReason}`))
+}
+
+/** Whether a receipt shows a session already ran under it (a client retry follows). */
+function ranBefore(receipt, usage) {
+  return Boolean(receipt.backend_session_id || receipt.runtime_session_id || receipt.product_session_id)
+    || tokensOf(usage) > 0
+}
+
+/** The tokens a usage record counts: its total, else what is known of it, else none. */
+function tokensOf(usage) {
+  if (Number.isSafeInteger(usage?.tokens)) return usage.tokens
+  return Number.isSafeInteger(usage?.known_tokens) ? usage.known_tokens : 0
 }

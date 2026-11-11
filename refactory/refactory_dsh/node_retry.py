@@ -124,10 +124,15 @@ def failure_kind(error: BaseException) -> str | None:
     answering: the model's own failure on the question, retried only when a step opts in.
     A wire that kept failing (``transport``) and a key, model name or prompt the provider
     refuses (``setup``) are none of them: the next session would fail the same way.
-    Cancellation, budget exhaustion, a refusal and a bad answer are never retried.
+    Cancellation, budget exhaustion, a refusal and a bad answer are never retried, and
+    neither is a session whose runtime did not finish shutting down.
     """
     from refactory_dsh.model import CompletionFailed, CompletionTimeout
 
+    if getattr(error, "cleanup_unconfirmed", False) or "child cleanup unconfirmed" in str(error):
+        # A session whose runtime did not finish shutting down (a timeout that then
+        # hung): its tools may still be running, so a fresh session could collide.
+        return None
     if isinstance(error, (CompletionTimeout, subprocess.TimeoutExpired)):
         return "timeout"
     if isinstance(error, RuntimeError) and str(error).startswith("model completion timed out"):
