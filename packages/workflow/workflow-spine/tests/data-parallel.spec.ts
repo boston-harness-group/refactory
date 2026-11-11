@@ -441,6 +441,48 @@ describe('data-parallel: the concurrent drain', () => {
   }, 60_000)
 })
 
+/**
+ * The body command for a failed item: item `id` prints `stderr` and exits 1 (after
+ * recording its own step as missing, when `missing`); every other item answers.
+ */
+function failOn(id: string, stderr: string, missing: boolean): string {
+  return `${PYTHON} -c 'import json,sys,pathlib; d=json.load(open("current_item.json")); p=pathlib.Path("reviews"); `
+    + `(d["id"] != ${JSON.stringify(id)}) or (${missing ? 'p.mkdir(exist_ok=True), (p / "work-missing.txt").write_text("spent"), ' : ''}`
+    + `sys.stderr.write(${JSON.stringify(stderr)}), sys.exit(1)); pathlib.Path("out.txt").write_text(d["id"])'`
+}
+
+describe('data-parallel: a failed body node in its item record', () => {
+  const THREE = ITEMS.slice(0, 3)
+
+  async function failedRecord(parallelism: number, work: string): Promise<Record<string, unknown>> {
+    const { workdir, taskDir } = loaderRun(THREE, parallelism)
+    const ctx = await mountLoader(processShell([]), {
+      graph: loaderGraph(parallelism, work), workdir,
+      commandEnv: { REFACTORY_WORKDIR: workdir, PYTHONPATH: taskDir },
+    })
+    expect(await drive(ctx)).toMatchObject({ status: 'done' })
+    const records = JSON.parse(readFileSync(join(workdir, 'item_records.json'), 'utf8')) as Array<Record<string, unknown>>
+    return records.find(record => record.id === 'i1')!
+  }
+
+  it.each([[1], [4]])('names the node and its error, then keeps the stderr tail (parallelism %i)', async (parallelism) => {
+    const stderr = 'loading notes.txt\nSnippetError: verdict gate check: no answer\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\n'
+    const record = await failedRecord(parallelism, failOn('i1', stderr, false))
+    const text = String(record.error_text)
+    expect(text.split('\n')[0]).toBe('work: SnippetError: verdict gate check: no answer')
+    expect(text.slice(text.indexOf('\n') + 1).trimEnd()).toBe(stderr.trimEnd())
+  }, 60_000)
+
+  it.each([[1], [4]])('finds no answer from a file named only before the marker (parallelism %i)', async (parallelism) => {
+    // items.no_answer reads the whole text: the step's missing output, out.txt, is named
+    // only in a log line the runner printed before its marker.
+    const stderr = 'cannot read out.txt\n--- refactory failure ---\nRuntimeError: step failed\n'
+    const record = await failedRecord(parallelism, failOn('i1', stderr, true))
+    expect(record.error_text).toBeNull()
+    expect(String(record.fail_reason)).toMatch(/^no answer: work/)
+  }, 60_000)
+})
+
 describe('data-parallel: validates graph with parallelism', () => {
   it('accepts a data node with parallelism', () => {
     const issues = validateGraph(parallelDataGraph(4))

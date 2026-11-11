@@ -1900,17 +1900,28 @@ _FAILURE_MARKER = "--- refactory failure ---"
 
 
 def _error_origin(text: str) -> tuple[str, str, str]:
-    """``(node, kind, message)`` of an item error, as both runtimes record a failed
-    node: ``<node>: <Kind>: <message>`` (the walker's ``nn.executor``; the spine prefixes
-    the node runner's failure text with the node id). A fork nests its branch's error
-    (``fork1: RuntimeError: inner: SnippetError: y``), so the innermost node and kind
-    are the origin. A message that starts with a kind has no node (``ValueError:
-    Expected: 3`` is a ValueError); one that starts with a name and no kind is that
-    node's (``decide: worker: timed out``). Empty node or kind when the text names none.
+    """``(node, kind, message)`` of an item error, read from its first line, where both
+    runtimes say what failed: ``<node>: <Kind>: <message>`` (the walker's
+    ``nn.executor``; the spine's ``nodeErrorText`` puts that line before the node's
+    stderr tail). A fork nests its branch's error (``fork1: RuntimeError: inner:
+    SnippetError: y``), so the innermost node and kind are the origin. A message that
+    starts with a kind has no node (``ValueError: Expected: 3`` is a ValueError); one
+    that starts with a name and no kind is that node's (``decide: worker failed``). A
+    raw stderr tail with the node runner's failure marker and no such line (an older
+    spine record) is read from the runner's own account after the marker. Empty node or
+    kind when the text names none.
     """
-    if _FAILURE_MARKER in text:  # a raw stderr tail: the runner's own account, once
-        before, _, after = text.rpartition(_FAILURE_MARKER)
-        text = after.strip() or before.strip()
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    node, kind, message = _error_line(lines[0] if lines else "")
+    if not kind and _FAILURE_MARKER in lines:
+        account = lines[len(lines) - 1 - lines[::-1].index(_FAILURE_MARKER) + 1:]
+        if account:
+            node, kind, message = _error_line(account[0])
+    return node, kind, message
+
+
+def _error_line(text: str) -> tuple[str, str, str]:
+    """``(node, kind, message)`` of one ``<node>: <Kind>: <message>`` line."""
     node = kind = ""
     pos = 0
     while step := _ERROR_STEP.match(text, pos):

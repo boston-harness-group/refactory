@@ -453,11 +453,19 @@ def test_item_errors_count_each_kind_at_its_node_with_its_first_message():
     # A node's failure with no exception kind: the node, and the record's kind.
     ("decide: worker: model completion timed out", ("timeout", "decide", "worker: model completion timed out")),
     ("dsh run failed (exit 1): boom", ("timeout", "", "dsh run failed (exit 1): boom")),
-    # A raw stderr tail from the node runner (`refactory_dsh.run.main`): the text after
-    # its marker, once; the warning and the first copy before it are dropped.
+    # The spine's record (`workflow-spine` `nodeErrorText`): the attribution line, then
+    # the node's stderr tail as before -- log lines, the error, the runner's marker and
+    # its account. Only the first line is read.
+    ("g: SnippetError: verdict gate 'g': bad\nloading notes.txt\nSnippetError: verdict gate "
+     "'g': bad\n--- refactory failure ---\nSnippetError: verdict gate 'g': bad",
+     ("SnippetError", "g", "verdict gate 'g': bad")),
+    ("decide: CompletionTimeout: model completion timed out after 60s\nworker: model "
+     "completion timed out after 60s", ("CompletionTimeout", "decide", "model completion timed out after 60s")),
+    # An older spine record: the raw tail, read from the runner's account after its marker.
     ("WARNING: slow\nSnippetError: verdict gate 'g': bad\n--- refactory failure ---\n"
      "SnippetError: verdict gate 'g': bad", ("SnippetError", "", "verdict gate 'g': bad")),
-    ("g: SnippetError: verdict gate 'g': bad\n--- refactory failure ---\n", ("SnippetError", "g", "verdict gate 'g': bad")),
+    # A multi-line message: the summary is its first line.
+    ("check: SnippetError: first line\nsecond line", ("SnippetError", "check", "first line")),
 ])
 def test_an_item_errors_node_and_kind_are_its_innermost(text, origin):
     from refactory_dsh.optim.base import item_errors
@@ -466,73 +474,13 @@ def test_an_item_errors_node_and_kind_are_its_innermost(text, origin):
     assert (error["kind"], error["node"], error["first"]) == origin
 
 
-def test_the_spine_runners_failure_text_is_attributed_to_its_node(tmp_path, monkeypatch, capsys):
-    """The spine records a failed node's error as its id, then the node runner's text
-    after its failure marker (`workflow-spine` `nodeErrorText`). Made here from the real
-    runner's stderr for a verdict gate that cannot read its answer."""
-    import json as json_mod
+def test_a_failed_items_record_keeps_the_spines_error_line_and_its_whole_tail():
+    """The spine sends the line naming the failed node, then the node's 4096-character
+    stderr tail as before (`nodeErrorText`); the record keeps all of it."""
+    from refactory_dsh import items
 
-    from refactory_dsh import lowering, run as run_mod, snippet
-    from refactory_dsh.optim.base import _FAILURE_MARKER, item_errors
-    from refactory_dsh.run import FAILURE_MARKER
-    from test_code_nodes import CRITIC_LOOP, _accepted
-
-    assert _FAILURE_MARKER == FAILURE_MARKER
-    lowering.write_declarations(_accepted(CRITIC_LOOP), tmp_path)
-    (tmp_path / "critic.txt").write_text("Looking at this carefully: fine.\nNo obvious omission.")
-    monkeypatch.setenv("DSH_WORKFLOW_NODE", json_mod.dumps({"id": "check", "type": "gate"}))
-    monkeypatch.setenv("REFACTORY_WORKDIR", str(tmp_path))
-    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
-    assert run_mod.main([snippet.VERDICT]) == 1
-    stderr = capsys.readouterr().err
-    assert FAILURE_MARKER in stderr and stderr.count("SnippetError") == 2, "setup: the runner's shape"
-    spine_text = "check: " + stderr.rpartition(FAILURE_MARKER)[2].strip()
-    for text in (spine_text, stderr):
-        (error,) = item_errors([_errored("t1", text)])
-        assert error["kind"] == "SnippetError"
-        assert error["first"].startswith("verdict gate 'check': neither the first word"), error
-        assert FAILURE_MARKER not in error["first"]
-    assert item_errors([_errored("t1", spine_text)])[0]["node"] == "check"
-
-
-def test_the_last_edit_section_shows_a_childs_item_errors():
-    """A child whose errored items were wrong in the parent too is neither fixed nor
-    broken, so before this its errors never reached the request."""
-    from refactory_dsh.optim.base import _edit_change_lines
-
-    parent = [{"id": f"t{k}", "passed": k == 0, "score": float(k == 0)} for k in range(4)]
-    child = [{"id": "t0", "passed": True, "score": 1.0},
-             *[_errored(f"t{k}", _SNIPPET_ERROR) for k in range(1, 4)]]
-    text = "\n".join(_edit_change_lines([{"child": "c", "parent": "p", "edit": [],
-                                           "parent_records": parent, "child_records": child}]))
-    assert "0 fixed (parent wrong, child right), 0 broken" in text, "setup: no item changed"
-    assert "Item errors: 3 of 4 train item(s) failed with an error" in text
-    assert "- 3 x SnippetError at node meta_gate; first (item t1): verdict gate 'meta_gate'" in text
-    assert text.count("SnippetError") == 1, "one line per kind, not one per item"
-    clean = "\n".join(_edit_change_lines([{"child": "c", "parent": "p", "edit": [],
-                                            "parent_records": parent, "child_records": parent}]))
-    assert "Item errors" not in clean
-
-
-def test_the_reasoning_section_shows_a_rejected_childs_item_errors(tmp_path, monkeypatch):
-    """The rejected child 6 had items fail with a SnippetError: its entry in "Your
-    earlier reasoning" counts them by kind at their node, with the first message, next
-    to its train score and fixed/broken counts; the current candidate 7 shows none."""
-    from refactory_dsh.optim.base import _reasoning_lines
-
-    loop, _proposer = _run_reasoning(tmp_path, monkeypatch)
-    ids = {_level(c): c.id for c in loop.population}
-    records = loop._train_item_records[ids[6]]
-    records[1:3] = [_errored(r["id"], _SNIPPET_ERROR) for r in records[1:3]]
-    seven = next(c for c in loop.population if c.id == ids[7])
-    loop._editing_parent = ids[7]
-    entries = {e["id"]: e for e in loop._reasoning_entries([seven])}
-    assert [(e["kind"], e["node"], e["count"]) for e in entries[ids[6]]["errors"]] == [
-        ("SnippetError", "meta_gate", 2)]
-    assert entries[ids[7]]["errors"] == []
-    text = "\n".join(_reasoning_lines(list(entries.values())))
-    block = text[text.index(f"### {ids[6]} "):]
-    assert block.index("Item errors: 2 of") < block.index("Edits:")
-    assert "- 2 x SnippetError at node meta_gate; first (item " in block
-    seven_block = text[text.index(f"### {ids[7]} "):text.index(f"### {ids[6]} ")]
-    assert "Item errors" not in seven_block
+    tail = "loading notes.txt\n" + "y" * 4096
+    text = "work: SnippetError: verdict gate check: no answer\n" + tail[-4096:]
+    record = items.make_item_record("i1", None, RuntimeError(text))
+    assert record["error_text"] == text
+    assert record["error_text"].endswith("y" * 4096)

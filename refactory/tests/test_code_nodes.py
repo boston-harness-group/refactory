@@ -461,7 +461,7 @@ def test_spine_runner_prints_a_verdict_gates_reason_then_its_label(tmp_path, mon
     assert run_mod.main([snippet.VERDICT]) == 1
     err = capsys.readouterr().err
     assert ("verdict gate 'check': file 'critic.txt' names two verdicts: 'proceed' as its "
-            "first word and 'reloop' alone on its last line") in err, err
+            "first word and 'reloop' on its last line") in err, err
     (tmp_path / "critic.txt").write_text("Looking at this carefully: fine.\nNo obvious omission.")
     assert run_mod.main([snippet.VERDICT]) == 1
     err = capsys.readouterr().err
@@ -496,7 +496,11 @@ def test_spine_runs_each_composition_as_the_walker_does(name, edits, monkeypatch
     ("**RELOOP** - show the step\nmore", ("reloop", "show the step\nmore")),
     ("# Proceed: fine", ("proceed", "fine")),
     ('"reloop" because B is wrong', ("reloop", "because B is wrong")),
-    ("> - proceed", ("proceed", "")),
+    # A list item is never a verdict, on the first line as on the last.
+    ("> - proceed", None),
+    ("- Reloop: not needed\n- Halt: no", None),
+    ("1. proceed\n2. reloop", None),
+    ("-proceed", ("proceed", "")),
     ("halt: give up", ("halt", "give up")),
 ])
 def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
@@ -521,7 +525,6 @@ def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
     ("Nothing can fix this.\n\nhalt", ("halt", "Nothing can fix this.")),
     # A first-word verdict with a last line that is not a bare answer is the first word.
     ("proceed: fine\n\nreloop if step 2 were wrong", ("proceed", "fine\n\nreloop if step 2 were wrong")),
-    ("proceed: fine\n\nreloop: no need", ("proceed", "fine\n\nreloop: no need")),
     # A list item on the last line is one option, not a verdict.
     ("Assessment:\n- Reloop: not needed\n- Halt: no", None),
     ("Options:\n- proceed\n- reloop\n- halt", None),
@@ -548,12 +551,16 @@ def test_a_verdict_may_stand_alone_on_the_last_line(text, expected):
     ("Proceed with caution: step 2 is thin.\n\nreloop", "proceed", "reloop"),
     ("Halt? No. The steps hold.\n\nproceed", "halt", "proceed"),
     ("reloop: show B\n\n**proceed**.", "reloop", "proceed"),
+    # With a reason after the last-line word too.
+    ("Halt? No, the steps hold.\n\nproceed — nothing to fix", "halt", "proceed"),
+    ("Proceed with caution: step 2 is thin.\n\nreloop — show step 2", "proceed", "reloop"),
+    ("proceed: fine\n\nreloop: no need", "proceed", "reloop"),
 ])
 def test_a_first_word_and_a_bare_last_line_that_differ_are_refused(text, first, last):
     """Two different verdicts in one text: neither is picked (no first-word halt of the
     whole run on "Halt? No.")."""
     with pytest.raises(snippet.SnippetError, match=f"names two verdicts: '{first}' as its "
-                       f"first word and '{last}' alone on its last line"):
+                       f"first word and '{last}' on its last line"):
         snippet.parse_verdict(text, ["proceed", "reloop", "halt"])
 
 

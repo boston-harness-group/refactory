@@ -243,25 +243,44 @@ function failureDetailOf(stderr: string): string {
   return `${head}\n…\n${tail}`
 }
 
-/** How much of a failed item's error its record keeps, as the walker's `make_item_record`. */
-const ITEM_ERROR_TEXT = 4_096
+/** How much of a failed node's stderr its item record keeps (the tail). */
+const ITEM_ERROR_TAIL = 4_096
+/** How long the line naming the failed node and its error may be (`items.ERROR_TEXT_CHARS`). */
+const ITEM_ERROR_LINE = 512
+/** What a dispatched agent's worker prints before its error (`worker_node.main`). */
+const WORKER_PREFIX = 'worker: '
+/** A model call that timed out, as `items.COMPLETION_TIMEOUT_TEXT` reads it. */
+const COMPLETION_TIMEOUT_TEXT = 'model completion timed out'
 
 /**
- * A failed pass-body node's error as its item record keeps it, in the walker's shape
- * (`<node>: <Type>: <message>`, `nn.executor`), so the optimizer can name the node and
- * the error on either runtime: the node id, then the node runner's own account after
- * its `--- refactory failure ---` marker (printed once, without the stderr copy before
- * it), or the stderr tail when it printed none.
+ * A failed pass-body node's error as its item record keeps it: a first line in the
+ * walker's shape, `<node>: <Kind>: <message>` (`nn.executor`), so the optimizer names
+ * the node and the error the same on either runtime, then the node's stderr tail exactly
+ * as before (log lines and file names included, which `items.no_answer` reads).
  */
 function nodeErrorText(failure: CommandFailure): string {
+  const tail = (failure.stderr || failure.error || `failed with exit code ${String(failure.exitCode)}`)
+    .slice(-ITEM_ERROR_TAIL)
+  if (!failure.nodeId) return tail
+  return `${failure.nodeId}: ${nodeErrorLine(tail)}`.slice(0, ITEM_ERROR_LINE) + `\n${tail}`
+}
+
+/**
+ * The line of a failed node's stderr that says what failed, as `<Kind>: <message>` when
+ * it can: the node runner's own account after its `--- refactory failure ---` marker
+ * (`refactory_dsh.run.main`); else a dispatched agent's worker error (a model call that
+ * timed out is a `CompletionTimeout`, as the walker names it); else the last line.
+ */
+function nodeErrorLine(stderr: string): string {
   const marker = '--- refactory failure ---'
-  const stderr = failure.stderr ?? ''
+  const lines = (text: string): string[] => text.split('\n').map(line => line.trim()).filter(line => line !== '')
   const at = stderr.lastIndexOf(marker)
-  const detail = at === -1 ? '' : stderr.slice(at + marker.length).trim()
-  const text = detail || (at === -1 ? stderr : stderr.slice(0, at).trim()) || failure.error
-    || `failed with exit code ${String(failure.exitCode)}`
-  const prefix = failure.nodeId ? `${failure.nodeId}: ` : ''
-  return prefix + text.slice(-(ITEM_ERROR_TEXT - prefix.length))
+  const account = at === -1 ? [] : lines(stderr.slice(at + marker.length))
+  if (account.length > 0) return account[0]!
+  const before = lines(at === -1 ? stderr : stderr.slice(0, at))
+  const worker = [...before].reverse().find(line => line.startsWith(WORKER_PREFIX))
+  const line = worker !== undefined ? worker.slice(WORKER_PREFIX.length) : (before.at(-1) ?? '')
+  return line.startsWith(COMPLETION_TIMEOUT_TEXT) ? `CompletionTimeout: ${line}` : line
 }
 
 /**

@@ -17,8 +17,8 @@ child), so the two cannot disagree about what a code node does:
   output -- the gate's first ``required_reads`` file, else its first ``inputs`` fact --
   written by an agent or a code node: its first word, or else its last line when that
   is the word alone or the word then a separator (``:``, ``—``, ``–``, ``-``, ``.``) and
-  more; the rest is the reason. A first word and a bare last-line word that name
-  different verdicts fail the gate (:func:`parse_verdict`).
+  more; the rest is the reason. A list item is never a verdict, and a first word and a
+  last line that name different verdicts fail the gate (:func:`parse_verdict`).
 
 ``inp`` is ``{"files": {read name: text}, "facts": {input name: value}}``: the
 node's declared reads that exist, and its declared ``inputs`` facts that are set.
@@ -546,31 +546,35 @@ def _last_line_verdict(line: str, lower: dict[str, str]) -> tuple[str, str, bool
 def parse_verdict(text: str, labels: list[str]) -> tuple[str, str] | None:
     """``(label, reason)`` from a verdict text, matched against ``labels`` in any case.
 
-    1. Its first word -- after leading markdown or quotes (``**``, ``#``, ``-``, ``"``,
-       ``:``) -- when that is a label; the reason is the rest of the text.
+    1. Its first word -- after leading markdown or quotes (``**``, ``#``, ``"``, ``:``)
+       -- when that is a label; the reason is the rest of the text.
     2. Otherwise its last non-empty line, when that (after leading markdown or quotes)
        is a label alone, with at most closing markdown and trailing punctuation
        (``proceed.``, ``**proceed**``), or a label then a separator (``:``, ``—``,
        ``–``, ``-``, ``.``) and more (``> reloop — show B``): the standard "reason
        first, verdict last" review. The reason is the text before that line, then what
-       follows the separator. A last line that is a list item (``- Halt: no``) or a
-       code fence is not a verdict.
+       follows the separator.
+
+    A line that is a list item (``- Halt: no``, ``1. proceed``) is never a verdict, first
+    or last, and neither is a code fence.
 
     ``None`` otherwise -- nothing between the first word and the last line is read:
     "Do not proceed" names no verdict, rather than proceed, and neither does a last line
     "reloop the check if unsure". Raises :class:`SnippetError` when the first word is a
-    label and the last line is a different label alone ("Halt? No. ...\n\nproceed"):
-    the text names two verdicts, and neither is picked."""
+    label and the last line names a different one, alone or with a reason ("Halt? No.
+    ...\n\nproceed — nothing to fix"): the text names two verdicts, and neither is
+    picked."""
     lower = {label.lower(): label for label in labels}
     body = str(text or "").strip()
     lines = body.splitlines()
-    word, rest = _lead_word(body)
+    listed = bool(lines) and _BULLET.match(lines[0].strip().lstrip(" \t>")) is not None
+    word, rest = ("", body) if listed else _lead_word(body)
     label = lower.get(word.lower())
     if label is not None:
         last = _last_line_verdict(lines[-1], lower) if len(lines) > 1 else None
-        if last is not None and last[2] and last[0] != label:
+        if last is not None and last[0] != label:
             raise SnippetError(f"names two verdicts: {label!r} as its first word and "
-                               f"{last[0]!r} alone on its last line")
+                               f"{last[0]!r} on its last line")
         return label, rest.lstrip(_REASON_LEAD).strip()
     if not lines:
         return None

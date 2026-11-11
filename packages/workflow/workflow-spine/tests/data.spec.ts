@@ -1249,13 +1249,19 @@ describe('abandonPass primitive (Correction 1)', () => {
 
 describe('spine error_text and stderr tail (Ask 5)', () => {
   it.each([
-    ['a stderr tail', 'work failed for item a', 'work: work failed for item a', undefined],
-    // The node runner's shape (refactory_dsh.run.main): the error, the marker, then its
-    // own account. The record keeps the account once, after the node's id, as the walker.
+    ['a stderr tail', 'work failed for item a', 'work: work failed for item a\nwork failed for item a'],
+    // The node runner's shape (refactory_dsh.run.main): log lines, the error, the marker,
+    // then its own account. The first line names the node and the account's error; the
+    // stderr tail follows unchanged.
     ['the node runner failure text',
-      'WARNING: slow\nSnippetError: verdict gate check: no answer\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\n',
-      'work: SnippetError: verdict gate check: no answer', '--- refactory failure ---'],
-  ])('spine error_text names the failed node and its error: %s', async (_label, stderrText, expected, absent) => {
+      'loading notes.txt\nSnippetError: verdict gate check: no answer\nits last line: x\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\nits last line: x\n',
+      'work: SnippetError: verdict gate check: no answer\nloading notes.txt\nSnippetError: verdict gate check: no answer\nits last line: x\n--- refactory failure ---\n'],
+    // A dispatched agent's worker: the error line, not the log line after it; a timed-out
+    // model call is a CompletionTimeout, as the walker names it.
+    ['a worker timeout',
+      'worker: model completion timed out after 60s of inactivity\nsession closed\n',
+      'work: CompletionTimeout: model completion timed out after 60s of inactivity\nworker: model'],
+  ])('spine error_text names the failed node and its error: %s', async (_label, stderrText, expected) => {
     // Ask 5: when a subgraph node's stderr says "work failed for item a",
     // the end --failed command receives that text, after the node's id.
     const workdir = scratch()
@@ -1309,9 +1315,7 @@ describe('spine error_text and stderr tail (Ask 5)', () => {
     // The end --failed command should have received the stderr tail
     const endFailedCmds = log.filter(c => c.includes(' end ') && c.includes('--failed'))
     expect(endFailedCmds.length).toBeGreaterThanOrEqual(1)
-    // The node's id and its error appear in the --failed argument
+    // The --failed argument: the node's id and its error, then the stderr tail as before
     expect(endFailedCmds[0]).toContain(expected)
-    if (absent !== undefined) expect(endFailedCmds[0]).not.toContain(absent)
-    expect(endFailedCmds[0]!.split('SnippetError').length).toBeLessThanOrEqual(2)
   })
 })
