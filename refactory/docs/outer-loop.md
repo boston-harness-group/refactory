@@ -29,13 +29,37 @@ candidates the way the SkillOpt strategy does, using the same `ValidationGate` a
 `FinalEvaluation` from `outerloop.py`. Only the optimizer, where edit ideas come from,
 differs. Without `--val-gate` nothing below applies.
 
-It follows SkillOpt's single line, where one current candidate is the only parent, so
-it refuses, before anything is rolled out, the optimizers and parent pickers that breed
-from a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`) and
-the strategies that merge parents or pick among sibling samples outside the gate
-(`autoscientists`, `best_of_n`, `reflective`). Run those without `--val-gate`. The
-`random`, `autoresearch` and `hill_climb` optimizers run with it, and so does
-`--parent-picker hill_climb`.
+Train is the proposer's feedback, validation decides every choice and test is scored
+once at the end. The validation average is the fitness for the parents, the pool and
+the winner, in every strategy, optimizer and parent picker; the proposer never sees a
+val score. `--selection` says how it selects:
+
+- **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
+  beats the incumbent's (the gate's current candidate), and the incumbent is the only
+  parent. The default for the default loop with a single-parent optimizer (`random`,
+  `autoresearch`, `hill_climb`, alone or as `--parent-picker hill_climb`), the
+  SkillOpt-matched setting; its decisions are those of the gate before pools existed.
+- **`pool`**: entry is permissive. Every judged candidate may enter a pool of the
+  `--pool-size` (8 by default) best by val score, with any tied with the last of them.
+  Parents come from the pool, the incumbent first, and each strategy or parent picker
+  chooses among them by val (a tie by train): `archive`, `evolutionary`, `islands` and
+  `map_elites` rank and choose cell champions by val and rebuild from the pool each
+  round, `random` takes the best on val, and a model proposer may name any pool member
+  as the parent. The incumbent still changes only on a strictly higher val score (a tie
+  goes to the higher train score, then the earlier candidate), and it is the winner. The
+  default for every other strategy and for the population optimizers and pickers.
+
+Strategies under the gate: `reflective` merges the two best of the pool on val and
+chooses prompt or structure from the val gains of past children over their parents
+(the gate's cache, rejected children included); `best_of_n` and `autoscientists` score
+the seed and send their samples and branches through the gate (the merge base is the
+best branch on val), and their natural ends (`samples_exhausted`, `merged`) run the
+final evaluation; `adaptive_meta` measures a stall on the best val score; `tree_search`
+debugs a failed candidate whether or not the gate kept it, and its notes name the leader
+without a val score. Every report has a `selection` section: the setting, the pool, its
+lines of descent (the seed's child each member descends from) and edit kinds, the share
+of children bred from the incumbent, and the budget (train, val and test scorings,
+rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 
 - **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
   (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
@@ -49,12 +73,13 @@ the strategies that merge parents or pick among sibling samples outside the gate
   The others are rejected, and one that beat the bar but lost to a sibling is marked
   shadowed in the report. SkillOpt gates one candidate per epoch, where the two rules
   agree; its own strategy keeps its gate unchanged.
-- **Parent and winner.** As in SkillOpt, the gate's current candidate (also the best on
-  val) is the parent every optimizer edits, with any accepted candidate a person kept,
-  whether or not its train run succeeded. The leaderboard lists the accepted candidates a
-  person has not rejected, ranked by val score. Its first is the winner: the report, the
-  held-out audit and `adopt` all name it, and the report's `best_score` is its val score
-  (`best_score_basis`), with its train score in `best_train_score`.
+- **Parent and winner.** Under `single`, as in SkillOpt, the gate's current candidate
+  (also the best on val) is the parent every optimizer edits, with any accepted
+  candidate a person kept, whether or not its train run succeeded, and the leaderboard
+  lists the accepted candidates a person has not rejected, ranked by val score. Under
+  `pool` the leaderboard is the pool, the incumbent first. Its first is the winner: the
+  report, the held-out audit and `adopt` all name it, and the report's `best_score` is
+  its val score (`best_score_basis`), with its train score in `best_train_score`.
 - **Fresh evidence.** As SkillOpt rolls out its current candidate on the train part
   every epoch, the candidate the optimizer edits is scored again at the start of each
   epoch's proposal step, on that epoch's train sample (the whole train part, or the
@@ -78,8 +103,10 @@ the strategies that merge parents or pick among sibling samples outside the gate
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
-  gradient's leaderboard) carries the gate's decision: `current` (the candidate it
-  edits), `kept`, `rejected` or `not gated`. The per-knob attribution counts, for each
+  gradient's leaderboard) carries the gate's decision: `current` (the incumbent),
+  `kept`, `rejected` or `not gated`; under `pool`, `kept` is in the pool now and
+  `rejected` is judged and out of it, and the request says so. The request's first line
+  gives the train score of the candidate the gate ranks first, labelled as such. The per-knob attribution counts, for each
   value, how many of its candidates were kept, rejected or not yet gated. The request
   says it edits the `current` candidate, and that a `rejected` one was not shown better
   on validation (with the gate's resolution, one item = 1/N of the val score, when the

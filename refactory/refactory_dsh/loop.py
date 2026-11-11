@@ -137,34 +137,34 @@ def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
     return found
 
 
-#: Under ``val_gate`` the default loop follows SkillOpt's single line: the gate's
-#: current candidate is the only parent. These optimizers breed from a population of
-#: parents (an archive, a tournament, islands, niche champions) ...
-VAL_GATE_REFUSED_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites")
-#: ... and these strategies merge parents or pick among sibling samples outside the
-#: gate, so neither can run under it.
-VAL_GATE_REFUSED_STRATEGIES = ("autoscientists", "best_of_n", "reflective")
+#: Optimizers and parent pickers that breed from a population of parents (an archive,
+#: a tournament, islands, niche champions). Under ``val_gate`` they default to the
+#: ``pool`` selection (``default_selection``).
+POPULATION_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites")
+
+#: ``LoopConfig.selection`` values under ``val_gate``: empty picks the default
+#: (``default_selection``); ``single`` is SkillOpt's line; ``pool`` keeps the best
+#: candidates on validation as parents.
+SELECTIONS = ("", "single", "pool")
 
 
 #: ``LoopConfig.portfolio`` values: off, or one candidate per edit level.
 PORTFOLIOS = ("", "prompt+pipeline")
 
 
-def val_gate_refusal(optimizer: str, strategy: str, picker: str = "") -> str:
-    """Why ``val_gate`` cannot run with this optimizer, parent picker or strategy;
-    empty when it can."""
-    if optimizer in VAL_GATE_REFUSED_OPTIMIZERS:
-        what = f"the {optimizer} optimizer breeds from a population of parents"
-    elif picker in VAL_GATE_REFUSED_OPTIMIZERS:
-        what = f"the {picker} parent picker breeds from a population of parents"
-    elif strategy in VAL_GATE_REFUSED_STRATEGIES:
-        what = (f"the {strategy} strategy merges parents or selects among samples "
-                "outside the gate")
-    else:
-        return ""
-    return (f"val_gate follows SkillOpt's single line, where the gate's current candidate "
-            f"is the only parent, and {what}; run it without --val-gate, or use the random, "
-            "autoresearch or hill_climb optimizer with --val-gate")
+def default_selection(strategy: str, optimizer: str, picker: str = "") -> str:
+    """The ``selection`` a ``val_gate`` run gets when it names none: ``single`` for the
+    default loop with a single-parent optimizer (the SkillOpt-matched setting, as before
+    pools existed), ``pool`` for every other strategy, optimizer or parent picker."""
+    if (strategy == "default" and optimizer not in POPULATION_OPTIMIZERS
+            and picker not in POPULATION_OPTIMIZERS):
+        return "single"
+    return "pool"
+
+
+def _train_key(candidate: Candidate) -> float:
+    """A candidate's train score for breaking a val tie; a failed train run counts lowest."""
+    return float(candidate.score) if candidate.score is not None else float("-inf")
 
 
 @dataclass
@@ -279,10 +279,11 @@ class LoopConfig:
     #: SkillOpt's evaluation protocol: train rollouts use SkillOpt's per-epoch seed
     #: (``outerloop.train_batch_seed``); every candidate evaluated on train, one that
     #: failed there included, is rolled out on the parts manifest's val part (with
-    #: ``seed``) and stays a parent only when its val score strictly beats the gate's
-    #: current candidate's; the last epoch's proposals are scored before the run
-    #: ends; and with a test part ``outerloop.FinalEvaluation`` runs at the end. The
-    #: winner is the best on val. Needs a manifest with a val part; a custom strategy
+    #: ``seed``), and its val score is the fitness every choice reads (``selection``):
+    #: the parents, the pool and the winner; the last epoch's proposals are scored
+    #: before the run ends; and with a test part ``outerloop.FinalEvaluation`` runs at
+    #: the end. The winner is the incumbent: the best on val, replaced only by a
+    #: strictly higher val score. Needs a manifest with a val part; a custom strategy
     #: (SkillOpt) keeps its own gate instead.
     val_gate: bool = False
     #: Train items per epoch: 0 (the default) scores every candidate on the whole train
@@ -340,6 +341,24 @@ class LoopConfig:
     #: the report counts the evaluations beyond ``batch_size``. Empty (the default):
     #: off.
     portfolio: str = ""
+    #: With ``val_gate``, how the validation average selects (``SELECTIONS``):
+    #:
+    #: - ``single``: SkillOpt's line. A candidate is kept only if its val score strictly
+    #:   beats the incumbent's (the gate's current candidate), and the incumbent (with
+    #:   any candidate a person kept) is the only parent.
+    #: - ``pool``: every judged candidate may enter a pool of the ``pool_size`` best by
+    #:   val score (ties at the edge kept). Parents come from the pool, each strategy
+    #:   and parent picker choosing among them by val. The incumbent still changes only
+    #:   on a strictly higher val score (a tie goes to the higher train score, then the
+    #:   earlier candidate), and it is the winner.
+    #:
+    #: Empty (the default) picks ``default_selection``: ``single`` for the default loop
+    #: with a single-parent optimizer, ``pool`` for every other strategy and for the
+    #: population optimizers and pickers. No effect without ``val_gate``.
+    selection: str = ""
+    #: The pool's size under ``selection`` ``pool``: the candidates with the best val
+    #: scores, plus any tied with the last of them.
+    pool_size: int = 8
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -553,6 +572,12 @@ class Loop(OuterLoop):
                 self.optimizer = PickedParent(picker, self.optimizer)  # type: ignore[arg-type]
             except ValueError as exc:
                 raise LoopError(str(exc)) from exc
+        if self.config.selection not in SELECTIONS:
+            raise LoopError(f"unknown selection {self.config.selection!r}; known: "
+                            f"{', '.join(s for s in SELECTIONS if s)}")
+        pool_size = self.config.pool_size
+        if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
+            raise LoopError("pool_size must be a positive integer")
         if self.config.portfolio not in PORTFOLIOS:
             raise LoopError(f"unknown portfolio {self.config.portfolio!r}; known: "
                             f"{', '.join(p for p in PORTFOLIOS if p)}")
@@ -916,10 +941,6 @@ class Loop(OuterLoop):
                     "val_gate needs a parts manifest with a 'val' part (--parts); "
                     "give the run one, or turn val_gate off"
                 )
-            picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
-            refusal = val_gate_refusal(self.optimizer.name, self.name, picker)
-            if refusal:
-                raise LoopError(refusal)
         elif (self.config.train_minibatch
               and len(self._train_ids()) > self.config.train_minibatch):
             # Without the gate the winner and the parents are picked by train score,
@@ -933,6 +954,11 @@ class Loop(OuterLoop):
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
                 "gate's best score; turn val_gate on, or leave them off"
+            )
+        elif self.config.selection:
+            raise LoopError(
+                f"selection {self.config.selection} chooses by validation score, which only "
+                "the validation gate measures; turn val_gate on, or leave selection empty"
             )
 
         if resumed:
@@ -2264,6 +2290,74 @@ class Loop(OuterLoop):
                 "extra_evaluations": sum(entry["evaluations"] for entries in rounds.values()
                                          for entry in entries[base:])}
 
+    def _selection_report(self) -> dict[str, Any]:
+        """How this run selected, what its pool holds, and what the search cost.
+
+        ``setting``: ``single`` or ``pool`` under ``val_gate``, ``train`` without it.
+        ``pool``: the candidates the next round would choose parents from (the pool;
+        under ``single`` the incumbent and what a person kept; without the gate the
+        ``pool_size`` best by train score). ``lines_of_descent``: how many distinct
+        lines the pool holds, a line being the seed's child a candidate descends from
+        (the seed is a line of its own), with ``largest_line_share``. ``edit_kinds``:
+        the pool's candidates by the level of the edit that made each one (``seed``,
+        ``prompt_knob``, ``pipeline``). ``parents_from_incumbent``: of the candidates
+        the run added, the share whose parent was the incumbent when they were added.
+        ``budget``: train scorings (evaluations, re-scores included), val and test
+        scorings, tokens and wall-clock, so arms are compared at equal cost rather
+        than equal rounds.
+        """
+        from refactory_dsh.optim.base import edit_level
+
+        setting = self.selection_mode() or ("train" if self._custom_strategy is None else "")
+        if setting == "pool":
+            members = self._pool()
+        elif setting == "single":
+            members = self._gated_parents()
+        else:
+            members = self.leaderboard(int(self.config.pool_size))
+        by_id = {c.id: c for c in self.population}
+
+        def line(candidate: Candidate) -> str:
+            seen: set[str] = set()
+            while candidate.parent and candidate.parent in by_id and candidate.id not in seen:
+                seen.add(candidate.id)
+                parent = by_id[candidate.parent]
+                if not parent.parent:
+                    return candidate.id
+                candidate = parent
+            return candidate.id
+
+        lines: dict[str, int] = {}
+        kinds: dict[str, int] = {}
+        for candidate in members:
+            lines[line(candidate)] = lines.get(line(candidate), 0) + 1
+            kind = edit_level(candidate.own_edits()) if candidate.parent else "seed"
+            kinds[kind] = kinds.get(kind, 0) + 1
+        choices = dict(self._strategy_state.get("parent_from_incumbent") or {})
+        counters = [counts for counts in self._occasion_counters.values()]
+        snapshot = self.budget.snapshot() if self.budget else {}
+        return {
+            "setting": setting,
+            "pool_size": int(self.config.pool_size) if setting == "pool" else None,
+            "pool": [c.id for c in members],
+            "lines_of_descent": len(lines),
+            "largest_line_share": (round(max(lines.values()) / len(members), 3)
+                                   if members else None),
+            "edit_kinds": dict(sorted(kinds.items())),
+            "parents_from_incumbent": (round(sum(1 for v in choices.values() if v) / len(choices), 3)
+                                       if choices else None),
+            "children": len(choices),
+            "budget": {
+                "train_scorings": self.evaluations,
+                "val_scorings": sum(int(c.get(task_module.VAL, 0)) for c in counters),
+                "test_scorings": sum(int(c.get(task_module.TEST, 0)) for c in counters),
+                "rollouts": self.rollouts,
+                "tokens": snapshot.get("tokens"),
+                "known_tokens": snapshot.get("known_tokens"),
+                "elapsed_s": snapshot.get("elapsed_s"),
+            },
+        }
+
     def _write_analysis(self) -> None:
         diagnosis = str(getattr(self.optimizer, "last_diagnosis", "") or "")
         if not diagnosis:
@@ -2484,6 +2578,11 @@ class Loop(OuterLoop):
                 )
                 continue
             known.add(candidate.id)
+            if candidate.parent and self._custom_strategy is None:
+                # Whether its parent was the incumbent when it was added, for the
+                # report's pool diversity; in the strategy state, so a resume keeps it.
+                self._strategy_state.setdefault("parent_from_incumbent", {})[candidate.id] = (
+                    candidate.parent == self._incumbent_id())
             self.population.append(candidate)
             added.append(candidate)
         self.generation += 1
@@ -3117,25 +3216,80 @@ class Loop(OuterLoop):
                 "best_train_score": winner.score}
 
     def _gated_parents(self) -> list[Candidate]:
-        """The parents under ``val_gate``: SkillOpt's rule, for every optimizer.
+        """The parents under ``val_gate``, for every optimizer and strategy.
 
-        The gate's current candidate (the last one accepted, which is also the best
-        on val) is the parent, whether or not its train run succeeded, with any
-        accepted candidate a person kept. The optimizer chooses from these alone,
-        so which candidate is edited does not depend on how an optimizer ranks a
-        missing train score.
+        ``single`` (SkillOpt's rule): the gate's current candidate (the last one
+        accepted, which is also the best on val), whether or not its train run
+        succeeded, with any accepted candidate a person kept. ``pool``: the pool
+        (``_pool``, the incumbent first), with any judged candidate a person kept.
+        The optimizer chooses from these alone, by val (``ProposalContext.val_scores``),
+        so which candidate is edited never depends on a train score from another
+        round's seed or sample.
         """
         gate = self._gate()
+        if self.selection_mode() == "pool":
+            pool = self._pool()
+            judged = set(self._gate_accepted) | set(self._gate_rejected)
+            return pool + [c for c in self._evaluated() if c.id in self.kept and c.id in judged
+                           and c not in pool and c.id not in self.rejected]
         board = self.leaderboard()
         current = next((c for c in board if c.id == gate.current_id), None)
         first = [current] if current is not None else board[:1]
         return first + [c for c in board if c.id in self.kept and c not in first]
+
+    def selection_mode(self) -> str:
+        """How the validation average selects in this run (``LoopConfig.selection``):
+        ``single`` or ``pool`` under the default loop's ``val_gate``; empty without it
+        (train scores select) or with a custom strategy (which keeps its own gate)."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return ""
+        if self.config.selection:
+            return self.config.selection
+        picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
+        return default_selection(self.name, self.config.optimizer, picker)
+
+    def _pool(self) -> list[Candidate]:
+        """The pool under ``selection`` ``pool``: the judged candidates with the
+        ``pool_size`` best val scores, plus any tied with the last of them, minus what a
+        person rejected. Ranked by val score, a tie by the higher train score (a failed
+        train run lowest), then the earlier candidate; the incumbent (the gate's current
+        candidate) is first, since it changes only on a strictly higher val score.
+
+        Rebuilt from the gate's cache each time it is read: a val score never changes,
+        so the pool is the same set a pool updated round by round would hold, and a
+        resumed run holds it again without storing it.
+        """
+        gate = self._gate()
+        judged = set(self._gate_accepted) | set(self._gate_rejected)
+        order = {c.id: index for index, c in enumerate(self.population)}
+        ranked = sorted(
+            (c for c in self._evaluated()
+             if c.id in judged and c.id in gate.cache and c.id not in self.rejected),
+            key=lambda c: (-gate.cache[c.id], -_train_key(c), order[c.id]))
+        size = max(1, int(self.config.pool_size))
+        if len(ranked) > size:
+            edge = gate.cache[ranked[size - 1].id]
+            ranked = [c for c in ranked if gate.cache[c.id] >= edge]
+        incumbent = next((c for c in ranked if c.id == gate.current_id), None)
+        if incumbent is not None:
+            ranked = [incumbent] + [c for c in ranked if c is not incumbent]
+        return ranked
+
+    def _incumbent_id(self) -> str | None:
+        """The candidate a parent counts as "the incumbent" for (``selection`` report):
+        the gate's current candidate under ``val_gate``, else the train leader."""
+        if self.config.val_gate and self._custom_strategy is None:
+            return self._gate().current_id
+        board = self.leaderboard(1)
+        return board[0].id if board else None
 
     def _store_gate_state(self) -> None:
         """Put the gate's state and decisions in the strategy state (not journaled)."""
         self._strategy_state["val_gate"] = {
             **self._gate().state_dict(),
             "accepted": list(self._gate_accepted), "rejected": list(self._gate_rejected),
+            # Which rule ranked the winner, so adopt names the one the report names.
+            "selection": self.selection_mode(), "pool_size": int(self.config.pool_size),
         }
 
     # ── val_gate: SkillOpt's early stop and post-training evaluation ────────
@@ -3330,6 +3484,10 @@ class Loop(OuterLoop):
         the report's winner, the held-out audit, the atomic adopt -- goes through
         this one ranking, so a dismissed branch cannot come back as the best answer.
         """
+        if self.config.val_gate and self.selection_mode() == "pool":
+            # The pool, the incumbent first: what every choice under ``pool`` reads.
+            pool = self._pool()
+            return pool[:limit] if limit else pool
         if self.config.val_gate:
             # The candidates the gate accepted, a failed train run included, ranked
             # by their val score: what the gate selects on, not the train score.
@@ -3384,13 +3542,19 @@ class Loop(OuterLoop):
 
     def _gate_decision(self, candidate_id: str) -> str | None:
         """What the validation gate decided about a candidate, as the optimizer reads
-        it: ``current`` (the one it edits), ``kept``, ``rejected`` or ``not gated``.
-        ``None`` without ``val_gate``. Never a val score."""
+        it: ``current`` (the incumbent), ``kept``, ``rejected`` or ``not gated``.
+        Under ``selection`` ``pool``, ``kept`` is in the pool now and ``rejected`` is
+        judged and not in it. ``None`` without ``val_gate``. Never a val score."""
         if not self.config.val_gate or self._custom_strategy is not None:
             return None
         gate = self._gate()
         if candidate_id == gate.current_id:
             return "current"
+        if self.selection_mode() == "pool":
+            judged = set(self._gate_accepted) | set(self._gate_rejected)
+            if candidate_id not in judged:
+                return "not gated"
+            return "kept" if any(c.id == candidate_id for c in self._pool()) else "rejected"
         if candidate_id in self._gate_accepted:
             return "kept"
         if candidate_id in self._gate_rejected:
@@ -3544,6 +3708,7 @@ class Loop(OuterLoop):
             "holdout": audit,
             "strategy_report": strategy_report,
             **({"portfolio": self._portfolio_report()} if self.config.portfolio else {}),
+            "selection": self._selection_report(),
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
@@ -3918,6 +4083,7 @@ class Loop(OuterLoop):
             "",
             *_strategy_report_section(payload.get("strategy_report") or {}),
             *_portfolio_section(payload.get("portfolio") or {}),
+            *_selection_section(payload.get("selection") or {}),
             "## Leaderboard",
             "",
             _md_table(
@@ -4049,7 +4215,8 @@ class Loop(OuterLoop):
 
     # ── context ────────────────────────────────────────────────────────────
     def _context(self) -> ProposalContext:
-        board = self.leaderboard(8)
+        # Under ``pool`` the whole pool: every parent a proposal may name is shown.
+        board = self.leaderboard(None if self.selection_mode() == "pool" else 8)
         described, graph_note = self._describe_parent(board)
         sandbox = self._sandbox_answer()
         return ProposalContext(
@@ -4112,6 +4279,7 @@ class Loop(OuterLoop):
             seed_knob_values=self._seed_knob_values(),
             parent=self._edited_id(board),
             val_scores=self._val_scores(),
+            selection=self.selection_mode(),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
         )
@@ -4844,6 +5012,39 @@ def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
         lines += [_md_table(["round", "level", "candidate", "outcome", "val", "parent val"],
                             round_rows), ""]
     return lines
+
+
+def _selection_section(selection: dict[str, Any]) -> list[str]:
+    """How the run selected, its pool's diversity and its budget, as a report section."""
+    if not selection or not selection.get("setting"):
+        return []
+    setting = selection["setting"]
+    what = {
+        "pool": (f"`pool`: the validation average is the fitness; the pool keeps the "
+                 f"{selection.get('pool_size')} best candidates on validation (ties at the edge "
+                 "kept) and parents come from it; the incumbent, the winner, changes only on a "
+                 "strictly higher validation score."),
+        "single": ("`single`: SkillOpt's line; a candidate is kept only on a strictly higher "
+                   "validation score than the incumbent's, and the incumbent is the only parent."),
+        "train": "`train`: no validation gate, so train scores choose the parents and the winner.",
+    }.get(setting, f"`{setting}`")
+    budget = selection.get("budget") or {}
+    share = selection.get("parents_from_incumbent")
+    return ["## Selection", "", what, "",
+            _md_table(["pool", "lines of descent", "largest line", "edit kinds",
+                       "parents from the incumbent"],
+                      [[len(selection.get("pool") or ()), selection.get("lines_of_descent"),
+                        selection.get("largest_line_share"),
+                        ", ".join(f"{k} {v}" for k, v in (selection.get("edit_kinds") or {}).items()),
+                        "n/a" if share is None else f"{share} of {selection.get('children')}"]]),
+            "",
+            _md_table(["train scorings", "val scorings", "test scorings", "rollouts", "tokens",
+                       "wall-clock s"],
+                      [[budget.get("train_scorings"), budget.get("val_scorings"),
+                        budget.get("test_scorings"), budget.get("rollouts"),
+                        budget.get("tokens") if budget.get("tokens") is not None
+                        else budget.get("known_tokens"), budget.get("elapsed_s")]]),
+            ""]
 
 
 def _strategy_report_section(report: dict[str, Any]) -> list[str]:

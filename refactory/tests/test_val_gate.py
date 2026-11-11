@@ -359,37 +359,8 @@ def test_hill_climb_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
     assert not set(again) & set(before), "a judged candidate is never rolled out on val again"
 
 
-@pytest.mark.parametrize("optimizer", ["archive", "evolutionary", "islands", "map_elites"])
-def test_val_gate_refuses_a_population_optimizer_before_any_rollout(tmp_path, optimizer):
-    """val_gate follows SkillOpt's single line (the current candidate is the only
-    parent), so an optimizer that breeds from a population is refused, at
-    configuration and at start, before anything is rolled out."""
-    from refactory_dsh import profiles
-
-    with pytest.raises(profiles.ProfileError, match="single line"):
-        profiles.normalize({"val_gate": True, "optimizer": optimizer})
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, val_gate=True, optimizer=optimizer)
-        with pytest.raises(LoopError, match=f"the {optimizer} optimizer.*without --val-gate"):
-            loop.run()
-    assert loop.rollouts == 0 and not (loop.root / "runs").exists()
-    assert profiles.normalize({"optimizer": optimizer})["optimizer"] == optimizer
-
-
-@pytest.mark.parametrize("strategy", ["autoscientists", "best_of_n", "reflective"])
-def test_val_gate_refuses_a_population_strategy_before_any_rollout(tmp_path, strategy):
-    from refactory_dsh import profiles, strategies
-
-    with pytest.raises(profiles.ProfileError, match="single line"):
-        profiles.normalize({"val_gate": True, "strategy": strategy})
-    with _patch_mode(LevelProbe):
-        loop = strategies.resolve(strategy)(MODE_ID, LoopConfig(
-            epochs=2, batch_size=1, optimizer="random", seed=7, runs_root=tmp_path / "run",
-            allowed_ops=("set_knob",), holdout=0.0, val_gate=True, strategy=strategy,
-            parts_manifest=str(_write_parts(tmp_path, test=True))), project=Path("."))
-        with pytest.raises(LoopError, match=f"the {strategy} strategy.*without --val-gate"):
-            loop.init()
-    assert loop.rollouts == 0 and not (loop.root / "runs").exists()
+# Population optimizers, pickers and strategies run under the gate with ``selection``
+# ``pool``: see test_validation_selection.py.
 
 
 @pytest.mark.parametrize("optimizer", ["random", "autoresearch", "hill_climb"])

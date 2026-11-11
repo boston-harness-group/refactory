@@ -170,12 +170,18 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     minibatch = result.get("train_minibatch")
     if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
-    if result["val_gate"]:
-        from refactory_dsh.loop import val_gate_refusal
-        refusal = val_gate_refusal(str(result.get("optimizer")), str(result.get("strategy")),
-                                   str(result.get("parent_picker") or ""))
-        if refusal:
-            raise ProfileError(refusal)
+    from refactory_dsh.loop import SELECTIONS
+    selection = result.get("selection") or ""
+    if selection not in SELECTIONS:
+        raise ProfileError(f"unknown selection: {selection}; known: "
+                           f"{', '.join(s for s in SELECTIONS if s)}")
+    if selection and not result["val_gate"]:
+        raise ProfileError(f"selection {selection} chooses by validation score, which only "
+                           "val_gate measures; turn val_gate on, or leave selection empty")
+    result["selection"] = selection
+    pool_size = result.get("pool_size")
+    if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
+        raise ProfileError("pool_size must be a positive integer")
     # max_items_in_flight: None or positive int
     mif = result.get("max_items_in_flight")
     if mif is not None:
@@ -398,7 +404,7 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
         "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
-        "fresh_evidence", "max_edits_per_proposal")}
+        "fresh_evidence", "max_edits_per_proposal", "selection", "pool_size")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
@@ -469,6 +475,13 @@ SETTING_HELP = {
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
                      "map_elites) with --optimizer: the picker chooses the candidate each "
                      "step edits, the optimizer writes the edits (default: none)",
+    "selection": "with --val-gate: pool keeps the --pool-size best candidates on validation "
+                 "as parents, the incumbent (the winner) changing only on a strictly higher "
+                 "val score; single is SkillOpt's line, the incumbent the only parent "
+                 "(default: single for the default loop with a single-parent optimizer, "
+                 "pool otherwise)",
+    "pool_size": "with --selection pool: how many candidates the pool keeps by val score, "
+                 "ties at the edge kept (default: 8)",
     "portfolio": "prompt+pipeline: each round asks the model proposer for one "
                  "prompt/knob-level and one pipeline-level candidate and evaluates both, "
                  "gated in that order (default: off)",

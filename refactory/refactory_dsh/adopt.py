@@ -200,15 +200,28 @@ def _gate_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any
     states = {str(entry.get("id")): entry for entry in entries
               if entry.get("event") == "candidate" and isinstance(entry.get("state"), dict)}
     cache = {str(k): float(v) for k, v in (gate.get("val_cache") or {}).items()}
-    eligible = [str(cid) for cid in gate.get("accepted") or ()
-                if str(cid) not in rejected and str(cid) in states]
+    pool = gate.get("selection") == "pool"
+    # Under ``pool`` every judged candidate may be in the pool; else only the accepted.
+    judged = list(gate.get("accepted") or ()) + (list(gate.get("rejected") or ()) if pool else [])
+    eligible = [str(cid) for cid in judged if str(cid) not in rejected and str(cid) in states]
     if not eligible:
         raise AdoptionError(
             f"{run_root} ran with the validation gate, which accepted no candidate that a "
             "person has not rejected and whose state was recorded; there is nothing to adopt"
         )
-    # Loop.leaderboard's order under val_gate: val score descending, then id.
-    winner_id = min(eligible, key=lambda cid: (-cache.get(cid, 0.0), cid))
+    if pool:
+        # Loop._pool's order: the incumbent first, then val score descending, a tie by
+        # the higher train score (a failed train run lowest), then the earlier candidate.
+        trains = _score_by_id(entries)
+        order = {cid: index for index, cid in enumerate(states)}
+        current = str(gate.get("current_candidate_id") or "")
+        winner_id = min(eligible, key=lambda cid: (
+            cid != current, -cache.get(cid, 0.0),
+            -(trains[cid] if trains.get(cid) is not None else float("-inf")),
+            order.get(cid, len(order))))
+    else:
+        # Loop.leaderboard's order under val_gate: val score descending, then id.
+        winner_id = min(eligible, key=lambda cid: (-cache.get(cid, 0.0), cid))
     found = states[winner_id]
     score = cache.get(winner_id, 0.0)
     train = _score_by_id(entries).get(str(winner_id))
