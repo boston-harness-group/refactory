@@ -1022,6 +1022,19 @@ class Loop(OuterLoop):
         kept. Runs before ``config.json`` is written, so the run records the decision."""
         self._val_gate_basis = "explicit"
         self.selection_warning = ""
+        saved = self.root / "config.json"
+        if self.config.resume and self.config.val_gate is None and saved.exists():
+            # A resumed run keeps the decision it recorded, and its selection, rather
+            # than re-deciding from the manifest: the epochs already run selected so.
+            try:
+                recorded = json.loads(saved.read_text())
+            except (OSError, ValueError):
+                recorded = {}
+            if isinstance(recorded.get("val_gate"), bool):
+                self.config.val_gate = recorded["val_gate"]
+                self._val_gate_basis = "resumed: the run's recorded decision"
+                if not self.config.selection and recorded.get("selection") in ("single", "pool"):
+                    self.config.selection = recorded["selection"]
         if self.config.val_gate is not None:
             self.config.val_gate = bool(self.config.val_gate)
             return
@@ -2374,7 +2387,7 @@ class Loop(OuterLoop):
         else:
             warning = ""
         if setting == "pool":
-            members = self._pool()
+            members = self._judged_ranked() if self._population_policy() else self._pool()
         elif setting == "single":
             members = self._gated_parents()
         else:
@@ -2406,6 +2419,10 @@ class Loop(OuterLoop):
             "val_gate": bool(self.config.val_gate),
             "val_gate_basis": self._val_gate_basis,
             "pool_size": int(self.config.pool_size) if setting == "pool" else None,
+            # What ``pool`` lists: the top pool_size, or every judged candidate for a
+            # population optimizer or picker.
+            "parent_set": ("every judged candidate" if setting == "pool" and self._population_policy()
+                           else setting),
             "pool": [c.id for c in members],
             "lines_of_descent": len(lines),
             "largest_line_share": (round(max(lines.values()) / len(members), 3)
@@ -3288,14 +3305,18 @@ class Loop(OuterLoop):
         ``single`` (SkillOpt's rule): the gate's current candidate (the last one
         accepted, which is also the best on val), whether or not its train run
         succeeded, with any accepted candidate a person kept. ``pool``: the pool
-        (``_pool``, the incumbent first), with any judged candidate a person kept.
-        The optimizer chooses from these alone, by val (``ProposalContext.val_scores``),
-        so which candidate is edited never depends on a train score from another
-        round's seed or sample.
+        (``_pool``, the incumbent first), with any judged candidate a person kept; a
+        population optimizer or parent picker (``archive``, ``evolutionary``,
+        ``islands``, ``map_elites``: ``ParentSelector.population``) gets every judged
+        candidate instead (``_judged_ranked``) and applies its own rule to them (niche
+        champions, island bests, its archive's own limit, tournaments), so a new
+        structure ranked below the pool keeps its niche. The optimizer chooses by val
+        (``ProposalContext.val_scores``), so which candidate is edited never depends on
+        a train score from another round's seed or sample.
         """
         gate = self._gate()
         if self.selection_mode() == "pool":
-            pool = self._pool()
+            pool = self._judged_ranked() if self._population_policy() else self._pool()
             judged = set(self._gate_accepted) | set(self._gate_rejected)
             return pool + [c for c in self._evaluated() if c.id in self.kept and c.id in judged
                            and c not in pool and c.id not in self.rejected]
@@ -3304,14 +3325,26 @@ class Loop(OuterLoop):
         first = [current] if current is not None else board[:1]
         return first + [c for c in board if c.id in self.kept and c not in first]
 
+    def _population_policy(self) -> bool:
+        """Whether this run's parents are picked by a population policy (the optimizer
+        itself, or its parent picker), which gets every judged candidate."""
+        policy = getattr(self.optimizer, "picker", self.optimizer)
+        return bool(getattr(policy, "population", False))
+
     def selection_mode(self) -> str:
         """How the validation average selects in this run (``LoopConfig.selection``):
         ``single`` or ``pool`` under the default loop's ``val_gate``; empty without it
-        (train scores select) or with a custom strategy (which keeps its own gate)."""
+        (train scores select) or with a custom strategy (which keeps its own gate).
+        An explicit setting wins; then the one the run's gate state recorded (so a
+        reader that rebuilds a finished run as a plain ``Loop`` reads the run's own
+        rule); then ``default_selection``."""
         if not self.config.val_gate or self._custom_strategy is not None:
             return ""
         if self.config.selection:
             return self.config.selection
+        stored = (self._strategy_state.get("val_gate") or {}).get("selection")
+        if stored in ("single", "pool"):
+            return str(stored)
         picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
         return default_selection(self.name, self.config.optimizer, picker)
 
@@ -3327,16 +3360,27 @@ class Loop(OuterLoop):
         resumed run holds it again without storing it.
         """
         gate = self._gate()
+        ranked = self._judged_ranked()
+        size = max(1, int(self.config.pool_size))
+        if len(ranked) > size:
+            edge = gate.cache[ranked[size - 1].id]
+            ranked = [c for c in ranked if gate.cache[c.id] >= edge]
+        incumbent = next((c for c in ranked if c.id == gate.current_id), None)
+        if incumbent is not None:
+            ranked = [incumbent] + [c for c in ranked if c is not incumbent]
+        return ranked
+
+    def _judged_ranked(self) -> list[Candidate]:
+        """Every judged candidate a person has not rejected (each has a val score),
+        ranked as the pool ranks: val score, a tie by train score (a failed train run
+        lowest), then the earlier; the incumbent first."""
+        gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
         order = {c.id: index for index, c in enumerate(self.population)}
         ranked = sorted(
             (c for c in self._evaluated()
              if c.id in judged and c.id in gate.cache and c.id not in self.rejected),
             key=lambda c: (-gate.cache[c.id], -_train_key(c), order[c.id]))
-        size = max(1, int(self.config.pool_size))
-        if len(ranked) > size:
-            edge = gate.cache[ranked[size - 1].id]
-            ranked = [c for c in ranked if gate.cache[c.id] >= edge]
         incumbent = next((c for c in ranked if c.id == gate.current_id), None)
         if incumbent is not None:
             ranked = [incumbent] + [c for c in ranked if c is not incumbent]
@@ -3852,6 +3896,18 @@ class Loop(OuterLoop):
                 if self.config.holdout <= 0 else
                 "the parts manifest names no val items, so there is no holdout: the "
                 "audit never runs the manifest's test items"
+            )
+        elif manifest is not None and self._audit_split().get("independent") is False:
+            # The audit's items are the val part the search selected on: a train-vs-val
+            # gap there is no overfit verdict, so none is given and nothing is rolled out.
+            # The val-vs-test audit (``audit_parts``) replaces this when there is a test
+            # part and the winner was scored on it.
+            status = "not_applicable"
+            note = (
+                "no independent check was possible: the audit's held-out items are the val "
+                "part the search selected on, and "
+                + ("the winner was not scored on the test part"
+                   if task_module.TEST in manifest else "the run has no test part")
             )
         elif not items and manifest is None:
             note = (

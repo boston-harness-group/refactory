@@ -9,6 +9,7 @@ validation as parents. Each test fails when the rule it names is reverted.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -216,7 +217,7 @@ def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_pa
     audit says its items are the val part the search selected on when there is no
     test part."""
     with _patch_mode(FitProbe):
-        loop = Loop(MODE_ID, _config(tmp_path, val_gate=None, parts_manifest=_manifest(
+        loop = Loop(MODE_ID, _config(tmp_path, val_gate=None, holdout=0.3, parts_manifest=_manifest(
             tmp_path, train=["t1", "t2", "t3"], val=["v1", "v2"])), project=Path("."))
         report = loop.run()
     assert loop.config.val_gate is True and loop.selection_mode() == "single"
@@ -226,7 +227,13 @@ def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_pa
     assert report["best_score_basis"].startswith("val")
     holdout = report["holdout"]
     assert holdout["split"] == "val" and holdout["independent"] is False
-    assert "not an independent check" in (loop.root / "report.md").read_text()
+    # No verdict on the part the search selected on, and no test part to compare with.
+    assert holdout["status"] == "not_applicable" and holdout["overfit"] is None
+    assert holdout["gap"] is None and "no independent check" in holdout["note"]
+    assert "the run has no test part" in holdout["note"] and report["exit_ok"] is True
+    rendered = (loop.root / "report.md").read_text()
+    assert "not an independent check" in rendered
+    assert "holds up" not in rendered and "— overfit" not in rendered
 
 
 def test_val_gate_0_turns_validation_selection_off(tmp_path):
@@ -475,7 +482,7 @@ def edit_kind_train(population: list[Candidate]) -> dict[str, Any]:
 
 def _judged_loop(tmp_path: Path, name: str, levels: dict[int, tuple[float | None, float]],
                  *, current: int, accepted: tuple[int, ...] = (), chain: bool = False,
-                 **overrides: Any) -> Loop:
+                 new_shape: tuple[int, ...] = (), **overrides: Any) -> Loop:
     """A strategy's loop holding judged candidates (level: (train, val)): children of
     the seed (level 0), or with ``chain`` a line of set_knob children each of the one
     before; the gate's incumbent is ``current``, accepted with the seed and ``accepted``."""
@@ -486,6 +493,8 @@ def _judged_loop(tmp_path: Path, name: str, levels: dict[int, tuple[float | None
     for level, (train, val) in levels.items():
         state = json.loads(json.dumps(seed_state))
         state["knobs"]["level"]["value"] = level
+        if level in new_shape:  # another agent step: a pipeline shape of its own
+            state["graph"]["nodes"]["extra_agent"] = {"id": "extra_agent", "kind": "agent"}
         parent = (None if level == 0 else
                   loop.population[-1] if chain else loop.population[0])
         candidate = Candidate.from_state(
@@ -502,6 +511,110 @@ def _judged_loop(tmp_path: Path, name: str, levels: dict[int, tuple[float | None
     gate.current_id = gate.best_id = incumbent.id
     gate.current_score = gate.best_score = gate.cache[incumbent.id]
     return loop
+
+
+def test_map_elites_keeps_the_niche_of_a_new_shape_ranked_below_the_pool(tmp_path):
+    """Nine judged candidates, pool_size 8: the one new shape (an extra agent step) is
+    9th on val. MAP-Elites is handed every judged candidate, so its cell holds it and
+    it can be picked; the pool alone would have dropped it."""
+    levels = {level: (0.5, 0.9 - level / 100) for level in range(8)}
+    levels[8] = (0.5, 0.1)
+    loop = _judged_loop(tmp_path, "default", levels, current=0, new_shape=(8,),
+                        optimizer="map_elites", selection="pool", pool_size=8)
+    new = next(c for c in loop.population if _level(c) == 8)
+    assert new not in loop._pool(), "setup: the new shape is outside the pool"
+    parents = loop._gated_parents()
+    assert new in parents
+    picked = loop.optimizer.select(_ctx(loop._val_scores()), 40, parents)
+    assert loop.optimizer.cells[loop.optimizer.features(new)] is new
+    assert new in picked
+    report_pool = loop._selection_report()
+    assert report_pool["parent_set"] == "every judged candidate" and new.id in report_pool["pool"]
+
+
+def test_an_island_whose_best_is_outside_the_top_k_still_breeds(tmp_path):
+    """Twenty judged candidates over three islands; every member of one island ranks
+    below the top 8. Islands still has that island and breeds its best."""
+    levels = {level: (0.5, 0.5) for level in range(20)}
+    loop = _judged_loop(tmp_path, "default", levels, current=0, optimizer="islands",
+                        selection="pool", pool_size=8)
+    policy = loop.optimizer
+    islands: dict[int, list[Candidate]] = {}
+    for candidate in loop.population:
+        islands.setdefault(policy.island_of(candidate), []).append(candidate)
+    weak = min(islands, key=lambda island: len(islands[island]))
+    others = [c for c in loop.population if policy.island_of(c) != weak]
+    gate = loop._gate()
+    for rank, candidate in enumerate(others):
+        gate.cache[candidate.id] = 0.9 - rank / 100
+    for rank, candidate in enumerate(islands[weak]):
+        gate.cache[candidate.id] = 0.2 - rank / 100
+    top = others[0]
+    loop._gate_accepted = [loop.population[0].id, top.id]
+    loop._gate_rejected = [c.id for c in loop.population if c.id not in loop._gate_accepted]
+    gate.current_id = gate.best_id = top.id
+    assert len(others) >= 8 and not {c.id for c in islands[weak]} & {c.id for c in loop._pool()}, "setup"
+    chosen = policy.select(_ctx(loop._val_scores()), len(islands), loop._gated_parents())
+    assert islands[weak][0] in chosen, "the weak island's best is bred"
+
+
+def test_archive_keeps_up_to_its_own_limit_under_the_pool(tmp_path):
+    levels = {level: (0.5, 0.9 - level / 100) for level in range(14)}
+    loop = _judged_loop(tmp_path, "default", levels, current=0, optimizer="archive",
+                        selection="pool", pool_size=8)
+    kept = loop.optimizer.select(_ctx(loop._val_scores()), 14, loop._gated_parents())
+    assert len(kept) == loop.optimizer.limit == 12
+    assert [_level(c) for c in kept] == list(range(12)), "the best 12 on val"
+
+
+def test_edit_kind_survives_a_child_whose_parent_has_no_val_score():
+    """Under the gate a parent may have no val score (never judged): its children are
+    not compared with it, rather than the decision failing."""
+    from refactory_dsh.strategies import edit_kind_decision
+
+    population, val = _settings_children(train_up_val_down=True)
+    del val[population[0].id]  # the seed was never judged
+    decision = edit_kind_decision(population, scores=val)
+    assert decision["edit_kind"] == "prompt_knob", "two compared children: no stall yet"
+
+
+def test_a_resumed_run_keeps_its_recorded_val_gate(tmp_path, monkeypatch):
+    """A run started with val_gate 0 and resumed with the setting left unset stays
+    train-selected (the manifest has val items, which would turn the gate on), and
+    names the winner an uninterrupted train-selected run names."""
+    _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
+    plan = [[(0, 1), (0, 2), (0, 3)], [(3, 4)]]
+    straight, _, expected = _run(tmp_path / "straight", monkeypatch, plan, epochs=2,
+                                 batch_size=3, val_gate=False)
+    _run(tmp_path / "stopped", monkeypatch, plan[:1], epochs=1, batch_size=3, val_gate=False)
+    loop, _, report = _run(tmp_path / "stopped", monkeypatch, plan[1:], epochs=2,
+                           batch_size=3, val_gate=None, resume=True)
+    assert loop.config.val_gate is False and report["selection"]["setting"] == "train"
+    assert report["selection"]["val_gate_basis"].startswith("resumed")
+    winner = _level(next(c for c in loop.population if c.id == report["best"]["id"]))
+    assert winner == _level(next(c for c in straight.population
+                                 if c.id == expected["best"]["id"])) == 3
+
+
+def test_a_finished_pool_run_recovers_a_reject_with_its_own_selection(tmp_path, monkeypatch):
+    """A finished reflective run (pool) whose incumbent a person rejects afterwards:
+    finished_control rebuilds the run as a plain Loop, and still reads the run's pool
+    rule, so report.json and adopt both name 4, the next of the pool."""
+    from refactory_dsh.adopt import best
+    from refactory_dsh.control import Control
+    from refactory_dsh.finished_control import recover_selection
+
+    _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
+    loop, _, report = _run(tmp_path, monkeypatch, POOL_PLAN[:2], strategy="reflective",
+                           epochs=2, batch_size=3, pool_size=2)
+    by_level = {_level(c): c for c in loop.population}
+    assert loop.selection_mode() == "pool" and report["best"]["id"] == by_level[2].id
+    Control(loop.root).path.write_text(json.dumps(
+        {"action": "reject", "target": by_level[2].id, "at": 1.0}))
+    with _patch_mode(FitProbe):
+        assert recover_selection(loop.root, project=Path(".")) is not None
+    recovered = json.loads((loop.root / "report.json").read_text())
+    assert recovered["best"]["id"] == by_level[4].id == best(loop.root)["candidate"]
 
 
 def test_reflective_merges_the_two_best_on_val_from_the_pool(tmp_path):
@@ -650,12 +763,39 @@ def test_every_strategy_selects_on_val_scores_test_only_at_the_end_and_hides_val
     assert not early_tests, "test is scored only in the final evaluation"
     assert proposer.prompts, "setup: the proposer was asked"
     assert "Train score of the candidate the validation gate ranks first" in proposer.prompts[-1]
-    shown = [form for v in val.values() for form in (f"{v}", f"{v:.6g}", f"{v:.5g}")]
+    judged = list(loop._gate().cache.values())
     for prompt in proposer.prompts:
-        leaked = [s for s in shown if s in prompt]
-        assert not leaked, (f"a val score reached the proposer: {leaked[:3]}: "
-                            + " | ".join(prompt[max(0, prompt.index(s) - 300):prompt.index(s) + 80]
-                                         for s in leaked[:1]))
+        leaked = _leaked(prompt, judged, items=4)
+        assert not leaked, f"a val score reached the proposer: {leaked[:3]}"
+
+
+def _leaked(text: str, values: list[float], *, items: int) -> list[str]:
+    """Each way ``text`` could show one of ``values`` (val scores), at any rounding: the
+    full number, 2 to 6 decimals, a percentage (0 or 1 decimal), and k/items when the
+    score is a whole number of the val part's items. A form must stand alone (no digit
+    or point around it), so 0.82 does not match inside 0.8213, a timing."""
+    found: list[str] = []
+    for value in values:
+        forms = {repr(value), *(f"{value:.{d}f}" for d in range(2, 7)),
+                 f"{value * 100:.0f}%", f"{value * 100:.1f}%", f"{value * 100:.0f} %"}
+        whole = value * items
+        if items and abs(whole - round(whole)) < 1e-9:
+            forms.add(f"{round(whole)}/{items}")
+        for form in forms:
+            match = re.search(rf"(?<![\d.]){re.escape(form)}(?![\d])", text)
+            if match:
+                found.append(f"{form!r} in ...{text[max(0, match.start() - 120):match.end() + 40]}...")
+    return found
+
+
+def test_the_leak_check_catches_a_val_score_at_any_rounding():
+    """The checker the prompt test uses: 14/17 = 0.8235... is caught as 0.82, 0.824,
+    82%, 82.4% and 14/17, and not inside an unrelated 0.8213."""
+    score = 14 / 17
+    for shown in ("best 0.82 so far", "best 0.824", "82% of items", "82.4%", "14/17 right",
+                  f"score {score}"):
+        assert _leaked(shown, [score], items=17), shown
+    assert not _leaked("took 0.8213 s, 182 items, 0.825", [score], items=17)
 
 
 # ── single reproduces the recorded gate decisions ──────────────────────────

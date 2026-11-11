@@ -1890,7 +1890,7 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                 "items, and the pool holds the candidates that scored best there (`kept`). "
                 "The best of all is marked `current`; it changes only when a candidate scores "
                 "strictly higher there. Scores here are train scores; held-out scores are "
-                "never shown. You edit the pipeline shown below, a member of the pool. A "
+                "never shown. You edit the pipeline shown below. A "
                 "`rejected` candidate is not among the best on validation; that is all it "
                 "says. " + resolution + "A change that was rejected must not be proposed "
                 "again unchanged, but when its train fixed/broken counts against its parent "

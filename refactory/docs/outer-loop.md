@@ -41,10 +41,12 @@ says why (`val_gate_basis`).
   The `--holdout` fraction of a Task's items (a run without a manifest) is never
   selected on: it stays the end-of-run audit's independent split. With a manifest the
   audit's held-out items are the val part, so under the gate the audit runs on the part
-  the search selected on; it then says so (`holdout.split` is `val`,
-  `holdout.independent` is false, and the report names the split) instead of reading
-  as a check on unseen items. With a test part the audit compares val with test, which
-  nothing selects on (`split` `test`).
+  the search selected on. It then gives no overfit verdict and rolls nothing out: it
+  says that no independent check was possible (`holdout.split` is `val`,
+  `holdout.independent` is false, `status` is `not_applicable`, and the report names
+  the split). With a test part the audit compares val with test, which nothing selects
+  on (`split` `test`). A resumed run keeps the `val_gate` and `selection` its
+  `config.json` recorded.
 - **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
   for them, and `--val-gate 1` is refused.
 
@@ -60,11 +62,13 @@ val score. `--selection` says how it selects:
   SkillOpt-matched setting; its decisions are those of the gate before pools existed.
 - **`pool`**: entry is permissive. Every judged candidate may enter a pool of the
   `--pool-size` (8 by default) best by val score, with any tied with the last of them.
-  Parents come from the pool, the incumbent first, and each strategy or parent picker
-  chooses among them by val (a tie by train): `archive`, `evolutionary`, `islands` and
-  `map_elites` rank and choose cell champions by val and rebuild from the pool each
-  round, `random` takes the best on val, and a model proposer may name any pool member
-  as the parent. The incumbent still changes only on a strictly higher val score (a tie
+  Parents come from the pool, the incumbent first, and each strategy chooses among
+  them by val (a tie by train): `random` takes the best on val, and a model proposer
+  may name any pool member as the parent. The population optimizers and pickers
+  (`archive`, `evolutionary`, `islands`, `map_elites`) are handed every judged
+  candidate a person has not rejected instead, and apply their own rule by val: the
+  archive's own limit (12), tournaments, the best of each island, each niche's
+  champion. So a new structure ranked below the pool keeps its niche or island. The incumbent still changes only on a strictly higher val score (a tie
   goes to the higher train score, then the earlier candidate), and it is the winner. The
   default for every other strategy and for the population optimizers and pickers.
 

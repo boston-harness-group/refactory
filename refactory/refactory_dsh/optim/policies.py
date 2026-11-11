@@ -77,6 +77,10 @@ class ParentSelector(Optimizer):
 
     #: Index of the choice, for a reproducible stream and a readable rationale.
     policy: str = ""
+    #: Whether the policy keeps a population of its own (an archive, a tournament,
+    #: islands, niches). Under the validation gate's ``pool`` selection it is handed
+    #: every judged candidate, not the top ``pool_size``, and applies its own rule.
+    population: bool = True
 
     def __init__(self, *, k: int = 3, seed: int = 0) -> None:
         super().__init__(k=k)
@@ -169,7 +173,8 @@ class ArchiveSelector(ParentSelector):
 
     def select(self, ctx, n, parents):
         # Rebuilt from the parents the loop hands over each round (under the validation
-        # gate, its pool), so a candidate the pool has dropped is not bred from again.
+        # gate every judged candidate a person has not rejected), ranked by val, so the
+        # archive holds the best ``limit`` of them.
         kept = self._ranked(ctx, parents)[: self.limit]
         self.members = {candidate.id: candidate for candidate in kept}
         return kept[:n] if kept else []
@@ -259,6 +264,7 @@ class HillClimbSelector(ParentSelector):
 
     name = "hill_climb"
     policy = "the best so far"
+    population = False
 
     def select(self, ctx, n, parents):
         val = getattr(ctx, "val_scores", None) or {}
@@ -284,6 +290,8 @@ class MapElitesSelector(ParentSelector):
     candidate -- another agent step, a verdict loop, a parallel fork, a code node --
     is the best of its own group until something of the same shape beats it, so a
     new structure is not lost to a prompt-tuned lineage that already scores higher.
+    Under the validation gate the loop hands it every judged candidate (not the top
+    ``pool_size``), so that holds there too, by val score.
     """
 
     name = "map_elites"
@@ -352,7 +360,9 @@ class MapElitesSelector(ParentSelector):
 
     def select(self, ctx, n, parents):
         # The cells are rebuilt from the parents the loop hands over each round (under
-        # the validation gate, its pool), each champion the fittest of its cell by val.
+        # the validation gate every judged candidate a person has not rejected, not only
+        # the pool), each champion the fittest of its cell by val: a new shape ranked
+        # below the pool still holds its cell.
         self.cells = {}
         fitness = self.fitness(ctx)
         for candidate in parents:
