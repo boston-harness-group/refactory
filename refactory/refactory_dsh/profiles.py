@@ -140,10 +140,11 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
-    # val_gate: a switch; the command line passes it as 0 or 1.
-    if result.get("val_gate") not in (True, False, 0, 1):
+    # val_gate: a switch; the command line passes it as 0 or 1. Unset (None) is the
+    # default: the run turns it on when its parts manifest has val items.
+    if result.get("val_gate") not in (True, False, 0, 1, None):
         raise ProfileError("val_gate must be true or false (1 or 0 on the command line)")
-    result["val_gate"] = bool(result.get("val_gate"))
+    result["val_gate"] = None if result.get("val_gate") is None else bool(result["val_gate"])
     # The default loop's early stop (needs val_gate): a count of stale epochs, 0 off,
     # and a switch the command line passes as 0 or 1.
     patience = result.get("early_stop_patience")
@@ -175,7 +176,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if selection not in SELECTIONS:
         raise ProfileError(f"unknown selection: {selection}; known: "
                            f"{', '.join(s for s in SELECTIONS if s)}")
-    if selection and not result["val_gate"]:
+    if selection and result["val_gate"] is False:
         raise ProfileError(f"selection {selection} chooses by validation score, which only "
                            "val_gate measures; turn val_gate on, or leave selection empty")
     result["selection"] = selection
@@ -472,6 +473,9 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
 
 #: ``--help`` text for the settings that have it.
 SETTING_HELP = {
+    "val_gate": "1 selects on the parts manifest's val part (the validation gate), 0 on "
+                "train scores (default: on when the manifest has val items, else train "
+                "selection with a warning)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
                      "map_elites) with --optimizer: the picker chooses the candidate each "
                      "step edits, the optimizer writes the edits (default: none)",
@@ -496,7 +500,7 @@ def add_arguments(parser: Any) -> None:
         # snapshots, not as a command-line object.
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
-        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight") else str
+        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight", "val_gate") else str
         parser.add_argument(flag, dest=key, type=kind, default=None, help=SETTING_HELP.get(key))
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")

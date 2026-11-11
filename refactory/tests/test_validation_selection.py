@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from refactory_dsh import profiles, strategies
-from refactory_dsh.loop import Loop, LoopConfig, LoopError, default_selection
+from refactory_dsh.loop import NO_VALIDATION, Loop, LoopConfig, LoopError, default_selection
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, ProposalContext
 from refactory_dsh.optim.policies import (
     ArchiveSelector, EvolutionarySelector, IslandsSelector, MapElitesSelector,
@@ -203,6 +203,103 @@ def test_the_report_gives_pool_diversity_and_the_budget(tmp_path, monkeypatch):
 # ── which setting a run gets ──────────────────────────────────────────────
 
 
+def _manifest(tmp_path: Path, **parts: list[str]) -> str:
+    path = tmp_path / "parts-custom.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(parts))
+    return str(path)
+
+
+def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_path):
+    """No --val-gate: a parts manifest with val items turns the gate on (single for
+    the default loop), config.json records it, adopt and the report agree, and the
+    audit says its items are the val part the search selected on when there is no
+    test part."""
+    with _patch_mode(FitProbe):
+        loop = Loop(MODE_ID, _config(tmp_path, val_gate=None, parts_manifest=_manifest(
+            tmp_path, train=["t1", "t2", "t3"], val=["v1", "v2"])), project=Path("."))
+        report = loop.run()
+    assert loop.config.val_gate is True and loop.selection_mode() == "single"
+    assert json.loads((loop.root / "config.json").read_text())["val_gate"] is True
+    assert report["selection"]["val_gate_basis"].startswith("default")
+    assert "warning" not in report["selection"]
+    assert report["best_score_basis"].startswith("val")
+    holdout = report["holdout"]
+    assert holdout["split"] == "val" and holdout["independent"] is False
+    assert "not an independent check" in (loop.root / "report.md").read_text()
+
+
+def test_val_gate_0_turns_validation_selection_off(tmp_path):
+    with _patch_mode(FitProbe):
+        loop = Loop(MODE_ID, _config(tmp_path, val_gate=False), project=Path("."))
+        report = loop.run()
+    assert loop.config.val_gate is False and loop.selection_mode() == ""
+    assert report["selection"]["setting"] == "train"
+    assert report["selection"]["warning"].startswith("val_gate 0")
+    assert report["holdout"]["independent"] is True, "train selected: val is unseen"
+
+
+@pytest.mark.parametrize("where", ["manifest without val", "no manifest"])
+def test_a_run_without_val_items_selects_on_train_and_warns(tmp_path, where):
+    """No val items (a manifest with none, or only the --holdout fraction): train
+    selection, with the warning in the run's events, its strategy log and its report.
+    The --holdout fraction stays the audit's independent split."""
+    parts = (_manifest(tmp_path, train=["t1", "t2", "t3"], test=["x1"])
+             if where == "manifest without val" else None)
+    with _patch_mode(FitProbe):
+        loop = Loop(MODE_ID, _config(tmp_path, val_gate=None, parts_manifest=parts,
+                                     holdout=0.3), project=Path("."))
+        report = loop.run()
+    assert loop.config.val_gate is False
+    assert report["selection"]["warning"] == NO_VALIDATION
+    assert NO_VALIDATION in (loop.root / "strategy.log").read_text()
+    assert NO_VALIDATION in (loop.root / "report.md").read_text()
+    steps = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
+    assert any(s.get("step") == "warning" and s.get("warning") == NO_VALIDATION for s in steps)
+    if where == "no manifest":
+        assert report["holdout"]["split"] == "holdout" and report["holdout"]["independent"]
+
+
+def test_explicit_selection_without_val_items_is_refused(tmp_path):
+    with _patch_mode(FitProbe):
+        with pytest.raises(LoopError, match="has none"):
+            Loop(MODE_ID, _config(tmp_path, val_gate=None, selection="pool", parts_manifest=_manifest(
+                tmp_path, train=["t1", "t2"])), project=Path(".")).run()
+
+
+def test_a_custom_strategy_keeps_its_own_gate_by_default(tmp_path):
+    """SkillOpt (a custom strategy) with val_gate unset is not refused: the default
+    leaves the loop's gate off for it, as an explicit 1 is refused."""
+    from refactory_dsh.outerloop import OuterLoop
+
+    class Nothing(OuterLoop):
+        name = "nothing"
+
+        def strategy(self, run):  # type: ignore[no-untyped-def]
+            run.stop("done")
+
+    with _patch_mode(FitProbe):
+        loop = Loop(MODE_ID, _config(tmp_path, val_gate=None), project=Path("."))
+        strategy = Nothing()
+        strategy.configure()
+        loop.set_custom_strategy(strategy)
+        loop.run()
+    assert loop.config.val_gate is False and loop.selection_warning == ""
+
+
+def test_profiles_and_the_command_line_leave_val_gate_unset_unless_given():
+    import argparse
+
+    assert profiles.defaults()["val_gate"] is None
+    assert profiles.normalize({})["val_gate"] is None
+    assert profiles.normalize({"val_gate": 0})["val_gate"] is False
+    assert profiles.normalize({"val_gate": 1})["val_gate"] is True
+    parser = argparse.ArgumentParser()
+    profiles.add_arguments(parser)
+    assert "val_gate" not in profiles.cli_overrides(parser.parse_args([]))
+    assert profiles.cli_overrides(parser.parse_args(["--val-gate", "0"]))["val_gate"] == 0
+
+
 def test_defaults_single_for_the_skillopt_matched_loop_and_pool_for_everything_else(tmp_path):
     assert default_selection("default", "autoresearch") == "single"
     assert default_selection("default", "random") == "single"
@@ -226,7 +323,8 @@ def test_defaults_single_for_the_skillopt_matched_loop_and_pool_for_everything_e
 
 def test_selection_needs_the_gate_and_a_known_value(tmp_path):
     with pytest.raises(profiles.ProfileError, match="val_gate"):
-        profiles.normalize({"selection": "pool"})
+        profiles.normalize({"selection": "pool", "val_gate": False})
+    assert profiles.normalize({"selection": "pool"})["val_gate"] is None, "unset: the run decides"
     with pytest.raises(profiles.ProfileError, match="unknown selection"):
         profiles.normalize({"val_gate": True, "selection": "pareto"})
     with pytest.raises(profiles.ProfileError, match="pool_size"):
@@ -585,11 +683,14 @@ def test_recorded_livemath_runs_replay_to_the_same_gate_decisions(
             for e in range(1, rounds + 1)]
     _scores(monkeypatch, train, val)
     config = run["config"]
+    # The empty setting is the whole default: val_gate unset too, on for a val part.
     loop, proposer, report = _run(
         tmp_path, monkeypatch, plan, epochs=config["epochs"],
         batch_size=2 if config["portfolio"] else 1,
         early_stop_patience=config["early_stop_patience"],
-        early_stop_at_full_val=config["early_stop_at_full_val"], selection=selection)
+        early_stop_at_full_val=config["early_stop_at_full_val"], selection=selection,
+        **({"val_gate": None} if not selection else {}))
+    assert loop.config.val_gate is True
     by_level = {_level(c): c.id for c in loop.population}
 
     def recorded(cids: list[str]) -> list[str]:

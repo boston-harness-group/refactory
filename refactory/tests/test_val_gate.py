@@ -477,7 +477,7 @@ def test_without_val_gate_the_default_loop_is_unchanged(tmp_path, monkeypatch):
     seeds = _record_train_seeds(monkeypatch)
     proposer = ScriptedLevels([[(5, 7)], [(7, 8)]])
     with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=2)
+        loop = _loop(tmp_path, epochs=2, val_gate=False)
         loop.optimizer = proposer
         report = loop.run()
     assert seeds == [(5, 7), (7, 7), (8, 7)]
@@ -721,7 +721,7 @@ def test_a_budget_stop_wins_over_an_early_stop_in_the_same_epoch(tmp_path, monke
 def test_early_stop_needs_the_val_gate(tmp_path):
     with _patch_mode(LevelProbe):
         with pytest.raises(LoopError, match="turn val_gate on"):
-            _loop(tmp_path, early_stop_patience=2).run()
+            _loop(tmp_path, early_stop_patience=2, val_gate=False).run()
 
 
 def test_early_stop_settings_come_from_the_command_line_and_are_saved(tmp_path, monkeypatch):

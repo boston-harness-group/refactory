@@ -148,6 +148,10 @@ POPULATION_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites")
 SELECTIONS = ("", "single", "pool")
 
 
+#: What a run without validation items says, in its log and its report, when it
+#: falls back to selecting on train scores (``LoopConfig.val_gate`` left unset).
+NO_VALIDATION = "no validation items: selecting on train scores"
+
 #: ``LoopConfig.portfolio`` values: off, or one candidate per edit level.
 PORTFOLIOS = ("", "prompt+pipeline")
 
@@ -285,7 +289,13 @@ class LoopConfig:
     #: the end. The winner is the incumbent: the best on val, replaced only by a
     #: strictly higher val score. Needs a manifest with a val part; a custom strategy
     #: (SkillOpt) keeps its own gate instead.
-    val_gate: bool = False
+    #:
+    #: ``None`` (the default) turns it on when the parts manifest has val items and the
+    #: strategy is a built-in one, and off otherwise: a run with no validation items
+    #: selects on train scores and says so (``NO_VALIDATION``). ``True`` or ``False``
+    #: is honoured as given (``--val-gate 1``/``0``). ``Loop.init`` replaces ``None``
+    #: with the decision before anything runs, so ``config.json`` records it.
+    val_gate: bool | None = None
     #: Train items per epoch: 0 (the default) scores every candidate on the whole train
     #: part. N > 0, when the train part has more than N items, samples N train ids each
     #: epoch with SkillOpt's per-epoch seed (``train_batch_seed``), scores every
@@ -692,6 +702,10 @@ class Loop(OuterLoop):
         #: The validation gate when ``config.val_gate`` is on (see ``_gate``), and
         #: the candidates it accepted and rejected, in order.
         self._val_gate: ValidationGate | None = None
+        #: Why ``val_gate`` is what it is (``_resolve_val_gate``), and the warning a run
+        #: that fell back to train selection gives.
+        self._val_gate_basis = "explicit"
+        self.selection_warning = ""
         self._gate_accepted: list[str] = []
         self._gate_rejected: list[str] = []
 
@@ -875,6 +889,7 @@ class Loop(OuterLoop):
             snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
         else:
             self._journal("resume_configuration", resolved_profile=snapshot)
+        self._resolve_val_gate()
         saved = self.root / "config.json"
         if self.config.resume and saved.exists():
             try:
@@ -958,7 +973,9 @@ class Loop(OuterLoop):
         elif self.config.selection:
             raise LoopError(
                 f"selection {self.config.selection} chooses by validation score, which only "
-                "the validation gate measures; turn val_gate on, or leave selection empty"
+                "the validation gate measures, and this run has none (val_gate 0, or a "
+                "parts manifest without val items); give it val items, or leave selection "
+                "empty"
             )
 
         if resumed:
@@ -992,6 +1009,47 @@ class Loop(OuterLoop):
             batch_size=self.config.batch_size,
             optimizer=self.search_name(),
         )
+
+    def _resolve_val_gate(self) -> None:
+        """Decide ``val_gate`` when the run left it unset (``None``): on when the parts
+        manifest it will load has val items and the strategy is a built-in one (a
+        custom strategy such as SkillOpt keeps its own gate), off otherwise. Off for
+        want of val items, the run says it selects on train scores (``NO_VALIDATION``),
+        in its events and its strategy log now, and in its report. An explicit value is
+        kept. Runs before ``config.json`` is written, so the run records the decision."""
+        self._val_gate_basis = "explicit"
+        self.selection_warning = ""
+        if self.config.val_gate is not None:
+            self.config.val_gate = bool(self.config.val_gate)
+            return
+        if self._custom_strategy is not None:
+            self.config.val_gate = False
+            self._val_gate_basis = f"the {self._custom_strategy.name} strategy keeps its own gate"
+            return
+        has_val = bool(self._manifest_val_ids())
+        self.config.val_gate = has_val
+        self._val_gate_basis = ("default: the parts manifest has val items" if has_val
+                                else "default: no val items")
+        if not has_val:
+            self.selection_warning = NO_VALIDATION
+            Run(_loop=self).log(f"warning: {NO_VALIDATION}")
+            # The run's events (printed by the command line, not for a library caller).
+            self._progress("warning", warning=NO_VALIDATION,
+                           detail="give the run a parts manifest with a val part to select "
+                                  "on validation")
+
+    def _manifest_val_ids(self) -> list[str]:
+        """The val ids of the parts manifest this run will load (``parts_manifest``, else
+        the run root's ``parts.json``); empty when there is none or it cannot be read
+        (``_load_parts_manifest`` then refuses an unreadable one)."""
+        source = (Path(self.config.parts_manifest) if self.config.parts_manifest
+                  else self.root / task_module.MANIFEST)
+        try:
+            data = json.loads(source.read_text())
+        except (OSError, ValueError):
+            return []
+        ids = data.get(task_module.VAL) if isinstance(data, dict) else None
+        return [str(item) for item in ids] if isinstance(ids, list) else []
 
     def _check_optimizer_route(self) -> None:
         """Refuse, before anything runs, an optimizer that calls a model on a route that
@@ -2309,6 +2367,13 @@ class Loop(OuterLoop):
         from refactory_dsh.optim.base import edit_level
 
         setting = self.selection_mode() or ("train" if self._custom_strategy is None else "")
+        if setting == "train":
+            val_ids = (task_module.manifest_part_ids(self._parts_manifest, task_module.VAL)
+                       if self._parts_manifest is not None else self._manifest_val_ids())
+            warning = (NO_VALIDATION if not val_ids else
+                       "val_gate 0: selecting on train scores, though the run has val items")
+        else:
+            warning = ""
         if setting == "pool":
             members = self._pool()
         elif setting == "single":
@@ -2338,6 +2403,9 @@ class Loop(OuterLoop):
         snapshot = self.budget.snapshot() if self.budget else {}
         return {
             "setting": setting,
+            **({"warning": warning} if warning else {}),
+            "val_gate": bool(self.config.val_gate),
+            "val_gate_basis": self._val_gate_basis,
             "pool_size": int(self.config.pool_size) if setting == "pool" else None,
             "pool": [c.id for c in members],
             "lines_of_descent": len(lines),
@@ -3826,6 +3894,7 @@ class Loop(OuterLoop):
             "instances": instances,
             "winner": winner.id if winner is not None else None,
             "measurements": self.holdout_measurements,
+            **self._audit_split(),
         }
         if gap is not None and seed_winner:
             note = SEED_WINNER_NOTE
@@ -3899,6 +3968,8 @@ class Loop(OuterLoop):
                                 "standard_error (from the val and test part sizes) is for "
                                 "information"),
             "winner": winner.id,
+            "split": task_module.TEST, "independent": True,
+            "split_note": "the test part, which nothing selected on",
         }
         if seed is not None and winner.id == seed.id:
             audit.update(added_gap=0.0, overfit=False, note=SEED_WINNER_NOTE)
@@ -3914,6 +3985,28 @@ class Loop(OuterLoop):
         added = gap - seed_gap
         audit.update(added_gap=added, overfit=added > OVERFIT_THRESHOLD)
         return audit
+
+    def _audit_split(self) -> dict[str, Any]:
+        """Which items the holdout audit runs, and whether they are independent of the
+        selection. With a parts manifest the audit's held-out items are its val part
+        (``task.manifest_part_ids``): under ``val_gate`` that is the part the search
+        selected on, so the audit is not independent, and the report says so rather
+        than present it as a check on unseen items. Without a manifest they are the
+        Task's ``--holdout`` fraction, which nothing selects on."""
+        if self._parts_manifest is None:
+            return {"split": task_module.HOLDOUT, "independent": True,
+                    "split_note": "the --holdout fraction of the Task's items, which nothing "
+                                  "selected on"}
+        if self._custom_strategy is not None:
+            return {"split": task_module.VAL, "independent": None,
+                    "split_note": f"the val part; the {self._custom_strategy.name} strategy "
+                                  "keeps its own selection, which may read it"}
+        if self.config.val_gate:
+            return {"split": task_module.VAL, "independent": False,
+                    "split_note": "the val part, which the search selected on, so this is "
+                                  "not an independent check; add a test part for one"}
+        return {"split": task_module.VAL, "independent": True,
+                "split_note": "the val part, which nothing selected on (train scores selected)"}
 
     def _missing_part_note(self, missing: Sequence[tuple[str, dict[str, Any]]]) -> str:
         """Why the winner's val or test score is missing: the part and its cause, and,
@@ -5031,6 +5124,7 @@ def _selection_section(selection: dict[str, Any]) -> list[str]:
     budget = selection.get("budget") or {}
     share = selection.get("parents_from_incumbent")
     return ["## Selection", "", what, "",
+            *([f"**Warning: {selection['warning']}.**", ""] if selection.get("warning") else []),
             _md_table(["pool", "lines of descent", "largest line", "edit kinds",
                        "parents from the incumbent"],
                       [[len(selection.get("pool") or ()), selection.get("lines_of_descent"),
@@ -5058,10 +5152,13 @@ def _strategy_report_section(report: dict[str, Any]) -> list[str]:
 
 
 def _holdout_sentence(audit: dict[str, Any]) -> str:
-    """The audit as one paragraph for the report, saying both numbers and the gap."""
+    """The audit as one paragraph for the report, saying both numbers and the gap, and
+    which split it ran on."""
     if not audit:
         return "_This run recorded no audit of the winner._"
     line = _holdout_line(audit)
+    if audit.get("split_note"):
+        line += f". Audit split: {audit['split_note']}"
     if audit.get("overfit"):
         return (
             f"{line}. Every candidate was searched on the train part, so the winner "

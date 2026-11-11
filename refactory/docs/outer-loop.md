@@ -22,12 +22,31 @@ call.  This means:
 `command_timeout_s` on each node's subprocess.  It does not use
 `enable_recovery`.
 
-## The default loop's validation gate (`--val-gate 1`)
+## The default loop's validation gate (on by default with val items)
 
-With `--val-gate 1` and a parts manifest with a val part, the default loop evaluates
-candidates the way the SkillOpt strategy does, using the same `ValidationGate` and
-`FinalEvaluation` from `outerloop.py`. Only the optimizer, where edit ideas come from,
-differs. Without `--val-gate` nothing below applies.
+When the run's parts manifest (`--parts-manifest`) has val items, the default loop
+evaluates candidates the way the SkillOpt strategy does, using the same
+`ValidationGate` and `FinalEvaluation` from `outerloop.py`; only the optimizer, where
+edit ideas come from, differs. No flag is needed: an unset `val_gate` (the command
+line's, a profile's or the library's default) turns the gate on when there are val
+items. `--val-gate 0` turns it off, and `--val-gate 1` insists on it (refused without
+val items). `config.json` records the decision, and the report's `selection` section
+says why (`val_gate_basis`).
+
+- **No val items.** A run with no parts manifest, or one without a val part, selects
+  on train scores and says so: "no validation items: selecting on train scores", in its
+  events, its `strategy.log` and its report (`selection.warning`). With `--val-gate 0`
+  the report says the run selected on train though it had val items.
+- **`--holdout`.** The validation set for selection is always the manifest's val part.
+  The `--holdout` fraction of a Task's items (a run without a manifest) is never
+  selected on: it stays the end-of-run audit's independent split. With a manifest the
+  audit's held-out items are the val part, so under the gate the audit runs on the part
+  the search selected on; it then says so (`holdout.split` is `val`,
+  `holdout.independent` is false, and the report names the split) instead of reading
+  as a check on unseen items. With a test part the audit compares val with test, which
+  nothing selects on (`split` `test`).
+- **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
+  for them, and `--val-gate 1` is refused.
 
 Train is the proposer's feedback, validation decides every choice and test is scored
 once at the end. The validation average is the fitness for the parents, the pool and
@@ -158,14 +177,14 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   (SkillOpt's initial val score) and is never a reason to stop. Each later epoch gates
   the batch the previous one proposed, and is checked right after that gating, before
   it proposes, as SkillOpt checks at an epoch's end; so a seed already at 1.0 still gets
-  one batch proposed and gated. Both settings need `--val-gate 1`, are saved with the
+  one batch proposed and gated. Both settings need the gate (val items, or `--val-gate 1`), are saved with the
   run and are kept on resume.
 
 ## Train minibatches (`--train-minibatch N`)
 
 By default every candidate is scored on the whole train part. With
 `--train-minibatch N` and a train part of more than N items, each epoch samples N train
-ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs `--val-gate 1`:
+ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs the gate (val items, or `--val-gate 1`):
 without the gate the winner and the parents are picked by train scores, which would
 then come from different samples, so the run is refused before anything is rolled
 out.
