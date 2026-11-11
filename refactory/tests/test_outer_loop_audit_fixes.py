@@ -618,7 +618,8 @@ def test_structural_wins_count_only_a_structural_step(tmp_path, monkeypatch):
     child = Candidate(id="c", parent="p", state={}, edits=edits, step_edits=1, score=0.5,
                       evaluated=True)
     fake = SimpleNamespace(population=[parent, child], rejections=[], _row=lambda c: {"id": c.id},
-                           _op_mix=lambda: {})
+                           _op_mix=lambda: {}, config=SimpleNamespace(val_gate=False),
+                           _custom_strategy=None)
     assert Loop._structural_wins(fake, [child, parent]) == []
     assert Loop._structural_stats(fake)["structural_candidates"] == 0
 

@@ -71,7 +71,8 @@ def test_rows_and_the_request_carry_the_gates_decision_and_no_val_score(tmp_path
     row6 = next(line for line in text.splitlines()
                 if line.startswith("| ") and history[6]["id"] in line and "rejected" in line)
     assert row6.rstrip().endswith("| rejected |")
-    assert "best kept by the validation gate" in text
+    # The tried-line gives the current candidate's train score, labelled as train.
+    assert f"train score of the validation gate's current candidate {history[7]['score']:.6g}" in text
     for score in loop._gate().cache.values():
         assert f"{score:.6g}" not in text and str(score) not in text, score
     assert not any("val" in key for row in ctx.history for key in row)

@@ -791,10 +791,7 @@ class ProposalContext:
                 f"{len(self.history)} candidate(s), best "
                 f"{max((c.get('score') or 0.0) for c in self.history):.6g}"
                 if self.history and not _gate_column(self.history)
-                else f"{len(self.history)} candidate(s), best kept by the validation gate "
-                f"{max((c.get('score') or 0.0) for c in self.history if c.get('gate') in ('kept', 'current')):.6g}"
-                if any(c.get("gate") in ("kept", "current") for c in self.history)
-                else f"{len(self.history)} candidate(s), none kept by the validation gate yet"
+                else f"{len(self.history)} candidate(s); {_current_line(self.history)}"
                 if self.history
                 else "(nothing evaluated yet)"
             )
@@ -1872,6 +1869,20 @@ def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
     return ["gate"] if any("gate" in row for row in rows) else []
 
 
+def _current_line(history: Sequence[dict[str, Any]]) -> str:
+    """What "What this run has already tried" says of the validation gate's choice: the
+    train score of the candidate marked ``current`` (a train score, labelled so; the
+    val score that made it current is never shown)."""
+    current = next((c for c in history if c.get("gate") == "current"), None)
+    if current is None:
+        return ("none judged by the validation gate yet"
+                if all(c.get("gate") in (None, "not gated") for c in history)
+                else "the validation gate's current candidate is older than this list")
+    score = current.get("score")
+    return ("train score of the validation gate's current candidate "
+            + (f"{score:.6g}" if isinstance(score, (int, float)) else "n/a (its train run failed)"))
+
+
 def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                selection: str = "") -> list[str]:
     """What the gate column means, said once, when there is one.
@@ -1886,13 +1897,18 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                   f"item is 1/{val_items} = {1 / val_items:.3g} of it, and a rejection can come "
                   "down to a single item. " if val_items > 0 else "")
     if selection == "pool":
+        below = any(row.get("gate") == "below pool" for rows in tables for row in rows)
         return ["This run keeps a validation pool: each candidate was also run on held-out "
-                "items, and the pool holds the candidates that scored best there (`kept`). "
+                "items, and the pool holds the candidates that scored best there (`in pool`). "
                 "The best of all is marked `current`; it changes only when a candidate scores "
-                "strictly higher there. Scores here are train scores; held-out scores are "
-                "never shown. You edit the pipeline shown below. A "
-                "`rejected` candidate is not among the best on validation; that is all it "
-                "says. " + resolution + "A change that was rejected must not be proposed "
+                "strictly higher there. A `left pool` candidate was in the pool and was pushed "
+                "out by better ones since. Rows are not in order of the held-out scores. "
+                "Scores here are train scores; held-out scores are never shown. You edit the "
+                "pipeline shown below. A `rejected` candidate never entered the pool; that is "
+                "all it says. "
+                + ("A `below pool` candidate never entered the pool either, but the parent "
+                   "picker may still choose it. " if below else "")
+                + resolution + "A change that was rejected must not be proposed "
                 "again unchanged, but when its train fixed/broken counts against its parent "
                 "(when shown below) were strongly positive, its direction may still be right: "
                 "you may build on it or combine it with edits to other steps in the same "
@@ -2244,7 +2260,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]
                     if entry.get("considered") else [])]
-    promising = [entry for entry in entries if entry.get("gate") == "rejected"
+    promising = [entry for entry in entries if entry.get("gate") in ("rejected", "below pool")
                  and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)
                  and entry["fixed"] > entry["broken"]]
     if promising:
