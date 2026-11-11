@@ -188,7 +188,7 @@ def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkey
     ids = {_level(c): c.id for c in loop.population}
     assert f"### Child {ids[6]} of {ids[7]} -- gate: rejected" in section
     assert "On 8 shared train item(s): 0 fixed (parent wrong, child right), 1 broken" in section
-    assert "#### Item t5 -- broken\nParent:\n### Item t5 — passed" in section
+    assert f"#### Item t5 -- broken (child {ids[6]})\nParent:\n### Item t5 — passed" in section
     assert "Child:\n### Item t5 — answered wrong" in section
     assert 'name="level" -- value: 6' in section and "different seeds" in section
     assert not any(f"Item {v}" in section for v in ("v1", "v2", "v3", "v4", "x1", "x2", "x3"))
@@ -236,7 +236,7 @@ def test_the_comparison_stays_within_its_budget():
     text = "\n".join(_edit_change_lines([pair]))
     assert len(text) <= EDIT_CHANGE_BUDGET + 3000
     assert "The other changed items (their trajectories did not fit)" in text
-    assert "| i19 | broken |" in text
+    assert "| c | i19 | broken |" in text
 
 
 def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
@@ -318,7 +318,7 @@ def test_each_proposal_keeps_the_diagnosis_of_the_call_that_made_it(tmp_path, mo
 
 def test_the_comparison_heading_says_children(tmp_path, monkeypatch):
     _loop_, proposer = _run_reasoning(tmp_path, monkeypatch)
-    assert "The latest children of the candidate you edit (its last batch)" in proposer.contexts[2].render()
+    assert "The latest children of the candidate you edit (every child of its last round, siblings included)" in proposer.contexts[2].render()
 
 
 def test_the_gate_note_states_its_resolution_and_when_a_rejected_change_may_be_built_on():

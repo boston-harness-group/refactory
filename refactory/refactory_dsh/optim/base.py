@@ -211,14 +211,16 @@ def _code_signatures(state: dict[str, Any]) -> dict[str, tuple[str, str, str]]:
 
 
 def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, Any],
-                        allowed: bool) -> list[str]:
+                        allowed: bool, sandbox: tuple[bool, str] | None = None) -> list[str]:
     """``E-code-nodes`` for each code node of the candidate (`refactory_dsh.snippet`) that
     the seed does not have as the same code node -- same id, kind, callable and code --
     when the run does not allow code nodes (``LoopConfig.allow_code_nodes``) or this
     machine cannot sandbox them (`snippet.available`). Compared by content, not by id: a
     proposal that removes a node and adds a code node under its id, or rewrites a seed
     code node's code, is a new code node. The seed's own code nodes, unchanged, are the
-    author's and are not held to it."""
+    author's and are not held to it. ``sandbox`` is the machine's answer the request
+    was written with (``ProposalContext.sandbox``), so the request's offer and this
+    refusal never disagree; asked afresh only when there is none."""
     from refactory_dsh import snippet
 
     seed = _code_signatures(seed_state)
@@ -229,7 +231,7 @@ def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, A
     if not allowed:
         why = "this run does not allow code nodes (allow_code_nodes is off)"
     else:
-        ok, reason = snippet.available()
+        ok, reason = sandbox if sandbox is not None else snippet.available()
         if ok:
             return []
         why = f"this machine cannot sandbox code nodes ({reason})"
@@ -444,6 +446,12 @@ class Rejection:
         )
 
 
+def _structural_edit(edit: Any) -> bool:
+    """Whether one edit changes the graph's structure: a macro or a node or edge edit."""
+    return isinstance(edit, dict) and (nn_edits.is_macro(edit.get("op", "")) or edit.get("op") in (
+        "add_node", "remove_node", "add_edge", "remove_edge"))
+
+
 @dataclass
 class Candidate:
     """One point in the search: a state, where it came from, and how it scored."""
@@ -498,9 +506,14 @@ class Candidate:
         return list(self.edits[len(self.edits) - count:]) if count else []
 
     def is_structural(self) -> bool:
-        return any(nn_edits.is_macro(edit.get("op", "")) or edit.get("op") in (
-            "add_node", "remove_node", "add_edge", "remove_edge",
-        ) for edit in self.edits)
+        """Whether the edits that made this candidate from its parent (``own_edits``)
+        change the graph's structure. A prompt-only child of a structural parent is not
+        structural: the label says what this step did, not what its lineage did."""
+        return any(_structural_edit(edit) for edit in self.own_edits())
+
+    def lineage_is_structural(self) -> bool:
+        """Whether any edit from the seed to this candidate changed the structure."""
+        return any(_structural_edit(edit) for edit in self.edits)
 
     def describe(self, *, include_reports: bool = False) -> dict[str, Any]:
         """Summarise for prompt rendering.
@@ -539,7 +552,10 @@ class ProposalContext:
     generation: int = 0
     mode_name: str = ""
     best_score: float | None = None
+    #: The mean score of every candidate scored so far (``Loop.loss_step``), over
+    #: ``mean_over`` of them; not one batch's mean.
     mean_score: float | None = None
+    mean_over: int = 0
     #: The run's intent ledger, rendered, read fresh before each generation. A note a
     #: person adds while the search runs reaches the next proposal, so a search is
     #: steerable and not only watchable.
@@ -658,6 +674,14 @@ class ProposalContext:
     #: under "The pipeline you may edit", so a prompt's ``{{name}}`` names a fact that
     #: exists there (rule V15) rather than a file name; empty says nothing.
     available: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    #: Wiring of the edited graph that runs but is likely not what was meant
+    #: (`nn.validate.wiring_warnings`), said beside its edges; never a refusal.
+    wiring_warnings: list[str] = field(default_factory=list)
+    #: The machine's code-node sandbox answer (`snippet.available`) this request was
+    #: written with: ``code_nodes`` offers by it and the refusal of a code node
+    #: (``E-code-nodes``) refuses by it, so the two agree within a request; ``None``
+    #: when not taken (the run does not allow code nodes). Never rendered.
+    sandbox: tuple[bool, str] | None = None
     #: Whether a person answers gates while this run's candidates run. An outer loop's
     #: candidates run headless, so the default leaves the person-answered gate kind out
     #: of the node schemas (`node_schema.render_schema`).
@@ -669,7 +693,8 @@ class ProposalContext:
             f"# Update request — generation {self.generation}, epoch {self.epoch}",
             "",
             f"Mode: `{self.mode_name}`. Best score so far: {self.best_score}. "
-            f"Batch mean: {self.mean_score}.",
+            + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
+             if self.mean_over else f"Mean score so far: {self.mean_score}."),
             "",
             *([self.steering, ""] if self.steering.strip() else []),
             *_strategy_section(self.strategy, self.strategy_name),
@@ -693,6 +718,8 @@ class ProposalContext:
             "Edges:",
             _table(["source", "target", "condition"],
                    [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
+            *(["Wiring warnings (the graph runs, but likely not as meant; not refusals):",
+                *(f"- {w}" for w in self.wiring_warnings)] if self.wiring_warnings else []),
             *_available_section(self.available, code_nodes=self.code_nodes),
             "",
             *_node_specs(self.node_states, text_chars=self.node_spec_text_chars,
@@ -1602,8 +1629,12 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
         found_lines: list[str] = []
         for kind, pattern in _reader_patterns(findings):
             ids = [str(i) for i in pattern.get("items") or ()]
-            id_text = ", ".join(ids[:READER_ITEM_IDS]) + (
+            id_text = (", ".join(ids[:READER_ITEM_IDS]) or "none in its group") + (
                 f" and {len(ids) - READER_ITEM_IDS} more" if len(ids) > READER_ITEM_IDS else "")
+            stray = [str(i) for i in pattern.get("not_in_group") or ()]
+            if stray:
+                id_text += (f"; it also named {', '.join(stray[:READER_ITEM_IDS])}, not an item "
+                            "of its group, so dropped")
             quotes = [f'"{_clip(quote, READER_QUOTE_CHARS)}"'
                       for quote in list(pattern.get("evidence") or ())[:READER_QUOTES]]
             found_lines.append(
@@ -2103,19 +2134,23 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
 
 def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
-    against its parent, on train items only."""
+    against its parent, on train items only. Every child is listed with its counts; the
+    changed items' trajectories share ``budget`` child by child in turn, so the first
+    child's cannot crowd out a sibling's."""
     if not pairs:
         return []
     lines = ["## What the last edit changed",
-             "The latest children of the candidate you edit (its last batch), or that "
+             "The latest children of the candidate you edit (every child of its last round, "
+             "siblings included), or that "
              "candidate itself when it has none yet, each compared with its parent item by "
              "item on the train items both were scored on. The parent's records are from the "
              "child's epoch, so the same seed, when it was scored then (the candidate you edit "
              "is re-scored each epoch); a pair scored with different seeds is marked, and some "
              "of its changes may be run-to-run noise."]
-    blocks: list[str] = []
-    rest: list[list[Any]] = []
+    per_child: list[list[tuple[str, list[Any]]]] = []
     for pair in pairs:
+        own: list[tuple[str, list[Any]]] = []
+        per_child.append(own)
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
         lines += ["", head, "Edits:", describe_edits(pair.get("edit"))]
@@ -2140,24 +2175,27 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
         for kind, items in (("fixed", change["fixed"]), ("broken", change["broken"]),
                             ("score rose", change["up"]), ("score dropped", change["down"])):
             for item in items:
-                block = (f"#### Item {item} -- {kind}\nParent:\n"
+                block = (f"#### Item {item} -- {kind} (child {pair.get('child')})\nParent:\n"
                          + _item_block(parent[item], budget // 2)
                          + "\nChild:\n" + _item_block(child[item], budget // 2))
-                blocks.append(block)
-                rest.append([item, kind, _outcome(parent[item]), parent[item].get("score"),
-                             _outcome(child[item]), child[item].get("score")])
+                own.append((block, [pair.get("child"), item, kind, _outcome(parent[item]),
+                                    parent[item].get("score"), _outcome(child[item]),
+                                    child[item].get("score")]))
+    # Child by child in turn: each child's first changed item, then each one's second.
+    turns = [entry for depth in range(max((len(own) for own in per_child), default=0))
+             for own in per_child if depth < len(own) for entry in [own[depth]]]
     used = len("\n".join(lines))
-    shown = 0
-    for block in blocks:
-        if used + len(block) + 2 > budget:
-            break
+    rest: list[list[Any]] = []
+    for block, row in turns:
+        if rest or used + len(block) + 2 > budget:
+            rest.append(row)
+            continue
         lines += ["", block]
         used += len(block) + 2
-        shown += 1
-    if shown < len(blocks):
+    if rest:
         lines += ["", "The other changed items (their trajectories did not fit):",
-                  _table(["item", "change", "parent", "parent score", "child", "child score"],
-                         rest[shown:])]
+                  _table(["child id", "item", "change", "parent", "parent score", "child",
+                          "child score"], rest)]
     return lines
 
 
@@ -2178,6 +2216,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
              if entry.get("fixed") is not None else "")) if part)
         lines += ["", f"### {entry.get('id')} (proposed in epoch {entry.get('epoch', '?')}) -- {outcome}",
                   *_item_error_lines(entry.get("errors") or (), int(entry.get("items") or 0)),
+                  *[f"Wiring warning this edit added: {w}" for w in entry.get("warnings") or ()],
                   "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
@@ -2276,6 +2315,9 @@ class Optimizer:
     #: otherwise is refused with ``E-code-nodes``. The loop sets it from
     #: ``allow_code_nodes``.
     allow_code_nodes: bool = True
+    #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
+    #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
+    sandbox: tuple[bool, str] | None = None
 
     #: Values only the grader may see (the train items' grader-only fields), which no
     #: code node's code may contain (``E-secret``), or a function returning them (called
@@ -2385,6 +2427,8 @@ class Optimizer:
         recorded here, fed back into the next attempt, and reported at the end.
         """
         self.rejections = []
+        # The request's sandbox answer: what it offered is what the refusals judge by.
+        self.sandbox = ctx.sandbox
         accepted: list[Candidate] = []
         feedback: list[str] = []
         if not parents:
@@ -2543,7 +2587,8 @@ class Optimizer:
         if tooled:
             return tooled
         coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,
-                                    bool(getattr(self, "allow_code_nodes", True)))
+                                    bool(getattr(self, "allow_code_nodes", True)),
+                                    getattr(self, "sandbox", None))
         if coded:
             return coded
         leaked = _secret_refusals(state, getattr(self, "grader_secrets", ()))

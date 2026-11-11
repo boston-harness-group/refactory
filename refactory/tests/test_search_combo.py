@@ -393,17 +393,18 @@ def test_portfolio_evaluates_both_levels_under_the_gate_and_counts_the_extra(tmp
 def test_the_portfolio_report_lists_candidates_in_the_order_the_gate_judged_them(
         tmp_path, monkeypatch):
     """Shadowing is read off the report's order, so that order must be the gate's: the
-    calls to ``ValidationGate.judge`` are recorded and compared round by round."""
+    candidates ``ValidationGate.judge_round`` is handed are recorded and compared round
+    by round."""
     from refactory_dsh.outerloop import ValidationGate
 
     judged: list[str] = []
-    original = ValidationGate.judge
+    original = ValidationGate.judge_round
 
-    def recording(self, run, candidate, *args, **kwargs):  # type: ignore[no-untyped-def]
-        judged.append(candidate.id)
-        return original(self, run, candidate, *args, **kwargs)
+    def recording(self, run, candidates, *args, **kwargs):  # type: ignore[no-untyped-def]
+        judged.extend(candidate.id for candidate in candidates)
+        return original(self, run, candidates, *args, **kwargs)
 
-    monkeypatch.setattr(ValidationGate, "judge", recording)
+    monkeypatch.setattr(ValidationGate, "judge_round", recording)
     loop = _run("default", tmp_path, ComboModel(portfolio), val_gate=True, batch_size=1,
                 epochs=3, portfolio="prompt+pipeline")
     report = json.loads((loop.root / "report.json").read_text())["portfolio"]

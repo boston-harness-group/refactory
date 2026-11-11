@@ -2207,6 +2207,14 @@ class Executor:
             # Forkserver child: per-process stdout capture, thread-safe,
             # no global sys.stdout swap.
             verdict = self._run_op_timed(node.evaluator, node, timeout)
+            # A reloop to a step that cannot see what the gate read hands it those
+            # files, as the spine's runner does (`run.with_unseen_reads`).
+            from refactory_dsh.nn.loops import blind_reloops
+            from refactory_dsh.run import with_unseen_reads
+
+            verdict = with_unseen_reads(
+                verdict, node.id, blind_reloops(self.graph, self.ctx.knobs).get(node.id),
+                self.ctx.workdir)
         if not isinstance(verdict, str) or not verdict:
             raise ExecutionError(
                 f"gate {node.id!r} returned {verdict!r}; a gate must return a verdict label"

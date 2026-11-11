@@ -1090,8 +1090,11 @@ class DesignMode(Mode):
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(
             "synthesize_qa", "op", call=f"{OPS}:synthesize_qa",
+            # And the QA director's coverage re-run, when one ran (`synthesize_qa` folds
+            # it in): declared, so a reader of the graph sees who uses that file.
             reads=("reviews/health-check.md", "reviews/code-review.md", "reviews/qa.md",
-                   "reviews/verification.md", "check-record.json", "design.md"),
+                   "reviews/verification.md", "reviews/qa-rerun.md", "check-record.json",
+                   "design.md"),
             writes=("reviews/qa-synthesized.md",),
             # It starts each round's judging: the last round's verdicts are set aside and
             # the judges' rereads start again.

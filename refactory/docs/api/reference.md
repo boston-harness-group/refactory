@@ -196,8 +196,10 @@ The validator: what makes architecture-in-the-state safe.
 | function | `template_names` | `(template: 'str') -> 'set[str]'` |
 | function | `unfilled_slot_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, baseline: 'tuple[Graph, Mapping[str, Any]] \| None' = None, resolve_calls: 'bool' = True) -> 'list[Issue]'` |
 | function | `unfilled_slots` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'dict[tuple[str, str], set[str]]'` |
+| function | `unread_output_warnings` | `(graph: 'Graph', baseline: 'Graph \| None' = None) -> 'list[str]'` |
 | function | `validate` | `(graph: 'Graph', values: 'Mapping[str, Any]', *, declared_knobs: 'Mapping[str, Knob]', invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, ports: 'tuple[Any, ...]' = (), grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), baseline: 'tuple[Graph, Mapping[str, Any]] \| None' = None) -> 'list[Issue]'` |
 | function | `validate_state` | `(state: 'Mapping[str, Any]', *, invariants: 'tuple[Invariant, ...]' = (), resolve_calls: 'bool' = True, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), baseline: 'Mapping[str, Any] \| None' = None) -> 'list[Issue]'` |
+| function | `wiring_warnings` | `(graph: 'Graph', baseline: 'Graph \| None' = None) -> 'list[str]'` |
 
 - **`Invariant`** — A mode-declared rule, for the parts only the author can know.
 - **`Issue`** — One reason a state was refused.
@@ -230,8 +232,10 @@ The validator: what makes architecture-in-the-state safe.
 - **`template_names`** — Every run value a template reads when rendered: its ``{{name}}`` slots and the
 - **`unfilled_slot_issues`** — V20: a ``{{name}}`` slot an edit leaves where nothing fills it.
 - **`unfilled_slots`** — Every ``{{name}}`` slot nothing fills, by ``(node, knob)``: the slots of each knob
+- **`unread_output_warnings`** — W-unread-output: a step (agent or op) that writes files, sets no fact, has an
 - **`validate`** — Every reason ``(graph, values)`` is not a runnable, scoreable mode.
 - **`validate_state`** — Validate a state dict without building a mode around it. ``baseline`` is the
+- **`wiring_warnings`** — ``W-…`` warnings for a graph that validates but is likely miswired.
 
 
 <a id="refactory_dsh-optim"></a>
@@ -303,6 +307,7 @@ The two extension points: what proposes, and what runs the search.
 | class | `FinalEvaluation` | `(*, record: 'Callable[..., Any] \| None' = None, label: 'str' = 'outer loop') -> 'None'` |
 | class | `OuterLoop` | `()` |
 | class | `OuterLoopError` | `` |
+| class | `RoundStopped` | `(accepted: 'list[Any]', rejected: 'list[Any]', error: 'Exception') -> 'None'` |
 | class | `Run` | `(_loop: 'Any', log_lines: 'list[str]' = <factory>, stopped: 'str \| None' = None) -> None` |
 | class | `ValidationGate` | `(*, seed: 'int \| None' = None) -> 'None'` |
 | class | `Verdict` | `(accepted: 'bool', score: 'float', cached: 'bool', incumbent: 'float', best: 'bool') -> None` |
@@ -314,6 +319,7 @@ The two extension points: what proposes, and what runs the search.
 - **`FinalEvaluation`** — After a search: the final candidate's val check, then three test rollouts.
 - **`OuterLoop`** — Base class for a custom strategy — the **custom strategy seam**.
 - **`OuterLoopError`** — A search cannot proceed. Always names what is wrong.
+- **`RoundStopped`** — A rollout refused part way through :meth:`ValidationGate.judge_round`: the
 - **`Run`** — Everything a search strategy is built from.
 - **`ValidationGate`** — Accept a candidate only on a strict val improvement, and keep the best on val.
 - **`Verdict`** — What :meth:`ValidationGate.judge` decided about one candidate.

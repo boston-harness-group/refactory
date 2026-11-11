@@ -149,6 +149,27 @@ class RandomOptimizer(Optimizer):
         return None
 
 
+def checked_patterns(payload: Any, items: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+    """A reader's patterns with every cited item id checked against the group it read.
+
+    A reader sees only its own group, so an id outside it is a slip (a val id, a
+    misremembered one) and must not reach the proposal call as evidence: it is dropped
+    from ``items`` and kept under ``not_in_group``, which the request says.
+    """
+    group = {str(item) for item in items}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for kind in ("failure_patterns", "success_patterns"):
+        patterns: list[dict[str, Any]] = []
+        for pattern in (payload.get(kind) if isinstance(payload, dict) else None) or ():
+            if not isinstance(pattern, dict):
+                continue
+            cited = [str(i) for i in pattern.get("items") or ()]
+            patterns.append({**pattern, "items": [i for i in cited if i in group],
+                             "not_in_group": [i for i in cited if i not in group]})
+        out[kind] = patterns
+    return out
+
+
 class AutoresearchOptimizer(Optimizer):
     """Ask a model to read the traces and propose the next update.
 
@@ -205,7 +226,8 @@ class AutoresearchOptimizer(Optimizer):
                 return cache[key], None
             if store is not None and (store / f"{key}.json").exists():
                 try:
-                    cache[key] = {**json.loads((store / f"{key}.json").read_text()), "group": index}
+                    saved = json.loads((store / f"{key}.json").read_text())
+                    cache[key] = {**saved, **checked_patterns(saved, items), "group": index}
                     return cache[key], None
                 except (OSError, json.JSONDecodeError):
                     pass
@@ -224,9 +246,7 @@ class AutoresearchOptimizer(Optimizer):
             except Exception as exc:
                 self.record_call(**call, reply=locals().get("reply"), error=f"{type(exc).__name__}: {exc}")
                 return None, {"group": index, "items": items, "error": f"{type(exc).__name__}: {exc}"}
-            found = {"group": index, "items": items,
-                     "failure_patterns": list(payload.get("failure_patterns") or []),
-                     "success_patterns": list(payload.get("success_patterns") or [])}
+            found = {"group": index, "items": items, **checked_patterns(payload, items)}
             self.record_call(**call, reply=reply, error=None,
                              patterns=len(found["failure_patterns"]) + len(found["success_patterns"]))
             cache[key] = found

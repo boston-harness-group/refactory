@@ -102,3 +102,109 @@ def loop_edges(graph: Graph) -> set[tuple[str, str, str]]:
         if key not in indices:
             visit(key)
     return loops
+
+
+def blind_reloops(graph: Graph, knob_values: Any = None) -> dict[str, dict[str, list[str]]]:
+    """The reloops whose redone step cannot see what their gate read, as
+    ``{gate: {condition: [files]}}``: the gate's read files (``reads`` and
+    ``required_reads``) that the step it sends back to is not shown.
+
+    Only a retry edge (`loop_edges`) from a code gate (``fn``) to an agent counts (any
+    other target has no prompt, `validate.wiring_warnings` names it; a person's note is
+    a person gate's feedback). A step with ``feedback_keys`` sees them all (its facts are
+    re-derived from the run's files before each dispatch, as design mode's steps are).
+    Otherwise each of the gate's files is judged on its own: the step sees it when
+
+    - it declares that file in ``reads`` or ``required_reads`` (it is handed the file);
+    - a name its prompts read (a ``{{name}}`` slot or an ``{% if %}`` condition) is a fact
+      set by a node that reads or writes *that* file (the gate itself reads every one);
+    - it reads a file written by a node that reads or writes that file.
+
+    A fact derived from one file says nothing of another, so a step that renders the
+    brief is still not shown the review. The reloop is wired, and left out, only when
+    every file is seen.
+
+    Both runtimes hand only these files over (`run.with_unseen_reads`): the walker from
+    the graph, the spine's node runner from the gate's ``blind_reloops`` declaration
+    (`lowering.declarations`), so a wired loop's prompts are unchanged.
+    """
+    from .validate import TEMPLATE_FIELDS, template_names
+
+    knob_values = dict(knob_values or {})
+
+    def prompt_names(node: Any) -> set[str]:
+        """Every name the node's prompts read, as sent (bound fields), conditions too."""
+        names: set[str] = set()
+        for field_name in TEMPLATE_FIELDS:
+            try:
+                text = node.bound(field_name, knob_values)
+            except Exception:  # noqa: BLE001 - a bad binding is V14's to report
+                text = getattr(node, field_name, "")
+            names |= template_names(str(text or ""))
+        return names
+
+    out: dict[str, dict[str, list[str]]] = {}
+    try:
+        retries = sorted(loop_edges(graph))
+    except GraphError:  # an ambiguous cycle is the validator's to refuse (V10)
+        return out
+    for gate_id, target_id, condition in retries:
+        gate, target = graph.nodes.get(gate_id), graph.nodes.get(target_id)
+        if gate is None or target is None or target.kind != "agent" or gate.gate_kind != "fn":
+            continue
+        if target.feedback_keys:
+            continue
+        files = list(dict.fromkeys((*gate.reads, *gate.required_reads)))
+        given = {*target.reads, *target.required_reads}
+        names = prompt_names(target)
+
+        def seen(name: str) -> bool:
+            """Whether the target is shown ``name``: handed it, or a fact or file made
+            by a node that reads or writes that very file."""
+            if name in given:
+                return True
+            touching = [node for node in graph.nodes.values()
+                        if name in (*node.reads, *node.required_reads, *node.writes)]
+            return any(set(node.produces) & names or set(node.writes) & given
+                       for node in touching)
+
+        unseen = [name for name in files if not seen(name)]
+        if unseen:
+            out.setdefault(gate_id, {})[condition.strip().lower()] = unseen
+    return out
+
+
+def cycle_nodes(graph: Graph, target: str, gate: str) -> set[str]:
+    """The nodes a retry from ``gate`` back to ``target`` runs again, the gate left out:
+    every node reachable from ``target`` that can also reach ``gate`` along non-retry
+    edges, fork targets and join sources (`RunRecord._uncomplete_between`'s rule)."""
+    retries = loop_edges(graph)
+    forward: dict[str, list[str]] = {}
+    backward: dict[str, list[str]] = {}
+
+    def link(source: str, to: str) -> None:
+        forward.setdefault(source, []).append(to)
+        backward.setdefault(to, []).append(source)
+
+    for edge in graph.edges:
+        if edge.key() not in retries:
+            link(edge.source, edge.target)
+    for node_id, node in graph.nodes.items():
+        if node.kind == "fork":
+            for child in node.targets:
+                link(node_id, child)
+        if node.kind == "join":
+            for source in node.sources:
+                link(source, node_id)
+
+    def reach(start: str, following: dict[str, list[str]]) -> set[str]:
+        seen, queue = {start}, [start]
+        for current in queue:
+            for other in following.get(current, ()):
+                if other not in seen:
+                    seen.add(other)
+                    queue.append(other)
+        return seen
+
+    after, before = reach(target, forward), reach(gate, backward)
+    return {node for node in after if node != gate and (node == target or node in before)}

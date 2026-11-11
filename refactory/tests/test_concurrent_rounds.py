@@ -168,7 +168,8 @@ def _same_as_one_at_a_time(runs: dict[int, tuple[Loop, dict[str, Any]]]) -> dict
 
 
 def test_concurrent_rounds_score_and_decide_as_one_at_a_time(tmp_path, monkeypatch, one_seed):
-    """A round of four children, all rejected, so the current candidate is re-scored
+    """A first round of two children (the lower one rejected: its sibling scored higher),
+    then a round of four children, all rejected, so the current candidate is re-scored
     (fresh evidence), then the final test evaluation: with the evaluations finishing
     in reverse order, two at once (two waves) or four (one), the run scores the same
     candidates on the same items and seeds, journals the same records and progress,
@@ -182,7 +183,8 @@ def test_concurrent_rounds_score_and_decide_as_one_at_a_time(tmp_path, monkeypat
         runs[width] = (loop, report)
     serial = _same_as_one_at_a_time(runs)
     assert serial["rescores"], "setup: the current candidate is re-scored"
-    assert len(serial["rejected"]) == 4 and max(of for _c, _i, of in serial["forward"]) == 4
+    # 6 beat the seed but lost to its sibling 7 (the round's highest val), then four.
+    assert len(serial["rejected"]) == 5 and max(of for _c, _i, of in serial["forward"]) == 4
 
 
 def test_the_seeds_first_round_scores_and_decides_as_one_at_a_time(tmp_path, monkeypatch):
@@ -649,12 +651,12 @@ def test_the_prefetched_val_scores_survive_a_kill_before_the_decisions(tmp_path,
     from test_val_gate import ScriptedLevels
 
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, cand: _level(cand) / 10))
-    judge = ValidationGate.judge
+    judge_round = ValidationGate.judge_round
 
-    def killed(self, run, candidate, **kwargs):  # type: ignore[no-untyped-def]
+    def killed(self, run, candidates, **kwargs):  # type: ignore[no-untyped-def]
         raise KeyboardInterrupt("killed before the decisions")
 
-    monkeypatch.setattr(ValidationGate, "judge", killed)
+    monkeypatch.setattr(ValidationGate, "judge_round", killed)
     settings = dict(val_gate=True, batch_size=2)
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, epochs=2, **settings)
@@ -664,14 +666,15 @@ def test_the_prefetched_val_scores_survive_a_kill_before_the_decisions(tmp_path,
     rolled = [r["id"] for r in _journal_events(loop, "part_result") if r["part"] == "val"]
     assert len(rolled) == 3, "setup: the seed's and both children's val rollouts"
 
-    monkeypatch.setattr(ValidationGate, "judge", judge)
+    monkeypatch.setattr(ValidationGate, "judge_round", judge_round)
     with _patch_mode(LevelProbe):
         resumed = _loop(tmp_path, epochs=2, resume=True, **settings)
         resumed.optimizer = ScriptedLevels([[]])
         resumed.run()
     again = [r["id"] for r in _journal_events(resumed, "part_result") if r["part"] == "val"]
     assert again[:3] == rolled and sorted(again[3:]) == [], "no val rollout again"
-    assert len(resumed._gate_accepted) == 3
+    # The seed and the round's higher child, 7; its sibling 6 lost to it.
+    assert len(resumed._gate_accepted) == 2 and len(resumed._gate_rejected) == 1
 
 
 def test_a_partial_prefetch_wave_leaves_the_rest_to_the_in_order_gate(tmp_path, monkeypatch, one_seed):

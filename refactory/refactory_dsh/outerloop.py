@@ -877,6 +877,15 @@ class OuterLoop:
 # ── selection on held-out parts, for any strategy ─────────────────────────
 
 
+class RoundStopped(Exception):
+    """A rollout refused part way through :meth:`ValidationGate.judge_round`: the
+    decisions about the candidates scored before it, and the refusal (``error``)."""
+
+    def __init__(self, accepted: list[Any], rejected: list[Any], error: Exception) -> None:
+        super().__init__(str(error))
+        self.accepted, self.rejected, self.error = accepted, rejected, error
+
+
 @dataclass(frozen=True)
 class Verdict:
     """What :meth:`ValidationGate.judge` decided about one candidate."""
@@ -982,6 +991,45 @@ class ValidationGate:
             self.current_id, self.current_score = candidate.id, score
             best = self.offer_best(candidate.id, score)
         return Verdict(accepted=accepted, score=score, cached=cached, incumbent=incumbent, best=best)
+
+    def judge_round(self, run: Run, candidates: Sequence[Candidate]) -> tuple[list[Candidate], list[Candidate]]:
+        """Judge one round's candidates together: ``(accepted, rejected)``, in order.
+
+        Each is scored on val against the same bar, the current candidate's score as
+        the round starts; the order they were proposed in cannot raise it. Of those that
+        strictly beat it, the one with the highest val score is accepted and becomes
+        current (and best, when it beats the best); ties go to the higher train score
+        (``Candidate.score``; a failed train run counts lowest), then to the earlier.
+        The others are rejected, a candidate that beat the bar but lost to a sibling
+        included. A rollout that raises (``OuterLoopError``) stops the round: what was
+        scored before it is judged, then the error propagates, and the rest stay
+        unjudged.
+        """
+        incumbent = self.current_score
+        scored: list[tuple[Candidate, float]] = []
+        error: OuterLoopError | None = None
+        for candidate in candidates:
+            try:
+                scored.append((candidate, self.score(run, candidate)[0]))
+            except OuterLoopError as exc:
+                error = exc
+                break
+        better = [(index, candidate, score) for index, (candidate, score) in enumerate(scored)
+                  if score > incumbent]
+        winner = None
+        if better:
+            def train(candidate: Candidate) -> float:
+                return float(candidate.score) if candidate.score is not None else float("-inf")
+
+            _index, winner, score = max(
+                better, key=lambda entry: (entry[2], train(entry[1]), -entry[0]))
+            self.current_id, self.current_score = winner.id, score
+            self.offer_best(winner.id, score)
+        accepted = [winner] if winner is not None else []
+        rejected = [candidate for candidate, _score in scored if candidate is not winner]
+        if error is not None:
+            raise RoundStopped(accepted, rejected, error)
+        return accepted, rejected
 
     def carry(self, candidate: Candidate, *, remember: bool = False) -> None:
         """Make ``candidate`` current at the current score, without a rollout.

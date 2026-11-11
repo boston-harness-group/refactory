@@ -381,7 +381,14 @@ What the two share, rather than each doing its own way:
 - **One prompt.** An agent node is sent its rendered template and nothing else: its
   notes say what it does (its event summary, a gate's question), and are not part of
   its prompt. A reloop's feedback is said once (`agent_delivery.with_feedback`: added
-  unless the prompt already carries it as whole lines), and
+  unless the prompt already carries it as whole lines). When the agent a code gate
+  reloops to cannot see a file the gate read (judged file by file: not in its reads, no
+  fact its prompt reads from a node that reads or writes that file, no
+  `feedback_keys`: `nn.loops.blind_reloops`), the feedback also carries those files
+  under "## Why this step is being redone", unless a file adds nothing beyond the gate's
+  reason (`run.with_unseen_reads`; the walker from the graph, the
+  spine's node runner from the gate's `blind_reloops` declaration). A wired loop, as
+  every shipped design, create and edit loop is, is unchanged. And
   the execution block lists its inputs in name order, as the lowered graph keeps them
   and as `Ledger.review` fingerprints a gate's. The session is opened with the node's
   role on both (`worker_node` reads it from the worker spec).
@@ -992,11 +999,12 @@ proposer, asked to choose, rates its prompt change more confident nearly every t
 and asked for one candidate it rarely writes a structural one. So under the portfolio
 each round asks it for one candidate per edit level (`optim.base.EDIT_LEVELS`), the
 loop refuses a second candidate of a level already covered (`E-level`, asking again
-for the missing one), and both are evaluated and gated. The gate judges them in the
-order they were proposed, as it judges any batch: the first one it accepts becomes the
-current candidate, so the second must beat that, not its parent. A second candidate
-that beat its parent can therefore lose to its sibling; the report's Portfolio section
-shows each round's decisions and marks such a candidate shadowed. A strategy that
+for the missing one), and both are evaluated and gated. The gate judges them
+together, as it judges any round: each against the current candidate as the round
+starts, the one with the highest val score accepted (a tie goes to the higher train
+score, then to the one proposed first). A candidate that beat its parent can therefore
+lose to its sibling; the report's Portfolio section shows each round's decisions and
+marks such a candidate shadowed. A strategy that
 publishes `edit_kind` for a round gets that level only (`reflective`'s settings-only
 merge does). The report counts what the candidates beyond `--batch-size` cost in
 evaluations, train and val runs both. The request's composition
