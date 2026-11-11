@@ -776,3 +776,8 @@ class ExhaustTask(Task):
         else:
             return VerifyResult(passed=False, score=0.0, details="no answer")
         return VerifyResult(passed=score >= 1.0, score=score)
+
+
+def no_review_yet(ctx: Any) -> None:
+    """Write the review file a step reads before any review exists."""
+    ctx.write_text("review.txt", "no review yet\n")

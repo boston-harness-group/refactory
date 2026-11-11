@@ -81,6 +81,10 @@ FORBIDDEN_NAMES = ("open", "__import__", "exec", "eval", "compile", "getattr", "
 
 #: The wall clock of one snippet, in seconds (well under any node's command timeout).
 WALL_S = 10
+#: The wall clock of the sandbox's start-up check (`available`), in seconds: its own
+#: limit, not the code's, because every op runs in a fresh process that probes again,
+#: and on a loaded machine starting the namespaces alone can take longer than WALL_S.
+PROBE_WALL_S = 60
 #: Its CPU seconds, heap/address space, largest file and most processes.
 CPU_S = 10
 MEMORY_MB = 512
@@ -138,6 +142,10 @@ out.flush()
 
 class SnippetError(RuntimeError):
     """A code node could not run, or returned something its node cannot use."""
+
+
+class SnippetTimeout(SnippetError):
+    """A sandboxed run went over its wall-clock limit."""
 
 
 # ── the static check (V18) ────────────────────────────────────────────────
@@ -281,7 +289,8 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...]) -> Any:
+def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
+               what: str = "the code") -> Any:
     try:
         payload = json.dumps({"code": code, "inp": inp})
     except (TypeError, ValueError) as exc:
@@ -299,7 +308,7 @@ def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...])
     except subprocess.TimeoutExpired as exc:
         _kill_group(proc)
         proc.communicate()
-        raise SnippetError(f"the code ran over its {timeout_s:g} s limit") from exc
+        raise SnippetTimeout(f"{what} ran over its {timeout_s:g} s limit") from exc
     finally:
         # Whatever the snippet left running in its group goes with it.
         _kill_group(proc)
@@ -320,28 +329,50 @@ def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...])
     return reply.get("result")
 
 
-@functools.lru_cache(maxsize=1)
+#: The start-up check's settled answer in this process (`_probe`); ``None`` until one.
+_PROBED: tuple[bool, str] | None = None
+
+
 def _probe() -> tuple[bool, str]:
+    """The sandbox start-up check, once per process: its answer is kept unless the
+    check ran out of time, which a loaded machine can cause and the next call retries,
+    so one slow start never disables code nodes for a whole process."""
+    global _PROBED
+    if _PROBED is not None:
+        return _PROBED
+    result, settled = _check_sandbox()
+    if settled:
+        _PROBED = result
+    return result
+
+
+def _check_sandbox() -> tuple[tuple[bool, str], bool]:
+    """``((ok, why), settled)``: whether a tiny snippet runs in the real sandbox under
+    :data:`PROBE_WALL_S`, and whether that answer is final (not a timeout)."""
     if not sys.platform.startswith("linux"):
-        return False, f"code nodes need Linux namespaces; this is {sys.platform}"
+        return (False, f"code nodes need Linux namespaces; this is {sys.platform}"), True
     if shutil.which("unshare") is None:
-        return False, "the unshare command is not installed"
+        return (False, "the unshare command is not installed"), True
     for needed in (PYTHON, BASH):
         if not os.path.exists(needed):
-            return False, f"{needed} does not exist"
+            return (False, f"{needed} does not exist"), True
     try:
         result = _sandboxed("def main(inp):\n    return inp['facts']['x'] + 1\n",
-                            {"files": {}, "facts": {"x": 1}}, timeout_s=WALL_S, extra=())
+                            {"files": {}, "facts": {"x": 1}}, timeout_s=PROBE_WALL_S, extra=(),
+                            what="its start-up check")
+    except SnippetTimeout as exc:
+        return (False, f"the sandbox was unavailable: {exc}"), False
     except SnippetError as exc:
-        return False, str(exc)
+        return (False, f"the sandbox was unavailable: {exc}"), True
     if result != 2:
-        return False, f"the sandbox probe returned {result!r}, not 2"
-    return True, ""
+        return (False, f"the sandbox probe returned {result!r}, not 2"), True
+    return (True, ""), True
 
 
 def available() -> tuple[bool, str]:
     """Whether code nodes can run here, and why not: a probe that runs a tiny snippet
-    in the real sandbox, once per process."""
+    in the real sandbox under its own start-up limit (:data:`PROBE_WALL_S`, not the
+    code's), once per process (a timed-out probe is tried again)."""
     return _probe()
 
 

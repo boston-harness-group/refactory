@@ -60,6 +60,66 @@ WORKDIR_ENV = "REFACTORY_WORKDIR"
 REASON_LIMIT = 4_000
 
 
+#: How much of each file a gate read is handed to the step it sends back to, when that
+#: step cannot see it (:func:`with_unseen_reads`); the whole reason is then clipped to
+#: :data:`REASON_LIMIT`.
+UNSEEN_FILE_CHARS = 1_500
+#: The heading the unseen files go under, inside the reloop's feedback.
+REDO_HEADING = "## Why this step is being redone"
+
+
+def with_unseen_reads(verdict: Any, gate: str, blind: Any, workdir: Path) -> Any:
+    """``verdict``, its reason extended with the files its gate read that the step a
+    reloop sends back to cannot see (``blind``: ``{condition: [files]}``, from
+    `nn.loops.blind_reloops`), when its label is one of those reloops.
+
+    A gate's reason is all a reloop hands the step it goes back to. When that step is
+    not handed the gate's inputs either (not in its reads, not through a fact its prompt
+    fills in), a bare ``reloop`` re-ran it with exactly the input it had (B-s44). Each
+    unseen file is added once, under :data:`REDO_HEADING`, unless the reason already
+    says it (a verdict gate's reason is its file less the verdict word). A reloop that
+    is wired, any other label, and a file the reason already carries change nothing,
+    so a wired loop's prompts stay as they were. Both runtimes apply it the same way:
+    the spine's runner below, the walker in ``_visit_gate``.
+    """
+    from refactory_dsh.nn import Verdict
+
+    if not isinstance(verdict, str) or not verdict.strip() or not isinstance(blind, dict):
+        return verdict
+    label = verdict.strip()
+    files = blind.get(label.lower())
+    if not files:
+        return verdict
+    reason = str(getattr(verdict, "reason", "") or "").strip()
+    root = Path(workdir).resolve()
+    shown: list[str] = []
+    for name in dict.fromkeys(str(n) for n in files if n):
+        path = (root / name).resolve()
+        if root not in path.parents or not path.is_file():
+            continue
+        try:
+            text = path.read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if reason and text and (reason in text or text in reason):
+            continue
+        if len(text) > UNSEEN_FILE_CHARS:
+            text = (text[:UNSEEN_FILE_CHARS]
+                    + f"\n… ({len(text) - UNSEEN_FILE_CHARS} more characters) …")
+        shown.append(f"`{name}`:\n{text or '(empty)'}")
+    if reason and not shown:
+        return verdict
+    lines = [REDO_HEADING,
+             f"Gate `{gate}` sent this step back (`{label}`)"
+             + ("." if reason else " without giving a reason.")]
+    if shown:
+        lines += ["It read these files, which this step is not given:", "", "\n\n".join(shown)]
+    out = Verdict(str(verdict), reason="\n\n".join(part for part in (reason, "\n".join(lines)) if part))
+    if hasattr(verdict, "_fn_stdout"):
+        out._fn_stdout = verdict._fn_stdout  # type: ignore[attr-defined]
+    return out
+
+
 def _clipped(reason: str) -> str:
     """``reason``, keeping its head and its tail once it is over :data:`REASON_LIMIT`."""
     if len(reason) <= REASON_LIMIT:
@@ -292,6 +352,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
                 result["required_reads"] = list(entry["required_reads"])
             if isinstance(entry.get("snippet"), dict):
                 result["snippet"] = dict(entry["snippet"])
+            if isinstance(entry.get("blind_reloops"), dict):
+                result["blind_reloops"] = dict(entry["blind_reloops"])
             return result
     manifest = _manifest()
     if str(manifest.get("id")) == node_id:
@@ -443,6 +505,11 @@ def run_node(
             ctx.set_fact(key, value)
     ctx._check_produces()  # noqa: SLF001
     _write_facts()
+    if not is_retryable:
+        # A reloop to a step that cannot see what the gate read hands it those files.
+        produced = with_unseen_reads(produced, node_id,
+                                     declarations(directory, node_id).get("blind_reloops"),
+                                     ctx.workdir)
     return produced
 
 

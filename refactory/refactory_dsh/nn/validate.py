@@ -130,6 +130,90 @@ class Invariant:
     check: Callable[[Graph, Mapping[str, Any]], str | None]
 
 
+#: Wiring that runs but is likely not what was meant: said to the optimizer beside the
+#: pipeline, never a refusal (``wiring_warnings``).
+WARNINGS: dict[str, str] = {
+    "W-reloop-target": "a gate's reloop goes back to an op (or other step with no prompt) "
+                       "and no step it re-runs reads the review the gate read (a file an "
+                       "agent wrote): a gate's reason reaches only an agent's prompt, so the "
+                       "review is lost",
+    "W-unread-output": "a new or edited step writes files no node declares in its reads and "
+                       "sets no fact, and it is not the last step: nothing is shown to use "
+                       "its work (an op that builds a prompt reads only the files it declares)",
+}
+
+
+def wiring_warnings(graph: Graph, baseline: Graph | None = None) -> list[str]:
+    """``W-…`` warnings for a graph that validates but is likely miswired.
+
+    - W-reloop-target: each retry edge (`loops.loop_edges`) whose target is neither an
+      agent nor a gate (both take the reason a reloop hands them), whose gate reads a
+      review (a file an agent writes), and none of whose re-run steps
+      (`loops.cycle_nodes`) declares reading it: the review reaches no step. An op that
+      iterates on its own output or state (a counter, a budget, a draft) is not warned of.
+    - W-unread-output (`unread_output_warnings`): a new or edited step -- one not in
+      ``baseline``, or changed from it; every step when there is no baseline -- whose
+      work nothing is shown to use.
+    """
+    from .loops import cycle_nodes, loop_edges
+
+    out: list[str] = []
+    for source, target, condition in sorted(loop_edges(graph)):
+        node, gate = graph.nodes.get(target), graph.nodes.get(source)
+        if node is None or gate is None or node.kind in ("agent", "gate"):
+            continue
+        # The review: what the gate reads that an agent wrote. A gate that checks an op's
+        # own output or state (a counter, a budget, a draft the op makes) has none.
+        files = {name for name in {*gate.reads, *gate.required_reads}
+                 if any(other.kind == "agent" and name in other.writes
+                        for other in graph.nodes.values())}
+        if not files or any(files & {*graph.nodes[member].reads, *graph.nodes[member].required_reads}
+                            for member in cycle_nodes(graph, target, source)
+                            if member in graph.nodes):
+            continue
+        out.append(f"W-reloop-target [{source}]: gate {source!r} sends control back to "
+                   f"{target!r} on {condition or 'its retry'!r}, a {node.kind} node, and no "
+                   f"step it re-runs reads what the gate read ({', '.join(sorted(files))}), so "
+                   "the review reaches no prompt; loop over the agent that should act on it, "
+                   "or have a re-run step read those files")
+    return out + unread_output_warnings(graph, baseline)
+
+
+def unread_output_warnings(graph: Graph, baseline: Graph | None = None) -> list[str]:
+    """W-unread-output: a step (agent or op) that writes files, sets no fact, has an
+    out-edge (the last step of a run or pass leaves its files as the output), and whose
+    every written file no other node declares in ``reads`` or ``required_reads``. Only
+    steps new or changed against ``baseline`` are judged, so a mode's own wiring is not
+    re-litigated on every request.
+
+    A warning, not a refusal: a Python op may open a file it does not declare, so
+    nothing here can prove the work is lost; it says no declaration shows a reader. A
+    step that sets a fact is left alone (a fact may feed the score)."""
+    before = {} if baseline is None else {k: n.to_state() for k, n in baseline.nodes.items()}
+    out: list[str] = []
+    for node_id in sorted(graph.reachable()):
+        node = graph.nodes.get(node_id)
+        if node is None or node.kind not in ("agent", "op") or not node.writes or node.produces:
+            continue
+        if baseline is not None and before.get(node_id) == node.to_state():
+            continue
+        if not graph.out_edges(node_id):
+            continue
+        read = {name for other_id, other in graph.nodes.items() if other_id != node_id
+                for name in (*other.reads, *other.required_reads)}
+        unread = [name for name in node.writes if name not in read]
+        if len(unread) < len(node.writes):
+            continue
+        files = ", ".join(repr(name) for name in unread)
+        out.append(f"W-unread-output [{node_id}]: node {node_id!r} writes {files}, which no node "
+                   "declares in its reads, and sets no fact, so nothing is shown to read its "
+                   "output and it runs on every item for nothing; wire it into a later step's "
+                   "`reads` (an op that builds a prompt reads only the files it declares, so "
+                   "a prompt saying \"the notes above\" does not make it read them), make its "
+                   "reply a fact a prompt fills in, or remove the node")
+    return out
+
+
 def on_path_nodes(graph: Graph) -> set[str]:
     """Nodes that lie on some ``start -> terminal`` path.
 

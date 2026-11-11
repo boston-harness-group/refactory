@@ -90,6 +90,11 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     optional_ids = _optional_node_ids(graph)
     knob_values = {name: (entry or {}).get("value") for name, entry in (state.get("knobs") or {}).items()}
     declarations: dict[str, dict[str, Any]] = {}
+    # The reloops whose redone step cannot see what the gate read: the gate's runner
+    # hands it those files (`run.with_unseen_reads`), as the walker does.
+    from refactory_dsh.nn.loops import blind_reloops
+
+    blind = blind_reloops(graph, knob_values)
     for node_id, node in graph.nodes.items():
         entry: dict[str, Any] = {
             "kind": node.kind,
@@ -139,6 +144,8 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["workspace"] = dict(node.workspace)
         if node.inputs:
             entry["inputs"] = list(node.inputs)
+        if node_id in blind:
+            entry["blind_reloops"] = blind[node_id]
         if needs_snippet_spec(node):
             # What a code or verdict node's callable needs beyond the context (its code,
             # inputs, labels): the runner hands it over as the walker's child does.

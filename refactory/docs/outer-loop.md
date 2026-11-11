@@ -40,11 +40,15 @@ the strategies that merge parents or pick among sibling samples outside the gate
 - **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
   (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
 - **Gate.** Every candidate evaluated on train is rolled out on val, including one whose
-  train run failed, and is accepted only when its val score strictly beats the gate's
-  current candidate (the last one accepted), not its parent. With `--batch-size` above 1
-  the decisions depend on the batch's order: a candidate accepted earlier in the batch
-  raises the bar for the ones after it. SkillOpt gates one candidate per epoch and has
-  no equivalent.
+  train run failed, and must strictly beat the gate's current candidate (the last one
+  accepted), not its parent. The candidates of one round (`--batch-size` above 1, or a
+  `--portfolio` round's one per edit level) are judged together, each against the
+  current candidate as the round starts, so the order they were proposed in decides
+  nothing: of those that beat it, the one with the highest val score is accepted and
+  becomes current; a tie goes to the higher train score, then to the one proposed first.
+  The others are rejected, and one that beat the bar but lost to a sibling is marked
+  shadowed in the report. SkillOpt gates one candidate per epoch, where the two rules
+  agree; its own strategy keeps its gate unchanged.
 - **Parent and winner.** As in SkillOpt, the gate's current candidate (also the best on
   val) is the parent every optimizer edits, with any accepted candidate a person kept,
   whether or not its train run succeeded. The leaderboard lists the accepted candidates a

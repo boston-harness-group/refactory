@@ -1864,11 +1864,17 @@ class Loop(OuterLoop):
         # Each knob's declaration as the candidates carry it (the latest wins), so a
         # knob an edit added is enumerated like one the mode declares.
         specs: dict[str, dict[str, Any]] = {}
+        # A frozen knob (the mode's run settings, or one the operator froze) is not the
+        # optimizer's to move, so its values are not attributed, nor its untried ones offered.
+        frozen = set(self.config.frozen) | {
+            name for name, knob in self.parameters.items() if getattr(knob, "frozen", False)}
         for candidate in evaluated:
             decision = self._gate_decision(candidate.id)
             for name, entry in (candidate.state.get("knobs") or {}).items():
                 if isinstance(entry.get("spec"), dict):
                     specs[name] = entry["spec"]
+                    if entry["spec"].get("frozen"):
+                        frozen.add(name)
                 buckets.setdefault(name, {}).setdefault(str(entry["value"]), []).append(
                     float(candidate.score)
                 )
@@ -1878,6 +1884,8 @@ class Loop(OuterLoop):
                     counts["kept" if decision in ("kept", "current") else decision] += 1
         attribution: dict[str, Any] = {}
         for name, values in sorted(buckets.items()):
+            if name in frozen:
+                continue
             attribution[name] = {
                 "tried": {
                     value: {
@@ -2190,10 +2198,10 @@ class Loop(OuterLoop):
 
         ``by_level``: candidates proposed, evaluated and kept by the validation gate,
         and the evaluations they cost (a train run, plus each val or test occasion).
-        ``rounds``: each round's candidates in the order they were gated, with the
+        ``rounds``: each round's candidates in the order they were proposed, with the
         gate's decision; a candidate the gate rejected although its val score beat
-        its parent's, after a sibling of the same round was accepted first, is
-        ``shadowed``: gating in proposal order raised the bar it lost to.
+        its parent's, because a sibling of the same round scored higher on val (or tied
+        and won the tie), is ``shadowed``.
         ``extra_evaluations``: what the candidates beyond ``batch_size`` in each round
         cost."""
         from refactory_dsh.optim.base import EDIT_LEVELS
@@ -2227,7 +2235,10 @@ class Loop(OuterLoop):
             siblings = rounds.setdefault(record.get("epoch"), [])
             val, parent_val = cache.get(record["id"]), cache.get(record.get("parent") or "")
             shadowed = (decision == "rejected" and val is not None and parent_val is not None
-                        and val > parent_val and any(s["kept"] for s in siblings))
+                        and val > parent_val and any(
+                            self._gate_decision(r["id"]) in ("kept", "current")
+                            for r in records if r.get("epoch") == record.get("epoch")
+                            and r["id"] != record["id"]))
             siblings.append({"id": record["id"], "level": record["level"],
                              "evaluated": bool(candidate is not None and candidate.evaluated),
                              "gate": decision, "kept": kept, "shadowed": shadowed,
@@ -2497,7 +2508,7 @@ class Loop(OuterLoop):
             refused=refused,
             population=len(self.population),
             refused_total=len(self.rejections),
-            structural_in_population=sum(1 for c in self.population if c.is_structural()),
+            structural_in_population=sum(1 for c in self.population if c.lineage_is_structural()),
         )
         self.epochs.append(summary)
         self._write_state()
@@ -3007,21 +3018,23 @@ class Loop(OuterLoop):
     def _gate_population(self, run: Run) -> None:
         """Judge each candidate evaluated on train that the gate has not judged.
 
-        The seed is rolled out on val and accepted; every later candidate, in
-        population order, is accepted only when its val score strictly beats the
-        gate's current candidate's (the last one accepted), as SkillOpt's gate
-        decides, so a child cannot pass by beating a weak old parent. A candidate
-        whose train run failed is rolled out on val too and the gate decides. A
-        refused rollout (a spent rollout budget) leaves the rest unjudged, and an
-        unjudged candidate is not a parent or a winner.
+        The seed is rolled out on val and accepted. Every later candidate the gate has
+        not judged is one round (``ValidationGate.judge_round``): each is judged against
+        the same bar, the gate's current candidate as the round starts, so the order
+        siblings were proposed in decides nothing. Of those whose val score strictly
+        beats it, the highest is accepted and becomes current; a tie goes to the higher
+        train score, then to the one proposed first. The rest are rejected, one that
+        beat the bar but lost to a sibling included (the report marks it shadowed). A
+        candidate whose train run failed is rolled out on val too and judged the same
+        way. A refused rollout (a spent rollout budget) judges what was scored before
+        it and leaves the rest unjudged; an unjudged candidate is not a parent or a
+        winner. SkillOpt gates one candidate per epoch, where both rules agree.
 
-        With ``batch_size`` > 1 the decisions depend on the batch's order: a
-        candidate accepted earlier in the batch raises the bar for the ones after
-        it. SkillOpt gates one candidate per epoch, so it has no equivalent. The val
-        rollouts do not: they are rolled out first, up to ``max_concurrent_evaluations``
-        at once (``_prefetch_val``), and the decisions are then taken in order from
-        the gate's cache.
+        The val rollouts are rolled out first, up to ``max_concurrent_evaluations`` at
+        once (``_prefetch_val``), and the decisions are then taken from the gate's cache.
         """
+        from refactory_dsh.outerloop import RoundStopped
+
         gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
         pending = [c for c in self.population if c.evaluated and c.id not in judged]
@@ -3031,20 +3044,31 @@ class Loop(OuterLoop):
             # Journaled now, so a run killed before the decisions rolls none again.
             self._store_gate_state()
             self._save_strategy_state()
-        for candidate in pending:
+        if pending and gate.best_id is None:
             try:
-                if gate.best_id is None:
-                    gate.start(run, candidate)
-                    self._strategy_state["gate_start_epoch"] = self.epoch
-                    accepted = True
-                else:
-                    accepted = gate.judge(run, candidate).accepted
+                gate.start(run, pending[0])
             except OuterLoopError as error:
                 run.log(f"val gate stopped: {error}")
-                break
-            (self._gate_accepted if accepted else self._gate_rejected).append(candidate.id)
+                return
+            self._strategy_state["gate_start_epoch"] = self.epoch
+            self._gate_accepted.append(pending[0].id)
             self._store_gate_state()
             self._save_strategy_state()
+            pending = pending[1:]
+        if not pending:
+            return
+        try:
+            accepted, rejected = gate.judge_round(run, pending)
+        except RoundStopped as stop:
+            accepted, rejected = stop.accepted, stop.rejected
+            run.log(f"val gate stopped: {stop.error}")
+        decided = {c.id for c in accepted} | {c.id for c in rejected}
+        for candidate in pending:
+            if candidate.id in decided:
+                (self._gate_accepted if candidate in accepted else self._gate_rejected).append(
+                    candidate.id)
+        self._store_gate_state()
+        self._save_strategy_state()
 
     def _prefetch_val(self, run: Run, gate: ValidationGate, pending: Sequence[Candidate]) -> None:
         """Roll the candidates the gate will judge out on val, in waves of up to
@@ -3362,7 +3386,16 @@ class Loop(OuterLoop):
         return "not gated"
 
     def scoring(self) -> dict[str, Any]:
-        """How a candidate's score is built, said where the numbers are recorded."""
+        """How a candidate's score is built, said where the numbers are recorded: the
+        evaluator's raw number when there is no size cost (``parsimony`` 0), else that
+        number minus the size cost."""
+        if not self.config.parsimony:
+            return {
+                "compared": "raw",
+                "parsimony": self.config.parsimony,
+                "detail": "candidates are ranked by raw_score: parsimony is 0, so there "
+                          "is no size cost and score equals raw_score",
+            }
         return {
             "compared": "penalized",
             "parsimony": self.config.parsimony,
@@ -4012,6 +4045,7 @@ class Loop(OuterLoop):
             mode_name=self.mode_id,
             best_score=(board[0].score if board else None),
             mean_score=self.loss.get("mean"),
+            mean_over=len(self.loss.get("scores") or ()),
             knobs=[
                 {"name": name, **spec,
                  "reachable": self._reachable(name, spec, described["knob_states"])}
@@ -4022,6 +4056,7 @@ class Loop(OuterLoop):
             node_states=described.get("node_states", []),
             # What each node has before it, so a prompt names a fact that is there.
             available=described.get("available", {}),
+            wiring_warnings=list(described.get("warnings") or ()),
             # Candidates run headless: no person answers a gate while they run.
             person_gates=False,
             leaderboard=[self._row(c) for c in board],
@@ -4074,6 +4109,12 @@ class Loop(OuterLoop):
             return {}
         return dict(self._gate().cache)
 
+    def _root_state(self) -> dict[str, Any] | None:
+        """The root candidate's state (the seed every lineage starts from); ``None``
+        before there is one."""
+        root = next((c for c in self.population if not c.parent), None)
+        return root.state if root is not None else None
+
     def _seed_knob_values(self) -> dict[str, Any]:
         """The root candidate's knob values, which every candidate's edit lineage
         starts from; empty before there is one."""
@@ -4096,15 +4137,20 @@ class Loop(OuterLoop):
         return str(parent_id) if parent_id else (board[0].id if board else None)
 
     def _edit_pairs(self, board: list[Candidate]) -> list[dict[str, Any]]:
-        """The latest evaluated children of the edited candidate (one batch), each with
-        its parent's train records; or, when it has none yet, the edited candidate
-        against its own parent. Train records only."""
+        """The latest evaluated children of the edited candidate, each with its parent's
+        train records; or, when it has none yet, the edited candidate against its own
+        parent. Train records only.
+
+        The latest children are every evaluated child proposed in the same epoch as the
+        last one (its round: all siblings, however many a round makes -- a portfolio
+        makes one per edit level whatever ``batch_size`` says); a child with no proposal
+        record counts in the last ``batch_size``."""
         edited = self._edited_id(board)
         by_id = {c.id: c for c in self.population}
         if edited is None or edited not in by_id:
             return []
         children = [c for c in self.population if c.parent == edited and c.evaluated]
-        chosen = children[-max(1, int(self.config.batch_size)):] or [by_id[edited]]
+        chosen = self._last_round(children) or [by_id[edited]]
         pairs = []
         for child in chosen:
             parent = by_id.get(child.parent or "")
@@ -4117,6 +4163,16 @@ class Loop(OuterLoop):
                 "parent_records": parent_records, "same_seed": same,
             })
         return pairs
+
+    def _last_round(self, children: Sequence[Candidate]) -> list[Candidate]:
+        """The children proposed in the epoch of the last of them (population order),
+        in order; without a proposal epoch, the last ``batch_size``."""
+        if not children:
+            return []
+        epoch = (self.proposals.get(children[-1].id) or {}).get("epoch")
+        if epoch is None:
+            return list(children[-max(1, int(self.config.batch_size)):])
+        return [c for c in children if (self.proposals.get(c.id) or {}).get("epoch") == epoch]
 
     def _records_like(self, parent_id: str, child_id: str) -> tuple[list[dict[str, Any]], bool]:
         """The parent's train records to compare with the child's: from the child's
@@ -4163,6 +4219,12 @@ class Loop(OuterLoop):
                       if parent is not None and candidate.evaluated else None)
             entries.append({
                 "id": candidate.id, "epoch": record.get("epoch"),
+                # What this edit added: its new or changed steps judged against its
+                # parent, less what the parent already had.
+                "warnings": [w for w in _wiring_warnings(
+                                 candidate.state, parent.state if parent is not None else None)
+                             if parent is None
+                             or w not in _wiring_warnings(parent.state, parent.state)],
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "considered": record.get("considered"),
@@ -4198,7 +4260,8 @@ class Loop(OuterLoop):
             nodes = (whole.get("graph") or {}).get("nodes") or {}
             return {**mode.describe(), "node_states": [dict(state) for state in nodes.values()],
                     "knob_states": dict(whole.get("knobs") or {}),
-                    "available": available_before(whole.get("graph") or {})}
+                    "available": available_before(whole.get("graph") or {}),
+                    "warnings": _wiring_warnings(whole, self._root_state())}
 
         if parent is None:
             return described(self.mode), ""
@@ -4656,6 +4719,22 @@ class Loop(OuterLoop):
         )
 
 
+def _wiring_warnings(state: Mapping[str, Any] | None,
+                     baseline: Mapping[str, Any] | None = None) -> list[str]:
+    """A state's wiring warnings (`nn.validate.wiring_warnings`), its steps judged against
+    ``baseline``'s (new or changed ones only) when given; none for a state whose graph
+    does not parse (the validator refuses it on its own)."""
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.validate import wiring_warnings
+
+    try:
+        before = (Graph.from_state((baseline or {}).get("graph") or {})
+                  if baseline is not None else None)
+        return wiring_warnings(Graph.from_state((state or {}).get("graph") or {}), before)
+    except Exception:  # noqa: BLE001 - a broken graph is V0's to report, not this note's
+        return []
+
+
 def _other_value(knob: Knob, current: Any, rng: random.Random) -> Any:
     """A value a knob accepts that is not the one it currently holds.
 
@@ -4734,9 +4813,10 @@ def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
              f"`{portfolio['setting']}`: {portfolio['rounds']} round(s) asked for one candidate "
              f"per edit level; the candidates beyond the batch size of {portfolio['batch_size']} "
              f"cost {portfolio['extra_evaluations']} evaluation(s) (train and val runs). The "
-             "gate judges a round's candidates in the order they were proposed, so one it "
-             "accepts first raises the bar for the next: a candidate that beat its parent on "
-             "val but lost to that sibling is marked shadowed.", "",
+             "gate judges a round's candidates together, each against the current candidate "
+             "as the round starts, and keeps the one with the highest val score (ties: higher "
+             "train score, then the one proposed first): a candidate that beat its parent on "
+             "val but lost to a sibling is marked shadowed.", "",
              _md_table(["level", "proposed", "evaluated", "kept by the gate", "evaluations"], rows),
              ""]
     round_rows = []
