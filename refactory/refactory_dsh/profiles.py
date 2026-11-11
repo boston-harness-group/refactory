@@ -140,10 +140,11 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
-    # val_gate: a switch; the command line passes it as 0 or 1.
-    if result.get("val_gate") not in (True, False, 0, 1):
+    # val_gate: a switch; the command line passes it as 0 or 1. Unset (None) is the
+    # default: the run turns it on when its parts manifest has val items.
+    if result.get("val_gate") not in (True, False, 0, 1, None):
         raise ProfileError("val_gate must be true or false (1 or 0 on the command line)")
-    result["val_gate"] = bool(result.get("val_gate"))
+    result["val_gate"] = None if result.get("val_gate") is None else bool(result["val_gate"])
     # The default loop's early stop (needs val_gate): a count of stale epochs, 0 off,
     # and a switch the command line passes as 0 or 1.
     patience = result.get("early_stop_patience")
@@ -170,12 +171,18 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     minibatch = result.get("train_minibatch")
     if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
-    if result["val_gate"]:
-        from refactory_dsh.loop import val_gate_refusal
-        refusal = val_gate_refusal(str(result.get("optimizer")), str(result.get("strategy")),
-                                   str(result.get("parent_picker") or ""))
-        if refusal:
-            raise ProfileError(refusal)
+    from refactory_dsh.loop import SELECTIONS
+    selection = result.get("selection") or ""
+    if selection not in SELECTIONS:
+        raise ProfileError(f"unknown selection: {selection}; known: "
+                           f"{', '.join(s for s in SELECTIONS if s)}")
+    if selection and result["val_gate"] is False:
+        raise ProfileError(f"selection {selection} chooses by validation score, which only "
+                           "val_gate measures; turn val_gate on, or leave selection empty")
+    result["selection"] = selection
+    pool_size = result.get("pool_size")
+    if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
+        raise ProfileError("pool_size must be a positive integer")
     # max_items_in_flight: None or positive int
     mif = result.get("max_items_in_flight")
     if mif is not None:
@@ -398,7 +405,7 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
         "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
-        "fresh_evidence", "max_edits_per_proposal")}
+        "fresh_evidence", "max_edits_per_proposal", "selection", "pool_size")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
@@ -466,9 +473,19 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
 
 #: ``--help`` text for the settings that have it.
 SETTING_HELP = {
+    "val_gate": "1 selects on the parts manifest's val part (the validation gate), 0 on "
+                "train scores (default: on when the manifest has val items, else train "
+                "selection with a warning)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
                      "map_elites) with --optimizer: the picker chooses the candidate each "
                      "step edits, the optimizer writes the edits (default: none)",
+    "selection": "with --val-gate: pool keeps the --pool-size best candidates on validation "
+                 "as parents, the incumbent (the winner) changing only on a strictly higher "
+                 "val score; single is SkillOpt's line, the incumbent the only parent "
+                 "(default: single for the default loop with a single-parent optimizer, "
+                 "pool otherwise)",
+    "pool_size": "with --selection pool: how many candidates the pool keeps by val score, "
+                 "ties at the edge kept (default: 8)",
     "portfolio": "prompt+pipeline: each round asks the model proposer for one "
                  "prompt/knob-level and one pipeline-level candidate and evaluates both, "
                  "gated in that order (default: off)",
@@ -483,7 +500,7 @@ def add_arguments(parser: Any) -> None:
         # snapshots, not as a command-line object.
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
-        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight") else str
+        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight", "val_gate") else str
         parser.add_argument(flag, dest=key, type=kind, default=None, help=SETTING_HELP.get(key))
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")

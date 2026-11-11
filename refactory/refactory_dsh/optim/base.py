@@ -669,6 +669,9 @@ class ProposalContext:
     #: what the gate ranks by (``HillClimbSelector``). Never rendered: the model's
     #: request shows gate decisions, not val scores.
     val_scores: dict[str, float] = field(default_factory=dict)
+    #: How the validation gate selects (``Loop.selection_mode``): ``single``, ``pool``,
+    #: or empty without the gate. Under ``pool`` the gate note says what the pool is.
+    selection: str = ""
     #: What is there before each node of the edited graph, on every path that reaches
     #: it (`available_before`): ``{node: {"facts": [...], "files": [...]}}``. Rendered
     #: under "The pipeline you may edit", so a prompt's ``{{name}}`` names a fact that
@@ -692,7 +695,10 @@ class ProposalContext:
         sections = [
             f"# Update request — generation {self.generation}, epoch {self.epoch}",
             "",
-            f"Mode: `{self.mode_name}`. Best score so far: {self.best_score}. "
+            f"Mode: `{self.mode_name}`. "
+            + (f"Best score so far: {self.best_score}. " if not self.selection else
+               f"Train score of the candidate the validation gate ranks first: "
+               f"{self.best_score}. ")
             + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
              if self.mean_over else f"Mean score so far: {self.mean_score}."),
             "",
@@ -757,7 +763,8 @@ class ProposalContext:
                                  text_knobs=[k.get("name") for k in self.knobs
                                              if k.get("kind") == "str"]),
             "## Recent results",
-            *_gate_note(self.leaderboard, self.history, val_items=self.val_items),
+            *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
+                        selection=self.selection),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
                      compact_edits(c.get("edits"), self.seed_knob_values),
@@ -1865,17 +1872,31 @@ def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
     return ["gate"] if any("gate" in row for row in rows) else []
 
 
-def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0) -> list[str]:
+def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
+               selection: str = "") -> list[str]:
     """What the gate column means, said once, when there is one.
 
     A rejection says only that the candidate was not shown better on validation; with
     ``val_items`` (the validation items the gate's score is the mean of) the note says
-    what one item is worth, so a one-item loss is read as the gate's resolution."""
+    what one item is worth, so a one-item loss is read as the gate's resolution. Under
+    ``selection`` ``pool`` it says what the pool is instead of SkillOpt's single line."""
     if not any(_gate_column(rows) for rows in tables):
         return []
     resolution = (f"The gate's score is the mean over {val_items} validation items, so one "
                   f"item is 1/{val_items} = {1 / val_items:.3g} of it, and a rejection can come "
                   "down to a single item. " if val_items > 0 else "")
+    if selection == "pool":
+        return ["This run keeps a validation pool: each candidate was also run on held-out "
+                "items, and the pool holds the candidates that scored best there (`kept`). "
+                "The best of all is marked `current`; it changes only when a candidate scores "
+                "strictly higher there. Scores here are train scores; held-out scores are "
+                "never shown. You edit the pipeline shown below. A "
+                "`rejected` candidate is not among the best on validation; that is all it "
+                "says. " + resolution + "A change that was rejected must not be proposed "
+                "again unchanged, but when its train fixed/broken counts against its parent "
+                "(when shown below) were strongly positive, its direction may still be right: "
+                "you may build on it or combine it with edits to other steps in the same "
+                "failure path."]
     return ["This run has a validation gate: each candidate was also run on held-out "
             "items, and the gate kept it only if it scored strictly higher there than the "
             "current candidate (an equal score is rejected). Scores here are train scores; "

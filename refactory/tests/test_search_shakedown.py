@@ -264,7 +264,9 @@ def _parts_run(tmp_path: Path, parts: dict[str, list[str]],
     with _patch_mode(PartsProbe):
         loop = Loop(PARTS_MODE, LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1,
                                            runs_root=tmp_path / "run", holdout=holdout,
-                                           parts_manifest=str(manifest)), project=Path("."))
+                                           parts_manifest=str(manifest),
+                                           # the audit of an ungated run's val part
+                                           val_gate=False), project=Path("."))
         report = loop.run()
     return loop, report
 

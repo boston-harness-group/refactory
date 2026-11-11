@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim.base import Candidate, Optimizer, Proposal, ProposalContext
@@ -77,6 +77,10 @@ class ParentSelector(Optimizer):
 
     #: Index of the choice, for a reproducible stream and a readable rationale.
     policy: str = ""
+    #: Whether the policy keeps a population of its own (an archive, a tournament,
+    #: islands, niches). Under the validation gate's ``pool`` selection it is handed
+    #: every judged candidate, not the top ``pool_size``, and applies its own rule.
+    population: bool = True
 
     def __init__(self, *, k: int = 3, seed: int = 0) -> None:
         super().__init__(k=k)
@@ -125,6 +129,26 @@ class ParentSelector(Optimizer):
     def _by_score(self, candidates: Sequence[Candidate]) -> list[Candidate]:
         return sorted(candidates, key=lambda c: (c.score or 0.0), reverse=True)
 
+    @staticmethod
+    def fitness(ctx: ProposalContext | None) -> Callable[[Candidate], Any]:
+        """What a policy ranks by: the validation gate's score (``ctx.val_scores``) when
+        the run has one, a tie by the higher train score (a failed train run lowest);
+        the train score otherwise. Under the gate, train scores of different rounds come
+        from different seeds and samples, so they only ever break a val tie."""
+        val = dict(getattr(ctx, "val_scores", None) or {})
+        if not val:
+            return lambda c: (c.score or 0.0)
+
+        def key(c: Candidate) -> tuple[float, float]:
+            return (val.get(c.id, float("-inf")),
+                    float(c.score) if c.score is not None else float("-inf"))
+        return key
+
+    def _ranked(self, ctx: ProposalContext | None, candidates: Sequence[Candidate]) -> list[Candidate]:
+        """``candidates`` best first by :meth:`fitness`; ties keep the order given (the
+        loop's pool order, else the population's)."""
+        return sorted(candidates, key=self.fitness(ctx), reverse=True)
+
     def reason(self, candidate: Candidate) -> str:
         """Why this policy chose ``candidate``, in a few words, for the request."""
         return self.policy
@@ -148,9 +172,10 @@ class ArchiveSelector(ParentSelector):
         self.members: dict[str, Candidate] = {}
 
     def select(self, ctx, n, parents):
-        for candidate in parents:
-            self.members.setdefault(candidate.id, candidate)
-        kept = self._by_score(list(self.members.values()))[: self.limit]
+        # Rebuilt from the parents the loop hands over each round (under the validation
+        # gate every judged candidate a person has not rejected), ranked by val, so the
+        # archive holds the best ``limit`` of them.
+        kept = self._ranked(ctx, parents)[: self.limit]
         self.members = {candidate.id: candidate for candidate in kept}
         return kept[:n] if kept else []
 
@@ -172,12 +197,13 @@ class EvolutionarySelector(ParentSelector):
 
     def select(self, ctx, n, parents):
         rng = self.rng(ctx, n)
-        pool = self._by_score(parents)[: max(self.tournament * 4, n)]
+        fitness = self.fitness(ctx)
+        pool = self._ranked(ctx, parents)[: max(self.tournament * 4, n)]
         if len(pool) < self.tournament:
             return pool[:n]
         chosen: list[Candidate] = []
         for _ in range(n):
-            chosen.append(max(rng.sample(pool, self.tournament), key=lambda c: (c.score or 0.0)))
+            chosen.append(max(rng.sample(pool, self.tournament), key=fitness))
         return chosen
 
 
@@ -218,11 +244,12 @@ class IslandsSelector(ParentSelector):
         populated = sorted(islands)
         if not populated:
             return []
+        fitness = self.fitness(ctx)
         chosen: list[Candidate] = []
         for offset in range(n):
             island = populated[(self._turn + offset) % len(populated)]
             members = islands[island]
-            chosen.append(max(members, key=lambda c: (c.score or 0.0)))
+            chosen.append(max(members, key=fitness))
         self._turn += 1
         return chosen
 
@@ -237,6 +264,7 @@ class HillClimbSelector(ParentSelector):
 
     name = "hill_climb"
     policy = "the best so far"
+    population = False
 
     def select(self, ctx, n, parents):
         val = getattr(ctx, "val_scores", None) or {}
@@ -262,6 +290,8 @@ class MapElitesSelector(ParentSelector):
     candidate -- another agent step, a verdict loop, a parallel fork, a code node --
     is the best of its own group until something of the same shape beats it, so a
     new structure is not lost to a prompt-tuned lineage that already scores higher.
+    Under the validation gate the loop hands it every judged candidate (not the top
+    ``pool_size``), so that holds there too, by val score.
     """
 
     name = "map_elites"
@@ -308,10 +338,13 @@ class MapElitesSelector(ParentSelector):
             sum(1 for edge in (1, 3) if steps > edge),
         )
 
-    def add(self, candidate: Candidate) -> None:
+    def add(self, candidate: Candidate, fitness: Callable[[Candidate], Any] | None = None) -> None:
+        """Make ``candidate`` its cell's champion if the cell is empty or it is strictly
+        fitter than the champion (``fitness``, the train score when not given)."""
+        fitness = fitness or (lambda c: (c.score or 0.0))
         key = self.features(candidate)
         held = self.cells.get(key)
-        if held is None or (candidate.score or 0.0) > (held.score or 0.0):
+        if held is None or fitness(candidate) > fitness(held):
             self.cells[key] = candidate
 
     def coverage(self) -> float:
@@ -322,12 +355,18 @@ class MapElitesSelector(ParentSelector):
 
     def reason(self, candidate: Candidate) -> str:
         shape = shape_label(pipeline_shape(candidate.state))
-        return (f"{self.policy}: the best-scoring candidate of shape [{shape}], one of "
+        return (f"{self.policy}: the best candidate of shape [{shape}], one of "
                 f"{len(self.cells)} shape group(s) held")
 
     def select(self, ctx, n, parents):
+        # The cells are rebuilt from the parents the loop hands over each round (under
+        # the validation gate every judged candidate a person has not rejected, not only
+        # the pool), each champion the fittest of its cell by val: a new shape ranked
+        # below the pool still holds its cell.
+        self.cells = {}
+        fitness = self.fitness(ctx)
         for candidate in parents:
-            self.add(candidate)
+            self.add(candidate, fitness)
         occupied = sorted(self.cells)
         if not occupied:
             return []

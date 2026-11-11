@@ -20,7 +20,7 @@ import json
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from refactory_dsh.loop import Loop
 from refactory_dsh.optim import Candidate, Proposal, pipeline_shape
@@ -128,8 +128,16 @@ SETTINGS_STALL = 3
 
 
 def edit_kind_decision(population: Sequence[Candidate],
-                       *, stall: int = SETTINGS_STALL) -> dict[str, Any]:
+                       *, stall: int = SETTINGS_STALL,
+                       scores: Mapping[str, float] | None = None) -> dict[str, Any]:
     """What kind of edit the evidence points to: ``pipeline`` or ``prompt_knob``.
+
+    ``scores``, when given, are the scores to read instead of the train scores: the
+    validation gate's, by candidate id (every candidate it judged, a rejected one
+    included). Under the gate train scores come from different seeds and samples each
+    round, so they say nothing about which change paid; val gains of children against
+    their parents do. The val scores never reach the decision's text, which the
+    proposer reads.
 
     Compares the top third of the scored candidates with the bottom third by
     pipeline shape (`optim.policies.pipeline_shape`) and score:
@@ -144,16 +152,29 @@ def edit_kind_decision(population: Sequence[Candidate],
 
     Empty when fewer than two candidates are scored: no evidence, no decision.
     """
-    scored = sorted((c for c in population if c.evaluated and c.score is not None),
-                    key=lambda c: (-(c.score or 0.0), c.id))
+    if scores is None:
+        def score(c: Candidate) -> float:
+            return c.score or 0.0
+
+        def has(c: Candidate) -> bool:
+            return c.evaluated and c.score is not None
+    else:
+        def score(c: Candidate) -> float:
+            return float(scores[c.id])
+
+        def has(c: Candidate) -> bool:
+            return c.evaluated and c.id in scores
+    scored = sorted((c for c in population if has(c)), key=lambda c: (-score(c), c.id))
     if len(scored) < 2:
         return {}
     k = max(1, len(scored) // 3)
     top, bottom = scored[:k], scored[-k:]
     top_keys = {_shape_key(c) for c in top}
     bottom_keys = {_shape_key(c) for c in bottom}
-    means = (f"top {k} mean {_mean([c.score or 0.0 for c in top]):.4g}, "
-             f"bottom {k} mean {_mean([c.score or 0.0 for c in bottom]):.4g}")
+    means = (f"top {k} mean {_mean([score(c) for c in top]):.4g}, "
+             f"bottom {k} mean {_mean([score(c) for c in bottom]):.4g}"
+             if scores is None else
+             f"the top {k} and the bottom {k} by validation score, which is not shown")
     pipeline = {"edit_kind": "pipeline",
                 "purpose": "this round: a pipeline-level change -- add, remove, rewire, "
                            "gate or parallelise steps, or (where the run allows code steps) "
@@ -169,13 +190,14 @@ def edit_kind_decision(population: Sequence[Candidate],
             f"[{_shape_text(bottom)}] ({means}): the score follows the pipeline's shape")}
     if len({_shape_key(c) for c in scored}) == 1:
         by_id = {c.id: c for c in population}
-        recent = [c for c in population if c.evaluated and c.score is not None
-                  and c.parent in by_id and _is_settings_only(c)][-stall:]
+        recent = [c for c in population if has(c) and c.parent in by_id
+                  and (scores is None or has(by_id[c.parent])) and _is_settings_only(c)][-stall:]
         stalled = len(recent) >= stall and all(
-            (c.score or 0.0) <= (by_id[c.parent].score or 0.0) for c in recent)
+            score(c) <= score(by_id[c.parent]) for c in recent)
         if stalled:
             return {**pipeline, "why": (
-                f"the last {len(recent)} prompt/knob edits did not beat their parents, and "
+                f"the last {len(recent)} prompt/knob edits did not beat their parents"
+                + ("" if scores is None else " on validation") + ", and "
                 f"every candidate so far has one shape [{_shape_text(scored)}], so the "
                 "scores say nothing yet about a different structure")}
         return {**settings, "why": (
@@ -197,12 +219,26 @@ class BestOfN(Loop):
 
     name = "best_of_n"
     width = 4
+    #: One round of samples is the whole search: ending it is a normal end, so the run
+    #: scores what it holds and, under ``val_gate``, runs the final evaluation.
+    normal_ends = ("epochs", "samples_exhausted")
 
     def batch_size(self, run: Run) -> int:
         return int(self.width) if self.strategy_decision.get("samples") else super().batch_size(run)
 
+    def _seed_population(self, seed: Candidate) -> None:
+        """No swept starting population: the N samples are the search, and a swept
+        candidate would never be evaluated (or, scored at the end, cost evaluations
+        nobody asked for)."""
+
+    def score_last_batch(self, run: Run | None = None) -> None:
+        """Nothing is left to score: each sample is evaluated when it is made, and
+        without ``val_gate`` the seed is not part of the search (SRF's best_of_n has no
+        seed run)."""
+
     def strategy(self, run: Run) -> None:
         seed = run.seed()
+        _gate_seed(self, run, seed)
         if getattr(self.optimizer, "uses_model", False):
             # A model proposer writes the N samples: one request, N proposals, all
             # against the seed. The knob sampler below is the random proposer's way.
@@ -210,19 +246,23 @@ class BestOfN(Loop):
                     f"{self.width} independent variants of the seed; each is evaluated "
                     "once and the best is kept, so make them different from each other")):
                 run.keep(run.evaluate(candidate))
-            run.stop("samples_exhausted")
-            return
-        for index in range(self.width):
-            if run.budget_left() <= 0:
-                break
-            edit = self._variant(index, seed)
-            if edit is None:
-                continue
-            outcome = run.attempt(Proposal(edit=edit, parent=seed.id), seed)
-            if isinstance(outcome, list):
-                run.log(f"variant {index} refused: {outcome[0]}")
-                continue
-            run.keep(run.evaluate(outcome))
+        else:
+            for index in range(self.width):
+                if run.budget_left() <= 0:
+                    break
+                edit = self._variant(index, seed)
+                if edit is None:
+                    continue
+                outcome = run.attempt(Proposal(edit=edit, parent=seed.id), seed)
+                if isinstance(outcome, list):
+                    run.log(f"variant {index} refused: {outcome[0]}")
+                    continue
+                run.keep(run.evaluate(outcome))
+        if self.config.val_gate:
+            # The samples are one round of the gate: each judged on val against the
+            # seed, the best kept as the incumbent (the winner) only on a strictly
+            # higher val score, and every one may enter the pool.
+            self._gate_population(run)
         run.stop("samples_exhausted")
 
     def _variant(self, index: int, seed: Candidate) -> dict[str, Any] | None:
@@ -246,6 +286,28 @@ class BestOfN(Loop):
 
     def update(self, run: Run, candidate: Candidate) -> None:
         """No archive: best-of-N is a single round, so keeping is enough."""
+
+
+def _gate_seed(loop: Loop, run: Run, seed: Candidate) -> None:
+    """Under ``val_gate``, before a strategy that never runs an epoch samples from the
+    seed: score the seed on train and start the gate with it, so the samples are judged
+    against the seed's val score and the seed is the incumbent until one beats it."""
+    if not loop.config.val_gate or seed.evaluated or run.budget_left() <= 0:
+        return
+    run.evaluate(seed)
+    loop._gate_population(run)
+
+
+def _fittest(loop: Loop, candidates: Sequence[Candidate]) -> Candidate:
+    """The best of ``candidates`` by what the run selects on: the validation gate's
+    score under ``val_gate`` (a tie by the higher train score, then the earlier), else
+    the train score (the first of equals)."""
+    val = loop._val_scores()
+    if val:
+        return max(candidates, key=lambda c: (
+            val.get(c.id, float("-inf")),
+            float(c.score) if c.score is not None else float("-inf")))
+    return max(candidates, key=lambda c: (c.score or 0.0))
 
 
 def _sample_from_optimizer(loop: Loop, run: Run, seed: Candidate, width: int,
@@ -289,8 +351,11 @@ class Reflective(Loop):
                 run.stop("epochs")
 
     def _merge_now(self, run: Run) -> bool:
-        """Merge once there are enough parents to have something to combine."""
-        return len(self.select_parents(3)) >= 3 and (self.merges + self.mutations) % 3 == 2
+        """Merge once there are enough parents to have something to combine: under
+        ``val_gate`` the parents the gate hands over (the pool; under ``single`` only the
+        incumbent and what a person kept, so a single line does not merge)."""
+        parents = self._gated_parents() if self.config.val_gate else self.select_parents(3)
+        return len(parents) >= 3 and (self.merges + self.mutations) % 3 == 2
 
     def epoch_step(self, run: Run | None = None, *, branch: str = "mutate") -> bool:
         """Record the branch **and publish it**, so the proposal can act on it.
@@ -311,12 +376,18 @@ class Reflective(Loop):
                            "other's settings"}
         else:
             # Reflection on the evidence: what kind of edit the scores point to.
-            self.strategy_decision = {"branch": "mutate",
-                                      **edit_kind_decision(self.population)}
+            self.strategy_decision = {"branch": "mutate", **self._edit_kind()}
         run.log(f"branch={branch}"
                 + (f" edit_kind={self.strategy_decision['edit_kind']}"
                    if self.strategy_decision.get("edit_kind") else ""))
         return super().epoch_step(run)
+
+    def _edit_kind(self) -> dict[str, Any]:
+        """Reflection on the evidence: what kind of edit the scores point to. Under the
+        gate on val: which kind of change raised a child's val score over its parent's
+        (the gate's cache holds every judged candidate's, a rejected one included)."""
+        return edit_kind_decision(
+            self.population, scores=self._val_scores() if self.config.val_gate else None)
 
     def propose(
         self, run: Run, parents: Sequence[Candidate], n: int
@@ -330,10 +401,18 @@ class Reflective(Loop):
         """
         if self.strategy_decision.get("branch") != "merge" or len(parents) < 2:
             return super().propose(run, parents, n)
-        # The two best parents. ``parents`` is the population in the order it was
-        # made, so its first two were the seed and the first sweep candidate, whatever
-        # they scored.
-        left, right = sorted(parents, key=lambda c: (-(c.score or 0.0), c.id))[:2]
+        # The two best parents: by val under the gate (from the pool), else by train.
+        # ``parents`` is in the order the loop holds them, so its first two are not
+        # necessarily the best.
+        val = self._val_scores()
+        if val:
+            order = {c.id: index for index, c in enumerate(self.population)}
+            left, right = sorted(parents, key=lambda c: (
+                -val.get(c.id, float("-inf")),
+                -(float(c.score) if c.score is not None else float("-inf")),
+                order.get(c.id, len(order))))[:2]
+        else:
+            left, right = sorted(parents, key=lambda c: (-(c.score or 0.0), c.id))[:2]
         edits = [
             {"op": "set_knob", "name": name, "value": entry["value"]}
             for name, entry in sorted((right.state.get("knobs") or {}).items())
@@ -429,7 +508,10 @@ class AdaptiveMeta(Loop):
                 "meta": True, "reason": "no progress since the last epoch",
                 "purpose": "widen the search: this round evaluates more candidates, so "
                            "make them differ from each other and from what was tried",
-                "why": f"the best score ({self._best}) has not improved since the last epoch",
+                # Under the gate the best is a val score, which the proposer never sees.
+                "why": ("the best validation score has not improved since the last epoch"
+                        if self.config.val_gate else
+                        f"the best score ({self._best}) has not improved since the last epoch"),
             } if meta else {"meta": False})
             run.log(f"meta={meta}")
             if not self.epoch_step(run):
@@ -445,7 +527,15 @@ class AdaptiveMeta(Loop):
         return base + 2 if self.strategy_decision.get("meta") else base
 
     def _meta_now(self, run: Run) -> bool:
-        """Fire the meta branch when progress has stalled."""
+        """Fire the meta branch when progress has stalled: under ``val_gate`` when the
+        gate's best val score has not risen since the last epoch (as its early stop
+        measures a stale epoch), else when the best train score has not."""
+        if self.config.val_gate:
+            gate = self._gate()
+            if len(gate.cache) < 3 or gate.best_id is None:
+                return False
+            previous, self._best = self._best, gate.best_score
+            return previous is not None and not self._best > previous + 1e-9
         scored = [c.score for c in run.history() if c.score is not None]
         if len(scored) < 3:
             return False
@@ -485,10 +575,15 @@ class TreeSearch(Loop):
 
     def _decide(self, parents: Sequence[Candidate]) -> Candidate | None:
         """``debug`` the newest failed leaf, ``draft`` while nothing beats the seed,
-        else ``improve`` the leader."""
+        else ``improve`` the leader (under ``val_gate`` the incumbent, the best on val).
+
+        A failed leaf is debugged whether or not the gate kept it: debugging is a
+        repair, not a selection, so it is looked for in the whole population, not only
+        among the parents."""
         by_id = {c.id: c for c in self.population}
         expanded = {c.parent for c in self.population if c.parent}
-        failed = [c for c in parents if c.evaluated and not c.exit_ok and c.id not in expanded]
+        failed = [c for c in self.population
+                  if c.evaluated and not c.exit_ok and c.id not in expanded]
         leader = self.select_parents(1)
         root = next((c for c in self.population if not c.parent), None)
         if failed:
@@ -500,8 +595,18 @@ class TreeSearch(Loop):
             why = "nothing has beaten the seed yet; write a different first version of it"
         elif leader:
             node, action = leader[0], "improve"
-            why = (f"candidate {leader[0].id} leads with score {leader[0].score} at depth "
-                   f"{self.tree.depth(leader[0].id)} of the tree")
+            depth = self.tree.depth(leader[0].id)
+            if self.config.val_gate:
+                # The proposer reads this note, and never a val score: the number goes
+                # to the strategy log only.
+                why = (f"candidate {leader[0].id} leads on validation (the gate's ranking) "
+                       f"at depth {depth} of the tree")
+                val = self._val_scores().get(leader[0].id)
+                Run(_loop=self).log(f"tree_search: improve {leader[0].id}, val {val}, "
+                                    f"train {leader[0].score}, depth {depth}")
+            else:
+                why = (f"candidate {leader[0].id} leads with score {leader[0].score} at depth "
+                       f"{depth} of the tree")
         else:
             return None
         self.last_action = action
@@ -525,6 +630,17 @@ class TreeSearch(Loop):
                          if c.id == self.strategy_decision.get("parent")), None)
         parents = [node] if node is not None else (self.select_parents(1) or list(parents))
         return super().propose(run, parents, n)
+
+    def install(self, run: Run, proposals: Sequence[Proposal],
+                parents: Sequence[Candidate]) -> list[Candidate]:
+        """Apply proposals to the node this step decided on, even one the parents the
+        loop handed over do not hold (a failed candidate the gate did not keep, which
+        ``debug`` repairs)."""
+        node = next((c for c in self.population
+                     if c.id == self.strategy_decision.get("parent")), None)
+        if node is not None and node not in parents:
+            parents = [node, *parents]
+        return super().install(run, proposals, parents)
 
 
 class StagedCurriculum(Loop):
@@ -623,12 +739,22 @@ class Autoscientists(Loop):
     name = "autoscientists"
     width = 3
     requires_model = True
+    #: The fork and its merge are the whole search: ending there is a normal end, so the
+    #: run scores what it holds and, under ``val_gate``, runs the final evaluation.
+    normal_ends = ("epochs", "merged")
 
     def batch_size(self, run: Run) -> int:
         return int(self.width) if self.strategy_decision.get("samples") else super().batch_size(run)
 
+    def _seed_population(self, seed: Candidate) -> None:
+        """No swept starting population: the branches are the search (see BestOfN)."""
+
+    def score_last_batch(self, run: Run | None = None) -> None:
+        """Nothing is left to score (see BestOfN)."""
+
     def strategy(self, run: Run) -> None:
         seed = run.seed()
+        _gate_seed(self, run, seed)
         produced: list[Candidate] = []
         if getattr(self.optimizer, "uses_model", False):
             # A model proposer writes the N branches; the merge below sees them all.
@@ -649,13 +775,20 @@ class Autoscientists(Loop):
                 continue
             produced.append(run.keep(run.evaluate(outcome)))
         self.merged = len(produced)
+        if self.config.val_gate:
+            # The branches are one round of the gate, judged on val against the seed.
+            self._gate_population(run)
         if len(produced) >= 2 and run.budget_left() > 0:
-            best = max(produced, key=lambda c: (c.score or 0.0))
+            # The merge base is the best branch by what the run selects on (val under
+            # the gate).
+            best = _fittest(self, produced)
             merge = self._merge(produced, best)
             if merge is not None:
                 outcome = run.attempt(Proposal(edit=merge, parent=best.id), best)
                 if not isinstance(outcome, list):
                     run.keep(run.evaluate(outcome))
+                    if self.config.val_gate:
+                        self._gate_population(run)
         run.stop("merged")
 
     def _merge(self, produced: Sequence[Candidate], best: Candidate) -> dict[str, Any] | None:

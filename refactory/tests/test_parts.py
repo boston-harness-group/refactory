@@ -108,6 +108,7 @@ def _make_loop_with_manifest(tmp_path, manifest_dict=None):
             epochs=1, batch_size=1, optimizer="random", seed=1,
             runs_root=tmp_path / "run",
             parts_manifest=str(manifest_path),
+            val_gate=False,  # train selection: the train leader is the parent
         ),
         project=Path("."),
     )
@@ -792,7 +793,7 @@ def test_resume_replays_part_results_for_audit(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True,
+                resume=True, val_gate=False,
             ),
             project=Path("."),
         )
@@ -1076,7 +1077,7 @@ def test_resume_occasion_counter(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True,
+                resume=True, val_gate=False,
             ),
             project=Path("."),
         )
@@ -1121,7 +1122,7 @@ def test_resume_rollout_count(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True,
+                resume=True, val_gate=False,
             ),
             project=Path("."),
         )
@@ -1156,7 +1157,7 @@ def test_resume_train_records(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True,
+                resume=True, val_gate=False,
             ),
             project=Path("."),
         )

@@ -456,7 +456,7 @@ def test_an_ungated_run_measures_train_rather_than_reuse_a_gated_export(tmp_path
     per-epoch one, so train is measured for real and the miss says why."""
     with _patch_mode(PartsProbe):
         code, root = _main(tmp_path, "B", "--optimizer", "hill_climb", "--epochs", "1",
-                           "--repeats", "3", "--seed-results", str(exported))
+                           "--repeats", "3", "--seed-results", str(exported), "--val-gate", "0")
     assert code == 0
     misses = _events(root, "seed_cache_miss")
     assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 3, cached 1004")]

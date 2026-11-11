@@ -64,6 +64,20 @@ def _elite(parents: Sequence[Candidate], ctx: ProposalContext) -> Sequence[Candi
     are bred from, which changes the search, which is how a duplicate stopped being
     refused one layer earlier than it should have been.
     """
+    val = dict(getattr(ctx, "val_scores", None) or {})
+    if val:
+        # Under the validation gate the elite is the best on val, a tie by the higher
+        # train score, then the order handed over (the loop's pool order). A candidate
+        # whose train run failed still has a val score, so the incumbent stays a
+        # parent even then.
+        ranked = sorted(
+            (candidate for candidate in parents if candidate.id in val),
+            key=lambda candidate: (-val[candidate.id],
+                                   -(candidate.score if candidate.score is not None
+                                     else float("-inf"))),
+        )
+        if ranked:
+            return ranked[: max(1, ctx.elite)]
     ranked = sorted(
         (candidate for candidate in parents if candidate.score is not None),
         key=lambda candidate: (-(candidate.score or 0.0), candidate.id),

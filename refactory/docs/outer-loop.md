@@ -22,20 +22,67 @@ call.  This means:
 `command_timeout_s` on each node's subprocess.  It does not use
 `enable_recovery`.
 
-## The default loop's validation gate (`--val-gate 1`)
+## The default loop's validation gate (on by default with val items)
 
-With `--val-gate 1` and a parts manifest with a val part, the default loop evaluates
-candidates the way the SkillOpt strategy does, using the same `ValidationGate` and
-`FinalEvaluation` from `outerloop.py`. Only the optimizer, where edit ideas come from,
-differs. Without `--val-gate` nothing below applies.
+When the run's parts manifest (`--parts-manifest`) has val items, the default loop
+evaluates candidates the way the SkillOpt strategy does, using the same
+`ValidationGate` and `FinalEvaluation` from `outerloop.py`; only the optimizer, where
+edit ideas come from, differs. No flag is needed: an unset `val_gate` (the command
+line's, a profile's or the library's default) turns the gate on when there are val
+items. `--val-gate 0` turns it off, and `--val-gate 1` insists on it (refused without
+val items). `config.json` records the decision, and the report's `selection` section
+says why (`val_gate_basis`).
 
-It follows SkillOpt's single line, where one current candidate is the only parent, so
-it refuses, before anything is rolled out, the optimizers and parent pickers that breed
-from a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`) and
-the strategies that merge parents or pick among sibling samples outside the gate
-(`autoscientists`, `best_of_n`, `reflective`). Run those without `--val-gate`. The
-`random`, `autoresearch` and `hill_climb` optimizers run with it, and so does
-`--parent-picker hill_climb`.
+- **No val items.** A run with no parts manifest, or one without a val part, selects
+  on train scores and says so: "no validation items: selecting on train scores", in its
+  events, its `strategy.log` and its report (`selection.warning`). With `--val-gate 0`
+  the report says the run selected on train though it had val items.
+- **`--holdout`.** The validation set for selection is always the manifest's val part.
+  The `--holdout` fraction of a Task's items (a run without a manifest) is never
+  selected on: it stays the end-of-run audit's independent split. With a manifest the
+  audit's held-out items are the val part, so under the gate the audit runs on the part
+  the search selected on. It then gives no overfit verdict and rolls nothing out: it
+  says that no independent check was possible (`holdout.split` is `val`,
+  `holdout.independent` is false, `status` is `not_applicable`, and the report names
+  the split). With a test part the audit compares val with test, which nothing selects
+  on (`split` `test`). A resumed run keeps the `val_gate` and `selection` its
+  `config.json` recorded.
+- **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
+  for them, and `--val-gate 1` is refused.
+
+Train is the proposer's feedback, validation decides every choice and test is scored
+once at the end. The validation average is the fitness for the parents, the pool and
+the winner, in every strategy, optimizer and parent picker; the proposer never sees a
+val score. `--selection` says how it selects:
+
+- **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
+  beats the incumbent's (the gate's current candidate), and the incumbent is the only
+  parent. The default for the default loop with a single-parent optimizer (`random`,
+  `autoresearch`, `hill_climb`, alone or as `--parent-picker hill_climb`), the
+  SkillOpt-matched setting; its decisions are those of the gate before pools existed.
+- **`pool`**: entry is permissive. Every judged candidate may enter a pool of the
+  `--pool-size` (8 by default) best by val score, with any tied with the last of them.
+  Parents come from the pool, the incumbent first, and each strategy chooses among
+  them by val (a tie by train): `random` takes the best on val, and a model proposer
+  may name any pool member as the parent. The population optimizers and pickers
+  (`archive`, `evolutionary`, `islands`, `map_elites`) are handed every judged
+  candidate a person has not rejected instead, and apply their own rule by val: the
+  archive's own limit (12), tournaments, the best of each island, each niche's
+  champion. So a new structure ranked below the pool keeps its niche or island. The incumbent still changes only on a strictly higher val score (a tie
+  goes to the higher train score, then the earlier candidate), and it is the winner. The
+  default for every other strategy and for the population optimizers and pickers.
+
+Strategies under the gate: `reflective` merges the two best of the pool on val and
+chooses prompt or structure from the val gains of past children over their parents
+(the gate's cache, rejected children included); `best_of_n` and `autoscientists` score
+the seed and send their samples and branches through the gate (the merge base is the
+best branch on val), and their natural ends (`samples_exhausted`, `merged`) run the
+final evaluation; `adaptive_meta` measures a stall on the best val score; `tree_search`
+debugs a failed candidate whether or not the gate kept it, and its notes name the leader
+without a val score. Every report has a `selection` section: the setting, the pool, its
+lines of descent (the seed's child each member descends from) and edit kinds, the share
+of children bred from the incumbent, and the budget (train, val and test scorings,
+rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 
 - **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
   (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
@@ -49,12 +96,13 @@ the strategies that merge parents or pick among sibling samples outside the gate
   The others are rejected, and one that beat the bar but lost to a sibling is marked
   shadowed in the report. SkillOpt gates one candidate per epoch, where the two rules
   agree; its own strategy keeps its gate unchanged.
-- **Parent and winner.** As in SkillOpt, the gate's current candidate (also the best on
-  val) is the parent every optimizer edits, with any accepted candidate a person kept,
-  whether or not its train run succeeded. The leaderboard lists the accepted candidates a
-  person has not rejected, ranked by val score. Its first is the winner: the report, the
-  held-out audit and `adopt` all name it, and the report's `best_score` is its val score
-  (`best_score_basis`), with its train score in `best_train_score`.
+- **Parent and winner.** Under `single`, as in SkillOpt, the gate's current candidate
+  (also the best on val) is the parent every optimizer edits, with any accepted
+  candidate a person kept, whether or not its train run succeeded, and the leaderboard
+  lists the accepted candidates a person has not rejected, ranked by val score. Under
+  `pool` the leaderboard is the pool, the incumbent first. Its first is the winner: the
+  report, the held-out audit and `adopt` all name it, and the report's `best_score` is
+  its val score (`best_score_basis`), with its train score in `best_train_score`.
 - **Fresh evidence.** As SkillOpt rolls out its current candidate on the train part
   every epoch, the candidate the optimizer edits is scored again at the start of each
   epoch's proposal step, on that epoch's train sample (the whole train part, or the
@@ -78,8 +126,10 @@ the strategies that merge parents or pick among sibling samples outside the gate
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
-  gradient's leaderboard) carries the gate's decision: `current` (the candidate it
-  edits), `kept`, `rejected` or `not gated`. The per-knob attribution counts, for each
+  gradient's leaderboard) carries the gate's decision: `current` (the incumbent),
+  `kept`, `rejected` or `not gated`; under `pool`, `kept` is in the pool now and
+  `rejected` is judged and out of it, and the request says so. The request's first line
+  gives the train score of the candidate the gate ranks first, labelled as such. The per-knob attribution counts, for each
   value, how many of its candidates were kept, rejected or not yet gated. The request
   says it edits the `current` candidate, and that a `rejected` one was not shown better
   on validation (with the gate's resolution, one item = 1/N of the val score, when the
@@ -131,14 +181,14 @@ the strategies that merge parents or pick among sibling samples outside the gate
   (SkillOpt's initial val score) and is never a reason to stop. Each later epoch gates
   the batch the previous one proposed, and is checked right after that gating, before
   it proposes, as SkillOpt checks at an epoch's end; so a seed already at 1.0 still gets
-  one batch proposed and gated. Both settings need `--val-gate 1`, are saved with the
+  one batch proposed and gated. Both settings need the gate (val items, or `--val-gate 1`), are saved with the
   run and are kept on resume.
 
 ## Train minibatches (`--train-minibatch N`)
 
 By default every candidate is scored on the whole train part. With
 `--train-minibatch N` and a train part of more than N items, each epoch samples N train
-ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs `--val-gate 1`:
+ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs the gate (val items, or `--val-gate 1`):
 without the gate the winner and the parents are picked by train scores, which would
 then come from different samples, so the run is refused before anything is rolled
 out.

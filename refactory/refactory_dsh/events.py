@@ -62,6 +62,7 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
             f"{record.get('epochs', '?')} epoch(s) x {record.get('batch_size', '?')} · "
             f"population {record.get('population', '?')}"
             + (" · resumed" if record.get("resumed") else "")
+            + (f" · warning: {record['warning']}" if record.get("warning") else "")
         )
     if step == "forward":
         where = f"{record.get('index', '?')}/{record.get('of', '?')}"

@@ -576,10 +576,16 @@ def test_a_finished_curriculum_scores_its_last_stage(tmp_path, gated):
         assert loop.evaluations == len(loop.population)
 
 
-def test_a_population_picker_is_refused_under_the_validation_gate(tmp_path):
-    with _combo_mode(), pytest.raises(LoopError, match="map_elites parent picker"):
-        Loop("fake/combo", _config(tmp_path, val_gate=True, parent_picker="map_elites"),
-             project=Path("."), model=ComboModel()).run()
+def test_a_population_picker_runs_under_the_validation_gate_from_the_pool(tmp_path):
+    """No longer refused: under the gate a population picker defaults to the pool
+    selection and picks, every step, a candidate the gate judged and kept in the pool."""
+    model = ComboModel()
+    loop = _run("default", tmp_path, model, parent_picker="map_elites", val_gate=True,
+                batch_size=1, epochs=3)
+    assert loop.selection_mode() == "pool"
+    judged = set(loop._gate_accepted) | set(loop._gate_rejected)
+    picked = [r.picked for r in model.requests if r.picked]
+    assert picked and set(picked) <= judged
 
 
 def test_hill_climb_picker_edits_the_gates_current_candidate(tmp_path):

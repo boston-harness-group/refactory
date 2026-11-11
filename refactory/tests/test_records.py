@@ -219,7 +219,7 @@ def test_val_test_records_never_reach_optimizer(tmp_path):
             MODE, LoopConfig(
                 epochs=1, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
-                parts_manifest=str(manifest_path),
+                parts_manifest=str(manifest_path), val_gate=False,
             ),
             project=Path("."),
         )
