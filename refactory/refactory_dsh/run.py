@@ -68,6 +68,25 @@ UNSEEN_FILE_CHARS = 1_500
 REDO_HEADING = "## Why this step is being redone"
 
 
+def _adds_nothing(text: str, reason: str, label: str) -> bool:
+    """Whether a file says nothing beyond a gate's reason: it is the reason, or the
+    reason with the verdict around it (a verdict gate's file, whose reason is the file
+    less its verdict word, `snippet.parse_verdict`). Compared whitespace-blind; a reason
+    that is merely contained in a longer file does not make the file redundant."""
+    from refactory_dsh.snippet import SnippetError, parse_verdict
+
+    def same(a: str, b: str) -> bool:
+        return " ".join(a.split()) == " ".join(b.split())
+
+    if same(text, reason):
+        return True
+    try:
+        parsed = parse_verdict(text, [label])
+    except SnippetError:
+        return False
+    return parsed is not None and same(parsed[1], reason)
+
+
 def with_unseen_reads(verdict: Any, gate: str, blind: Any, workdir: Path) -> Any:
     """``verdict``, its reason extended with the files its gate read that the step a
     reloop sends back to cannot see (``blind``: ``{condition: [files]}``, from
@@ -76,8 +95,9 @@ def with_unseen_reads(verdict: Any, gate: str, blind: Any, workdir: Path) -> Any
     A gate's reason is all a reloop hands the step it goes back to. When that step is
     not handed the gate's inputs either (not in its reads, not through a fact its prompt
     fills in), a bare ``reloop`` re-ran it with exactly the input it had (B-s44). Each
-    unseen file is added once, under :data:`REDO_HEADING`, unless the reason already
-    says it (a verdict gate's reason is its file less the verdict word). A reloop that
+    unseen file is added once, under :data:`REDO_HEADING`, unless it adds nothing beyond
+    the reason (`_adds_nothing`: a verdict gate's reason is its file less the verdict
+    word). A reloop that
     is wired, any other label, and a file the reason already carries change nothing,
     so a wired loop's prompts stay as they were. Both runtimes apply it the same way:
     the spine's runner below, the walker in ``_visit_gate``.
@@ -101,7 +121,7 @@ def with_unseen_reads(verdict: Any, gate: str, blind: Any, workdir: Path) -> Any
             text = path.read_text(errors="replace").strip()
         except OSError:
             continue
-        if reason and text and (reason in text or text in reason):
+        if reason and _adds_nothing(text, reason, label):
             continue
         if len(text) > UNSEEN_FILE_CHARS:
             text = (text[:UNSEEN_FILE_CHARS]

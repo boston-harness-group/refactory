@@ -678,8 +678,11 @@ these limits:
   manifest, no credential.
 - Limits of 512 MB of memory, 10 CPU seconds, 1 MB files and 32 processes. A limit that
   cannot be set fails the node.
-- 10 s of wall time. After that the whole process group is killed, and the PID namespace
-  with it, so nothing the snippet started outlives it.
+- 10 s of wall time for the code, counted once the sandbox has started (its driver says
+  so first). After that the whole process group is killed, and the PID namespace with
+  it, so nothing the snippet started outlives it. Starting the sandbox has its own
+  allowance of 60 s (`snippet.STARTUP_S`); running over that is the sandbox being
+  unavailable, reported as such, not the code running over.
 
 The snippet never gets the context, the run directory, other facts or the knobs. The
 wrapper writes its outputs through the context, so declared writes and facts are still
@@ -688,7 +691,11 @@ enforced. The host's `/etc` and `/usr` stay readable (the interpreter needs them
 The sandbox fails closed. It is unavailable when `unshare` or the system Python is
 missing, or when the probe snippet does not run (`snippet.available()`). In that case a
 code node fails, the request does not describe code nodes, and an edit that adds one is
-refused `E-code-nodes`. A failed code op is retried once, as every op is: always on the
+refused `E-code-nodes`. The probe's answer, passing or failing, is kept for 5 minutes
+(`snippet.PROBE_CACHE_S`) in a per-user file every process reads, so a busy machine pays
+one probe, not one per op; and one request's answer decides both whether it describes
+code nodes and whether it refuses one (`ProposalContext.sandbox`). The answer only says
+whether to try: code still runs only inside the sandbox. A failed code op is retried once, as every op is: always on the
 spine, and on the walker when recovery is on. A snippet is pure, so the retry changes
 nothing but time.
 

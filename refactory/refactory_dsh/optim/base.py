@@ -211,14 +211,16 @@ def _code_signatures(state: dict[str, Any]) -> dict[str, tuple[str, str, str]]:
 
 
 def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, Any],
-                        allowed: bool) -> list[str]:
+                        allowed: bool, sandbox: tuple[bool, str] | None = None) -> list[str]:
     """``E-code-nodes`` for each code node of the candidate (`refactory_dsh.snippet`) that
     the seed does not have as the same code node -- same id, kind, callable and code --
     when the run does not allow code nodes (``LoopConfig.allow_code_nodes``) or this
     machine cannot sandbox them (`snippet.available`). Compared by content, not by id: a
     proposal that removes a node and adds a code node under its id, or rewrites a seed
     code node's code, is a new code node. The seed's own code nodes, unchanged, are the
-    author's and are not held to it."""
+    author's and are not held to it. ``sandbox`` is the machine's answer the request
+    was written with (``ProposalContext.sandbox``), so the request's offer and this
+    refusal never disagree; asked afresh only when there is none."""
     from refactory_dsh import snippet
 
     seed = _code_signatures(seed_state)
@@ -229,7 +231,7 @@ def _code_node_refusals(seed_state: dict[str, Any], candidate_state: dict[str, A
     if not allowed:
         why = "this run does not allow code nodes (allow_code_nodes is off)"
     else:
-        ok, reason = snippet.available()
+        ok, reason = sandbox if sandbox is not None else snippet.available()
         if ok:
             return []
         why = f"this machine cannot sandbox code nodes ({reason})"
@@ -675,6 +677,11 @@ class ProposalContext:
     #: Wiring of the edited graph that runs but is likely not what was meant
     #: (`nn.validate.wiring_warnings`), said beside its edges; never a refusal.
     wiring_warnings: list[str] = field(default_factory=list)
+    #: The machine's code-node sandbox answer (`snippet.available`) this request was
+    #: written with: ``code_nodes`` offers by it and the refusal of a code node
+    #: (``E-code-nodes``) refuses by it, so the two agree within a request; ``None``
+    #: when not taken (the run does not allow code nodes). Never rendered.
+    sandbox: tuple[bool, str] | None = None
     #: Whether a person answers gates while this run's candidates run. An outer loop's
     #: candidates run headless, so the default leaves the person-answered gate kind out
     #: of the node schemas (`node_schema.render_schema`).
@@ -2308,6 +2315,9 @@ class Optimizer:
     #: otherwise is refused with ``E-code-nodes``. The loop sets it from
     #: ``allow_code_nodes``.
     allow_code_nodes: bool = True
+    #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
+    #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
+    sandbox: tuple[bool, str] | None = None
 
     #: Values only the grader may see (the train items' grader-only fields), which no
     #: code node's code may contain (``E-secret``), or a function returning them (called
@@ -2417,6 +2427,8 @@ class Optimizer:
         recorded here, fed back into the next attempt, and reported at the end.
         """
         self.rejections = []
+        # The request's sandbox answer: what it offered is what the refusals judge by.
+        self.sandbox = ctx.sandbox
         accepted: list[Candidate] = []
         feedback: list[str] = []
         if not parents:
@@ -2575,7 +2587,8 @@ class Optimizer:
         if tooled:
             return tooled
         coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,
-                                    bool(getattr(self, "allow_code_nodes", True)))
+                                    bool(getattr(self, "allow_code_nodes", True)),
+                                    getattr(self, "sandbox", None))
         if coded:
             return coded
         leaked = _secret_refusals(state, getattr(self, "grader_secrets", ()))

@@ -109,16 +109,20 @@ def blind_reloops(graph: Graph, knob_values: Any = None) -> dict[str, dict[str, 
     ``{gate: {condition: [files]}}``: the gate's read files (``reads`` and
     ``required_reads``) that the step it sends back to is not shown.
 
-    Only a retry edge (`loop_edges`) to an agent counts (any other target has no prompt;
-    `validate.wiring_warnings` names it). That agent sees the gate's inputs, and the
-    reloop is wired, when any of these holds; the reloop is then left out:
+    Only a retry edge (`loop_edges`) from a code gate (``fn``) to an agent counts (any
+    other target has no prompt, `validate.wiring_warnings` names it; a person's note is
+    a person gate's feedback). A step with ``feedback_keys`` sees them all (its facts are
+    re-derived from the run's files before each dispatch, as design mode's steps are).
+    Otherwise each of the gate's files is judged on its own: the step sees it when
 
-    - it declares the file in ``reads`` or ``required_reads`` (it is handed the file);
-    - it has ``feedback_keys`` (its facts are re-derived from the run's files before each
-      dispatch, as design mode's steps are);
+    - it declares that file in ``reads`` or ``required_reads`` (it is handed the file);
     - a name its prompts read (a ``{{name}}`` slot or an ``{% if %}`` condition) is a fact
-      the gate sets, or one set by a node that reads or writes one of the gate's files
-      (the review reaches it as a fact), or it reads a file such a node writes.
+      set by a node that reads or writes *that* file (the gate itself reads every one);
+    - it reads a file written by a node that reads or writes that file.
+
+    A fact derived from one file says nothing of another, so a step that renders the
+    brief is still not shown the review. The reloop is wired, and left out, only when
+    every file is seen.
 
     Both runtimes hand only these files over (`run.with_unseen_reads`): the walker from
     the graph, the spine's node runner from the gate's ``blind_reloops`` declaration
@@ -148,22 +152,25 @@ def blind_reloops(graph: Graph, knob_values: Any = None) -> dict[str, dict[str, 
         gate, target = graph.nodes.get(gate_id), graph.nodes.get(target_id)
         if gate is None or target is None or target.kind != "agent" or gate.gate_kind != "fn":
             continue
+        if target.feedback_keys:
+            continue
         files = list(dict.fromkeys((*gate.reads, *gate.required_reads)))
-        unseen = [name for name in files
-                  if name not in target.reads and name not in target.required_reads]
-        if not unseen or target.feedback_keys:
-            continue
-        # What the gate's files become: the facts and files of the gate and of any node
-        # that reads or writes one of them. The target sees the review when its prompt reads one
-        # of those facts, or it reads one of those files.
-        readers = [gate, *(node for node in graph.nodes.values()
-                           if any(name in (*node.reads, *node.required_reads, *node.writes)
-                                  for name in files))]
-        facts = {fact for node in readers for fact in node.produces}
-        written = {name for node in readers for name in node.writes}
-        if prompt_names(target) & facts or written & {*target.reads, *target.required_reads}:
-            continue
-        out.setdefault(gate_id, {})[condition.strip().lower()] = unseen
+        given = {*target.reads, *target.required_reads}
+        names = prompt_names(target)
+
+        def seen(name: str) -> bool:
+            """Whether the target is shown ``name``: handed it, or a fact or file made
+            by a node that reads or writes that very file."""
+            if name in given:
+                return True
+            touching = [node for node in graph.nodes.values()
+                        if name in (*node.reads, *node.required_reads, *node.writes)]
+            return any(set(node.produces) & names or set(node.writes) & given
+                       for node in touching)
+
+        unseen = [name for name in files if not seen(name)]
+        if unseen:
+            out.setdefault(gate_id, {})[condition.strip().lower()] = unseen
     return out
 
 

@@ -84,24 +84,37 @@ def test_siblings_share_the_comparisons_budget_in_turn():
 
 def _review_loop(wired: bool | str) -> nn.Graph:
     """write -> review -> check (a verdict gate on review.txt) -> done; check sends write
-    back on ``reloop``. Blind (False): write is shown nothing of the review (B-s44's
-    decide/meta_review). Wired (True): write reads review.txt. Wired through a fact
-    ("fact"): the review's answer is a fact write's prompt renders when set, as design
-    mode's steps render their gate's feedback."""
+    back on ``reloop``.
+
+    - ``False``, blind: write is shown nothing of the review (B-s44's decide/meta_review).
+    - ``True``: write reads review.txt.
+    - ``"fact"``: the review's answer is a fact write's prompt renders when set, as design
+      mode's steps render their gate's feedback.
+    - ``"brief"``: the gate also reads brief.json, which an op writes and whose fact
+      ``brief`` write's prompt renders; the review is still not shown.
+    - ``"answer"``: the gate also reads write's own answer.txt, whose fact ``answer``
+      write's prompt tests; the review is still not shown.
+    """
     from refactory_dsh import snippet
 
     graph = nn.Graph()
     prompt = ("Write it." + ("{% if review_note %}\nLast review: {{review_note}}{% endif %}"
-                             if wired == "fact" else ""))
+                             if wired == "fact" else "")
+              + ("\nBrief: {{brief}}" if wired == "brief" else "")
+              + ("{% if answer %}{% endif %}" if wired == "answer" else ""))
     graph.add(nn.Node("write", "agent", prompt_template=prompt, writes=("answer.txt",),
-                      reads=(("review.txt",) if wired is True else ())))
+                      reads=(("review.txt",) if wired is True else ()),
+                      produces=(("answer",) if wired == "answer" else ())))
     graph.add(nn.Node("review", "agent", prompt_template="Review it.", reads=("answer.txt",),
                       writes=("review.txt",), produces=(("review_note",) if wired == "fact" else ())))
-    graph.add(nn.Node("check", "gate", evaluator=snippet.VERDICT, reads=("review.txt",),
+    extra = {"brief": ("brief.json",), "answer": ("answer.txt",)}.get(str(wired), ())
+    graph.add(nn.Node("check", "gate", evaluator=snippet.VERDICT, reads=("review.txt", *extra),
                       required_reads=("review.txt",), max_iterations=2))
     graph.add(nn.Node("done", "op", call="loop_ops:noop", reads=("answer.txt",)))
-    if wired is True:  # the file write reads exists before the first review
-        graph.add(nn.Node("start", "op", call="loop_ops:no_review_yet", writes=("review.txt",)))
+    first = {True: ("start", "loop_ops:no_review_yet", ("review.txt",), ()),
+             "brief": ("start", "loop_ops:write_brief", ("brief.json",), ("brief",))}.get(wired)
+    if first is not None:  # what write reads or renders exists before the first review
+        graph.add(nn.Node(first[0], "op", call=first[1], writes=first[2], produces=first[3]))
         graph.connect("start", "write")
         graph.start = "start"
     graph.connect("write", "review")
@@ -150,6 +163,9 @@ def test_which_reloops_are_blind():
     assert blind_reloops(_review_loop(False)) == {"check": {"reloop": ["review.txt"]}}
     assert blind_reloops(_review_loop(True)) == {}, "it reads the review"
     assert blind_reloops(_review_loop("fact")) == {}, "its prompt renders the review's fact"
+    # Judged file by file: a fact from another of the gate's files shows not the review.
+    assert blind_reloops(_review_loop("brief")) == {"check": {"reloop": ["review.txt"]}}
+    assert blind_reloops(_review_loop("answer")) == {"check": {"reloop": ["review.txt"]}}
     keys = _review_loop(False)
     keys.nodes["write"] = dataclasses.replace(keys.nodes["write"], feedback_keys=("note",))
     assert blind_reloops(keys) == {}, "its facts are re-derived from the run's files"
@@ -204,6 +220,11 @@ def test_a_reason_that_already_says_the_file_adds_nothing(tmp_path):
     (tmp_path.parent / "secret.txt").write_text("SECRET")
     out = with_unseen_reads("reloop", "g", {"reloop": ["../secret.txt"]}, tmp_path)
     assert "SECRET" not in out.reason and "without giving a reason" in out.reason
+    # A short reason contained in a longer review does not hide the review.
+    (tmp_path / "long.txt").write_text("reloop\n\n- tests failed\n- the lint step failed too")
+    terse = with_unseen_reads(nn.Verdict("reloop", reason="tests failed"), "g",
+                              {"reloop": ["long.txt"]}, tmp_path)
+    assert "`long.txt`:\nreloop\n\n- tests failed\n- the lint step failed too" in terse.reason
     short = nn.Verdict("reloop", reason="not one of A-E")
     added = with_unseen_reads(short, "g", {"reloop": ["review.txt"]}, tmp_path)
     assert added.reason.startswith("not one of A-E\n\n## Why this step is being redone\n")
@@ -262,13 +283,17 @@ def _spine_writes(graph: nn.Graph, run: Path, tmp_path: Path, monkeypatch: Any) 
 def test_both_runtimes_give_the_same_redo_prompts(tmp_path, monkeypatch):
     """[both runtimes] The blind loop's redo carries the review on the walker and on the
     spine, the same text; the wired loop's prompts are the same on both, with nothing
-    added."""
-    for wired in (False, True):
+    added; a step shown another of the gate's files (the brief, its own answer) still
+    gets the review, and only the review."""
+    for wired in (False, True, "brief", "answer"):
         graph = _review_loop(wired)
         walker = _walked_writes(graph, tmp_path / f"walker-{wired}")
         spine = _spine_writes(graph, tmp_path / f"spine-{wired}", tmp_path, monkeypatch)
         assert walker == spine and len(walker) == 2, (wired, walker, spine)
-        assert ("Why this step is being redone" in walker[1]) is (not wired)
+        handed = wired is not True
+        assert ("Why this step is being redone" in walker[1]) is handed
+        assert ("`review.txt`:\nreloop" in walker[1]) is handed
+        assert "`brief.json`" not in walker[1] and "`answer.txt`" not in walker[1]
 
 
 def test_a_reloop_to_a_step_that_is_not_an_agent_is_warned_of():
@@ -471,48 +496,103 @@ def test_the_loop_keeps_the_rounds_tie_winner_on_train_score(tmp_path, monkeypat
     assert _level(by_id[loop._gate().current_id]) == 6
 
 
-# ── the sandbox's start-up check ────────────────────────────────────────────
+# ── the sandbox's start-up is not the code's time ───────────────────────────
 
 
-def test_the_sandbox_check_has_its_own_limit_and_says_the_sandbox_was_unavailable(monkeypatch):
+def _slow_start(monkeypatch: Any, delay: float) -> None:
+    """Stand the sandbox in with the bare driver behind a ``delay`` of start-up, so the
+    two clocks can be told apart on any machine (no namespaces needed)."""
     from refactory_dsh import snippet
 
-    if not sys.platform.startswith("linux"):
-        pytest.skip("the start-up check runs only on Linux")
-    monkeypatch.setattr(snippet.shutil, "which", lambda name: "/usr/bin/" + name)
-    monkeypatch.setattr(snippet, "PYTHON", sys.executable)
-    monkeypatch.setattr(snippet, "BASH", sys.executable)
-    limits: list[float] = []
+    monkeypatch.setattr(snippet, "_command", lambda extra: [
+        "bash", "-c", f'sleep {delay}; exec "$0" -I -S -c "$1"', sys.executable, snippet._DRIVER])
 
-    def slow(code, inp, *, timeout_s, extra, what="the code"):  # type: ignore[no-untyped-def]
-        limits.append(timeout_s)
-        raise snippet.SnippetTimeout(f"{what} ran over its {timeout_s:g} s limit")
 
-    monkeypatch.setattr(snippet, "_sandboxed", slow)
-    monkeypatch.setattr(snippet, "_PROBED", None)
-    ok, why = snippet.available()
-    assert not ok and limits == [snippet.PROBE_WALL_S] and snippet.PROBE_WALL_S > snippet.WALL_S
-    assert why.startswith("the sandbox was unavailable") and "start-up check ran over" in why
-    assert "the code ran over" not in why
-    snippet.available()
-    assert len(limits) == 2, "a timed-out check is not kept: the next call checks again"
-    with pytest.raises(snippet.SnippetError, match="cannot run here: the sandbox was unavailable"):
+def test_a_slow_sandbox_start_is_not_counted_against_the_code(monkeypatch):
+    """Two seconds to start and a one-second code limit: the code still runs, because
+    the code's clock starts once the sandbox has (``STARTED``)."""
+    from refactory_dsh import snippet
+
+    _slow_start(monkeypatch, 2)
+    assert snippet._sandboxed("def main(inp):\n    return inp + 1\n", 41, timeout_s=1,
+                              extra=(), startup_s=30) == 42
+
+
+def test_a_start_over_its_allowance_is_the_sandbox_unavailable_not_the_code(monkeypatch):
+    from refactory_dsh import snippet
+
+    _slow_start(monkeypatch, 3)
+    monkeypatch.setattr(snippet, "STARTUP_S", 0.5)
+    monkeypatch.setattr(snippet, "available", lambda: (True, ""))
+    with pytest.raises(snippet.SandboxUnavailable,
+                       match="cannot run here: the sandbox was unavailable: the sandbox did "
+                             "not start within 0.5 s") as raised:
         snippet.execute("def main(inp):\n    return 1\n", {})
+    assert "ran over" not in str(raised.value)
+    # The code's own overrun is still the code's.
+    _slow_start(monkeypatch, 0)
+    with pytest.raises(snippet.SnippetTimeout, match="the code ran over its 1 s limit"):
+        snippet._sandboxed("def main(inp):\n    while True:\n        pass\n", {},
+                           timeout_s=1, extra=(), startup_s=30)
 
 
-def test_a_settled_sandbox_check_is_kept(monkeypatch):
+def test_a_failed_check_is_kept_for_a_bounded_time_across_processes(tmp_path, monkeypatch):
+    """A busy machine pays one check per PROBE_CACHE_S, not one per op: a failed check is
+    read back from the shared file by a fresh process, and taken again once it is old."""
+    import time
+
     from refactory_dsh import snippet
 
-    calls: list[int] = []
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path))
+    checks: list[int] = []
 
     def check():  # type: ignore[no-untyped-def]
-        calls.append(1)
-        return (True, ""), True
+        checks.append(1)
+        return False, "the sandbox was unavailable: it did not start within 60 s"
 
     monkeypatch.setattr(snippet, "_check_sandbox", check)
     monkeypatch.setattr(snippet, "_PROBED", None)
-    assert snippet.available() == (True, "") and snippet.available() == (True, "")
-    assert len(calls) == 1
+    assert snippet.available()[0] is False and len(checks) == 1
+    monkeypatch.setattr(snippet, "_PROBED", None)  # a fresh process
+    assert snippet.available() == (False, "the sandbox was unavailable: it did not start "
+                                          "within 60 s")
+    assert len(checks) == 1, "read from the shared file, not checked again"
+    later = time.time() + snippet.PROBE_CACHE_S + 1
+    monkeypatch.setattr(snippet, "_PROBED", None)
+    monkeypatch.setattr(time, "time", lambda: later)
+    snippet.available()
+    assert len(checks) == 2, "an old answer is checked again"
+
+
+def test_the_offer_and_the_refusal_use_one_answer_per_request(tmp_path, monkeypatch):
+    """The request's answer (``ProposalContext.sandbox``) decides both: the loop asks
+    once per request, and the refusal judges by that answer, never asking again."""
+    from refactory_dsh import snippet
+    from refactory_dsh.optim.base import _code_node_refusals
+
+    answers = iter([(True, ""), (False, "busy")])
+    asked: list[int] = []
+
+    def flipping():  # type: ignore[no-untyped-def]
+        asked.append(1)
+        return next(answers)
+
+    monkeypatch.setattr(snippet, "available", flipping)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, val_gate=True, epochs=1, allow_code_nodes=True)
+        loop.init()
+        ctx = loop._context()
+    assert ctx.sandbox == (True, "") and ctx.code_nodes is True and len(asked) == 1
+    proposer = ScriptedLevels([])
+    proposer.propose_valid(ctx, 1, parents=[])
+    assert proposer.sandbox == (True, "")
+    coded = nn.Graph()
+    coded.add(nn.Node("c", "op", call=snippet.RUN, code="def main(inp):\n    return {}\n"))
+    code_node = {"graph": coded.to_state()}
+    monkeypatch.setattr(snippet, "available", lambda: pytest.fail("asked again"))
+    assert _code_node_refusals({}, code_node, True, (True, "")) == []
+    assert "busy" in _code_node_refusals({}, code_node, True, (False, "busy"))[0]
 
 
 # ── "structural" is the candidate's own edit ────────────────────────────────
@@ -617,3 +697,39 @@ def test_frozen_knobs_are_left_out_of_the_knob_attribution(tmp_path, monkeypatch
     loop.parameters = {**loop.parameters,
                        "level": dataclasses.replace(loop.parameters["level"], frozen=True)}
     assert "level" not in loop._knob_attribution(evaluated)
+
+
+# ── the portfolio report's shadowed rule ────────────────────────────────────
+
+
+def test_a_sibling_beaten_by_one_proposed_after_it_is_shadowed(tmp_path, monkeypatch):
+    """Seed 5 gets 6 (proposed first) and then 7: both beat 5 on val, 7 wins the round.
+    6 is rejected although it beat its parent: shadowed, though the winner came after."""
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    loop, _proposer, _report = _gated(tmp_path, monkeypatch, [[(5, 6), (5, 7)], []],
+                                      epochs=2, batch_size=2)
+    by_level = {_level(c): c.id for c in loop.population}
+    for level, edit_level in ((6, "prompt_knob"), (7, "pipeline")):
+        loop.proposals[by_level[level]]["level"] = edit_level
+    report = loop._portfolio_report()
+    [round_] = [entry["candidates"] for entry in report["per_round"]
+                if {c["id"] for c in entry["candidates"]} == {by_level[6], by_level[7]}]
+    first, second = round_
+    assert (first["id"], first["gate"], first["shadowed"]) == (by_level[6], "rejected", True)
+    assert second["id"] == by_level[7] and second["kept"] and not second["shadowed"]
+
+
+# ── design mode declares what synthesize_qa reads ───────────────────────────
+
+
+def test_design_modes_qa_rerun_is_declared_where_it_is_read():
+    """``synthesize_qa`` folds in ``reviews/qa-rerun.md`` (``design_ops.synthesize_qa``)
+    and declares it, so the wiring check finds a reader for ``qa_director_rerun``."""
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.validate import wiring_warnings
+
+    graph = Graph.from_state(DesignMode().state_dict()["graph"])
+    assert "reviews/qa-rerun.md" in graph.nodes["synthesize_qa"].reads
+    assert "reviews/qa-rerun.md" in graph.nodes["qa_director_rerun"].writes
+    assert not [w for w in wiring_warnings(graph) if w.startswith("W-unread-output")]

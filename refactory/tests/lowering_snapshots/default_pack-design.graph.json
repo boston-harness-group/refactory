@@ -772,6 +772,7 @@
         "design.md",
         "reviews/code-review.md",
         "reviews/health-check.md",
+        "reviews/qa-rerun.md",
         "reviews/qa.md",
         "reviews/verification.md"
       ],

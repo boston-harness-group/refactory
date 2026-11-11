@@ -709,14 +709,26 @@ class Loop(OuterLoop):
         attached = getattr(self, "_custom_strategy", None)
         return str(attached.name) if attached is not None else self.optimizer.name
 
-    def _code_nodes_offered(self) -> bool:
+    def _code_nodes_offered(self, sandbox: tuple[bool, str] | None = None) -> bool:
         """Whether the request describes code nodes: the run allows them and this
-        machine can sandbox them (`snippet.available`, probed once per process)."""
+        machine can sandbox them (``sandbox``, the request's `snippet.available`
+        answer; asked when not given)."""
         if not self.config.allow_code_nodes:
             return False
+        if sandbox is None:
+            from refactory_dsh import snippet
+
+            sandbox = snippet.available()
+        return bool(sandbox[0])
+
+    def _sandbox_answer(self) -> tuple[bool, str] | None:
+        """The machine's sandbox answer for one request (`snippet.available`), taken once
+        so the offer and the refusals agree; ``None`` when the run allows no code nodes."""
+        if not self.config.allow_code_nodes:
+            return None
         from refactory_dsh import snippet
 
-        return snippet.available()[0]
+        return snippet.available()
 
     def _grader_secrets(self) -> frozenset:
         """The train items' grader-only values (`task.grader_secrets`), loaded once, the
@@ -4039,6 +4051,7 @@ class Loop(OuterLoop):
     def _context(self) -> ProposalContext:
         board = self.leaderboard(8)
         described, graph_note = self._describe_parent(board)
+        sandbox = self._sandbox_answer()
         return ProposalContext(
             epoch=self.epoch,
             generation=self.generation,
@@ -4092,7 +4105,8 @@ class Loop(OuterLoop):
             reasoning=self._reasoning_entries(board),
             max_edits=int(self.config.max_edits_per_proposal),
             parsimony=float(self.config.parsimony),
-            code_nodes=self._code_nodes_offered(),
+            code_nodes=self._code_nodes_offered(sandbox),
+            sandbox=sandbox,
             score_is_item_mean=bool(self._score_is_item_mean),
             val_items=self._gate_val_items(),
             seed_knob_values=self._seed_knob_values(),

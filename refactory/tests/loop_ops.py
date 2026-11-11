@@ -781,3 +781,9 @@ class ExhaustTask(Task):
 def no_review_yet(ctx: Any) -> None:
     """Write the review file a step reads before any review exists."""
     ctx.write_text("review.txt", "no review yet\n")
+
+
+def write_brief(ctx: Any) -> dict[str, Any]:
+    """Write the brief file a gate reads, and set the brief as a fact."""
+    ctx.write_text("brief.json", "{\"goal\": \"answer it\"}\n")
+    return {"brief": "answer it"}

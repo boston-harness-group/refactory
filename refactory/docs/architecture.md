@@ -382,10 +382,11 @@ What the two share, rather than each doing its own way:
   notes say what it does (its event summary, a gate's question), and are not part of
   its prompt. A reloop's feedback is said once (`agent_delivery.with_feedback`: added
   unless the prompt already carries it as whole lines). When the agent a code gate
-  reloops to cannot see what the gate read (not in its reads, not through a fact its
-  prompt reads, no `feedback_keys`: `nn.loops.blind_reloops`), the feedback also
-  carries those files under "## Why this step is being redone", unless the gate's
-  reason already says them (`run.with_unseen_reads`; the walker from the graph, the
+  reloops to cannot see a file the gate read (judged file by file: not in its reads, no
+  fact its prompt reads from a node that reads or writes that file, no
+  `feedback_keys`: `nn.loops.blind_reloops`), the feedback also carries those files
+  under "## Why this step is being redone", unless a file adds nothing beyond the gate's
+  reason (`run.with_unseen_reads`; the walker from the graph, the
   spine's node runner from the gate's `blind_reloops` declaration). A wired loop, as
   every shipped design, create and edit loop is, is unchanged. And
   the execution block lists its inputs in name order, as the lowered graph keeps them

@@ -79,12 +79,19 @@ FORBIDDEN_NAMES = ("open", "__import__", "exec", "eval", "compile", "getattr", "
                    "delattr", "globals", "locals", "vars", "input", "breakpoint", "help",
                    "exit", "quit", "memoryview", "__builtins__", "__loader__", "__spec__")
 
-#: The wall clock of one snippet, in seconds (well under any node's command timeout).
+#: The wall clock of one snippet, in seconds (well under any node's command timeout),
+#: counted from when the sandbox has started and the code is handed in.
 WALL_S = 10
-#: The wall clock of the sandbox's start-up check (`available`), in seconds: its own
-#: limit, not the code's, because every op runs in a fresh process that probes again,
-#: and on a loaded machine starting the namespaces alone can take longer than WALL_S.
-PROBE_WALL_S = 60
+#: How long the sandbox itself may take to start (new namespaces, hidden directories,
+#: the interpreter), in seconds: its own allowance, never the code's. On a loaded
+#: machine start-up alone can take longer than WALL_S; running over it is the sandbox
+#: being unavailable (:class:`SandboxUnavailable`), not the code running over.
+STARTUP_S = 60
+#: How long an answer of the start-up check (`available`) is kept, in seconds, in this
+#: process and in a file every process of this user reads (:func:`_probe_cache_path`),
+#: so a busy machine does not pay a check per op. A failed or timed-out check is kept
+#: too, for the same bounded time, and checked again after it.
+PROBE_CACHE_S = 300
 #: Its CPU seconds, heap/address space, largest file and most processes.
 CPU_S = 10
 MEMORY_MB = 512
@@ -127,6 +134,8 @@ _SHELL = (
 _DRIVER = """\
 import sys, json
 out = sys.stdout
+out.write("STARTED\\n")
+out.flush()
 sys.stdout = sys.stderr
 try:
     data = json.loads(sys.stdin.read())
@@ -146,6 +155,14 @@ class SnippetError(RuntimeError):
 
 class SnippetTimeout(SnippetError):
     """A sandboxed run went over its wall-clock limit."""
+
+
+class SandboxUnavailable(SnippetError):
+    """The sandbox did not start within :data:`STARTUP_S`: the machine, not the code."""
+
+
+#: The line the driver writes first, once the sandbox has started (`_DRIVER`).
+_STARTED = "STARTED"
 
 
 # ── the static check (V18) ────────────────────────────────────────────────
@@ -290,7 +307,15 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
-               what: str = "the code") -> Any:
+               startup_s: float | None = None) -> Any:
+    """``main(inp)`` of ``code`` in the sandbox. Two clocks: the sandbox has
+    ``startup_s`` (default :data:`STARTUP_S`) to start -- its driver says so with its
+    first line -- and only then does the code's ``timeout_s`` begin. Missing the first is
+    :class:`SandboxUnavailable`; the second, :class:`SnippetTimeout`."""
+    import threading
+    import time
+
+    startup_s = STARTUP_S if startup_s is None else startup_s
     try:
         payload = json.dumps({"code": code, "inp": inp})
     except (TypeError, ValueError) as exc:
@@ -298,20 +323,52 @@ def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
     try:
         proc = subprocess.Popen(
             _command(extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, env=_environment(), cwd="/",
+            stderr=subprocess.PIPE, env=_environment(), cwd="/",
             preexec_fn=_confine,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise SnippetError(f"the sandbox could not start: {exc}") from exc
+    chunks: dict[str, list[bytes]] = {"out": [], "err": []}
+    started = threading.Event()
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(payload.encode())  # type: ignore[union-attr]
+            proc.stdin.close()  # type: ignore[union-attr]
+        except (OSError, ValueError):
+            pass  # the sandbox ended first; its exit says why
+
+    def drain(stream: Any, key: str) -> None:
+        for block in iter(lambda: stream.read1(65536), b""):
+            chunks[key].append(block)
+            if key == "out" and b"\n" in b"".join(chunks["out"]):
+                started.set()
+        started.set() if key == "out" else None
+
+    readers = [threading.Thread(target=feed, daemon=True),
+               threading.Thread(target=drain, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=drain, args=(proc.stderr, "err"), daemon=True)]
+    for reader in readers:
+        reader.start()
     try:
-        stdout, stderr = proc.communicate(payload, timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        _kill_group(proc)
-        proc.communicate()
-        raise SnippetTimeout(f"{what} ran over its {timeout_s:g} s limit") from exc
+        if not started.wait(startup_s):
+            raise SandboxUnavailable(f"the sandbox did not start within {startup_s:g} s")
+        begun = time.monotonic()
+        try:
+            proc.wait(timeout=max(0.0, timeout_s - (time.monotonic() - begun)))
+        except subprocess.TimeoutExpired as exc:
+            raise SnippetTimeout(f"the code ran over its {timeout_s:g} s limit") from exc
     finally:
         # Whatever the snippet left running in its group goes with it.
         _kill_group(proc)
+        proc.wait()
+        for reader in readers[1:]:
+            reader.join(5)
+    out = b"".join(chunks["out"]).decode(errors="replace")
+    first, _, stdout = out.partition("\n")
+    stderr = b"".join(chunks["err"]).decode(errors="replace")
+    if first != _STARTED and proc.returncode not in (_MOUNT_FAILED, _NPROC_FAILED):
+        stdout = out
     proc = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     if proc.returncode in (_MOUNT_FAILED, _NPROC_FAILED):
         what = "hide the file system" if proc.returncode == _MOUNT_FAILED else "cap its processes"
@@ -329,50 +386,79 @@ def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
     return reply.get("result")
 
 
-#: The start-up check's settled answer in this process (`_probe`); ``None`` until one.
-_PROBED: tuple[bool, str] | None = None
+#: The start-up check's answer in this process and when it was taken (`_probe`).
+_PROBED: tuple[tuple[bool, str], float] | None = None
+
+
+def _probe_cache_path() -> Path:
+    """Where every process of this user finds the last start-up check's answer: in
+    refactory's own directory (`paths.refactory_home`), keyed by the interpreter and
+    shell the sandbox uses."""
+    import hashlib
+
+    from refactory_dsh.paths import refactory_home
+
+    key = hashlib.sha256(f"{PYTHON}\0{BASH}\0{shutil.which('unshare')}".encode()).hexdigest()[:16]
+    return refactory_home() / "cache" / f"sandbox-check-{key}.json"
 
 
 def _probe() -> tuple[bool, str]:
-    """The sandbox start-up check, once per process: its answer is kept unless the
-    check ran out of time, which a loaded machine can cause and the next call retries,
-    so one slow start never disables code nodes for a whole process."""
+    """The sandbox start-up check's answer, taken at most once per :data:`PROBE_CACHE_S`
+    for every process of this user: from this process's memory, else the shared file,
+    else a fresh check, which is written back. A failed or timed-out check is kept as
+    long as a passing one, so a busy machine does not pay a check per op; it is taken
+    again once it is older. Fail-safe either way: an answer only says whether to try,
+    and code runs only inside the sandbox (`execute`), which refuses when it cannot be
+    set up."""
+    import time
+
     global _PROBED
-    if _PROBED is not None:
-        return _PROBED
-    result, settled = _check_sandbox()
-    if settled:
-        _PROBED = result
+    now = time.time()
+    if _PROBED is not None and now - _PROBED[1] < PROBE_CACHE_S:
+        return _PROBED[0]
+    path = _probe_cache_path()
+    try:
+        saved = json.loads(path.read_text())
+        if 0 <= now - float(saved["at"]) < PROBE_CACHE_S:
+            _PROBED = ((bool(saved["ok"]), str(saved["why"])), float(saved["at"]))
+            return _PROBED[0]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    result = _check_sandbox()
+    _PROBED = (result, now)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pending = path.with_suffix(f".{os.getpid()}.tmp")
+        pending.write_text(json.dumps({"ok": result[0], "why": result[1], "at": now}))
+        os.replace(pending, path)
+    except OSError:
+        pass  # this process still keeps it
     return result
 
 
-def _check_sandbox() -> tuple[tuple[bool, str], bool]:
-    """``((ok, why), settled)``: whether a tiny snippet runs in the real sandbox under
-    :data:`PROBE_WALL_S`, and whether that answer is final (not a timeout)."""
+def _check_sandbox() -> tuple[bool, str]:
+    """``(ok, why)``: whether a tiny snippet runs in the real sandbox (its own start-up
+    allowance, :data:`STARTUP_S`, then the code's :data:`WALL_S`)."""
     if not sys.platform.startswith("linux"):
-        return (False, f"code nodes need Linux namespaces; this is {sys.platform}"), True
+        return False, f"code nodes need Linux namespaces; this is {sys.platform}"
     if shutil.which("unshare") is None:
-        return (False, "the unshare command is not installed"), True
+        return False, "the unshare command is not installed"
     for needed in (PYTHON, BASH):
         if not os.path.exists(needed):
-            return (False, f"{needed} does not exist"), True
+            return False, f"{needed} does not exist"
     try:
         result = _sandboxed("def main(inp):\n    return inp['facts']['x'] + 1\n",
-                            {"files": {}, "facts": {"x": 1}}, timeout_s=PROBE_WALL_S, extra=(),
-                            what="its start-up check")
-    except SnippetTimeout as exc:
-        return (False, f"the sandbox was unavailable: {exc}"), False
+                            {"files": {}, "facts": {"x": 1}}, timeout_s=WALL_S, extra=())
     except SnippetError as exc:
-        return (False, f"the sandbox was unavailable: {exc}"), True
+        return False, f"the sandbox was unavailable: {exc}"
     if result != 2:
-        return (False, f"the sandbox probe returned {result!r}, not 2"), True
-    return (True, ""), True
+        return False, f"the sandbox probe returned {result!r}, not 2"
+    return True, ""
 
 
 def available() -> tuple[bool, str]:
-    """Whether code nodes can run here, and why not: a probe that runs a tiny snippet
-    in the real sandbox under its own start-up limit (:data:`PROBE_WALL_S`, not the
-    code's), once per process (a timed-out probe is tried again)."""
+    """Whether code nodes can run here, and why not: a check that runs a tiny snippet in
+    the real sandbox, its answer kept for :data:`PROBE_CACHE_S` across processes."""
     return _probe()
 
 
@@ -387,7 +473,12 @@ def execute(code: str, inp: Any, *, timeout_s: float = WALL_S,
     issues = static_issues(code)
     if issues:
         raise SnippetError("the code is refused (rule V18): " + "; ".join(issues))
-    return _sandboxed(code, inp, timeout_s=timeout_s, extra=hide)
+    try:
+        return _sandboxed(code, inp, timeout_s=timeout_s, extra=hide)
+    except SandboxUnavailable as exc:
+        # The machine was too busy to start the sandbox: not the code's doing.
+        raise SandboxUnavailable(f"code nodes cannot run here: the sandbox was unavailable: "
+                                 f"{exc}") from exc
 
 
 # ── what a node declares ──────────────────────────────────────────────────
