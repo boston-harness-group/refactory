@@ -12,11 +12,14 @@ export function apply(ctx) {
   // before this one keep their record (`earlier_sessions`) and their tokens count:
   // `usage` is the receipt's total across sessions, `session_usage` this session's own.
   const earlier = [...(initial.earlier_sessions ?? [])]
-  if (ranBefore(initial)) {
+  // The last session's own usage: its session_usage, or nothing when it reported none.
+  // Only a receipt no session of this observer has written yet holds it in `usage`.
+  const lastUsage = 'session_usage' in initial ? initial.session_usage : (earlier.length ? null : initial.usage ?? null)
+  if (ranBefore(initial, lastUsage)) {
     earlier.push({
       backend_session_id: initial.backend_session_id ?? null, runtime_session_id: initial.runtime_session_id ?? null,
       product_session_id: initial.product_session_id ?? null, stop_reason: initial.stop_reason ?? null,
-      usage: initial.session_usage ?? initial.usage ?? null,
+      usage: lastUsage,
     })
   }
   const earlierTokens = earlier.reduce((sum, session) => sum + tokensOf(session.usage), 0)
@@ -81,7 +84,10 @@ export function apply(ctx) {
     adapter: '@deepseek-ai/dsh-subagent', adapter_version: dshVersion,
     version: backend === 'dsh' ? dshVersion : null, installed_product_version: productVersion,
     version_kind: backend === 'claude_code' ? 'agent-sdk' : 'runtime', source: 'installed-package' }
-  save({ runtime, ...(earlier.length ? { earlier_sessions: earlier, session_usage: null } : {}) })
+  // A new session starts with none of the last one's ids or usage, so a session that
+  // ends before reporting is not counted again as the one before it.
+  save({ runtime, ...(earlier.length ? { earlier_sessions: earlier, session_usage: null, backend_session_id: null,
+    runtime_session_id: null, product_session_id: null, stop_reason: null } : {}) })
   ctx.on('refactory/worker-metadata', (parentId, metadata) => {
     if (backend !== 'dsh') {
       if (metadata.actual_route?.worker_backend === backend) {
@@ -171,9 +177,9 @@ export function apply(ctx) {
 }
 
 /** Whether a receipt shows a session already ran under it (a client retry follows). */
-function ranBefore(receipt) {
+function ranBefore(receipt, usage) {
   return Boolean(receipt.backend_session_id || receipt.runtime_session_id || receipt.product_session_id)
-    || tokensOf(receipt.session_usage ?? receipt.usage) > 0
+    || tokensOf(usage) > 0
 }
 
 /** The tokens a usage record counts: its total, else what is known of it, else none. */

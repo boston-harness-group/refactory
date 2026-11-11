@@ -379,7 +379,7 @@ def test_a_node_session_runs_under_the_whole_dispatch_envelope(monkeypatch):
     seen.clear()
     with pytest.raises(RuntimeError, match="timed out after 1s"):
         DshModelClient(timeout_s=1).complete("hello")
-    assert seen["stop_at"] is None
+    # Each attempt is handed its own absolute deadline: here one completion's limit.
     assert seen["budget_s"] == 1
 
 
@@ -780,13 +780,20 @@ def test_an_answer_whose_worker_cleanup_failed_is_kept_with_a_warning(monkeypatc
         assert len(queue) == 1 and waits == []
         [event] = _events(run, TEARDOWN_EVENT)
         assert event["state"] == "warning" and "the answer is kept" in event["summary"]
-        assert "teardown" in event["error"]
+        assert "teardown" in event["error"] and event["cleanup"] == "unconfirmed"
+        tools = client._tool_policy != "none"
+        assert event["tools"] is tools
+        assert ("its tool processes may still be running" in event["summary"]) is tools
 
 
 @pytest.mark.parametrize("stdout, stderr", [
     ("", TEARDOWN),
     # The worker stopped without completing before its cleanup failed: no answer.
     ("partial\n", f"dsh: worker cancelled: stopped\n{TEARDOWN}"),
+    # A turn whose error only quotes the teardown signature is not the worker's own
+    # failure line: its partial text is not an answer.
+    ("partial\n", "dsh: worker error: the tool printed (product: X; stage: teardown; "
+                   "category: unknown; exit code: 0)"),
 ])
 def test_a_teardown_failure_without_an_answer_fails_at_once(monkeypatch, tmp_path, stdout, stderr):
     from refactory_dsh.model import TEARDOWN_EVENT

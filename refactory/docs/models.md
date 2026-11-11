@@ -359,17 +359,21 @@ time limit (1800 + 600 s by default; it used to inherit the run's 3 attempts and
 retry is recorded as a `model_call_retried` event with its cause, the attempt number and
 the discarded attempt's usage, and the worker receipt adds up the usage of every session
 under it (`usage` is the total, `session_usage` the last session's own, and
-`earlier_sessions` keeps each earlier session's ids and usage). A node with a wall has
-one deadline on every backend, `claude_code` and `codex` included: its retries spend what
-remains of it rather than a fresh `timeout_s` each.
+`earlier_sessions` keeps each earlier session's ids and usage; a session that ended before
+reporting counts as none). A node with a wall has that one limit on every backend,
+`claude_code` and `codex` included: each attempt runs for at most `timeout_s` and never
+past the wall, so retries spend what remains of the wall rather than a fresh `timeout_s`
+each. When the wait before a retry uses up the wall, no attempt starts: the call fails
+with the wire's cause as a `transport` failure, which a node's timeout retry does not rerun.
 
 A worker whose cleanup fails after it answered keeps its answer. The worker bridge exits
 0 when the answer is on stdout and only the cleanup failed (for example waiting for the
 worker's process scope to empty under load), printing
 `dsh: worker teardown failed after its answer: ...`; the client also keeps the answer when
 a runtime exits 1 with a teardown failure after a clean CLI exit (`stage: teardown; ...;
-exit code: 0` in one group) and the answer on stdout. Either way it records a
-`worker_teardown_failed` warning event and does not ask again, with or without tools: it
+exit code: 0` in the worker's own `dsh: worker failed:` line) and the answer on stdout.
+Either way it records a `worker_teardown_failed` warning event (for a session with tools
+it says the tool processes may still be running, since the cleanup that failed was theirs) and does not ask again, with or without tools: it
 used to re-ask a session without tools, discarding a finished answer. A teardown failure
 with no answer, after a nonzero exit, or after the worker stopped without completing, is
 not kept and not retried. A completion whose deadline passed and whose runtime then did

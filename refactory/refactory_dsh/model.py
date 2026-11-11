@@ -442,10 +442,13 @@ def teardown_warning(stderr: str) -> str:
 
 def answered_before_teardown(stdout: str, stderr: str) -> bool:
     """Whether a failed completion is a finished answer whose cleanup failed: stdout holds
-    the answer, the failure is a teardown after a clean CLI exit, and the worker reported
+    the answer, the failure is the worker's own ``dsh: worker failed:`` line for a teardown
+    after a clean CLI exit (not a turn whose error merely quotes one), and the worker reported
     no other stop (``dsh: worker cancelled: ...``). The bridge itself exits 0 then
     (`TEARDOWN_WARNING`); this keeps the answer from a runtime that does not."""
-    if not (stdout or "").strip() or not is_clean_exit_teardown_failure(failure_cause(stderr)):
+    cause = failure_cause(stderr)
+    if (not (stdout or "").strip() or not cause.startswith("dsh: worker failed:")
+            or not is_clean_exit_teardown_failure(cause)):
         return False
     return not any(line.startswith("dsh: worker ") and not is_clean_exit_teardown_failure(line)
                    and not line.startswith(TEARDOWN_WARNING)
@@ -499,7 +502,10 @@ def failure_cause(stderr: str) -> str:
     limit read "dsh: reasoning:". With no diagnostic after it, the cause says so
     rather than quoting the reasoning.
     """
-    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    # The bridge's warning that cleanup failed after an answer is not why a completion
+    # failed: a worker that stopped reports its own diagnostic above it.
+    lines = [line.strip() for line in (stderr or "").splitlines()
+             if line.strip() and not line.strip().startswith(TEARDOWN_WARNING)]
     for line in reversed(lines):
         if line == REASONING_HEADER:
             continue
@@ -1053,26 +1059,45 @@ class DshModelClient:
         # `timeout_s` alone (#307). A CEO turn or a console call keeps the plain
         # completion deadline. The wall is absolute across attempts: a transport
         # retry spends whatever remains of the same envelope.
-        if self._worker_backend == "dsh" and self._node_id:
-            budget_s = node_session_budget_s(self._attempts, self._timeout_s)
-            stop_at = time.monotonic() + budget_s
-        else:
-            budget_s = self._timeout_s
-            stop_at = None
-        # A node with a wall has one deadline on every backend: its retries spend what
-        # remains of it, so a node never outlives its wall by a fresh `timeout_s` each.
+        #
+        # ``cap_s`` is the longest one attempt may run; ``total_s`` the node's limit
+        # across its attempts, when it has one. A node with a wall has that one limit on
+        # every backend: an attempt runs for at most ``cap_s`` and never past the wall,
+        # so a retry spends what remains of the wall, not a fresh `timeout_s`, and gets
+        # no less than an attempt's own time while the wall allows it.
+        dsh_node = self._worker_backend == "dsh" and bool(self._node_id)
+        cap_s = node_session_budget_s(self._attempts, self._timeout_s) if dsh_node else self._timeout_s
+        total_s: int | None = cap_s if dsh_node else None
         wall = getattr(self, "_node_wall_s", None)
         if wall is not None:
-            if wall < budget_s or getattr(self, "_node_wall_exact", False):
-                budget_s = wall
-            stop_at = time.monotonic() + budget_s
+            exact = getattr(self, "_node_wall_exact", False)
+            if dsh_node:
+                if wall < cap_s or exact:
+                    cap_s = total_s = wall
+            else:
+                total_s = wall
+                if wall < cap_s or exact:
+                    cap_s = wall
+        stop_at = time.monotonic() + total_s if total_s is not None else None
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
                   else [self._backoff_s * 2 ** index for index in range(self._attempts - 1)])
         for attempt in range(1, self._attempts + 1):
             self._raise_if_cancelled()
             self._checkpoint()
+            now = time.monotonic()
+            if stop_at is not None and attempt > 1 and stop_at - now <= 0:
+                # The wait before this retry used up the node's time: an attempt now
+                # would time out at once. It failed on the wire, and says so -- not a
+                # timeout, which a node's timeout retry would run again.
+                raise CompletionFailed(
+                    f"model completion failed on the wire {attempt - 1} time(s) and the node's "
+                    f"time ran out before it could ask again; last cause: {last}",
+                    kind="transport")
+            attempt_stop = now + cap_s if stop_at is None else min(stop_at, now + cap_s)
+            budget_s = max(1, int(round(attempt_stop - now)))
             try:
-                proc = self._run_completion(cmd, run_dir, stop_at, budget_s, task=task, target_workdir=target_workdir)
+                proc = self._run_completion(cmd, run_dir, attempt_stop, budget_s, task=task,
+                                            target_workdir=target_workdir)
             except subprocess.TimeoutExpired as exc:
                 # The deadline passed first, so this is a timeout even when the runtime
                 # then failed to shut down: that failure is the timeout's detail and a
@@ -1166,14 +1191,20 @@ class DshModelClient:
 
     def _record_teardown(self, run_dir: Path, detail: str) -> None:
         who = self._node_id or "a model call"
+        tools = getattr(self, "_tool_policy", "") != "none"
+        # With tools, the session's tool processes may outlive the failed cleanup.
         self._emit(run_dir, TEARDOWN_EVENT, state="warning", error=detail[:500],
-                   summary=f"{who}: the worker's cleanup failed after it answered; the answer is kept")
+                   tools=tools, cleanup="unconfirmed",
+                   summary=f"{who}: the worker's cleanup failed after it answered; the answer is kept"
+                           + ("; its tool processes may still be running" if tools else ""))
 
     def _record_retry(self, run_dir: Path, attempt: int, cause: str) -> None:
         """A completion the client is about to ask again: why, which attempt failed, and
         what the discarded attempt cost (the worker observer's ``session_usage``)."""
         receipt = self._receipt()
-        usage = receipt.get("session_usage") or receipt.get("usage")
+        # The session's own usage once the observer writes it (none when it died before
+        # reporting); a receipt from before any session_usage has only its total.
+        usage = receipt["session_usage"] if "session_usage" in receipt else receipt.get("usage")
         who = self._node_id or "a model call"
         self._emit(run_dir, RETRY_EVENT, state="retrying", cause=cause[:500], attempt=attempt,
                    attempts=self._attempts, usage=usage,

@@ -249,3 +249,116 @@ def test_a_timeout_with_unconfirmed_cleanup_is_never_a_retried_timeout():
                              "child cleanup unconfirmed; not retried")
     hung.cleanup_unconfirmed = True  # type: ignore[attr-defined]
     assert failure_kind(hung) is None
+
+
+@needs_node
+@pytest.mark.parametrize("middle", ["request", "start"])
+def test_a_session_that_reports_nothing_is_not_counted_as_the_one_before(tmp_path, middle):
+    """Three sessions under one receipt: 30 tokens, then one that reports none (after its
+    request, or before it), then 5. The total is 35, the first session is kept once, and
+    each retry event carries its own session's usage (none for the silent one)."""
+    dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: socket hang up", "code": 1},
+                                  {"usage": middle, "err": "dsh: TRANSPORT: ECONNRESET", "code": 1},
+                                  {"usage": 5, "out": "right"}])
+    run = tmp_path / "run"
+    assert dsh.client().complete("Solve.", workdir=run).strip() == "right"
+    [path] = list((run / ".refactory/workers").glob("worker-*.json"))
+    receipt = json.loads(path.read_text())
+    assert receipt["usage"]["tokens"] == 35
+    earlier = [(s["runtime_session_id"], (s["usage"] or {}).get("tokens")) for s in receipt["earlier_sessions"]]
+    assert earlier == ([("session-0", 30), ("session-1", None)] if middle == "request"
+                       else [("session-0", 30)])
+    assert [(e["usage"] or {}).get("tokens") for e in _events(run, RETRY_EVENT)] == [30, None]
+
+
+def _clocked(monkeypatch, outcomes, step_s):  # type: ignore[no-untyped-def]
+    """Run completions on a fake clock: each attempt takes ``step_s`` and returns the
+    next outcome; a wait advances the clock. Returns the (stop_at, start) of each."""
+    clock = [1000.0]
+    seen: list[tuple[float, float]] = []
+    queue = list(outcomes)
+
+    def run(self, cmd, run_dir, stop_at=None, budget_s=None, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append((stop_at, clock[0]))
+        clock[0] += step_s
+        return queue.pop(0)
+
+    monkeypatch.setattr(DshModelClient, "_run_completion", run)
+    monkeypatch.setattr(model_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(model_mod.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    return seen
+
+
+class _Wire:
+    returncode, stdout, stderr = 1, "", "dsh: TRANSPORT: socket hang up"
+
+
+class _Answer:
+    returncode, stdout, stderr = 0, "done\n", ""
+
+
+def test_a_retry_gets_a_whole_attempt_while_the_wall_allows(monkeypatch):
+    """claude_code, timeout_s 600 and a 3600 s wall: attempt 1 fails on the wire after
+    550 s, and attempt 2 still gets its 600 s (the wall has about 3000 s left)."""
+    seen = _clocked(monkeypatch, [_Wire(), _Answer()], 550)
+    client = (DshModelClient(worker_backend="claude_code", timeout_s=600, retry_window_s=10)
+              .with_tool_policy("none").with_wall(3600))
+    assert client.complete("hello") == "done\n"
+    (first_stop, first_at), (second_stop, second_at) = seen
+    assert first_stop - first_at == pytest.approx(600)
+    assert second_stop - second_at == pytest.approx(600)
+
+
+def test_a_retry_the_wait_leaves_no_time_for_fails_on_the_wire_not_as_a_timeout(monkeypatch):
+    """A 100 s wall: attempt 1 fails on the wire after 95 s, and the 20 s wait before a
+    retry uses up the rest. No attempt starts only to time out at once: the call fails
+    with the wire's cause, as a transport failure, which no timeout retry reruns."""
+    from refactory_dsh.model import CompletionFailed
+    from refactory_dsh.node_retry import failure_kind
+
+    seen = _clocked(monkeypatch, [_Wire(), _Answer()], 95)
+    client = (DshModelClient(worker_backend="claude_code", timeout_s=600, retry_window_s=60)
+              .with_tool_policy("none").with_wall(100))
+    with pytest.raises(CompletionFailed) as raised:
+        client.complete("hello")
+    assert len(seen) == 1
+    assert raised.value.kind == "transport" and failure_kind(raised.value) is None
+    assert "time ran out before it could ask again" in str(raised.value)
+    assert "dsh: TRANSPORT: socket hang up" in str(raised.value)
+
+
+class _Bridged:
+    """What the real bridge printed and the exit it asked for, as a completion."""
+
+    def __init__(self, done: dict) -> None:
+        self.returncode, self.stdout, self.stderr = done["code"], done["stdout"], done["stderr"]
+
+
+@needs_node
+def test_the_real_bridges_warning_keeps_the_answer_end_to_end(tmp_path, monkeypatch):
+    """The real bridge, its cleanup failing after a completed answer (exit 0 and its
+    warning line), read by the real client: the answer is kept and the warning recorded."""
+    proc = _Bridged(_bridge(tmp_path, "completed", "worker"))
+    monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: proc)
+    run = tmp_path / "run"
+    client = DshModelClient(worker_backend="dsh", provider="p", model="m", attempts=3, retry_window_s=0)
+    assert client.complete("Solve.", workdir=run) == "the answer\n"
+    [event] = _events(run, TEARDOWN_EVENT)
+    assert event["error"].startswith(TEARDOWN_WARNING) and "stage: teardown" in event["error"]
+
+
+@needs_node
+def test_a_worker_that_stopped_reports_its_own_cause_not_the_warning(tmp_path, monkeypatch):
+    """The real bridge for a worker that stopped and whose cleanup then failed: the
+    client fails with the worker's own stop line, not the cleanup warning after it."""
+    from refactory_dsh.model import CompletionFailed, failure_cause
+
+    done = _bridge(tmp_path, "cancelled", "worker")
+    assert failure_cause(done["stderr"]) == "dsh: worker cancelled: stopped"
+    proc = _Bridged(done)
+    monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: proc)
+    client = DshModelClient(worker_backend="dsh", provider="p", model="m", attempts=3, retry_window_s=0)
+    with pytest.raises(CompletionFailed) as raised:
+        client.complete("Solve.", workdir=tmp_path / "run")
+    assert str(raised.value) == "model completion failed (exit 1): dsh: worker cancelled: stopped"
+    assert raised.value.kind == "worker"
