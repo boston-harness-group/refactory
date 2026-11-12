@@ -89,7 +89,8 @@ SEARCH_ONLY_FIELDS = {
          "max_edits_per_proposal", "fresh_evidence", "early_stop_patience",
          "early_stop_at_full_val", "selection", "pool_size",
          "run_ledger", "lessons", "step_review", "structure_guidance",
-         "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches"),
+         "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches",
+         "integrity_judge"),
         "decides what is proposed, re-scored or kept, not what the seed scores"),
     "val_gate": ("decides what is kept; the train rollout seed it implies is checked "
                  "per part instead (the cached part's seed against the rollout's)"),

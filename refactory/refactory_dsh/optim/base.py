@@ -738,6 +738,10 @@ class ProposalContext:
     #: and the ranked ``findings``, for "What the analysts found, ranked"; ``None`` when
     #: no analyst ran.
     analysis: dict[str, Any] | None = None
+    #: The integrity judge's verdicts on this run's proposals (``Loop._integrity``,
+    #: ``LoopConfig.integrity_judge``), for "Integrity review of your proposals"; empty
+    #: (the judge off) says nothing.
+    integrity: list[dict[str, Any]] = field(default_factory=list)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -904,14 +908,16 @@ class ProposalContext:
 
 def _feedback_sections(ctx: "ProposalContext") -> list[str]:
     """The run-wide feedback sections (`optim.feedback`): every change by kind, whether
-    the last round's added steps contributed, and the optimizer's own lessons; each
-    only when its field holds something."""
-    from . import feedback
+    the last round's added steps contributed, the optimizer's own lessons, and the
+    integrity judge's verdicts on its proposals (`optim.integrity`); each only when its
+    field holds something."""
+    from . import feedback, integrity
 
     out: list[str] = []
     for lines in (feedback.ledger_lines(ctx.ledger),
                   feedback.step_review_lines(ctx.added_steps),
-                  feedback.lessons_lines(ctx.lessons) if ctx.ask_lessons else []):
+                  feedback.lessons_lines(ctx.lessons) if ctx.ask_lessons else [],
+                  integrity.feedback_lines(ctx.integrity)):
         if lines:
             out += ["", *lines]
     return out

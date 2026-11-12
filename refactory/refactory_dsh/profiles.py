@@ -176,6 +176,19 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < least:
             raise ProfileError(f"{key} must be an integer of at least {least}")
+    # integrity_judge: a bare value, or an object (JSON text on the command line) with
+    # mode, default and a per-category policy (optim.integrity.parse_setting).
+    from refactory_dsh.optim.integrity import parse_setting
+    judge = result.get("integrity_judge")
+    if isinstance(judge, str) and judge.strip().startswith("{"):
+        try:
+            judge = result["integrity_judge"] = json.loads(judge)
+        except json.JSONDecodeError as error:
+            raise ProfileError(f"integrity_judge is not valid JSON: {error}") from error
+    try:
+        parse_setting(judge)
+    except ValueError as error:
+        raise ProfileError(str(error)) from error
     max_edits = result.get("max_edits_per_proposal")
     if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
         raise ProfileError("max_edits_per_proposal must be a positive integer (1 is single edits)")
@@ -420,7 +433,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         # What the proposer is shown, not how anything is scored (optim.feedback,
         # optim.analysts).
         "run_ledger", "lessons", "step_review", "structure_guidance",
-        "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches")}
+        "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches",
+        # Judges proposals and shows or refuses them; it scores nothing (optim.integrity).
+        "integrity_judge")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
@@ -519,6 +534,18 @@ SETTING_HELP = {
                                 "8, SkillOpt's; at least 2)",
     "analyst_max_batches": "with --analysts 1: the most analyst calls per round, failure "
                            "batches first (default: 0, no limit, as SkillOpt)",
+    "integrity_judge": "off (default), on, flag or a JSON object: one optimizer-model call per "
+                       "proposal asks whether its benefit depends on how the data, grader "
+                       "or environment happen to be built. on (or veto): an exploit or "
+                       "suspect verdict about what the change adds is refused before "
+                       "evaluation (E-integrity) in every category by default (an "
+                       "inherited finding, a judge error or a salvaged reply never is); "
+                       "flag (or warn): verdicts are only shown. "
+                       "'{\"mode\": \"on\", \"policy\": {\"answer_leak\": \"off\", "
+                       "\"train_overfit\": \"warn\"}}' sets categories one by one (off, "
+                       "warn, veto); a bare value covers every category the object does "
+                       "not name and overrides a Task's integrity_policy; a Task's "
+                       "integrity_allowances still turn their categories off",
     "portfolio": "prompt+pipeline: each round asks the model proposer for one "
                  "prompt/knob-level and one pipeline-level candidate and evaluates both, "
                  "gated in that order (default: off)",

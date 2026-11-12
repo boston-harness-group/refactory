@@ -162,10 +162,13 @@ def touched(edits: Any) -> list[str]:
 def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | None,
                  parent_records: Sequence[Mapping[str, Any]] | None,
                  child_records: Sequence[Mapping[str, Any]] | None,
-                 gate: str | None, same_seed: bool = True) -> dict[str, Any]:
+                 gate: str | None, same_seed: bool = True,
+                 integrity: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One row of "Every change so far, by kind": train records and the gate's word
     only. A child whose parent was not scored with its round's seed (``same_seed``
-    false) gets no fixed/broken counts: the difference would be partly the seed's."""
+    false) gets no fixed/broken counts: the difference would be partly the seed's.
+    ``integrity`` is the integrity judge's verdict on it (`optim.integrity`), when the
+    judge is on; the row then carries it in a few words."""
     edits = candidate.own_edits()
     change = (edit_change(parent_records, child_records)
               if parent is not None and child_records and same_seed else None)
@@ -179,7 +182,14 @@ def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | Non
         "shared": change["shared"] if change else 0,
         "gate": gate, "same_seed": bool(same_seed),
         "rationale": str((record or {}).get("rationale") or ""),
+        **({"integrity": _integrity_cell(integrity)} if integrity else {}),
     }
+
+
+def _integrity_cell(record: Mapping[str, Any]) -> str:
+    from .integrity import cell
+
+    return cell(record)
 
 
 def _net(entry: Mapping[str, Any]) -> int | None:
@@ -204,6 +214,8 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
     if not entries:
         return []
     gated = any(entry.get("gate") for entry in entries)
+    # The integrity judge's column, only when it judged something (`optim.integrity`).
+    judged = any("integrity" in entry for entry in entries)
     tally: list[str] = []
     for kind in CHANGE_KINDS:
         of_kind = [entry for entry in entries if entry.get("kind") == kind]
@@ -222,11 +234,14 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
              "wrong and child right / the reverse; `n/a (different seed)` when the parent was "
              "not scored in that round)"
              + ("; `gate` is what the validation gate decided" if gated else "")
+             + ("; `integrity` is the integrity review's verdict on the change (does its "
+                "benefit depend on how the data, grader or environment happen to be built?)"
+                if judged else "")
              + ". Read it for which kinds of change have paid off in this pipeline and which "
              "have not, before choosing yours.",
              *tally]
     headers = ["id", "round", "parent", "kind", "touched", "train fixed/broken",
-               *(["gate"] if gated else []), "rationale"]
+               *(["gate"] if gated else []), *(["integrity"] if judged else []), "rationale"]
 
     def row(entry: Mapping[str, Any]) -> list[Any]:
         counts = (f"{entry['fixed']}/{entry['broken']} of {entry.get('shared')}"
@@ -235,6 +250,7 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
         return [entry.get("id"), entry.get("round", ""), entry.get("parent"), entry.get("kind"),
                 _touched_text(list(entry.get("touched") or ())), counts,
                 *([entry.get("gate") or ""] if gated else []),
+                *([entry.get("integrity") or "not judged"] if judged else []),
                 _clip(entry.get("rationale"), LEDGER_RATIONALE_CHARS) or "(none)"]
 
     shown = list(entries)[-max(1, rows):]
