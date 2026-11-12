@@ -172,7 +172,8 @@ Each of these happened, and the shape of the code is the response.
   rather than repairs, and validation happens before budget is spent.
 - **A surface that lied.** Structural wins were counted from failed runs, and
   duplicates vanished. `structural_wins` requires `exit_ok` and a score above the
-  candidate's parent; duplicates are refused
+  candidate's parent (under the validation gate, a val score above the parent's);
+  duplicates are refused
   at the optimizer layer and `attempt == 0` is asserted in the tests.
 - **Steps that deleted their own run.** When the loop became a mode, each node
   rehydrates from the journal — and `resume=False` means "start over", so the

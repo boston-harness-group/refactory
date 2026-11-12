@@ -3136,11 +3136,13 @@ def test_post_training_evaluation_runs_in_skillopts_order(tmp_path, monkeypatch)
     final_skill = _current_skill(strategy)
     assert final_skill != _best_skill(strategy), "setup: the slow update changed the final skill"
     after = calls[calls.index(next(c for c in calls if c[0] == "test")) - 1:]
-    assert [(part, s) for part, _, s, _ in after] == [("val", 7), ("test", 7), ("test", 7), ("test", 7)]
+    # The best is the seed here, so the best's test score is the seed's (one rollout,
+    # delta exactly 0) rather than a second rollout of the same candidate.
+    assert strategy.gate.best_id == seed.id, "setup: the seed stays the best"
+    assert [(part, s) for part, _, s, _ in after] == [("val", 7), ("test", 7), ("test", 7)]
     assert after[0][3] == final_skill
     assert after[1][1] == seed.id
-    assert after[2][1] == strategy.gate.best_id
-    assert after[3][3] == final_skill
+    assert after[2][3] == final_skill
 
     # The toy task passes x1 and x2 of the three test items: 1, 1, 0.5.
     expected = (1.0 + 1.0 + 0.5) / 3
@@ -3156,7 +3158,7 @@ def test_post_training_evaluation_runs_in_skillopts_order(tmp_path, monkeypatch)
     assert "## Strategy report" in (infra.root / "report.md").read_text()
     assert json.loads((infra.root / "report.json").read_text())["strategy_report"] == strategy_report
     decisions = _decisions(_read_trace(tmp_path), "test_eval")
-    assert [d["action"] for d in decisions] == ["baseline_test", "best_test", "final_test"]
+    assert [d["action"] for d in decisions] == ["baseline_test", "best_test_reused", "final_test"]
 
 
 def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
@@ -3203,8 +3205,9 @@ def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
 
     decisions = _decisions(_read_trace(tmp_path), "test_eval")
     actions = [d["action"] for d in decisions]
-    # Must be in canonical order regardless of completion order
-    assert actions == ["baseline_test", "best_test", "final_test"], (
+    # Must be in canonical order regardless of completion order (the best is the seed
+    # here, so its score is the baseline's; the final finishes before the baseline).
+    assert actions == ["baseline_test", "best_test_reused", "final_test"], (
         f"trace decisions in wrong order: {actions}"
     )
 
@@ -3228,13 +3231,16 @@ def test_post_training_evaluation_reuses_the_best_when_the_final_skill_is_it(tmp
     assert _current_skill(strategy) == _best_skill(strategy)
     seed = infra.population[0]
     assert strategy.gate.best_id == seed.id
-    # The initial val and epoch 1's val gate; then no final-skill val rollout,
-    # the seed (baseline) and the best (the seed again) on test, and no third.
-    assert [(part, cid) for part, cid, _, _ in calls][-2:] == [("test", seed.id), ("test", seed.id)]
-    assert [part for part, _, _, _ in calls] == ["val", "val", "test", "test"]
+    # The initial val and epoch 1's val gate; then no final-skill val rollout, and
+    # the seed on test once: the best is the seed and the final is the best, so both
+    # reuse the baseline's score (a second rollout would only add noise to the delta).
+    assert [(part, cid) for part, cid, _, _ in calls][-1:] == [("test", seed.id)]
+    assert [part for part, _, _, _ in calls] == ["val", "val", "test"]
     strategy_report = report["strategy_report"]
     assert strategy_report["final_selection_hard"] == strategy.gate.best_score
-    assert strategy_report["final_test_hard"] == strategy_report["test_hard"]
+    assert (strategy_report["final_test_hard"] == strategy_report["test_hard"]
+            == strategy_report["baseline_test_hard"])
+    assert strategy_report["test_delta_hard"] == 0
 
 
 def test_post_training_val_check_promotes_a_better_final_skill(tmp_path, monkeypatch):

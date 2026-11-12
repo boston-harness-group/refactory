@@ -1091,8 +1091,9 @@ class FinalEvaluation:
        score when it is the best, else a fresh val rollout; a score above the best's
        makes it the best.
     2. ``baseline_test``, ``best_test``, ``final_test``: the seed, the best and the
-       final candidate on test, concurrently through ``Run.evaluate_many``; the final
-       reuses the best's score when it is the best.
+       final candidate on test, concurrently through ``Run.evaluate_many``; the best
+       reuses the seed's score when it is the seed, and the final the best's when it
+       is the best, or the seed's when it is the seed.
 
     Every rollout uses ``seed``. Each finished phase is kept (``completed``) and
     ``save`` is called, so a resumed run continues where it stopped; the decisions go
@@ -1159,15 +1160,26 @@ class FinalEvaluation:
                     )
                 finished("final_selection")
 
-            # (phase, candidate) for each pending test phase; None reuses the best's.
+            # (phase, candidate) for each pending test phase; None reuses the score of
+            # the earlier phase that rolled the same candidate out (``reuses``): a best
+            # or final that is the seed takes the baseline's, a final that is the best
+            # the best's. So a seed that wins is scored on test once and its deltas are
+            # 0, not the noise between two rollouts of the same candidate.
             plan: list[tuple[str, Candidate | None]] = []
-            if "baseline_test" not in self.completed:
-                plan.append(("baseline_test", run.seed()))
-            if "best_test" not in self.completed:
-                plan.append(("best_test", self._held(run, gate.best_id)))
-            if "final_test" not in self.completed:
-                final_is_best = gate.current_id == gate.best_id
-                plan.append(("final_test", None if final_is_best else self._held(run, gate.current_id)))
+            seed_id = run.seed().id
+            reuses: dict[str, str] = {}
+            if gate.best_id == seed_id:
+                reuses["best_test"] = "baseline_test"
+            if gate.current_id == gate.best_id:
+                reuses["final_test"] = "best_test"
+            elif gate.current_id == seed_id:
+                reuses["final_test"] = "baseline_test"
+            held = {"baseline_test": seed_id, "best_test": gate.best_id,
+                    "final_test": gate.current_id}
+            for phase in self.TEST_PHASES:
+                if phase not in self.completed:
+                    plan.append((phase, None if phase in reuses
+                                 else self._held(run, held[phase])))
             requests = [EvalRequest(candidate=cand, part="test", seed=seed)
                         for _phase, cand in plan if cand is not None]
             request_phases = [phase for phase, cand in plan if cand is not None]
@@ -1183,10 +1195,11 @@ class FinalEvaluation:
 
                     run.evaluate_many(requests, on_result=_on_result)
                 for phase, cand in plan:
-                    if cand is None:  # the final candidate is the best: reuse its score
-                        best = phases.get("best_test") or {}
-                        phases[phase] = {"score": best.get("score", result.get("best_test")),
-                                         "reused": True}
+                    if cand is None:  # the same candidate as an earlier phase: reuse it
+                        source = reuses[phase]
+                        earlier = phases.get(source) or {}
+                        phases[phase] = {"score": earlier.get("score", result.get(source)),
+                                         "reused": True, "from": source}
                         finished(phase)
             finally:
                 self._trace_test_phases(save)
@@ -1243,7 +1256,9 @@ class FinalEvaluation:
                 break
             entry = phases[phase]
             if entry.get("reused"):
-                self.record("test_eval", action="final_test_reused", score=entry.get("score"))
+                # ``final_test_reused`` as before; the best (the seed) reusing the
+                # baseline is ``best_test_reused``.
+                self.record("test_eval", action=f"{phase}_reused", score=entry.get("score"))
             else:
                 self.record("test_eval", action=phase, score=entry.get("score"),
                             candidate=entry.get("candidate", ""))

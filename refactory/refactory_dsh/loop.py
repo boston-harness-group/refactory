@@ -706,8 +706,12 @@ class Loop(OuterLoop):
         #: that fell back to train selection gives.
         self._val_gate_basis = "explicit"
         self.selection_warning = ""
+        #: What a resume put back from the run's record (``_keep_recorded_run_shape``).
+        self._resumed_shape: dict[str, Any] = {}
         self._gate_accepted: list[str] = []
         self._gate_rejected: list[str] = []
+        #: The ids each gating judged, in order (``_pool_entered``).
+        self._gate_rounds: list[list[str]] = []
 
     def _init_item_gate(self, candidate: Candidate | None = None) -> None:
         """Create the item-in-flight limiter on the first evaluate_many call.
@@ -872,6 +876,7 @@ class Loop(OuterLoop):
 
         self.root.mkdir(parents=True, exist_ok=True)
         from refactory_dsh import profiles
+        self._keep_recorded_run_shape()
         settings = {k: v for k, v in self.config.to_dict().items() if k not in profiles.RUNTIME_FIELDS}
         snapshot = profiles.refresh(self.project, self.mode_id, settings, self.config.resolved_profile, model_client=self.model) if self.config.resolved_profile else profiles.resolve(
             self.project, self.mode_id, overrides=settings, validate_settings=False, model_client=self.model)
@@ -890,6 +895,10 @@ class Loop(OuterLoop):
         else:
             self._journal("resume_configuration", resolved_profile=snapshot)
         self._resolve_val_gate()
+        if self.config.val_gate and self._custom_strategy is None and not self.config.selection:
+            # Recorded as resolved, so config.json says the rule the run selects by and
+            # a resume compares real values (``_keep_recorded_run_shape``).
+            self.config.selection = self.selection_mode()
         saved = self.root / "config.json"
         if self.config.resume and saved.exists():
             try:
@@ -1013,6 +1022,78 @@ class Loop(OuterLoop):
             optimizer=self.search_name(),
         )
 
+    #: The settings that shape how a run selects, which a resumed run keeps as it
+    #: recorded them (``_keep_recorded_run_shape``): the epochs already run selected so.
+    RESUME_KEEPS = ("val_gate", "selection", "pool_size")
+
+    def _keep_recorded_run_shape(self) -> None:
+        """On resume, put back the run's recorded ``RESUME_KEEPS`` settings from its
+        ``config.json``, before anything reads them.
+
+        A setting the resume command leaves out takes the recorded value, whatever the
+        profile or the defaults now say (said in the run's log when they differ). One
+        the resume command gives explicitly with a different value is refused, as a
+        different ``train_minibatch`` is: the run would select its later epochs by
+        another rule than its earlier ones. Which settings a command gave explicitly is
+        the launch snapshot's ``overrides``; a loop built in code without one counts a
+        value other than ``LoopConfig``'s default as given. A ``selection`` left empty
+        is compared as the default it resolves to."""
+        self._resumed_shape = {}
+        saved = self.root / "config.json"
+        if not self.config.resume or not saved.exists():
+            return
+        try:
+            recorded = json.loads(saved.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(recorded, dict):
+            return
+        overrides = (self.config.resolved_profile or {}).get("overrides")
+        defaults = LoopConfig()
+        for key in self.RESUME_KEEPS:
+            value = recorded.get(key)
+            if key == "val_gate" and not isinstance(value, bool):
+                continue
+            if key == "selection" and value not in SELECTIONS:
+                continue
+            if key == "pool_size" and (isinstance(value, bool) or not isinstance(value, int)
+                                       or value < 1):
+                continue
+            current = getattr(self.config, key)
+            if key == "val_gate" and current is not None:
+                current = bool(current)
+            if self._shape_value(key, current) == self._shape_value(key, value):
+                continue
+            given = (key in overrides if isinstance(overrides, dict)
+                     else current != getattr(defaults, key))
+            if given:
+                flag = "--" + key.replace("_", "-")
+                raise LoopError(
+                    f"this run was started with {key} {self._shown(key, value)} and this "
+                    f"resume asks for {key} {self._shown(key, current)}; resume it without "
+                    f"{flag} (or with {flag} {self._shown(key, value)}), or start a new run")
+            setattr(self.config, key, value)
+            self._resumed_shape[key] = value
+            Run(_loop=self).log(f"resume: keeping the run's recorded {key} {value!r} "
+                                f"(this launch said {current!r})")
+
+    def _shown(self, key: str, value: Any) -> str:
+        """A ``RESUME_KEEPS`` value as its flag takes it: ``val_gate`` as 1 or 0, an
+        empty ``selection`` as the default it resolves to."""
+        if isinstance(value, bool):
+            return str(int(value))
+        if key == "selection" and not value:
+            return f"{self._shape_value(key, value)} (unset: the default)"
+        return str(value)
+
+    def _shape_value(self, key: str, value: Any) -> Any:
+        """A ``RESUME_KEEPS`` value as it acts: an empty ``selection`` is the default
+        it resolves to."""
+        if key == "selection" and not value:
+            picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
+            return default_selection(self.name, self.config.optimizer, picker)
+        return value
+
     def _resolve_val_gate(self) -> None:
         """Decide ``val_gate`` when the run left it unset (``None``): on when the parts
         manifest it will load has val items and the strategy is a built-in one (a
@@ -1022,19 +1103,9 @@ class Loop(OuterLoop):
         kept. Runs before ``config.json`` is written, so the run records the decision."""
         self._val_gate_basis = "explicit"
         self.selection_warning = ""
-        saved = self.root / "config.json"
-        if self.config.resume and self.config.val_gate is None and saved.exists():
-            # A resumed run keeps the decision it recorded, and its selection, rather
-            # than re-deciding from the manifest: the epochs already run selected so.
-            try:
-                recorded = json.loads(saved.read_text())
-            except (OSError, ValueError):
-                recorded = {}
-            if isinstance(recorded.get("val_gate"), bool):
-                self.config.val_gate = recorded["val_gate"]
-                self._val_gate_basis = "resumed: the run's recorded decision"
-                if not self.config.selection and recorded.get("selection") in ("single", "pool"):
-                    self.config.selection = recorded["selection"]
+        if "val_gate" in self._resumed_shape:
+            # Restored by _keep_recorded_run_shape: the epochs already run selected so.
+            self._val_gate_basis = "resumed: the run's recorded decision"
         if self.config.val_gate is not None:
             self.config.val_gate = bool(self.config.val_gate)
             return
@@ -2304,12 +2375,15 @@ class Loop(OuterLoop):
     def _portfolio_report(self) -> dict[str, Any]:
         """What ``portfolio`` cost and produced, from the journaled proposal records.
 
-        ``by_level``: candidates proposed, evaluated and kept by the validation gate,
-        and the evaluations they cost (a train run, plus each val or test occasion).
+        ``by_level``: candidates proposed, evaluated and kept by the validation gate
+        (``kept``: accepted, under ``pool`` as the incumbent; with ``in_pool`` under
+        ``pool``: in the pool now), and the evaluations they cost (a train run, plus
+        each val or test occasion).
         ``rounds``: each round's candidates in the order they were proposed, with the
-        gate's decision; a candidate the gate rejected although its val score beat
-        its parent's, because a sibling of the same round scored higher on val (or tied
-        and won the tie), is ``shadowed``.
+        gate's decision (``_gate_decision``) and whether it was ``accepted``; a
+        candidate the gate did not accept although its val score beat its parent's,
+        because a sibling of the same round scored higher on val (or tied and won the
+        tie), is ``shadowed``.
         ``extra_evaluations``: what the candidates beyond ``batch_size`` in each round
         cost."""
         from refactory_dsh.optim.base import EDIT_LEVELS
@@ -2325,26 +2399,31 @@ class Loop(OuterLoop):
                 return 0
             return 1 + sum((self._occasion_counters.get(candidate.id) or {}).values())
 
-        by_level = {level: {"proposed": 0, "evaluated": 0, "kept": 0, "evaluations": 0}
-                    for level in EDIT_LEVELS}
+        pool = self.selection_mode() == "pool"
+        accepted = set(self._gate_accepted)
+        fields = ("proposed", "evaluated", "kept", *(("in_pool",) if pool else ()), "evaluations")
+        by_level = {level: dict.fromkeys(fields, 0) for level in EDIT_LEVELS}
         rounds: dict[Any, list[dict[str, Any]]] = {}
         for record in records:
             candidate = by_id.get(record["id"])
-            entry = by_level.setdefault(str(record["level"]), {
-                "proposed": 0, "evaluated": 0, "kept": 0, "evaluations": 0})
+            entry = by_level.setdefault(str(record["level"]), dict.fromkeys(fields, 0))
             entry["proposed"] += 1
-            decision = self._gate_decision(record["id"])
+            decision = self._gate_decision(record["id"], detail=True)
             if candidate is not None and candidate.evaluated:
                 entry["evaluated"] += 1
             entry["evaluations"] += cost(candidate)
-            kept = decision in ("kept", "current")
+            # Accepted by the gate: under single, kept; under pool, made the incumbent
+            # (a pool member that was never the incumbent was not accepted).
+            kept = record["id"] in accepted
             if kept:
                 entry["kept"] += 1
+            if pool and decision in ("current", "in pool"):
+                entry["in_pool"] += 1
             siblings = rounds.setdefault(record.get("epoch"), [])
             val, parent_val = cache.get(record["id"]), cache.get(record.get("parent") or "")
-            shadowed = (decision == "rejected" and val is not None and parent_val is not None
-                        and val > parent_val and any(
-                            self._gate_decision(r["id"]) in ("kept", "current")
+            shadowed = (record["id"] in self._gate_rejected and val is not None
+                        and parent_val is not None and val > parent_val and any(
+                            r["id"] in accepted
                             for r in records if r.get("epoch") == record.get("epoch")
                             and r["id"] != record["id"]))
             siblings.append({"id": record["id"], "level": record["level"],
@@ -2354,6 +2433,7 @@ class Loop(OuterLoop):
                              "evaluations": cost(candidate)})
         base = int(self.config.batch_size)
         return {"setting": self.config.portfolio, "batch_size": base,
+                "selection": self.selection_mode(),
                 "rounds": len(rounds), "by_level": by_level,
                 "per_round": [{"epoch": epoch, "candidates": entries}
                               for epoch, entries in rounds.items()],
@@ -3207,6 +3287,7 @@ class Loop(OuterLoop):
             gate.load_state_dict(saved)
             self._gate_accepted = list(saved.get("accepted") or [])
             self._gate_rejected = list(saved.get("rejected") or [])
+            self._gate_rounds = [list(r) for r in saved.get("rounds") or []]
             self._val_gate = gate
         return self._val_gate
 
@@ -3247,6 +3328,7 @@ class Loop(OuterLoop):
                 return
             self._strategy_state["gate_start_epoch"] = self.epoch
             self._gate_accepted.append(pending[0].id)
+            self._gate_rounds.append([pending[0].id])
             self._store_gate_state()
             self._save_strategy_state()
             pending = pending[1:]
@@ -3262,6 +3344,8 @@ class Loop(OuterLoop):
             if candidate.id in decided:
                 (self._gate_accepted if candidate in accepted else self._gate_rejected).append(
                     candidate.id)
+        if decided:
+            self._gate_rounds.append([c.id for c in pending if c.id in decided])
         self._store_gate_state()
         self._save_strategy_state()
 
@@ -3360,15 +3444,63 @@ class Loop(OuterLoop):
         resumed run holds it again without storing it.
         """
         gate = self._gate()
-        ranked = self._judged_ranked()
-        size = max(1, int(self.config.pool_size))
-        if len(ranked) > size:
-            edge = gate.cache[ranked[size - 1].id]
-            ranked = [c for c in ranked if gate.cache[c.id] >= edge]
+        ranked = self._top(self._judged_ranked())
         incumbent = next((c for c in ranked if c.id == gate.current_id), None)
         if incumbent is not None:
             ranked = [incumbent] + [c for c in ranked if c is not incumbent]
         return ranked
+
+    def _top(self, ranked: list[Candidate]) -> list[Candidate]:
+        """``ranked`` (best val first) cut to the pool: the ``pool_size`` best val
+        scores, plus any tied with the last of them."""
+        gate = self._gate()
+        size = max(1, int(self.config.pool_size))
+        if len(ranked) > size:
+            edge = gate.cache[ranked[size - 1].id]
+            ranked = [c for c in ranked if gate.cache[c.id] >= edge]
+        return ranked
+
+    def _pool_entered(self) -> set[str]:
+        """The judged candidates that were in the pool after the gating that judged them.
+
+        A val score never changes and later gatings only add candidates, so a candidate
+        out of the pool now either entered it then and was pushed out since (``left
+        pool``) or never entered it. Rebuilt gating by gating from the gate's cache and
+        the ids each gating judged (``rounds`` in the gate state). Every judged
+        candidate counts, one a person rejected later included: it held its place when
+        the others were judged, so a later rejection does not turn them into ``left
+        pool``. A run recorded before ``rounds`` existed groups by proposal epoch.
+        """
+        gate = self._gate()
+        key = (len(self.population), len(self._gate_accepted), len(self._gate_rejected),
+               len(gate.cache), len(self._gate_rounds), int(self.config.pool_size))
+        cached = getattr(self, "_pool_entered_memo", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        judged = set(self._gate_accepted) | set(self._gate_rejected)
+        by_id = {c.id: c for c in self.population}
+        order = {c.id: index for index, c in enumerate(self.population)}
+        rounds = [[cid for cid in r if cid in by_id and cid in gate.cache]
+                  for r in self._gate_rounds]
+        if not self._gate_rounds:
+            members = [c for c in self._evaluated() if c.id in judged and c.id in gate.cache]
+            rounds, last = [], object()
+            for candidate in members:
+                epoch = (self.proposals.get(candidate.id) or {}).get("epoch")
+                if rounds and epoch is not None and epoch == last:
+                    rounds[-1].append(candidate.id)
+                else:
+                    rounds.append([candidate.id])
+                last = epoch
+        entered: set[str] = set()
+        seen: list[Candidate] = []
+        for ids in rounds:
+            seen.extend(by_id[cid] for cid in ids)
+            top = {c.id for c in self._top(sorted(
+                seen, key=lambda c: (-gate.cache[c.id], -_train_key(c), order[c.id])))}
+            entered |= {cid for cid in ids if cid in top}
+        self._pool_entered_memo = (key, entered)
+        return entered
 
     def _judged_ranked(self) -> list[Candidate]:
         """Every judged candidate a person has not rejected (each has a val score),
@@ -3399,6 +3531,7 @@ class Loop(OuterLoop):
         self._strategy_state["val_gate"] = {
             **self._gate().state_dict(),
             "accepted": list(self._gate_accepted), "rejected": list(self._gate_rejected),
+            "rounds": [list(r) for r in self._gate_rounds],
             # Which rule ranked the winner, so adopt names the one the report names.
             "selection": self.selection_mode(), "pool_size": int(self.config.pool_size),
         }
@@ -3504,6 +3637,9 @@ class Loop(OuterLoop):
         if self._unevaluated() and not reserved:
             self.forward(epoch=self.epoch + 1)
             self._gate_population(run)
+            # The last batch's scores and gate decisions, which no later epoch's
+            # scheduler writes: without this state.json shows them "not gated".
+            self._write_state()
         if not run.has_part(task_module.TEST):
             final.skip(run, "the parts manifest has no 'test' part", save)
             return
@@ -3633,12 +3769,13 @@ class Loop(OuterLoop):
         """
         return [c.id for c in self.population if not c.evaluated]
 
-    def _row(self, candidate: Candidate) -> dict[str, Any]:
+    def _row(self, candidate: Candidate, *, detail: bool = False) -> dict[str, Any]:
         """One candidate as a reader sees it: both scores, and what its size cost.
 
         The leaderboard, the lineage and the records the optimizer reads all go
         through here, so none of them reports a score without the cost that was
-        taken off it.
+        taken off it. ``detail``: the gate's pool labels (``_gate_decision``), for the
+        report, ``state.json`` and the log only; never for anything the optimizer reads.
         """
         nodes = node_count(candidate.state)
         row = {
@@ -3646,26 +3783,40 @@ class Loop(OuterLoop):
             "nodes": nodes,
             "size_cost": round(self.config.parsimony * nodes, 6),
         }
-        gate = self._gate_decision(candidate.id)
+        gate = self._gate_decision(candidate.id, detail=detail)
         if gate is not None:
             row["gate"] = gate
         return row
 
-    def _gate_decision(self, candidate_id: str) -> str | None:
-        """What the validation gate decided about a candidate, as the optimizer reads
-        it: ``current`` (the incumbent), ``kept``, ``rejected`` or ``not gated``.
-        Under ``selection`` ``pool``, ``kept`` is in the pool now and ``rejected`` is
-        judged and not in it. ``None`` without ``val_gate``. Never a val score."""
+    def _gate_decision(self, candidate_id: str, *, detail: bool = False) -> str | None:
+        """What the validation gate decided about a candidate: ``current`` (the
+        incumbent), ``kept`` (accepted as the incumbent when judged, since replaced),
+        ``rejected`` or ``not gated``. ``None`` without ``val_gate``. Never a val score.
+
+        That is all the optimizer reads, under ``pool`` as under ``single``: which
+        candidates the pool holds follows their val ranking, so it tells no more than
+        ``single`` does. With ``detail`` (the report, ``state.json``, the log), under
+        ``pool`` a candidate not current says where it stands in the pool: ``in pool``
+        (in it now), ``left pool`` (in it after the gating that judged it, pushed out
+        since), ``rejected`` (never in it, or rejected by a person) or ``below pool``
+        (never in it, but a population policy still breeds from every judged
+        candidate)."""
         if not self.config.val_gate or self._custom_strategy is not None:
             return None
         gate = self._gate()
         if candidate_id == gate.current_id:
             return "current"
-        if self.selection_mode() == "pool":
+        if detail and self.selection_mode() == "pool":
             judged = set(self._gate_accepted) | set(self._gate_rejected)
             if candidate_id not in judged:
                 return "not gated"
-            return "kept" if any(c.id == candidate_id for c in self._pool()) else "rejected"
+            if candidate_id in self.rejected:
+                return "rejected"
+            if any(c.id == candidate_id for c in self._pool()):
+                return "in pool"
+            if candidate_id in self._pool_entered():
+                return "left pool"
+            return "below pool" if self._population_policy() else "rejected"
         if candidate_id in self._gate_accepted:
             return "kept"
         if candidate_id in self._gate_rejected:
@@ -3782,7 +3933,7 @@ class Loop(OuterLoop):
             "resources": self.budget.snapshot() if self.budget else None,
             "population": len(self.population),
             "unevaluated": self._unevaluated(),
-            "best": self._row(best) if best else None,
+            "best": self._row(best, detail=True) if best else None,
             "best_score": best.score if best else None,
             "raw_best_score": best.raw_score if best else None,
             "seed_score": self.population[0].score if self.population and self.population[0].exit_ok else None,
@@ -3790,8 +3941,9 @@ class Loop(OuterLoop):
             "improvement": {"status": "observed" if best and self.population and self.population[0].score is not None and best.score is not None and best.score > self.population[0].score else "none",
                             "interpretation": "sample means are observations, not proof of a stochastic improvement"},
             "scoring": self.scoring(),
-            "leaderboard": [self._row(c) for c in board],
-            "failed_candidates": [self._row(c) for c in self._evaluated() if not c.exit_ok],
+            "leaderboard": [self._row(c, detail=True) for c in board],
+            "failed_candidates": [self._row(c, detail=True) for c in self._evaluated()
+                                  if not c.exit_ok],
             "kept": list(self.kept),
             "rejected": list(self.rejected),
             "adoptions": list(self.adoptions),
@@ -4143,16 +4295,27 @@ class Loop(OuterLoop):
         """Structural candidates that scored above the parent they were bred from.
 
         A structural candidate that merely ran is not a win: counting those made
-        every structural edit that did not crash look like progress.
+        every structural edit that did not crash look like progress. Under the default
+        loop's ``val_gate`` "scored above" is the gate's val score (the selection's
+        fitness), not the train score, and each win carries both val scores. This is
+        the report's, never the proposer's: the request shows no val score.
         """
         by_id = {c.id: c for c in self.population}
         wins: list[dict[str, Any]] = []
+        gated = self.config.val_gate and self._custom_strategy is None
+        cache = self._gate().cache if gated else {}
         for candidate in board:
             parent = by_id.get(candidate.parent or "")
-            if (candidate.is_structural() and candidate.exit_ok and candidate.score is not None
-                    and parent is not None and parent.exit_ok and parent.score is not None
-                    and candidate.score > parent.score):
-                wins.append(self._row(candidate))
+            if not candidate.is_structural() or parent is None:
+                continue
+            if gated:
+                val, parent_val = cache.get(candidate.id), cache.get(parent.id)
+                if val is not None and parent_val is not None and val > parent_val:
+                    wins.append({**self._row(candidate, detail=True), "val": val,
+                                 "parent_val": parent_val})
+            elif (candidate.exit_ok and candidate.score is not None and parent.exit_ok
+                  and parent.score is not None and candidate.score > parent.score):
+                wins.append(self._row(candidate, detail=True))
         return wins
 
     def _lineage(self, candidate: Candidate | None) -> list[dict[str, Any]]:
@@ -4163,7 +4326,7 @@ class Loop(OuterLoop):
         seen: set[str] = set()
         while candidate is not None and candidate.id not in seen:
             seen.add(candidate.id)
-            chain.append(self._row(candidate))
+            chain.append(self._row(candidate, detail=True))
             candidate = by_id.get(candidate.parent or "")
         return list(reversed(chain))
 
@@ -4248,9 +4411,16 @@ class Loop(OuterLoop):
             "",
             "## Structural candidates that beat their parent",
             "",
+            *(["On the validation gate's val score (`val` against `parent val`); `score` is "
+               "the train score.", ""] if (payload.get("selection") or {}).get("setting")
+              in ("single", "pool") else []),
             _md_table(
-                ["id", "score", "raw", "nodes", "edits"],
+                ["id", "score", "raw", "nodes",
+                 *(["val", "parent val"] if any("val" in c for c in payload["structural_wins"])
+                   else []), "edits"],
                 [[c["id"], c.get("score"), c.get("raw_score"), c.get("nodes"),
+                  *([c.get("val"), c.get("parent_val")]
+                    if any("val" in w for w in payload["structural_wins"]) else []),
                   json.dumps(c.get("edits"), default=str)]
                  for c in payload["structural_wins"]],
             ),
@@ -4387,7 +4557,7 @@ class Loop(OuterLoop):
             wiring_warnings=list(described.get("warnings") or ()),
             # Candidates run headless: no person answers a gate while they run.
             person_gates=False,
-            leaderboard=[self._row(c) for c in board],
+            leaderboard=[self._row(c) for c in self._request_order(board)],
             history=self._history(),
             tried=self._tried(),
             elite=int(self.config.elite),
@@ -4428,9 +4598,25 @@ class Loop(OuterLoop):
             parent=self._edited_id(board),
             val_scores=self._val_scores(),
             selection=self.selection_mode(),
+            population_parents=(self.selection_mode() == "pool" and self._population_policy()),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
         )
+
+    def _request_order(self, board: list[Candidate]) -> list[Candidate]:
+        """The request's "Recent results" rows in an order no val score decides.
+
+        Under ``val_gate`` the leaderboard is ranked by val score, so listing it as
+        ranked would tell the proposer the val ranking it must not see. The rows go
+        instead: the gate's current candidate first (it is marked ``current`` anyway),
+        then by train score (a failed train run lowest), then the earlier candidate.
+        Without the gate the leaderboard is the train ranking already and is kept."""
+        if not self.config.val_gate or self._custom_strategy is not None:
+            return list(board)
+        current = self._gate().current_id
+        order = {c.id: index for index, c in enumerate(self.population)}
+        return sorted(board, key=lambda c: (c.id != current, -_train_key(c),
+                                            order.get(c.id, len(order))))
 
     def _val_scores(self) -> dict[str, float]:
         """The gate's val score per judged candidate under ``val_gate`` (parent
@@ -5044,7 +5230,8 @@ class Loop(OuterLoop):
                 "kept": list(self.kept),
                 "rejected": list(self.rejected),
                 "adoptions": list(self.adoptions),
-                "population": [self._row(candidate) for candidate in self.population],
+                "population": [self._row(candidate, detail=True)
+                               for candidate in self.population],
             },
         )
 
@@ -5137,23 +5324,38 @@ def _holdout_line(audit: dict[str, Any]) -> str:
 def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
     if not portfolio:
         return []
-    rows = [[level, entry["proposed"], entry["evaluated"], entry["kept"], entry["evaluations"]]
+    pool = portfolio.get("selection") == "pool"
+    rows = [[level, entry["proposed"], entry["evaluated"], entry["kept"],
+             *([entry.get("in_pool", 0)] if pool else []), entry["evaluations"]]
             for level, entry in portfolio["by_level"].items()]
     lines = ["## Portfolio", "",
              f"`{portfolio['setting']}`: {portfolio['rounds']} round(s) asked for one candidate "
              f"per edit level; the candidates beyond the batch size of {portfolio['batch_size']} "
              f"cost {portfolio['extra_evaluations']} evaluation(s) (train and val runs). The "
              "gate judges a round's candidates together, each against the current candidate "
-             "as the round starts, and keeps the one with the highest val score (ties: higher "
-             "train score, then the one proposed first): a candidate that beat its parent on "
-             "val but lost to a sibling is marked shadowed.", "",
-             _md_table(["level", "proposed", "evaluated", "kept by the gate", "evaluations"], rows),
+             "as the round starts, and accepts the one with the highest val score (ties: higher "
+             "train score, then the one proposed first)"
+             + (" as the new incumbent, if it beats the current one strictly" if pool else "")
+             + ": a candidate that beat its parent on val but lost to a sibling is marked "
+             "shadowed."
+             + (" Under pool selection every judged candidate may also enter the pool of the "
+                "best on val: `in pool` is in it now, `left pool` was in it when judged and "
+                "was pushed out since, `rejected` never entered it (`below pool` when the "
+                "parent picker still breeds from every judged candidate). `accepted` marks a "
+                "former incumbent." if pool else ""), "",
+             _md_table(["level", "proposed", "evaluated",
+                        "accepted as incumbent" if pool else "kept by the gate",
+                        *(["in pool now"] if pool else []), "evaluations"], rows),
              ""]
     round_rows = []
     for entry in portfolio.get("per_round") or []:
         for candidate in entry["candidates"]:
-            outcome = ("shadowed" if candidate["shadowed"] else candidate["gate"]
-                       or ("evaluated" if candidate["evaluated"] else "not evaluated"))
+            outcome = candidate["gate"] or ("evaluated" if candidate["evaluated"]
+                                            else "not evaluated")
+            if pool and candidate.get("kept") and candidate["gate"] != "current":
+                outcome = f"accepted, {outcome}"
+            if candidate["shadowed"]:
+                outcome = f"shadowed, {outcome}" if pool else "shadowed"
             round_rows.append([entry["epoch"], candidate["level"], candidate["id"], outcome,
                                candidate["val"], candidate["parent_val"]])
     if round_rows:
@@ -5342,6 +5544,21 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if previous.get("mode") != args.mode:
                 raise profiles.ProfileError("the resume directory belongs to another mode")
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
+            for key in Loop.RESUME_KEEPS:
+                # Refused here, before the settings are checked together, with the
+                # loop's wording (``Loop._keep_recorded_run_shape``): a recorded
+                # selection with --val-gate 0 would fail that check less clearly.
+                was, asked = previous.get(key), overrides.get(key)
+                if asked is None or was in (None, ""):
+                    continue
+                if key == "val_gate":
+                    was, asked = int(bool(was)), int(bool(asked))
+                if asked != was:
+                    flag = "--" + key.replace("_", "-")
+                    raise profiles.ProfileError(
+                        f"this run was started with {key} {was} and this resume asks for "
+                        f"{key} {asked}; resume it without {flag} (or with {flag} {was}), "
+                        "or start a new run")
             return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}),
                                     previous.get("resolved_profile") or {}, overrides=overrides)
         return profiles.resolve(project, args.mode, name=args.profile,

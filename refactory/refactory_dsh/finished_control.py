@@ -54,8 +54,8 @@ def recover_selection(root: Path, *, project: Path | None = None) -> dict[str, A
     audit = report.get('holdout') or {}
     audited = winner is not None and audit.get('winner') == winner.id and audit.get('status') in ('measured', 'not_applicable')
     report.update(kept=loop.kept, rejected=loop.rejected,
-                  leaderboard=[loop._row(candidate) for candidate in board],
-                  best=loop._row(winner) if winner else None,
+                  leaderboard=[loop._row(candidate, detail=True) for candidate in board],
+                  best=loop._row(winner, detail=True) if winner else None,
                   **(loop.best_score_fields(winner) if winner else {"best_score": None}),
                   raw_best_score=winner.raw_score if winner else None,
                   lineage=loop._lineage(winner),

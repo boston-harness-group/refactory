@@ -45,8 +45,11 @@ says why (`val_gate_basis`).
   says that no independent check was possible (`holdout.split` is `val`,
   `holdout.independent` is false, `status` is `not_applicable`, and the report names
   the split). With a test part the audit compares val with test, which nothing selects
-  on (`split` `test`). A resumed run keeps the `val_gate` and `selection` its
-  `config.json` recorded.
+  on (`split` `test`). A resumed run keeps the `val_gate`, `selection` and `pool_size`
+  its `config.json` recorded, whatever its profile or the defaults now say; a resume
+  command that gives one of them explicitly with another value is refused, naming both.
+  A launch that leaves `selection` unset records the rule it resolved (`single` or
+  `pool`).
 - **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
   for them, and `--val-gate 1` is refused.
 
@@ -127,10 +130,21 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
   gradient's leaderboard) carries the gate's decision: `current` (the incumbent),
-  `kept`, `rejected` or `not gated`; under `pool`, `kept` is in the pool now and
-  `rejected` is judged and out of it, and the request says so. The request's first line
-  gives the train score of the candidate the gate ranks first, labelled as such. The per-knob attribution counts, for each
-  value, how many of its candidates were kept, rejected or not yet gated. The request
+  `kept` (accepted as the incumbent when judged), `rejected` or `not gated`, under
+  `pool` as under `single`: pool members are not labelled as such. The request's
+  "Recent results" table lists the pool, though, so a `rejected` row there is one that
+  scored well on val. Under `pool` the request adds that a parent may be any candidate
+  that scored well on val, or with a population parent picker (`archive`,
+  `evolutionary`, `islands`, `map_elites`) any judged candidate, a rejected one
+  included. The report, `state.json`
+  and the log label pool runs in full: `current`, `in pool` (in the pool now), `left
+  pool` (in it after the gating that judged it, pushed out since), `rejected` (never in
+  it, or rejected by a person), `below pool` (never in it, but a population picker still
+  breeds from every judged candidate) or `not gated`. "Recent results" lists the current
+  candidate first and the rest by train score, then age, never in val order. The
+  request's first line, and the line over "What this run has already tried", give the
+  train score of the current candidate, labelled as such. The per-knob attribution
+  counts, for each value, how many of its candidates had each decision. The request
   says it edits the `current` candidate, and that a `rejected` one was not shown better
   on validation (with the gate's resolution, one item = 1/N of the val score, when the
   score is the items' mean); a rejected change is never re-proposed unchanged, but one
@@ -150,7 +164,10 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   a train-score "improved".
 - **Final evaluation.** After a normal end (the epoch bound or an early stop), with a
   test part, the final candidate's val check runs, then the seed, the best and the final
-  candidate on test with `seed`. A run that ends on a spent evaluation, rollout, time or
+  candidate on test with `seed`; a best or final that is the seed reuses the seed's
+  test score (one rollout, its delta exactly 0), as a final that is the best reuses the
+  best's. Before this, a seed that won was rolled out twice and its delta was rollout
+  noise. A run that ends on a spent evaluation, rollout, time or
   token budget, or a person's stop, scores neither the last proposals nor the test part,
   as SkillOpt; the report keeps the real stop reason (a spent budget wins over an early
   stop in the same epoch) and says why it skipped. The report's `strategy_report`

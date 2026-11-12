@@ -672,6 +672,10 @@ class ProposalContext:
     #: How the validation gate selects (``Loop.selection_mode``): ``single``, ``pool``,
     #: or empty without the gate. Under ``pool`` the gate note says what the pool is.
     selection: str = ""
+    #: Under ``pool``, whether a population parent picker (``archive``, ``evolutionary``,
+    #: ``islands``, ``map_elites``) chooses the parent from every judged candidate
+    #: rather than from the pool; the gate note says which (``_gate_note``).
+    population_parents: bool = False
     #: What is there before each node of the edited graph, on every path that reaches
     #: it (`available_before`): ``{node: {"facts": [...], "files": [...]}}``. Rendered
     #: under "The pipeline you may edit", so a prompt's ``{{name}}`` names a fact that
@@ -764,7 +768,7 @@ class ProposalContext:
                                              if k.get("kind") == "str"]),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
-                        selection=self.selection),
+                        selection=self.selection, population=self.population_parents),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
                      compact_edits(c.get("edits"), self.seed_knob_values),
@@ -791,10 +795,7 @@ class ProposalContext:
                 f"{len(self.history)} candidate(s), best "
                 f"{max((c.get('score') or 0.0) for c in self.history):.6g}"
                 if self.history and not _gate_column(self.history)
-                else f"{len(self.history)} candidate(s), best kept by the validation gate "
-                f"{max((c.get('score') or 0.0) for c in self.history if c.get('gate') in ('kept', 'current')):.6g}"
-                if any(c.get("gate") in ("kept", "current") for c in self.history)
-                else f"{len(self.history)} candidate(s), none kept by the validation gate yet"
+                else f"{len(self.history)} candidate(s); {_current_line(self.history)}"
                 if self.history
                 else "(nothing evaluated yet)"
             )
@@ -1872,8 +1873,22 @@ def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
     return ["gate"] if any("gate" in row for row in rows) else []
 
 
+def _current_line(history: Sequence[dict[str, Any]]) -> str:
+    """What "What this run has already tried" says of the validation gate's choice: the
+    train score of the candidate marked ``current`` (a train score, labelled so; the
+    val score that made it current is never shown)."""
+    current = next((c for c in history if c.get("gate") == "current"), None)
+    if current is None:
+        return ("none judged by the validation gate yet"
+                if all(c.get("gate") in (None, "not gated") for c in history)
+                else "the validation gate's current candidate is older than this list")
+    score = current.get("score")
+    return ("train score of the validation gate's current candidate "
+            + (f"{score:.6g}" if isinstance(score, (int, float)) else "n/a (its train run failed)"))
+
+
 def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
-               selection: str = "") -> list[str]:
+               selection: str = "", population: bool = False) -> list[str]:
     """What the gate column means, said once, when there is one.
 
     A rejection says only that the candidate was not shown better on validation; with
@@ -1886,17 +1901,26 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                   f"item is 1/{val_items} = {1 / val_items:.3g} of it, and a rejection can come "
                   "down to a single item. " if val_items > 0 else "")
     if selection == "pool":
-        return ["This run keeps a validation pool: each candidate was also run on held-out "
-                "items, and the pool holds the candidates that scored best there (`kept`). "
-                "The best of all is marked `current`; it changes only when a candidate scores "
-                "strictly higher there. Scores here are train scores; held-out scores are "
-                "never shown. You edit the pipeline shown below. A "
-                "`rejected` candidate is not among the best on validation; that is all it "
-                "says. " + resolution + "A change that was rejected must not be proposed "
-                "again unchanged, but when its train fixed/broken counts against its parent "
-                "(when shown below) were strongly positive, its direction may still be right: "
-                "you may build on it or combine it with edits to other steps in the same "
-                "failure path."]
+        # The same labels as ``single`` (the pool's own membership follows the val
+        # ranking, so it is never shown): what changes is that a parent may be any
+        # candidate that scored well there (with a population picker, any judged
+        # candidate), a rejected one included.
+        return ["This run has a validation gate with a pool of parents: each candidate "
+                "was also run on held-out items, and the gate kept it only if it scored "
+                "strictly higher there than the current candidate (an equal score is "
+                "rejected); the best so far is marked `current`. "
+                + ("A parent may be any candidate judged so far, a `rejected` one included, "
+                   "as the parent picker chooses. " if population else
+                   "A parent may be any of the candidates that scored well there, a "
+                   "`rejected` one included. ")
+                + "Rows are not in order of the held-out scores. Scores here are train "
+                "scores; held-out scores are never shown. You edit the pipeline shown below. A `rejected` "
+                "candidate was not shown better than the current one on validation; that is "
+                "all a rejection says. " + resolution + "A change that was rejected must not "
+                "be proposed again unchanged, but when its train fixed/broken counts against "
+                "its parent (when shown below) were strongly positive, its direction may still "
+                "be right: you may build on it or combine it with edits to other steps in the "
+                "same failure path."]
     return ["This run has a validation gate: each candidate was also run on held-out "
             "items, and the gate kept it only if it scored strictly higher there than the "
             "current candidate (an equal score is rejected). Scores here are train scores; "
