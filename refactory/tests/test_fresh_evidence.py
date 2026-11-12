@@ -91,12 +91,16 @@ def test_an_unchanged_current_candidate_is_rescored_each_epoch_with_its_seed(tmp
 
 def test_a_candidate_created_this_epoch_is_not_scored_twice(tmp_path, monkeypatch):
     """Each child is accepted and becomes current in the epoch that scored it, so its
-    records are already that epoch's: nothing is re-scored."""
+    records are already that epoch's: it is not re-scored. Its parent is, beside it, on
+    the round's sample (so the two pair on one seed) -- one re-score per round, the
+    run's last proposals excepted; no candidate is scored twice in one epoch."""
     measured = _tag_seeds(monkeypatch)
     loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)]])
-    assert not _events(loop, "rescore")
-    train_ids = [c for _e, c, _s in measured]
-    assert len(train_ids) == len(set(train_ids)), "each candidate scored on train once"
+    levels = {c.id: _level(c) for c in loop.population}
+    assert [(levels[r["id"]], r["epoch"]) for r in _events(loop, "rescore")] == [(5, 2), (7, 3)]
+    pairs = [(e, c) for e, c, _s in measured]
+    assert len(pairs) == len(set(pairs)), "no candidate scored twice in one epoch"
+    assert loop.evaluations == sum(1 for c in loop.population if c.evaluated) + 2
     for epoch, seeds in proposer.seeds:
         assert seeds == {f"seed {train_batch_seed(SEED, epoch)}"}, (epoch, seeds)
 

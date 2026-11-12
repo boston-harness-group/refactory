@@ -119,13 +119,22 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   journaled (`rescore`, with its epoch and seed); a resumed run reads its epoch back and
   does not repeat it. A re-score that fails, or returns fewer items than it ran, is no
   evidence: the previous records stay, the epoch is not marked, and it is journaled as
-  `rescore_failed` (still counted as an evaluation). Train records are kept per epoch, so
-  "What the last edit changed" and "Your earlier reasoning" compare a child with its
-  parent's records from the child's epoch (the same seed); a pair from different epochs
-  is marked as such. `--fresh-evidence 0`
+  `rescore_failed` (still counted as an evaluation). The re-score runs in the round
+  itself: when an epoch evaluates children of the candidate the last proposal step
+  edited, that parent is scored on the epoch's train sample beside them, taking one of
+  the `--max-concurrent-evaluations` slots, unless it already has this epoch's records.
+  So every judged child pairs with its parent on the same seed, a round that keeps a
+  child included; a round that keeps none finds the parent re-scored and does not score
+  it again after gating, and a re-score that failed in the round is not tried again in
+  that epoch. The run's last proposals, scored after the last epoch, get no parent
+  re-score (no request reads their comparison). Train records are kept per epoch, so
+  "What the last edit changed", "Your earlier reasoning" and the run-wide feedback
+  sections compare a child with its parent's records from the child's epoch (the same
+  seed); a pair from different epochs is marked as such. `--fresh-evidence 0`
   turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
-  35-item train part this is one more train evaluation of 35 rollouts per epoch in
-  which the gate kept no new candidate.
+  35-item train part this is one train evaluation of 35 rollouts per epoch, the epochs
+  whose gate kept a child included; with 3 concurrent evaluations (two portfolio
+  children and the re-score) the round's wall clock is unchanged.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the

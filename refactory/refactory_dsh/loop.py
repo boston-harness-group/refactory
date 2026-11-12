@@ -672,6 +672,10 @@ class Loop(OuterLoop):
         #: The latest ``lessons`` the model proposer wrote (``LoopConfig.lessons``):
         #: ``{"text", "epoch", "generation"}``, journaled as ``optimizer_lessons``.
         self._lessons: dict[str, Any] = {}
+        #: The (candidate, epoch) re-scores tried in this process (`_rescore`), so a
+        #: round's in-batch re-score that failed is not tried again after gating; a
+        #: resumed run tries again.
+        self._rescore_tried: set[tuple[str, int]] = set()
         #: Loop-private storage for per-part evaluation data (records, workdirs,
         #: scores).  Keyed by (candidate_id, part_name).  This data never reaches
         #: optimizer-facing APIs.
@@ -1322,6 +1326,11 @@ class Loop(OuterLoop):
         batch = [candidate for candidate in self.population if not candidate.evaluated]
         at = self.epoch if epoch is None else epoch
         seed = self._train_seed(at)
+        # Fresh evidence: the round's parent is scored on the round's sample beside its
+        # children (`_round_parent`), so each child pairs with it on the same seed. Not
+        # when scoring a run's last proposals (an explicit ``epoch``): no proposal reads
+        # those comparisons.
+        parent = self._round_parent(batch, at) if epoch is None and batch else None
         index = 0
         while index < len(batch):
             if self.evaluations >= self.config.max_evaluations:
@@ -1337,8 +1346,21 @@ class Loop(OuterLoop):
             items = self._minibatch(at)
             each = len(items) if items is not None else len(self._train_ids())
             size = self._wave_size(min(len(batch) - index,
-                                       self.config.max_evaluations - self.evaluations), each)
+                                       self.config.max_evaluations - self.evaluations
+                                       - (parent is not None)), each)
+            if parent is not None:
+                # The re-score takes one of the wave's concurrent slots.
+                size = max(1, min(size, int(self.config.max_concurrent_evaluations or 1) - 1))
             wave = batch[index:index + size]
+            beside = None
+            if parent is not None:
+                rescored, parent = parent, None
+                if int(self.config.max_concurrent_evaluations or 1) > 1:
+                    import concurrent.futures
+                    beside = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    pending = beside.submit(self._rescore, rescored, at)
+                else:
+                    self._rescore(rescored, at)
             try:
                 if len(wave) == 1:
                     self._evaluate(wave[0], seed=seed, items=items)
@@ -1354,6 +1376,10 @@ class Loop(OuterLoop):
             except BudgetStopped as exc:
                 self.bound = self.bound or str(exc)
                 break
+            finally:
+                if beside is not None:
+                    pending.result()
+                    beside.shutdown()
             index += len(wave)
             if self.budget and self.budget.snapshot().get("exhausted"):
                 break
@@ -1461,12 +1487,39 @@ class Loop(OuterLoop):
         if not edited or self._records_epoch.get(str(edited)) == self.epoch:
             return
         parent = next((c for c in self.population if c.id == edited and c.evaluated), None)
-        if parent is None:
+        if parent is None or (parent.id, self.epoch) in self._rescore_tried:
             return
+        self._rescore(parent, self.epoch)
+
+    def _round_parent(self, batch: Sequence[Candidate], epoch: int) -> Candidate | None:
+        """The parent ``forward`` re-scores beside its children (fresh evidence): the
+        candidate the last proposal step edited (else the one parent every child of the
+        batch shares), when a child of the batch has it as parent, it was evaluated, and
+        it has no records from ``epoch`` yet. Scoring it on the round's train sample with
+        the round's seed pairs every child with its parent on the same seed, a round
+        that keeps a child included; in a round that keeps none it is the re-score the
+        proposal step would have made, which then finds it done."""
+        if not self._fresh_evidence():
+            return None
+        parents = {c.parent for c in batch if c.parent}
+        edited = self.strategy_decision.get("parent") or self._editing_parent
+        chosen = (str(edited) if edited in parents
+                  else next(iter(parents)) if len(parents) == 1 else None)
+        if (chosen is None or self._records_epoch.get(chosen) == epoch
+                or (chosen, epoch) in self._rescore_tried):
+            return None
+        return next((c for c in self.population if c.id == chosen and c.evaluated), None)
+
+    def _rescore(self, parent: Candidate, epoch: int) -> bool:
+        """Score ``parent`` on ``epoch``'s train sample with ``epoch``'s seed as fresh
+        evidence: its records (the optimizer's evidence, and the ones its children are
+        compared with) are replaced and kept by epoch; its id and scores stay. Counted,
+        journaled and shown as a re-score. Whether it was scored."""
+        self._rescore_tried.add((parent.id, epoch))
         if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
-            return
+            return False
         if self.evaluations >= self.config.max_evaluations:
-            return
+            return False
         if self.budget:
             # The time and token budgets, checked as every scoring path checks them: a
             # spent budget stops the re-score here, before anything runs.
@@ -1475,8 +1528,9 @@ class Loop(OuterLoop):
                 self.budget.checkpoint("work" if self._owns_resource_budget else None)
             except BudgetExhausted as exc:
                 self.bound = str(exc)
-                return
-        workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{self.epoch}"
+                return False
+        batch = self._minibatch(epoch)
+        workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{epoch}"
         if batch:
             task_module.make_manifest(workdir, train_ids=batch)
         elif self._parts_manifest is not None and (self.root / task_module.MANIFEST).exists():
@@ -1484,11 +1538,11 @@ class Loop(OuterLoop):
             workdir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(self.root / task_module.MANIFEST, workdir / task_module.MANIFEST)
         result, measurements = self._measure(parent, workdir, task_module.TRAIN,
-                                             seed=self._train_seed(self.epoch), items=batch)
+                                             seed=self._train_seed(epoch), items=batch)
         if not measurements.get("count"):
             # The measurement's own budget checkpoint stopped it before a trial ran:
             # nothing was scored, so nothing is counted and the records stay.
-            return
+            return False
         expected = len(batch) if batch else len(self._train_ids())
         scored = {str(record.get("id")) for record in result.item_records}
         if not (result.exit_ok and measurements.get("complete") and len(scored) >= expected):
@@ -1499,35 +1553,36 @@ class Loop(OuterLoop):
                 self.evaluations += 1
                 if not measurements.get("cached_from"):
                     self.rollouts += len(result.item_records) or 1
-                self._journal("rescore_failed", id=parent.id, epoch=self.epoch,
-                              seed=self._train_seed(self.epoch), exit_ok=result.exit_ok,
+                self._journal("rescore_failed", id=parent.id, epoch=epoch,
+                              seed=self._train_seed(epoch), exit_ok=result.exit_ok,
                               error=result.error, records=len(scored), expected=expected,
                               measurements=measurements)
                 self._journal("rollouts", rollouts=self.rollouts)
-            self._progress("rescore", candidate=parent.id, epoch=self.epoch, failed=True,
+            self._progress("rescore", candidate=parent.id, epoch=epoch, failed=True,
                            error=result.error, records=len(scored), expected=expected,
                            duration_s=result.duration_s)
-            return
+            return False
         with self._state_lock:
             # An evaluation like any other: it counts toward the evaluation budget (the
             # time and token budgets are charged inside the measurement), and it is
             # journaled so a resumed run counts it too.
             self.evaluations += 1
-            self._journal("rescore", id=parent.id, epoch=self.epoch,
-                          seed=self._train_seed(self.epoch), items=len(batch or ()) or None,
+            self._journal("rescore", id=parent.id, epoch=epoch,
+                          seed=self._train_seed(epoch), items=len(batch or ()) or None,
                           score=result.score if result.exit_ok else None,
                           exit_ok=result.exit_ok, measurements=measurements)
             self._train_item_records[parent.id] = list(result.item_records)
-            self._records_epoch[parent.id] = self.epoch
-            self._records_by_epoch.setdefault(parent.id, {})[self.epoch] = list(result.item_records)
+            self._records_epoch[parent.id] = epoch
+            self._records_by_epoch.setdefault(parent.id, {})[epoch] = list(result.item_records)
             if not measurements.get("cached_from"):
                 self.rollouts += len(result.item_records) or 1
             self._journal("train_records", id=parent.id, records=list(result.item_records))
-            self._journal("train_records_epoch", id=parent.id, epoch=self.epoch)
+            self._journal("train_records_epoch", id=parent.id, epoch=epoch)
             self._journal("rollouts", rollouts=self.rollouts)
-        self._progress("rescore", candidate=parent.id, epoch=self.epoch,
+        self._progress("rescore", candidate=parent.id, epoch=epoch,
                        score=result.score if result.exit_ok else None,
                        records=len(result.item_records), duration_s=result.duration_s)
+        return True
 
     def _carry_ledger(self, workdir: Path) -> None:
         """Put the run's ledger where the candidate's own nodes look for it.
