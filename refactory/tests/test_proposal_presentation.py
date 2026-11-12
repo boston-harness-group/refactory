@@ -222,7 +222,7 @@ def test_the_history_shows_edits_compactly_not_whole_values():
     assert "-seed line 7 " in tried and "+FIRST CHANGE " in tried
     assert f"set_knob a__system_prompt: {len(first)} -> {len(second)} chars; diff:" in tried
     assert "+SECOND ADDITION" in tried
-    assert '"node": {"id": "n2", "kind": "agent", "prompt": "PPP' in tried
+    assert '"node": {"id": "n2", "kind": "agent", "prompt_template": "PPP' in tried
     assert "set_knob b patch:" in tried
     row = next(line for line in tried.splitlines() if line.startswith("| c2 |"))
     assert row.startswith("| c2 | c1 | 0.6 | true | true | ")
@@ -324,3 +324,75 @@ def test_the_available_table_fits_its_limit_on_a_large_graph():
     assert "declared reads are pasted into its prompt" in lines[0]
     small = "\n".join(base._available_section({"a": {"facts": ["f"], "files": ["x.txt"]}}))
     assert "| a | f | x.txt |" in small
+
+
+# ── past edits keep their wiring whole wherever a request shows them ─────────
+
+
+def _long_split() -> list[dict]:
+    """A split whose first step's long prompts come before every step's wiring (the
+    LiveMath split the optimizer misread as never reading ``meta_check_notes.txt``)."""
+    def step(node_id: str, reads: list[str]) -> dict:
+        return {"id": node_id, "kind": "agent",
+                "system_prompt_template": f"SYSTEM-{node_id} " + "s" * 3000,
+                "prompt_template": f"PROMPT-{node_id} " + "p" * 3000,
+                "reads": reads, "writes": [f"{node_id}_notes.txt"],
+                "produces": [f"{node_id}_notes"]}
+    split = {"op": "split", "target": "decide",
+             "into": [step("meta_check", ["current_item.json"]),
+                      step("final_decide", ["current_item.json", "meta_check_notes.txt"])]}
+    insert = {"op": "insert_after", "target": "final_decide",
+              "node": {**step("verify", ["final_decide_notes.txt"]), "max_iterations": 3,
+                       "on_exhausted": "continue"}}
+    return [split, insert]
+
+
+def _wiring_whole(text: str, compact: bool = False) -> None:
+    """Every step's id, reads, writes and produces appear whole; its prompts do not."""
+    for node_id, reads in (("meta_check", ["current_item.json"]),
+                           ("final_decide", ["current_item.json", "meta_check_notes.txt"]),
+                           ("verify", ["final_decide_notes.txt"])):
+        assert f'"id": "{node_id}"' in text, node_id
+        assert f'"reads": {json.dumps(reads)}' in text, (node_id, reads)
+        assert f'"writes": ["{node_id}_notes.txt"]' in text, node_id
+        assert f'"produces": ["{node_id}_notes"]' in text, node_id
+        assert f"PROMPT-{node_id}" in text, "each prompt keeps its head"
+    assert '"max_iterations": 3' in text and '"on_exhausted": "continue"' in text
+    assert "p" * 700 not in text and "more chars)" in text, "the prompts are shortened"
+
+
+def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
+    """'What the last edit changed', 'Your earlier reasoning' (and its full rejected
+    edits), the recent results and the history table: each shows every step's wiring
+    whole, however long the prompts before it, and shortens only the prompts."""
+    edits = _long_split()
+    row = {"id": "c2", "parent": "c1", "score": 0.5, "structural": True, "exit_ok": True,
+           "edits": edits}
+    text = ProposalContext(
+        edit_pairs=[{"child": "c2", "parent": None, "edit": edits}],
+        reasoning=[{"id": "c2", "epoch": 1, "gate": "rejected", "score": 0.5, "fixed": 3,
+                    "broken": 1, "edit": edits}],
+        leaderboard=[row], history=[row]).render()
+    changed = text[text.index("## What the last edit changed"):text.index("## Your earlier")]
+    reasoning = text[text.index("## Your earlier"):text.index("### Full edits of")]
+    full = text[text.index("### Full edits of"):].split("\n## ", 1)[0]
+    recent = text[text.index("## Recent results"):text.index("## Evidence from the traces")]
+    tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
+    for section in (changed, reasoning, full, recent, tried):
+        _wiring_whole(section)
+    assert len(changed) < 6000 and len(tried) < 6000, "the text stays bounded"
+
+
+def test_the_text_budget_shortens_long_texts_and_keeps_short_ones_whole():
+    split = _long_split()[0]
+    split["into"][0]["prompt_template"] = "short"
+    shown = base.fit_edit_text(split, 1000)
+    assert shown["into"][0]["prompt_template"] == "short"
+    texts = [n[k] for n in shown["into"] for k in ("prompt_template", "system_prompt_template")]
+    kept = sum(len(t.split("…", 1)[0]) for t in texts)
+    assert kept <= 1000 and all(t.endswith("more chars)") for t in texts[1:])
+    assert shown["into"][1]["reads"] == ["current_item.json", "meta_check_notes.txt"]
+    long_wire = {"op": "add_edge", "source": "a", "target": "b", "condition": "c" * 900,
+                 "note": "n" * 900}
+    assert base.fit_edit_text(long_wire, 100) == {**long_wire, "note": "n" * 100
+                                                  + "… (800 more chars)"}, "wiring is never cut"

@@ -19,7 +19,7 @@ import pytest
 from refactory_dsh import nn, profiles
 from refactory_dsh.loop import Loop, LoopError
 from refactory_dsh.optim import AutoresearchOptimizer, Candidate, Optimizer, Proposal, ProposalContext
-from refactory_dsh.optim.base import DEFAULT_MAX_EDITS
+from refactory_dsh.optim.base import DEFAULT_MAX_EDITS, proposal_refusal
 from refactory_dsh.outerloop import Run
 
 from test_skillopt import TASK_REF, _patch_mode
@@ -252,12 +252,63 @@ def test_autoresearch_parses_lists_and_says_it_may_bundle():
     optimizer = AutoresearchOptimizer(client)
     parent = _seed()
     proposals = optimizer.propose(ProposalContext(max_edits=4), 3, [parent])
-    assert [p.steps for p in proposals] == [pair, [_knob("level", 1)]]
-    assert proposals[0].rationale == "cascade"
+    # The unreadable entry is not dropped: it comes first, as a proposal refused with why.
+    assert [p.steps for p in proposals[1:]] == [pair, [_knob("level", 1)]]
+    assert proposal_refusal(proposals[0])[0].startswith("E-proposal-shape: entry 2 of its 2")
+    assert proposals[1].rationale == "cascade"
     assert "up to\n4 edits" in client.prompts[0] or "up to 4 edits" in client.prompts[0].replace("\n", " ")
     assert '"edits": [' in client.prompts[0]
     optimizer.propose(ProposalContext(max_edits=1), 1, [parent])
     assert '"edits": [' not in client.prompts[1], "a run of single edits does not mention bundles"
+
+
+
+def test_an_edit_written_at_the_proposals_top_level_is_read_as_its_edit():
+    """A live answer put a split's fields beside its rationale instead of under "edit";
+    it is that edit, with the proposal's own fields kept as the proposal's."""
+    split = {"op": "split", "target": "decide", "into": [{"id": "a"}, {"id": "b"}]}
+    client = _Answer({"proposals": [
+        {"edit": _knob("level", 1)},
+        {**split, "rationale": "two looks", "prediction": "fewer slips", "confidence": 0.6},
+    ]})
+    proposals = AutoresearchOptimizer(client).propose(ProposalContext(), 2, [_seed()])
+    assert [p.steps for p in proposals] == [[_knob("level", 1)], [split]]
+    assert (proposals[1].rationale, proposals[1].prediction, proposals[1].confidence) == (
+        "two looks", "fewer slips", 0.6)
+
+
+class _Answers:
+    """Answers each proposal call with the next scripted payload (then none)."""
+
+    def __init__(self, *payloads: dict[str, Any]) -> None:
+        self.payloads = list(payloads)
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, *, system: str = "", **_: Any) -> str:
+        self.prompts.append(prompt)
+        return json.dumps(self.payloads.pop(0) if self.payloads else {"proposals": []})
+
+
+def test_a_proposal_entry_with_no_edit_is_a_counted_refusal_shown_back(tmp_path, monkeypatch):
+    """An entry with no usable edit is refused with its reason: counted as refused in
+    the epoch's tally, journaled, and in the retry's request -- never dropped."""
+    client = _Answers({"proposals": [{"edit": _knob("level", 3)}, "junk",
+                                     {"rationale": "forgot the edit"}]})
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    with _patch_mode(TwoLevels):
+        loop = _loop(tmp_path, epochs=1, batch_size=2)
+        loop.optimizer = AutoresearchOptimizer(client)
+        loop.run()
+    reasons = [reason for r in loop.rejections for reason in r.reasons]
+    shape = [r for r in reasons if r.startswith("E-proposal-shape")]
+    assert len(shape) == 2, reasons
+    assert any("not str" in r for r in shape) and any("carries no edit" in r for r in shape)
+    tally = [r for r in map(json.loads, (loop.root / "progress.jsonl").read_text().splitlines())
+             if r.get("step") == "optimizer"]
+    assert (tally[0]["accepted"], tally[0]["refused"]) == (1, 2), tally[0]
+    assert tally[0]["epoch_refusal_codes"] == {"E-proposal-shape": 2}
+    assert len(client.prompts) >= 2 and "E-proposal-shape" in client.prompts[1]
+    assert "Why your last proposals were refused" in client.prompts[1]
 
 
 # ── a structure + knob bundle on LiveMath's skill graph ────────────────────
