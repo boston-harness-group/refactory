@@ -1345,24 +1345,33 @@ class Loop(OuterLoop):
                     break
             items = self._minibatch(at)
             each = len(items) if items is not None else len(self._train_ids())
-            size = self._wave_size(min(len(batch) - index,
-                                       self.config.max_evaluations - self.evaluations
-                                       - (parent is not None)), each)
+            remaining = len(batch) - index
+            if parent is not None and not self._room_for_rescore(remaining, each):
+                # The children keep priority: the re-score goes only where the
+                # evaluation and rollout budgets hold every child of the batch and it.
+                parent = None
+            size = self._wave_size(min(remaining,
+                                       self.config.max_evaluations - self.evaluations), each)
             if parent is not None:
                 # The re-score takes one of the wave's concurrent slots.
                 size = max(1, min(size, int(self.config.max_concurrent_evaluations or 1) - 1))
             wave = batch[index:index + size]
-            beside = None
-            if parent is not None:
-                rescored, parent = parent, None
-                if int(self.config.max_concurrent_evaluations or 1) > 1:
-                    import concurrent.futures
-                    beside = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    pending = beside.submit(self._rescore, rescored, at)
-                else:
-                    self._rescore(rescored, at)
+            beside, parent = parent, None
             try:
-                if len(wave) == 1:
+                if beside is not None:
+                    # One batch: the re-score shares the children's reservation, the
+                    # run-wide item gate and the stop signal (`Run.evaluate_many`).
+                    start = index
+                    Run(_loop=self).evaluate_many(
+                        [*(EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items,
+                                       seed=seed) for candidate in wave),
+                         EvalRequest(candidate=beside, part=task_module.TRAIN, items=items,
+                                     seed=seed, rescore_epoch=at)],
+                        on_result=lambda position, candidate: (
+                            self._forwarded(candidate, start + position, len(batch), at, items)
+                            if position < len(wave) else None),
+                    )
+                elif len(wave) == 1:
                     self._evaluate(wave[0], seed=seed, items=items)
                     self._forwarded(wave[0], index, len(batch), at, items)
                 else:
@@ -1376,14 +1385,27 @@ class Loop(OuterLoop):
             except BudgetStopped as exc:
                 self.bound = self.bound or str(exc)
                 break
-            finally:
-                if beside is not None:
-                    pending.result()
-                    beside.shutdown()
             index += len(wave)
             if self.budget and self.budget.snapshot().get("exhausted"):
                 break
         return len(batch)
+
+    def _room_for_rescore(self, children: int, items_each: int) -> bool:
+        """Whether the round's parent may be re-scored beside its ``children`` still to
+        score: the evaluation budget holds all of them and the re-score, and with
+        ``max_rollouts`` so does the rollout budget -- each child's train and, under
+        ``val_gate``, val rollouts, then the re-score's train rollouts (train at its
+        items times ``repeats``). The children keep priority: a re-score never takes
+        the rollouts a child needs to be scored or judged."""
+        if self.evaluations + children + 1 > self.config.max_evaluations:
+            return False
+        cap = self.config.max_rollouts
+        if cap is None:
+            return True
+        train = max(int(items_each), 1) * max(int(self.config.repeats or 1), 1)
+        val = (len(task_module.manifest_part_ids(self._parts_manifest, task_module.VAL) or ())
+               if self.config.val_gate and self._parts_manifest is not None else 0)
+        return self.rollouts + children * (train + val) + train <= cap
 
     def _wave_size(self, wanted: int, items_each: int) -> int:
         """How many of the next ``wanted`` evaluations may run at once (at least one).
@@ -1510,17 +1532,27 @@ class Loop(OuterLoop):
             return None
         return next((c for c in self.population if c.id == chosen and c.evaluated), None)
 
-    def _rescore(self, parent: Candidate, epoch: int) -> bool:
+    def _rescore(self, parent: Candidate, epoch: int, *, reserved: bool = False,
+                 item_gate: Any = None, item_slots: bool = False,
+                 stop_event: threading.Event | None = None) -> bool:
         """Score ``parent`` on ``epoch``'s train sample with ``epoch``'s seed as fresh
         evidence: its records (the optimizer's evidence, and the ones its children are
         compared with) are replaced and kept by epoch; its id and scores stay. Counted,
-        journaled and shown as a re-score. Whether it was scored."""
+        journaled and shown as a re-score. Whether it was scored.
+
+        ``reserved``: run as a request of ``Run.evaluate_many`` (``forward``'s batch),
+        which reserved its evaluation, checked its rollouts and hands over its item gate
+        and stop signal; the evaluation is then not counted again here, and a re-score
+        a budget stopped before any trial ran raises ``BudgetStopped`` so the
+        reservation is returned."""
         self._rescore_tried.add((parent.id, epoch))
-        if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
-            return False
-        if self.evaluations >= self.config.max_evaluations:
-            return False
-        if self.budget:
+        counted = 0 if reserved else 1
+        if not reserved:
+            if self.config.max_rollouts is not None and self.rollouts >= self.config.max_rollouts:
+                return False
+            if self.evaluations >= self.config.max_evaluations:
+                return False
+        if self.budget and not reserved:
             # The time and token budgets, checked as every scoring path checks them: a
             # spent budget stops the re-score here, before anything runs.
             from refactory_dsh.budgets import BudgetExhausted
@@ -1538,10 +1570,14 @@ class Loop(OuterLoop):
             workdir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(self.root / task_module.MANIFEST, workdir / task_module.MANIFEST)
         result, measurements = self._measure(parent, workdir, task_module.TRAIN,
-                                             seed=self._train_seed(epoch), items=batch)
+                                             seed=self._train_seed(epoch), items=batch,
+                                             item_gate=item_gate, item_slots=item_slots,
+                                             stop_event=stop_event)
         if not measurements.get("count"):
             # The measurement's own budget checkpoint stopped it before a trial ran:
             # nothing was scored, so nothing is counted and the records stay.
+            if reserved:
+                raise BudgetStopped(f"the re-score of {parent.id} was stopped before it ran")
             return False
         expected = len(batch) if batch else len(self._train_ids())
         scored = {str(record.get("id")) for record in result.item_records}
@@ -1550,7 +1586,7 @@ class Loop(OuterLoop):
             # epoch is not marked (a resume in this epoch tries again), and what it spent
             # is counted and journaled like any evaluation.
             with self._state_lock:
-                self.evaluations += 1
+                self.evaluations += counted
                 if not measurements.get("cached_from"):
                     self.rollouts += len(result.item_records) or 1
                 self._journal("rescore_failed", id=parent.id, epoch=epoch,
@@ -1566,7 +1602,7 @@ class Loop(OuterLoop):
             # An evaluation like any other: it counts toward the evaluation budget (the
             # time and token budgets are charged inside the measurement), and it is
             # journaled so a resumed run counts it too.
-            self.evaluations += 1
+            self.evaluations += counted
             self._journal("rescore", id=parent.id, epoch=epoch,
                           seed=self._train_seed(epoch), items=len(batch or ()) or None,
                           score=result.score if result.exit_ok else None,

@@ -121,8 +121,14 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   evidence: the previous records stay, the epoch is not marked, and it is journaled as
   `rescore_failed` (still counted as an evaluation). The re-score runs in the round
   itself: when an epoch evaluates children of the candidate the last proposal step
-  edited, that parent is scored on the epoch's train sample beside them, taking one of
-  the `--max-concurrent-evaluations` slots, unless it already has this epoch's records.
+  edited, that parent is scored on the epoch's train sample beside them, in the same
+  concurrent batch: it takes one of the `--max-concurrent-evaluations` slots and its
+  items count against `--max-items-in-flight` with the children's, and a stop ends it
+  with them (a child's error is the one raised). It goes in only when there is room for
+  every child still to score and it: `--max-evaluations` must hold all of them, and
+  `--max-rollouts`, when set, each child's train and val rollouts and then the
+  re-score's train rollouts, so a re-score never takes what a child needs to be scored
+  or judged. It is skipped when it already has this epoch's records.
   So every judged child pairs with its parent on the same seed, a round that keeps a
   child included; a round that keeps none finds the parent re-scored and does not score
   it again after gating, and a re-score that failed in the round is not tried again in
@@ -134,7 +140,10 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
   35-item train part this is one train evaluation of 35 rollouts per epoch, the epochs
   whose gate kept a child included; with 3 concurrent evaluations (two portfolio
-  children and the re-score) the round's wall clock is unchanged.
+  children and the re-score) the round's wall clock is unchanged. Every gated strategy
+  that runs epochs, and a parent picker, pays about one extra train evaluation per
+  round that keeps a child; under a fixed `--max-evaluations` the run then gets fewer
+  rounds. `best_of_n` and `autoscientists` are unchanged.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the

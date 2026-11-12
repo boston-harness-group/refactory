@@ -57,6 +57,11 @@ class EvalRequest:
     part: str = "train"
     items: list[str] | None = None
     seed: int | None = None
+    #: A train re-score of an already evaluated candidate as fresh evidence for
+    #: ``epoch`` (``Loop._rescore``): its records are replaced and kept by epoch, its
+    #: score and id stay. It shares the batch's evaluation and rollout reservation,
+    #: item gate and stop signal. The default loop's own requests only.
+    rescore_epoch: int | None = None
 
 
 class OuterLoopError(RuntimeError):
@@ -390,7 +395,11 @@ class Run:
                 with counts_lock:
                     started_train += 1
             try:
-                if req.part == "train":
+                if req.rescore_epoch is not None:
+                    loop._rescore(  # noqa: SLF001
+                        req.candidate, req.rescore_epoch, reserved=True,
+                        item_gate=stoppable_gate, item_slots=True, stop_event=stop_event)
+                elif req.part == "train":
                     loop._evaluate(  # noqa: SLF001
                         req.candidate, seed=req.seed, items=req.items,
                         _budget_reserved=True,

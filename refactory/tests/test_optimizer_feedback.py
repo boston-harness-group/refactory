@@ -814,3 +814,138 @@ def test_the_parents_rescore_takes_one_of_the_concurrent_slots(tmp_path, monkeyp
         loop.run()
     assert '"rescore"' in (loop.root / "journal.jsonl").read_text()
     assert state["most"] == 2
+
+
+def _rescore_run(tmp_path: Path, monkeypatch: Any, plan: list, **overrides: Any):
+    from refactory_dsh.loop import Loop
+    from test_gate_aware_context import Reasoning
+
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
+    proposer = Reasoning(plan)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, **{"epochs": len(plan), "val_gate": True, "batch_size": 2,
+                                  "fresh_evidence": True, **overrides})
+        loop.optimizer = proposer
+        loop.run()
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    return loop, [e for e in events if e.get("event") == "rescore"]
+
+
+class ParallelProbe(LevelProbe):
+    """LevelProbe with its items run 4 at a time (a ``parallelism_knob``), so the
+    run-wide item gate is what limits items in flight, as LiveMath's
+    ``data_parallelism`` does."""
+
+    name = "level_probe"
+
+    @classmethod
+    def declare(cls):  # type: ignore[no-untyped-def]
+        from refactory_dsh import nn
+
+        return {**LevelProbe.declare(),
+                "par": nn.Knob(default=4, kind="int", lo=1, hi=8, frozen=True,
+                               description="items at once")}
+
+    def build(self):  # type: ignore[no-untyped-def]
+        import dataclasses
+
+        graph = super().build()
+        data = graph.nodes["data"]
+        graph.nodes["data"] = dataclasses.replace(data, parallelism_knob="par",
+                                                  knobs=(*data.knobs, "par"))
+        return graph
+
+
+def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeypatch):
+    """Two children and the parent's re-score run at once, their items 4 at a time each,
+    under a run-wide cap of 2 items in flight: counted from each item's pass start to its
+    completion, never more than 2 -- the re-score's items included."""
+    import threading
+
+    from refactory_dsh import items as items_module
+    from refactory_dsh.loop import Loop
+    from test_gate_aware_context import Reasoning
+
+    from refactory_dsh.outerloop import Run
+
+    lock, state = threading.Lock(), {"now": 0, "most": 0, "batch": False}
+    start, done = items_module.prepare_pass_dir, items_module.mark_pass_complete
+    many = Run.evaluate_many
+
+    def evaluate_many(self, requests, **kwargs):  # type: ignore[no-untyped-def]
+        # Items in flight are counted inside batches: a lone evaluation (the seed's)
+        # runs at its own parallelism, outside the run-wide gate, as on main.
+        state["batch"] = len(requests) > 1
+        try:
+            return many(self, requests, **kwargs)
+        finally:
+            state["batch"] = False
+
+    def prepare(*args, **kwargs):  # type: ignore[no-untyped-def]
+        with lock:
+            state["now"] += 1
+            if state["batch"]:
+                state["most"] = max(state["most"], state["now"])
+        return start(*args, **kwargs)
+
+    def complete(*args, **kwargs):  # type: ignore[no-untyped-def]
+        with lock:
+            state["now"] -= 1
+        return done(*args, **kwargs)
+
+    monkeypatch.setattr(items_module, "prepare_pass_dir", prepare)
+    monkeypatch.setattr(items_module, "mark_pass_complete", complete)
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
+    proposer = Reasoning([[(5, 7), (5, 6)], []])
+    with _patch_mode(ParallelProbe):
+        loop = _loop(tmp_path, epochs=2, val_gate=True, batch_size=2, fresh_evidence=True,
+                     max_concurrent_evaluations=3, max_items_in_flight=2)
+        loop.optimizer = proposer
+        loop.run()
+    assert '"rescore"' in (loop.root / "journal.jsonl").read_text(), "setup: re-scored"
+    assert state["most"] == 2, state
+
+
+@pytest.mark.parametrize("cap", [2, 3, 4, 5, 6])
+def test_the_rescore_never_passes_the_evaluation_budget(tmp_path, monkeypatch, cap):
+    """The seed (1) and its two children (2) fit a cap of 3; the re-score only goes in
+    when the cap holds the children and it, so the run never passes the cap and the
+    children are never crowded out by it."""
+    loop, rescores = _rescore_run(tmp_path, monkeypatch, [[(5, 7), (5, 6)], [(7, 8), (7, 4)], []],
+                                  max_evaluations=cap, max_concurrent_evaluations=3)
+    assert loop.evaluations <= cap
+    children = [c for c in loop.population if c.parent]
+    if cap >= 3:
+        assert sum(1 for c in children if c.evaluated and _level(c) in (7, 6)) == 2
+    if cap == 3:
+        assert rescores == [], "no room beside the children"
+    if cap == 4:
+        assert [r["epoch"] for r in rescores] == [2]
+
+
+@pytest.mark.parametrize("cap", [14, 24, 32, 36, 40, 44, 52])
+def test_the_rescore_only_starts_where_the_rollout_budget_holds_it(tmp_path, monkeypatch, cap):
+    """8 train and 4 val items each; before epoch 2 the seed's train (8) and val (4)
+    rollouts are spent. The re-score goes in only when the rollout cap holds both
+    children, train and val, and it (12 + 2 x 12 + 8 = 44), so it never crowds out a
+    child's scoring or judging, and the run never spends past the cap or past what it
+    spends without the re-score; without room it spends exactly the same."""
+    from refactory_dsh.loop import Loop
+
+    loop, rescores = _rescore_run(tmp_path / "with", monkeypatch, [[(5, 7), (5, 6)], []],
+                                  max_rollouts=cap, max_concurrent_evaluations=3,
+                                  max_evaluations=60)
+    monkeypatch.setattr(Loop, "_round_parent", lambda self, batch, epoch: None)
+    baseline, none = _rescore_run(tmp_path / "without", monkeypatch, [[(5, 7), (5, 6)], []],
+                                  max_rollouts=cap, max_concurrent_evaluations=3,
+                                  max_evaluations=60)
+    assert none == []
+    assert bool(rescores) == (12 + 2 * 12 + 8 <= cap), (cap, rescores)
+    if rescores:
+        assert loop.rollouts <= max(cap, baseline.rollouts)
+    else:
+        assert loop.rollouts == baseline.rollouts
+    assert loop._gate_rejected == baseline._gate_rejected, "the same children judged"
