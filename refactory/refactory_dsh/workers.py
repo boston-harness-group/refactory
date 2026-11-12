@@ -261,6 +261,25 @@ def session_store_rows(store: Path | None) -> list[dict[str, Any]]:
             {'id': 'storage-json', 'config': {'root': str(store / 'storages')}}]
 
 
+def session_patch(workdir: Path) -> Path | None:
+    """A patch that gives a coordinator started without a model client its own store.
+
+    `GraphTelemetry` gives a coordinator with a client its store through its observer
+    patch; a library caller that starts the spine with no client (`run_on_dsh` without
+    ``model``) gets this one, named like a receipt so the store sits with the others.
+    None when the shared store is chosen (`SESSIONS_ENV`): there is no context to carry it.
+    """
+    # Named as a receipt would be; no receipt is written, so receipt readers see none.
+    receipt = Path(workdir) / '.refactory' / 'workers' / ('coordinator-' + uuid.uuid4().hex + '.json')
+    store = session_store(receipt)
+    if store is None:
+        return None
+    path = receipt.with_suffix('.patch.yml')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(session_store_rows(store)) + '\n')
+    return path
+
+
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
                 workspace_root: Path | None = None, tool_home: Path | None = None,
@@ -536,8 +555,11 @@ class GraphTelemetry:
             route['permission_mode'] = context.get('permission_mode') or 'default'
         self.path = begin(workdir, route, role='coordinator')
         self.patch = self.path.with_suffix('.patch.yml')
+        # The context alone decides, as it does for the node commands the spine starts
+        # (their environment is scrubbed): a client folds `SESSIONS_ENV` into the context
+        # when it is created, and a context without the field means ``run``.
         observer_patch(self.patch, route, provider_config=context.get('provider_config'),
-                       session_store=session_store(self.path, context.get('dsh_sessions')))
+                       session_store=session_store(self.path, context.get('dsh_sessions') or 'run'))
         self.context = context
 
     def command(self, argv: list[str]) -> list[str]:

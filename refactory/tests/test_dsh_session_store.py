@@ -114,6 +114,73 @@ def test_the_default_leaves_a_saved_context_and_the_evaluation_context_as_they_w
     assert 'dsh_sessions' not in json.dumps(identities[0])
 
 
+def test_a_node_command_takes_the_choice_from_the_context_it_inherits(monkeypatch):
+    """A spine node command sees no `SESSIONS_ENV` (its environment is scrubbed), only the
+    run's worker context, so a client it builds takes the choice from there."""
+    monkeypatch.delenv(workers.SESSIONS_ENV, raising=False)
+    monkeypatch.setenv('REFACTORY_WORKER_CONTEXT', json.dumps({'dsh_sessions': 'shared'}))
+    assert DshModelClient(provider='p', model='m').context()['dsh_sessions'] == 'shared'
+
+
+def test_the_coordinator_follows_the_context_not_the_environment(monkeypatch, tmp_path):
+    """A resumed spine run whose saved context is the default keeps per-process stores for
+    its coordinator, as its node commands do, whatever the resuming shell sets."""
+    monkeypatch.delenv(workers.SESSIONS_ENV, raising=False)
+    saved = DshModelClient(provider='p', model='m').context()
+    monkeypatch.setenv(workers.SESSIONS_ENV, 'shared')
+    telemetry = workers.GraphTelemetry(tmp_path, saved, None)
+    assert _rows(telemetry.patch)['session-persistence-jsonl']['config'] == {
+        'root': str(telemetry.path.with_suffix('.dsh') / 'sessions')}
+
+
+def _spine_without_a_client(monkeypatch, tmp_path):
+    """Start `run_on_dsh` with no model client and return the argv it spawns."""
+    from refactory_dsh import dsh_profile, registry
+    from refactory_dsh.dsh_runtime import run_on_dsh
+    from refactory_dsh.paths import REPO_ROOT
+    from tests_support import _profile
+
+    class Process:
+        stdout, stderr, returncode = iter(()), iter(()), None
+
+        def wait(self, timeout=None):
+            self.returncode = 1
+            return 1
+
+    state = registry.resolve(REPO_ROOT, "circle_packing/adaptive")[1]().state_dict()
+    home = tmp_path / "home"
+    _profile(home, "graph", ["@deepseek-ai/dsh-base", dsh_profile.GRAPH_BUNDLE])
+    monkeypatch.setenv("DSH_HOME", str(home))
+    monkeypatch.delenv("REFACTORY_MODEL_DSH_HOME", raising=False)
+    seen = {}
+
+    def capture(command, **kwargs):
+        seen["command"] = command
+        return Process()
+    monkeypatch.setattr("refactory_dsh.dsh_runtime.subprocess.Popen", capture)
+    run_on_dsh(state, tmp_path / "run", name="probe")
+    return seen["command"]
+
+
+def test_a_coordinator_started_without_a_client_keeps_its_own_store(monkeypatch, tmp_path):
+    monkeypatch.delenv(workers.SESSIONS_ENV, raising=False)
+    argv = _spine_without_a_client(monkeypatch, tmp_path)
+    assert argv.index("--patch") < argv.index("--profile")
+    patch = Path(argv[argv.index("--patch") + 1])
+    store = patch.parent / patch.name.replace(".patch.yml", ".dsh")
+    assert patch.parent == tmp_path / "run" / ".refactory" / "workers"
+    assert _rows(patch) == {
+        'session-persistence-jsonl': {'id': 'session-persistence-jsonl', 'config': {'root': str(store / 'sessions')}},
+        'storage-json': {'id': 'storage-json', 'config': {'root': str(store / 'storages')}}}
+    # It is not a receipt: receipt readers still see none.
+    assert not list(patch.parent.glob('*.json'))
+
+
+def test_a_coordinator_without_a_client_honours_shared(monkeypatch, tmp_path):
+    monkeypatch.setenv(workers.SESSIONS_ENV, 'shared')
+    assert "--patch" not in _spine_without_a_client(monkeypatch, tmp_path)
+
+
 def test_an_unknown_choice_fails_before_launch(monkeypatch):
     monkeypatch.setenv(workers.SESSIONS_ENV, 'elsewhere')
     with pytest.raises(ValueError, match=workers.SESSIONS_ENV):

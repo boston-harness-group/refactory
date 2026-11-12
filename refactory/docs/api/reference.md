@@ -987,6 +987,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `provider_rows` | `(route: 'dict[str, Any]', provider_config: 'dict[str, Any] \| None') -> 'list[dict[str, Any]]'` |
 | function | `resolve_route` | `(base: 'dict[str, Any]', *, role: 'str' = 'worker', node: 'str' = '', role_routes: 'dict[str, Any] \| None' = None, node_routes: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
 | function | `run_graph_command` | `(argv: 'list[str]', *, workdir: 'Path', context: 'dict[str, Any]', timeout: 'float \| None' = None, env: 'dict[str, str] \| None' = None, stop_condition: 'Any \| None' = None, **kwargs: 'Any') -> 'Any'` |
+| function | `session_patch` | `(workdir: 'Path') -> 'Path \| None'` |
 | function | `session_store` | `(receipt: 'Path', choice: 'str \| None' = None) -> 'Path \| None'` |
 | function | `session_store_choice` | `(value: 'str \| None' = None) -> 'str'` |
 | function | `session_store_rows` | `(store: 'Path \| None') -> 'list[dict[str, Any]]'` |
@@ -1001,6 +1002,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 - **`provider_rows`** — Declare selected provider routes to a runtime that cannot see profiles.
 - **`resolve_route`** — Explicit node overrides role overrides run; runtime supplies empty fields.
 - **`run_graph_command`** — Inherit terminal IO while polling graph resource and coordinator receipts.
+- **`session_patch`** — A patch that gives a coordinator started without a model client its own store.
 - **`session_store`** — The DSH session store of the process a receipt records, or None for the shared one.
 - **`session_store_choice`** — ``run`` or ``shared``: an explicit value, else `SESSIONS_ENV`, else ``run``.
 - **`session_store_rows`** — Point DSH's session log and its storage domains (the projection cache) at ``store``.
