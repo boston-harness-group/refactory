@@ -365,14 +365,20 @@ class AutoresearchOptimizer(Optimizer):
                               "client": type(self._client).__name__}, sort_keys=True)
 
     def _ask(self, ctx: ProposalContext, system: str, prompt: str, fields: dict[str, Any],
-             parse: Any, counts: dict[str, int]) -> tuple[Any, str | None]:
+             parse: Any, counts: dict[str, int], rebuild: Any = None
+             ) -> tuple[Any, str | None, bool]:
         """One analyst-stage call (`_analyse`): ``parse(payload)`` of the reply, or
-        ``None`` and why. Cached by the optimizer's model and the call's whole text, in
-        memory and in the run directory (``analyst_findings/``); a call is recorded in
-        the optimizer trace with what it found. At most ``analysts.CONCURRENCY`` calls
-        of a stage are in flight at once, merges included. A spent budget, a cancelled
-        run or a missing model choice stop the proposal (as the SkillOpt port's
-        ``ask``); any other failure is recorded and returned, never raised."""
+        ``None`` and why, and whether it was retried after a context overflow. Cached by
+        the optimizer's model and the call's whole text, in memory and in the run
+        directory (``analyst_findings/``); a call is recorded in the optimizer trace with
+        what it found. At most ``analysts.CONCURRENCY`` calls of a stage are in flight
+        at once, merges included. A call the provider refuses as longer than the model's
+        context (`analysts.context_overflow`) is retried once with ``rebuild(room)``, the
+        same request within half the failed prompt's length; its answer is cached under
+        the original call, so a retry or a resumed run pays for neither again. A spent
+        budget, a cancelled run or a missing model choice stop the proposal (as the
+        SkillOpt port's ``ask``); any other failure is recorded and returned, never
+        raised."""
         import hashlib
         import threading
         from concurrent.futures import CancelledError
@@ -390,46 +396,65 @@ class AutoresearchOptimizer(Optimizer):
         store = (Path(self.trace_path).parent / "analyst_findings"
                  if self.trace_path is not None else None)
         key = hashlib.sha256(f"{self._model_id()}\n{system}\n{prompt}".encode()).hexdigest()
-        reply = cache.get(key)
-        if reply is None and store is not None and (store / f"{key}.json").exists():
+        held = cache.get(key)
+        if held is None and store is not None and (store / f"{key}.json").exists():
             try:
-                reply = json.loads((store / f"{key}.json").read_text()).get("reply")
-            except (OSError, json.JSONDecodeError, AttributeError):
-                reply = None
-        if isinstance(reply, str):
-            found = parse(extract_json(reply))
+                held = json.loads((store / f"{key}.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                held = None
+        if isinstance(held, dict) and isinstance(held.get("reply"), str):
+            found = parse(extract_json(held["reply"]))
             if found is not None:
                 with lock:
                     counts["cached"] += 1
-                cache[key] = reply
-                return found, None
-        call = {**fields, "epoch": ctx.epoch, "generation": ctx.generation,
-                "system": system, "prompt": prompt}
-        reply = None
-        with lock:
-            counts["calls"] += 1
-        try:
-            with gate:
-                reply = self._client.complete(prompt, system=system, **self._completion_options)
-            found = parse(extract_json(reply))
-            if found is None:
-                raise ValueError('the answer has no "findings" list')
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            if isinstance(exc, (BudgetExhausted, CancelledError, ModelChoiceError)):
+                cache[key] = held
+                retried = bool(held.get("context_retry"))
+                if retried and rebuild is not None:
+                    rebuild(max(1, len(prompt) // 2))  # the retried request's own record
+                return found, None, retried
+
+        def attempt(text: str, retry: bool) -> tuple[Any, str | None, str | None]:
+            call = {**fields, "epoch": ctx.epoch, "generation": ctx.generation,
+                    "system": system, "prompt": text,
+                    **({"context_retry": True} if retry else {})}
+            reply = None
+            with lock:
+                counts["calls"] += 1
+            try:
+                with gate:
+                    reply = self._client.complete(text, system=system,
+                                                  **self._completion_options)
+                found = parse(extract_json(reply))
+                if found is None:
+                    raise ValueError('the answer has no "findings" list')
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
                 self.record_call(**call, reply=reply, error=error)
-                raise
-            self.record_call(**call, reply=reply, error=error)
-            return None, error
-        self.record_call(**call, reply=reply, error=None, findings=found)
-        cache[key] = reply
+                if isinstance(exc, (BudgetExhausted, CancelledError, ModelChoiceError)):
+                    raise
+                return None, error, None
+            self.record_call(**call, reply=reply, error=None, findings=found)
+            return found, None, reply
+
+        found, error, reply = attempt(prompt, False)
+        retried = False
+        if found is None and rebuild is not None and analysts.context_overflow(error or ""):
+            # Once, at half the length the provider refused, re-clipped the same way.
+            retried = True
+            found, error, reply = attempt(rebuild(max(1, len(prompt) // 2)), True)
+        if found is None:
+            return None, error, retried
+        # The answer, under the original call's key: the same call made again (a retry,
+        # a resumed run) is answered from here, retried or not.
+        held = {"reply": reply, **({"context_retry": True} if retried else {})}
+        cache[key] = held
         if store is not None:
             try:
                 store.mkdir(parents=True, exist_ok=True)
-                (store / f"{key}.json").write_text(json.dumps({"reply": reply}))
+                (store / f"{key}.json").write_text(json.dumps(held))
             except OSError:
                 pass
-        return found, None
+        return found, None, retried
 
     def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
         """The analysis of this proposal step, made once: keyed by the epoch, the
@@ -511,14 +536,25 @@ class AutoresearchOptimizer(Optimizer):
             items = [str(r.get("id")) for r in group]
             prompt, clip = analysts.analyst_batch(ctx, kind, index, totals[kind], group,
                                                   pipeline)
-            found, error = self._ask(
+
+            def smaller(room: int) -> str:
+                # The same batch re-clipped within ``room``; its clipping is the one
+                # the analyst read, so it is the one recorded.
+                text, clip_used = analysts.analyst_batch(ctx, kind, index, totals[kind],
+                                                         group, pipeline, room=room)
+                clip.update(clip_used)
+                return text
+
+            found, error, retried = self._ask(
                 ctx, analysts.FAILURE_SYSTEM if kind == "failure" else analysts.SUCCESS_SYSTEM,
                 prompt,
                 {"kind": f"analyst_{kind}", "group": index, "items": items},
-                lambda payload: analysts.parse_findings(payload, kind, items), counts)
+                lambda payload: analysts.parse_findings(payload, kind, items), counts,
+                rebuild=smaller)
             return {"kind": kind, "index": index, "items": items, "found": found or [],
                     "findings": len(found or ()), "clipped": clip["items"],
                     "clipped_chars": clip["chars"],
+                    **({"context_retry": True} if retried else {}),
                     "error": error}
 
         def merge_lists(step: str, lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -537,15 +573,18 @@ class AutoresearchOptimizer(Optimizer):
                     number, chunk = numbered
                     if len(chunk) == 1:
                         return chunk[0]
-                    found, error = self._ask(
+                    found, error, retried = self._ask(
                         ctx, analysts.merge_system(step),
                         analysts.merge_prompt(ctx, step, chunk, level, pipeline),
                         {"kind": f"analyst_merge_{step}", "level": level, "batch": number,
                          "lists": len(chunk)},
                         lambda payload: analysts.parse_findings(payload, step, sorted(analysed),
-                                                                limit=None), counts)
+                                                                limit=None), counts,
+                        rebuild=lambda room: analysts.fit_merge_prompt(ctx, step, chunk, level,
+                                                                       room))
                     merges.append({"step": step, "level": level, "batch": number,
                                    "lists": len(chunk), "fallback": found is None,
+                                   **({"context_retry": True} if retried else {}),
                                    "error": error})
                     return found if found is not None else [f for part in chunk for f in part]
 
@@ -564,16 +603,20 @@ class AutoresearchOptimizer(Optimizer):
                                                     if b["kind"] == kind]),
                     analysts.KINDS)
             if failure_side and success_side:
-                found, error = self._ask(
+                found, error, retried = self._ask(
                     ctx, analysts.merge_system("final"),
                     analysts.merge_prompt(ctx, "final", [failure_side, success_side], 0,
                                           pipeline),
                     {"kind": "analyst_merge_final", "level": 0, "batch": 1, "lists": 2},
                     lambda payload: analysts.parse_findings(payload, "failure",
                                                             sorted(analysed), limit=None),
-                    counts)
+                    counts,
+                    rebuild=lambda room: analysts.fit_merge_prompt(
+                        ctx, "final", [failure_side, success_side], 0, room))
                 merges.append({"step": "final", "level": 0, "batch": 1, "lists": 2,
-                               "fallback": found is None, "error": error})
+                               "fallback": found is None,
+                               **({"context_retry": True} if retried else {}),
+                               "error": error})
                 # SkillOpt's fallback: the failure findings first, then the success ones.
                 ranked = found if found is not None else [*failure_side, *success_side]
             else:

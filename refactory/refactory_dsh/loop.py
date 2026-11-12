@@ -6013,6 +6013,7 @@ def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> 
                                   if b.get("error")),
             "clipped_items": sum(int(a.get("clipped_items") or 0) for a in analyses),
             "clipped_chars": sum(int(a.get("clipped_chars") or 0) for a in analyses),
+            "context_retries": sum(int(a.get("context_retries") or 0) for a in analyses),
             "stopped": sum(1 for a in analyses if a.get("error")),
             "latest": dict(analyses[-1]) if analyses else None}
 
@@ -6033,6 +6034,9 @@ def _analysts_section(report: dict[str, Any]) -> list[str]:
              + (f"; {report['clipped_items']} item trace(s) were clipped to fit an "
                 f"analyst's room ({report.get('clipped_chars', 0)} characters left out)"
                 if report.get("clipped_items") else "")
+             + (f"; {report['context_retries']} call(s) were too long for the model's "
+                "context and retried once at half the length"
+                if report.get("context_retries") else "")
              + (f"; {report['stopped']} round(s) stopped before the stage finished"
                 if report.get("stopped") else "")
              + ". Every round's findings are in journal.jsonl (`analyst_findings`) and each "

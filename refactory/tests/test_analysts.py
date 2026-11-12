@@ -873,9 +873,10 @@ def _long(item: str, chars: int, passed: bool = False) -> dict[str, Any]:
 
 
 def test_a_small_batch_of_long_traces_is_not_clipped():
-    """Three four-step items of about 150000 characters each: 450000 together fit the
+    """Three four-step items of about 120000 characters each: 360000 together fit the
     call's room, so none is clipped (an equal fixed share per item would have cut them)."""
-    group = [_long(f"f{i}", 150000) for i in range(3)]
+    assert analysts.ANALYST_ROOM == 400000
+    group = [_long(f"f{i}", 120000) for i in range(3)]
     prompt, clip = analysts.analyst_batch(_ctx(group), "failure", 1, 1, group, "PIPE")
     assert clip == {"items": 0, "chars": 0}
     assert "characters omitted" not in prompt
@@ -1001,3 +1002,131 @@ def test_a_complete_analysis_or_the_same_incomplete_one_is_not_journaled_twice()
     analyses: list[dict[str, Any]] = []
     assert len(_keep(analyses, failed)) == 1 and len(analyses) == 1
     assert _keep(analyses, failed) == [], "a retry reusing the same incomplete analysis"
+
+
+# ── context overflow: one retry at half the length ─────────────────────────
+
+
+TOO_LONG = "prompt is too long: 212000 tokens > 200000 maximum"
+
+
+class Overflowing(Client):
+    """Refuses as too long every analyst or merge prompt over ``limit`` characters (the
+    model's context), as the Claude Code runner words it."""
+
+    def __init__(self, limit: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.limit = limit
+
+    def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+        if system in ANALYST_SYSTEMS + MERGE_SYSTEMS and len(prompt) > self.limit:
+            with self.lock:
+                self.calls.append((system, prompt))
+            raise RuntimeError(f"claude_code worker failed: {TOO_LONG}")
+        return super().complete(prompt, system=system, **kwargs)
+
+
+def test_an_analyst_too_long_for_the_context_is_retried_once_at_half_its_length(tmp_path):
+    group = [_long(f"f{i}", 60000) for i in range(4)]  # ~240k: fits the room, not the model
+    client = Overflowing(limit=150000)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(_ctx(group), 1, [])
+    first, second = client.of((analysts.FAILURE_SYSTEM,))
+    assert len(second) <= len(first) // 2 < len(first), "re-made at half the length"
+    assert "characters omitted" in second and "characters omitted" not in first
+    # Re-clipped by the same water-filling: every item cut to one length.
+    blocks = [second.split(f"### Item f{i} ")[1].split("\n\n### Item ")[0]
+              .split("\n\n## Answer")[0] for i in range(4)]
+    assert max(map(len, blocks)) - min(map(len, blocks)) <= 200
+    (batch,) = optimizer.last_analysis["batches"]
+    assert batch["context_retry"] is True and not batch["error"] and batch["findings"] == 1
+    assert batch["clipped"] == 4 and batch["clipped_chars"] > 100000, "the retried clip"
+    assert optimizer.last_analysis["calls"] == 2
+    entry = analysts.journal_entry(optimizer.last_analysis)
+    assert entry["context_retries"] == 1 and entry["batches"][0]["context_retry"] is True
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    failed, retried = [t for t in trace if t["kind"] == "analyst_failure"]
+    assert TOO_LONG in failed["error"] and retried.get("context_retry") and not retried["error"]
+    # Cached under the original call: made again (a resumed run), nothing is paid and
+    # the retry is still recorded.
+    again = Overflowing(limit=150000)
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    for held in (tmp_path / "analyst_findings").glob("round-*.json"):
+        held.unlink()
+    resumed.propose(_ctx(group), 1, [])
+    assert again.of(ANALYST_SYSTEMS + MERGE_SYSTEMS) == []
+    (batch,) = resumed.last_analysis["batches"]
+    assert batch["context_retry"] is True and batch["clipped"] == 4
+
+
+def test_a_retry_that_is_still_too_long_gives_up_and_other_errors_are_not_retried():
+    group = [_long(f"f{i}", 60000) for i in range(4)]
+    client = Overflowing(limit=1000)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(_ctx(group), 1, [])
+    assert len(client.of((analysts.FAILURE_SYSTEM,))) == 2, "once, not more"
+    (batch,) = optimizer.last_analysis["batches"]
+    assert batch["context_retry"] is True and TOO_LONG in batch["error"]
+
+    def down(system: str, prompt: str) -> str:
+        raise RuntimeError("503 overloaded")
+
+    other = Client(analyst=down)
+    plain = AutoresearchOptimizer(other)
+    plain.propose(_ctx([_rec("f0", False)]), 1, [])
+    assert len(other.of((analysts.FAILURE_SYSTEM,))) == 1
+    (batch,) = plain.last_analysis["batches"]
+    assert "context_retry" not in batch and "503" in batch["error"]
+
+
+def test_a_merge_too_long_for_the_context_is_retried_with_its_pipeline_clipped():
+    records = [_rec(f"f{i}", False) for i in range(2)] + [_rec("s0", True)]
+    ctx = _ctx(records, group_size=1)
+    ctx = replace(ctx, knobs=[*ctx.knobs, {"name": "big", "kind": "str",
+                                           "value": "B" * 19000, "frozen": False}])
+    sizes = {}
+
+    class MergeOverflow(Client):
+        def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+            if system == analysts.MERGE_FAILURE_SYSTEM:
+                with self.lock:
+                    self.calls.append((system, prompt))
+                if len(prompt) > 15000:
+                    sizes.setdefault("first", len(prompt))
+                    raise RuntimeError(f"invalid_request_error: {TOO_LONG}")
+                sizes["retry"] = len(prompt)
+                return json.dumps({"findings": [{"finding": "merged", "items": ["f0"]}]})
+            return super().complete(prompt, system=system, **kwargs)
+
+    client = MergeOverflow()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(ctx, 1, [])
+    assert sizes["retry"] <= sizes["first"] // 2
+    (merge,) = [m for m in optimizer.last_analysis["merges"] if m["step"] == "failure"]
+    assert merge["context_retry"] is True and not merge["error"] and not merge["fallback"]
+    assert analysts.journal_entry(optimizer.last_analysis)["context_retries"] == 1
+    retried = client.of((analysts.MERGE_FAILURE_SYSTEM,))[-1]
+    assert '"finding": "FAILURE over' in retried, "the findings stay whole"
+
+
+@pytest.mark.parametrize("error,overflow", [
+    ("prompt is too long: 212000 tokens > 200000 maximum", True),
+    ("Input is too long for requested model.", True),
+    ("context_length_exceeded", True),
+    ("This model's maximum context length is 200000 tokens", True),
+    ("503 overloaded", False), ("rate_limit_error", False), ("", False)])
+def test_what_counts_as_a_context_overflow(error, overflow):
+    assert analysts.context_overflow(error) is overflow
+
+
+def test_context_retries_are_reported():
+    from refactory_dsh.loop import LoopConfig, _analysts_report, _analysts_section
+
+    entry = {"epoch": 1, "generation": 1, "batches": [], "merges": [], "calls": 3,
+             "cached": 0, "findings": [], "context_retries": 2}
+    report = _analysts_report([entry], LoopConfig(analysts=True))
+    assert report["context_retries"] == 2
+    assert ("2 call(s) were too long for the model's context and retried once at half "
+            "the length" in "\n".join(_analysts_section(report)))

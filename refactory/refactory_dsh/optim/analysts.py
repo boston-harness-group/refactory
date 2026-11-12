@@ -54,10 +54,12 @@ MERGE_BATCH_SIZE = 8
 #: (``analyst_edit_budget``, 4).
 FINDINGS_PER_ANALYST = 4
 #: One analyst call's whole prompt, in characters. The optimizer model (Opus 4.6) reads
-#: 200k tokens; at about 4 characters a token 500000 characters is about 125k tokens,
-#: leaving room for the system prompt, the reply (findings are short) and a denser
-#: tokenisation than 4 per token. A batch of 8 multi-step traces normally fits whole.
-ANALYST_ROOM = 500000
+#: 200k tokens, of which Claude Code's own system prompt and the reserved reply take
+#: about 30-40k. Traces dense in notation run 2.5-3.5 characters a token, so 400000
+#: characters is about 115-160k tokens: inside the rest at all but the densest. A call
+#: the provider still refuses as too long is retried once at half its length
+#: (`context_overflow`, ``AutoresearchOptimizer._ask``).
+ANALYST_ROOM = 400000
 #: The least an item is cut to when a batch does not fit, however many items it holds.
 ITEM_FLOOR = 4000
 #: A step input is clipped to no less than this before any output is clipped.
@@ -66,6 +68,17 @@ INPUT_FLOOR = 1500
 TEXT_FLOOR = 40
 #: A node text or setting value in the pipeline an analyst reads, head and tail.
 PIPELINE_TEXT_CHARS = 20000
+#: What a failed call says when its prompt was longer than the model's context: the
+#: Claude Code and DSH runners' wording (`refactory_dsh.model.SETUP_FAILURE_MARKERS`)
+#: and the providers' own.
+CONTEXT_MARKERS = ("prompt is too long", "input is too long", "context_length_exceeded",
+                   "context length", "context window", "maximum context", "too many tokens")
+
+
+def context_overflow(error: str) -> bool:
+    """Whether a failed call's error says its prompt did not fit the model's context."""
+    lowered = (error or "").lower()
+    return any(marker in lowered for marker in CONTEXT_MARKERS)
 #: The most calls of one analyst stage in flight at once, analysts and merges together
 #: (the two sides' merges run side by side): 8 runs SkillOpt's 35 train items (about 5
 #: or 6 batches of 8) in one wave.
@@ -202,10 +215,10 @@ def fit_item(record: dict[str, Any], budget: int) -> str:
     return item_text(record, both, both) + "\n" + _CLIPPED
 
 
-def pipeline_text(ctx: Any) -> str:
+def pipeline_text(ctx: Any, text_chars: int = PIPELINE_TEXT_CHARS) -> str:
     """The pipeline as an analyst reads it (SkillOpt's analyst reads the current skill):
     its nodes and edges, each node in full with the values of the settings bound to it,
-    and every setting's value."""
+    and every setting's value; each long text at most ``text_chars``, head and tail."""
     knob_values = {k.get("name"): k.get("value") for k in ctx.knobs}
     lines = ["Nodes:",
              _table(["id", "kind", "call", "knobs"],
@@ -216,7 +229,7 @@ def pipeline_text(ctx: Any) -> str:
                     [[e.get("source"), e.get("target"), e.get("condition")] for e in ctx.edges])]
     if ctx.node_states:
         lines += ["", "Each node in full:"]
-        lines += [_node_spec(state, PIPELINE_TEXT_CHARS, knob_values)
+        lines += [_node_spec(state, text_chars, knob_values)
                   for state in sorted(ctx.node_states, key=lambda s: str(s.get("id")))]
     bound = {str(pair[1]): f"`{state.get('id')}`.{pair[0]}"
              for state in ctx.node_states for pair in state.get("field_bindings") or ()
@@ -232,7 +245,7 @@ def pipeline_text(ctx: Any) -> str:
             text = value if isinstance(value, str) else json.dumps(value, default=str)
             lines += [f"- `{knob.get('name')}` ({knob.get('kind')}"
                       + (", frozen" if knob.get("frozen") else "") + "):",
-                      _clip_middle(text, PIPELINE_TEXT_CHARS)]
+                      _clip_middle(text, text_chars)]
     return "\n".join(lines)
 
 
@@ -372,18 +385,18 @@ def analyst_prompt(ctx: Any, kind: str, index: int, total: int,
 
 
 def analyst_batch(ctx: Any, kind: str, index: int, total: int,
-                  group: Sequence[dict[str, Any]], pipeline: str
-                  ) -> tuple[str, dict[str, int]]:
+                  group: Sequence[dict[str, Any]], pipeline: str,
+                  room: int = ANALYST_ROOM) -> tuple[str, dict[str, int]]:
     """One analyst's request -- the pipeline, the changes possible, the optimizer's
     lessons and the batch's items in full -- and what was clipped:
-    ``{"items", "chars"}``. The items share what ``ANALYST_ROOM`` leaves after the rest
-    of the prompt; only when together they do not fit are the longest cut, all to one
+    ``{"items", "chars"}``. The items share what ``room`` (``ANALYST_ROOM``) leaves after
+    the rest of the prompt; only when together they do not fit are the longest cut, all to one
     length (`item_cap`), step inputs first (`fit_item`). SkillOpt never clips."""
     head, tail = _analyst_frame(ctx, kind, index, total, len(group), pipeline)
     wholes = [item_text(record) for record in group]
     separators = 2 * max(0, len(group) - 1)
     cap = item_cap([len(text) for text in wholes],
-                   ANALYST_ROOM - len(head) - len(tail) - separators)
+                   room - len(head) - len(tail) - separators)
     # `fit_item` keeps an item no longer than the cap whole.
     blocks = [text if cap is None else fit_item(record, cap)
               for record, text in zip(group, wholes)]
@@ -571,6 +584,24 @@ def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
             f"{body}\n\n## Answer\n{MERGE_ANSWER}")
 
 
+def fit_merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
+                     level: int, room: int) -> str:
+    """A merge request within ``room`` characters, for a call retried after a context
+    overflow: the pipeline's texts are clipped (head and tail) to the largest length
+    that fits, down to ``TEXT_FLOOR``; the findings are kept whole."""
+    def make(chars: int) -> str:
+        return merge_prompt(ctx, step, lists, level, pipeline_text(ctx, chars))
+
+    low, high = TEXT_FLOOR, PIPELINE_TEXT_CHARS
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(make(middle)) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return make(low)
+
+
 def merge_system(step: str) -> str:
     return {"failure": MERGE_FAILURE_SYSTEM, "success": MERGE_SUCCESS_SYSTEM,
             "final": MERGE_FINAL_SYSTEM}[step]
@@ -665,8 +696,12 @@ def journal_entry(analysis: Mapping[str, Any]) -> dict[str, Any]:
             "failed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "failure"),
             "passed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "success"),
             "batches": [{key: b.get(key) for key in ("kind", "index", "items", "findings",
-                                                      "clipped", "clipped_chars", "error")}
+                                                      "clipped", "clipped_chars",
+                                                      "context_retry", "error")}
                         for b in batches_],
+            "context_retries": (sum(1 for b in batches_ if b.get("context_retry"))
+                                + sum(1 for m in analysis.get("merges") or ()
+                                      if m.get("context_retry"))),
             "clipped_items": sum(int(b.get("clipped") or 0) for b in batches_),
             "clipped_chars": sum(int(b.get("clipped_chars") or 0) for b in batches_),
             "merges": list(analysis.get("merges") or ()),
