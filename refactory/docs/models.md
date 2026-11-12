@@ -269,6 +269,10 @@ Observe-only patches on the pinned DSH providers emit whitelisted route/usage me
 
 Worker receipts also feed [live activity](live-control.md); saved [profiles](optimization-profiles.md) retain requested routes in their exact launch snapshot. Configuration readiness is not execution evidence. DSH completed the bounded CLI and native GUI task. Codex and Claude Code completed the CLI task with explicit edit permissions and the native GUI task with the new `skip` default. Earlier native-policy failures remain documented as permission controls; see the [validation record](release-validation-20260926.md).
 
+### Where worker sessions are kept
+
+Every DSH process a run starts (each node's or optimizer's completion, and the spine's coordinator) keeps its DSH sessions in its own store beside its receipt, `.refactory/workers/<worker-id>.dsh/` in the run directory (`sessions/` for the session log, `storages/` for DSH's projection cache), not in the shared `$DSH_HOME/sessions` and `$DSH_HOME/storages`. DSH looks a session up by probing every project directory under its root and loads the whole projection cache when it starts, so a shared store made every helper slower and larger with each run the machine had ever done (52k stored sessions: 3.7 GB per helper and billions of failed path lookups in the kernel). A store per process holds only its own sessions. Nothing in refactory reads a worker's DSH session back; the store stays with the run as evidence and goes when the run directory is deleted. A completion without a run directory (the shared scratch directory) deletes its store when it ends. `DSH_HOME` itself is unchanged, so credentials, settings and profiles are the person's, and the run's evaluation context is the same: a run started before this resumes as it was. `REFACTORY_DSH_SESSIONS=shared`, set where the run starts, keeps the old shared store (for example to open worker sessions in the DSH GUI); the choice rides the worker context, so the spine's scrubbed node commands get it too.
+
 ## Credentials for nested execution
 
 Create/edit smoke and panel optimization launch further DSH processes. Their environment
