@@ -379,7 +379,7 @@ class LoopConfig:
     #: far". An answer without them keeps the previous ones. On by default.
     lessons: bool = True
     #: Each step a candidate of the last round added is reviewed before the next
-    #: proposal: its train fixed/broken counts, how often the final output changed,
+    #: proposal: its train fixed/broken counts, how often the final answer changed,
     #: and one call of the optimizer's model per step on up to 4 train items
     #: (`optim.feedback.review_prompt`), shown as "Did the added steps contribute?".
     #: On by default; a model proposer only.

@@ -12,8 +12,8 @@ Three request sections, each behind a ``LoopConfig`` switch:
   learned is carried forward rather than re-derived (SkillOpt's slow update does this
   for its skill text).
 - **Did the added steps contribute?** (``step_review``): for each step a candidate of
-  the last round added, the train items it fixed and broke, how often the final step's
-  output changed, and a reviewer's verdict on whether the step's output holds anything
+  the last round added, the train items it fixed and broke, how often the final answer
+  (what the grader read) changed, and a reviewer's verdict on whether the step's output holds anything
   its inputs lacked.
 
 Domain-free by construction: they read the graph, a score per item and each step's
@@ -300,6 +300,15 @@ def _final_output(record: Mapping[str, Any]) -> str | None:
     return " ".join(str(exchanges[-1].get("response") or "").split())
 
 
+def _answer(record: Mapping[str, Any]) -> str | None:
+    """The answer the grader read for an item (its record's ``prediction``), whitespace-
+    and case-normalised and not parsed any further; ``None`` when none is recorded."""
+    value = record.get("prediction")
+    if value is None:
+        return None
+    return " ".join(str(value).split()).lower()
+
+
 def _numbers(exchanges: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> list[float]:
     out = []
     for exchange in exchanges:
@@ -316,20 +325,29 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
                   items: int = STEP_REVIEW_ITEMS) -> dict[str, Any]:
     """What the child's train records show of one added step, against its parent on the
     train items both were scored on: the candidate's fixed and broken items, how many
-    shared items' final step output changed (plain text, whitespace-normalised), the
+    shared items' final answer changed (the ``prediction`` the grader read, whitespace-
+    and case-normalised; where either item recorded none, the final step's output text,
+    whitespace-normalised, counted apart), the
     step's median duration and tokens when its records carry them, and up to ``items``
     samples of what the step was given, what it wrote and what the step after it wrote
     (changed outcomes first, then by id)."""
     change = edit_change(parent_records, child_records)
     parent, child = _by_item(parent_records), _by_item(child_records)
     shared = sorted(set(parent) & set(child))
-    compared = changed = 0
+    # Reasoning text differs between runs on nearly every item, so the answer the grader
+    # read is compared; the output text only for items that recorded no answer.
+    compared = changed = text_compared = text_changed = 0
     for item in shared:
+        before, after = _answer(parent[item]), _answer(child[item])
+        if before is not None and after is not None:
+            compared += 1
+            changed += before != after
+            continue
         before, after = _final_output(parent[item]), _final_output(child[item])
         if before is None or after is None:
             continue
-        compared += 1
-        changed += before != after
+        text_compared += 1
+        text_changed += before != after
     ran = []
     for item in sorted(child):
         exchanges = [e for e in child[item].get("exchanges") or () if isinstance(e, Mapping)]
@@ -354,6 +372,7 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
     return {
         "step": step, "shared": change["shared"], "fixed": len(change["fixed"]),
         "broken": len(change["broken"]), "compared": compared, "final_changed": changed,
+        "text_compared": text_compared, "text_changed": text_changed,
         "ran": len(ran),
         "median_s": round(statistics.median(durations), 1) if durations else None,
         "median_tokens": round(statistics.median(tokens)) if tokens else None,
@@ -427,8 +446,8 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]]) -> list[str]:
         return []
     lines = ["## Did the added steps contribute?",
              "Each step a candidate of the last round added, on the train items it shares "
-             "with its parent: the candidate's fixed/broken items, how often the final step's "
-             "output text changed, and a reviewer's verdict (one call per step, on up to "
+             "with its parent: the candidate's fixed/broken items, how often the final answer "
+             "(what the grader read) changed, and a reviewer's verdict (one call per step, on up to "
              f"{STEP_REVIEW_ITEMS} train items) on whether the step's output holds facts, "
              "checks, computations or alternatives its inputs lacked. A step that only "
              "restates its inputs adds a model call and little else."]
@@ -443,8 +462,15 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]]) -> list[str]:
             facts = ["no train item shared with its parent"]
         if entry.get("compared"):
             share = entry["final_changed"] / entry["compared"]
-            facts.append(f"final output changed on {entry['final_changed']}/{entry['compared']} "
-                         f"({share:.0%})")
+            facts.append(f"final answer changed on {entry['final_changed']}/{entry['compared']} "
+                         f"({share:.0%}; the answer the grader read)")
+        if entry.get("text_compared"):
+            share = entry["text_changed"] / entry["text_compared"]
+            facts.append(f"final output text changed on {entry['text_changed']}/"
+                         f"{entry['text_compared']} ({share:.0%}; "
+                         + ("items that recorded no answer, so " if entry.get("compared") else
+                            "no answer recorded, so ")
+                         + "the last step's output text was compared)")
         if entry.get("median_s") is not None:
             facts.append(f"median {entry['median_s']} s")
         if entry.get("median_tokens") is not None:

@@ -571,9 +571,12 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
 - **Did the added steps contribute?** (`--step-review`, default `1`). For every step a
   candidate of the last round added (an insert, a split's halves, a fork's branches, a
   loop's gate; not the fork and join themselves), on the train items it shares with its
-  parent: the candidate's fixed and broken items, how many items' final step output
-  changed (whitespace-normalised text), and the step's median duration and tokens when
-  its records carry them. Then one call of the optimizer's model per step that recorded
+  parent: the candidate's fixed and broken items, how many items' final answer changed
+  (the item record's `prediction`, the answer the grader read, whitespace- and
+  case-normalised and not parsed further; reasoning text differs from run to run on
+  nearly every item, so it is not what is compared; an item with no recorded answer
+  falls back to the last step's output text, counted apart and labelled so), and the
+  step's median duration and tokens when its records carry them. Then one call of the optimizer's model per step that recorded
   text output (at most 8 per request): it reads, on up to 4 train items (changed outcomes
   first), the step's prompt as sent, its output and the next step's output, and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short

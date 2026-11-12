@@ -284,8 +284,9 @@ def test_lessons_shown_are_bounded():
 # ── added steps ─────────────────────────────────────────────────────────────
 
 
-def _rec(item: str, passed: bool, steps: dict[str, str]) -> dict[str, Any]:
-    return {"id": item, "passed": passed, "score": float(passed),
+def _rec(item: str, passed: bool, steps: dict[str, str],
+         prediction: str | None = None) -> dict[str, Any]:
+    return {"id": item, "passed": passed, "score": float(passed), "prediction": prediction,
             "exchanges": [{"node": node, "prompt": f"GIVEN {node} {item}", "response": text}
                           for node, text in steps.items()]}
 
@@ -300,11 +301,18 @@ CHILD_STATE = {"graph": {"nodes": {"a": {"id": "a", "kind": "agent"},
                                    "decide": {"id": "decide", "kind": "agent"}}}}
 
 
+#: The answers the grader read. The child's differ from the parent's on t4 and t5 only
+#: (t0 differs in case and spacing alone); its reasoning text differs on every item.
+PARENT_ANSWERS = ["A", "B", "C", "D", "E", "A"]
+CHILD_ANSWERS = [" a ", "B", "C", "D", "b", "B"]
+
+
 def _pair_records() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    parent = [_rec(f"t{i}", i < 3, {"a": "notes", "decide": f"Answer {i}"}) for i in range(6)]
+    parent = [_rec(f"t{i}", i < 3, {"a": "notes", "decide": f"Reasoning {i}"},
+                   PARENT_ANSWERS[i]) for i in range(6)]
     child = [_rec(f"t{i}", i in (1, 2, 4), {"a": "notes", "think": f"THINK {i}",
-                                            "decide": f"Answer {i}" if i < 4 else f"New {i}"})
-             for i in range(6)]
+                                            "decide": f"Reasoning {i}, reconsidered"},
+                  CHILD_ANSWERS[i]) for i in range(6)]
     return parent, child
 
 
@@ -317,22 +325,37 @@ def test_an_added_steps_evidence_is_train_counts_and_samples():
     parent, child = _pair_records()
     evidence = feedback.step_evidence("think", parent_records=parent, child_records=child)
     assert (evidence["shared"], evidence["fixed"], evidence["broken"]) == (6, 1, 1)
-    assert (evidence["compared"], evidence["final_changed"]) == (6, 2)
+    assert (evidence["compared"], evidence["final_changed"]) == (6, 2), "answers, not text"
+    assert (evidence["text_compared"], evidence["text_changed"]) == (0, 0)
     assert evidence["ran"] == 6 and evidence["median_s"] is None
     samples = evidence["samples"]
     assert len(samples) == feedback.STEP_REVIEW_ITEMS
     assert [s["item"] for s in samples] == ["t4", "t0", "t1", "t2"], "changed outcomes first"
     assert samples[0] == {"item": "t4", "input": "GIVEN think t4", "output": "THINK 4",
-                          "next_step": "decide", "next_output": "New 4"}
+                          "next_step": "decide", "next_output": "Reasoning 4, reconsidered"}
     code = feedback.step_evidence("check", parent_records=parent, child_records=child)
     assert code["ran"] == 0 and code["samples"] == []
 
 
-def test_whitespace_alone_is_not_a_changed_final_output():
-    parent = [_rec("t0", True, {"decide": "Answer:  1\n"})]
-    child = [_rec("t0", True, {"x": "y", "decide": "Answer: 1"})]
-    assert feedback.step_evidence("x", parent_records=parent,
-                                  child_records=child)["final_changed"] == 0
+def test_without_a_recorded_answer_the_output_text_is_compared_and_said():
+    """t0 and t1 recorded no answer: their last outputs are compared as text (spacing
+    alone is no change), counted apart from t2's answer, and the line says which."""
+    parent = [_rec("t0", True, {"decide": "Answer:  1\n"}),
+              _rec("t1", True, {"decide": "one"}), _rec("t2", True, {"decide": "r"}, "A")]
+    child = [_rec("t0", True, {"x": "y", "decide": "Answer: 1"}),
+             _rec("t1", True, {"x": "y", "decide": "two"}),
+             _rec("t2", True, {"x": "y", "decide": "s"}, "B")]
+    evidence = feedback.step_evidence("x", parent_records=parent, child_records=child)
+    assert (evidence["compared"], evidence["final_changed"]) == (1, 1)
+    assert (evidence["text_compared"], evidence["text_changed"]) == (2, 1)
+    line = feedback.step_review_lines([{**evidence, "candidate": "c", "kind": "other"}])[-1]
+    assert "final answer changed on 1/1 (100%; the answer the grader read)" in line
+    assert ("final output text changed on 1/2 (50%; items that recorded no answer, so the "
+            "last step's output text was compared)") in line
+    only_text = feedback.step_evidence("x", parent_records=parent[:2], child_records=child[:2])
+    text = feedback.step_review_lines([{**only_text, "candidate": "c", "kind": "other"}])[-1]
+    assert "final answer changed" not in text
+    assert "(50%; no answer recorded, so the last step's output text was compared)" in text
 
 
 @pytest.mark.parametrize("payload,verdict", [
@@ -374,11 +397,12 @@ def test_each_added_step_is_reviewed_once_shown_and_kept_for_a_resume(tmp_path):
     assert len(client.reviews) == 1, "one call for the step with text output; none for code"
     review = client.reviews[0]
     assert "# Reviewing an added step: `think`" in review
-    assert "GIVEN think t4" in review and "THINK 4" in review and "New 4" in review
+    assert "GIVEN think t4" in review and "THINK 4" in review and "Reasoning 4, reconsidered" in review
     assert "does it contain facts, checks, computations or alternatives its inputs lacked" in review
     section = _section(client.proposals[0], "## Did the added steps contribute?")
     assert ("- `think` (agent, added by c1, parallel; gate rejected): 1 fixed / 1 broken on 6 "
-            "shared train item(s); final output changed on 2/6 (33%); review: restates_inputs "
+            "shared train item(s); final answer changed on 2/6 (33%; the answer the grader "
+            "read); review: restates_inputs "
             '-- "THINK 4" -- It repeats the notes.') in section
     assert "- `check` (code, added by c1" in section and "recorded no text output" in section
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
