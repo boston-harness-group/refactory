@@ -769,11 +769,22 @@ def test_every_strategy_selects_on_val_scores_test_only_at_the_end_and_hides_val
         assert not leaked, f"a val score reached the proposer: {leaked[:3]}"
 
 
+#: A duration or a cost the request shows as a JSON field (``"total_s": 0.6121``, the
+#: gradient's cost row): its number is a timing, never a score, so the leak check masks
+#: it -- a real run's timing can round to the same digits as a val score.
+_TIMING_FIELD = re.compile(
+    r'("(?:[a-z_]*_s|[a-z_]*_ms|[a-z_]*seconds|[a-z_]*duration[a-z_]*|[a-z_]*elapsed[a-z_]*)"'
+    r'\s*:\s*)-?\d+(?:\.\d+)?(?:e-?\d+)?')
+
+
 def _leaked(text: str, values: list[float], *, items: int) -> list[str]:
     """Each way ``text`` could show one of ``values`` (val scores), at any rounding: the
     full number, 2 to 6 decimals, a percentage (0 or 1 decimal), and k/items when the
     score is a whole number of the val part's items. A form must stand alone (no digit
-    or point around it), so 0.82 does not match inside 0.8213, a timing."""
+    or point around it), so 0.82 does not match inside 0.8213, a timing. The values of
+    timing fields (``_TIMING_FIELD``) are masked first: only a number that is not a
+    duration can be a leaked score."""
+    text = _TIMING_FIELD.sub(lambda m: m.group(1) + "<timing>", text)
     found: list[str] = []
     for value in values:
         forms = {repr(value), *(f"{value:.{d}f}" for d in range(2, 7)),
@@ -796,6 +807,15 @@ def test_the_leak_check_catches_a_val_score_at_any_rounding():
                   f"score {score}"):
         assert _leaked(shown, [score], items=17), shown
     assert not _leaked("took 0.8213 s, 182 items, 0.825", [score], items=17)
+    # A timing field rounding to a val score's digits is a timing (the cost row's
+    # ``"total_s": 0.6121`` beside a val score 0.612137), but the same digits as a score
+    # are still caught.
+    val = 0.612137
+    assert not _leaked('| cost | {"n": 3, "mean_s": 0.204, "total_s": 0.6121, '
+                       '"duration_s": 0.61, "elapsed": 0.612137} |', [val], items=4)
+    for shown in ("| score | 0.6121 |", '{"score": 0.6121, "total_s": 1.5}', "best 0.61",
+                  "| c1 | 0.612137 | kept |", '"val": 0.6121'):
+        assert _leaked(shown, [val], items=4), shown
 
 
 # ── single reproduces the recorded gate decisions ──────────────────────────
