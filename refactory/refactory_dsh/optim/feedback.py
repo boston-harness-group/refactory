@@ -63,6 +63,9 @@ STEP_REVIEW_OUTPUT_CHARS = 2000
 STEP_REVIEW_NEXT_CHARS = 1200
 STEP_REVIEW_QUOTE_CHARS = 240
 STEP_REVIEW_NOTE_CHARS = 300
+#: The most characters "Did the added steps contribute?" gives full entries; the steps
+#: past it get one short line each.
+STEP_REVIEW_CHARS = 9000
 #: The verdicts a review may give.
 STEP_VERDICTS = ("adds_new_work", "restates_inputs", "contradicts_inputs", "no_effect")
 
@@ -159,12 +162,13 @@ def touched(edits: Any) -> list[str]:
 def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | None,
                  parent_records: Sequence[Mapping[str, Any]] | None,
                  child_records: Sequence[Mapping[str, Any]] | None,
-                 gate: str | None) -> dict[str, Any]:
+                 gate: str | None, same_seed: bool = True) -> dict[str, Any]:
     """One row of "Every change so far, by kind": train records and the gate's word
-    only."""
+    only. A child whose parent was not scored with its round's seed (``same_seed``
+    false) gets no fixed/broken counts: the difference would be partly the seed's."""
     edits = candidate.own_edits()
     change = (edit_change(parent_records, child_records)
-              if parent is not None and child_records else None)
+              if parent is not None and child_records and same_seed else None)
     shared = bool(change and change["shared"])
     return {
         "id": candidate.id, "round": (record or {}).get("epoch"),
@@ -173,7 +177,7 @@ def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | Non
         "fixed": len(change["fixed"]) if shared else None,
         "broken": len(change["broken"]) if shared else None,
         "shared": change["shared"] if change else 0,
-        "gate": gate,
+        "gate": gate, "same_seed": bool(same_seed),
         "rationale": str((record or {}).get("rationale") or ""),
     }
 
@@ -214,7 +218,9 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
     lines = ["## Every change so far, by kind",
              "Every candidate this run has evaluated, by the kind of change its own edits "
              "made. `fixed/broken` compares it with its parent on the train items both were "
-             "scored on (parent wrong and child right / the reverse)"
+             "scored with the same seed, in the round the candidate was evaluated (parent "
+             "wrong and child right / the reverse; `n/a (different seed)` when the parent was "
+             "not scored in that round)"
              + ("; `gate` is what the validation gate decided" if gated else "")
              + ". Read it for which kinds of change have paid off in this pipeline and which "
              "have not, before choosing yours.",
@@ -224,7 +230,8 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
 
     def row(entry: Mapping[str, Any]) -> list[Any]:
         counts = (f"{entry['fixed']}/{entry['broken']} of {entry.get('shared')}"
-                  if _net(entry) is not None else "n/a")
+                  if _net(entry) is not None else
+                  "n/a (different seed)" if entry.get("same_seed") is False else "n/a")
         return [entry.get("id"), entry.get("round", ""), entry.get("parent"), entry.get("kind"),
                 _touched_text(list(entry.get("touched") or ())), counts,
                 *([entry.get("gate") or ""] if gated else []),
@@ -320,17 +327,56 @@ def _numbers(exchanges: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> lis
     return out
 
 
+_FACT = re.compile(r"\{\{\s*([A-Za-z_][\w.-]*)\s*\}\}")
+
+
+def downstream(graph: Mapping[str, Any] | None, step: str) -> set[str] | None:
+    """The steps that read what ``step`` writes or produces, directly or through other
+    steps (a file in ``reads``/``required_reads``, a fact in ``inputs`` or as a
+    ``{{name}}`` in a prompt), from a state's graph; ``None`` without one."""
+    nodes = ((graph or {}).get("graph") or {}).get("nodes") if graph else None
+    if not isinstance(nodes, Mapping) or step not in nodes:
+        return None
+
+    def outputs(node: Mapping[str, Any]) -> set[str]:
+        return {str(v) for key in ("writes", "produces") for v in node.get(key) or ()}
+
+    def inputs(node: Mapping[str, Any]) -> set[str]:
+        names = {str(v) for key in ("reads", "required_reads", "inputs")
+                 for v in node.get(key) or ()}
+        for key in ("prompt_template", "system_prompt_template"):
+            names |= set(_FACT.findall(str(node.get(key) or "")))
+        return names
+
+    found: set[str] = set()
+    frontier = outputs(nodes[step])
+    while frontier:
+        nxt: set[str] = set()
+        for node_id, node in nodes.items():
+            if node_id == step or node_id in found or not isinstance(node, Mapping):
+                continue
+            if inputs(node) & frontier:
+                found.add(str(node_id))
+                nxt |= outputs(node)
+        frontier = nxt
+    return found
+
+
 def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | None,
                   child_records: Sequence[Mapping[str, Any]] | None,
-                  items: int = STEP_REVIEW_ITEMS) -> dict[str, Any]:
+                  items: int = STEP_REVIEW_ITEMS,
+                  graph: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """What the child's train records show of one added step, against its parent on the
     train items both were scored on: the candidate's fixed and broken items, how many
     shared items' final answer changed (the ``prediction`` the grader read, whitespace-
     and case-normalised; where either item recorded none, the final step's output text,
     whitespace-normalised, counted apart), the
     step's median duration and tokens when its records carry them, and up to ``items``
-    samples of what the step was given, what it wrote and what the step after it wrote
-    (changed outcomes first, then by id)."""
+    samples of what the step was given, what it wrote and what the next recorded step that
+    reads its output wrote (by ``graph``'s data flow, so a sibling fork branch is not
+    taken for it; without a graph, the next recorded step), changed outcomes first, then
+    by id."""
+    readers = downstream(graph, step)
     change = edit_change(parent_records, child_records)
     parent, child = _by_item(parent_records), _by_item(child_records)
     shared = sorted(set(parent) & set(child))
@@ -360,7 +406,8 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
     order = {item: rank for rank, item in enumerate([*change["fixed"], *change["broken"]])}
     samples = []
     for item, exchanges, at in sorted(ran, key=lambda r: (order.get(r[0], len(order)), r[0]))[:items]:
-        after = exchanges[at + 1] if at + 1 < len(exchanges) else None
+        later = exchanges[at + 1:]
+        after = next((e for e in later if readers is None or e.get("node") in readers), None)
         samples.append({
             "item": item,
             "input": _clip_middle(exchanges[at].get("prompt"), STEP_REVIEW_INPUT_CHARS),
@@ -394,18 +441,18 @@ def review_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
                  f"### What `{step}` was given (its prompt as sent)", sample.get("input") or "(empty)",
                  f"### What `{step}` wrote", sample.get("output") or "(empty)"]
         if sample.get("next_step"):
-            block += [f"### What the next step, `{sample['next_step']}`, wrote",
+            block += [f"### What the next step that reads it, `{sample['next_step']}`, wrote",
                       sample.get("next_output") or "(empty)"]
         else:
-            block.append("(No step ran after it.)")
+            block.append("(No recorded step after it reads what it wrote.)")
         blocks.append("\n".join(block))
     return "\n\n".join([
         f"# Reviewing an added step: `{step}`",
         (f"Mode: `{mode_name}`. " if mode_name else "")
         + f"Candidate `{entry.get('candidate')}` added the {entry.get('node_kind') or ''} step "
         f"`{step}` to the pipeline ({entry.get('kind')}). Below, on {len(blocks)} train "
-        "item(s), is what the step was given, what it wrote, and what the step after it "
-        "wrote.",
+        "item(s), is what the step was given, what it wrote, and what the next step that "
+        "reads its output wrote.",
         "Compare the step's output with what it was given: does it contain facts, checks, "
         "computations or alternatives its inputs lacked? Then look at the next step's "
         "output: does it use what this step wrote? Judge the step's own contribution, not "
@@ -439,7 +486,8 @@ def parse_review(payload: Any) -> dict[str, str]:
             "note": _clip(payload.get("note"), STEP_REVIEW_NOTE_CHARS)}
 
 
-def step_review_lines(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
+                      chars: int = STEP_REVIEW_CHARS) -> list[str]:
     """"Did the added steps contribute?": one entry per step the last round's candidates
     added, with its train counts and its review; nothing for none."""
     if not entries:
@@ -451,11 +499,15 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]]) -> list[str]:
              f"{STEP_REVIEW_ITEMS} train items) on whether the step's output holds facts, "
              "checks, computations or alternatives its inputs lacked. A step that only "
              "restates its inputs adds a model call and little else."]
+    used, compact = sum(len(line) + 1 for line in lines), 0
     for entry in entries:
         head = (f"- `{entry.get('step')}` ({entry.get('node_kind') or 'step'}, added by "
                 f"{entry.get('candidate')}, {entry.get('kind')}"
                 + (f"; gate {entry['gate']}" if entry.get("gate") else "") + "): ")
-        if entry.get("shared"):
+        if entry.get("same_seed") is False:
+            facts = ["fixed/broken and answer changes n/a (different seed: the parent was not "
+                     "scored in the round this candidate was evaluated)"]
+        elif entry.get("shared"):
             facts = [f"{entry.get('fixed')} fixed / {entry.get('broken')} broken on "
                      f"{entry.get('shared')} shared train item(s)"]
         else:
@@ -475,8 +527,6 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]]) -> list[str]:
             facts.append(f"median {entry['median_s']} s")
         if entry.get("median_tokens") is not None:
             facts.append(f"median {entry['median_tokens']} tokens")
-        if entry.get("same_seed") is False:
-            facts.append("parent scored with a different seed, so some changes may be noise")
         review = entry.get("review")
         if isinstance(review, Mapping):
             said = f"review: {review.get('verdict')}"
@@ -490,7 +540,22 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]]) -> list[str]:
             said = "review: none (the step recorded no text output: a code, gate, fork or join step, or it never ran)"
         else:
             said = "review: none (more added steps than are reviewed per round)"
-        lines.append(head + "; ".join(facts) + "; " + said)
+        line = head + "; ".join(facts) + "; " + said
+        if used + len(line) + 1 > chars:
+            # Past the section's room: what each remaining step did, in one short line.
+            line = (f"- `{entry.get('step')}` (added by {entry.get('candidate')}): "
+                    + ("n/a (different seed)" if entry.get("same_seed") is False else
+                       f"{entry.get('fixed')} fixed / {entry.get('broken')} broken")
+                    + (f"; final answer changed {entry['final_changed']}/{entry['compared']}"
+                       if entry.get("compared") and entry.get("same_seed") is not False else "")
+                    + (f"; review: {review.get('verdict')}" if isinstance(review, Mapping)
+                       else ""))
+            if not compact:
+                lines.append(f"(The section is kept within {chars} characters: the remaining "
+                             "steps in one line each.)")
+            compact += 1
+        lines.append(line)
+        used += len(line) + 1
     return lines
 
 

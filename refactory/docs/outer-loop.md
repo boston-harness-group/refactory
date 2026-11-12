@@ -555,7 +555,11 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   run has evaluated (under the gate, every one it judged), oldest first: id, round,
   parent, the kind of change its own edits made, the knobs and steps they touched, its
   train fixed/broken counts against its parent on shared items, the gate's word and its
-  rationale (140 characters). The kind comes from the edit ops and the kinds of node
+  rationale (140 characters). Under the gate the counts compare the candidate's records
+  from the round it was evaluated in (not a later re-score of it as the edited
+  candidate) with its parent's from that same round, so both share a seed; when the
+  parent was not scored in that round the row says `n/a (different seed)` and the
+  tally leaves it out. The kind comes from the edit ops and the kinds of node
   they add: `prompt/setting` (knob edits only), `added agent step`, `added code step`
   (an op whose code the edit wrote), `split`, `loop/gate`, `parallel`,
   `removal/rewire` (bypass, remove, reorder, edges) or `other`; a proposal that makes
@@ -576,13 +580,19 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   case-normalised and not parsed further; reasoning text differs from run to run on
   nearly every item, so it is not what is compared; an item with no recorded answer
   falls back to the last step's output text, counted apart and labelled so), and the
-  step's median duration and tokens when its records carry them. Then one call of the optimizer's model per step that recorded
+  step's median duration and tokens when its records carry them. These counts follow
+  the ledger's same-round rule; without a same-round parent they are `n/a (different
+  seed)`. Then one call of the optimizer's model per step that recorded
   text output (at most 8 per request): it reads, on up to 4 train items (changed outcomes
-  first), the step's prompt as sent, its output and the next step's output, and answers
+  first), the step's prompt as sent, its output and the output of the next recorded step
+  that reads it (through the graph's reads, inputs and `{{fact}}` slots, so a sibling
+  fork branch is not taken for it), and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
   quote and a note. The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
-  and cached in memory and in `<run root>/step_reviews/`, so a retry or a resumed run
-  pays for none again. A failed or unreadable review is recorded and the step is shown
+  and cached in memory and in `<run root>/step_reviews/` (cleared by a fresh run in the
+  same directory, as the trace is), so a retry or a resumed run pays for none again.
+  The section keeps full entries within 9000 characters; steps past that get one line
+  of counts each. A failed or unreadable review is recorded and the step is shown
   without a verdict; it never fails the proposal.
 - **What makes a new step pay off** (`--structure-guidance`, default `0`). When on,
   "How nodes compose" adds one generic paragraph: a step helps when it adds work or

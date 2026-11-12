@@ -566,3 +566,147 @@ def test_the_switches_and_their_defaults():
     assert settings["run_ledger"] is False and settings["structure_guidance"] is True
     with pytest.raises(profiles.ProfileError):
         profiles.normalize({"lessons": "yes"})
+
+
+# ── review fixes: same-round comparisons, caps, gate, budget, data flow ─────
+
+
+def _rescored(tmp_path: Path, monkeypatch: Any):
+    """Gated: the child (round 9) was kept as the edited candidate and re-scored in round
+    10, and its parent was scored in rounds 9 and 10; the older child (round 8) has no
+    parent records from its round."""
+    loop, child = _loop_with_an_added_step(tmp_path, monkeypatch, gated=True)
+    seed = loop.population[0]
+    older = next(c for c in loop.population
+                 if (loop.proposals.get(c.id) or {}).get("epoch") == 8)
+    parent9, child9 = _pair_records()
+    parent10 = [_rec(f"t{i}", True, {"a": "n", "decide": "x"}, "A") for i in range(6)]
+    child10 = [_rec(f"t{i}", False, {"a": "n", "think": "t", "decide": "y"}, "Q") for i in range(6)]
+    loop._records_by_epoch[seed.id] = {9: parent9, 10: parent10}
+    loop._train_item_records[seed.id], loop._records_epoch[seed.id] = parent10, 10
+    loop._records_by_epoch[child.id] = {9: child9, 10: child10}
+    loop._train_item_records[child.id], loop._records_epoch[child.id] = child10, 10
+    loop._records_by_epoch[older.id] = {8: child9}
+    loop._records_epoch[older.id] = 8
+    return loop, child, older
+
+
+def test_a_rescored_child_is_compared_in_the_round_it_was_evaluated(tmp_path, monkeypatch):
+    loop, child, older = _rescored(tmp_path, monkeypatch)
+    ctx = loop._context()
+    ledger = {e["id"]: e for e in ctx.ledger}
+    assert (ledger[child.id]["fixed"], ledger[child.id]["broken"]) == (1, 1), "round 9 vs 9"
+    step = ctx.added_steps[0]
+    assert (step["fixed"], step["broken"], step["final_changed"]) == (1, 1, 2)
+    assert step["same_seed"] is True
+    entries = {e["id"]: e for e in loop._reasoning_entries(loop.leaderboard())}
+    assert (entries[child.id]["fixed"], entries[child.id]["broken"]) == (1, 1)
+    # The older child's parent has no round-8 records: no counts, said so.
+    assert ledger[older.id]["fixed"] is None and ledger[older.id]["same_seed"] is False
+    section = "\n".join(feedback.ledger_lines(ctx.ledger))
+    row = next(line for line in section.splitlines() if line.startswith(f"| {older.id} |"))
+    assert "| n/a (different seed) |" in row
+    assert "added agent step: tried 2, kept 0, best train fixed-broken +0" in section
+
+
+def test_without_the_parents_round_an_added_step_shows_no_counts(tmp_path, monkeypatch):
+    loop, child, _older = _rescored(tmp_path, monkeypatch)
+    del loop._records_by_epoch[loop.population[0].id][9]
+    step = loop._context().added_steps[0]
+    assert step["same_seed"] is False and step["shared"] == 0 and step["compared"] == 0
+    assert step["samples"], "the review still reads the child's own records"
+    line = feedback.step_review_lines([step])[-1]
+    assert "fixed/broken and answer changes n/a (different seed" in line
+    assert "fixed / " not in line and "final answer changed" not in line
+
+
+def test_a_candidate_the_gate_has_not_judged_is_left_out(tmp_path, monkeypatch):
+    loop, child = _loop_with_an_added_step(tmp_path, monkeypatch, gated=True)
+    loop._gate_rejected.remove(child.id)
+    ctx = loop._context()
+    assert child.id not in {e["id"] for e in ctx.ledger}
+    assert child.id not in {e["candidate"] for e in ctx.added_steps}
+
+
+def _many_steps(count: int) -> list[dict[str, Any]]:
+    parent, child = _pair_records()
+    base = feedback.step_evidence("think", parent_records=parent, child_records=child)
+    return [{**base, "step": f"s{k}", "candidate": "c1", "parent": "p0", "kind": "parallel",
+             "node_kind": "agent", "gate": "rejected", "same_seed": True,
+             "samples": [{**sample, "output": f"OUT {k}"} for sample in base["samples"]]}
+            for k in range(count)]
+
+
+def test_at_most_the_capped_number_of_steps_are_reviewed_per_round():
+    client = _Answering({"proposals": []}, REVIEW)
+    AutoresearchOptimizer(client).propose(ProposalContext(added_steps=_many_steps(11)), 1, [])
+    assert len(client.reviews) == feedback.STEP_REVIEW_STEPS
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert section.count("more added steps than are reviewed per round") == 11 - feedback.STEP_REVIEW_STEPS
+
+
+def test_a_spent_budget_during_a_review_stops_the_proposal():
+    from refactory_dsh.budgets import BudgetExhausted
+
+    client = _Answering({"proposals": []}, BudgetExhausted("token budget spent"))
+    with pytest.raises(BudgetExhausted):
+        AutoresearchOptimizer(client).propose(ProposalContext(added_steps=_added()), 1, [])
+    assert client.proposals == []
+
+
+def test_the_added_steps_section_stays_within_its_characters():
+    entries = [{**entry, "review": {"verdict": "restates_inputs", "example": "e" * 240,
+                                    "note": "n" * 300}} for entry in _many_steps(40)]
+    lines = feedback.step_review_lines(entries)
+    full = [line for line in lines if '-- "eee' in line]
+    short = [line for line in lines if line.startswith("- `") and '-- "eee' not in line]
+    assert full and short and len(full) + len(short) == 40
+    assert sum(len(line) + 1 for line in lines[: lines.index(full[-1]) + 1]) <= feedback.STEP_REVIEW_CHARS
+    assert short[-1] == ("- `s39` (added by c1): 1 fixed / 1 broken; final answer changed 2/6; "
+                         "review: restates_inputs")
+    assert "the remaining steps in one line each" in "\n".join(lines)
+
+
+FORKED = {"graph": {"nodes": {
+    "a": {"id": "a", "kind": "agent", "writes": ["a.txt"]},
+    "side_a": {"id": "side_a", "kind": "agent", "reads": ["a.txt"], "writes": ["sa.txt"]},
+    "side_b": {"id": "side_b", "kind": "agent", "reads": ["a.txt"], "produces": ["sb"]},
+    "join": {"id": "join", "kind": "op", "reads": ["sa.txt"], "produces": ["joined"]},
+    "decide": {"id": "decide", "kind": "agent", "prompt_template": "{{ joined }} and {{sb}}"}}}}
+
+
+def test_the_next_step_is_the_one_that_reads_the_steps_output():
+    """In a fork, the sibling branch that ran after ``side_a`` does not read it; the
+    step that does (through an op) is ``decide``."""
+    records = [_rec("t0", True, {"a": "A", "side_a": "SA", "side_b": "SB", "decide": "D"})]
+    shown = feedback.step_evidence("side_a", parent_records=[], child_records=records,
+                                   graph=FORKED)["samples"][0]
+    assert (shown["next_step"], shown["next_output"]) == ("decide", "D")
+    assert feedback.downstream(FORKED, "side_a") == {"join", "decide"}
+    assert feedback.downstream(FORKED, "side_b") == {"decide"}
+    last = feedback.step_evidence("decide", parent_records=[], child_records=records,
+                                  graph=FORKED)["samples"][0]
+    assert last["next_step"] == "" and "No recorded step after it reads" in \
+        feedback.review_prompt({"step": "decide", "samples": [last]})
+
+
+def test_a_fresh_run_clears_the_cached_reviews_and_a_resume_keeps_them(tmp_path, monkeypatch):
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    with _patch_mode(LevelProbe):
+        first = _loop(tmp_path, epochs=1, val_gate=True)
+        first.optimizer = Recording([[]])
+        first.run()
+        cached = first.root / "step_reviews" / "x.json"
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text("{}")
+        resumed = _loop(tmp_path, epochs=2, val_gate=True, resume=True)
+        resumed.optimizer = Recording([[]])
+        resumed.run()
+        assert resumed.root == first.root and cached.exists(), "a resume keeps them"
+        from refactory_dsh.budgets import LEDGER
+
+        (first.root / LEDGER).unlink()  # a fresh run is refused where a budget ledger is
+        fresh = _loop(tmp_path, epochs=1, val_gate=True)
+        fresh.optimizer = Recording([[]])
+        fresh.run()
+        assert fresh.root == first.root and not cached.exists()

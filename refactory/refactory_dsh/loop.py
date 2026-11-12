@@ -950,6 +950,8 @@ class Loop(OuterLoop):
         self.optimizer.trace_path = self.root / OPTIMIZER_TRACE
         if not self.config.resume:
             self.optimizer.trace_path.unlink(missing_ok=True)
+            # The step reviews it cached go with it (`AutoresearchOptimizer._review_steps`).
+            shutil.rmtree(self.root / "step_reviews", ignore_errors=True)
         resumed = self._replay_if_asked()
         (self.root / run_history.RUN_FILE).write_text(
             json.dumps(
@@ -4734,6 +4736,32 @@ class Loop(OuterLoop):
             return list(history[at]), True
         return latest, at is not None and self._records_epoch.get(parent_id) == at
 
+    def _round_records(self, parent_id: str, child_id: str
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        """A child's train records from the round it was evaluated in, its parent's from
+        that same round, and whether they share that round's seed.
+
+        A kept child becomes the edited candidate and is re-scored in later rounds
+        (fresh evidence), which replaces its latest records; the round it was first
+        evaluated in stays in ``_records_by_epoch``, and only the parent's records from
+        that round share its seed. Without ``val_gate`` every train rollout uses the
+        run's seed, so the latest records of both always do. When the parent has no
+        records from the child's round the pair does not share a seed (``False``) and
+        the parent's latest are returned for a caller that still wants them."""
+        child_latest = list(self._train_item_records.get(child_id, []))
+        parent_latest = list(self._train_item_records.get(parent_id, []))
+        if not self.config.val_gate:
+            return parent_latest, child_latest, True
+        rounds = self._records_by_epoch.get(child_id) or {}
+        at = min(rounds) if rounds else self._records_epoch.get(child_id)
+        # Its latest records are its evaluation round's until a re-score replaces them.
+        child = (list(rounds[at]) if rounds and self._records_epoch.get(child_id) != at
+                 else child_latest)
+        parent_rounds = self._records_by_epoch.get(parent_id) or {}
+        if at is not None and at in parent_rounds:
+            return list(parent_rounds[at]), child, True
+        return parent_latest, child, False
+
     def _reasoning_entries(self, board: list[Candidate]) -> list[dict[str, Any]]:
         """The optimizer's own reasoning about recent candidates -- the line from the
         seed to the edited candidate, and the latest refused children -- beside what
@@ -4757,10 +4785,12 @@ class Loop(OuterLoop):
             if record.get("origin") != "optimizer":
                 continue
             parent = by_id.get(candidate.parent or "")
-            parent_records, same = (self._records_like(parent.id, candidate.id)
-                                    if parent is not None else ([], None))
-            records = (list(self._train_item_records.get(candidate.id) or ())
-                       if candidate.evaluated else [])
+            # The child as it was judged (its evaluation round's records, not a later
+            # re-score of it as the edited candidate) against its parent from that round.
+            parent_records, records, same = (
+                self._round_records(parent.id, candidate.id) if parent is not None
+                else ([], list(self._train_item_records.get(candidate.id) or ()), None))
+            records = records if candidate.evaluated else []
             change = (edit_change(parent_records, records)
                       if parent is not None and candidate.evaluated else None)
             entries.append({
@@ -4814,13 +4844,13 @@ class Loop(OuterLoop):
         entries = []
         for candidate in self._judged():
             parent = by_id.get(candidate.parent or "")
-            parent_records = (self._records_like(parent.id, candidate.id)[0]
-                              if parent is not None else [])
+            parent_records, child_records, same = (
+                self._round_records(parent.id, candidate.id) if parent is not None
+                else ([], list(self._train_item_records.get(candidate.id) or ()), True))
             entries.append(ledger_entry(
                 candidate, parent, record=self.proposals.get(candidate.id),
-                parent_records=parent_records,
-                child_records=self._train_item_records.get(candidate.id) or [],
-                gate=self._gate_decision(candidate.id)))
+                parent_records=parent_records, child_records=child_records,
+                gate=self._gate_decision(candidate.id), same_seed=same))
         return entries
 
     def _added_steps(self) -> list[dict[str, Any]]:
@@ -4845,16 +4875,16 @@ class Loop(OuterLoop):
             steps = added_steps(parent.state, candidate.state)
             if not steps:
                 continue
-            parent_records, same = self._records_like(parent.id, candidate.id)
-            child_records = self._train_item_records.get(candidate.id) or []
+            parent_records, child_records, same = self._round_records(parent.id, candidate.id)
             kind = change_kind(candidate.own_edits(), candidate.state)
             for step, node_kind in steps:
                 entries.append({
                     "candidate": candidate.id, "parent": parent.id, "kind": kind,
                     "node_kind": node_kind, "gate": self._gate_decision(candidate.id),
                     "same_seed": same,
-                    **step_evidence(step, parent_records=parent_records,
-                                    child_records=child_records)})
+                    # Counts against a parent scored with another seed are not shown.
+                    **step_evidence(step, parent_records=parent_records if same else [],
+                                    child_records=child_records, graph=candidate.state)})
         return entries
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
