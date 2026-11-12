@@ -208,6 +208,9 @@ class AutoresearchOptimizer(Optimizer):
         #: The answer's ``lessons`` (when the request asked for them), for the loop to
         #: keep and show back; empty when the answer carried none.
         self.last_lessons: str = ""
+        #: This round's analysis (``ProposalContext.analysts`` on; `_analyse`), for the
+        #: loop to journal; ``None`` when no analyst ran.
+        self.last_analysis: dict[str, Any] | None = None
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         import inspect
@@ -348,14 +351,166 @@ class AutoresearchOptimizer(Optimizer):
         return [{**entry, **reviewed.get(index, {})}
                 for index, entry in enumerate(ctx.added_steps)]
 
+    def _ask(self, ctx: ProposalContext, system: str, prompt: str, fields: dict[str, Any],
+             parse: Any, counts: dict[str, int]) -> tuple[Any, str | None]:
+        """One analyst-stage call (`_analyse`): ``parse(payload)`` of the reply, or
+        ``None`` and why. Cached by its whole text, in memory and in the run directory
+        (``analyst_findings/``), so a retry or a resumed run pays for no call again; a
+        call is recorded in the optimizer trace with what it found. A spent budget stops
+        the proposal; any other failure is recorded and returned, never raised."""
+        import hashlib
+        import threading
+        from pathlib import Path
+
+        from refactory_dsh.budgets import BudgetExhausted
+
+        cache: dict[str, str] = self.__dict__.setdefault("_analyst_cache", {})
+        lock = self.__dict__.setdefault("_analyst_lock", threading.Lock())
+        store = (Path(self.trace_path).parent / "analyst_findings"
+                 if self.trace_path is not None else None)
+        key = hashlib.sha256(f"{system}\n{prompt}".encode()).hexdigest()
+        reply = cache.get(key)
+        if reply is None and store is not None and (store / f"{key}.json").exists():
+            try:
+                reply = json.loads((store / f"{key}.json").read_text()).get("reply")
+            except (OSError, json.JSONDecodeError, AttributeError):
+                reply = None
+        if isinstance(reply, str):
+            found = parse(extract_json(reply))
+            if found is not None:
+                with lock:
+                    counts["cached"] += 1
+                cache[key] = reply
+                return found, None
+        call = {**fields, "epoch": ctx.epoch, "generation": ctx.generation,
+                "system": system, "prompt": prompt}
+        reply = None
+        with lock:
+            counts["calls"] += 1
+        try:
+            reply = self._client.complete(prompt, system=system, **self._completion_options)
+            found = parse(extract_json(reply))
+            if found is None:
+                raise ValueError('the answer has no "findings" list')
+        except Exception as exc:
+            if isinstance(exc, BudgetExhausted):
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+            self.record_call(**call, reply=reply, error=error)
+            return None, error
+        self.record_call(**call, reply=reply, error=None, findings=found)
+        cache[key] = reply
+        if store is not None:
+            try:
+                store.mkdir(parents=True, exist_ok=True)
+                (store / f"{key}.json").write_text(json.dumps({"reply": reply}))
+            except OSError:
+                pass
+        return found, None
+
+    def _analyse(self, ctx: ProposalContext) -> dict[str, Any] | None:
+        """The analyst stage (`optim.analysts`, ``ctx.analysts``): failure and success
+        analysts over batches of the edited candidate's train items, concurrently, then
+        the failure-first merge into one ranked list. ``None`` without items."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from . import analysts
+
+        conf = analysts.settings(**{k: v for k, v in ctx.analysts.items()
+                                    if k in ("group_size", "merge_batch_size", "max_batches")})
+        failures, successes = analysts.split(ctx.item_records, int(ctx.epoch))
+        if not failures and not successes:
+            return None
+        plan, left = analysts.batches(failures, successes, group_size=conf["group_size"],
+                                      max_batches=conf["max_batches"])
+        pipeline = analysts.pipeline_text(ctx)
+        totals = {kind: sum(1 for k, _i, _g in plan if k == kind) for kind in analysts.KINDS}
+        analysed = {str(r.get("id")) for _k, _i, group in plan for r in group}
+        counts = {"calls": 0, "cached": 0}
+        merges: list[dict[str, Any]] = []
+
+        def analyse(batch: tuple[str, int, list[dict[str, Any]]]) -> dict[str, Any]:
+            kind, index, group = batch
+            items = [str(r.get("id")) for r in group]
+            found, error = self._ask(
+                ctx, analysts.FAILURE_SYSTEM if kind == "failure" else analysts.SUCCESS_SYSTEM,
+                analysts.analyst_prompt(ctx, kind, index, totals[kind], group, pipeline),
+                {"kind": f"analyst_{kind}", "group": index, "items": items},
+                lambda payload: analysts.parse_findings(payload, kind, items), counts)
+            return {"kind": kind, "index": index, "items": items, "found": found or [],
+                    "findings": len(found or ()), "error": error}
+
+        def merge_lists(step: str, lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+            """SkillOpt's hierarchical merge (``aggregate.py``): lists without findings
+            are dropped, one list is not merged, and each level merges batches of
+            ``merge_batch_size``; an unreadable merge keeps every input finding."""
+            current = [found for found in lists if found]
+            level = 0
+            while len(current) > 1:
+                level += 1
+                size = conf["merge_batch_size"]
+                chunks = [current[i:i + size] for i in range(0, len(current), size)]
+
+                def merge(numbered: tuple[int, list[list[dict[str, Any]]]],
+                          level: int = level) -> list[dict[str, Any]]:
+                    number, chunk = numbered
+                    if len(chunk) == 1:
+                        return chunk[0]
+                    found, error = self._ask(
+                        ctx, analysts.merge_system(step),
+                        analysts.merge_prompt(ctx, step, chunk, level, pipeline),
+                        {"kind": f"analyst_merge_{step}", "level": level, "batch": number,
+                         "lists": len(chunk)},
+                        lambda payload: analysts.parse_findings(payload, step, sorted(analysed),
+                                                                limit=None), counts)
+                    merges.append({"step": step, "level": level, "batch": number,
+                                   "lists": len(chunk), "fallback": found is None,
+                                   "error": error})
+                    return found if found is not None else [f for part in chunk for f in part]
+
+                with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY,
+                                                               len(chunks)))) as pool:
+                    current = list(pool.map(merge, enumerate(chunks, 1)))
+            return current[0] if current else []
+
+        with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY, len(plan)))) as pool:
+            done = list(pool.map(analyse, plan))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            failure_side, success_side = pool.map(
+                lambda kind: merge_lists(kind, [b["found"] for b in done if b["kind"] == kind]),
+                analysts.KINDS)
+        if failure_side and success_side:
+            found, error = self._ask(
+                ctx, analysts.merge_system("final"),
+                analysts.merge_prompt(ctx, "final", [failure_side, success_side], 0, pipeline),
+                {"kind": "analyst_merge_final", "level": 0, "batch": 1, "lists": 2},
+                lambda payload: analysts.parse_findings(payload, "failure", sorted(analysed),
+                                                        limit=None), counts)
+            merges.append({"step": "final", "level": 0, "batch": 1, "lists": 2,
+                           "fallback": found is None, "error": error})
+            # SkillOpt's fallback: the failure findings first, then the success ones.
+            ranked = found if found is not None else [*failure_side, *success_side]
+        else:
+            ranked = failure_side or success_side
+        return {"epoch": ctx.epoch, "generation": ctx.generation, "candidate": ctx.parent,
+                **conf, "batches": [{k: v for k, v in b.items() if k != "found"} for b in done],
+                "merges": sorted(merges, key=lambda m: (m["step"], m["level"], m["batch"])),
+                "not_analysed": left, "findings": list(ranked), **counts}
+
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
         self.last_lessons = ""
+        self.last_analysis = None
         if ctx.added_steps:
             ctx = replace(ctx, added_steps=self._review_steps(ctx))
+        if ctx.analysts and ctx.item_records:
+            # The analysts read every item in full and their ranked findings take the
+            # readers' place, as SkillOpt's analysts are its only reading of the traces.
+            self.last_analysis = self._analyse(ctx)
+            ctx = replace(ctx, analysis=self.last_analysis)
         groups = trajectory_groups(ctx.item_records, ctx.evidence_budget) if ctx.item_records else []
-        if len(groups) > 1:
+        if len(groups) > 1 and ctx.analysis is None:
             findings, failures = self._read(ctx, groups)
             ctx = replace(ctx, reader_findings=findings, reader_failures=failures)
         ctx = replace(ctx, proposals=max(1, n))

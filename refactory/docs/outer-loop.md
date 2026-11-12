@@ -626,6 +626,62 @@ The readers' success patterns (what the passing items do right) have their own h
 after the failure patterns, up to 4 per reader whatever its failure patterns, and a
 quarter of the findings' room the failure patterns cannot take.
 
+### The analyst stage: SkillOpt's per-round analysis (`--analysts`)
+
+`--analysts 1` (default `0`) gives the model proposer the analysis SkillOpt's reflect
+stage gives its patch step (`optim/analysts.py`; the SkillOpt port's `analysts.py` and
+`merge.py`). Before each proposal of `autoresearch` (alone, under `--portfolio`, or
+paired with a parent picker), on the train records the request carries:
+
+- **Failure analysts.** Every item not passed (answered wrong, no answer, or an error),
+  each once, shuffled with the epoch as seed and cut into batches of
+  `--analyst-group-size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
+  batch, up to 4 at once. Each reads the pipeline (its nodes and edges, each node in
+  full with the settings bound to it, every other setting's value) and each item's full
+  trace: its input, every step's input and output in the order they ran, the expected
+  answer, the prediction, the score and the grader's feedback (an item longer than its
+  share of 240000 characters has its step inputs clipped first, then its outputs). It
+  writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
+  (steps, edges, settings, or the structure), the change that would fix it, the items it
+  covers (an id outside the batch is dropped), its impact and quotes.
+- **Success analysts.** The passed items likewise (seed + 1): what made them work, where
+  it comes from, and what a change must preserve.
+- **Merge and rank.** Failure findings merge level by level in batches of
+  `--analyst-merge-batch-size` lists (8), then success findings; a final merge with
+  failure priority returns one de-duplicated list ranked by items covered and impact.
+  As in SkillOpt, one list is not merged, the final merge runs only when both sides
+  found something, and an unreadable merge keeps every input finding (failures first).
+- **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
+  characters) before the item results, and the analysts take the readers' place: no
+  reader call runs, and when the items do not fit one request the items they cite are
+  shown in full first. SkillOpt's analysts are its only reading of the trajectories, so
+  running both would give this loop more analysis than SkillOpt's.
+- `--analyst-max-batches` (0, no limit, as SkillOpt) caps the analyst calls per round,
+  failure batches first; the request says how many items went unanalysed.
+
+Every call is recorded in `optimizer_trace.jsonl` (kinds `analyst_failure`,
+`analyst_success`, `analyst_merge_failure`, `analyst_merge_success`,
+`analyst_merge_final`) with its parsed findings, and cached in memory and in
+`<run root>/analyst_findings/` (cleared by a fresh run), so a retry or a resumed run
+pays for none again. Each round's batches, merges, call counts and ranked findings are
+journaled (`analyst_findings`, restored on resume), and report.md's "What the analysts
+found" gives the rounds, the calls and the latest round's top 5 findings. A failed
+analyst call is shown and never fails the proposal; a spent budget stops it. The calls
+go through the optimizer's model route and count in the run's budget like the readers'.
+The prompts name no dataset or task, ask for nothing beyond what SkillOpt's analysts
+ask, and see train records only. Off, no call is made and every request is
+byte-identical to a run without the stage; the four settings are excluded from the
+settings digest, so a run resumes whichever way they are set.
+
+Per round with SkillOpt's settings, for F failed and S passed train items:
+ceil(F/8) + ceil(S/8) analyst calls, then the merges (one per side with more than one
+list, at most 8 lists each, plus the final one when both sides found something), then
+the proposal: on 35 train items, about 5-6 analyst and 3 merge calls, as SkillOpt's
+analysts and merges make. SkillOpt's rank call (it trims its merged edits to the edit
+budget), slow update and meta skill are not run: the proposer chooses and writes the
+edits, and its `lessons` are this loop's optimizer-side memory (they are shown to the
+analysts and merges, as SkillOpt shows its meta skill).
+
 ## LiveMath skill graph (`livemath/skill_graph`)
 
 Arm C of the outer-loop study starts from arm A's seed skill, converted by hand into an

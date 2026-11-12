@@ -166,10 +166,16 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         raise ProfileError("fresh_evidence must be true or false (1 or 0 on the command line)")
     result["fresh_evidence"] = bool(result.get("fresh_evidence"))
     # What the model proposer is shown (optim.feedback): switches, 0 or 1 on the command line.
-    for key in ("run_ledger", "lessons", "step_review", "structure_guidance"):
+    for key in ("run_ledger", "lessons", "step_review", "structure_guidance", "analysts"):
         if result.get(key) not in (True, False, 0, 1):
             raise ProfileError(f"{key} must be true or false (1 or 0 on the command line)")
         result[key] = bool(result.get(key))
+    # The analyst stage's sizes (optim.analysts), SkillOpt's by default.
+    for key, least in (("analyst_group_size", 1), ("analyst_merge_batch_size", 2),
+                       ("analyst_max_batches", 0)):
+        value = result.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            raise ProfileError(f"{key} must be an integer of at least {least}")
     max_edits = result.get("max_edits_per_proposal")
     if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
         raise ProfileError("max_edits_per_proposal must be a positive integer (1 is single edits)")
@@ -411,8 +417,10 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
         "fresh_evidence", "max_edits_per_proposal", "selection", "pool_size",
-        # What the proposer is shown, not how anything is scored (optim.feedback).
-        "run_ledger", "lessons", "step_review", "structure_guidance")}
+        # What the proposer is shown, not how anything is scored (optim.feedback,
+        # optim.analysts).
+        "run_ledger", "lessons", "step_review", "structure_guidance",
+        "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
@@ -501,6 +509,16 @@ SETTING_HELP = {
                    "optimizer-model call per step) and shows the verdicts; 0 off",
     "structure_guidance": "1 adds what makes a new step pay off to the request's "
                           "'How nodes compose' (default: 0, off)",
+    "analysts": "1 runs SkillOpt's per-round analysis before each model proposal: failure "
+                "and success analysts over the edited candidate's train items in full, one "
+                "optimizer-model call per batch, merged into one ranked list of findings "
+                "that replaces the readers' summaries (default: 0, off)",
+    "analyst_group_size": "with --analysts 1: train items per analyst call (default: 8, "
+                          "SkillOpt's)",
+    "analyst_merge_batch_size": "with --analysts 1: finding lists per merge call (default: "
+                                "8, SkillOpt's; at least 2)",
+    "analyst_max_batches": "with --analysts 1: the most analyst calls per round, failure "
+                           "batches first (default: 0, no limit, as SkillOpt)",
     "portfolio": "prompt+pipeline: each round asks the model proposer for one "
                  "prompt/knob-level and one pipeline-level candidate and evaluates both, "
                  "gated in that order (default: off)",

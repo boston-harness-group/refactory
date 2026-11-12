@@ -387,6 +387,22 @@ class LoopConfig:
     #: "How nodes compose" also says what makes a new step pay off
     #: (`optim.feedback.STRUCTURE_GUIDANCE`). Off by default (an experiment's switch).
     structure_guidance: bool = False
+    #: The analyst stage (`optim.analysts`): before each proposal of a model proposer
+    #: (autoresearch, alone, in a portfolio or under a parent picker), failure and
+    #: success analysts read the edited candidate's train items in full, in batches of
+    #: ``analyst_group_size``, one optimizer-model call per batch, and their findings
+    #: are merged in batches of ``analyst_merge_batch_size`` into one ranked list, shown
+    #: as "What the analysts found, ranked" in place of the readers' summaries;
+    #: journaled (``analyst_findings``) and summarised in report.md. SkillOpt's
+    #: per-round analysis. Off by default: off makes no call and changes no request.
+    analysts: bool = False
+    #: Items per analyst call (SkillOpt's ``minibatch_size``, 8).
+    analyst_group_size: int = 8
+    #: Finding lists per merge call (SkillOpt's ``merge_batch_size``, 8; at least 2).
+    analyst_merge_batch_size: int = 8
+    #: The most analyst calls per round, failure batches first; 0 (the default, as
+    #: SkillOpt) is no limit.
+    analyst_max_batches: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -672,6 +688,9 @@ class Loop(OuterLoop):
         #: The latest ``lessons`` the model proposer wrote (``LoopConfig.lessons``):
         #: ``{"text", "epoch", "generation"}``, journaled as ``optimizer_lessons``.
         self._lessons: dict[str, Any] = {}
+        #: Each round's analysis the analyst stage journaled (``LoopConfig.analysts``;
+        #: `optim.analysts.journal_entry` with the epoch and generation), for report.md.
+        self._analyses: list[dict[str, Any]] = []
         #: The (candidate, epoch) re-scores tried in this process (`_rescore`), so a
         #: round's in-batch re-score that failed is not tried again after gating; a
         #: resumed run tries again.
@@ -956,6 +975,8 @@ class Loop(OuterLoop):
             self.optimizer.trace_path.unlink(missing_ok=True)
             # The step reviews it cached go with it (`AutoresearchOptimizer._review_steps`).
             shutil.rmtree(self.root / "step_reviews", ignore_errors=True)
+            # And the analyst stage's (`AutoresearchOptimizer._ask`).
+            shutil.rmtree(self.root / "analyst_findings", ignore_errors=True)
         resumed = self._replay_if_asked()
         (self.root / run_history.RUN_FILE).write_text(
             json.dumps(
@@ -3003,8 +3024,11 @@ class Loop(OuterLoop):
             context.attempt = self._proposal_attempt
             if hasattr(self.optimizer, "last_lessons"):
                 self.optimizer.last_lessons = ""
+            if hasattr(self.optimizer, "last_analysis"):
+                self.optimizer.last_analysis = None
             proposals = self.optimizer.propose(context, n, parents)
             self._keep_lessons()
+            self._keep_analysis()
             return proposals
         except BudgetExhausted as exc:
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
@@ -4110,6 +4134,8 @@ class Loop(OuterLoop):
             "holdout": audit,
             "strategy_report": strategy_report,
             **({"portfolio": self._portfolio_report()} if self.config.portfolio else {}),
+            **({"analysts": _analysts_report(self._analyses, self.config)}
+               if self.config.analysts else {}),
             "selection": self._selection_report(),
         }
         if gated and best is not None:
@@ -4533,6 +4559,7 @@ class Loop(OuterLoop):
             "",
             *_strategy_report_section(payload.get("strategy_report") or {}),
             *_portfolio_section(payload.get("portfolio") or {}),
+            *_analysts_section(payload.get("analysts") or {}),
             *_selection_section(payload.get("selection") or {}),
             "## Leaderboard",
             "",
@@ -4732,6 +4759,7 @@ class Loop(OuterLoop):
             lessons=dict(self._lessons) if self.config.lessons else {},
             added_steps=self._added_steps() if self.config.step_review else [],
             structure_guidance=bool(self.config.structure_guidance),
+            analysts=self._analyst_settings(),
             max_edits=int(self.config.max_edits_per_proposal),
             parsimony=float(self.config.parsimony),
             code_nodes=self._code_nodes_offered(sandbox),
@@ -4933,6 +4961,33 @@ class Loop(OuterLoop):
             return
         self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
         self._journal("optimizer_lessons", **self._lessons)
+
+    def _analyst_settings(self) -> dict[str, int]:
+        """``ProposalContext.analysts``: the analyst stage's settings, empty when off."""
+        if not self.config.analysts:
+            return {}
+        from refactory_dsh.optim.analysts import settings
+
+        return settings(group_size=self.config.analyst_group_size,
+                        merge_batch_size=self.config.analyst_merge_batch_size,
+                        max_batches=self.config.analyst_max_batches)
+
+    def _keep_analysis(self) -> None:
+        """Journal the round's analysis (``analyst_findings``) once: a retry in the same
+        generation reuses its cached calls and the same findings, and is not journaled
+        again."""
+        from refactory_dsh.optim.analysts import journal_entry
+
+        analysis = getattr(self.optimizer, "last_analysis", None)
+        if not self.config.analysts or not analysis:
+            return
+        entry = {"epoch": self.epoch, "generation": self.generation, **journal_entry(analysis)}
+        last = self._analyses[-1] if self._analyses else {}
+        if (last.get("epoch"), last.get("generation"), last.get("findings")) == (
+                entry["epoch"], entry["generation"], entry["findings"]):
+            return
+        self._analyses.append(entry)
+        self._journal("analyst_findings", **entry)
 
     def _judged(self) -> list[Candidate]:
         """The evaluated candidates the search made (every one with a parent), in
@@ -5332,6 +5387,9 @@ class Loop(OuterLoop):
                     self.load_strategy_state(record["state"])
             elif event == "optimizer_lessons":
                 self._lessons = {key: record.get(key) for key in ("text", "epoch", "generation")}
+            elif event == "analyst_findings":
+                self._analyses.append({key: value for key, value in record.items()
+                                       if key not in ("event", "at", "ts")})
             elif event in ("rescore", "rescore_failed"):
                 rescores += 1
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
@@ -5568,6 +5626,54 @@ def _holdout_line(audit: dict[str, Any]) -> str:
         + f" — {verdict} ({split})"
         + (f"; {audit['note']}" if audit.get("note") and audit.get("overfit") is False else "")
     )
+
+
+#: The latest round's findings report.md lists.
+REPORT_ANALYST_FINDINGS = 5
+
+
+def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> dict[str, Any]:
+    """What report.json says of the analyst stage: its settings, the rounds it ran, the
+    model calls they made (cached ones apart), and the latest round's analysis."""
+    return {"group_size": int(config.analyst_group_size),
+            "merge_batch_size": int(config.analyst_merge_batch_size),
+            "max_batches": int(config.analyst_max_batches),
+            "rounds": len(analyses),
+            "calls": sum(int(a.get("calls") or 0) for a in analyses),
+            "cached": sum(int(a.get("cached") or 0) for a in analyses),
+            "failed_batches": sum(1 for a in analyses for b in a.get("batches") or ()
+                                  if b.get("error")),
+            "latest": dict(analyses[-1]) if analyses else None}
+
+
+def _analysts_section(report: dict[str, Any]) -> list[str]:
+    if not report:
+        return []
+    lines = ["## What the analysts found", "",
+             f"The analyst stage ran in {report['rounds']} proposal round(s): "
+             f"{report['calls']} optimizer-model call(s) (analysts and merges; "
+             f"{report['cached']} more answered from the cache), batches of up to "
+             f"{report['group_size']} train items, merges of up to "
+             f"{report['merge_batch_size']} lists"
+             + (f", at most {report['max_batches']} analyst call(s) per round"
+                if report.get("max_batches") else "")
+             + (f"; {report['failed_batches']} batch(es) could not be analysed"
+                if report.get("failed_batches") else "")
+             + ". Every round's findings are in journal.jsonl (`analyst_findings`) and each "
+             "call in optimizer_trace.jsonl.", ""]
+    latest = report.get("latest")
+    if latest:
+        from refactory_dsh.optim.analysts import finding_line
+
+        lines += [f"Epoch {latest.get('epoch')}, generation {latest.get('generation')} "
+                  f"(candidate `{latest.get('candidate')}`, {latest.get('failed_items')} "
+                  f"failed and {latest.get('passed_items')} passed item(s)), the top "
+                  "findings:", ""]
+        found = list(latest.get("findings") or ())
+        lines += [finding_line(rank, entry) for rank, entry in
+                  enumerate(found[:REPORT_ANALYST_FINDINGS], 1)] or ["_No common pattern._"]
+        lines.append("")
+    return lines
 
 
 def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
