@@ -47,7 +47,9 @@ says why (`val_gate_basis`).
   the split). With a test part the audit compares val with test, which nothing selects
   on (`split` `test`). A resumed run keeps the `val_gate`, `selection` and `pool_size`
   its `config.json` recorded, whatever its profile or the defaults now say; a resume
-  command that gives one of them explicitly with another value is refused.
+  command that gives one of them explicitly with another value is refused, naming both.
+  A launch that leaves `selection` unset records the rule it resolved (`single` or
+  `pool`).
 - **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
   for them, and `--val-gate 1` is refused.
 
@@ -128,10 +130,14 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
   gradient's leaderboard) carries the gate's decision: `current` (the incumbent),
-  `kept`, `rejected` or `not gated`. Under `pool`: `current`, `in pool` (in the pool
-  now), `left pool` (in the pool when judged, pushed out since), `rejected` (never in
-  the pool; `below pool` when a population picker still breeds from every judged
-  candidate) or `not gated`, and the request says so. "Recent results" lists the current
+  `kept` (accepted as the incumbent when judged), `rejected` or `not gated`, under
+  `pool` as under `single`: which candidates the pool holds follows their val ranking,
+  so the optimizer is not told. Under `pool` the request adds that a parent may be any
+  candidate that scored well on val, a rejected one included. The report, `state.json`
+  and the log label pool runs in full: `current`, `in pool` (in the pool now), `left
+  pool` (in it after the gating that judged it, pushed out since), `rejected` (never in
+  it, or rejected by a person), `below pool` (never in it, but a population picker still
+  breeds from every judged candidate) or `not gated`. "Recent results" lists the current
   candidate first and the rest by train score, then age, never in val order. The
   request's first line, and the line over "What this run has already tried", give the
   train score of the current candidate, labelled as such. The per-knob attribution
@@ -155,9 +161,10 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   a train-score "improved".
 - **Final evaluation.** After a normal end (the epoch bound or an early stop), with a
   test part, the final candidate's val check runs, then the seed, the best and the final
-  candidate on test with `seed`; a best that is the seed reuses the seed's test score
-  (one rollout, `best_test_delta` exactly 0), as a final that is the best reuses the
-  best's. A run that ends on a spent evaluation, rollout, time or
+  candidate on test with `seed`; a best or final that is the seed reuses the seed's
+  test score (one rollout, its delta exactly 0), as a final that is the best reuses the
+  best's. Before this, a seed that won was rolled out twice and its delta was rollout
+  noise. A run that ends on a spent evaluation, rollout, time or
   token budget, or a person's stop, scores neither the last proposals nor the test part,
   as SkillOpt; the report keeps the real stop reason (a spent budget wins over an early
   stop in the same epoch) and says why it skipped. The report's `strategy_report`

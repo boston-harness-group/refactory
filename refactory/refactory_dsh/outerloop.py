@@ -1093,7 +1093,7 @@ class FinalEvaluation:
     2. ``baseline_test``, ``best_test``, ``final_test``: the seed, the best and the
        final candidate on test, concurrently through ``Run.evaluate_many``; the best
        reuses the seed's score when it is the seed, and the final the best's when it
-       is the best (``REUSES``).
+       is the best, or the seed's when it is the seed.
 
     Every rollout uses ``seed``. Each finished phase is kept (``completed``) and
     ``save`` is called, so a resumed run continues where it stopped; the decisions go
@@ -1106,9 +1106,6 @@ class FinalEvaluation:
 
     PHASES = ("final_selection", "baseline_test", "best_test", "final_test", "final_done")
     TEST_PHASES = ("baseline_test", "best_test", "final_test")
-    #: The phase whose score a phase reuses when it is the same candidate: the best is
-    #: the seed (``best_test`` from ``baseline_test``), the final is the best.
-    REUSES = {"best_test": "baseline_test", "final_test": "best_test"}
 
     def __init__(self, *, record: Callable[..., Any] | None = None, label: str = "outer loop") -> None:
         self.record = record or (lambda step_type, **fields: None)
@@ -1163,20 +1160,26 @@ class FinalEvaluation:
                     )
                 finished("final_selection")
 
-            # (phase, candidate) for each pending test phase; None reuses an earlier
-            # phase's score (``REUSES``): the best's is the baseline's when the best is
-            # the seed, so a seed that wins is scored on test once and its delta is 0,
-            # not the noise between two rollouts of the same candidate.
+            # (phase, candidate) for each pending test phase; None reuses the score of
+            # the earlier phase that rolled the same candidate out (``reuses``): a best
+            # or final that is the seed takes the baseline's, a final that is the best
+            # the best's. So a seed that wins is scored on test once and its deltas are
+            # 0, not the noise between two rollouts of the same candidate.
             plan: list[tuple[str, Candidate | None]] = []
-            seed_candidate = run.seed()
-            if "baseline_test" not in self.completed:
-                plan.append(("baseline_test", seed_candidate))
-            if "best_test" not in self.completed:
-                best_is_seed = gate.best_id == seed_candidate.id
-                plan.append(("best_test", None if best_is_seed else self._held(run, gate.best_id)))
-            if "final_test" not in self.completed:
-                final_is_best = gate.current_id == gate.best_id
-                plan.append(("final_test", None if final_is_best else self._held(run, gate.current_id)))
+            seed_id = run.seed().id
+            reuses: dict[str, str] = {}
+            if gate.best_id == seed_id:
+                reuses["best_test"] = "baseline_test"
+            if gate.current_id == gate.best_id:
+                reuses["final_test"] = "best_test"
+            elif gate.current_id == seed_id:
+                reuses["final_test"] = "baseline_test"
+            held = {"baseline_test": seed_id, "best_test": gate.best_id,
+                    "final_test": gate.current_id}
+            for phase in self.TEST_PHASES:
+                if phase not in self.completed:
+                    plan.append((phase, None if phase in reuses
+                                 else self._held(run, held[phase])))
             requests = [EvalRequest(candidate=cand, part="test", seed=seed)
                         for _phase, cand in plan if cand is not None]
             request_phases = [phase for phase, cand in plan if cand is not None]
@@ -1193,7 +1196,7 @@ class FinalEvaluation:
                     run.evaluate_many(requests, on_result=_on_result)
                 for phase, cand in plan:
                     if cand is None:  # the same candidate as an earlier phase: reuse it
-                        source = self.REUSES[phase]
+                        source = reuses[phase]
                         earlier = phases.get(source) or {}
                         phases[phase] = {"score": earlier.get("score", result.get(source)),
                                          "reused": True, "from": source}

@@ -881,20 +881,113 @@ def test_the_requests_rows_follow_train_score_after_the_current_candidate(
 
 
 def test_pool_labels_say_in_pool_left_pool_and_rejected(tmp_path, monkeypatch):
-    """The pool scenario (pool_size 2): 5 is the incumbent; 4, 2 and 1 are in the pool
-    (2 was the incumbent before 5); the seed was in the pool until round 1 pushed it
-    out; 3 never entered it. With a population picker, which still breeds from every
-    judged candidate, 3 is ``below pool`` rather than ``rejected``."""
+    """The pool scenario (pool_size 2), in the report's labels: 5 is the incumbent; 4,
+    2 and 1 are in the pool (2 was the incumbent before 5); the seed was in the pool
+    until round 1 pushed it out; 3 never entered it. The optimizer's labels are
+    ``single``'s: kept (accepted as the incumbent when judged) or rejected."""
     _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
-    loop, _, _ = _run(tmp_path / "pool", monkeypatch, POOL_PLAN, epochs=3, batch_size=3,
-                      selection="pool", pool_size=2)
-    labels = {_level(c): loop._gate_decision(c.id) for c in loop.population}
+    loop, _, report = _run(tmp_path / "pool", monkeypatch, POOL_PLAN, epochs=3,
+                           batch_size=3, selection="pool", pool_size=2)
+    labels = {_level(c): loop._gate_decision(c.id, detail=True) for c in loop.population}
     assert labels == {5: "current", 4: "in pool", 2: "in pool", 1: "in pool",
                       0: "left pool", 3: "rejected"}
-    loop._population_policy = lambda: True  # type: ignore[method-assign]
-    loop._pool_entered_memo = None
-    assert loop._gate_decision(next(c.id for c in loop.population if _level(c) == 3)) \
-        == "below pool"
+    proposer_view = {_level(c): loop._gate_decision(c.id) for c in loop.population}
+    assert proposer_view == {5: "current", 4: "rejected", 2: "kept", 1: "rejected",
+                             0: "kept", 3: "rejected"}
+    assert {row["gate"] for row in report["leaderboard"]} == {"current", "in pool"}
+
+
+def test_the_proposer_never_sees_a_pool_label(tmp_path, monkeypatch):
+    """Under pool, every request (rows, history, reasoning, gate note) uses single's
+    labels only; the pool labels are the report's."""
+    _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
+    loop, proposer, _ = _run(tmp_path, monkeypatch, POOL_PLAN + [[(5, 6)]], model=True,
+                             epochs=4, batch_size=3, selection="pool", pool_size=2)
+    assert loop._gate_decision(loop.population[0].id, detail=True) == "left pool", "setup"
+    assert len(proposer.prompts) == 4
+    for prompt in proposer.prompts:
+        for label in ("in pool", "left pool", "below pool", "pushed out"):
+            assert label not in prompt, label
+        cells = set(re.findall(r"\| (current|kept|rejected|not gated|[a-z ]+pool) \|$",
+                               prompt, re.M))
+        assert cells <= {"current", "kept", "rejected", "not gated"}, cells
+    assert "left pool" in (loop.root / "state.json").read_text()
+
+
+def test_ties_at_the_pool_edge_enter_the_pool(tmp_path, monkeypatch):
+    """pool_size 2. Round 1: 1 (0.7) and 2 and 3 tied on 0.6 at the edge: all three
+    enter. Round 2: 4 (0.8) and 5 (0.75) push the edge up to 0.7, so 2 and 3 leave the
+    pool: ``left pool``, not ``rejected``, as is the seed."""
+    val = {0: 0.5, 1: 0.7, 2: 0.6, 3: 0.6, 4: 0.8, 5: 0.75}
+    _scores(monkeypatch, {level: 0.5 for level in val}, val)
+    loop, _, _ = _run(tmp_path, monkeypatch, [[(0, 1), (0, 2), (0, 3)], [(1, 4), (1, 5)]],
+                      epochs=2, batch_size=3, selection="pool", pool_size=2)
+    labels = {_level(c): loop._gate_decision(c.id, detail=True) for c in loop.population}
+    assert labels == {4: "current", 5: "in pool", 1: "left pool", 2: "left pool",
+                      3: "left pool", 0: "left pool"}
+    # Entry is judged per gating, as recorded: had one gating judged them all, 2 and 3
+    # would never have entered.
+    ids = {_level(c): c.id for c in loop.population}
+    loop._gate_rounds = [[ids[0]], [ids[level] for level in (1, 2, 3, 4, 5)]]
+    assert loop._gate_decision(ids[2], detail=True) == "rejected"
+
+
+def test_a_person_rejection_does_not_make_others_leave_the_pool(tmp_path, monkeypatch):
+    """pool_size 2. Round 1: 1 (0.9) and 2 (0.7) enter, 3 (0.6) does not. Round 2: 4
+    (0.95). A person then rejects 2: 3 still never entered the pool (2 held its place
+    when 3 was judged), so it is ``rejected``, not ``left pool``; 2 is rejected."""
+    val = {0: 0.5, 1: 0.9, 2: 0.7, 3: 0.6, 4: 0.95}
+    _scores(monkeypatch, {level: 0.5 for level in val}, val)
+    loop, _, _ = _run(tmp_path, monkeypatch, [[(0, 1), (0, 2), (0, 3)], [(1, 4)]],
+                      epochs=2, batch_size=3, selection="pool", pool_size=2)
+    by_level = {_level(c): c.id for c in loop.population}
+    loop.rejected = [by_level[2]]
+    loop._pool_entered_memo = None  # recomputed with the rejection in place
+    labels = {level: loop._gate_decision(cid, detail=True) for level, cid in by_level.items()}
+    assert labels == {4: "current", 1: "in pool", 2: "rejected", 3: "rejected",
+                      0: "left pool"}
+
+
+class _PickedScript(Optimizer):
+    """A proposer for a real parent picker: each round, the child levels it is given,
+    each a child of whatever parent the picker handed over."""
+
+    name = "picked_script"
+
+    def __init__(self, rounds: list[list[int]]) -> None:
+        super().__init__(k=1)
+        self.rounds = list(rounds)
+        self.parents: list[int] = []
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        parent = parents[0]
+        self.parents.append(_level(parent))
+        levels = self.rounds.pop(0) if self.rounds else []
+        return [Proposal(edit={"op": "set_knob", "name": "level", "value": level},
+                         parent=parent.id) for level in levels]
+
+
+def test_below_pool_with_a_real_population_picker(tmp_path, monkeypatch):
+    """The evolutionary picker (a population policy) breeds from every judged candidate,
+    so 3, which never entered the pool of 2, is ``below pool`` in the report, and the
+    selection resolves to pool by default and is recorded so."""
+    from refactory_dsh.optim.compose import PickedParent
+
+    _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    with _patch_mode(FitProbe):
+        loop = strategies.create("default", MODE_ID, _config(
+            tmp_path, epochs=3, batch_size=3, pool_size=2, parent_picker="evolutionary"),
+            project=Path("."))
+        assert loop._population_policy()
+        picker = loop.optimizer.picker
+        loop.optimizer = PickedParent(picker, _PickedScript([[1, 2, 3], [4], [5]]))
+        loop.run()
+    assert loop.selection_mode() == "pool"
+    assert json.loads((loop.root / "config.json").read_text())["selection"] == "pool"
+    by_level = {_level(c): c.id for c in loop.population}
+    assert loop._gate_decision(by_level[3], detail=True) == "below pool"
+    assert loop._gate_decision(by_level[3]) == "rejected"
 
 
 def test_the_portfolio_report_under_pool_counts_incumbents_and_pool_members(
@@ -948,7 +1041,7 @@ def test_structural_wins_under_the_gate_are_judged_on_val():
     down = Candidate(id="down", parent="p", state={}, edits=edit, step_edits=1, score=0.95,
                      evaluated=True)
     fake = SimpleNamespace(
-        population=[parent, up, down], _row=lambda c: {"id": c.id},
+        population=[parent, up, down], _row=lambda c, **_: {"id": c.id},
         config=SimpleNamespace(val_gate=True), _custom_strategy=None,
         _gate=lambda: SimpleNamespace(cache={"p": 0.5, "up": 0.75, "down": 0.25}))
     wins = Loop._structural_wins(fake, [up, down, parent])
@@ -991,12 +1084,13 @@ def test_a_seed_that_wins_is_scored_on_test_once_and_its_delta_is_zero(tmp_path,
 # ── resume keeps the run's selection ───────────────────────────────────────
 
 
-def _cli(tmp_path: Path, *argv: str) -> int:
+def _cli(tmp_path: Path, *argv: str, profile: bool = True) -> int:
     from refactory_dsh import loop as loop_module
 
     with _patch_mode(FitProbe):
         return loop_module.main([MODE_ID, "--project", str(tmp_path), "--runs-root",
-                                 str(tmp_path / "run"), "--profile", "pool-probe", *argv])
+                                 str(tmp_path / "run"),
+                                 *(["--profile", "pool-probe"] if profile else []), *argv])
 
 
 @pytest.fixture
@@ -1024,14 +1118,35 @@ def test_a_resume_keeps_the_selection_and_pool_size_its_launch_gave(tmp_path, po
     assert report["selection"]["setting"] == "pool" and report["selection"]["pool_size"] == 3
 
 
-@pytest.mark.parametrize("flag", [("--pool-size", "5"), ("--selection", "single")])
-def test_a_resume_that_names_another_selection_is_refused(tmp_path, pool_profile, capsys, flag):
-    """A resume command that gives a different selection or pool size explicitly is
-    refused, as a different train_minibatch is; the recorded run is left as it was."""
+@pytest.mark.parametrize("profile", [True, False])
+@pytest.mark.parametrize("flag,named", [
+    (("--pool-size", "5"), "pool_size 3 and this resume asks for pool_size 5"),
+    (("--selection", "single"), "selection pool and this resume asks for selection single"),
+    (("--val-gate", "0"), "val_gate 1 and this resume asks for val_gate 0"),
+])
+def test_a_resume_that_names_another_selection_is_refused(
+        tmp_path, pool_profile, capsys, flag, named, profile):
+    """A resume command, with its profile or without one, that gives a different
+    selection, pool size or val_gate explicitly is refused, as a different
+    train_minibatch is, naming both values; the recorded run is left as it was."""
     before = (pool_profile / "config.json").read_text()
-    assert _cli(tmp_path, "--epochs", "2", "--resume", *flag) == 2
-    assert "this run was started with" in capsys.readouterr().err
+    assert _cli(tmp_path, "--epochs", "2", "--resume", *flag, profile=profile) == 2
+    assert named in capsys.readouterr().err
     assert (pool_profile / "config.json").read_text() == before
+
+
+def test_a_launch_records_the_selection_it_resolved(tmp_path, monkeypatch):
+    """Launched with no --selection, the run records the rule it resolved (single for
+    the default loop here), so a resume compares real values."""
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+    _scores(monkeypatch, {}, {})
+    profiles.save(tmp_path, "pool-probe", {"settings": {
+        "optimizer": "random", "allowed_ops": ["set_knob"], "val_gate": True, "seed": 7,
+        "holdout": 0.0, "batch_size": 1, "max_evaluations": 50,
+        "parts_manifest": str(_write_parts(tmp_path, test=True))}})
+    assert _cli(tmp_path, "--epochs", "1") == 0
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    assert (config["selection"], config["pool_size"]) == ("single", 8)
 
 
 def test_a_loop_built_in_code_resumes_with_its_recorded_selection(tmp_path, monkeypatch):
@@ -1049,3 +1164,51 @@ def test_a_loop_built_in_code_resumes_with_its_recorded_selection(tmp_path, monk
     assert proposer.handed[0] == [2, 1], "round 2 breeds from the pool of 2"
     assert _levels(loop, report["selection"]["pool"]) == [5, 4, 2, 1]
     assert _levels(loop, [report["best"]["id"]]) == [5]
+
+
+def test_a_final_candidate_that_is_the_seed_reuses_the_seeds_test_score():
+    """The final (current) candidate is the seed and the best another: the seed is
+    rolled out on test once, as the baseline; the final's score is that one and its
+    delta exactly 0. Only the best gets its own rollout."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from refactory_dsh.outerloop import FinalEvaluation
+
+    seed, best = SimpleNamespace(id="s"), SimpleNamespace(id="b")
+    rolled: list[str] = []
+    scores = {"s": 0.5, "b": 0.7}
+
+    class FakeRun:
+        def final_scoring(self):  # type: ignore[no-untyped-def]
+            return contextlib.nullcontext()
+
+        def seed(self):  # type: ignore[no-untyped-def]
+            return seed
+
+        def candidate(self, cid):  # type: ignore[no-untyped-def]
+            return {"s": seed, "b": best}.get(cid)
+
+        def evaluate(self, candidate, *, part, seed=None):  # type: ignore[no-untyped-def]
+            assert part == "val"
+
+        def part_scores(self, candidate, part):  # type: ignore[no-untyped-def]
+            return [{"score": 0.4 if part == "val" else scores[candidate.id]}]
+
+        def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
+            for index, request in enumerate(requests):
+                rolled.append(request.candidate.id)
+                on_result(index, request.candidate)
+
+        def log(self, text):  # type: ignore[no-untyped-def]
+            pass
+
+    gate = SimpleNamespace(current_id="s", best_id="b", best_score=0.6,
+                           offer_best=lambda cid, score: False)
+    final = FinalEvaluation()
+    final.run(FakeRun(), gate, seed=7, save=lambda: None)  # type: ignore[arg-type]
+    assert sorted(rolled) == ["b", "s"], "the seed once, the best once"
+    result = final.result
+    assert result["status"] == "done"
+    assert result["final_test"] == result["baseline_test"] == 0.5
+    assert result["final_test_delta"] == 0 and result["best_test_delta"] == pytest.approx(0.2)

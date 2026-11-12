@@ -1897,22 +1897,22 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                   f"item is 1/{val_items} = {1 / val_items:.3g} of it, and a rejection can come "
                   "down to a single item. " if val_items > 0 else "")
     if selection == "pool":
-        below = any(row.get("gate") == "below pool" for rows in tables for row in rows)
-        return ["This run keeps a validation pool: each candidate was also run on held-out "
-                "items, and the pool holds the candidates that scored best there (`in pool`). "
-                "The best of all is marked `current`; it changes only when a candidate scores "
-                "strictly higher there. A `left pool` candidate was in the pool and was pushed "
-                "out by better ones since. Rows are not in order of the held-out scores. "
-                "Scores here are train scores; held-out scores are never shown. You edit the "
-                "pipeline shown below. A `rejected` candidate never entered the pool; that is "
-                "all it says. "
-                + ("A `below pool` candidate never entered the pool either, but the parent "
-                   "picker may still choose it. " if below else "")
-                + resolution + "A change that was rejected must not be proposed "
-                "again unchanged, but when its train fixed/broken counts against its parent "
-                "(when shown below) were strongly positive, its direction may still be right: "
-                "you may build on it or combine it with edits to other steps in the same "
-                "failure path."]
+        # The same labels as ``single`` (the pool's own membership follows the val
+        # ranking, so it is never shown): what changes is that a parent may be any
+        # candidate that scored well there, a rejected one included.
+        return ["This run has a validation gate with a pool of parents: each candidate "
+                "was also run on held-out items, and the gate kept it only if it scored "
+                "strictly higher there than the current candidate (an equal score is "
+                "rejected); the best so far is marked `current`. A parent may be any of the "
+                "candidates that scored well there, a `rejected` one included. Rows are not "
+                "in order of the held-out scores. Scores here are train scores; held-out "
+                "scores are never shown. You edit the pipeline shown below. A `rejected` "
+                "candidate was not shown better than the current one on validation; that is "
+                "all a rejection says. " + resolution + "A change that was rejected must not "
+                "be proposed again unchanged, but when its train fixed/broken counts against "
+                "its parent (when shown below) were strongly positive, its direction may still "
+                "be right: you may build on it or combine it with edits to other steps in the "
+                "same failure path."]
     return ["This run has a validation gate: each candidate was also run on held-out "
             "items, and the gate kept it only if it scored strictly higher there than the "
             "current candidate (an equal score is rejected). Scores here are train scores; "
@@ -2260,7 +2260,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]
                     if entry.get("considered") else [])]
-    promising = [entry for entry in entries if entry.get("gate") in ("rejected", "below pool")
+    promising = [entry for entry in entries if entry.get("gate") == "rejected"
                  and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)
                  and entry["fixed"] > entry["broken"]]
     if promising:
