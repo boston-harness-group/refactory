@@ -872,10 +872,13 @@ class ParallelProbe(LevelProbe):
         return graph
 
 
-def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeypatch):
-    """Two children and the parent's re-score run at once, their items 4 at a time each,
-    under a run-wide cap of 2 items in flight: counted from each item's pass start to its
-    completion, never more than 2 -- the re-score's items included."""
+@pytest.mark.parametrize("children,slots", [(2, 3), (4, 4)])
+def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeypatch,
+                                                                 children, slots):
+    """The parent's re-score beside two children (a slot free) or after four (every
+    slot taken), items 4 at a time each, under a run-wide cap of 2 items in flight:
+    counted from each item's pass start to its completion, never more than 2 -- the
+    re-score's items included, alone or not."""
     import threading
 
     from refactory_dsh import items as items_module
@@ -890,8 +893,9 @@ def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeyp
 
     def evaluate_many(self, requests, **kwargs):  # type: ignore[no-untyped-def]
         # Items in flight are counted inside batches: a lone evaluation (the seed's)
-        # runs at its own parallelism, outside the run-wide gate, as on main.
-        state["batch"] = len(requests) > 1
+        # runs at its own parallelism, outside the run-wide gate, as on main; a lone
+        # re-score is a batch.
+        state["batch"] = len(requests) > 1 or any(r.rescore_epoch is not None for r in requests)
         try:
             return many(self, requests, **kwargs)
         finally:
@@ -914,10 +918,12 @@ def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeyp
     monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
     monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
     monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
-    proposer = Reasoning([[(5, 7), (5, 6)], []])
+    plan = [[(5, 7), (5, 6)] if children == 2 else [(5, 1), (5, 2), (5, 3), (5, 4)], []]
+    proposer = Reasoning(plan)
     with _patch_mode(ParallelProbe):
-        loop = _loop(tmp_path, epochs=2, val_gate=True, batch_size=2, fresh_evidence=True,
-                     max_concurrent_evaluations=3, max_items_in_flight=2)
+        loop = _loop(tmp_path, epochs=2, val_gate=True, batch_size=children,
+                     fresh_evidence=True, max_concurrent_evaluations=slots,
+                     max_items_in_flight=2)
         loop.optimizer = proposer
         loop.run()
     assert '"rescore"' in (loop.root / "journal.jsonl").read_text(), "setup: re-scored"

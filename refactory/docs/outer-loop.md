@@ -126,11 +126,12 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   wave when that wave leaves a slot free (two portfolio children and three slots, the
   live shape), else it runs after the children, alone. Either way it is a request of a
   `Run.evaluate_many` batch: its items count against `--max-items-in-flight` with the
-  children's, and a stop ends it with them (a child's error is the one raised). It goes in only when there is room for
-  every child still to score and it: `--max-evaluations` must hold all of them, and
-  `--max-rollouts`, when set, each child's train and val rollouts and then the
-  re-score's train rollouts, so a re-score never takes what a child needs to be scored
-  or judged. It is skipped when it already has this epoch's records.
+  children's, and a stop ends it with them (a child's error is the one raised). It goes
+  in only when there is room for every child still to score and it: `--max-evaluations`
+  must hold all of them, and `--max-rollouts`, when set, each child's train and val
+  rollouts and then the re-score's train rollouts, so a re-score never takes what a
+  child needs to be scored or judged. It is skipped when it already has this epoch's
+  records.
   So every judged child pairs with its parent on the same seed, a round that keeps a
   child included; a round that keeps none finds the parent re-scored and does not score
   it again after gating, and a re-score that failed in the round is not tried again in

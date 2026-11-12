@@ -1400,17 +1400,10 @@ class Loop(OuterLoop):
         """The round's parent re-score when its children filled every concurrent slot:
         alone, after them, as a batch of its own (the item gate and stop signal of
         `Run.evaluate_many`). ``forward`` kept it only where the evaluation and rollout
-        budgets hold every child and it (`_room_for_rescore`); the time and token
-        budgets, which the wave may have spent, are checked here."""
-        from refactory_dsh.budgets import BudgetExhausted
-
+        budgets hold every child and it (`_room_for_rescore`). A time or token budget the
+        wave spent refuses it in `_measure` before any trial runs: the reservation comes
+        back and the bound is set (``BudgetStopped``)."""
         items = self._minibatch(epoch)
-        if self.budget:
-            try:
-                self.budget.checkpoint("work" if self._owns_resource_budget else None)
-            except BudgetExhausted as exc:
-                self.bound = str(exc)
-                return
         try:
             Run(_loop=self).evaluate_many([EvalRequest(
                 candidate=parent, part=task_module.TRAIN, items=items, seed=seed,
