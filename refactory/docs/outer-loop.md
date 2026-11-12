@@ -540,6 +540,58 @@ the journal. A trace line that cannot be written (a full disk) is a warning; the
 proposals are kept. The other library optimizers call no model; SkillOpt records its own
 calls in `skillopt_trace.jsonl`.
 
+### Run-wide feedback: changes by kind, lessons, added-step reviews
+
+Three more request sections (`optim/feedback.py`) carry what the run has taught so
+far, beyond the recent candidates above. Each has a switch (a profile setting, or `0`/`1`
+on the command line), none changes how anything is scored, and none reads anything but
+the graph, train records and the gate's outcome words: no answer or option is parsed,
+and no validation item or score is shown. They hold for every strategy that builds this
+request (the default loop, `reflective`, `best_of_n`, `autoscientists`, a parent
+picker paired with `autoresearch`); SkillOpt builds its own requests and is unchanged.
+The Python walker and the optimizer only; nothing here touches the TypeScript spine.
+
+- **Every change so far, by kind** (`--run-ledger`, default `1`). Every candidate the
+  run has evaluated (under the gate, every one it judged), oldest first: id, round,
+  parent, the kind of change its own edits made, the knobs and steps they touched, its
+  train fixed/broken counts against its parent on shared items, the gate's word and its
+  rationale (140 characters). The kind comes from the edit ops and the kinds of node
+  they add: `prompt/setting` (knob edits only), `added agent step`, `added code step`
+  (an op whose code the edit wrote), `split`, `loop/gate`, `parallel`,
+  `removal/rewire` (bypass, remove, reorder, edges) or `other`; a proposal that makes
+  several is filed under its most specific structure. A tally line per kind comes
+  first (tried, kept, best train fixed−broken). The newest 40 rows (within 9000
+  characters) are listed; older ones are only in the tally.
+- **Your lessons so far** (`--lessons`, default `1`). The answer format has an optional
+  `lessons` field: what the results so far teach about which changes help here, keeping,
+  revising or dropping earlier lessons. The latest (at most 1500 characters) is kept with
+  the epoch and generation it was written in, journaled (`optimizer_lessons`), restored
+  on resume and shown back in the next request; an answer without it keeps the previous
+  lessons.
+- **Did the added steps contribute?** (`--step-review`, default `1`). For every step a
+  candidate of the last round added (an insert, a split's halves, a fork's branches, a
+  loop's gate; not the fork and join themselves), on the train items it shares with its
+  parent: the candidate's fixed and broken items, how many items' final step output
+  changed (whitespace-normalised text), and the step's median duration and tokens when
+  its records carry them. Then one call of the optimizer's model per step that recorded
+  text output (at most 8 per request): it reads, on up to 4 train items (changed outcomes
+  first), the step's prompt as sent, its output and the next step's output, and answers
+  `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
+  quote and a note. The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
+  and cached in memory and in `<run root>/step_reviews/`, so a retry or a resumed run
+  pays for none again. A failed or unreadable review is recorded and the step is shown
+  without a verdict; it never fails the proposal.
+- **What makes a new step pay off** (`--structure-guidance`, default `0`). When on,
+  "How nodes compose" adds one generic paragraph: a step helps when it adds work or
+  information the pipeline lacks (an independent attempt, several attempts combined by
+  a vote or a check, a computation or check in code, a retry with a specific reason);
+  one that re-reads the same notes with the same model tends to repeat their mistakes.
+  Off by default, for an experiment.
+
+The readers' success patterns (what the passing items do right) have their own heading
+after the failure patterns, up to 4 per reader whatever its failure patterns, and a
+quarter of the findings' room the failure patterns cannot take.
+
 ## LiveMath skill graph (`livemath/skill_graph`)
 
 Arm C of the outer-loop study starts from arm A's seed skill, converted by hand into an

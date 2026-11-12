@@ -1,0 +1,544 @@
+"""What the model proposer learns across a run (`optim.feedback`), each behind a switch.
+
+- ``run_ledger``: "Every change so far, by kind" lists every evaluated candidate of the
+  run (not only the recent ones), with the kind of change it made, train fixed/broken
+  against its parent and the gate's word, after a tally per kind; bounded.
+- ``lessons``: the answer's optional ``lessons`` are kept, journaled, shown back as "Your
+  lessons so far" and survive a resume; an answer without them keeps the old ones.
+- ``step_review``: each step the last round added gets its train counts and one review
+  call (``step_review``), cached, whose failure is shown and never fatal.
+- Readers' success patterns get their own heading and room.
+- ``structure_guidance`` (off by default) adds what makes a new step pay off.
+
+No new section shows a validation item or score. Each test fails when the behaviour it
+names is reverted.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from refactory_dsh.optim import ProposalContext, feedback
+from refactory_dsh.optim.base import Candidate, Proposal
+from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+from refactory_dsh.outerloop import ValidationGate
+
+from test_gate_aware_context import Recording, _passes_by_level, _val
+from test_skillopt import TEST_IDS, VAL_IDS, _patch_mode
+from test_val_gate import LevelProbe, _level, _loop
+
+
+def _section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:] if end == -1 else text[start:end]
+
+
+# ── change kinds ────────────────────────────────────────────────────────────
+
+
+AGENT = {"id": "think", "kind": "agent", "writes": ["think.txt"], "prompt_template": "p"}
+CODE = {"id": "count", "kind": "op", "call": "refactory_dsh.snippet:run", "code": "def main(i): ..."}
+
+
+@pytest.mark.parametrize("edits,kind", [
+    ([{"op": "set_knob", "name": "a__task", "value": "x"}], "prompt/setting"),
+    ([{"op": "add_knob", "name": "k", "spec": {}}], "prompt/setting"),
+    ([{"op": "insert_after", "target": "a", "node": AGENT}], "added agent step"),
+    ([{"op": "insert_after", "target": "a", "node": AGENT},
+      {"op": "set_knob", "name": "think__task", "value": "x"}], "added agent step"),
+    ([{"op": "insert_before", "target": "a", "node": CODE}], "added code step"),
+    ([{"op": "insert_after", "target": "a", "node": AGENT},
+      {"op": "insert_after", "target": "think", "node": CODE}], "added code step"),
+    ([{"op": "split", "target": "a", "into": [AGENT, {**AGENT, "id": "b"}]}], "split"),
+    ([{"op": "loop", "target": "a", "gate": {"id": "g", "kind": "gate"}}], "loop/gate"),
+    ([{"op": "insert_after", "target": "a", "node": {"id": "g", "kind": "gate"}}], "loop/gate"),
+    ([{"op": "parallel", "target": "a", "branches": [AGENT]}], "parallel"),
+    ([{"op": "bypass", "target": "a"}], "removal/rewire"),
+    ([{"op": "add_edge", "source": "a", "target": "b"}], "removal/rewire"),
+    ([{"op": "reorder", "first": "a", "second": "b"}], "removal/rewire"),
+    ([{"op": "insert_after", "target": "a", "node": {"id": "x", "kind": "data"}}], "other"),
+])
+def test_a_change_is_filed_by_its_ops_and_the_kinds_of_node_it_adds(edits, kind):
+    assert feedback.change_kind(edits) == kind
+
+
+def test_a_duplicate_is_filed_by_the_kind_of_the_node_it_copies():
+    # The copy is looked up by its new id (the target need not be in the state shown).
+    state = {"graph": {"nodes": {"a2": {**AGENT, "id": "a2"}}}}
+    assert feedback.change_kind([{"op": "duplicate", "target": "a", "new_id": "a2"}],
+                                state) == "added agent step"
+
+
+def test_what_a_change_touched_names_knobs_and_steps():
+    edits = [{"op": "split", "target": "decide", "into": [AGENT, {**AGENT, "id": "final"}]},
+             {"op": "set_knob", "name": "final__task", "value": "x"}]
+    assert feedback.touched(edits) == ["think", "final", "decide", "final__task"]
+
+
+# ── the run ledger ──────────────────────────────────────────────────────────
+
+
+#: Eight rounds: more candidates than "Your earlier reasoning" keeps (REASONING_ENTRIES).
+PLAN = [[(5, 7)], [(7, 6)], [(7, 8)], [(8, 4)], [(8, 9)], [(9, 3)], [(9, 2)], [(9, 6)], []]
+
+
+def _ledger_run(tmp_path: Path, monkeypatch: Any, **overrides: Any):
+    from refactory_dsh.loop import Loop
+
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    _passes_by_level(monkeypatch)
+    proposer = Recording(PLAN)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, **{"epochs": len(PLAN), "val_gate": True,
+                                  "max_evaluations": 200, **overrides})
+        loop.optimizer = proposer
+        loop.run()
+    return loop, proposer
+
+
+def _no_val(text: str, loop: Any) -> None:
+    """No validation (or test) item id and no val score appears in ``text``."""
+    for item in (*VAL_IDS, *TEST_IDS):
+        assert f"Item {item}" not in text and f"| {item} |" not in text and f" {item}," not in text
+    for score in loop._gate().cache.values():
+        assert f"{score:.6g}" not in text and str(score) not in text, score
+
+
+def test_the_ledger_lists_every_candidate_of_the_run_with_a_tally(tmp_path, monkeypatch):
+    from refactory_dsh.optim.base import REASONING_ENTRIES
+
+    loop, proposer = _ledger_run(tmp_path, monkeypatch)
+    ctx = proposer.contexts[-1]
+    made = [c for c in loop.population if c.parent and c.evaluated]
+    assert len(made) > REASONING_ENTRIES, "setup: more than the recent candidates"
+    assert [entry["id"] for entry in ctx.ledger] == [c.id for c in made]
+    text = ctx.render()
+    section = _section(text, "## Every change so far, by kind")
+    assert all(f"| {c.id} |" in section for c in made), "every candidate, not only recent"
+    kept = sum(1 for e in ctx.ledger if e["gate"] in feedback.KEPT_WORDS)
+    nets = [e["fixed"] - e["broken"] for e in ctx.ledger if e["fixed"] is not None]
+    assert (f"- prompt/setting: tried {len(made)}, kept {kept}, best train fixed-broken "
+            f"{max(nets):+d}") in section
+    ids = {_level(c): c.id for c in loop.population}
+    row = next(line for line in section.splitlines() if line.startswith(f"| {ids[4]} |"))
+    # 4 (from 8) breaks t3-t6 against 8: passes t1-t2 only.
+    assert "| prompt/setting | level | 0/4 of 8 | rejected |" in row
+    _no_val(section, loop)
+
+
+def test_without_the_ledger_switch_there_is_no_ledger(tmp_path, monkeypatch):
+    _loop_, proposer = _ledger_run(tmp_path, monkeypatch, run_ledger=False)
+    ctx = proposer.contexts[-1]
+    assert ctx.ledger == []
+    assert "## Every change so far, by kind" not in ctx.render()
+
+
+def _entry(index: int, kind: str = "prompt/setting", gate: str = "rejected",
+           rationale: str = "R" * 1000, touched: list[str] | None = None) -> dict[str, Any]:
+    return {"id": f"c{index:04d}", "round": index, "parent": "p", "kind": kind,
+            "touched": touched or ["decide__task"], "fixed": 1, "broken": 2, "shared": 30,
+            "gate": gate, "rationale": rationale}
+
+
+def test_the_ledger_keeps_the_newest_rows_and_counts_the_older_in_the_tally():
+    entries = [_entry(i, kind="added agent step" if i % 2 else "prompt/setting",
+                      gate="kept" if i % 10 == 0 else "rejected", rationale="short")
+               for i in range(300)]
+    lines = feedback.ledger_lines(entries)
+    text = "\n".join(lines)
+    rows = [line for line in lines[-1].splitlines() if line.startswith("| c")]
+    assert len(rows) == feedback.LEDGER_ROWS
+    assert rows[-1].startswith("| c0299 |"), "the newest are kept"
+    assert "- prompt/setting: tried 150, kept 30, best train fixed-broken -1" in text
+    assert "- added agent step: tried 150, kept 0, best train fixed-broken -1" in text
+    assert f"The {300 - len(rows)} oldest are counted in the tally above only" in text
+
+
+def test_the_ledger_table_stays_within_its_characters():
+    entries = [_entry(i, touched=[f"{'k' * 80}_{n}" for n in range(6)]) for i in range(300)]
+    lines = feedback.ledger_lines(entries)
+    rows = [line for line in lines[-1].splitlines() if line.startswith("| c")]
+    assert len(lines[-1]) <= feedback.LEDGER_CHARS < len(rows[0]) * feedback.LEDGER_ROWS
+    assert rows[-1].startswith("| c0299 |") and "+2 more" in rows[-1]
+    assert "R" * (feedback.LEDGER_RATIONALE_CHARS + 1) not in "\n".join(lines)
+
+
+def test_without_the_gate_the_ledger_has_no_gate_column():
+    lines = feedback.ledger_lines([{**_entry(1), "gate": None}])
+    assert "| gate |" not in lines[-1] and "kept" not in "\n".join(lines)
+
+
+# ── lessons ─────────────────────────────────────────────────────────────────
+
+
+class Lessons(Recording):
+    """Writes lessons in rounds 1 and 3 (round 2's answer carries none)."""
+
+    WRITES = {1: "LESSON-ONE: prompt moves on level help", 3: "LESSON-THREE: revised"}
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        out = super().propose(ctx, n, parents)
+        self.last_lessons = self.WRITES.get(len(self.contexts), "")
+        return out
+
+
+def _lessons_run(tmp_path: Path, monkeypatch: Any, plan: list, **overrides: Any):
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    proposer = Lessons(plan)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, **{"epochs": len(plan), "val_gate": True, **overrides})
+        loop.optimizer = proposer
+        loop.run()
+    return loop, proposer
+
+
+def test_lessons_are_kept_shown_back_and_kept_when_an_answer_has_none(tmp_path, monkeypatch):
+    loop, proposer = _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)], []])
+    first, second, third, fourth = (c.render() for c in proposer.contexts[:4])
+    assert '"lessons": "<optional, short: what the results so far teach' in first
+    assert "## Your lessons so far" not in first, "nothing written yet"
+    assert "LESSON-ONE" in _section(second, "## Your lessons so far")
+    assert "in epoch 1 (generation" in second
+    assert "LESSON-ONE" in third, "round 2 wrote none: the old lessons stay"
+    assert "LESSON-THREE" in fourth and "LESSON-ONE" not in fourth
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    written = [e["text"] for e in events if e.get("event") == "optimizer_lessons"]
+    assert written == [Lessons.WRITES[1], Lessons.WRITES[3]]
+    _no_val(_section(fourth, "## Your lessons so far"), loop)
+
+
+def test_lessons_survive_a_resume(tmp_path, monkeypatch):
+    _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)]])
+    again = Recording([[]])
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=4, val_gate=True, resume=True)
+        resumed.optimizer = again
+        resumed.run()
+    assert resumed._lessons["text"] == Lessons.WRITES[3]
+    assert "LESSON-THREE" in _section(again.contexts[0].render(), "## Your lessons so far")
+
+
+def test_without_the_lessons_switch_nothing_is_asked_kept_or_shown(tmp_path, monkeypatch):
+    loop, proposer = _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], []], lessons=False)
+    text = proposer.contexts[1].render()
+    assert '"lessons"' not in text and "## Your lessons so far" not in text
+    assert "optimizer_lessons" not in (loop.root / "journal.jsonl").read_text()
+
+
+class _Answering:
+    """A proposal client answering with ``answer``; step reviews with ``review``."""
+
+    def __init__(self, answer: dict[str, Any], review: Any = None) -> None:
+        self.answer, self.review = answer, review
+        self.proposals: list[str] = []
+        self.reviews: list[str] = []
+        self.lock = __import__("threading").Lock()
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        if system == feedback.STEP_REVIEW_SYSTEM:
+            with self.lock:
+                self.reviews.append(prompt)
+            if isinstance(self.review, Exception):
+                raise self.review
+            return self.review if isinstance(self.review, str) else json.dumps(self.review)
+        self.proposals.append(prompt)
+        return json.dumps(self.answer)
+
+
+def test_the_proposer_reads_lessons_from_its_answer_only_when_asked():
+    long = "L" * 5000
+    optimizer = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": long}))
+    optimizer.propose(ProposalContext(ask_lessons=True), 1, [])
+    assert optimizer.last_lessons == "L" * (feedback.LESSONS_CHARS - 1) + "…"
+    listed = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": ["a", "b"]}))
+    listed.propose(ProposalContext(ask_lessons=True), 1, [])
+    assert listed.last_lessons == "- a\n- b"
+    unasked = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": "x"}))
+    unasked.propose(ProposalContext(ask_lessons=False), 1, [])
+    assert unasked.last_lessons == ""
+
+
+def test_a_parent_picker_hands_its_proposers_lessons_through():
+    from refactory_dsh.optim import compose, policies
+
+    proposer = AutoresearchOptimizer(_Answering({"proposals": []}))
+    paired = compose.PickedParent(policies.HillClimbSelector(), proposer)
+    proposer.last_lessons = "FROM-PROPOSER"
+    assert paired.last_lessons == "FROM-PROPOSER"
+    paired.last_lessons = ""
+    assert proposer.last_lessons == ""
+
+
+def test_lessons_shown_are_bounded():
+    lines = feedback.lessons_lines({"text": "x" * 9000, "epoch": 2, "generation": 3})
+    assert len(lines[-1]) == feedback.LESSONS_CHARS
+
+
+# ── added steps ─────────────────────────────────────────────────────────────
+
+
+def _rec(item: str, passed: bool, steps: dict[str, str]) -> dict[str, Any]:
+    return {"id": item, "passed": passed, "score": float(passed),
+            "exchanges": [{"node": node, "prompt": f"GIVEN {node} {item}", "response": text}
+                          for node, text in steps.items()]}
+
+
+PARENT_STATE = {"graph": {"nodes": {"a": {"id": "a", "kind": "agent"},
+                                    "decide": {"id": "decide", "kind": "agent"}}}}
+CHILD_STATE = {"graph": {"nodes": {"a": {"id": "a", "kind": "agent"},
+                                   "fork1": {"id": "fork1", "kind": "fork"},
+                                   "think": {"id": "think", "kind": "agent"},
+                                   "join1": {"id": "join1", "kind": "join"},
+                                   "check": {"id": "check", "kind": "op", "code": "x"},
+                                   "decide": {"id": "decide", "kind": "agent"}}}}
+
+
+def _pair_records() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    parent = [_rec(f"t{i}", i < 3, {"a": "notes", "decide": f"Answer {i}"}) for i in range(6)]
+    child = [_rec(f"t{i}", i in (1, 2, 4), {"a": "notes", "think": f"THINK {i}",
+                                            "decide": f"Answer {i}" if i < 4 else f"New {i}"})
+             for i in range(6)]
+    return parent, child
+
+
+def test_added_steps_are_found_by_graph_difference_without_plumbing():
+    assert feedback.added_steps(PARENT_STATE, CHILD_STATE) == [("think", "agent"),
+                                                                ("check", "code")]
+
+
+def test_an_added_steps_evidence_is_train_counts_and_samples():
+    parent, child = _pair_records()
+    evidence = feedback.step_evidence("think", parent_records=parent, child_records=child)
+    assert (evidence["shared"], evidence["fixed"], evidence["broken"]) == (6, 1, 1)
+    assert (evidence["compared"], evidence["final_changed"]) == (6, 2)
+    assert evidence["ran"] == 6 and evidence["median_s"] is None
+    samples = evidence["samples"]
+    assert len(samples) == feedback.STEP_REVIEW_ITEMS
+    assert [s["item"] for s in samples] == ["t4", "t0", "t1", "t2"], "changed outcomes first"
+    assert samples[0] == {"item": "t4", "input": "GIVEN think t4", "output": "THINK 4",
+                          "next_step": "decide", "next_output": "New 4"}
+    code = feedback.step_evidence("check", parent_records=parent, child_records=child)
+    assert code["ran"] == 0 and code["samples"] == []
+
+
+def test_whitespace_alone_is_not_a_changed_final_output():
+    parent = [_rec("t0", True, {"decide": "Answer:  1\n"})]
+    child = [_rec("t0", True, {"x": "y", "decide": "Answer: 1"})]
+    assert feedback.step_evidence("x", parent_records=parent,
+                                  child_records=child)["final_changed"] == 0
+
+
+@pytest.mark.parametrize("payload,verdict", [
+    ({"verdict": "adds_new_work", "example": "e", "note": "n"}, "adds_new_work"),
+    ({"verdict": "Restates inputs"}, "restates_inputs"),
+    ({"verdict": "contradicts-inputs"}, "contradicts_inputs"),
+    ({"verdict": "no_effect", "example": "q" * 900}, "no_effect"),
+])
+def test_a_review_verdict_is_read(payload, verdict):
+    found = feedback.parse_review(payload)
+    assert found["verdict"] == verdict
+    assert len(found["example"]) <= feedback.STEP_REVIEW_QUOTE_CHARS
+
+
+@pytest.mark.parametrize("payload", [{"verdict": "great"}, {}, ["adds_new_work"], "x"])
+def test_a_review_without_a_known_verdict_is_refused(payload):
+    with pytest.raises(ValueError):
+        feedback.parse_review(payload)
+
+
+def _added(**overrides: Any) -> list[dict[str, Any]]:
+    parent, child = _pair_records()
+    base = {"candidate": "c1", "parent": "p0", "kind": "parallel", "gate": "rejected",
+            "same_seed": True}
+    return [{**base, "node_kind": kind,
+             **feedback.step_evidence(step, parent_records=parent, child_records=child)}
+            for step, kind in feedback.added_steps(PARENT_STATE, CHILD_STATE)]
+
+
+REVIEW = {"verdict": "restates_inputs", "example": "THINK 4", "note": "It repeats the notes."}
+
+
+def test_each_added_step_is_reviewed_once_shown_and_kept_for_a_resume(tmp_path):
+    client = _Answering({"proposals": []}, REVIEW)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    ctx = ProposalContext(mode_name="m", added_steps=_added())
+    optimizer.propose(ctx, 1, [])
+    assert len(client.reviews) == 1, "one call for the step with text output; none for code"
+    review = client.reviews[0]
+    assert "# Reviewing an added step: `think`" in review
+    assert "GIVEN think t4" in review and "THINK 4" in review and "New 4" in review
+    assert "does it contain facts, checks, computations or alternatives its inputs lacked" in review
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert ("- `think` (agent, added by c1, parallel; gate rejected): 1 fixed / 1 broken on 6 "
+            "shared train item(s); final output changed on 2/6 (33%); review: restates_inputs "
+            '-- "THINK 4" -- It repeats the notes.') in section
+    assert "- `check` (code, added by c1" in section and "recorded no text output" in section
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    assert [t["verdict"] for t in trace if t["kind"] == "step_review"] == ["restates_inputs"]
+    optimizer.propose(ctx, 1, [])
+    assert len(client.reviews) == 1, "a retry pays for no review again"
+    memory = _Answering({"proposals": []}, REVIEW)
+    unstored = AutoresearchOptimizer(memory)  # no run directory: the memory cache alone
+    unstored.propose(ctx, 1, [])
+    unstored.propose(ctx, 1, [])
+    assert len(memory.reviews) == 1
+    again = _Answering({"proposals": []}, REVIEW)
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ctx, 1, [])
+    assert again.reviews == [] and "review: restates_inputs" in again.proposals[0]
+
+
+@pytest.mark.parametrize("review", [RuntimeError("503 overloaded"), {"verdict": "great"},
+                                    "not json at all"])
+def test_a_failed_review_is_recorded_shown_and_never_fatal(tmp_path, review):
+    client = _Answering({"proposals": [{"edit": {"op": "set_knob", "name": "k", "value": 2}}]},
+                        review)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    proposals = optimizer.propose(ProposalContext(added_steps=_added()), 1, [])
+    assert len(proposals) == 1, "the proposal is still made"
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert "- `think` (agent" in section and "review: not available (" in section
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    failed = [t for t in trace if t["kind"] == "step_review"]
+    assert len(failed) == 1 and failed[0]["error"]
+    assert not list((tmp_path / "step_reviews").glob("*.json")), "a failure is not cached"
+
+
+def _loop_with_an_added_step(tmp_path: Path, monkeypatch: Any, *, gated: bool = False,
+                             **overrides: Any):
+    """A finished run, then one more child of the seed, proposed by the optimizer in a
+    later round, that adds an agent step (rejected by the gate when ``gated``); its
+    records and its parent's are train records."""
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    proposer = Recording([[(5, 7)], []])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, **{"epochs": 2, "val_gate": gated, **overrides})
+        loop.optimizer = proposer
+        loop.run()
+    seed = loop.population[0]
+    state = json.loads(json.dumps(seed.state))
+    state["graph"]["nodes"]["think"] = {"id": "think", "kind": "agent"}
+    edit = {"op": "insert_after", "target": "work", "node": {"id": "think", "kind": "agent"}}
+    child = Candidate.from_state(state, parent=seed.id, edits=[edit])
+    child.evaluated, child.score = True, 0.1
+    loop.population.append(child)
+    if gated:
+        loop._gate_rejected.append(child.id)
+    loop.proposals[child.id] = {"id": child.id, "origin": "optimizer", "epoch": 9,
+                                "rationale": "add a second opinion"}
+    # An earlier round's child that added a step too: not the last round, not reviewed.
+    older_state = json.loads(json.dumps(seed.state))
+    older_state["graph"]["nodes"]["old_step"] = {"id": "old_step", "kind": "agent"}
+    older = Candidate.from_state(older_state, parent=seed.id, edits=[
+        {"op": "insert_after", "target": "work", "node": {"id": "old_step", "kind": "agent"}}])
+    older.evaluated, older.score = True, 0.1
+    loop.population.insert(len(loop.population) - 1, older)
+    loop.proposals[older.id] = {"id": older.id, "origin": "optimizer", "epoch": 8}
+    if gated:
+        loop._gate_rejected.append(older.id)
+    parent_records, child_records = _pair_records()
+    loop._train_item_records[seed.id] = parent_records
+    loop._train_item_records[child.id] = child_records
+    loop._train_item_records[older.id] = child_records
+    return loop, child
+
+
+def test_the_loop_hands_the_last_rounds_added_steps_with_train_evidence(tmp_path, monkeypatch):
+    loop, child = _loop_with_an_added_step(tmp_path, monkeypatch)
+    ctx = loop._context()
+    assert [(e["candidate"], e["step"], e["kind"]) for e in ctx.added_steps] == [
+        (child.id, "think", "added agent step")]
+    assert ctx.added_steps[0]["fixed"] == 1 and ctx.added_steps[0]["samples"]
+    ledger = {e["id"]: e for e in ctx.ledger}
+    assert ledger[child.id]["kind"] == "added agent step"
+    assert ledger[child.id]["touched"] == ["think", "work"]
+
+
+def test_without_the_review_switch_no_step_is_handed_over(tmp_path, monkeypatch):
+    loop, _child = _loop_with_an_added_step(tmp_path, monkeypatch, step_review=False)
+    assert loop._context().added_steps == []
+
+
+def test_the_new_sections_never_show_validation_records(tmp_path, monkeypatch):
+    """Under the gate, with val records stored beside train ones: the ledger and the
+    step evidence read the train records only."""
+    loop, child = _loop_with_an_added_step(tmp_path, monkeypatch, gated=True)
+    for cid in (loop.population[0].id, child.id):
+        loop._part_results.setdefault(cid, {})["val"] = [{"records": [
+            _rec(item, True, {"think": f"VALTEXT {item}", "decide": "v"}) for item in VAL_IDS]}]
+    ctx = loop._context()
+    text = "\n".join(feedback.step_review_lines(ctx.added_steps)
+                     + feedback.ledger_lines(ctx.ledger))
+    text += feedback.review_prompt(ctx.added_steps[0])
+    assert ctx.added_steps[0]["gate"] == "rejected" and "| rejected |" in text
+    assert ctx.added_steps[0]["ran"] == 6, "train items only"
+    assert all(s["item"].startswith("t") for s in ctx.added_steps[0]["samples"])
+    assert "VALTEXT" not in text
+    _no_val(text, loop)
+
+
+# ── readers' success patterns ───────────────────────────────────────────────
+
+
+def test_success_patterns_have_their_own_heading_and_room():
+    """A reader that found many long failure patterns and two success patterns: both
+    success patterns are shown under their own heading, after the failures."""
+    from refactory_dsh.optim.base import READER_PATTERNS, _trajectories
+
+    records = [_rec(f"t{i}", i % 2 == 0, {"a": "x" * 3000}) for i in range(40)]
+    findings = [{"group": 1, "items": [r["id"] for r in records],
+                 "failure_patterns": [{"pattern": f"FAIL-{k} " + "f" * 390, "items": ["t1"],
+                                       "evidence": ["q" * 240] * 3} for k in range(20)],
+                 "success_patterns": [{"pattern": f"PASS-{k}", "items": ["t0"],
+                                       "evidence": ["good"]} for k in range(2)]}]
+    text = "\n".join(_trajectories(records, budget=6000, findings=findings))
+    heading = "### What the passing items do right (the readers' success patterns)"
+    assert heading in text
+    after = text[text.index(heading):]
+    assert "PASS-0" in after and "PASS-1" in after
+    assert text.index("FAIL-0") < text.index(heading)
+    assert text.count("FAIL-") <= READER_PATTERNS - 2
+
+
+# ── structure guidance ──────────────────────────────────────────────────────
+
+
+def _composed(**fields: Any) -> str:
+    ctx = ProposalContext(
+        catalogue=[{"op": "insert_after", "kind": "topology", "macro": True,
+                    "fields": ["target", "node"], "description": "d"}],
+        node_states=[{"id": "a", "kind": "agent", "writes": ["a.txt"]},
+                     {"id": "b", "kind": "agent", "writes": ["b.txt"]}],
+        edges=[{"source": "a", "target": "b"}], **fields)
+    return _section(ctx.render(), "## How nodes compose")
+
+
+def test_structure_guidance_is_off_by_default_and_said_when_on():
+    from refactory_dsh.loop import LoopConfig
+
+    assert LoopConfig().structure_guidance is False
+    assert "What makes a new step pay off" not in _composed()
+    assert feedback.STRUCTURE_GUIDANCE in _composed(structure_guidance=True)
+
+
+def test_the_switches_and_their_defaults():
+    from refactory_dsh import profiles
+    from refactory_dsh.loop import LoopConfig
+
+    config = LoopConfig()
+    assert (config.run_ledger, config.lessons, config.step_review,
+            config.structure_guidance) == (True, True, True, False)
+    settings = profiles.normalize({"run_ledger": 0, "structure_guidance": 1})
+    assert settings["run_ledger"] is False and settings["structure_guidance"] is True
+    with pytest.raises(profiles.ProfileError):
+        profiles.normalize({"lessons": "yes"})

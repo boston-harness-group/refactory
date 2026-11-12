@@ -2041,7 +2041,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## profile-resolve
 
-Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The val_gate option is unset by default, which turns the gate on when the parts manifest has val items; 0 or 1 is kept as given. The selection option (with val_gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size.
+Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The val_gate option is unset by default, which turns the gate on when the parts manifest has val items; 0 or 1 is kept as given. The selection option (with val_gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -2083,6 +2083,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "lessons": true,
     "max_concurrent_evaluations": 4,
     "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
@@ -2106,12 +2107,15 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "provider_config": {},
     "repeats": 1,
     "role_routes": {},
+    "run_ledger": true,
     "seed": 0,
     "seed_results": null,
     "selection": "",
     "setting_sources": "",
+    "step_review": true,
     "strategy": "default",
     "strategy_options": {},
+    "structure_guidance": false,
     "train_minibatch": 0,
     "val_gate": null,
     "validation_reserve_s": 0,
@@ -2350,6 +2354,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "array"
+    },
+    "lessons": {
+      "default": null,
+      "description": "1 (default) lets the model proposer write lessons that are kept, survive a resume and are shown back next round; 0 off",
+      "flags": [
+        "--lessons"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
     },
     "max_concurrent_evaluations": {
       "default": null,
@@ -2647,6 +2662,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "run_ledger": {
+      "default": null,
+      "description": "1 (default) shows the model proposer every candidate of the run by kind of change, with train fixed/broken counts and the gate's word; 0 off",
+      "flags": [
+        "--run-ledger"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "runs_root": {
       "default": null,
       "description": "the directory runs live under, one subdirectory per run; this is not the loop's --runs-root, which is the run directory itself",
@@ -2713,6 +2739,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "object"
     },
+    "step_review": {
+      "default": null,
+      "description": "1 (default) reviews each step the last round added (train counts and one optimizer-model call per step) and shows the verdicts; 0 off",
+      "flags": [
+        "--step-review"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "strategy": {
       "default": null,
       "description": "",
@@ -2737,6 +2774,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "array"
+    },
+    "structure_guidance": {
+      "default": null,
+      "description": "1 adds what makes a new step pay off to the request's 'How nodes compose' (default: 0, off)",
+      "flags": [
+        "--structure-guidance"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
     },
     "train_minibatch": {
       "default": null,
@@ -2794,8 +2842,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The val_gate option is unset by default, which turns the gate on when the parts manifest has val items; 0 or 1 is kept as given. The selection option (with val_gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size.",
-  "reviewed_schema": "40f271dba3f9cbe2093ee824fc403a5f8c51fabcb98d65a9be1c9c19a71fc29b"
+  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The val_gate option is unset by default, which turns the gate on when the parts manifest has val items; 0 or 1 is kept as given. The selection option (with val_gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off.",
+  "reviewed_schema": "866e97753e868661ee1af72378a6f86a61d02a6faa6a36faff21b805d85e2c67"
 }
 ```
 
@@ -3591,7 +3639,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3637,6 +3685,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "lessons": true,
     "max_concurrent_evaluations": 4,
     "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
@@ -3660,12 +3709,15 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "provider_config": {},
     "repeats": 1,
     "role_routes": {},
+    "run_ledger": true,
     "seed": 0,
     "seed_results": null,
     "selection": "",
     "setting_sources": "",
+    "step_review": true,
     "strategy": "default",
     "strategy_options": {},
+    "structure_guidance": false,
     "train_minibatch": 0,
     "val_gate": null,
     "validation_reserve_s": 0,
@@ -3907,6 +3959,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "array"
+    },
+    "lessons": {
+      "default": null,
+      "description": "1 (default) lets the model proposer write lessons that are kept, survive a resume and are shown back next round; 0 off",
+      "flags": [
+        "--lessons"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
     },
     "max_concurrent_evaluations": {
       "default": null,
@@ -4215,6 +4278,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "run_ledger": {
+      "default": null,
+      "description": "1 (default) shows the model proposer every candidate of the run by kind of change, with train fixed/broken counts and the gate's word; 0 off",
+      "flags": [
+        "--run-ledger"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "runs_root": {
       "default": null,
       "description": "the directory runs live under, one subdirectory per run; this is not the loop's --runs-root, which is the run directory itself",
@@ -4281,6 +4355,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "object"
     },
+    "step_review": {
+      "default": null,
+      "description": "1 (default) reviews each step the last round added (train counts and one optimizer-model call per step) and shows the verdicts; 0 off",
+      "flags": [
+        "--step-review"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "strategy": {
       "default": null,
       "description": "",
@@ -4305,6 +4390,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "array"
+    },
+    "structure_guidance": {
+      "default": null,
+      "description": "1 adds what makes a new step pay off to the request's 'How nodes compose' (default: 0, off)",
+      "flags": [
+        "--structure-guidance"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
     },
     "train_minibatch": {
       "default": null,
@@ -4362,8 +4458,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size.",
-  "reviewed_schema": "2da2999cf3313ec6765c398710d2e0dc3cda7ee26732ba849601a511f24f2e26"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off.",
+  "reviewed_schema": "4cfb664c85e727e35c3a75f2b2f89069d3885b91b1abb706b9d3e140aed7f92b"
 }
 ```
 
@@ -6023,7 +6119,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -6051,6 +6147,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "holdout": 0.3,
     "intent": "",
     "knobs": {},
+    "lessons": true,
     "max_concurrent_evaluations": 4,
     "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
@@ -6074,12 +6171,15 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "provider_config": {},
     "repeats": 1,
     "role_routes": {},
+    "run_ledger": true,
     "seed": 0,
     "seed_results": null,
     "selection": "",
     "setting_sources": "",
+    "step_review": true,
     "strategy": "default",
     "strategy_options": {},
+    "structure_guidance": false,
     "train_minibatch": 0,
     "val_gate": null,
     "validation_reserve_s": 0,
@@ -6320,6 +6420,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "array"
+    },
+    "lessons": {
+      "default": null,
+      "description": "1 (default) lets the model proposer write lessons that are kept, survive a resume and are shown back next round; 0 off",
+      "flags": [
+        "--lessons"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
     },
     "max_concurrent_evaluations": {
       "default": null,
@@ -6606,6 +6717,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "object"
     },
+    "run_ledger": {
+      "default": null,
+      "description": "1 (default) shows the model proposer every candidate of the run by kind of change, with train fixed/broken counts and the gate's word; 0 off",
+      "flags": [
+        "--run-ledger"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "runs_root": {
       "default": null,
       "description": "",
@@ -6661,6 +6783,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
+    "step_review": {
+      "default": null,
+      "description": "1 (default) reviews each step the last round added (train counts and one optimizer-model call per step) and shows the verdicts; 0 off",
+      "flags": [
+        "--step-review"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
+    },
     "strategy": {
       "default": null,
       "description": "",
@@ -6685,6 +6818,17 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "array"
+    },
+    "structure_guidance": {
+      "default": null,
+      "description": "1 adds what makes a new step pay off to the request's 'How nodes compose' (default: 0, off)",
+      "flags": [
+        "--structure-guidance"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "integer"
     },
     "train_minibatch": {
       "default": null,
@@ -6753,8 +6897,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size.",
-  "reviewed_schema": "65a453baa1c389925c1184492299ae457535cd006354203753ea264089b3c348"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off.",
+  "reviewed_schema": "32233f75aeff137c6117af01e3ab7daa3b312b4ce0b9639ab00ad56bcec77578"
 }
 ```
 

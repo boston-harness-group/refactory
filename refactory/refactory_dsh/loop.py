@@ -369,6 +369,24 @@ class LoopConfig:
     #: The pool's size under ``selection`` ``pool``: the candidates with the best val
     #: scores, plus any tied with the last of them.
     pool_size: int = 8
+    #: The model proposer's request lists every evaluated candidate of the run, not only
+    #: the recent ones, under "Every change so far, by kind": the kind of change it made
+    #: (`optim.feedback.change_kind`), what it touched, its train fixed/broken counts
+    #: against its parent and the gate's word, after a tally per kind. On by default.
+    run_ledger: bool = True
+    #: The model proposer's answer may carry ``lessons`` (which changes help here); the
+    #: latest are journaled, kept across a resume and shown back as "Your lessons so
+    #: far". An answer without them keeps the previous ones. On by default.
+    lessons: bool = True
+    #: Each step a candidate of the last round added is reviewed before the next
+    #: proposal: its train fixed/broken counts, how often the final output changed,
+    #: and one call of the optimizer's model per step on up to 4 train items
+    #: (`optim.feedback.review_prompt`), shown as "Did the added steps contribute?".
+    #: On by default; a model proposer only.
+    step_review: bool = True
+    #: "How nodes compose" also says what makes a new step pay off
+    #: (`optim.feedback.STRUCTURE_GUIDANCE`). Off by default (an experiment's switch).
+    structure_guidance: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -651,6 +669,9 @@ class Loop(OuterLoop):
         #: The strategy's own state, backing store for the default
         #: strategy_state_dict / load_strategy_state implementations.
         self._strategy_state: dict[str, Any] = {}
+        #: The latest ``lessons`` the model proposer wrote (``LoopConfig.lessons``):
+        #: ``{"text", "epoch", "generation"}``, journaled as ``optimizer_lessons``.
+        self._lessons: dict[str, Any] = {}
         #: Loop-private storage for per-part evaluation data (records, workdirs,
         #: scores).  Keyed by (candidate_id, part_name).  This data never reaches
         #: optimizer-facing APIs.
@@ -2866,7 +2887,11 @@ class Loop(OuterLoop):
         try:
             context = self._context()
             context.attempt = self._proposal_attempt
-            return self.optimizer.propose(context, n, parents)
+            if hasattr(self.optimizer, "last_lessons"):
+                self.optimizer.last_lessons = ""
+            proposals = self.optimizer.propose(context, n, parents)
+            self._keep_lessons()
+            return proposals
         except BudgetExhausted as exc:
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
             raise
@@ -4588,6 +4613,11 @@ class Loop(OuterLoop):
             graph_note=graph_note,
             edit_pairs=self._edit_pairs(board),
             reasoning=self._reasoning_entries(board),
+            ledger=self._ledger() if self.config.run_ledger else [],
+            ask_lessons=bool(self.config.lessons),
+            lessons=dict(self._lessons) if self.config.lessons else {},
+            added_steps=self._added_steps() if self.config.step_review else [],
+            structure_guidance=bool(self.config.structure_guidance),
             max_edits=int(self.config.max_edits_per_proposal),
             parsimony=float(self.config.parsimony),
             code_nodes=self._code_nodes_offered(sandbox),
@@ -4750,6 +4780,81 @@ class Loop(OuterLoop):
                 "broken": len(change["broken"]) if change and change["shared"] else None,
                 "errors": item_errors(records), "items": len(records),
             })
+        return entries
+
+    def _keep_lessons(self) -> None:
+        """Keep the lessons the proposer's answer carried (``LoopConfig.lessons``), with
+        the epoch and generation they were written in, and journal them so a resumed run
+        shows them back; an answer without lessons keeps the previous ones."""
+        written = str(getattr(self.optimizer, "last_lessons", "") or "").strip()
+        if not self.config.lessons or not written or written == self._lessons.get("text"):
+            return
+        self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
+        self._journal("optimizer_lessons", **self._lessons)
+
+    def _judged(self) -> list[Candidate]:
+        """The evaluated candidates the search made (every one with a parent), in
+        population order; under ``val_gate`` only those the gate has judged."""
+        out = []
+        for candidate in self.population:
+            if not candidate.parent or not candidate.evaluated:
+                continue
+            if self._gate_decision(candidate.id) == "not gated":
+                continue
+            out.append(candidate)
+        return out
+
+    def _ledger(self) -> list[dict[str, Any]]:
+        """Every evaluated candidate of the run as "Every change so far, by kind" lists
+        it (`optim.feedback.ledger_entry`): train records against its parent's from the
+        same epoch, and the gate's word. Never a val score."""
+        from refactory_dsh.optim.feedback import ledger_entry
+
+        by_id = {c.id: c for c in self.population}
+        entries = []
+        for candidate in self._judged():
+            parent = by_id.get(candidate.parent or "")
+            parent_records = (self._records_like(parent.id, candidate.id)[0]
+                              if parent is not None else [])
+            entries.append(ledger_entry(
+                candidate, parent, record=self.proposals.get(candidate.id),
+                parent_records=parent_records,
+                child_records=self._train_item_records.get(candidate.id) or [],
+                gate=self._gate_decision(candidate.id)))
+        return entries
+
+    def _added_steps(self) -> list[dict[str, Any]]:
+        """The steps the last round's candidates added, each with its train evidence
+        against its parent (`optim.feedback.step_evidence`), for the proposer to review.
+        The last round is the latest epoch any judged candidate the optimizer proposed
+        was proposed in. Train records only."""
+        from refactory_dsh.optim.feedback import added_steps, change_kind, step_evidence
+
+        by_id = {c.id: c for c in self.population}
+        proposed = [c for c in self._judged()
+                    if (self.proposals.get(c.id) or {}).get("origin") == "optimizer"
+                    and (self.proposals.get(c.id) or {}).get("epoch") is not None]
+        if not proposed:
+            return []
+        last = max(int(self.proposals[c.id]["epoch"]) for c in proposed)
+        entries = []
+        for candidate in proposed:
+            parent = by_id.get(candidate.parent or "")
+            if parent is None or int(self.proposals[candidate.id]["epoch"]) != last:
+                continue
+            steps = added_steps(parent.state, candidate.state)
+            if not steps:
+                continue
+            parent_records, same = self._records_like(parent.id, candidate.id)
+            child_records = self._train_item_records.get(candidate.id) or []
+            kind = change_kind(candidate.own_edits(), candidate.state)
+            for step, node_kind in steps:
+                entries.append({
+                    "candidate": candidate.id, "parent": parent.id, "kind": kind,
+                    "node_kind": node_kind, "gate": self._gate_decision(candidate.id),
+                    "same_seed": same,
+                    **step_evidence(step, parent_records=parent_records,
+                                    child_records=child_records)})
         return entries
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
@@ -5083,6 +5188,8 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
+            elif event == "optimizer_lessons":
+                self._lessons = {key: record.get(key) for key in ("text", "epoch", "generation")}
             elif event in ("rescore", "rescore_failed"):
                 rescores += 1
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 1))

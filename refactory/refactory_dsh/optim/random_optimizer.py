@@ -205,6 +205,9 @@ class AutoresearchOptimizer(Optimizer):
         self._system = system or (
             "You are the optimizer of a search over workflows. You reply with JSON only."
         )
+        #: The answer's ``lessons`` (when the request asked for them), for the loop to
+        #: keep and show back; empty when the answer carried none.
+        self.last_lessons: str = ""
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         import inspect
@@ -278,9 +281,79 @@ class AutoresearchOptimizer(Optimizer):
         failures = [failed for _found, failed in results if failed is not None]
         return findings, failures
 
+    def _review_steps(self, ctx: ProposalContext) -> list[dict[str, Any]]:
+        """Each added step (``ctx.added_steps``) with a reviewer's verdict on whether its
+        output holds work its inputs lacked: one call per step that recorded text output,
+        up to ``STEP_REVIEW_STEPS``, concurrently, each recorded (kind ``step_review``)
+        and cached like the readers' findings, in memory and in the run directory, so a
+        retry or a resumed run pays for none again. A failed call is recorded and the
+        step is shown with ``review_error``; it never fails the proposal."""
+        from concurrent.futures import ThreadPoolExecutor
+        from pathlib import Path
+
+        from . import feedback
+
+        cache: dict[str, dict[str, Any]] = self.__dict__.setdefault("_review_cache", {})
+        store = (Path(self.trace_path).parent / "step_reviews"
+                 if self.trace_path is not None else None)
+        reviewable = [index for index, entry in enumerate(ctx.added_steps)
+                      if entry.get("samples")][: feedback.STEP_REVIEW_STEPS]
+
+        def review(index: int) -> tuple[int, dict[str, Any]]:
+            entry = ctx.added_steps[index]
+            prompt = feedback.review_prompt(entry, ctx.mode_name)
+            key = feedback.review_key(prompt)
+            if key in cache:
+                return index, {"review": cache[key]}
+            if store is not None and (store / f"{key}.json").exists():
+                try:
+                    saved = feedback.stored_review((store / f"{key}.json").read_text())
+                except OSError:
+                    saved = None
+                if saved is not None:
+                    cache[key] = saved
+                    return index, {"review": saved}
+            call = {"kind": "step_review", "epoch": ctx.epoch, "generation": ctx.generation,
+                    "step": entry.get("step"), "candidate": entry.get("candidate"),
+                    "items": [s.get("item") for s in entry.get("samples") or ()],
+                    "system": feedback.STEP_REVIEW_SYSTEM, "prompt": prompt}
+            reply = None
+            try:
+                reply = self._client.complete(prompt, system=feedback.STEP_REVIEW_SYSTEM,
+                                              **self._completion_options)
+                found = feedback.parse_review(extract_json(reply))
+            except Exception as exc:  # a failed review is shown as such, never fatal
+                from refactory_dsh.budgets import BudgetExhausted
+
+                if isinstance(exc, BudgetExhausted):
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+                self.record_call(**call, reply=reply, error=error)
+                return index, {"review_error": error}
+            self.record_call(**call, reply=reply, error=None, verdict=found["verdict"])
+            cache[key] = found
+            if store is not None:
+                try:
+                    store.mkdir(parents=True, exist_ok=True)
+                    (store / f"{key}.json").write_text(json.dumps(found))
+                except OSError:
+                    pass
+            return index, {"review": found}
+
+        reviewed: dict[int, dict[str, Any]] = {}
+        if reviewable:
+            with ThreadPoolExecutor(max_workers=max(1, min(READER_CONCURRENCY,
+                                                           len(reviewable)))) as pool:
+                reviewed = dict(pool.map(review, reviewable))
+        return [{**entry, **reviewed.get(index, {})}
+                for index, entry in enumerate(ctx.added_steps)]
+
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
+        self.last_lessons = ""
+        if ctx.added_steps:
+            ctx = replace(ctx, added_steps=self._review_steps(ctx))
         groups = trajectory_groups(ctx.item_records, ctx.evidence_budget) if ctx.item_records else []
         if len(groups) > 1:
             findings, failures = self._read(ctx, groups)
@@ -304,6 +377,9 @@ class AutoresearchOptimizer(Optimizer):
             raise
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
         self.last_considered = considered_text(payload.get("considered"))
+        if ctx.ask_lessons:
+            from .feedback import lessons_text
+            self.last_lessons = lessons_text(payload.get("lessons"))
         parent_ids = {parent.id for parent in parents}
         # A proposal that names no parent belongs to the pipeline the request showed
         # ("The pipeline you may edit" is ``ctx.parent``'s). Left unset, the loop
