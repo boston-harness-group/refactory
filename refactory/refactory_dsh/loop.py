@@ -1352,11 +1352,14 @@ class Loop(OuterLoop):
                 parent = None
             size = self._wave_size(min(remaining,
                                        self.config.max_evaluations - self.evaluations), each)
-            if parent is not None:
-                # The re-score takes one of the wave's concurrent slots.
-                size = max(1, min(size, int(self.config.max_concurrent_evaluations or 1) - 1))
             wave = batch[index:index + size]
-            beside, parent = parent, None
+            # The children keep the slots too: the re-score joins the round's last wave
+            # when that wave leaves a concurrent slot free (the live shape: two children,
+            # three slots), else it runs after the children (`_rescore_after`).
+            beside = None
+            if (parent is not None and index + len(wave) == len(batch)
+                    and len(wave) < int(self.config.max_concurrent_evaluations or 1)):
+                beside, parent = parent, None
             try:
                 if beside is not None:
                     # One batch: the re-score shares the children's reservation, the
@@ -1388,7 +1391,32 @@ class Loop(OuterLoop):
             index += len(wave)
             if self.budget and self.budget.snapshot().get("exhausted"):
                 break
+        else:
+            if parent is not None:
+                self._rescore_after(parent, at, seed)
         return len(batch)
+
+    def _rescore_after(self, parent: Candidate, epoch: int, seed: int) -> None:
+        """The round's parent re-score when its children filled every concurrent slot:
+        alone, after them, as a batch of its own (the item gate and stop signal of
+        `Run.evaluate_many`). ``forward`` kept it only where the evaluation and rollout
+        budgets hold every child and it (`_room_for_rescore`); the time and token
+        budgets, which the wave may have spent, are checked here."""
+        from refactory_dsh.budgets import BudgetExhausted
+
+        items = self._minibatch(epoch)
+        if self.budget:
+            try:
+                self.budget.checkpoint("work" if self._owns_resource_budget else None)
+            except BudgetExhausted as exc:
+                self.bound = str(exc)
+                return
+        try:
+            Run(_loop=self).evaluate_many([EvalRequest(
+                candidate=parent, part=task_module.TRAIN, items=items, seed=seed,
+                rescore_epoch=epoch)])
+        except BudgetStopped as exc:
+            self.bound = self.bound or str(exc)
 
     def _room_for_rescore(self, children: int, items_each: int) -> bool:
         """Whether the round's parent may be re-scored beside its ``children`` still to

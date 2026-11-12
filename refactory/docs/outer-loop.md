@@ -121,10 +121,12 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   evidence: the previous records stay, the epoch is not marked, and it is journaled as
   `rescore_failed` (still counted as an evaluation). The re-score runs in the round
   itself: when an epoch evaluates children of the candidate the last proposal step
-  edited, that parent is scored on the epoch's train sample beside them, in the same
-  concurrent batch: it takes one of the `--max-concurrent-evaluations` slots and its
-  items count against `--max-items-in-flight` with the children's, and a stop ends it
-  with them (a child's error is the one raised). It goes in only when there is room for
+  edited, that parent is scored on the epoch's train sample with them. The children
+  keep the `--max-concurrent-evaluations` slots: the re-score joins the round's last
+  wave when that wave leaves a slot free (two portfolio children and three slots, the
+  live shape), else it runs after the children, alone. Either way it is a request of a
+  `Run.evaluate_many` batch: its items count against `--max-items-in-flight` with the
+  children's, and a stop ends it with them (a child's error is the one raised). It goes in only when there is room for
   every child still to score and it: `--max-evaluations` must hold all of them, and
   `--max-rollouts`, when set, each child's train and val rollouts and then the
   re-score's train rollouts, so a re-score never takes what a child needs to be scored

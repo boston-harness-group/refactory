@@ -132,7 +132,11 @@ def _slow_and_val_by_level(monkeypatch: Any) -> None:
     original_many, original = Run.evaluate_many, Loop._evaluate
 
     def many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
-        ids = [r.candidate.id for r in requests if r.part == "train"]
+        # A fresh-evidence re-score of the round's parent may share a wave
+        # (``rescore_epoch``): it is not a candidate's evaluation (``_rescore``, not
+        # ``_evaluate``), so it is not ordered with them.
+        ids = [r.candidate.id for r in requests
+               if r.part == "train" and getattr(r, "rescore_epoch", None) is None]
         with lock:
             for cid in ids:
                 waves[cid], done[cid] = ids, threading.Event()

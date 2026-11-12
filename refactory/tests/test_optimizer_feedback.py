@@ -736,6 +736,17 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
         return original(self, candidate, workdir, part, **kwargs)
 
     monkeypatch.setattr(Loop, "_measure", measure)
+    from refactory_dsh.outerloop import Run
+
+    batches: list[list[tuple[int, Any]]] = []
+    many = Run.evaluate_many
+
+    def evaluate_many(self, requests, **kwargs):  # type: ignore[no-untyped-def]
+        if all(r.part == "train" for r in requests):
+            batches.append([(_level(r.candidate), r.rescore_epoch) for r in requests])
+        return many(self, requests, **kwargs)
+
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
     proposer = Reasoning([[(5, 7), (5, 6)], [(7, 3), (7, 2)], []])
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2, fresh_evidence=True,
@@ -744,6 +755,9 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
         loop.run()
     ids = {_level(c): c.id for c in loop.population}
     assert loop.config.fresh_evidence and loop.config.train_minibatch == 0
+    # Two children and three slots: the re-score runs in the children's wave.
+    assert sorted(batches[0]) == [(5, 2), (6, None), (7, None)]
+    assert sorted(batches[1]) == [(2, None), (3, None), (7, 3)]
     assert sorted(loop._records_by_epoch[ids[5]]) == [1, 2]
     assert sorted(loop._records_by_epoch[ids[7]]) == [2, 3]
     by = {(level, epoch): seed for level, epoch, seed in seeds}
@@ -779,8 +793,9 @@ def test_without_fresh_evidence_no_parent_is_scored_beside_its_children(tmp_path
 
 
 def test_the_parents_rescore_takes_one_of_the_concurrent_slots(tmp_path, monkeypatch):
-    """With two concurrent evaluations, two children and the parent's re-score never
-    have more than two train measurements in flight."""
+    """With two concurrent evaluations, the two children fill both slots and the
+    parent's re-score runs after them: never more than two train measurements in
+    flight."""
     import threading
     import time
 
@@ -949,3 +964,35 @@ def test_the_rescore_only_starts_where_the_rollout_budget_holds_it(tmp_path, mon
     else:
         assert loop.rollouts == baseline.rollouts
     assert loop._gate_rejected == baseline._gate_rejected, "the same children judged"
+
+
+def test_children_that_fill_every_slot_go_first_and_the_rescore_after(tmp_path, monkeypatch):
+    """Four children and four slots: the children run in one wave, as without the
+    re-score, and the parent's re-score runs after them, alone."""
+    from refactory_dsh.outerloop import Run
+
+    batches: list[list[tuple[int, Any]]] = []
+    many = Run.evaluate_many
+
+    def evaluate_many(self, requests, **kwargs):  # type: ignore[no-untyped-def]
+        if all(r.part == "train" for r in requests):
+            batches.append([(_level(r.candidate), r.rescore_epoch) for r in requests])
+        return many(self, requests, **kwargs)
+
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    loop, rescores = _rescore_run(tmp_path, monkeypatch, [[(5, 1), (5, 2), (5, 3), (5, 4)], []],
+                                  batch_size=4, max_concurrent_evaluations=4)
+    assert [sorted(b) for b in batches[:2]] == [
+        [(1, None), (2, None), (3, None), (4, None)], [(5, 2)]]
+    assert [r["epoch"] for r in rescores] == [2]
+
+
+@pytest.mark.parametrize("cap,rescored", [(5, False), (6, True)])
+def test_a_rescore_after_full_slots_still_needs_room(tmp_path, monkeypatch, cap, rescored):
+    """Four children fill four slots; the seed (1) and they (4) take a cap of 5, so the
+    re-score after them is skipped; at 6 it runs. The cap is never passed."""
+    loop, rescores = _rescore_run(tmp_path, monkeypatch, [[(5, 1), (5, 2), (5, 3), (5, 4)], []],
+                                  batch_size=4, max_concurrent_evaluations=4, max_evaluations=cap)
+    assert loop.evaluations <= cap
+    assert sum(1 for c in loop.population if c.parent and c.evaluated) == 4
+    assert bool(rescores) == rescored
