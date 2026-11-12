@@ -6,6 +6,7 @@ Refactory. Capabilities describe this adapter, not everything a product can do.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -33,6 +34,12 @@ WORKSPACE_COMMAND_TIMEOUT_MS = 600_000
 OPENCODE_PROVIDER = 'opencode-go'
 OPENCODE_API_KEY_ENV = 'OPENCODE_API_KEY'
 OPENCODE_SESSION_HEADER = 'x-opencode-session'
+
+#: Where a DSH process refactory starts keeps its sessions (`session_store_rows`):
+#: ``run`` (the default) gives each process its own store beside its receipt, in the
+#: run directory; ``shared`` leaves them in ``$DSH_HOME/sessions``, as before.
+SESSIONS_ENV = 'REFACTORY_DSH_SESSIONS'
+SESSION_STORES = ('run', 'shared')
 
 
 def capabilities(backend: str) -> dict[str, Any]:
@@ -215,10 +222,69 @@ def provider_rows(route: dict[str, Any], provider_config: dict[str, Any] | None)
     return []
 
 
+def session_store_choice(value: str | None = None) -> str:
+    """``run`` or ``shared``: an explicit value, else `SESSIONS_ENV`, else ``run``."""
+    choice = (value or os.environ.get(SESSIONS_ENV) or 'run').strip()
+    if choice not in SESSION_STORES:
+        raise ValueError(f'{SESSIONS_ENV} must be one of {", ".join(SESSION_STORES)}; got {choice!r}')
+    return choice
+
+
+def session_store(receipt: Path, choice: str | None = None) -> Path | None:
+    """The DSH session store of the process a receipt records, or None for the shared one.
+
+    DSH keeps every session it runs, and its JSONL backend finds one by id by probing
+    every project directory under its root (three lookups each), checks the whole root
+    once per process, and its projection cache loads every stored session's record at
+    start-up. Under the one shared ``$DSH_HOME`` all of that grows with every run on the
+    machine: 52k stored sessions made each helper 3.7 GB and filled the kernel's dentry
+    cache with billions of failed lookups. A store per process holds only its own
+    sessions, so its cost no longer depends on what ran before. Nothing in refactory
+    reads a worker's DSH session back; the store stays beside the receipt as evidence,
+    and goes with the run directory.
+    """
+    if session_store_choice(choice) == 'shared':
+        return None
+    return receipt.with_suffix('.dsh')
+
+
+def session_store_rows(store: Path | None) -> list[dict[str, Any]]:
+    """Point DSH's session log and its storage domains (the projection cache) at ``store``.
+
+    The two roots the base profile puts under ``$DSH_HOME`` (``sessions``, ``storages``).
+    DSH_HOME itself is unchanged: credentials, settings and profiles stay the person's,
+    and the run's evaluation context (`profiles`), which names DSH_HOME, is the same.
+    """
+    if store is None:
+        return []
+    return [{'id': 'session-persistence-jsonl', 'config': {'root': str(store / 'sessions')}},
+            {'id': 'storage-json', 'config': {'root': str(store / 'storages')}}]
+
+
+def session_patch(workdir: Path) -> Path | None:
+    """A patch that gives a coordinator started without a model client its own store.
+
+    `GraphTelemetry` gives a coordinator with a client its store through its observer
+    patch; a library caller that starts the spine with no client (`run_on_dsh` without
+    ``model``) gets this one, named like a receipt so the store sits with the others.
+    None when the shared store is chosen (`SESSIONS_ENV`): there is no context to carry it.
+    """
+    # Named as a receipt would be; no receipt is written, so receipt readers see none.
+    receipt = Path(workdir) / '.refactory' / 'workers' / ('coordinator-' + uuid.uuid4().hex + '.json')
+    store = session_store(receipt)
+    if store is None:
+        return None
+    path = receipt.with_suffix('.patch.yml')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(session_store_rows(store)) + '\n')
+    return path
+
+
 def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
                 workspace_root: Path | None = None, tool_home: Path | None = None,
-                system_prompt: str = "", tool_policy: str = "") -> None:
+                system_prompt: str = "", tool_policy: str = "",
+                session_store: Path | None = None) -> None:
     """Compose installed DSH services, never a parallel agent wire protocol.
 
     ``workspace_root`` confines the node's tools to its workspace (`permission_patch`).
@@ -226,6 +292,8 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     the DSH process keeps its own, and a command run in a workspace never reaches it.
     ``system_prompt`` is the rendered system text; when non-empty, a composition plugin
     is inserted that injects it as a system-prompt section.
+    ``session_store`` is where this process keeps its DSH sessions (`session_store_rows`);
+    None keeps DSH's shared store.
     """
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
@@ -235,6 +303,7 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
         plugin = Path(__file__).with_name('system_prompt_plugin.mjs')
         rows.append({'insert': [{'id': 'refactory-system-prompt', 'name': str(plugin)}]})
     rows.extend(permission_patch(route, workspace_root=workspace_root))
+    rows.extend(session_store_rows(session_store))
     if tool_home is not None:
         rows.append({'id': 'shell-env', 'config': {'dshHome': str(tool_home)}})
         if route['worker_backend'] in ('dsh', 'openshell'):
@@ -446,10 +515,13 @@ def environment(context: dict[str, Any] | None) -> dict[str, str]:
 
 
 def observer_patch(path: Path, route: dict[str, Any],
-                   provider_config: dict[str, Any] | None = None) -> None:
+                   provider_config: dict[str, Any] | None = None, *,
+                   session_store: Path | None = None) -> None:
     rows = [{'insert': [{'id': 'refactory-worker-observer',
                         'name': str(Path(__file__).with_name('worker_observer.mjs'))}]}]
     rows.extend(permission_patch(route))
+    # The coordinator's CEO and its in-process subagents are DSH sessions too.
+    rows.extend(session_store_rows(session_store))
     # The coordinator's runtime is as nested as a node's: without this row the
     # graph profile cannot resolve the selected provider and silently dispatches
     # its own default instead.
@@ -483,7 +555,11 @@ class GraphTelemetry:
             route['permission_mode'] = context.get('permission_mode') or 'default'
         self.path = begin(workdir, route, role='coordinator')
         self.patch = self.path.with_suffix('.patch.yml')
-        observer_patch(self.patch, route, provider_config=context.get('provider_config'))
+        # The context alone decides: a client folds `SESSIONS_ENV` into the context when it
+        # is created, and a context without the field means ``run``. (A node command's
+        # worker, rebuilt from its spec, falls back to the variable instead: see models.md.)
+        observer_patch(self.patch, route, provider_config=context.get('provider_config'),
+                       session_store=session_store(self.path, context.get('dsh_sessions') or 'run'))
         self.context = context
 
     def command(self, argv: list[str]) -> list[str]:

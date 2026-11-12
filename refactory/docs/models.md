@@ -269,6 +269,26 @@ Observe-only patches on the pinned DSH providers emit whitelisted route/usage me
 
 Worker receipts also feed [live activity](live-control.md); saved [profiles](optimization-profiles.md) retain requested routes in their exact launch snapshot. Configuration readiness is not execution evidence. DSH completed the bounded CLI and native GUI task. Codex and Claude Code completed the CLI task with explicit edit permissions and the native GUI task with the new `skip` default. Earlier native-policy failures remain documented as permission controls; see the [validation record](release-validation-20260926.md).
 
+### Where worker sessions are kept
+
+Three kinds of DSH process that refactory starts keep their DSH sessions in their own store in the run directory, not in the shared `$DSH_HOME/sessions` and `$DSH_HOME/storages`:
+
+- every `DshModelClient` completion: walker nodes, spine-dispatched node commands, the optimizer's calls and the CLI's one-off calls; the store is `.refactory/workers/<worker-id>.dsh/` beside the completion's receipt;
+- the spine's coordinator (its CEO and in-process subagents), with a model client (`GraphTelemetry`): `.refactory/workers/<worker-id>.dsh/` beside the coordinator receipt;
+- the spine's coordinator started without a model client (`run_on_dsh` / `DshEvaluator` with no client): `.refactory/workers/coordinator-<id>.dsh/`, from the patch beside it.
+
+Each store holds `sessions/` (the session log) and `storages/` (DSH's projection cache). Other DSH processes are not covered: the DSH GUI and any `dsh` a person starts keep the shared store, as do profile commands (`dsh plugin`), which store no sessions.
+
+DSH looks a session up by probing every project directory under its root and loads the whole projection cache when it starts, so a shared store made every helper slower and larger with each run the machine had ever done (52k stored sessions: 3.7 GB per helper and billions of failed path lookups in the kernel). A store per process holds only its own sessions. Nothing in refactory reads a worker's DSH session back; the store stays with the run as evidence and goes when the run directory is deleted. A completion without a run directory (the shared scratch directory) deletes its store when it ends. `DSH_HOME` itself is unchanged, so credentials, settings and profiles are the person's, and the run's evaluation context is the same: a run started before this resumes as it was.
+
+`REFACTORY_DSH_SESSIONS=shared`, set where the run starts, keeps the old shared store (for example to open worker sessions in the DSH GUI). The rule for where the choice comes from:
+
+- A model client takes an explicit `dsh_sessions`, else the worker context it inherits (`REFACTORY_WORKER_CONTEXT`), else `REFACTORY_DSH_SESSIONS`, else `run`. Its context records the choice only when it is `shared`.
+- The spine's coordinator with a client follows the run's context alone: no field means `run`.
+- A node command the spine starts rebuilds its client from the worker spec's context by the first rule, and it sees the launching shell's environment, `REFACTORY_DSH_SESSIONS` included. A `shared` context gives `shared`; a default context (no field) falls back to the variable.
+- A coordinator without a client has no context, so it reads `REFACTORY_DSH_SESSIONS` when it starts.
+- So a run started with the default and resumed (spine or walker) from a shell that sets `REFACTORY_DSH_SESSIONS=shared` keeps a per-process store for a spine coordinator with a client, while its workers' remaining calls use the shared store. Nothing reads the sessions back, so only where the evidence lands changes. To keep a run on one store, set the variable the same way for its resume as for its start.
+
 ## Credentials for nested execution
 
 Create/edit smoke and panel optimization launch further DSH processes. Their environment

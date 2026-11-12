@@ -213,6 +213,10 @@ def run_on_dsh(
     if telemetry is not None:
         command = telemetry.command(command)
         env.update(telemetry.environment())
+    elif (sessions := workers.session_patch(workdir)) is not None:
+        # No client, so no observer patch: the coordinator still keeps its own store.
+        index = command.index("--profile")
+        command[index:index] = ["--patch", str(sessions)]
     if context:
         if context.get("budget_ledger"):
             env["REFACTORY_BUDGET_LEDGER"] = str(context["budget_ledger"])

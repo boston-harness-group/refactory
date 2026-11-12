@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -569,8 +570,9 @@ class DshModelClient:
         inactivity_s: int | None = None,
         max_completion_tokens: str = "",
         setting_sources: str = "",
+        dsh_sessions: str = "",
     ) -> None:
-        from refactory_dsh.workers import validate_route
+        from refactory_dsh.workers import session_store_choice, validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
         if not isinstance(inherited, dict):
             raise ValueError("REFACTORY_WORKER_CONTEXT must contain an object")
@@ -629,6 +631,10 @@ class DshModelClient:
         #: Inherited only within the same product, as effort is: a DSH client in a
         #: Claude Code worker's child process must not take Claude Code's sources.
         self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
+        #: Where each completion's DSH process keeps its sessions (`workers.session_store`),
+        #: carried in `context()` when it is ``shared``, so a worker rebuilt from its spec
+        #: keeps it; a context without the field falls back to `workers.SESSIONS_ENV`.
+        self._dsh_sessions = session_store_choice(dsh_sessions or inherited.get("dsh_sessions"))
         self._permission_mode = permission_mode
         self._role_routes = copy.deepcopy(role_routes or {})
         self._node_routes = copy.deepcopy(node_routes or {})
@@ -822,6 +828,8 @@ class DshModelClient:
             **({"max_completion_tokens": mct} if (mct := getattr(self, "_max_completion_tokens", ""))
                else {}),
             **({"setting_sources": ss} if (ss := getattr(self, "_setting_sources", "")) else {}),
+            # Only the non-default choice, so a default context is the bytes it was.
+            **({"dsh_sessions": ds} if (ds := getattr(self, "_dsh_sessions", "run")) != "run" else {}),
         }
 
     def _environment(self, *, target_workdir: "Path | None" = None) -> dict[str, str]:
@@ -981,6 +989,13 @@ class DshModelClient:
                 workers.account_usage(client._budget, receipt, final=True)
             workers.finish(client._worker_receipt, state, error=str(error))
             raise
+        finally:
+            if original_workdir is None:
+                # The scratch directory is every caller's, so it keeps no session store;
+                # a run directory keeps its own beside the receipt (`workers.session_store`).
+                store = workers.session_store(client._worker_receipt, getattr(client, "_dsh_sessions", None))
+                if store is not None:
+                    shutil.rmtree(store, ignore_errors=True)
         workers.finish(client._worker_receipt, "completed")
         return result
 
@@ -1035,11 +1050,14 @@ class DshModelClient:
             patch = self._worker_receipt.with_suffix(".patch.yml")
             cwd = getattr(self, "_cwd", None)
             from refactory_dsh.workspace import tool_dsh_home
+            from refactory_dsh.workers import session_store
             write_patch(patch, self._runtime_root, self.route(), provider_config=self._provider_config,
                         workspace_root=cwd if getattr(self, "_confine", False) else None,
                         tool_home=tool_dsh_home(cwd) if cwd is not None else None,
                         system_prompt=system,
-                        tool_policy=getattr(self, '_tool_policy', ''))
+                        tool_policy=getattr(self, '_tool_policy', ''),
+                        session_store=session_store(self._worker_receipt,
+                                                    getattr(self, "_dsh_sessions", None)))
             cmd += ["--patch", str(patch)]
         if self._worker_backend == "dsh":
             if self._provider:
