@@ -208,6 +208,9 @@ class AutoresearchOptimizer(Optimizer):
         #: The answer's ``lessons`` (when the request asked for them), for the loop to
         #: keep and show back; empty when the answer carried none.
         self.last_lessons: str = ""
+        #: This round's analysis (``ProposalContext.analysts`` on; `_analyse`), for the
+        #: loop to journal; ``None`` when no analyst ran.
+        self.last_analysis: dict[str, Any] | None = None
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         import inspect
@@ -348,14 +351,296 @@ class AutoresearchOptimizer(Optimizer):
         return [{**entry, **reviewed.get(index, {})}
                 for index, entry in enumerate(ctx.added_steps)]
 
+    def _model_id(self) -> str:
+        """The optimizer route's model, for the analyst caches' keys: an answer from
+        one model is not reused for another."""
+        route = getattr(self._client, "route", None)
+        try:
+            found = route() if callable(route) else {}
+        except Exception:  # a client that cannot say is keyed by its type alone
+            found = {}
+        found = found if isinstance(found, dict) else {}
+        return json.dumps({key: found.get(key) for key in
+                           ("worker_backend", "provider", "model", "effort")} | {
+                              "client": type(self._client).__name__}, sort_keys=True)
+
+    def _ask(self, ctx: ProposalContext, system: str, prompt: str, fields: dict[str, Any],
+             parse: Any, counts: dict[str, int], rebuild: Any = None
+             ) -> tuple[Any, str | None, bool]:
+        """One analyst-stage call (`_analyse`): ``parse(payload)`` of the reply, or
+        ``None`` and why, and whether it was retried after a context overflow. Cached by
+        the optimizer's model and the call's whole text, in memory and in the run
+        directory (``analyst_findings/``); a call is recorded in the optimizer trace with
+        what it found. At most ``analysts.CONCURRENCY`` calls of a stage are in flight
+        at once, merges included. A call the provider refuses as longer than the model's
+        context (`analysts.context_overflow`) is retried once with ``rebuild(room)``, the
+        same request within half the failed prompt's length; its answer is cached under
+        the original call, so a retry or a resumed run pays for neither again. A spent
+        budget, a cancelled run or a missing model choice stop the proposal (as the
+        SkillOpt port's ``ask``); any other failure is recorded and returned, never
+        raised."""
+        import hashlib
+        import threading
+        from concurrent.futures import CancelledError
+        from pathlib import Path
+
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.model import ModelChoiceError
+
+        from . import analysts
+
+        cache: dict[str, str] = self.__dict__.setdefault("_analyst_cache", {})
+        lock = self.__dict__.setdefault("_analyst_lock", threading.Lock())
+        gate = self.__dict__.setdefault("_analyst_gate",
+                                        threading.BoundedSemaphore(analysts.CONCURRENCY))
+        store = (Path(self.trace_path).parent / "analyst_findings"
+                 if self.trace_path is not None else None)
+        key = hashlib.sha256(f"{self._model_id()}\n{system}\n{prompt}".encode()).hexdigest()
+        held = cache.get(key)
+        if held is None and store is not None and (store / f"{key}.json").exists():
+            try:
+                held = json.loads((store / f"{key}.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                held = None
+        if isinstance(held, dict) and isinstance(held.get("reply"), str):
+            found = parse(extract_json(held["reply"]))
+            if found is not None:
+                with lock:
+                    counts["cached"] += 1
+                cache[key] = held
+                retried = bool(held.get("context_retry"))
+                if retried and rebuild is not None:
+                    rebuild(max(1, len(prompt) // 2))  # the retried request's own record
+                return found, None, retried
+
+        def attempt(text: str, retry: bool) -> tuple[Any, str | None, str | None]:
+            call = {**fields, "epoch": ctx.epoch, "generation": ctx.generation,
+                    "system": system, "prompt": text,
+                    **({"context_retry": True} if retry else {})}
+            reply = None
+            with lock:
+                counts["calls"] += 1
+            try:
+                with gate:
+                    reply = self._client.complete(text, system=system,
+                                                  **self._completion_options)
+                found = parse(extract_json(reply))
+                if found is None:
+                    raise ValueError('the answer has no "findings" list')
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                self.record_call(**call, reply=reply, error=error)
+                if isinstance(exc, (BudgetExhausted, CancelledError, ModelChoiceError)):
+                    raise
+                return None, error, None
+            self.record_call(**call, reply=reply, error=None, findings=found)
+            return found, None, reply
+
+        found, error, reply = attempt(prompt, False)
+        retried = False
+        if found is None and rebuild is not None and analysts.context_overflow(error or ""):
+            # Once, at half the length the provider refused, re-clipped the same way.
+            retried = True
+            found, error, reply = attempt(rebuild(max(1, len(prompt) // 2)), True)
+        if found is None:
+            return None, error, retried
+        # The answer, under the original call's key: the same call made again (a retry,
+        # a resumed run) is answered from here, retried or not.
+        held = {"reply": reply, **({"context_retry": True} if retried else {})}
+        cache[key] = held
+        if store is not None:
+            try:
+                store.mkdir(parents=True, exist_ok=True)
+                (store / f"{key}.json").write_text(json.dumps(held))
+            except OSError:
+                pass
+        return found, None, retried
+
+    def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
+        """The analysis of this proposal step, made once: keyed by the epoch, the
+        generation, the edited candidate, its train records, the stage's settings and
+        the optimizer's model (`analysts.round_key`), never by the lessons, so a retry
+        in the same step reuses it (the lessons it saw are those of the step's first
+        attempt) and pays for no call. Kept in memory and in
+        ``analyst_findings/round-<key>.json``, so a resumed run reuses it too."""
+        from pathlib import Path
+
+        from . import analysts
+
+        key = analysts.round_key(ctx, self._model_id())
+        held = self.__dict__.get("_held_analysis")
+        if held is not None and held[0] == key:
+            return held[1]
+        store = (Path(self.trace_path).parent / "analyst_findings" / f"round-{key}.json"
+                 if self.trace_path is not None else None)
+        if store is not None and store.exists():
+            try:
+                saved = json.loads(store.read_text())
+            except (OSError, json.JSONDecodeError):
+                saved = None
+            if isinstance(saved, dict) and saved.get("key") == key:
+                # Made and journaled by an earlier process: nothing was paid now.
+                analysis = {**saved, "cached": saved.get("cached", 0) + saved.get("calls", 0),
+                            "calls": 0}
+                self._held_analysis = (key, analysis)
+                return analysis
+        analysis = self._analyse(ctx, key)
+        if analysis is not None:
+            self._held_analysis = (key, analysis)
+            failed = (any(b.get("error") for b in analysis["batches"])
+                      or any(m.get("error") for m in analysis["merges"]))
+            # A step with a failed call is kept for its retries, not for a resumed run,
+            # which tries the failed calls again (the others from their own cache).
+            if store is not None and not failed:
+                try:
+                    store.parent.mkdir(parents=True, exist_ok=True)
+                    store.write_text(json.dumps(analysis, default=str))
+                except OSError:
+                    pass
+        return analysis
+
+    def _analyse(self, ctx: ProposalContext, key: str = "") -> dict[str, Any] | None:
+        """The analyst stage (`optim.analysts`, ``ctx.analysts``): failure and success
+        analysts over batches of the edited candidate's train items, concurrently, then
+        the failure-first merge into one ranked list. ``None`` without items. When a
+        call stops the stage (a spent budget), ``last_analysis`` holds what it made and
+        paid so far, with the ``error``, for the loop to journal, and the error is
+        raised."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from . import analysts
+
+        conf = analysts.settings(**{k: v for k, v in ctx.analysts.items()
+                                    if k in ("group_size", "merge_batch_size", "max_batches")})
+        failures, successes = analysts.split(ctx.item_records, int(ctx.epoch))
+        if not failures and not successes:
+            return None
+        plan, left = analysts.batches(failures, successes, group_size=conf["group_size"],
+                                      max_batches=conf["max_batches"])
+        pipeline = analysts.pipeline_text(ctx)
+        totals = {kind: sum(1 for k, _i, _g in plan if k == kind) for kind in analysts.KINDS}
+        analysed = {str(r.get("id")) for _k, _i, group in plan for r in group}
+        counts = {"calls": 0, "cached": 0}
+        merges: list[dict[str, Any]] = []
+        done: list[dict[str, Any]] = []
+
+        def made(findings: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+            return {"key": key, "epoch": ctx.epoch, "generation": ctx.generation,
+                    "candidate": ctx.parent, **conf,
+                    "batches": [{k: v for k, v in b.items() if k != "found"} for b in done],
+                    "merges": sorted(merges, key=lambda m: (m["step"], m["level"], m["batch"])),
+                    "not_analysed": left, "findings": list(findings), **counts, **extra}
+
+        def analyse(batch: tuple[str, int, list[dict[str, Any]]]) -> dict[str, Any]:
+            kind, index, group = batch
+            items = [str(r.get("id")) for r in group]
+            prompt, clip = analysts.analyst_batch(ctx, kind, index, totals[kind], group,
+                                                  pipeline)
+
+            def smaller(room: int) -> str:
+                # The same batch re-clipped within ``room``; its clipping is the one
+                # the analyst read, so it is the one recorded.
+                text, clip_used = analysts.analyst_batch(ctx, kind, index, totals[kind],
+                                                         group, pipeline, room=room)
+                clip.update(clip_used)
+                return text
+
+            found, error, retried = self._ask(
+                ctx, analysts.FAILURE_SYSTEM if kind == "failure" else analysts.SUCCESS_SYSTEM,
+                prompt,
+                {"kind": f"analyst_{kind}", "group": index, "items": items},
+                lambda payload: analysts.parse_findings(payload, kind, items), counts,
+                rebuild=smaller)
+            return {"kind": kind, "index": index, "items": items, "found": found or [],
+                    "findings": len(found or ()), "clipped": clip["items"],
+                    "clipped_chars": clip["chars"],
+                    **({"context_retry": True} if retried else {}),
+                    "error": error}
+
+        def merge_lists(step: str, lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+            """SkillOpt's hierarchical merge (``aggregate.py``): lists without findings
+            are dropped, one list is not merged, and each level merges batches of
+            ``merge_batch_size``; an unreadable merge keeps every input finding."""
+            current = [found for found in lists if found]
+            level = 0
+            while len(current) > 1:
+                level += 1
+                size = conf["merge_batch_size"]
+                chunks = [current[i:i + size] for i in range(0, len(current), size)]
+
+                def merge(numbered: tuple[int, list[list[dict[str, Any]]]],
+                          level: int = level) -> list[dict[str, Any]]:
+                    number, chunk = numbered
+                    if len(chunk) == 1:
+                        return chunk[0]
+                    found, error, retried = self._ask(
+                        ctx, analysts.merge_system(step),
+                        analysts.merge_prompt(ctx, step, chunk, level, pipeline),
+                        {"kind": f"analyst_merge_{step}", "level": level, "batch": number,
+                         "lists": len(chunk)},
+                        lambda payload: analysts.parse_findings(payload, step, sorted(analysed),
+                                                                limit=None), counts,
+                        rebuild=lambda room: analysts.fit_merge_prompt(ctx, step, chunk, level,
+                                                                       room))
+                    merges.append({"step": step, "level": level, "batch": number,
+                                   "lists": len(chunk), "fallback": found is None,
+                                   **({"context_retry": True} if retried else {}),
+                                   "error": error})
+                    return found if found is not None else [f for part in chunk for f in part]
+
+                with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY,
+                                                               len(chunks)))) as pool:
+                    current = list(pool.map(merge, enumerate(chunks, 1)))
+            return current[0] if current else []
+
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY,
+                                                           len(plan)))) as pool:
+                done[:] = list(pool.map(analyse, plan))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                failure_side, success_side = pool.map(
+                    lambda kind: merge_lists(kind, [b["found"] for b in done
+                                                    if b["kind"] == kind]),
+                    analysts.KINDS)
+            if failure_side and success_side:
+                found, error, retried = self._ask(
+                    ctx, analysts.merge_system("final"),
+                    analysts.merge_prompt(ctx, "final", [failure_side, success_side], 0,
+                                          pipeline),
+                    {"kind": "analyst_merge_final", "level": 0, "batch": 1, "lists": 2},
+                    lambda payload: analysts.parse_findings(payload, "failure",
+                                                            sorted(analysed), limit=None),
+                    counts,
+                    rebuild=lambda room: analysts.fit_merge_prompt(
+                        ctx, "final", [failure_side, success_side], 0, room))
+                merges.append({"step": "final", "level": 0, "batch": 1, "lists": 2,
+                               "fallback": found is None,
+                               **({"context_retry": True} if retried else {}),
+                               "error": error})
+                # SkillOpt's fallback: the failure findings first, then the success ones.
+                ranked = found if found is not None else [*failure_side, *success_side]
+            else:
+                ranked = failure_side or success_side
+        except BaseException as exc:
+            # What was made and paid before the stop, for the loop to journal.
+            self.last_analysis = made([], error=f"{type(exc).__name__}: {exc}")
+            raise
+        return made(ranked)
+
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
         self.last_lessons = ""
+        self.last_analysis = None
         if ctx.added_steps:
             ctx = replace(ctx, added_steps=self._review_steps(ctx))
+        if ctx.analysts and ctx.item_records:
+            # The analysts read every item in full and their ranked findings take the
+            # readers' place, as SkillOpt's analysts are its only reading of the traces.
+            self.last_analysis = self._round_analysis(ctx)
+            ctx = replace(ctx, analysis=self.last_analysis)
         groups = trajectory_groups(ctx.item_records, ctx.evidence_budget) if ctx.item_records else []
-        if len(groups) > 1:
+        if len(groups) > 1 and ctx.analysis is None:
             findings, failures = self._read(ctx, groups)
             ctx = replace(ctx, reader_findings=findings, reader_failures=failures)
         ctx = replace(ctx, proposals=max(1, n))
