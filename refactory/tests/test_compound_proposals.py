@@ -277,6 +277,40 @@ def test_an_edit_written_at_the_proposals_top_level_is_read_as_its_edit():
         "two looks", "fewer slips", 0.6)
 
 
+def test_a_bare_edit_keeps_only_the_fields_its_op_takes():
+    """A proposal-level "id" or "diagnosis" beside a bare edit is not the edit's: a
+    split keeps none of them, while a remove_node's own "id" is kept."""
+    client = _Answer({"proposals": [
+        {"id": "p1", "diagnosis": "d", "considered": "c", "op": "split", "target": "decide",
+         "into": [{"id": "a"}, {"id": "b"}], "rationale": "r"},
+        {"op": "remove_node", "id": "extra_step", "diagnosis": "d"},
+    ]})
+    proposals = AutoresearchOptimizer(client).propose(ProposalContext(), 2, [_seed()])
+    assert [p.steps for p in proposals] == [
+        [{"op": "split", "target": "decide", "into": [{"id": "a"}, {"id": "b"}]}],
+        [{"op": "remove_node", "id": "extra_step"}]]
+    assert proposals[0].rationale == "r"
+
+
+@pytest.mark.parametrize("payload, steps, refused", [
+    ({"diagnosis": "d", "op": "set_knob", "name": "level", "value": 2}, [[_knob("level", 2)]], 0),
+    ({"diagnosis": "d", "edit": _knob("level", 2), "rationale": "r"}, [[_knob("level", 2)]], 0),
+    ({"proposal": {"edit": _knob("level", 2)}}, [[_knob("level", 2)]], 0),
+    ({"diagnosis": "nothing to say"}, [], 1),
+    ({"diagnosis": "nothing worth trying", "proposals": []}, [], 0),
+])
+def test_an_answer_without_a_proposals_list_is_read_or_refused(payload, steps, refused):
+    """A single proposal or bare edit at the answer's top level is read as one
+    proposal; an answer with nothing to read is one E-proposal-shape refusal, so the
+    retry and the next request hear about it; an empty list proposes nothing."""
+    proposals = AutoresearchOptimizer(_Answer(payload)).propose(ProposalContext(), 2, [_seed()])
+    shapes = [p for p in proposals if proposal_refusal(p)]
+    assert [p.steps for p in proposals if p not in shapes] == steps
+    assert len(shapes) == refused
+    assert all(proposal_refusal(p)[0].startswith('E-proposal-shape: the answer has no "proposals"')
+               for p in shapes)
+
+
 class _Answers:
     """Answers each proposal call with the next scripted payload (then none)."""
 

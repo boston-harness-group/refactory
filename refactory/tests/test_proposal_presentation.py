@@ -396,3 +396,44 @@ def test_the_text_budget_shortens_long_texts_and_keeps_short_ones_whole():
                  "note": "n" * 900}
     assert base.fit_edit_text(long_wire, 100) == {**long_wire, "note": "n" * 100
                                                   + "… (800 more chars)"}, "wiring is never cut"
+
+
+def test_a_patch_entrys_target_is_text_not_wiring():
+    """``target`` names a node at an edit's top level, but inside a knob patch it is the
+    text being replaced: it is shortened like any text, so the sections stay within
+    the bounds they had before."""
+    patch = {"op": "set_knob", "name": "decide_prompt",
+             "patch": [{"target": "T" * 6000, "replacement": "R" * 6000}]}
+    text = ProposalContext(
+        edit_pairs=[{"child": "c2", "parent": None, "edit": [patch]}],
+        reasoning=[{"id": "c2", "epoch": 1, "score": 0.5, "edit": [patch]}],
+        history=[{"id": "c2", "parent": "c1", "edits": [patch]}]).render()
+    changed = text[text.index("## What the last edit changed"):text.index("## Your earlier")]
+    reasoning = text[text.index("## Your earlier"):].split("\n## ", 1)[0]
+    tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
+    for section in (changed, reasoning):
+        assert "T" * 500 not in section and len(section) < 1500, len(section)
+    assert len(tried) < 1500, "the history keeps its own patch bound"
+    assert 'name="decide_prompt"' in changed, "the knob it patches is still named"
+
+
+def test_a_listing_stays_within_its_text_budget_however_many_steps():
+    """Twenty long prompts share one edit's budget even when each one's share is
+    tiny: the texts are cut below any floor, down to a bare length marker, and the
+    wiring stays whole."""
+    into = [{"id": f"s{i}", "kind": "agent", "prompt_template": "p" * 3000,
+             "system_prompt_template": "s" * 3000, "reads": [f"s{i - 1}.txt"],
+             "writes": [f"s{i}.txt"]} for i in range(10)]
+    split = {"op": "split", "target": "decide", "into": into}
+    bare = {"op": "split", "target": "decide",
+            "into": [{**n, "prompt_template": "", "system_prompt_template": ""} for n in into]}
+    for budget in (600, 100):
+        shown = base.fit_edit_text(split, budget)
+        texts = [n[k] for n in shown["into"] for k in ("prompt_template", "system_prompt_template")]
+        assert sum(len(t.split("…", 1)[0]) for t in texts) <= budget, budget
+        assert [n["reads"] for n in shown["into"]] == [n["reads"] for n in into]
+        assert len(json.dumps(shown)) <= len(json.dumps(bare)) + budget + 25 * len(texts)
+    assert all(t.startswith("… (3000 chars)") for n in base.fit_edit_text(split, 100)["into"]
+               for t in (n["prompt_template"], n["system_prompt_template"]))
+    row = base.compact_edits([split])
+    assert len(row) <= len(json.dumps(bare)) + base.HISTORY_EDIT_CHARS + 25 * 20

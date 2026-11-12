@@ -316,8 +316,10 @@ class AutoresearchOptimizer(Optimizer):
         # the next request says why. Listed first, so a batch filled by the readable
         # ones cannot skip it.
         unreadable: list[Proposal] = []
-        listed = payload.get("proposals") or ()
-        for raw in listed if isinstance(listed, (list, tuple)) else [listed]:
+        listed, missing = _answered_proposals(payload)
+        if missing:
+            unreadable.append(unreadable_proposal(payload, missing))
+        for raw in listed:
             steps, why = _proposal_edits(raw)
             if not steps:
                 unreadable.append(unreadable_proposal(raw, why))
@@ -351,13 +353,39 @@ def _parse_edit(edit: Any) -> dict[str, Any] | None:
 
 #: The keys of an answered proposal that are about the proposal, not its edit.
 PROPOSAL_FIELDS = ("rationale", "prediction", "confidence", "parent")
+#: The keys that hold an answered proposal's edit (``_proposal_edits``).
+EDIT_KEYS = ("edit", "edits", "edit_json")
+
+
+def _answered_proposals(payload: dict[str, Any]) -> tuple[list[Any], str]:
+    """The proposal entries of an answer, and why there are none when it has no
+    ``proposals`` list: its ``proposals`` (one object counts as one entry), else a
+    single ``proposal``, else the answer itself when it is one proposal (an edit
+    written at its top level, or an ``edit``/``edits`` beside the diagnosis). An empty
+    ``proposals`` list is an answer that proposes nothing, not a malformed one."""
+    if "proposals" in payload or "proposal" in payload:
+        listed = payload["proposals"] if "proposals" in payload else payload["proposal"]
+        if not listed:
+            return [], ""
+        return (list(listed) if isinstance(listed, (list, tuple)) else [listed]), ""
+    if "op" in payload or any(key in payload for key in EDIT_KEYS):
+        return [payload], ""
+    return [], 'the answer has no "proposals" list'
+
+
+def _op_fields(op: Any) -> tuple[str, ...] | None:
+    """The fields the catalogue's ``op`` takes, or ``None`` for an op it does not have."""
+    for entry in nn_edits.catalogue("broad"):
+        if entry["op"] == op:
+            return tuple(entry["fields"])
+    return None
 
 
 def _proposal_edits(raw: Any) -> tuple[list[dict[str, Any]], str]:
     """The edits one answered proposal carries, in order, or none and why: its
     ``edits`` list (a compound proposal), else its single ``edit``, else -- an edit
-    written at the proposal's top level (``{"op": ..., "rationale": ...}``) -- its own
-    fields less the proposal's (``PROPOSAL_FIELDS``). An entry that is not an edit
+    written at the proposal's top level (``{"op": ..., "rationale": ...}``) -- the
+    fields its op takes (``_op_fields``). An entry that is not an edit
     drops the whole proposal: applying the rest would score something the model did
     not propose. More edits than the run allows are kept, so the loop refuses them
     with the reason (``E-too-many-edits``) the next request shows."""
@@ -371,12 +399,18 @@ def _proposal_edits(raw: Any) -> tuple[list[dict[str, Any]], str]:
             return [], (f"entry {bad[0]} of its {len(steps)} edits is not an edit object "
                         "naming its op")
         return steps, ""  # type: ignore[return-value]
-    if "op" in raw and not any(key in raw for key in ("edit", "edits", "edit_json")):
-        return [{key: value for key, value in raw.items() if key not in PROPOSAL_FIELDS}], ""
+    if "op" in raw and not any(key in raw for key in EDIT_KEYS):
+        # Only what the op takes: a proposal-level key ("id", "diagnosis") left in
+        # would be read as the edit's own (an "id" naming a node to remove). An op the
+        # catalogue lacks keeps its fields less the proposal's, for E-op to name.
+        fields = _op_fields(raw["op"])
+        return [{key: value for key, value in raw.items()
+                 if (key == "op" or key in fields if fields is not None
+                     else key not in PROPOSAL_FIELDS)}], ""
     single = _parse_edit(raw.get("edit") or raw.get("edit_json"))
     if single is not None:
         return [single], ""
-    if any(key in raw for key in ("edit", "edits", "edit_json")):
+    if any(key in raw for key in EDIT_KEYS):
         return [], "its edit is not an edit object naming its op"
     return [], "it carries no edit (no \"edit\", \"edits\" or \"op\")"
 

@@ -2103,66 +2103,71 @@ EDIT_NAMING_FIELDS = ("op", "name", "target", "id", "source", "first", "second",
 #: The fields of an edit, and of a node it carries, that say how it is wired: shown
 #: whole wherever past edits are listed, however long. Only the other text (prompts,
 #: code, knob values, descriptions) is shortened, so a reader never mistakes a step's
-#: cut-off ``reads`` for a step that reads nothing.
+#: cut-off ``reads`` for a step that reads nothing. They are wiring only at an edit's
+#: top level and inside the node objects it carries (``EDIT_NODE_FIELDS``): under a
+#: ``value``, ``patch``, ``config``, ``spec`` or ``code`` every string is free text (a
+#: patch entry's ``target`` is the text it replaces).
 EDIT_WIRING_FIELDS = frozenset((
     *EDIT_NAMING_FIELDS, "ids", "kind", "reads", "writes", "produces", "inputs",
     "required_reads", "optional_targets", "call", "evaluator", "gate_kind",
     "max_iterations", "on_exhausted", "targets", "sources", "edges", "start", "knobs",
     "parallelism", "parallelism_knob", "feedback_keys", "task_ref", "tools", "blocking",
     "subgraph_entry", "subgraph_exit", "path", "role", "source_path"))
-#: The least of a long text a shortened listing keeps, however many texts share it.
-EDIT_TEXT_FLOOR = 60
+#: The fields of an edit or node that hold node objects (one, or a list).
+EDIT_NODE_FIELDS = frozenset((*NODE_OBJECT_FIELDS, "nodes"))
+#: A text the budget would cut to fewer characters than this is shown as its length
+#: marker alone ("… (N chars)").
+EDIT_TEXT_MIN = 20
 
 
-def _texts(value: Any, key: Any = None) -> list[int]:
-    """The lengths of the free-text strings in an edit (any string outside a wiring
-    field, ``EDIT_WIRING_FIELDS``), which is all a listing may shorten."""
-    if key in EDIT_WIRING_FIELDS:
-        return []
-    if isinstance(value, str):
-        return [len(value)]
-    if isinstance(value, dict):
-        return [n for k, v in value.items() for n in _texts(v, k)]
+def _map_text(value: Any, fn: Any, structured: bool = True) -> Any:
+    """``value`` with ``fn`` applied to each free-text string. In an edit or a node
+    (``structured``) the wiring fields stay as they are and node fields are walked as
+    nodes; everything else, at any depth, is free text."""
     if isinstance(value, (list, tuple)):
-        return [n for v in value for n in _texts(v, key)]
-    return []
-
-
-def _shortened(value: Any, limit: int, key: Any = None) -> Any:
-    """``value`` with each free-text string longer than ``limit`` cut to its head and a
-    "… (N more chars)" marker; wiring fields (``EDIT_WIRING_FIELDS``) and structure whole."""
-    if key in EDIT_WIRING_FIELDS:
+        return [_map_text(item, fn, structured) for item in value]
+    if isinstance(value, str):
+        return fn(value)
+    if not isinstance(value, dict):
         return value
-    if isinstance(value, str):
-        return (value if len(value) <= limit
-                else f"{value[:limit]}… ({len(value) - limit} more chars)")
-    if isinstance(value, dict):
-        return {k: _shortened(v, limit, k) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_shortened(v, limit, key) for v in value]
-    return value
+    if not structured:
+        return {key: _map_text(item, fn, False) for key, item in value.items()}
+    return {key: item if key in EDIT_WIRING_FIELDS
+            else _map_text(item, fn, key in EDIT_NODE_FIELDS)
+            for key, item in value.items()}
+
+
+def _cut(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit < EDIT_TEXT_MIN:
+        return f"… ({len(text)} chars)"
+    return f"{text[:limit]}… ({len(text) - limit} more chars)"
 
 
 def _text_limit(lengths: Sequence[int], budget: int) -> int:
     """The longest any one text may stay so all of them together fit ``budget``: short
-    texts stay whole and the long ones share what is left equally (never below
-    ``EDIT_TEXT_FLOOR``)."""
+    texts stay whole and the long ones share what is left equally, however little
+    that is (``_cut`` shows a share under ``EDIT_TEXT_MIN`` as a marker alone)."""
     remaining = max(0, budget)
     ordered = sorted(lengths)
     for index, length in enumerate(ordered):
         share = remaining // (len(ordered) - index)
         if length > share:
-            return max(EDIT_TEXT_FLOOR, share)
+            return share
         remaining -= length
     return max(ordered, default=0)
 
 
 def fit_edit_text(value: Any, budget: int, cap: int | None = None) -> Any:
-    """An edit (or edits) with its free text shortened to fit ``budget`` characters in
-    all (and no one text past ``cap``), and its structure and wiring kept whole however
-    long they are."""
-    limit = _text_limit(_texts(value), budget)
-    return _shortened(value, limit if cap is None else min(cap, limit))
+    """An edit (or a list of edits) with its free text shortened to fit ``budget``
+    characters in all (and no one text past ``cap``), and its structure and wiring
+    kept whole however long they are."""
+    lengths: list[int] = []
+    _map_text(value, lambda text: lengths.append(len(text)) or text)
+    limit = _text_limit(lengths, budget)
+    limit = limit if cap is None else min(cap, limit)
+    return _map_text(value, lambda text: _cut(text, limit))
 
 
 def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS,
