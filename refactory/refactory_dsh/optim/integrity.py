@@ -12,9 +12,10 @@ domain-free set (``CATEGORIES``), quoted evidence and a reason.
 The loop uses it under ``LoopConfig.integrity_judge`` (``Loop._integrity_check``,
 ``Loop._integrity_audit``), off by default. Each category has a policy (``POLICIES``):
 ``off`` (not asked about), ``warn`` (the verdict is recorded and shown; the change is
-still evaluated) or ``veto`` (an ``exploit`` verdict naming the category refuses the
-change before it is evaluated, ``E-integrity``). A ``suspect`` verdict, a judge error, a
-malformed or salvaged reply never vetoes. The policy of a category, most specific first
+still evaluated) or ``veto`` (an ``exploit`` or ``suspect`` verdict about what the
+change adds, naming the category, refuses it before it is evaluated, ``E-integrity``;
+`vetoes`). An ``inherited`` finding, a judge error, a malformed or salvaged reply never
+vetoes. The policy of a category, most specific first
 (``resolve_policy``): the run's setting for it; a Task's allowance
 (``Task.integrity_allowances``: off, and the judge is told why it is legitimate); the
 run's default -- ``veto`` for ``on``/``veto``, ``warn`` for ``flag``/``warn`` -- which
@@ -540,7 +541,7 @@ def parse_verdict(payload: Any, categories: Sequence[str] | None = None) -> dict
 
     An ``exploit`` must state the ``property`` of the data, grader or environment its
     benefit depends on (the prompt's definition); one that states none is read as
-    ``suspect`` (``judged`` keeps what it said), so it is shown, never vetoed. Items of
+    ``suspect`` (``judged`` keeps what it said). Items of
     ``evidence`` that are not strings (an object, a number) are kept as JSON text."""
     if not isinstance(payload, Mapping):
         raise ValueError("the integrity verdict is not a JSON object")
@@ -724,13 +725,20 @@ def asked(policy: Mapping[str, str]) -> list[str]:
     return [name for name in CATEGORIES if policy.get(name, "off") != "off"]
 
 
+#: The verdicts that refuse a change, about what it adds, in a veto category (`vetoes`).
+VETO_VERDICTS = ("exploit", "suspect")
+
+
 def vetoes(verdict: Mapping[str, Any], policy: Mapping[str, str]) -> bool:
-    """Whether a verdict refuses its change: an ``exploit`` (never ``suspect``) about what
-    this change adds (``source`` ``new``) that names a category whose policy is
-    ``veto``. A finding only about content an earlier change left (``inherited``) is
-    recorded and shown as a warning, and a failed or salvaged judgement never vetoes."""
-    if (verdict.get("error") or verdict.get("salvaged") or verdict.get("verdict") != "exploit"
-            or verdict.get("source") == "inherited"):
+    """Whether a verdict refuses its change: an ``exploit`` or ``suspect`` verdict whose
+    finding is not ``inherited`` (any other or no ``source`` counts as about what this
+    change adds) and that names a category whose policy is ``veto``. Never a failed
+    judgement (no verdict, or an error), a salvaged reply, an ``inherited`` finding
+    (about content an earlier change left: recorded and shown as a warning), a
+    category whose policy is ``warn`` or ``off``, or a verdict that names no category."""
+    if (verdict.get("error") or verdict.get("salvaged")
+            or verdict.get("verdict") not in VETO_VERDICTS
+            or _word(verdict.get("source")) == "inherited"):
         return False
     return any(policy.get(name) == "veto" for name in verdict.get("categories") or ())
 
@@ -748,11 +756,12 @@ def ask(client: Any, prompt: str, categories: Sequence[str] | None = None,
 
     reply = client.complete(prompt, system=SYSTEM, **options)
     try:
-        payload = extract_json(reply)
+        return parse_verdict(extract_json(reply), categories), reply
     except ValueError:
-        # Not valid JSON: read what can be read, marked so it never vetoes.
+        # Not valid JSON, or the first object found in it is not the verdict (a quoted
+        # ``{}`` inside a reply that is not valid JSON): read what can be read, marked so
+        # it never vetoes.
         return salvage(reply, categories), reply
-    return parse_verdict(payload, categories), reply
 
 
 def refusal(verdict: Mapping[str, Any], policy: Mapping[str, str] | None = None) -> str:
@@ -762,14 +771,16 @@ def refusal(verdict: Mapping[str, Any], policy: Mapping[str, str] | None = None)
     categories = ", ".join(name for name in named
                            if policy is None or policy.get(name) == "veto") or "no category named"
     quote = next(iter(verdict.get("evidence") or ()), "")
-    return (f"{REFUSAL_CODE}: an integrity review judged what this change adds an exploit "
+    said = ("an exploit" if verdict.get("verdict") == "exploit" else
+            "suspect: it may rely on how the data, grader or environment happen to be built")
+    return (f"{REFUSAL_CODE}: an integrity review judged what this change adds {said} "
             f"({categories}): {_clip(verdict.get('reason'), 400) or 'no reason given'}"
             + (f' -- it quoted "{_clip(quote, 200)}"' if quote else "")
             + (f"; it depends on: {_clip(verdict.get('property'), 200)}"
                if verdict.get("property") else "")
-            + ". Its benefit would depend on how the data, grader or environment happen to "
-            "be built, not on doing the task better; propose a change that does the task "
-            "better")
+            + ". A change whose benefit may depend on how the data, grader or environment "
+            "happen to be built is refused in this run; propose a change that does the task "
+            "better and holds in general")
 
 
 # ── what the optimizer and a reader see ─────────────────────────────────────
@@ -807,12 +818,12 @@ def feedback_lines(records: Sequence[Mapping[str, Any]], *, rows: int = FEEDBACK
     lines = ["## Integrity review of your proposals",
              "Each proposal is reviewed for whether its benefit would hold if the dataset, "
              "grader or environment had been built differently, or depends on how they "
-             "happen to be built. An exploit verdict, or a proposal refused before "
-             "evaluation, means its benefit depends on such a property: that does not count "
-             "as progress, so do the task better instead. A suspect verdict only flags a "
-             "possible reliance on how the data or grader was built: consider whether the "
-             "rule holds in general. An inherited finding is about content an earlier "
-             "change put in, not about that proposal's own change.",
+             "happen to be built. A proposal refused before evaluation was judged exploit "
+             "or suspect for what it adds: that does not count as progress, so do the task "
+             "better instead. A verdict that was only flagged -- in a category that only "
+             "warns, or an inherited finding about content an earlier change put in, not "
+             "about that proposal's own change -- asks you to consider whether the rule "
+             "holds in general.",
              tally]
     flagged = [r for r in records if r.get("verdict") in ("suspect", "exploit")][-max(1, rows):]
     used = sum(len(line) + 1 for line in lines)

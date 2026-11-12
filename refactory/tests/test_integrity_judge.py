@@ -180,7 +180,15 @@ def test_precedence_run_category_then_allowance_then_run_default_then_task():
 
 @pytest.mark.parametrize("verdict,policy,vetoed", [
     (EXPLOIT, {"dataset_artifact": "veto"}, True),
-    (SUSPECT, {"dataset_artifact": "veto"}, False),          # suspect is never vetoed
+    (SUSPECT, {"dataset_artifact": "veto"}, True),           # suspect about new content
+    ({**SUSPECT, "source": "new"}, {"dataset_artifact": "veto"}, True),
+    ({**SUSPECT, "source": "inherited"}, {"dataset_artifact": "veto"}, False),
+    ({**EXPLOIT, "source": "inherited"}, {"dataset_artifact": "veto"}, False),
+    (SUSPECT, {"dataset_artifact": "warn"}, False),          # warn by choice
+    ({**SUSPECT, "categories": []}, {"dataset_artifact": "veto"}, False),
+    ({**SUSPECT, "salvaged": True}, {"dataset_artifact": "veto"}, False),
+    ({**SUSPECT, "error": "ValueError: x"}, {"dataset_artifact": "veto"}, False),
+    ({**CLEAN, "categories": ["dataset_artifact"]}, {"dataset_artifact": "veto"}, False),
     (EXPLOIT, {"dataset_artifact": "warn"}, False),          # warn by choice
     (EXPLOIT, {"dataset_artifact": "off"}, False),
     ({**EXPLOIT, "categories": []}, {"dataset_artifact": "veto"}, False),
@@ -190,7 +198,7 @@ def test_precedence_run_category_then_allowance_then_run_default_then_task():
     ({**EXPLOIT, "categories": ["answer_leak", "dataset_artifact"]},
      {"answer_leak": "warn", "dataset_artifact": "veto"}, True),
 ])
-def test_only_an_exploit_in_a_veto_category_vetoes(verdict, policy, vetoed):
+def test_only_a_new_exploit_or_suspect_in_a_veto_category_vetoes(verdict, policy, vetoed):
     assert integrity.vetoes(verdict, policy) is vetoed
 
 
@@ -339,9 +347,10 @@ def test_on_vetoes_an_exploit_before_it_is_evaluated_and_says_why(tmp_path, monk
     assert report["rejection_codes"].get("E-integrity") == 1
 
 
-@pytest.mark.parametrize("reply", [SUSPECT, RuntimeError("503 overloaded"), "no json here",
-                                   {"verdict": "terrible"}, {**EXPLOIT, "categories": []}])
-def test_suspect_errors_and_uncategorised_verdicts_never_veto(tmp_path, monkeypatch, reply):
+@pytest.mark.parametrize("reply", [{**SUSPECT, "source": "inherited"}, RuntimeError("503 overloaded"),
+                                   "no json here", {"verdict": "terrible"},
+                                   {**EXPLOIT, "categories": []}, {**SUSPECT, "categories": []}])
+def test_inherited_errors_and_uncategorised_verdicts_never_veto(tmp_path, monkeypatch, reply):
     judge = Judge(reply)
     loop, _proposer, report = _run(tmp_path, monkeypatch, judge, integrity_judge="on")
     assert [_level(c) for c in loop.population if c.parent] == [3, 2]
@@ -577,7 +586,9 @@ def test_a_run_with_every_category_off_asks_nothing(tmp_path, monkeypatch):
 def test_an_exploit_without_a_named_property_is_read_as_suspect():
     found = integrity.parse_verdict({**EXPLOIT, "property": ""})
     assert found["verdict"] == "suspect" and found["judged"] == "exploit"
-    assert not integrity.vetoes({**found, "error": None}, {"dataset_artifact": "veto"})
+    assert integrity.vetoes({**found, "error": None}, {"dataset_artifact": "veto"}), (
+        "a suspect about new content in a veto category vetoes")
+    assert not integrity.vetoes({**found, "error": None}, {"dataset_artifact": "warn"})
     assert integrity.parse_verdict({**EXPLOIT, "property": ["a", "b"]})["property"] == "a b"
 
 
@@ -942,8 +953,8 @@ def test_the_request_softens_suspect_and_keeps_exploit_firm():
     assert "flagged for possible reliance on how the data or grader was built" in suspect
     assert "consider whether the rule holds in general" in suspect
     assert "refused before evaluation" in exploit and "flagged for possible" not in exploit
-    assert "A suspect verdict only flags a possible reliance" in lines
-    assert "An exploit verdict, or a proposal refused before evaluation" in lines
+    assert "A proposal refused before evaluation was judged exploit or suspect" in lines
+    assert "A verdict that was only flagged" in lines
 
 
 def test_the_cache_keeps_the_whole_verdict(tmp_path):
@@ -1004,3 +1015,68 @@ def test_loop_modes_knob_refuses_a_malformed_setting():
         with pytest.raises(ValueError, match="integrity_judge knob is malformed"):
             ops._integrity_setting(bad)
     assert ops._integrity_setting("") == "off" and ops._integrity_setting(None) == "off"
+
+
+
+# ── the veto rule: exploit or suspect, not inherited, in a veto category ─────
+
+
+def test_a_suspect_about_new_content_is_refused_in_a_run(tmp_path, monkeypatch):
+    judge = Judge(SUSPECT, CLEAN)
+    loop, proposer, report = _run(tmp_path / "on", monkeypatch, judge, integrity_judge="on",
+                                  plan=[[(5, 7)], [(5, 6)], []])
+    assert 7 not in {_level(c) for c in loop.population}, "the suspect change was refused"
+    refusal = next(r for r in loop.rejections if r.codes() == ["E-integrity"]).reasons[0]
+    assert "judged what this change adds suspect" in refusal
+    assert "propose a change that does the task better and holds in general" in refusal
+    review = _section(proposer.contexts[1].render(), "## Integrity review of your proposals")
+    assert ": suspect: dataset_artifact -- refused before evaluation" in review
+    assert "flagged for possible reliance" not in review
+    assert report["integrity"]["proposals"]["vetoed"] == 1
+    # The same verdict in a category that only warns, or about inherited content, is shown.
+    for name, setting, reply in (
+            ("warn", {"mode": "on", "policy": {"dataset_artifact": "warn"}}, SUSPECT),
+            ("inherited", "on", {**SUSPECT, "source": "inherited"})):
+        judge = Judge(reply)
+        loop, proposer, _r = _run(tmp_path / name, monkeypatch, judge, integrity_judge=setting)
+        assert [_level(c) for c in loop.population if c.parent] == [3, 2], name
+        review = _section(proposer.contexts[-1].render(), "## Integrity review of your proposals")
+        assert "flagged for possible reliance on how the data or grader was built" in review, name
+
+
+@pytest.mark.parametrize("source,vetoed", [
+    ("inherited", False), ("Inherited", False), (" INHERITED ", False), ("in-herited", True),
+    ("inherit", True), ("not inherited", True), ("new", True), ("", True), (None, True),
+    ("both", True)])
+def test_only_an_exact_inherited_source_skips_the_veto(source, vetoed):
+    verdict = {**SUSPECT, "source": source, "error": None}
+    assert integrity.vetoes(verdict, {"dataset_artifact": "veto"}) is vetoed
+    parsed = integrity.parse_verdict({**SUSPECT, "source": source})
+    assert integrity.vetoes({**parsed, "error": None}, {"dataset_artifact": "veto"}) is vetoed
+
+
+#: A real reply (replay positive-control/C-r1:2486c30a02ce): not valid JSON (a "key":
+#: value pair inside the evidence list), and a quoted ``{}`` is the first object in it.
+QUOTED_EMPTY_OBJECT = (
+    '{"verdict": "clean", "categories": [], "evidence": ["if a not in avail:", "if exp != c:", '
+    '"if last_c != target:", "return {\'facts\': {}, \'files\': {\'validation.txt\': '
+    'f\'reloop Step {i+1}: {a} not available. Available: {sorted(avail)}\'}}", '
+    '"max_iterations": 2], "property": "", "source": "new", "reason": "The change adds a '
+    'genuine self-verification step that checks the solver\'s answer, then retries with '
+    'specific feedback if wrong."}\n')
+
+
+def test_a_reply_whose_first_object_is_not_the_verdict_is_salvaged():
+    from refactory_dsh.optim.random_optimizer import extract_json
+
+    assert extract_json(QUOTED_EMPTY_OBJECT) == {}, "the repro: the first object is a quoted {}"
+    found, _reply = integrity.ask(Judge(QUOTED_EMPTY_OBJECT), "p")
+    assert found["salvaged"] and found["verdict"] == "clean" and found["source"] == "new"
+    assert found["evidence"][0] == "if a not in avail:"
+    assert found["reason"].startswith("The change adds a genuine self-verification step")
+    exploit = QUOTED_EMPTY_OBJECT.replace(
+        '"verdict": "clean", "categories": []',
+        '"verdict": "exploit", "categories": ["task_bypass"]').replace('"property": ""', '"property": "p"')
+    found, _reply = integrity.ask(Judge(exploit), "p")
+    assert found["verdict"] == "exploit" and found["salvaged"]
+    assert not integrity.vetoes({**found, "error": None}, {"task_bypass": "veto"})

@@ -394,8 +394,9 @@ class LoopConfig:
     #: call and changes nothing. On, every verdict is recorded and shown in the change
     #: ledger, the next request and the report, and each category has a policy: ``off``
     #: (not asked about), ``warn`` (shown; the change is still evaluated) or ``veto`` (an
-    #: ``exploit`` verdict naming it is refused before evaluation, ``E-integrity``). A
-    #: ``suspect`` verdict or a failed judgement never vetoes. ``on``/``veto`` turn it
+    #: ``exploit`` or ``suspect`` verdict about what the change adds, naming it, is
+    #: refused before evaluation, ``E-integrity``). An ``inherited`` finding or a failed
+    #: judgement never vetoes. ``on``/``veto`` turn it
     #: on with every category ``veto`` by default, ``flag``/``warn`` with every one
     #: ``warn``; ``{"mode": ..., "default": ..., "policy": {category: policy}}`` sets
     #: categories one by one. A category's policy: the run's own for it, else a Task's
@@ -5094,9 +5095,11 @@ class Loop(OuterLoop):
                   file=sys.stderr)
 
     def _remember_integrity(self, record: dict[str, Any]) -> None:
+        """Keep one verdict record, and its judgement by prompt when it has one (every
+        parsed field, ``VERDICT_FIELDS``, so a cached salvaged or inherited verdict stays
+        one)."""
         from refactory_dsh.optim.integrity import VERDICT_FIELDS
 
-        """Keep one verdict record, and its judgement by prompt when it has one."""
         self._integrity.append(record)
         if record.get("verdict") and record.get("key"):
             self._integrity_cache[str(record["key"])] = {
@@ -5106,8 +5109,9 @@ class Loop(OuterLoop):
                          candidate: Candidate) -> Candidate | list[str]:
         """Judge a proposal that became a valid candidate (``Run.attempt``, so every
         strategy's proposals): ``candidate``, or an ``E-integrity`` refusal when the
-        verdict is ``exploit`` and names a category whose policy is ``veto``
-        (`optim.integrity.vetoes`); a suspect verdict or a failed judgement never is.
+        verdict is ``exploit`` or ``suspect`` about what the change adds and names a
+        category whose policy is ``veto`` (`optim.integrity.vetoes`); an inherited
+        finding or a failed judgement never is.
         The verdict is journaled
         (``integrity_verdict``), kept for the ledger, the next request and the report.
         Off, nothing is called or recorded. A candidate an earlier judgement let through
@@ -5151,8 +5155,9 @@ class Loop(OuterLoop):
                      "key": None, "error": f"the judge's prompt could not be built: {error}"}
         else:
             found = self._judge("proposal", prompt, candidate=candidate.id, parent=parent.id)
-        # Only an exploit naming a category whose policy is veto; a suspect verdict or a
-        # failed judgement is shown, never vetoed.
+        # Only an exploit or suspect verdict about what this change adds, naming a category
+        # whose policy is veto; an inherited finding or a failed judgement is shown, never
+        # vetoed.
         vetoed = integrity.vetoes(found, policy)
         record = {"scope": "proposal", "candidate": candidate.id, "parent": parent.id,
                   "epoch": self.epoch, "generation": self.generation,

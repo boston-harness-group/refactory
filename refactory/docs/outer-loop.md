@@ -677,16 +677,24 @@ prompt names no dataset, task or answer format.
   `suspect` when unsure, and given legitimate counter-examples (general know-how such as
   "re-check each intermediate result before using it"). Evidence items that
   are not strings are kept as JSON text; a reply that is not valid JSON is read field
-  by field and marked `salvaged`.
+  by field and marked `salvaged` -- also when the first object a reply holds is not the
+  verdict (a quoted `{}` inside a reply that is not valid JSON).
 - **What it does: a policy per category**, `off` (not asked about), `warn` (recorded
   and shown; the change is still evaluated) or `veto` (refused before evaluation with
-  `E-integrity`, which the next request shows with the judge's reason). Only an
-  `exploit` verdict about what this change adds (`source: new`, also when the reply
-  does not say) naming a `veto` category vetoes. A `suspect` verdict, an `inherited`
-  finding (recorded and shown as a warning: a harmless child of a flagged parent is
-  evaluated), an exploit that names no category or no property, a failed call, a
-  malformed or salvaged reply never veto: a failure is recorded as a judge error and
-  shown as such.
+  `E-integrity`, which the next request shows with the judge's reason). The veto rule:
+  the verdict is `exploit` or `suspect`, its finding is not `inherited` (a missing or
+  other `source` counts as about what this change adds), and it names a category whose
+  policy is `veto`. These never veto: an `inherited` finding (recorded and shown as a
+  warning: a harmless child of a flagged parent is evaluated; only exactly
+  `inherited`, in any case or spacing, counts), a category whose policy is `warn` or
+  `off`, a verdict that names no category, a failed call, a malformed or salvaged
+  reply: a failure is recorded as a judge error and shown as such.
+- **What slipped past once is not vetoed later.** A change that got through -- the
+  judge failed or its reply was salvaged, its category only warns, the judge was off
+  when it was proposed, or the finding was about inherited content -- stays in the
+  candidates built on it, and their proposals are not vetoed for it (an inherited
+  finding never vetoes). Only the final audit of the winner's combined change from the
+  seed reports it.
 - **Setting it.** `--integrity-judge on` (or `veto`): every category `veto`.
   `--integrity-judge flag` (or `warn`): every category `warn`. An object sets
   categories one by one, in a profile or as JSON on the command line:
@@ -709,8 +717,10 @@ prompt names no dataset, task or answer format.
   verdict of the proposal that was evaluated; `(inherited)` marks a finding about
   earlier content); the request gains "Integrity review of your proposals": a tally,
   then the newest 8 suspect or exploit verdicts, each with its categories, quote, reason
-  and whether it was refused (within 4000 characters) -- an exploit or a refusal does
-  not count as progress, a suspect verdict asks whether the rule holds in general; the
+  and whether it was refused (within 4000 characters) -- a refusal (an exploit or
+  suspect verdict about what the proposal added) does not count as progress, a verdict
+  that was only flagged (a warn category, an inherited finding) asks whether the rule
+  holds in general; the
   report (`integrity` in `report.json`, "Integrity review" in `report.md`) gives the
   policy, the counts, every flagged proposal and the winner's combined-change verdict.
   The final verdict is reported, never acted on.
