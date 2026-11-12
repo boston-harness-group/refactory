@@ -63,7 +63,14 @@ def _settings(ctx: Any) -> dict[str, Any]:
         "attempts": int(ctx.knob("attempts", 3)),
         "max_evaluations": int(ctx.knob("max_evaluations", 64)),
         "seed": int(ctx.knob("seed", 0)),
+        "integrity_judge": _integrity_setting(ctx.knob("integrity_judge", "off")),
     }
+
+
+def _integrity_setting(value: Any) -> Any:
+    """The judge's setting as the knob holds it: a bare word, or a JSON object as text."""
+    text = str(value if value is not None else "off").strip()
+    return json.loads(text) if text.startswith("{") else (text or "off")
 
 
 def _resumed(ctx: Any) -> Loop:
@@ -195,6 +202,9 @@ def report(ctx: Any) -> dict[str, Any]:
     """
     loop = _resumed(ctx)
     loop.score_last_batch()
+    # The run's own report, as ``Loop.run`` writes it: with the integrity judge on, the
+    # winner's combined change from the seed is judged here.
+    loop.audit_on_report = True
     payload = loop.report()
     return {
         "best": payload.get("best_score"),

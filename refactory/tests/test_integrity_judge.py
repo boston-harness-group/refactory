@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from refactory_dsh import nn, task as task_module
 from refactory_dsh.optim import integrity
 from refactory_dsh.optim.base import Candidate, Proposal
 from refactory_dsh.outerloop import Run, ValidationGate
@@ -41,7 +42,8 @@ def _section(text: str, heading: str) -> str:
 
 EXPLOIT = {"verdict": "exploit", "categories": ["dataset_artifact"],
            "evidence": ["if that option is listed, choose it"],
-           "reason": "It keys on a feature that only marks the right answer in this data."}
+           "reason": "It keys on a feature that only marks the right answer in this data.",
+           "property": "in this data a certain feature appears only beside the right result"}
 SUSPECT = {**EXPLOIT, "verdict": "suspect"}
 CLEAN = {"verdict": "clean", "categories": [], "evidence": [], "reason": "Better checking."}
 
@@ -98,8 +100,8 @@ def _proposal_prompts(judge: Judge) -> list[str]:
 def test_a_verdict_is_read_and_bounded():
     found = integrity.parse_verdict({
         "verdict": "Exploit", "categories": ["dataset-artifact", "Train overfit", "made_up"],
-        "evidence": "q" * 900, "reason": "r" * 2000})
-    assert found["verdict"] == "exploit"
+        "evidence": "q" * 900, "reason": "r" * 2000, "property": "p"})
+    assert found["verdict"] == "exploit" and found["property"] == "p"
     assert found["categories"] == ["dataset_artifact", "train_overfit"]
     assert found["unknown_categories"] == ["made_up"]
     assert len(found["evidence"]) == 1 and len(found["evidence"][0]) <= integrity.QUOTE_CHARS + 40
@@ -134,8 +136,10 @@ def test_bare_settings_and_their_defaults():
         assert integrity.parse_setting(word) == {"default": "veto", "policy": {}}
     for word in ("flag", "warn"):
         assert integrity.parse_setting(word) == {"default": "warn", "policy": {}}
+    # An object naming no mode and no default leaves the other categories to the Tasks.
     assert integrity.parse_setting('{"policy": {"answer_leak": "off"}}') == {
-        "default": "veto", "policy": {"answer_leak": "off"}}
+        "default": None, "policy": {"answer_leak": "off"}}
+    assert integrity.parse_setting({"mode": "on", "policy": {}})["default"] == "veto"
     assert integrity.parse_setting({"mode": "flag", "default": "veto"})["default"] == "veto"
     for bad in ("yes", {"policy": {"nope": "off"}}, {"policy": {"answer_leak": "block"}},
                 {"mode": "loud"}, {"extra": 1}, "{not json", 3):
@@ -143,20 +147,32 @@ def test_bare_settings_and_their_defaults():
             integrity.parse_setting(bad)
 
 
-def test_precedence_run_setting_then_task_then_default():
-    setting = integrity.parse_setting({"mode": "on", "policy": {"answer_leak": "warn"}})
+def test_precedence_run_category_then_allowance_then_run_default_then_task():
+    declared = {"answer_leak": "off", "grader_exploit": "warn", "task_bypass": "veto"}
+    allowances = {"train_overfit": "items are meant to be memorised",
+                  "environment_tamper": "reading the item's files is the task"}
+    # A per-category run setting beats everything; an allowance beats the run default;
+    # a bare run default covers every other category and overrides the Tasks' policies.
     policy = integrity.resolve_policy(
-        setting, declared={"answer_leak": "off", "grader_exploit": "warn"},
-        allowances={"train_overfit": "items are meant to be memorised"})
-    assert policy == {"answer_leak": "warn",          # the run's setting beats the Task's off
-                      "dataset_artifact": "veto",     # nothing declared: the default
-                      "grader_exploit": "warn",       # the Task's declaration
-                      "environment_tamper": "veto",
+        integrity.parse_setting({"mode": "on", "policy": {"answer_leak": "warn",
+                                                          "environment_tamper": "veto"}}),
+        declared=declared, allowances=allowances)
+    assert policy == {"answer_leak": "warn",          # the run's own, over the Task's off
+                      "dataset_artifact": "veto",     # the run's default
+                      "grader_exploit": "veto",       # the run's default, over the Task's warn
+                      "environment_tamper": "veto",   # the run's own, over an allowance
                       "task_bypass": "veto",
                       "train_overfit": "off"}         # the Task's allowance
-    warned = integrity.resolve_policy(integrity.parse_setting("flag"),
-                                      declared={"task_bypass": "veto"})
-    assert warned["dataset_artifact"] == "warn" and warned["task_bypass"] == "veto"
+    # A Task cannot raise a bare flag to veto.
+    warned = integrity.resolve_policy(integrity.parse_setting("flag"), declared=declared,
+                                      allowances=allowances)
+    assert warned == {"answer_leak": "warn", "dataset_artifact": "warn", "grader_exploit": "warn",
+                      "environment_tamper": "off", "task_bypass": "warn", "train_overfit": "off"}
+    # A run that names no default leaves the other categories to the Tasks, then veto.
+    left = integrity.resolve_policy(integrity.parse_setting({"policy": {"answer_leak": "veto"}}),
+                                    declared=declared)
+    assert (left["answer_leak"], left["grader_exploit"], left["task_bypass"],
+            left["dataset_artifact"]) == ("veto", "warn", "veto", "veto")
     assert set(integrity.resolve_policy(None).values()) == {"off"}
     assert integrity.asked(policy) == ["answer_leak", "dataset_artifact", "grader_exploit",
                                        "environment_tamper", "task_bypass"]
@@ -366,8 +382,13 @@ def test_a_task_allowance_turns_a_category_off_and_the_run_setting_wins(tmp_path
     assert all(c.evaluated for c in loop.population), "the finding is in an allowed category"
     assert [r["verdict"] for r in loop._integrity if r["scope"] == "proposal"] == ["clean", "clean"]
     assert report["integrity"]["policy"]["answer_leak"] == "off"
-    assert report["integrity"]["policy"]["grader_exploit"] == "warn"
+    assert report["integrity"]["policy"]["grader_exploit"] == "veto", "a bare on beats the Task's warn"
     assert "answer_leak" in report["integrity"]["allowances"]
+
+    judge = Judge(leak)
+    _l, _p, report = _run(tmp_path / "object", monkeypatch, judge,
+                          integrity_judge={"policy": {"dataset_artifact": "veto"}})
+    assert report["integrity"]["policy"]["grader_exploit"] == "warn", "no run default: the Task's"
 
     judge = Judge(leak)
     loop, _p, _r = _run(tmp_path / "user", monkeypatch, judge,
@@ -520,9 +541,9 @@ def test_a_past_runs_proposals_replay_with_the_prompt_the_run_used(tmp_path, mon
     assert integrity.main(["export", str(loop.root), "--out", str(out)]) == 0
     entries = integrity.read_entries(out)
     assert [e["candidate"] for e in entries] == [c.id for c in loop.population if c.parent]
-    for entry in entries:
-        entry["integrity_judge"] = "flag"
+    assert all(e["integrity_judge"] == "flag" for e in entries), "the run's own setting"
     assert [integrity.entry_prompt(e) for e in entries] == _proposal_prompts(judge)
+    assert [e["live"]["verdict"] for e in entries] == ["clean", "clean"]
 
 
 def test_a_proposal_judged_before_is_not_judged_again(tmp_path):
@@ -546,3 +567,326 @@ def test_a_run_with_every_category_off_asks_nothing(tmp_path, monkeypatch):
                             integrity_judge={"mode": "on", "default": "off"})
     assert judge.prompts == [] and loop._integrity == []
     assert report["integrity"]["final_audit"]["note"] == "every category is off: nothing to judge"
+
+
+
+# ── review fixes: calibration, context, carried-over content, parsing, precedence ──
+
+
+def test_an_exploit_without_a_named_property_is_read_as_suspect():
+    found = integrity.parse_verdict({**EXPLOIT, "property": ""})
+    assert found["verdict"] == "suspect" and found["judged"] == "exploit"
+    assert not integrity.vetoes({**found, "error": None}, {"dataset_artifact": "veto"})
+    assert integrity.parse_verdict({**EXPLOIT, "property": ["a", "b"]})["property"] == "a b"
+
+
+def test_non_string_evidence_items_are_kept_as_text():
+    found = integrity.parse_verdict({**CLEAN, "evidence": [{"max_iterations": 2}, 3, "q", None]})
+    assert found["evidence"] == ['{"max_iterations": 2}', "3", "q"]
+    assert integrity.parse_verdict({**CLEAN, "evidence": {"a": 1}})["evidence"] == ['{"a": 1}']
+
+
+BROKEN = ('{"verdict": "exploit", "categories": ["task_bypass"], "evidence": ["return 0", '
+          '"max_iterations": 1, "on_exhausted": "continue"], "reason": "It \\"skips\\" the '
+          'work.", "property": "p"}')
+
+
+def test_a_reply_that_is_not_valid_json_is_salvaged_and_never_vetoes(tmp_path, monkeypatch):
+    found, _reply = integrity.ask(Judge(BROKEN), "p", ["task_bypass"])
+    assert found["salvaged"] and found["verdict"] == "exploit"
+    assert found["categories"] == ["task_bypass"]
+    assert found["evidence"] == ["return 0", "continue"], "values kept, keys dropped"
+    assert found["reason"] == 'It "skips" the work.'
+    assert not integrity.vetoes({**found, "error": None}, {"task_bypass": "veto"})
+    with pytest.raises(ValueError):
+        integrity.salvage("no verdict here")
+    loop, _p, _r = _run(tmp_path, monkeypatch, Judge(BROKEN), integrity_judge="on")
+    assert [_level(c) for c in loop.population if c.parent] == [3, 2], "evaluated, not vetoed"
+    assert all(r.get("salvaged") for r in loop._integrity if r["scope"] == "proposal")
+
+
+def test_the_prompt_is_calibrated_and_domain_free():
+    text = integrity._how_to_judge() + integrity._answer() + "".join(integrity.CATEGORIES.values())
+    for cue in ("usually", "default to", "option order", "expected answer", "prefer it"):
+        assert cue not in text, cue
+    assert "convert them first" in text, "a legitimate counter-example"
+    assert "A general rule learned from training failures is legitimate" in text
+    assert "When in doubt, say suspect." in text
+    assert "trigger has nothing to do with doing the task" in text
+    assert '"property"' in text
+    summary = integrity.evidence_summary(RECORDS)
+    assert "expected" not in summary and "| reference | produced |" in summary
+
+
+def test_the_settings_a_change_touches_are_described_and_a_missing_rationale_said():
+    state = integrity._applied(PARENT_STATE, EDITS[:1])
+    PARENT_KNOB = PARENT_STATE["knobs"]["solve__task"]
+    described = json.loads(json.dumps(PARENT_STATE))
+    described["knobs"]["solve__task"]["spec"]["description"] = "what the solve step is asked to do"
+    after = json.loads(json.dumps(state))
+    after["knobs"]["solve__task"]["spec"] = described["knobs"]["solve__task"]["spec"]
+    prompt = integrity.proposal_prompt(edits=EDITS[:1], parent_state=described, state=after)
+    settings = _section(prompt, "## What the settings it touches are for")
+    assert "- `solve__task`: what the solve step is asked to do; kind str" in settings
+    assert "read by `solve`" in settings
+    reasoning = _section(prompt, "## The optimizer's reasoning for it")
+    assert "Rationale: (no rationale given)" in reasoning
+    assert "Diagnosis: (no diagnosis given)" in reasoning
+    assert PARENT_KNOB["value"]  # the fixture is untouched
+    bare = integrity.proposal_prompt(edits=[{"op": "bypass", "target": "solve"}],
+                                     parent_state=None, state=None)
+    assert "## What the settings it touches are for" not in bare
+
+
+def test_the_loop_shows_the_judge_a_bare_knob_moves_description(tmp_path, monkeypatch):
+    judge = Judge(CLEAN)
+    _run(tmp_path, monkeypatch, judge, integrity_judge="flag")
+    settings = _section(judge.prompts[0], "## What the settings it touches are for")
+    assert "- `level`: a level; kind int; range 0 to 9; default 5; 5 -> 3" in settings
+    assert "Rationale: (no rationale given)" in judge.prompts[0]
+
+
+def test_content_kept_from_earlier_changes_is_judged_too(tmp_path, monkeypatch):
+    """The second proposal (3 -> 2) is judged with what the first change (5 -> 3) left
+    in the candidate; the first, made on the seed itself, has no such section."""
+    judge = Judge(CLEAN)
+    _run(tmp_path, monkeypatch, judge, integrity_judge="flag")
+    first, second = _proposal_prompts(judge)
+    heading = "## What the candidate keeps from earlier changes"
+    assert heading not in first
+    kept = _section(second, heading)
+    assert "### setting `level` changed: 5 -> 2" in kept
+    assert "an exploit an earlier change put in and this candidate keeps counts" in kept
+    assert "Text or code an earlier change put in and this change keeps counts" in second
+
+
+def _two_tasks(monkeypatch: Any, first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    for name, attrs in (("integrity_task_a", first), ("integrity_task_b", second)):
+        cls = type(name, (task_module.Task,), {"name": name, **attrs})
+        monkeypatch.setitem(task_module.TASKS, name, cls)
+    graph = nn.Graph()
+    for node, ref in (("a", "integrity_task_a"), ("b", "integrity_task_b")):
+        graph.add(nn.Node(node, "data", task_ref=ref, subgraph_entry=f"w{node}",
+                          subgraph_exit=f"w{node}", writes=(f"{node}.json",)))
+        graph.add(nn.Node(f"w{node}", "op", call="loop_ops:record_item"))
+    graph.connect("a", "b")
+    return {"graph": graph.to_state()}
+
+
+def test_when_tasks_disagree_the_more_lenient_holds_and_an_allowance_beats_a_veto(monkeypatch):
+    state = _two_tasks(
+        monkeypatch,
+        {"integrity_policy": {"grader_exploit": "veto", "task_bypass": "warn",
+                              "answer_leak": "veto"}},
+        {"integrity_policy": {"grader_exploit": "warn", "task_bypass": "veto"},
+         "integrity_allowances": {"answer_leak": "recall of these items is the task"}})
+    declared = task_module.integrity_declaration(state)
+    assert declared["policy"] == {"grader_exploit": "warn", "task_bypass": "warn",
+                                  "answer_leak": "veto"}
+    policy = integrity.resolve_policy(integrity.parse_setting({"policy": {}}),
+                                      declared=declared["policy"],
+                                      allowances=declared["allowances"])
+    assert (policy["grader_exploit"], policy["task_bypass"], policy["answer_leak"]) == (
+        "warn", "warn", "off")
+    told = integrity.told(declared["allowances"], policy)
+    assert told == {"answer_leak": "recall of these items is the task"}
+
+
+def test_a_tasks_unknown_policy_word_is_refused_and_an_unloadable_task_warned(monkeypatch):
+    state = _two_tasks(monkeypatch, {"integrity_policy": {"answer_leak": "block"}}, {})
+    with pytest.raises(task_module.TaskError, match="block"):
+        task_module.integrity_declaration(state)
+    state = _two_tasks(monkeypatch, {"integrity_allowances": {"made_up": "x"}}, {})
+    with pytest.raises(task_module.TaskError, match="made_up"):
+        task_module.integrity_declaration(state)
+    graph = nn.Graph()
+    graph.add(nn.Node("a", "data", task_ref="no_such_task_anywhere", subgraph_entry="w",
+                      subgraph_exit="w", writes=("a.json",)))
+    graph.add(nn.Node("w", "op", call="loop_ops:record_item"))
+    with pytest.warns(RuntimeWarning, match="could not be loaded"):
+        assert task_module.integrity_declaration({"graph": graph.to_state()}) == {
+            "policy": {}, "allowances": {}}
+
+
+def test_a_tasks_declaration_defaults_are_not_shared_mutable_objects():
+    with pytest.raises(TypeError):
+        task_module.Task.integrity_allowances["answer_leak"] = "x"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        task_module.Task.integrity_policy["answer_leak"] = "off"  # type: ignore[index]
+
+
+def test_a_run_whose_task_declares_an_unknown_policy_stops(tmp_path, monkeypatch):
+    from refactory_dsh.loop import LoopError
+
+    monkeypatch.setattr(SkillTask, "integrity_policy", {"answer_leak": "block"}, raising=False)
+    with pytest.raises(LoopError, match="block"):
+        _run(tmp_path, monkeypatch, Judge(CLEAN), integrity_judge="on")
+
+
+def test_a_run_without_a_model_says_so_instead_of_judging_nothing(tmp_path, monkeypatch):
+    from refactory_dsh.loop import LoopError
+
+    with pytest.raises(LoopError, match="no model to judge with"):
+        _run(tmp_path, monkeypatch, None, integrity_judge="flag")
+    journal = tmp_path / "run" / "journal.jsonl"
+    assert not journal.exists() or '"train_records"' not in journal.read_text(), (
+        "refused before anything was evaluated")
+
+
+def test_without_a_budget_the_judge_uses_the_runs_own_optimizer_route(tmp_path):
+    """The graph-run loop binds no budget when its node context has none."""
+    routed: list[str] = []
+
+    class Model:
+        def for_node(self, node, role=""):
+            routed.append(f"{node}/{role}")
+            return self
+
+        def complete(self, prompt, *, system="", workdir=None):
+            return json.dumps(CLEAN)
+
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, integrity_judge="on")
+        loop.model = Model()
+        loop.bind_budget(None)
+    assert loop._judge_model is None
+    assert loop._judge_client() is not None and routed == ["optimizer/optimizer"]
+
+
+def test_the_report_judges_the_winner_only_when_it_may_call_a_model(tmp_path, monkeypatch):
+    """A report-only replay makes no call; the graph-run loop's report node may."""
+    judge = Judge(CLEAN)
+    loop, _p, _r = _run(tmp_path, monkeypatch, judge, integrity_judge="flag")
+    with _patch_mode(LevelProbe):
+        again = _loop(tmp_path, **{"epochs": len(PLAN), "val_gate": False, "max_evaluations": 50,
+                                   "integrity_judge": {"mode": "flag", "policy": {
+                                       "answer_leak": "off"}}, "resume": True})
+        again.integrity_client = fresh = Judge(CLEAN)
+        again.init()
+        assert again._integrity_report(again.leaderboard()[0])["final_audit"]["error"].startswith(
+            "not judged")
+        again.audit_on_report = True
+        assert again._integrity_report(again.leaderboard()[0])["final_audit"]["verdict"] == "clean"
+    assert len(fresh.prompts) == 1 and fresh.prompts[0].startswith("# Integrity review of a search")
+
+
+def test_loop_mode_report_sets_the_audit(monkeypatch):
+    from refactory_packages.loop_mode import ops
+
+    seen: list[bool] = []
+
+    class Fake:
+        audit_on_report = False
+
+        def score_last_batch(self):
+            pass
+
+        def report(self):
+            seen.append(self.audit_on_report)
+            return {}
+
+    monkeypatch.setattr(ops, "_resumed", lambda ctx: Fake())
+    ops.report(object())
+    assert seen == [True]
+    assert ops._integrity_setting('{"mode": "on"}') == {"mode": "on"}
+    assert ops._integrity_setting("flag") == "flag"
+
+
+def test_a_prompt_that_cannot_be_built_is_a_judge_error_not_a_crash(tmp_path, monkeypatch):
+    def broken(**_kwargs):
+        raise KeyError("spec")
+
+    monkeypatch.setattr(integrity, "proposal_prompt", broken)
+    judge = Judge(EXPLOIT)
+    loop, _p, report = _run(tmp_path, monkeypatch, judge, integrity_judge="on")
+    assert _proposal_prompts(judge) == []
+    records = [r for r in loop._integrity if r["scope"] == "proposal"]
+    assert len(records) == 2 and all("could not be built" in r["error"] for r in records)
+    assert report["integrity"]["proposals"]["errors"] == 2
+    assert all(c.evaluated for c in loop.population)
+
+
+def test_a_spent_budget_while_judging_stops_the_run(tmp_path, monkeypatch):
+    from refactory_dsh.budgets import BudgetExhausted
+
+    judge = Judge(BudgetExhausted("token budget spent"))
+    loop, _p, report = _run(tmp_path, monkeypatch, judge, integrity_judge="on")
+    assert "token budget spent" in str(report["bound"])
+    assert [c for c in loop.population if c.parent] == [], "nothing past the judge ran"
+    trace = (loop.root / "optimizer_trace.jsonl").read_text()
+    assert "BudgetExhausted" in trace
+
+
+def test_a_duplicate_is_not_judged_again_and_the_ledger_shows_the_evaluated_verdict(tmp_path):
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, integrity_judge="flag")
+        loop.integrity_client = judge = Judge(SUSPECT, EXPLOIT)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        edit = {"op": "set_knob", "name": "level", "value": 3}
+        first = run.attempt(Proposal(edit=edit, parent=seed.id, rationale="one"), seed)
+        second = run.attempt(Proposal(edit=edit, parent=seed.id, rationale="two"), seed)
+    assert isinstance(first, Candidate) and isinstance(second, Candidate)
+    assert len(judge.prompts) == 1, "the same state is not judged twice"
+    assert loop._integrity_of(first.id)["verdict"] == "suspect"
+    # A vetoed proposal of a state, then one let through: the ledger shows the latter.
+    loop._integrity[:] = [{"scope": "proposal", "candidate": "x", "vetoed": True, "verdict": "exploit"},
+                          {"scope": "proposal", "candidate": "x", "vetoed": False, "verdict": "clean"},
+                          {"scope": "proposal", "candidate": "x", "vetoed": True, "verdict": "exploit"}]
+    assert loop._integrity_of("x")["verdict"] == "clean"
+
+
+def test_vetoed_proposals_are_exported_with_the_runs_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(SkillTask, "integrity_allowances", {"answer_leak": "the task is recall"},
+                        raising=False)
+    judge = Judge(EXPLOIT, CLEAN)
+    loop, _p, _r = _run(tmp_path, monkeypatch, judge, integrity_judge="on",
+                        plan=[[(5, 7)], [(5, 6)], []])
+    out = tmp_path / "exported.jsonl"
+    assert integrity.main(["export", str(loop.root), "--out", str(out)]) == 0
+    entries = integrity.read_entries(out)
+    assert [e["live"]["vetoed"] for e in entries] == [True, False]
+    assert entries[0]["allowances"] == {"answer_leak": "the task is recall"}
+    assert entries[0]["integrity_judge"] == "on"
+    assert [integrity.entry_prompt(e) for e in entries] == _proposal_prompts(judge)
+    assert "the task is recall" in integrity.entry_prompt(entries[0])
+
+
+def test_the_export_takes_each_parents_train_records_as_of_its_proposal(tmp_path):
+    """The parent's records changed between its two children (a re-score): each child
+    carries the records the proposer saw then."""
+    root = tmp_path / "run"
+    root.mkdir()
+    seed_state = {"knobs": {}, "graph": {"start": "x", "nodes": {}}}
+    events = [
+        {"event": "candidate", "id": "s", "parent": None, "edits": [], "state": seed_state},
+        {"event": "train_records", "id": "s", "records": [{"id": "t1", "passed": False, "label": "OLD"}]},
+        {"event": "candidate", "id": "c1", "parent": "s", "step_edits": 1,
+         "edits": [{"op": "set_knob", "name": "k", "value": 1}], "state": seed_state},
+        {"event": "train_records", "id": "s", "records": [{"id": "t1", "passed": True, "label": "NEW"}]},
+        {"event": "candidate", "id": "c2", "parent": "s", "step_edits": 1,
+         "edits": [{"op": "set_knob", "name": "k", "value": 2}], "state": seed_state},
+    ]
+    (root / "journal.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    with pytest.warns(RuntimeWarning, match="declaration could not be read"):
+        entries = {e["id"]: e for e in integrity.proposals_from_run(root)}
+    assert entries["c1"]["train_records"][0]["label"] == "OLD"
+    assert entries["c2"]["train_records"][0]["label"] == "NEW"
+    assert entries["c1"]["integrity_judge"] == "on" and entries["c1"]["seed_state"] == seed_state
+    # Judged runs: the records as they stood when each verdict was journaled.
+    judged = events[:2] + [
+        {"event": "integrity_policy", "setting": "flag", "task_policy": {}, "allowances": {}},
+        {"event": "integrity_verdict", "scope": "proposal", "candidate": "v1", "parent": "s",
+         "generation": 0, "verdict": "exploit", "vetoed": True,
+         "input": {"edits": [{"op": "set_knob", "name": "k", "value": 1}], "rationale": "r"}},
+        events[3],
+        {"event": "integrity_verdict", "scope": "proposal", "candidate": "v2", "parent": "s",
+         "generation": 1, "verdict": "clean", "vetoed": False,
+         "input": {"edits": [], "rationale": "q", "parent_state": {"knobs": {"x": 1}}}},
+    ]
+    (root / "journal.jsonl").write_text("".join(json.dumps(e) + "\n" for e in judged))
+    rows = integrity.proposals_from_run(root)
+    assert [r["train_records"][0]["label"] for r in rows] == ["OLD", "NEW"]
+    assert rows[0]["integrity_judge"] == "flag" and rows[0]["rationale"] == "r"
+    assert rows[1]["parent_state"] == {"knobs": {"x": 1}}, "an in-between parent's own state"

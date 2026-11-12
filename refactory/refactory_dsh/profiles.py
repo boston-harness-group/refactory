@@ -523,7 +523,9 @@ SETTING_HELP = {
                        "default; flag (or warn): verdicts are only shown. "
                        "'{\"mode\": \"on\", \"policy\": {\"answer_leak\": \"off\", "
                        "\"train_overfit\": \"warn\"}}' sets categories one by one (off, "
-                       "warn, veto); a run's setting beats the Task's declaration",
+                       "warn, veto); a bare value covers every category the object does "
+                       "not name and overrides a Task's integrity_policy; a Task's "
+                       "integrity_allowances still turn their categories off",
     "portfolio": "prompt+pipeline: each round asks the model proposer for one "
                  "prompt/knob-level and one pipeline-level candidate and evaluates both, "
                  "gated in that order (default: off)",

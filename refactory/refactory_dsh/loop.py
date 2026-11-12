@@ -398,8 +398,10 @@ class LoopConfig:
     #: ``suspect`` verdict or a failed judgement never vetoes. ``on``/``veto`` turn it
     #: on with every category ``veto`` by default, ``flag``/``warn`` with every one
     #: ``warn``; ``{"mode": ..., "default": ..., "policy": {category: policy}}`` sets
-    #: categories one by one. A category's policy is the run's, else the Task's
-    #: (``Task.integrity_policy``, ``Task.integrity_allowances``), else the default.
+    #: categories one by one. A category's policy: the run's own for it, else a Task's
+    #: allowance (``Task.integrity_allowances``: off), else the run's default, else (an
+    #: object with no default) the Tasks' ``integrity_policy``, else veto
+    #: (`optim.integrity.resolve_policy`).
     integrity_judge: str | dict[str, Any] = "off"
 
     def to_dict(self) -> dict[str, Any]:
@@ -517,7 +519,14 @@ class Loop(OuterLoop):
                 self.budget.set_validation_owner("search")
             self.bind_budget(self.budget)
             self._executing_strategy = True
+            self.audit_on_report = True
             try:
+                if self._integrity_on():
+                    self._integrity_policy()  # an unreadable declaration stops the run here
+                    if self._judge_client() is None:
+                        raise LoopError("integrity_judge is on but this run has no model to "
+                                        "judge with (the judge uses the optimizer's model "
+                                        "route); turn it off or give the run a model")
                 try:
                     result = super().run()
                 except (BudgetExhausted, BudgetStopped) as exc:
@@ -699,6 +708,12 @@ class Loop(OuterLoop):
         #: a caller replaces it.
         self._judge_model: Any = None
         self.integrity_client: Any = None
+        #: Whether ``report`` may judge the winner's combined change from the seed (a
+        #: model call): set by ``run`` and by the graph-run loop's report node
+        #: (``loop_mode``), never by a report-only replay.
+        self.audit_on_report = False
+        #: Whether a failed judgement was already said on stderr (once per process).
+        self._judge_error_said = False
         #: The (candidate, epoch) re-scores tried in this process (`_rescore`), so a
         #: round's in-batch re-score that failed is not tried again after gating; a
         #: resumed run tries again.
@@ -4982,18 +4997,33 @@ class Loop(OuterLoop):
             from refactory_dsh.optim import integrity
             from refactory_dsh.task import integrity_declaration
 
+            from refactory_dsh.task import TaskError
+
             try:
                 declared = integrity_declaration(self.mode.state_dict())
-            except Exception:  # noqa: BLE001 - a graph whose Tasks cannot load declares nothing
-                declared = {"policy": {}, "allowances": {}}
-            policy = integrity.resolve_policy(
-                self._integrity_setting(),
-                declared={k: v for k, v in declared["policy"].items()
-                          if k in integrity.CATEGORIES and v in integrity.POLICIES},
-                allowances=declared["allowances"])
+            except TaskError as exc:
+                raise LoopError(f"integrity judge: {exc}") from exc
+            policy = integrity.resolve_policy(self._integrity_setting(),
+                                              declared=declared["policy"],
+                                              allowances=declared["allowances"])
             cached = (policy, integrity.told(declared["allowances"], policy))
             self.__dict__["_integrity_resolved"] = cached
+            self.__dict__["_integrity_declared"] = declared
         return cached
+
+    def _journal_integrity_policy(self) -> None:
+        """Journal the judge's setting, the Tasks' declaration and the policy they give
+        (``integrity_policy``) before the first judgement that uses them, and again only
+        when they change (a resume with another setting): what the offline replay needs
+        to rebuild the run's prompts (`optim.integrity.proposals_from_run`)."""
+        policy, _told = self._integrity_policy()
+        declared = self.__dict__["_integrity_declared"]
+        record = {"setting": self.config.integrity_judge, "task_policy": declared["policy"],
+                  "allowances": declared["allowances"], "policy": policy}
+        if json.dumps(record, sort_keys=True, default=str) != json.dumps(
+                self.__dict__.get("_integrity_policy_journaled"), sort_keys=True, default=str):
+            self.__dict__["_integrity_policy_journaled"] = record
+            self._journal("integrity_policy", **record)
 
     def _judge_client(self) -> Any:
         """The judge's model, without tools: ``integrity_client`` when a caller set one,
@@ -5002,6 +5032,11 @@ class Loop(OuterLoop):
         from refactory_dsh.optim.random_optimizer import text_only
 
         model = self.integrity_client if self.integrity_client is not None else self._judge_model
+        if model is None and self.model is not None:
+            # No budget bound the route (the graph-run loop's node without one): the
+            # optimizer's route of the run's own model.
+            model = (self.model.for_node("optimizer", role="optimizer")
+                     if callable(getattr(self.model, "for_node", None)) else self.model)
         return text_only(model) if model is not None else None
 
     def _judge(self, scope: str, prompt: str, **fields: Any) -> dict[str, Any]:
@@ -5022,7 +5057,8 @@ class Loop(OuterLoop):
         categories = integrity.asked(self._integrity_policy()[0])
         client = self._judge_client()
         if client is None:
-            return {**failed, "error": "no model client: the integrity judge uses the optimizer's model"}
+            raise LoopError("integrity_judge is on but this run has no model to judge with "
+                            "(the judge uses the optimizer's model route)")
         import inspect
         options: dict[str, Any] = {}
         try:
@@ -5040,11 +5076,22 @@ class Loop(OuterLoop):
             self.optimizer.record_call(**call, reply=reply, error=error)
             if isinstance(exc, BudgetExhausted) and scope == "proposal":
                 raise
+            self._say_judge_error(error)
             return {**failed, "error": error}
         self.optimizer.record_call(**call, reply=reply, error=None, verdict=found["verdict"],
                                    categories=found["categories"])
         self._integrity_cache[key] = found
         return {**found, "error": None, "key": key}
+
+    def _say_judge_error(self, error: str) -> None:
+        """A failed judgement on stderr, the first time in this process (each one is in
+        the trace, the progress stream and the report), so a judge that fails every
+        time is never silent."""
+        if not self._judge_error_said:
+            self._judge_error_said = True
+            print(f"refactory: the integrity judge failed ({error[:300]}); the change is "
+                  "evaluated without a verdict. Later failures are in the report.",
+                  file=sys.stderr)
 
     def _remember_integrity(self, record: dict[str, Any]) -> None:
         """Keep one verdict record, and its judgement by prompt when it has one."""
@@ -5074,22 +5121,40 @@ class Loop(OuterLoop):
         if not integrity.asked(policy):
             # Every category is off: nothing to ask about.
             return candidate
+        self._journal_integrity_policy()
         diagnosis = (str(getattr(self.optimizer, "last_diagnosis", "") or "")
                      if self._custom_strategy is None else "")
-        prompt = integrity.proposal_prompt(
-            edits=candidate.own_edits(), parent_state=parent.state, state=candidate.state,
-            rationale=proposal.rationale, prediction=proposal.prediction, diagnosis=diagnosis,
-            # The records the proposer read: the parent's train records, never val or test.
-            records=list(self._train_item_records.get(parent.id) or ()),
-            mode_name=self.mode_id, parent_id=parent.id, candidate_id=candidate.id,
-            categories=integrity.asked(policy), allowances=allowances)
-        found = self._judge("proposal", prompt, candidate=candidate.id, parent=parent.id)
+        # What the judge reads, journaled with its verdict so a past run's proposals,
+        # vetoed ones included, can be judged again offline with the same prompt.
+        given = {"edits": candidate.own_edits(), "rationale": str(proposal.rationale or ""),
+                 "prediction": str(proposal.prediction or ""), "diagnosis": diagnosis}
+        if not any(c.id == parent.id for c in self.population):
+            # A parent the journal does not hold (a strategy's in-between candidate,
+            # SkillOpt's per-knob patches): its state goes with the record.
+            given["parent_state"] = parent.state
+        try:
+            prompt = integrity.proposal_prompt(
+                edits=given["edits"], parent_state=parent.state, state=candidate.state,
+                rationale=given["rationale"], prediction=given["prediction"],
+                diagnosis=diagnosis,
+                # The records the proposer read: the parent's train records, never val or test.
+                records=list(self._train_item_records.get(parent.id) or ()),
+                mode_name=self.mode_id, parent_id=parent.id, candidate_id=candidate.id,
+                categories=integrity.asked(policy), allowances=allowances,
+                seed_state=self._seed_state())
+        except Exception as exc:  # a prompt that cannot be built is a failed judgement
+            error = f"{type(exc).__name__}: {exc}"
+            self._say_judge_error(error)
+            found = {"verdict": None, "categories": [], "evidence": [], "reason": "",
+                     "key": None, "error": f"the judge's prompt could not be built: {error}"}
+        else:
+            found = self._judge("proposal", prompt, candidate=candidate.id, parent=parent.id)
         # Only an exploit naming a category whose policy is veto; a suspect verdict or a
         # failed judgement is shown, never vetoed.
         vetoed = integrity.vetoes(found, policy)
         record = {"scope": "proposal", "candidate": candidate.id, "parent": parent.id,
                   "epoch": self.epoch, "generation": self.generation,
-                  "vetoed": vetoed, **found}
+                  "vetoed": vetoed, **found, "input": given}
         with self._state_lock:
             self._remember_integrity(record)
             self._journal("integrity_verdict", **record)
@@ -5103,8 +5168,16 @@ class Loop(OuterLoop):
         ``None`` with the judge off or no verdict."""
         if not self._integrity_on():
             return None
-        return next((r for r in reversed(self._integrity)
-                     if r.get("scope") == "proposal" and r.get("candidate") == candidate_id), None)
+        # The verdict that let it through to evaluation (an earlier proposal of the same
+        # state may have been vetoed).
+        mine = [r for r in self._integrity
+                if r.get("scope") == "proposal" and r.get("candidate") == candidate_id]
+        return next((r for r in mine if not r.get("vetoed")), mine[-1] if mine else None)
+
+    def _seed_state(self) -> dict[str, Any] | None:
+        """The pipeline the search started from (the population's first candidate)."""
+        seed = next((c for c in self.population if not c.parent), None)
+        return seed.state if seed is not None else None
 
     def _integrity_feedback(self) -> list[dict[str, Any]]:
         """The run's proposal verdicts, for "Integrity review of your proposals"; none
@@ -5149,9 +5222,10 @@ class Loop(OuterLoop):
                      and r.get("verdict")), None)
         if done is not None:
             return done
-        if not getattr(self, "_executing_strategy", False):
+        if not self.audit_on_report:
             return {"candidate": best.id, "verdict": None,
-                    "error": "not judged: the run was not executing (a report-only replay)"}
+                    "error": "not judged: a report-only replay makes no model call"}
+        self._journal_integrity_policy()
         found = self._judge("final", prompt, candidate=best.id, seed=seed.id)
         # Reported, never vetoed: the search is over (a person reads it before adopting).
         record = {"scope": "final", "candidate": best.id, "seed": seed.id,
@@ -5588,6 +5662,9 @@ class Loop(OuterLoop):
                 self._lessons = {key: record.get(key) for key in ("text", "epoch", "generation")}
             elif event == "integrity_verdict":
                 self._remember_integrity({k: v for k, v in record.items() if k != "event"})
+            elif event == "integrity_policy":
+                self.__dict__["_integrity_policy_journaled"] = {
+                    k: v for k, v in record.items() if k != "event"}
             elif event in ("rescore", "rescore_failed"):
                 rescores += 1
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
