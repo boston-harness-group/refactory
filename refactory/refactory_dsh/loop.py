@@ -4995,15 +4995,24 @@ class Loop(OuterLoop):
     def _keep_analysis(self) -> None:
         """Journal the step's analysis (``analyst_findings``) once per analysis key
         (`optim.analysts.round_key`): a retry in the same step reuses the analysis and
-        is not journaled again, nor is one a resumed run reloaded. An analysis a spent
-        budget stopped is journaled with what it paid and its ``error``."""
+        is not journaled again, nor is one a resumed run reloaded from a complete
+        earlier analysis. An analysis a spent budget stopped is journaled with what it
+        paid and its ``error``; one remade after an incomplete one (a failed batch or
+        merge, or a stop) is journaled too, so the journal holds what the proposer saw
+        and every call paid."""
         from refactory_dsh.optim.analysts import journal_entry
 
         analysis = getattr(self.optimizer, "last_analysis", None)
         if not self.config.analysts or not analysis:
             return
         entry = {"epoch": self.epoch, "generation": self.generation, **journal_entry(analysis)}
-        if entry.get("key") and any(a.get("key") == entry["key"] and not a.get("error")
+
+        def complete(earlier: dict[str, Any]) -> bool:
+            return (not earlier.get("error")
+                    and not any(b.get("error") for b in earlier.get("batches") or ())
+                    and not any(m.get("error") for m in earlier.get("merges") or ()))
+
+        if entry.get("key") and any(a.get("key") == entry["key"] and (complete(a) or a == entry)
                                     for a in self._analyses):
             return
         self._analyses.append(entry)
@@ -5664,6 +5673,7 @@ def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> 
             "failed_batches": sum(1 for a in analyses for b in a.get("batches") or ()
                                   if b.get("error")),
             "clipped_items": sum(int(a.get("clipped_items") or 0) for a in analyses),
+            "clipped_chars": sum(int(a.get("clipped_chars") or 0) for a in analyses),
             "stopped": sum(1 for a in analyses if a.get("error")),
             "latest": dict(analyses[-1]) if analyses else None}
 
@@ -5682,7 +5692,8 @@ def _analysts_section(report: dict[str, Any]) -> list[str]:
              + (f"; {report['failed_batches']} batch(es) could not be analysed"
                 if report.get("failed_batches") else "")
              + (f"; {report['clipped_items']} item trace(s) were clipped to fit an "
-                "analyst's room" if report.get("clipped_items") else "")
+                f"analyst's room ({report.get('clipped_chars', 0)} characters left out)"
+                if report.get("clipped_items") else "")
              + (f"; {report['stopped']} round(s) stopped before the stage finished"
                 if report.get("stopped") else "")
              + ". Every round's findings are in journal.jsonl (`analyst_findings`) and each "

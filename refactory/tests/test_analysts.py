@@ -866,19 +866,138 @@ def test_a_proposer_that_asks_no_model_is_refused_and_a_custom_strategy_warned(
             warned.set_custom_strategy(OuterLoop())
 
 
-def test_clipped_items_are_counted_journaled_and_reported(tmp_path, monkeypatch):
-    big = _rec("f0", False, steps={"a": ("I" * 40000, "O" * 40000)})
-    assert analysts.clipped_items([big]) == 0, "alone it has the whole room"
-    group = [big] + [_rec(f"f{i}", False) for i in range(1, 8)]
-    assert analysts.clipped_items(group) == 1, "one of eight: over its 30000 share"
-    client = Client()
-    optimizer = AutoresearchOptimizer(client)
+def _long(item: str, chars: int, passed: bool = False) -> dict[str, Any]:
+    """An item of four steps whose texts add up to about ``chars`` characters."""
+    each = chars // 8
+    return _rec(item, passed, steps={f"s{n}": ("I" * each, "O" * each) for n in range(4)})
+
+
+def test_a_small_batch_of_long_traces_is_not_clipped():
+    """Three four-step items of about 150000 characters each: 450000 together fit the
+    call's room, so none is clipped (an equal fixed share per item would have cut them)."""
+    group = [_long(f"f{i}", 150000) for i in range(3)]
+    prompt, clip = analysts.analyst_batch(_ctx(group), "failure", 1, 1, group, "PIPE")
+    assert clip == {"items": 0, "chars": 0}
+    assert "characters omitted" not in prompt
+    assert all(analysts.item_text(record) in prompt for record in group)
+    assert len(prompt) <= analysts.ANALYST_ROOM
+
+
+def test_a_batch_over_the_room_has_its_longest_items_clipped_to_one_length():
+    shorts = [_long(f"s{i}", 5000) for i in range(6)]
+    longs = [_long("f6", 300000), _long("f7", 400000)]
+    group = shorts + longs
+    prompt, clip = analysts.analyst_batch(_ctx(group), "failure", 1, 1, group, "PIPE")
+    assert len(prompt) <= analysts.ANALYST_ROOM
+    blocks = {item: prompt.split(f"### Item {item} ")[1].split("\n\n### Item ")[0]
+              .split("\n\n## Answer")[0] for item in ("s0", "f6", "f7")}
+    assert "characters omitted" not in blocks["s0"], "the short items stay whole"
+    assert all(analysts.item_text(r) in prompt for r in shorts)
+    assert "characters omitted" in blocks["f6"] and "characters omitted" in blocks["f7"]
+    # Both long items are cut to the same length (within one clipped text's rounding),
+    # and together they use the room the short ones leave.
+    assert abs(len(blocks["f6"]) - len(blocks["f7"])) <= 200
+    assert len(prompt) > analysts.ANALYST_ROOM - 2000
+    wholes = {r["id"]: len(analysts.item_text(r)) for r in longs}
+    assert clip["items"] == 2
+    left_out = sum(wholes.values()) - sum(len(prompt.split(f"### Item {i} ")[1]
+                                              .split("\n\n### Item ")[0]
+                                              .split("\n\n## Answer")[0]) + len(f"### Item {i} ")
+                                          for i in ("f6", "f7"))
+    assert abs(clip["chars"] - left_out) <= 4
+
+
+def test_the_item_cap_fills_the_room_and_keeps_its_floor():
+    assert analysts.item_cap([10, 20], 30) is None, "fits whole"
+    assert analysts.item_cap([1000, 9000, 9000], 15000) == 7000
+    assert analysts.item_cap([90000] * 8, 8000) == analysts.ITEM_FLOOR
+
+
+def test_clipped_items_and_characters_are_journaled_and_reported():
+    group = [_long("f0", 600000)] + [_rec(f"f{i}", False) for i in range(1, 8)]
+    optimizer = AutoresearchOptimizer(Client())
     optimizer.propose(_ctx(group), 1, [])
     entry = analysts.journal_entry(optimizer.last_analysis)
-    assert entry["clipped_items"] == 1 and entry["batches"][0]["clipped"] == 1
+    (batch,) = entry["batches"]
+    assert entry["clipped_items"] == batch["clipped"] == 1
+    assert entry["clipped_chars"] == batch["clipped_chars"] > 100000
     from refactory_dsh.loop import LoopConfig, _analysts_report, _analysts_section
 
     report = _analysts_report([{**entry, "epoch": 1, "generation": 1}],
                               LoopConfig(analysts=True))
-    assert report["clipped_items"] == 1
-    assert "1 item trace(s) were clipped" in "\n".join(_analysts_section(report))
+    assert report["clipped_items"] == 1 and report["clipped_chars"] == entry["clipped_chars"]
+    assert (f"1 item trace(s) were clipped to fit an analyst's room "
+            f"({entry['clipped_chars']} characters left out)"
+            in "\n".join(_analysts_section(report)))
+
+
+# ── delta review: step keys and journaling after a resume ──────────────────
+
+
+def test_each_parent_and_each_train_sample_gets_its_own_analysis():
+    client = Client()
+    optimizer = AutoresearchOptimizer(client)
+    records = [_rec("f0", False), _rec("f1", False), _rec("s0", True)]
+    base = replace(_ctx(records, group_size=1), parent="p1")
+    optimizer.propose(base, 1, [])
+    first = optimizer.last_analysis
+    optimizer.propose(replace(base, parent="p2"), 1, [])
+    other_parent = optimizer.last_analysis
+    assert other_parent is not first and other_parent["key"] != first["key"]
+    assert other_parent["candidate"] == "p2"
+    resampled = [_rec("f2", False), _rec("s1", True)]
+    optimizer.propose(replace(base, item_records=resampled), 1, [])
+    other_sample = optimizer.last_analysis
+    assert other_sample is not first and other_sample["key"] != first["key"]
+    assert {i for b in other_sample["batches"] for i in b["items"]} == {"f2", "s1"}
+    assert other_sample["calls"] > 0, "new items, new calls"
+
+
+def _keep(analyses: list[dict[str, Any]], analysis: dict[str, Any]) -> list[tuple[str, dict]]:
+    """``Loop._keep_analysis`` on a loop that has journaled ``analyses`` (as a resume
+    replays them); what it journals."""
+    from types import SimpleNamespace
+
+    from refactory_dsh.loop import Loop
+
+    journal: list[tuple[str, dict]] = []
+    stub = SimpleNamespace(config=SimpleNamespace(analysts=True),
+                           optimizer=SimpleNamespace(last_analysis=analysis),
+                           _analyses=analyses, epoch=1, generation=1,
+                           _journal=lambda event, **entry: journal.append((event, entry)))
+    Loop._keep_analysis(stub)  # type: ignore[arg-type]
+    return journal
+
+
+def _made(**overrides: Any) -> dict[str, Any]:
+    return {"key": "K", "candidate": "c", "merges": [], "calls": 1, "cached": 8,
+            "batches": [{"kind": "failure", "index": 1, "items": ["f0"], "error": None}],
+            "findings": [{"finding": "new", "items": ["f0"]}], **overrides}
+
+
+@pytest.mark.parametrize("earlier", [
+    {"batches": [{"kind": "failure", "index": 1, "items": ["f0"], "error": "RuntimeError: 503"}]},
+    {"merges": [{"step": "final", "level": 0, "batch": 1, "error": "ValueError: no json"}]},
+    {"error": "BudgetExhausted: tokens spent", "findings": []},
+], ids=["failed batch", "failed merge", "stopped by the budget"])
+def test_a_step_remade_after_an_incomplete_analysis_is_journaled_again(earlier):
+    """After a resume the journal holds the step's incomplete first analysis; the step is
+    remade (its failed call paid again) and that analysis, the one the proposer saw, is
+    journaled too, so every paid call is counted."""
+    first = {"epoch": 1, "generation": 1, "key": "K", "calls": 9, "cached": 0,
+             "batches": [{"kind": "failure", "index": 1, "items": ["f0"], "error": None}],
+             "merges": [], "findings": [{"finding": "old"}], **earlier}
+    journal = _keep([first], _made())
+    assert [event for event, _e in journal] == ["analyst_findings"]
+    assert journal[0][1]["findings"] == [{"finding": "new", "items": ["f0"]}]
+    assert journal[0][1]["calls"] == 1
+
+
+def test_a_complete_analysis_or_the_same_incomplete_one_is_not_journaled_twice():
+    complete = {"epoch": 1, "generation": 1, **analysts.journal_entry(_made())}
+    assert _keep([complete], _made(calls=0, cached=9)) == [], "reloaded after a resume"
+    failed = _made(batches=[{"kind": "failure", "index": 1, "items": ["f0"],
+                             "error": "RuntimeError: 503"}])
+    analyses: list[dict[str, Any]] = []
+    assert len(_keep(analyses, failed)) == 1 and len(analyses) == 1
+    assert _keep(analyses, failed) == [], "a retry reusing the same incomplete analysis"

@@ -53,10 +53,12 @@ MERGE_BATCH_SIZE = 8
 #: The most findings one analyst writes: SkillOpt's analyst edit budget L
 #: (``analyst_edit_budget``, 4).
 FINDINGS_PER_ANALYST = 4
-#: One analyst call's room in characters for its items, after the pipeline; each item
-#: gets an equal share and is clipped (inputs first) only when it does not fit it.
-ANALYST_BUDGET = 240000
-#: The least an item's share is cut to, however many items a batch holds.
+#: One analyst call's whole prompt, in characters. The optimizer model (Opus 4.6) reads
+#: 200k tokens; at about 4 characters a token 500000 characters is about 125k tokens,
+#: leaving room for the system prompt, the reply (findings are short) and a denser
+#: tokenisation than 4 per token. A batch of 8 multi-step traces normally fits whole.
+ANALYST_ROOM = 500000
+#: The least an item is cut to when a batch does not fit, however many items it holds.
 ITEM_FLOOR = 4000
 #: A step input is clipped to no less than this before any output is clipped.
 INPUT_FLOOR = 1500
@@ -333,16 +335,22 @@ Rules:
 """
 
 
-def _share(group: Sequence[dict[str, Any]]) -> int:
-    """Each item's room in an analyst call: an equal share of ``ANALYST_BUDGET``."""
-    return max(ITEM_FLOOR, ANALYST_BUDGET // max(1, len(group)))
-
-
-def clipped_items(group: Sequence[dict[str, Any]]) -> int:
-    """How many of a batch's items are longer than their share and so clipped
-    (SkillOpt never clips a trace; the count is journaled and reported)."""
-    share = _share(group)
-    return sum(1 for record in group if len(item_text(record)) > share)
+def item_cap(lengths: Sequence[int], room: int) -> int | None:
+    """The one length the batch's items are cut to so that together they fit ``room``,
+    or ``None`` when they fit whole. Room a short item leaves goes to the long ones:
+    the cap is the largest that fits (water-filling), so every clipped item is cut to
+    the same length, and never below ``ITEM_FLOOR``."""
+    if sum(lengths) <= room:
+        return None
+    # Never below the floor: when even the floor does not fit, the search ends there.
+    low, high = ITEM_FLOOR, max(ITEM_FLOOR, max(lengths))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if sum(min(n, middle) for n in lengths) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def round_key(ctx: Any, model: str = "") -> str:
@@ -359,22 +367,48 @@ def round_key(ctx: Any, model: str = "") -> str:
 
 def analyst_prompt(ctx: Any, kind: str, index: int, total: int,
                    group: Sequence[dict[str, Any]], pipeline: str) -> str:
-    """One analyst's request: the pipeline, the changes possible, the optimizer's lessons
-    and the batch's items in full (each in an equal share of ``ANALYST_BUDGET``)."""
-    share = _share(group)
-    body = "\n\n".join(fit_item(record, share) for record in group)
+    """One analyst's request (`analyst_batch`), without its clipping counts."""
+    return analyst_batch(ctx, kind, index, total, group, pipeline)[0]
+
+
+def analyst_batch(ctx: Any, kind: str, index: int, total: int,
+                  group: Sequence[dict[str, Any]], pipeline: str
+                  ) -> tuple[str, dict[str, int]]:
+    """One analyst's request -- the pipeline, the changes possible, the optimizer's
+    lessons and the batch's items in full -- and what was clipped:
+    ``{"items", "chars"}``. The items share what ``ANALYST_ROOM`` leaves after the rest
+    of the prompt; only when together they do not fit are the longest cut, all to one
+    length (`item_cap`), step inputs first (`fit_item`). SkillOpt never clips."""
+    head, tail = _analyst_frame(ctx, kind, index, total, len(group), pipeline)
+    wholes = [item_text(record) for record in group]
+    separators = 2 * max(0, len(group) - 1)
+    cap = item_cap([len(text) for text in wholes],
+                   ANALYST_ROOM - len(head) - len(tail) - separators)
+    # `fit_item` keeps an item no longer than the cap whole.
+    blocks = [text if cap is None else fit_item(record, cap)
+              for record, text in zip(group, wholes)]
+    clipped = [(whole, block) for whole, block in zip(wholes, blocks) if block != whole]
+    return head + "\n\n".join(blocks) + tail, {
+        "items": len(clipped),
+        "chars": sum(max(0, len(whole) - len(block)) for whole, block in clipped)}
+
+
+def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
+                   pipeline: str) -> tuple[str, str]:
+    """An analyst prompt's text before and after its items."""
     label = "failed" if kind == "failure" else "passed"
     answer = (FAILURE_ANSWER if kind == "failure" else SUCCESS_ANSWER).replace(
         "{limit}", str(FINDINGS_PER_ANALYST))
-    return (f"# Analysing {label} items -- batch {index} of {total}\n\n"
-            f"Mode: `{ctx.mode_name}`.\n\n"
-            f"## The pipeline\n{pipeline}\n\n"
-            f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
-            f"{_lessons_text(ctx)}"
-            f"## The {label} items ({len(group)} total)\n"
-            "Each item in full: its input, every step's input and output in the order the "
-            "steps ran, the expected answer, the prediction, the score and the grader's "
-            f"feedback.\n\n{body}\n\n## Answer\n{answer}")
+    return ((f"# Analysing {label} items -- batch {index} of {total}\n\n"
+             f"Mode: `{ctx.mode_name}`.\n\n"
+             f"## The pipeline\n{pipeline}\n\n"
+             f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
+             f"{_lessons_text(ctx)}"
+             f"## The {label} items ({count} total)\n"
+             "Each item in full: its input, every step's input and output in the order the "
+             "steps ran, the expected answer, the prediction, the score and the grader's "
+             "feedback.\n\n"),
+            f"\n\n## Answer\n{answer}")
 
 
 # ── what an analyst wrote ──────────────────────────────────────────────────
@@ -631,8 +665,10 @@ def journal_entry(analysis: Mapping[str, Any]) -> dict[str, Any]:
             "failed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "failure"),
             "passed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "success"),
             "batches": [{key: b.get(key) for key in ("kind", "index", "items", "findings",
-                                                      "clipped", "error")} for b in batches_],
+                                                      "clipped", "clipped_chars", "error")}
+                        for b in batches_],
             "clipped_items": sum(int(b.get("clipped") or 0) for b in batches_),
+            "clipped_chars": sum(int(b.get("clipped_chars") or 0) for b in batches_),
             "merges": list(analysis.get("merges") or ()),
             "not_analysed": dict(analysis.get("not_analysed") or {}),
             "calls": int(analysis.get("calls") or 0),

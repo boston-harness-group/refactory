@@ -509,13 +509,16 @@ class AutoresearchOptimizer(Optimizer):
         def analyse(batch: tuple[str, int, list[dict[str, Any]]]) -> dict[str, Any]:
             kind, index, group = batch
             items = [str(r.get("id")) for r in group]
+            prompt, clip = analysts.analyst_batch(ctx, kind, index, totals[kind], group,
+                                                  pipeline)
             found, error = self._ask(
                 ctx, analysts.FAILURE_SYSTEM if kind == "failure" else analysts.SUCCESS_SYSTEM,
-                analysts.analyst_prompt(ctx, kind, index, totals[kind], group, pipeline),
+                prompt,
                 {"kind": f"analyst_{kind}", "group": index, "items": items},
                 lambda payload: analysts.parse_findings(payload, kind, items), counts)
             return {"kind": kind, "index": index, "items": items, "found": found or [],
-                    "findings": len(found or ()), "clipped": analysts.clipped_items(group),
+                    "findings": len(found or ()), "clipped": clip["items"],
+                    "clipped_chars": clip["chars"],
                     "error": error}
 
         def merge_lists(step: str, lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:

@@ -641,9 +641,13 @@ paired with a parent picker), on the train records the request carries:
   analysts. Each reads the pipeline (its nodes and edges, each node in
   full with the settings bound to it, every other setting's value) and each item's full
   trace: its input, every step's input and output in the order they ran, the expected
-  answer, the prediction, the score and the grader's feedback (an item longer than its
-  share of 240000 characters, 30000 for each of 8 items, has its step inputs clipped
-  first, then its outputs; SkillOpt never clips, so the clipped items are counted). It
+  answer, the prediction, the score and the grader's feedback. A call's prompt has
+  500000 characters of room (`ANALYST_ROOM`: about 125k tokens at 4 characters a token,
+  inside the optimizer model's 200k-token context with margin for the reply), and the
+  batch's items share what the rest of the prompt leaves: a batch that fits is never
+  clipped, and one that does not has its longest items cut to one common length (never
+  below 4000 characters), step inputs first, then outputs. SkillOpt never clips, so the
+  clipped items and the characters left out are counted. It
   writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
   (steps, edges, settings, or the structure), the change that would fix it, the items it
   covers (an id outside the batch is dropped), its impact and quotes.
@@ -669,14 +673,17 @@ refused answer wrote) reuses it and makes no call; the analysts and merges read 
 lessons of the step's first attempt. The step's analysis is also kept in
 `<run root>/analyst_findings/round-<key>.json` when every call of it succeeded, so a
 resumed run reuses it; a step with a failed call is made again on resume, its successful
-calls answered from their own cache.
+calls answered from their own cache, and that analysis (the one its proposal sees) is
+journaled too, with the calls it paid. An analysis is journaled again for its step only
+when the earlier one was incomplete (a failed batch or merge, or stopped by the budget)
+and this one differs from it.
 
 Every call is recorded in `optimizer_trace.jsonl` (kinds `analyst_failure`,
 `analyst_success`, `analyst_merge_failure`, `analyst_merge_success`,
 `analyst_merge_final`) with its parsed findings, and cached by the optimizer's model and
 its whole text, in memory and in `<run root>/analyst_findings/` (cleared by a fresh
-run). Each step's batches, merges, call counts, clipped items and ranked findings are
-journaled once (`analyst_findings`, restored on resume), also when the proposal call
+run). Each step's batches, merges, call counts, clipped items (and characters left out)
+and ranked findings are journaled once (`analyst_findings`, restored on resume), also when the proposal call
 after it fails, and when a spent budget stops the stage part way (with what it paid and
 the `error`). report.md's "What the analysts found" gives the rounds, the calls, the
 clipped items and the latest round's top 5 findings. A failed analyst call is shown and
@@ -704,8 +711,8 @@ analysts and merges, as SkillOpt shows its meta skill).
 
 Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
 LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
-these are generic by design (no dataset hints); SkillOpt never clips a trace (here an
-item over its share is clipped, and counted); SkillOpt shows each item's task type
+these are generic by design (no dataset hints); SkillOpt never clips a trace (here a
+batch over the call's room has its longest items clipped, and counted); SkillOpt shows each item's task type
 (here the item's input, and its choices when it has them); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
 with its error.
