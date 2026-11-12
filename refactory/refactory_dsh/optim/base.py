@@ -712,6 +712,23 @@ class ProposalContext:
     #: candidates run headless, so the default leaves the person-answered gate kind out
     #: of the node schemas (`node_schema.render_schema`).
     person_gates: bool = False
+    #: Every evaluated candidate of the run with the kind of change it made, its train
+    #: fixed/broken counts against its parent and the gate's word (``Loop._ledger``,
+    #: ``LoopConfig.run_ledger``), for "Every change so far, by kind"; empty says nothing.
+    ledger: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether the answer format asks for ``lessons`` (``LoopConfig.lessons``), and the
+    #: latest the optimizer wrote, ``{"text", "epoch", "generation"}`` (``Loop._lessons``),
+    #: for "Your lessons so far".
+    ask_lessons: bool = False
+    lessons: dict[str, Any] = field(default_factory=dict)
+    #: The steps the last round's candidates added, with their train evidence
+    #: (``feedback.step_evidence``; ``LoopConfig.step_review``) and, once a model
+    #: optimizer has reviewed them, each step's ``review`` or ``review_error``, for "Did
+    #: the added steps contribute?".
+    added_steps: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether "How nodes compose" says what makes a new step pay off
+    #: (``LoopConfig.structure_guidance``; ``feedback.STRUCTURE_GUIDANCE``).
+    structure_guidance: bool = False
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -784,7 +801,8 @@ class ProposalContext:
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
                                  text_knobs=[k.get("name") for k in self.knobs
-                                             if k.get("kind") == "str"]),
+                                             if k.get("kind") == "str"],
+                                 structure_guidance=self.structure_guidance),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
                         selection=self.selection, population=self.population_parents),
@@ -833,6 +851,7 @@ class ProposalContext:
                 ],
             ),
         ]
+        sections += _feedback_sections(self)
         if self.prior_runs:
             sections += [
                 "",
@@ -860,13 +879,28 @@ class ProposalContext:
         sections += ["", "## Answer", answer_instructions(
             self.catalogue, parsimony=self.parsimony,
             items=_item_count(self.item_records) if self.score_is_item_mean else 0,
-            code_nodes=self.code_nodes)]
+            code_nodes=self.code_nodes, lessons=self.ask_lessons)]
         if self.max_edits > 1:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue,
                                                  proposals=self.proposals)]
         if self.edit_levels:
             sections += ["", *levels_instructions(self.edit_levels, code_nodes=self.code_nodes)]
         return "\n".join(sections)
+
+
+def _feedback_sections(ctx: "ProposalContext") -> list[str]:
+    """The run-wide feedback sections (`optim.feedback`): every change by kind, whether
+    the last round's added steps contributed, and the optimizer's own lessons; each
+    only when its field holds something."""
+    from . import feedback
+
+    out: list[str] = []
+    for lines in (feedback.ledger_lines(ctx.ledger),
+                  feedback.step_review_lines(ctx.added_steps),
+                  feedback.lessons_lines(ctx.lessons) if ctx.ask_lessons else []):
+        if lines:
+            out += ["", *lines]
+    return out
 
 
 #: The edit levels a portfolio round asks for, one proposal each (``edit_level``).
@@ -1056,11 +1090,13 @@ def _fact_filled_knobs(node_states: Sequence[dict[str, Any]],
 def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                         edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                         code_nodes: bool = False,
-                        text_knobs: Iterable[str] | None = None) -> list[str]:
+                        text_knobs: Iterable[str] | None = None,
+                        structure_guidance: bool = False) -> list[str]:
     """The language's primitives and how they compose, with one short example per
     composition the run permits (a new agent, a code op, a verdict loop, a parallel
     fork), built from this graph's own ids, so no one shape reads as the way to grow
-    the pipeline. Nothing when the run permits no structural op."""
+    the pipeline. With ``structure_guidance``, what makes a new step pay off
+    (`feedback.STRUCTURE_GUIDANCE`). Nothing when the run permits no structural op."""
     from refactory_dsh import snippet
 
     if not structural_ops(catalogue):
@@ -1149,6 +1185,9 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             "them until you say so: insert a node after the join that reads the branches' "
             "files or facts, or use a branch's fact as `{{name}}` where a later step fills "
             "it in (above).")
+    if structure_guidance:
+        from .feedback import STRUCTURE_GUIDANCE
+        lines.append(STRUCTURE_GUIDANCE)
     anchor = _composition_anchor(node_states, edges, protected)
     if anchor is None or not ({"loop", "insert_before", "insert_after"} & ops):
         return lines + [""]
@@ -1206,11 +1245,12 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
-                        items: int = 0, code_nodes: bool = False) -> str:
+                        items: int = 0, code_nodes: bool = False, lessons: bool = False) -> str:
     """The answer format and its rules, with examples for what this run permits.
 
     ``items`` is the number of train items when the raw score is known to be their
     mean (0 otherwise): only then does the size cost line compare a node with one item.
+    ``lessons`` asks for the optional ``lessons`` field (``LoopConfig.lessons``).
     """
     structural = structural_example(catalogue)
     ops = {op.get("op") for op in catalogue}
@@ -1225,6 +1265,8 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         '{"diagnosis": "<what the evidence shows is limiting the score>",',
         ' "considered": "<optional, short: the kinds of change you weighed for this '
         f'diagnosis ({", ".join(kinds)}) and why you chose yours>",',
+        *([' "lessons": "<optional, short: what the results so far teach about which changes '
+           'help here -- keep, revise or drop your earlier lessons>",'] if lessons else []),
         ' "proposals": [{"edit": {"op": "<operation>", ...},',
         '                "rationale": "<why, citing the evidence>",',
         '                "prediction": "<expected effect on the score>",',
@@ -1264,6 +1306,9 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         "  you expect and how you could be wrong.",
         "- If the evidence justifies no change, return an empty proposal list and say why.",
     ]
+    if lessons:
+        lines.append("- `lessons` replaces the lessons you wrote before and is shown back to you "
+                     "next round; leave it out to keep them as they are.")
     return "\n".join(lines) + "\n"
 
 
@@ -1578,19 +1623,26 @@ def trajectory_groups(records: Sequence[dict[str, Any]],
 _TABLE_CELL_CHARS = 200
 
 
+#: Per reader, the success patterns kept whatever its failure patterns (at most this
+#: many); failure patterns fill the rest of ``READER_PATTERNS``.
+READER_SUCCESS_PATTERNS = 4
+#: The share of the findings' room held for success patterns when a reader found some.
+READER_SUCCESS_SHARE = 0.25
+
+
 def _reader_patterns(findings: Sequence[dict[str, Any]] | None) -> list[tuple[str, dict[str, Any]]]:
     """The readers' patterns the request shows, as ``(kind, pattern)`` in their order:
     reader by reader, failure patterns then success patterns, at most
-    ``READER_PATTERNS`` per reader."""
+    ``READER_PATTERNS`` per reader, of which up to ``READER_SUCCESS_PATTERNS`` success
+    patterns are kept however many failure patterns the reader found."""
     out: list[tuple[str, dict[str, Any]]] = []
     for found in findings or ():
-        shown = 0
-        for kind in ("failure_patterns", "success_patterns"):
-            for pattern in found.get(kind) or ():
-                if not isinstance(pattern, dict) or shown >= READER_PATTERNS:
-                    continue
-                shown += 1
-                out.append((kind, pattern))
+        kept = {kind: [p for p in found.get(kind) or () if isinstance(p, dict)]
+                for kind in ("failure_patterns", "success_patterns")}
+        successes = kept["success_patterns"][:READER_SUCCESS_PATTERNS]
+        failures = kept["failure_patterns"][:READER_PATTERNS - len(successes)]
+        out += [("failure_patterns", p) for p in failures]
+        out += [("success_patterns", p) for p in successes]
     return out
 
 
@@ -1654,6 +1706,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     else:
         lines += ["", "### What the readers found"]
         found_lines: list[str] = []
+        success_lines: list[str] = []
         for kind, pattern in _reader_patterns(findings):
             ids = [str(i) for i in pattern.get("items") or ()]
             id_text = (", ".join(ids[:READER_ITEM_IDS]) or "none in its group") + (
@@ -1664,19 +1717,28 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                             "of its group, so dropped")
             quotes = [f'"{_clip(quote, READER_QUOTE_CHARS)}"'
                       for quote in list(pattern.get("evidence") or ())[:READER_QUOTES]]
-            found_lines.append(
+            (success_lines if kind == "success_patterns" else found_lines).append(
                 f"- [{kind.split('_')[0]}] {_clip(pattern.get('pattern', ''), READER_PATTERN_CHARS)} "
                 f"(step `{_clip(pattern.get('step', 'unclear'), 60)}`; items {id_text}) "
                 "-- evidence: " + " | ".join(quotes))
         cap = int(budget * READER_FINDINGS_SHARE)
+        # What the passing items do right gets its own heading after the failures, and
+        # room the failures cannot take: up to READER_SUCCESS_SHARE of the cap.
+        held = min(sum(len(line) + 1 for line in success_lines), int(cap * READER_SUCCESS_SHARE))
         used_findings = 0
-        for index, line in enumerate(found_lines):
-            if used_findings + len(line) + 1 > cap:
-                lines.append(f"({len(found_lines) - index} more pattern(s) not shown: the "
-                             f"findings are kept within {cap} characters)")
-                break
-            lines.append(line)
-            used_findings += len(line) + 1
+        for heading, kind_lines, room in (
+                ("", found_lines, cap - held),
+                ("### What the passing items do right (the readers' success patterns)",
+                 success_lines, cap)):
+            if heading and kind_lines:
+                lines += ["", heading]
+            for index, line in enumerate(kind_lines):
+                if used_findings + len(line) + 1 > room:
+                    lines.append(f"({len(kind_lines) - index} more pattern(s) not shown: the "
+                                 f"findings are kept within {cap} characters)")
+                    break
+                lines.append(line)
+                used_findings += len(line) + 1
         for failure in failures:
             lines.append(f"(Group {failure.get('group')} -- items "
                          f"{', '.join(str(i) for i in failure.get('items') or ())} -- could "

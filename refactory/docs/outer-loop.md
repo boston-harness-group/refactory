@@ -119,13 +119,34 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   journaled (`rescore`, with its epoch and seed); a resumed run reads its epoch back and
   does not repeat it. A re-score that fails, or returns fewer items than it ran, is no
   evidence: the previous records stay, the epoch is not marked, and it is journaled as
-  `rescore_failed` (still counted as an evaluation). Train records are kept per epoch, so
-  "What the last edit changed" and "Your earlier reasoning" compare a child with its
-  parent's records from the child's epoch (the same seed); a pair from different epochs
-  is marked as such. `--fresh-evidence 0`
+  `rescore_failed` (still counted as an evaluation). The re-score runs in the round
+  itself: when an epoch evaluates children of the candidate the last proposal step
+  edited, that parent is scored on the epoch's train sample with them. The children
+  keep the `--max-concurrent-evaluations` slots: the re-score joins the round's last
+  wave when that wave leaves a slot free (two portfolio children and three slots, the
+  live shape), else it runs after the children, alone. Either way it is a request of a
+  `Run.evaluate_many` batch: its items count against `--max-items-in-flight` with the
+  children's, and a stop ends it with them (a child's error is the one raised). It goes
+  in only when there is room for every child still to score and it: `--max-evaluations`
+  must hold all of them, and `--max-rollouts`, when set, each child's train and val
+  rollouts and then the re-score's train rollouts, so a re-score never takes what a
+  child needs to be scored or judged. It is skipped when it already has this epoch's
+  records.
+  So every judged child pairs with its parent on the same seed, a round that keeps a
+  child included; a round that keeps none finds the parent re-scored and does not score
+  it again after gating, and a re-score that failed in the round is not tried again in
+  that epoch. The run's last proposals, scored after the last epoch, get no parent
+  re-score (no request reads their comparison). Train records are kept per epoch, so
+  "What the last edit changed", "Your earlier reasoning" and the run-wide feedback
+  sections compare a child with its parent's records from the child's epoch (the same
+  seed); a pair from different epochs is marked as such. `--fresh-evidence 0`
   turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
-  35-item train part this is one more train evaluation of 35 rollouts per epoch in
-  which the gate kept no new candidate.
+  35-item train part this is one train evaluation of 35 rollouts per epoch, the epochs
+  whose gate kept a child included; with 3 concurrent evaluations (two portfolio
+  children and the re-score) the round's wall clock is unchanged. Every gated strategy
+  that runs epochs, and a parent picker, pays about one extra train evaluation per
+  round that keeps a child; under a fixed `--max-evaluations` the run then gets fewer
+  rounds. `best_of_n` and `autoscientists` are unchanged.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
@@ -539,6 +560,71 @@ run appends to the file; a fresh run in the same directory starts it over, as it
 the journal. A trace line that cannot be written (a full disk) is a warning; the
 proposals are kept. The other library optimizers call no model; SkillOpt records its own
 calls in `skillopt_trace.jsonl`.
+
+### Run-wide feedback: changes by kind, lessons, added-step reviews
+
+Three more request sections (`optim/feedback.py`) carry what the run has taught so
+far, beyond the recent candidates above. Each has a switch (a profile setting, or `0`/`1`
+on the command line), none changes how anything is scored, and none reads anything but
+the graph, train records and the gate's outcome words: no answer or option is parsed,
+and no validation item or score is shown. They hold for every strategy that builds this
+request (the default loop, `reflective`, `best_of_n`, `autoscientists`, a parent
+picker paired with `autoresearch`); SkillOpt builds its own requests and is unchanged.
+The Python walker and the optimizer only; nothing here touches the TypeScript spine.
+
+- **Every change so far, by kind** (`--run-ledger`, default `1`). Every candidate the
+  run has evaluated (under the gate, every one it judged), oldest first: id, round,
+  parent, the kind of change its own edits made, the knobs and steps they touched, its
+  train fixed/broken counts against its parent on shared items, the gate's word and its
+  rationale (140 characters). Under the gate the counts compare the candidate's records
+  from the round it was evaluated in (not a later re-score of it as the edited
+  candidate) with its parent's from that same round, so both share a seed; when the
+  parent was not scored in that round the row says `n/a (different seed)` and the
+  tally leaves it out. The kind comes from the edit ops and the kinds of node
+  they add: `prompt/setting` (knob edits only), `added agent step`, `added code step`
+  (an op whose code the edit wrote), `split`, `loop/gate`, `parallel`,
+  `removal/rewire` (bypass, remove, reorder, edges) or `other`; a proposal that makes
+  several is filed under its most specific structure. A tally line per kind comes
+  first (tried, kept, best train fixed−broken). The newest 40 rows (within 9000
+  characters) are listed; older ones are only in the tally.
+- **Your lessons so far** (`--lessons`, default `1`). The answer format has an optional
+  `lessons` field: what the results so far teach about which changes help here, keeping,
+  revising or dropping earlier lessons. The latest (at most 1500 characters) is kept with
+  the epoch and generation it was written in, journaled (`optimizer_lessons`), restored
+  on resume and shown back in the next request; an answer without it keeps the previous
+  lessons.
+- **Did the added steps contribute?** (`--step-review`, default `1`). For every step a
+  candidate of the last round added (an insert, a split's halves, a fork's branches, a
+  loop's gate; not the fork and join themselves), on the train items it shares with its
+  parent: the candidate's fixed and broken items, how many items' final answer changed
+  (the item record's `prediction`, the answer the grader read, whitespace- and
+  case-normalised and not parsed further; reasoning text differs from run to run on
+  nearly every item, so it is not what is compared; an item with no recorded answer
+  falls back to the last step's output text, counted apart and labelled so), and the
+  step's median duration and tokens when its records carry them. These counts follow
+  the ledger's same-round rule; without a same-round parent they are `n/a (different
+  seed)`. Then one call of the optimizer's model per step that recorded
+  text output (at most 8 per request): it reads, on up to 4 train items (changed outcomes
+  first), the step's prompt as sent, its output and the output of the next recorded step
+  that reads it (through the graph's reads, inputs and `{{fact}}` slots, so a sibling
+  fork branch is not taken for it), and answers
+  `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
+  quote and a note. The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
+  and cached in memory and in `<run root>/step_reviews/` (cleared by a fresh run in the
+  same directory, as the trace is), so a retry or a resumed run pays for none again.
+  The section keeps full entries within 9000 characters; steps past that get one line
+  of counts each. A failed or unreadable review is recorded and the step is shown
+  without a verdict; it never fails the proposal.
+- **What makes a new step pay off** (`--structure-guidance`, default `0`). When on,
+  "How nodes compose" adds one generic paragraph: a step helps when it adds work or
+  information the pipeline lacks (an independent attempt, several attempts combined by
+  a vote or a check, a computation or check in code, a retry with a specific reason);
+  one that re-reads the same notes with the same model tends to repeat their mistakes.
+  Off by default, for an experiment.
+
+The readers' success patterns (what the passing items do right) have their own heading
+after the failure patterns, up to 4 per reader whatever its failure patterns, and a
+quarter of the findings' room the failure patterns cannot take.
 
 ## LiveMath skill graph (`livemath/skill_graph`)
 
