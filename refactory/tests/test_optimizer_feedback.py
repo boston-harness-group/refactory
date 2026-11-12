@@ -710,3 +710,50 @@ def test_a_fresh_run_clears_the_cached_reviews_and_a_resume_keeps_them(tmp_path,
         fresh.optimizer = Recording([[]])
         fresh.run()
         assert fresh.root == first.root and not cached.exists()
+
+
+def test_the_live_sequence_pairs_every_row_that_has_a_same_seed_parent(tmp_path, monkeypatch):
+    """Arm B's sequence with fresh evidence on and the whole train part each epoch: the
+    seed 5 (scored in epoch 1) gets children 7 and 6 in epoch 2; 7 is kept, 6 rejected.
+    7 is then the edited candidate, already scored in epoch 2, so nothing re-scores the
+    seed in epoch 2. 7's children 3 and 2 are evaluated in epoch 3 and both rejected, so
+    7 stays the edited candidate and is re-scored in epoch 3.
+
+    Every row whose parent was scored in the child's own round has numeric counts on
+    those same-seed records: 3 and 2 against 7's epoch-3 re-score. The rows of the
+    round that kept a child (7 and its sibling 6) have no such pair -- the seed was
+    never scored with epoch 2's seed -- so they are n/a, not a cross-seed difference."""
+    from refactory_dsh.loop import Loop
+    from test_gate_aware_context import Reasoning
+
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
+    _passes_by_level(monkeypatch)
+    seeds: dict[tuple[int, int], int] = {}
+    original = Loop._measure
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        if part == "train":
+            seeds[(_level(candidate), self.epoch)] = kwargs.get("seed")
+        return original(self, candidate, workdir, part, **kwargs)
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    proposer = Reasoning([[(5, 7), (5, 6)], [(7, 3), (7, 2)], []])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2, fresh_evidence=True)
+        loop.optimizer = proposer
+        loop.run()
+    ids = {_level(c): c.id for c in loop.population}
+    assert loop.config.fresh_evidence and loop.config.train_minibatch == 0
+    # What each candidate was scored on, by epoch: the seed only in epoch 1; 7 when it
+    # was evaluated (2) and re-scored as the edited candidate (3).
+    assert sorted(loop._records_by_epoch[ids[5]]) == [1]
+    assert sorted(loop._records_by_epoch[ids[7]]) == [2, 3]
+    assert seeds[(7, 3)] == seeds[(3, 3)] == seeds[(2, 3)], "the epoch-3 pairs share a seed"
+    assert seeds[(6, 2)] != seeds[(5, 1)]
+    rows = {e["id"]: e for e in proposer.contexts[-1].ledger}
+    # 7 passes t1-t5; 3 passes t1 (4 broken), 2 passes none (5 broken).
+    assert (rows[ids[3]]["fixed"], rows[ids[3]]["broken"], rows[ids[3]]["same_seed"]) == (0, 4, True)
+    assert (rows[ids[2]]["fixed"], rows[ids[2]]["broken"], rows[ids[2]]["same_seed"]) == (0, 5, True)
+    for level in (7, 6):
+        assert rows[ids[level]]["fixed"] is None and rows[ids[level]]["same_seed"] is False
