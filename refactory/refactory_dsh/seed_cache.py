@@ -88,7 +88,7 @@ SEARCH_ONLY_FIELDS = {
          "edit_preset", "allowed_ops", "frozen", "allow_new_node_tools", "allow_code_nodes",
          "max_edits_per_proposal", "fresh_evidence", "early_stop_patience",
          "early_stop_at_full_val", "selection", "pool_size",
-         "run_ledger", "lessons", "step_review", "structure_guidance"),
+         "run_ledger", "lessons", "step_review", "structure_guidance", "integrity_judge"),
         "decides what is proposed, re-scored or kept, not what the seed scores"),
     "val_gate": ("decides what is kept; the train rollout seed it implies is checked "
                  "per part instead (the cached part's seed against the rollout's)"),

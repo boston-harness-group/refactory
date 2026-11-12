@@ -202,7 +202,8 @@
     "elite": 3.0,
     "attempts": 3.0,
     "max_evaluations": 64.0,
-    "seed": 0.0
+    "seed": 0.0,
+    "integrity_judge": "off"
   },
   "knob_specs": {
     "target": {
@@ -305,6 +306,17 @@
       "values": [],
       "frozen": true,
       "description": "the run's randomness; frozen, so a score measures the structure rather than the draw",
+      "required": false
+    },
+    "integrity_judge": {
+      "default": "off",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "the loop's integrity judge (LoopConfig.integrity_judge: off, on, flag, or a JSON object); frozen, because it guards the search rather than being a setting to optimize",
       "required": false
     }
   }

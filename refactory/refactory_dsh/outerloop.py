@@ -115,7 +115,12 @@ class Run:
     # ── the cheap primitive ────────────────────────────────────────────────
     def attempt(self, proposal: Proposal, parent: Candidate) -> Candidate | list[str]:
         """Apply a typed edit -- or a compound proposal's edits, in order, as one
-        candidate -- and validate it. Spends no budget."""
+        candidate -- and validate it. Spends no evaluation budget.
+
+        With ``integrity_judge`` on, a proposal that became a valid candidate is also
+        judged (``Loop._integrity_check``): one call of the optimizer's model, charged
+        to the run's token and time budgets; under ``veto`` an ``exploit`` is refused
+        here (``E-integrity``), so every strategy's proposals pass the same judge."""
         # Unknown and unpermitted are two facts with two fixes; see Loop._refinement.
         reason = proposal_refusal(
             proposal, permitted=self._loop.permitted_ops(),
@@ -135,6 +140,9 @@ class Run:
             graders=getattr(self._loop, "graders", ()),
             allow_new_node_tools=bool(getattr(self._loop.config, "allow_new_node_tools", False)),
         )
+        check = getattr(self._loop, "_integrity_check", None)
+        if not isinstance(outcome, list) and callable(check):
+            outcome = check(proposal, parent, outcome)
         if isinstance(outcome, list):
             self._loop.rejections.append(
                 Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
