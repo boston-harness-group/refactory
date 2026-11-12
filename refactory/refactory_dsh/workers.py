@@ -555,9 +555,9 @@ class GraphTelemetry:
             route['permission_mode'] = context.get('permission_mode') or 'default'
         self.path = begin(workdir, route, role='coordinator')
         self.patch = self.path.with_suffix('.patch.yml')
-        # The context alone decides, as it does for the node commands the spine starts
-        # (their environment is scrubbed): a client folds `SESSIONS_ENV` into the context
-        # when it is created, and a context without the field means ``run``.
+        # The context alone decides: a client folds `SESSIONS_ENV` into the context when it
+        # is created, and a context without the field means ``run``. (A node command's
+        # worker, rebuilt from its spec, falls back to the variable instead: see models.md.)
         observer_patch(self.patch, route, provider_config=context.get('provider_config'),
                        session_store=session_store(self.path, context.get('dsh_sessions') or 'run'))
         self.context = context

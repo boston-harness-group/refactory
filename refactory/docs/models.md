@@ -284,9 +284,10 @@ DSH looks a session up by probing every project directory under its root and loa
 `REFACTORY_DSH_SESSIONS=shared`, set where the run starts, keeps the old shared store (for example to open worker sessions in the DSH GUI). The rule for where the choice comes from:
 
 - A model client takes an explicit `dsh_sessions`, else the worker context it inherits (`REFACTORY_WORKER_CONTEXT`), else `REFACTORY_DSH_SESSIONS`, else `run`. Its context records the choice only when it is `shared`.
-- The spine's coordinator with a client, and the node commands the spine starts (whose environment is scrubbed), follow the run's context alone: no field means `run`. So a spine run resumes with the choice it started with, whatever the resuming shell sets.
+- The spine's coordinator with a client follows the run's context alone: no field means `run`.
+- A node command the spine starts rebuilds its client from the worker spec's context by the first rule, and it sees the launching shell's environment, `REFACTORY_DSH_SESSIONS` included. A `shared` context gives `shared`; a default context (no field) falls back to the variable.
 - A coordinator without a client has no context, so it reads `REFACTORY_DSH_SESSIONS` when it starts.
-- A walker run rebuilt from its saved context in a shell that sets `REFACTORY_DSH_SESSIONS=shared` uses the shared store for its remaining calls; nothing reads the sessions back, so only where the evidence lands changes.
+- So a run started with the default and resumed (spine or walker) from a shell that sets `REFACTORY_DSH_SESSIONS=shared` keeps a per-process store for a spine coordinator with a client, while its workers' remaining calls use the shared store. Nothing reads the sessions back, so only where the evidence lands changes. To keep a run on one store, set the variable the same way for its resume as for its start.
 
 ## Credentials for nested execution
 

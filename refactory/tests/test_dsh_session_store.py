@@ -86,8 +86,8 @@ def test_shared_keeps_dshs_own_store_and_travels_to_dispatched_workers(monkeypat
     client = DshModelClient(provider='p', model='m')
     context = client.context()
     assert context['dsh_sessions'] == 'shared'
-    # A node command the spine starts has a scrubbed environment: the choice rides the
-    # worker spec's context, which the dispatched worker is rebuilt from.
+    # The choice rides the worker spec's context, which the dispatched worker is rebuilt
+    # from, so it holds without the variable in the worker's environment.
     monkeypatch.delenv(workers.SESSIONS_ENV)
     rebuilt = DshModelClient(**context)
     assert rebuilt.context() == context
@@ -115,8 +115,8 @@ def test_the_default_leaves_a_saved_context_and_the_evaluation_context_as_they_w
 
 
 def test_a_node_command_takes_the_choice_from_the_context_it_inherits(monkeypatch):
-    """A spine node command sees no `SESSIONS_ENV` (its environment is scrubbed), only the
-    run's worker context, so a client it builds takes the choice from there."""
+    """A client built under an inherited worker context (`REFACTORY_WORKER_CONTEXT`) takes
+    the choice from it when no explicit value is given."""
     monkeypatch.delenv(workers.SESSIONS_ENV, raising=False)
     monkeypatch.setenv('REFACTORY_WORKER_CONTEXT', json.dumps({'dsh_sessions': 'shared'}))
     assert DshModelClient(provider='p', model='m').context()['dsh_sessions'] == 'shared'
@@ -174,6 +174,17 @@ def test_a_coordinator_started_without_a_client_keeps_its_own_store(monkeypatch,
         'storage-json': {'id': 'storage-json', 'config': {'root': str(store / 'storages')}}}
     # It is not a receipt: receipt readers still see none.
     assert not list(patch.parent.glob('*.json'))
+
+
+def test_each_client_less_coordinator_gets_its_own_store(monkeypatch, tmp_path):
+    """Two coordinators of one run directory (a rerun, a resume) must not share a store:
+    a shared store is the cost this avoids, and a second process would take the first's
+    session lock."""
+    monkeypatch.delenv(workers.SESSIONS_ENV, raising=False)
+    first, second = workers.session_patch(tmp_path), workers.session_patch(tmp_path)
+    assert first != second
+    assert _rows(first)['session-persistence-jsonl'] != _rows(second)['session-persistence-jsonl']
+    assert _rows(first)['storage-json'] != _rows(second)['storage-json']
 
 
 def test_a_coordinator_without_a_client_honours_shared(monkeypatch, tmp_path):

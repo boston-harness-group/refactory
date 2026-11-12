@@ -632,8 +632,8 @@ class DshModelClient:
         #: Claude Code worker's child process must not take Claude Code's sources.
         self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
         #: Where each completion's DSH process keeps its sessions (`workers.session_store`),
-        #: chosen where the run starts and carried in `context()`: a node command the spine
-        #: starts gets a scrubbed environment, so it could not read the choice there.
+        #: carried in `context()` when it is ``shared``, so a worker rebuilt from its spec
+        #: keeps it; a context without the field falls back to `workers.SESSIONS_ENV`.
         self._dsh_sessions = session_store_choice(dsh_sessions or inherited.get("dsh_sessions"))
         self._permission_mode = permission_mode
         self._role_routes = copy.deepcopy(role_routes or {})
