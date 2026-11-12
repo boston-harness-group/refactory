@@ -17,7 +17,7 @@ from refactory_dsh.nn import edits as nn_edits
 
 from .base import (
     READER_CONCURRENCY, Candidate, Optimizer, Proposal, ProposalContext, considered_text,
-    trajectory_groups,
+    trajectory_groups, unreadable_proposal,
 )
 
 def text_only(model: Any) -> Any:
@@ -312,11 +312,17 @@ class AutoresearchOptimizer(Optimizer):
         described = ctx.parent if ctx.parent in parent_ids else None
 
         proposals: list[Proposal] = []
-        for raw in payload.get("proposals") or ():
-            if not isinstance(raw, dict):
-                continue
-            steps = _proposal_edits(raw)
+        # An entry with no usable edit is refused, not dropped: the loop counts it and
+        # the next request says why. Listed first, so a batch filled by the readable
+        # ones cannot skip it.
+        unreadable: list[Proposal] = []
+        listed, missing = _answered_proposals(payload)
+        if missing:
+            unreadable.append(unreadable_proposal(payload, missing))
+        for raw in listed:
+            steps, why = _proposal_edits(raw)
             if not steps:
+                unreadable.append(unreadable_proposal(raw, why))
                 continue
             parent = raw.get("parent")
             proposals.append(
@@ -328,8 +334,9 @@ class AutoresearchOptimizer(Optimizer):
                     parent=parent if parent in parent_ids else described,
                 )
             )
-        proposals = proposals[: max(1, n)]
-        self.record_call(**call, reply=text, proposals=len(proposals),
+        proposals = [*unreadable, *proposals[: max(1, n)]]
+        self.record_call(**call, reply=text, proposals=len(proposals) - len(unreadable),
+                         unreadable=len(unreadable),
                          diagnosis=self.last_diagnosis, considered=self.last_considered,
                          error=None)
         return proposals
@@ -344,18 +351,68 @@ def _parse_edit(edit: Any) -> dict[str, Any] | None:
     return edit if isinstance(edit, dict) and "op" in edit else None
 
 
-def _proposal_edits(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    """The edits one answered proposal carries, in order: its ``edits`` list (a
-    compound proposal), else its single ``edit``. An entry that is not an edit drops
-    the whole proposal: applying the rest would score something the model did not
-    propose. More edits than the run allows are kept, so the loop refuses them with
-    the reason (``E-too-many-edits``) the next request shows."""
+#: The keys of an answered proposal that are about the proposal, not its edit.
+PROPOSAL_FIELDS = ("rationale", "prediction", "confidence", "parent")
+#: The keys that hold an answered proposal's edit (``_proposal_edits``).
+EDIT_KEYS = ("edit", "edits", "edit_json")
+
+
+def _answered_proposals(payload: dict[str, Any]) -> tuple[list[Any], str]:
+    """The proposal entries of an answer, and why there are none when it has no
+    ``proposals`` list: its ``proposals`` (one object counts as one entry), else a
+    single ``proposal``, else the answer itself when it is one proposal (an edit
+    written at its top level, or an ``edit``/``edits`` beside the diagnosis). An empty
+    ``proposals`` list is an answer that proposes nothing, not a malformed one."""
+    if "proposals" in payload or "proposal" in payload:
+        listed = payload["proposals"] if "proposals" in payload else payload["proposal"]
+        if not listed:
+            return [], ""
+        return (list(listed) if isinstance(listed, (list, tuple)) else [listed]), ""
+    if "op" in payload or any(key in payload for key in EDIT_KEYS):
+        return [payload], ""
+    return [], 'the answer has no "proposals" list'
+
+
+def _op_fields(op: Any) -> tuple[str, ...] | None:
+    """The fields the catalogue's ``op`` takes, or ``None`` for an op it does not have."""
+    for entry in nn_edits.catalogue("broad"):
+        if entry["op"] == op:
+            return tuple(entry["fields"])
+    return None
+
+
+def _proposal_edits(raw: Any) -> tuple[list[dict[str, Any]], str]:
+    """The edits one answered proposal carries, in order, or none and why: its
+    ``edits`` list (a compound proposal), else its single ``edit``, else -- an edit
+    written at the proposal's top level (``{"op": ..., "rationale": ...}``) -- the
+    fields its op takes (``_op_fields``). An entry that is not an edit
+    drops the whole proposal: applying the rest would score something the model did
+    not propose. More edits than the run allows are kept, so the loop refuses them
+    with the reason (``E-too-many-edits``) the next request shows."""
+    if not isinstance(raw, dict):
+        return [], f"a proposal is a JSON object, not {type(raw).__name__}"
     listed = raw.get("edits")
     if isinstance(listed, list) and listed:
         steps = [_parse_edit(edit) for edit in listed]
-        return [] if any(step is None for step in steps) else steps  # type: ignore[misc]
+        bad = [index for index, step in enumerate(steps, 1) if step is None]
+        if bad:
+            return [], (f"entry {bad[0]} of its {len(steps)} edits is not an edit object "
+                        "naming its op")
+        return steps, ""  # type: ignore[return-value]
+    if "op" in raw and not any(key in raw for key in EDIT_KEYS):
+        # Only what the op takes: a proposal-level key ("id", "diagnosis") left in
+        # would be read as the edit's own (an "id" naming a node to remove). An op the
+        # catalogue lacks keeps its fields less the proposal's, for E-op to name.
+        fields = _op_fields(raw["op"])
+        return [{key: value for key, value in raw.items()
+                 if (key == "op" or key in fields if fields is not None
+                     else key not in PROPOSAL_FIELDS)}], ""
     single = _parse_edit(raw.get("edit") or raw.get("edit_json"))
-    return [single] if single is not None else []
+    if single is not None:
+        return [single], ""
+    if any(key in raw for key in EDIT_KEYS):
+        return [], "its edit is not an edit object naming its op"
+    return [], "it carries no edit (no \"edit\", \"edits\" or \"op\")"
 
 
 def _confidence(value: Any) -> float:

@@ -150,8 +150,9 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   score is the items' mean); a rejected change is never re-proposed unchanged, but one
   whose train fixed/broken counts (when shown) were strongly positive may be built on or
   combined with edits to other steps in the same failure path. "Your earlier reasoning"
-  shows the full edits of the latest such rejected candidate (more fixed than broken),
-  up to 4000 characters (`REJECTED_EDITS_CHARS`).
+  shows the full edits of the latest such rejected candidate (more fixed than broken):
+  every step's wiring whole, its free text sharing 4000 characters
+  (`REJECTED_EDITS_CHARS`).
   The history's best is the best kept candidate. Val scores are never shown to it;
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
@@ -255,17 +256,33 @@ sections at once; this is the default loop's equivalent.
   separate proposals. The random
   and population optimizers emit single edits. A proposal with one `edit` works as
   before.
+- **Reading an answer.** A proposal whose edit sits at its own top level
+  (`{"op": "split", ..., "rationale": ...}`) is read as that edit, keeping only the
+  fields its op takes (a proposal-level `id` or `diagnosis` is dropped); an answer with
+  no `proposals` list is read the same way when it is one proposal (`proposal`, an
+  `edit`/`edits`, or a bare edit at its top level). An entry that still yields no edit,
+  or an answer with nothing to read, is refused `E-proposal-shape` with the reason: it
+  is counted with the epoch's refusals (and in the refusal pressure that can add an
+  attempt) and shown under "Why your last proposals were refused" in the retry and the
+  next request, never dropped. An empty `proposals` list proposes nothing.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
   `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
   them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
   "What the last edit changed" and "Your earlier reasoning" list every edit, its op and
-  what it names whole and only long values clipped. "Recent results" and "What this run
+  what it names whole. Wherever past edits are shown, the wiring of the edit and of each
+  node it carries (ids, kind, reads, writes, produces, call, evaluator, gate fields, ...;
+  `EDIT_WIRING_FIELDS`) is never cut; only free text (prompts, code, knob values, and
+  anything under a `value`, `patch`, `config` or `spec`) is shortened, with
+  "… (N more chars)", or "… (N chars)" alone when a text's share is tiny. The texts
+  share a fixed budget: 400 characters per field of an edit in those two sections
+  (`EDIT_FIELD_CHARS`; 300 in the reasoning entries), short texts whole and long ones
+  cut evenly, never more than the budget in all. "Recent results" and "What this run
   has already tried" show each candidate's lineage of edits compactly: a text
   `set_knob` as old -> new length and a line diff against the value it replaced (the
   previous edit to that knob, else the seed's value), lines joined with ` ⏎ `; a patch's
-  ops; a structural edit's fields with node objects as id, kind and the first 200
-  characters of the prompt; each edit at most 600 characters (`HISTORY_EDIT_CHARS`),
-  with "... (N more chars)" when cut. A refused list is recorded as
+  ops; a structural edit with its wiring whole and its texts sharing 600 characters
+  (`HISTORY_EDIT_CHARS`), at most 200 each; a diff, value or patch at most 600
+  characters, with "... (N more chars)" when cut. A refused list is recorded as
   `{"edits": [...]}`. The loop-as-a-graph path (`write_pending`/`read_pending`) carries
   `step_edits` and the edit reports.
 - **Attribution.** The per-knob attribution credits knob values by state: every knob's

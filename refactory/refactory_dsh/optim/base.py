@@ -63,8 +63,6 @@ NODE_SPEC_TEXT_FLOOR = 200
 NODE_SPEC_SECTION_CHARS = 30000
 #: Edit fields that take a whole node object (``into`` takes a list of two).
 NODE_OBJECT_FIELDS = ("node", "into", "gate", "branches")
-#: The fields among them that hold a list of node objects.
-NODE_LIST_FIELDS = ("into", "branches")
 
 
 def reason_code(reason: str) -> str:
@@ -398,16 +396,37 @@ def _protected_culprit(steps: Sequence[dict[str, Any]], start: dict[str, Any],
             "no later edit restores it]")
 
 
+#: The key of the stand-in edit an answer's unreadable proposal entry becomes
+#: (``unreadable_proposal``): its value says why, and ``proposal_refusal`` refuses it
+#: with ``E-proposal-shape``, so the entry is counted and shown back, never dropped.
+UNREADABLE_PROPOSAL = "unreadable_proposal"
+
+
+def unreadable_proposal(raw: Any, why: str) -> Proposal:
+    """A proposal entry of a model's answer that carries no usable edit, as a proposal
+    the loop refuses with ``why`` (``E-proposal-shape``) like any other refusal."""
+    entry = _clip(json.dumps(raw, default=str), 300)
+    rationale = str(raw.get("rationale", "") or "") if isinstance(raw, dict) else ""
+    return Proposal(edit={UNREADABLE_PROPOSAL: f"{why}; the entry was {entry}"},
+                    rationale=rationale)
+
+
 def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = None,
                      max_edits: int | None = None) -> list[str]:
     """Why a proposal is refused before any edit is applied; empty when it is not.
 
-    Too many edits (``E-too-many-edits``), an edit that is not an object (``E-op``),
-    an op outside the catalogue, and, given ``permitted``, an op outside this run's
-    permitted edits (``E-policy``). Each refusal of a compound proposal names the
-    edit (its index, from 1) it is about.
+    An answer's entry that carried no edit (``E-proposal-shape``), too many edits
+    (``E-too-many-edits``), an edit that is not an object (``E-op``), an op outside
+    the catalogue, and, given ``permitted``, an op outside this run's permitted edits
+    (``E-policy``). Each refusal of a compound proposal names the edit (its index,
+    from 1) it is about.
     """
     steps = proposal.steps
+    if (len(steps) == 1 and isinstance(steps[0], dict) and "op" not in steps[0]
+            and UNREADABLE_PROPOSAL in steps[0]):
+        return [f"E-proposal-shape: {steps[0][UNREADABLE_PROPOSAL]}. Write each proposal "
+                'as {"edit": {"op": ...}} or {"edits": [{"op": ...}, ...]}, with '
+                "rationale, prediction and confidence beside it"]
     if max_edits is not None and len(steps) > max(1, int(max_edits)):
         return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and this run "
                 f"allows at most {max(1, int(max_edits))} per proposal "
@@ -2081,47 +2100,115 @@ EDIT_FIELD_CHARS = 400
 #: The fields that say what an edit touches, shown whole before any value.
 EDIT_NAMING_FIELDS = ("op", "name", "target", "id", "source", "first", "second", "new_id",
                       "position", "condition")
+#: The fields of an edit, and of a node it carries, that say how it is wired: shown
+#: whole wherever past edits are listed, however long. Only the other text (prompts,
+#: code, knob values, descriptions) is shortened, so a reader never mistakes a step's
+#: cut-off ``reads`` for a step that reads nothing. They are wiring only at an edit's
+#: top level and inside the node objects it carries (``EDIT_NODE_FIELDS``): under a
+#: ``value``, ``patch``, ``config``, ``spec`` or ``code`` every string is free text (a
+#: patch entry's ``target`` is the text it replaces).
+EDIT_WIRING_FIELDS = frozenset((
+    *EDIT_NAMING_FIELDS, "ids", "kind", "reads", "writes", "produces", "inputs",
+    "required_reads", "optional_targets", "call", "evaluator", "gate_kind",
+    "max_iterations", "on_exhausted", "targets", "sources", "edges", "start", "knobs",
+    "parallelism", "parallelism_knob", "feedback_keys", "task_ref", "tools", "blocking",
+    "subgraph_entry", "subgraph_exit", "path", "role", "source_path"))
+#: The fields of an edit or node that hold node objects (one, or a list).
+EDIT_NODE_FIELDS = frozenset((*NODE_OBJECT_FIELDS, "nodes"))
+#: A text the budget would cut to fewer characters than this is shown as its length
+#: marker alone ("… (N chars)").
+EDIT_TEXT_MIN = 20
 
 
-def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS) -> str:
+def _map_text(value: Any, fn: Any, structured: bool = True) -> Any:
+    """``value`` with ``fn`` applied to each free-text string. In an edit or a node
+    (``structured``) the wiring fields stay as they are and node fields are walked as
+    nodes; everything else, at any depth, is free text."""
+    if isinstance(value, (list, tuple)):
+        return [_map_text(item, fn, structured) for item in value]
+    if isinstance(value, str):
+        return fn(value)
+    if not isinstance(value, dict):
+        return value
+    if not structured:
+        return {key: _map_text(item, fn, False) for key, item in value.items()}
+    return {key: item if key in EDIT_WIRING_FIELDS
+            else _map_text(item, fn, key in EDIT_NODE_FIELDS)
+            for key, item in value.items()}
+
+
+def _cut(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit < EDIT_TEXT_MIN:
+        return f"… ({len(text)} chars)"
+    return f"{text[:limit]}… ({len(text) - limit} more chars)"
+
+
+def _text_limit(lengths: Sequence[int], budget: int) -> int:
+    """The longest any one text may stay so all of them together fit ``budget``: short
+    texts stay whole and the long ones share what is left equally, however little
+    that is (``_cut`` shows a share under ``EDIT_TEXT_MIN`` as a marker alone)."""
+    remaining = max(0, budget)
+    ordered = sorted(lengths)
+    for index, length in enumerate(ordered):
+        share = remaining // (len(ordered) - index)
+        if length > share:
+            return share
+        remaining -= length
+    return max(ordered, default=0)
+
+
+def fit_edit_text(value: Any, budget: int, cap: int | None = None) -> Any:
+    """An edit (or a list of edits) with its free text shortened to fit ``budget``
+    characters in all (and no one text past ``cap``), and its structure and wiring
+    kept whole however long they are."""
+    lengths: list[int] = []
+    _map_text(value, lambda text: lengths.append(len(text)) or text)
+    limit = _text_limit(lengths, budget)
+    limit = limit if cap is None else min(cap, limit)
+    return _map_text(value, lambda text: _cut(text, limit))
+
+
+def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS,
+                   text_budget: int | None = None) -> str:
     """A candidate's edits as a reader needs them: one line per edit, its op and what it
-    names first, whole, then each other field clipped, so no edit of a compound
-    proposal is cut away by a long value before it."""
+    names first, whole, then each other field with its wiring whole (every node's id,
+    kind, reads, writes, ...; ``EDIT_WIRING_FIELDS``) and only its free text shortened,
+    so no edit of a compound proposal, and no step of a split, is cut away by a long
+    prompt before it. The free text of all the edits shares ``text_budget`` characters
+    (by default ``field_chars`` per field)."""
     steps = list(edits) if isinstance(edits, (list, tuple)) else [edits]
+    rests = [{key: value for key, value in edit.items() if key not in EDIT_NAMING_FIELDS}
+             if isinstance(edit, dict) else edit for edit in steps]
+    if text_budget is None:
+        text_budget = field_chars * sum(max(1, len(rest)) if isinstance(rest, dict) else 1
+                                        for rest in rests)
+    shown = fit_edit_text(rests, text_budget)
     lines = []
-    for index, edit in enumerate(steps, 1):
+    for index, (edit, rest) in enumerate(zip(steps, shown), 1):
         if not isinstance(edit, dict):
             lines.append(f"{index}. {_clip(json.dumps(edit, default=str), field_chars)}")
             continue
         head = " ".join(f"{key}={json.dumps(edit[key], default=str)}"
                         for key in EDIT_NAMING_FIELDS if key in edit)
-        rest = "; ".join(f"{key}: {_clip(json.dumps(value, default=str), field_chars)}"
-                         for key, value in edit.items() if key not in EDIT_NAMING_FIELDS)
-        lines.append(f"{index}. {head}" + (f" -- {rest}" if rest else ""))
+        tail = "; ".join(f"{key}: {json.dumps(value, default=str, ensure_ascii=False)}"
+                         for key, value in rest.items())
+        lines.append(f"{index}. {head}" + (f" -- {tail}" if tail else ""))
     return "\n".join(lines) if lines else "(none)"
 
 
 #: How much of one edit "What this run has already tried" shows: a ``set_knob``'s
-#: diff against the value it replaced, a patch's ops, a structural edit's fields.
+#: diff against the value it replaced, a patch's ops, a structural edit's free text
+#: (its wiring is always whole).
 HISTORY_EDIT_CHARS = 600
-#: How much of a node's prompt a structural edit in that table shows.
+#: How much of any one text (a node's prompt) a structural edit in that table shows.
 HISTORY_NODE_PROMPT_CHARS = 200
 _UNKNOWN = object()
 
 
 def _bounded(text: str, limit: int = HISTORY_EDIT_CHARS) -> str:
     return text if len(text) <= limit else f"{text[:limit]}... ({len(text) - limit} more chars)"
-
-
-def _node_summary(node: Any) -> Any:
-    """A node object as the history shows it: id, kind and the head of its prompt."""
-    if not isinstance(node, dict):
-        return node
-    out = {key: node[key] for key in ("id", "kind") if key in node}
-    prompt = node.get("prompt_template") or node.get("system_prompt_template")
-    if prompt:
-        out["prompt"] = _bounded(str(prompt), HISTORY_NODE_PROMPT_CHARS)
-    return out
 
 
 #: Joins a diff's lines in a table cell, where a newline would become a space.
@@ -2143,9 +2230,11 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
     without whole values: each edit's op and what it names; a text ``set_knob`` as
     old -> new length and a bounded diff against the value it replaced (the previous
     ``set_knob`` of that knob in the lineage, else ``before``, the seed's values); a
-    patch's ops; a structural edit's fields with node objects summarised. Each edit is
-    at most ``HISTORY_EDIT_CHARS`` characters plus a "(N more chars)" marker. The
-    "Parameters you may move" table already shows the current values in full."""
+    patch's ops; a structural edit's fields with every node's wiring whole and its free
+    text (prompts, code) sharing ``HISTORY_EDIT_CHARS`` characters (``fit_edit_text``).
+    A diff, value or patch is at most ``HISTORY_EDIT_CHARS`` characters plus a "(N more
+    chars)" marker. The "Parameters you may move" table already shows the current
+    values in full."""
     values: dict[str, Any] = dict(before or {})
     parts: list[str] = []
     for edit in list(edits) if isinstance(edits, (list, tuple)) else [edits]:
@@ -2169,11 +2258,9 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
             parts.append(f"set_knob {name} patch: "
                          + _bounded(json.dumps(edit["patch"], default=str)))
         else:
-            shown = {key: ([_node_summary(n) for n in value] if key in NODE_LIST_FIELDS
-                           and isinstance(value, list) else _node_summary(value)
-                           if key in NODE_OBJECT_FIELDS else value)
-                     for key, value in edit.items()}
-            parts.append(_bounded(json.dumps(shown, default=str)))
+            parts.append(json.dumps(fit_edit_text(edit, HISTORY_EDIT_CHARS,
+                                                  cap=HISTORY_NODE_PROMPT_CHARS),
+                                    default=str, ensure_ascii=False))
     return "; ".join(parts) if parts else "(none)"
 
 
@@ -2276,10 +2363,10 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
         lines += ["", f"### Full edits of {entry.get('id')}, the latest rejected candidate that "
                   f"fixed more train items than it broke ({entry['fixed']} fixed / "
                   f"{entry['broken']} broken)",
-                  f"Shown whole up to {REJECTED_EDITS_CHARS} characters, so it can be built on "
+                  f"Every step's wiring whole, its text shortened to fit {REJECTED_EDITS_CHARS} "
+                  "characters, so it can be built on "
                   "or combined with edits to other steps; not to be re-proposed unchanged.",
-                  _bounded(describe_edits(entry.get("edit"), REJECTED_EDITS_CHARS),
-                           REJECTED_EDITS_CHARS)]
+                  describe_edits(entry.get("edit"), text_budget=REJECTED_EDITS_CHARS)]
     return lines
 
 

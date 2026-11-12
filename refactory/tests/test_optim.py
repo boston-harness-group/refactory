@@ -302,7 +302,10 @@ def test_the_autoresearch_prompt_lists_the_refusals_on_a_retry():
 def test_a_model_that_returns_nothing_is_a_failed_round_not_a_crash():
     mode = _mode()
     parents = [Candidate.from_state(mode.state_dict())]
-    optimizer = optim.AutoresearchOptimizer(FakeModel(["no json here at all"]), k=2)
+    # Both rounds answer with no JSON: an empty object would be an answer with no
+    # proposals list, which is refused (E-proposal-shape), not a failed round.
+    optimizer = optim.AutoresearchOptimizer(
+        FakeModel(["no json here at all", "no json here either"]), k=2)
     candidates, rejections = optimizer.propose_valid(
         _context(mode), 1, parents=parents, invariants=mode.invariants()
     )
