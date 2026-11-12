@@ -4598,6 +4598,7 @@ class Loop(OuterLoop):
             parent=self._edited_id(board),
             val_scores=self._val_scores(),
             selection=self.selection_mode(),
+            population_parents=(self.selection_mode() == "pool" and self._population_policy()),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
         )

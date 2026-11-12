@@ -912,6 +912,8 @@ def test_the_proposer_never_sees_a_pool_label(tmp_path, monkeypatch):
                                prompt, re.M))
         assert cells <= {"current", "kept", "rejected", "not gated"}, cells
     assert "left pool" in (loop.root / "state.json").read_text()
+    assert all("A parent may be any of the candidates that scored well there" in prompt
+               and "judged so far" not in prompt for prompt in proposer.prompts)
 
 
 def test_ties_at_the_pool_edge_enter_the_pool(tmp_path, monkeypatch):
@@ -958,8 +960,10 @@ class _PickedScript(Optimizer):
         super().__init__(k=1)
         self.rounds = list(rounds)
         self.parents: list[int] = []
+        self.prompts: list[str] = []
 
     def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        self.prompts.append(ctx.render())
         parent = parents[0]
         self.parents.append(_level(parent))
         levels = self.rounds.pop(0) if self.rounds else []
@@ -981,13 +985,22 @@ def test_below_pool_with_a_real_population_picker(tmp_path, monkeypatch):
             project=Path("."))
         assert loop._population_policy()
         picker = loop.optimizer.picker
-        loop.optimizer = PickedParent(picker, _PickedScript([[1, 2, 3], [4], [5]]))
+        proposer = _PickedScript([[1, 2, 3], [4], [5]])
+        loop.optimizer = PickedParent(picker, proposer)
         loop.run()
     assert loop.selection_mode() == "pool"
     assert json.loads((loop.root / "config.json").read_text())["selection"] == "pool"
     by_level = {_level(c): c.id for c in loop.population}
     assert loop._gate_decision(by_level[3], detail=True) == "below pool"
     assert loop._gate_decision(by_level[3]) == "rejected"
+    # Its optimizer is told that a parent may be any judged candidate, not only the
+    # pool's (the picker breeds from all of them), and nothing about the pool itself.
+    assert len(proposer.prompts) == 3
+    for prompt in proposer.prompts:
+        assert "A parent may be any candidate judged so far" in prompt
+        assert "candidates that scored well there" not in prompt
+        for label in ("in pool", "left pool", "below pool"):
+            assert label not in prompt, label
 
 
 def test_the_portfolio_report_under_pool_counts_incumbents_and_pool_members(

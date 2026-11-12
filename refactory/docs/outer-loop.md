@@ -131,9 +131,12 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the
   gradient's leaderboard) carries the gate's decision: `current` (the incumbent),
   `kept` (accepted as the incumbent when judged), `rejected` or `not gated`, under
-  `pool` as under `single`: which candidates the pool holds follows their val ranking,
-  so the optimizer is not told. Under `pool` the request adds that a parent may be any
-  candidate that scored well on val, a rejected one included. The report, `state.json`
+  `pool` as under `single`: pool members are not labelled as such. The request's
+  "Recent results" table lists the pool, though, so a `rejected` row there is one that
+  scored well on val. Under `pool` the request adds that a parent may be any candidate
+  that scored well on val, or with a population parent picker (`archive`,
+  `evolutionary`, `islands`, `map_elites`) any judged candidate, a rejected one
+  included. The report, `state.json`
   and the log label pool runs in full: `current`, `in pool` (in the pool now), `left
   pool` (in it after the gating that judged it, pushed out since), `rejected` (never in
   it, or rejected by a person), `below pool` (never in it, but a population picker still

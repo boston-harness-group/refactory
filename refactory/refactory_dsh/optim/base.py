@@ -672,6 +672,10 @@ class ProposalContext:
     #: How the validation gate selects (``Loop.selection_mode``): ``single``, ``pool``,
     #: or empty without the gate. Under ``pool`` the gate note says what the pool is.
     selection: str = ""
+    #: Under ``pool``, whether a population parent picker (``archive``, ``evolutionary``,
+    #: ``islands``, ``map_elites``) chooses the parent from every judged candidate
+    #: rather than from the pool; the gate note says which (``_gate_note``).
+    population_parents: bool = False
     #: What is there before each node of the edited graph, on every path that reaches
     #: it (`available_before`): ``{node: {"facts": [...], "files": [...]}}``. Rendered
     #: under "The pipeline you may edit", so a prompt's ``{{name}}`` names a fact that
@@ -764,7 +768,7 @@ class ProposalContext:
                                              if k.get("kind") == "str"]),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
-                        selection=self.selection),
+                        selection=self.selection, population=self.population_parents),
             _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
                      compact_edits(c.get("edits"), self.seed_knob_values),
@@ -1884,7 +1888,7 @@ def _current_line(history: Sequence[dict[str, Any]]) -> str:
 
 
 def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
-               selection: str = "") -> list[str]:
+               selection: str = "", population: bool = False) -> list[str]:
     """What the gate column means, said once, when there is one.
 
     A rejection says only that the candidate was not shown better on validation; with
@@ -1899,14 +1903,18 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
     if selection == "pool":
         # The same labels as ``single`` (the pool's own membership follows the val
         # ranking, so it is never shown): what changes is that a parent may be any
-        # candidate that scored well there, a rejected one included.
+        # candidate that scored well there (with a population picker, any judged
+        # candidate), a rejected one included.
         return ["This run has a validation gate with a pool of parents: each candidate "
                 "was also run on held-out items, and the gate kept it only if it scored "
                 "strictly higher there than the current candidate (an equal score is "
-                "rejected); the best so far is marked `current`. A parent may be any of the "
-                "candidates that scored well there, a `rejected` one included. Rows are not "
-                "in order of the held-out scores. Scores here are train scores; held-out "
-                "scores are never shown. You edit the pipeline shown below. A `rejected` "
+                "rejected); the best so far is marked `current`. "
+                + ("A parent may be any candidate judged so far, a `rejected` one included, "
+                   "as the parent picker chooses. " if population else
+                   "A parent may be any of the candidates that scored well there, a "
+                   "`rejected` one included. ")
+                + "Rows are not in order of the held-out scores. Scores here are train "
+                "scores; held-out scores are never shown. You edit the pipeline shown below. A `rejected` "
                 "candidate was not shown better than the current one on validation; that is "
                 "all a rejection says. " + resolution + "A change that was rejected must not "
                 "be proposed again unchanged, but when its train fixed/broken counts against "
