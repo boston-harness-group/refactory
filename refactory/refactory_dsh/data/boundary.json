@@ -48,6 +48,7 @@
     "refactory_dsh.optim.base",
     "refactory_dsh.optim.compose",
     "refactory_dsh.optim.feedback",
+    "refactory_dsh.optim.integrity",
     "refactory_dsh.optim.policies",
     "refactory_dsh.optim.random_optimizer",
     "refactory_dsh.outerloop",

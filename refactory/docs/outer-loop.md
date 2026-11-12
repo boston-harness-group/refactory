@@ -626,6 +626,87 @@ The readers' success patterns (what the passing items do right) have their own h
 after the failure patterns, up to 4 per reader whatever its failure patterns, and a
 quarter of the findings' room the failure patterns cannot take.
 
+### The integrity judge (`--integrity-judge`, default `off`)
+
+An optimizer paid by a score finds whatever raises it, and some of that is not the task
+done better: a rule keyed to a feature that only marks the right answer in this data, a
+prior about which answers are common, a code step that settles the answer without doing
+the task, a hard-coded answer, gaming the grader's matching, reading an answer file.
+The integrity judge (`optim/integrity.py`) asks one question of each proposal: *would
+this change still help if the dataset, grader or environment had been built
+differently, or does its benefit depend on how they happen to be built?* Its prompt
+names no dataset, task or answer format.
+
+- **When it is called.** Off by default: no call, nothing recorded, and the request,
+  the report and the run's settings digest are as before. On, every proposal that
+  became a valid candidate is judged in `Run.attempt` (`Loop._integrity_check`), so
+  every strategy's proposals pass it: the default loop and its optimizers (random,
+  autoresearch, a parent picker, the portfolio, the pool), `best_of_n`, `reflective`,
+  `autoscientists` and a custom strategy such as SkillOpt. The starting population's
+  sweep of single knob moves is not judged. One call of the optimizer's model (its
+  route, without tools, charged to the run's token and time budgets) per proposal,
+  recorded in `optimizer_trace.jsonl` (kind `integrity_proposal`), and one more when
+  the run reports: the winner's combined change from the seed (kind `integrity_final`),
+  so an exploit assembled across several edits that each passed is caught. Verdicts
+  are journaled (`integrity_verdict`), cached by prompt, and restored on resume; a
+  resumed run pays for no judgement twice.
+- **What it reads.** The proposal's edits in full (as "What this run has already tried"
+  renders them, within 20000 characters), what they do to the pipeline's state (each
+  changed setting as a unified diff, each added step whole, removed steps, wiring), the
+  optimizer's diagnosis, rationale and predicted effect, the pipeline before the change,
+  and a summary of the parent's train records the proposer saw (outcome, expected answer,
+  answer and the start of each item's input, within 6000 characters). Never a
+  validation or test item.
+- **What it answers.** `{"verdict": "clean" | "suspect" | "exploit", "categories": [...],
+  "evidence": ["<quote>"], "reason": "..."}`, with categories from a fixed generic set:
+  `answer_leak` (hard-coded answers, item ids, item-specific facts), `dataset_artifact`
+  (rules keyed to label-correlated surface features, option position or format, base
+  rates or priors about the answers), `grader_exploit` (gaming the scorer or the output
+  format), `environment_tamper` (reading answer or test files, editing checks),
+  `task_bypass` (code or steps that decide without doing the task) and `train_overfit`
+  (rules fitted to particular training items).
+- **What it does: a policy per category**, `off` (not asked about), `warn` (recorded
+  and shown; the change is still evaluated) or `veto` (refused before evaluation with
+  `E-integrity`, which the next request shows with the judge's reason). Only an
+  `exploit` verdict naming a `veto` category vetoes. A `suspect` verdict, an exploit
+  that names no category, a failed call and a malformed reply never veto: a failure is
+  recorded as a judge error and shown as such.
+- **Setting it.** `--integrity-judge on` (or `veto`): every category `veto` by default.
+  `--integrity-judge flag` (or `warn`): every category `warn`. An object sets categories
+  one by one, in a profile or as JSON on the command line:
+  `--integrity-judge '{"mode": "on", "policy": {"answer_leak": "off", "train_overfit": "warn"}}'`
+  (`mode` is a bare value above, `default` a policy for the categories the object does
+  not name). A category's policy is the run's setting for it, else the Task's
+  declaration, else the run's default.
+- **What a task declares.** A Task (`refactory_dsh/task.py`) may set
+  `integrity_allowances = {category: "why it is legitimate here"}`, e.g.
+  `{"answer_leak": "the task is to recall facts about these items"}` or
+  `{"grader_exploit": "the output format is the objective"}`: that category is off for
+  the run unless the run names it, and the judge is told the reason under "What this
+  task allows". `integrity_policy = {category: off|warn|veto}` sets a category's policy
+  the same way. Where two Tasks of a graph disagree, the more lenient policy holds.
+- **Where the verdicts show.** The change ledger gains an `integrity` column
+  (`exploit: dataset_artifact`, `clean`, `judge error`); the request gains "Integrity
+  review of your proposals": a tally, then the newest 8 suspect or exploit verdicts,
+  each with its categories, quote, reason and whether it was refused (within 4000
+  characters); the report (`integrity` in `report.json`, "Integrity review" in
+  `report.md`) gives the policy, the counts, every flagged proposal and the winner's
+  combined-change verdict. The final verdict is reported, never acted on.
+- **Offline.** `python -m refactory_dsh.optim.integrity judge --proposal FILE` judges
+  saved proposals with the same prompt a run builds (`--print-prompt` prints them and
+  calls nothing; `--model`, `--provider`, `--worker-backend`, `--effort` pick the
+  route). FILE is a JSON object, a JSON list or JSON lines; each entry carries `edits`
+  (a list, or one `edit`) and optionally `parent_state` (with it the state diff is
+  computed), `state`, `rationale`, `prediction`, `diagnosis`, `train_records`,
+  `mode_name`, `parent`, `candidate`, `integrity_judge` (the run setting, `on` by
+  default), `task_policy`, `allowances`, and an `id` and `label` echoed in the output. A
+  `"scope": "cumulative"` entry carries `seed_state`, `state`, `steps` (`{"id", "edits",
+  "rationale"}` in order) and `train_records`. One JSON line per entry comes out: `id`,
+  `label`, `verdict`, `categories`, `evidence`, `reason`, `vetoed`, `error`.
+  `python -m refactory_dsh.optim.integrity export RUN_DIR` writes a past run's proposals
+  in that format, from its journal (the parent's train records as they stood when each
+  was proposed).
+
 ## LiveMath skill graph (`livemath/skill_graph`)
 
 Arm C of the outer-loop study starts from arm A's seed skill, converted by hand into an

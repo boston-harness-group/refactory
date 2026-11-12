@@ -82,6 +82,16 @@ class Task:
     #: nodes could find them: grader-derived, so no node outside the grader side may
     #: consume them (V17). Default: none.
     grader_outputs: tuple[str, ...] = ()
+    #: What the integrity judge (`optim.integrity`, ``LoopConfig.integrity_judge``) is to
+    #: treat as legitimate for this task: ``{category: why, in plain words}``, e.g.
+    #: ``{"answer_leak": "the task is to recall facts about these items"}``. A category
+    #: named here is off for the run (not asked about) unless the run's own setting
+    #: names it, and the judge is told the reason. Default: none.
+    integrity_allowances: dict[str, str] = {}
+    #: The task's policy per integrity category (``off``, ``warn`` or ``veto``), where
+    #: it differs from the run's default; a run's own setting for a category wins.
+    #: Default: none.
+    integrity_policy: dict[str, str] = {}
 
     def instances(
         self, *, part: str | None = None, seed: int | None = None,
@@ -191,6 +201,35 @@ def grader_secrets(state: dict[str, Any], *, part: str | None = None) -> set[str
             for name in hidden:
                 secrets |= strings(instance.metadata.get(name)) - visible
     return secrets
+
+
+def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """What the graph's Tasks declare for the integrity judge: ``{"policy": {...},
+    "allowances": {...}}``, from each data node's Task (``Task.integrity_policy``,
+    ``Task.integrity_allowances``). Where two Tasks disagree on a category the more
+    lenient policy holds (off, then warn, then veto); allowances are joined. A Task that
+    cannot be loaded declares nothing."""
+    from refactory_dsh.nn.graph import Graph
+
+    order = {"off": 0, "warn": 1, "veto": 2}
+    policy: dict[str, str] = {}
+    allowances: dict[str, str] = {}
+    graph = Graph.from_state(state.get("graph") or {})
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    for ref in refs:
+        try:
+            task = load_task(ref)
+        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
+            continue
+        for name, level in dict(getattr(task, "integrity_policy", None) or {}).items():
+            level = str(level).strip().lower()
+            if name not in policy or order.get(level, 2) < order.get(policy[name], 2):
+                policy[str(name)] = level
+        for name, text in dict(getattr(task, "integrity_allowances", None) or {}).items():
+            if str(text).strip():
+                allowances[str(name)] = (f"{allowances[name]}; {text}" if name in allowances
+                                         else str(text))
+    return {"policy": policy, "allowances": allowances}
 
 
 def node_item(item: dict[str, Any], task: Task | None, knobs: dict[str, Any] | None) -> dict[str, Any]:

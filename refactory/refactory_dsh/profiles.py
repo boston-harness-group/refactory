@@ -170,6 +170,19 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         if result.get(key) not in (True, False, 0, 1):
             raise ProfileError(f"{key} must be true or false (1 or 0 on the command line)")
         result[key] = bool(result.get(key))
+    # integrity_judge: a bare value, or an object (JSON text on the command line) with
+    # mode, default and a per-category policy (optim.integrity.parse_setting).
+    from refactory_dsh.optim.integrity import parse_setting
+    judge = result.get("integrity_judge")
+    if isinstance(judge, str) and judge.strip().startswith("{"):
+        try:
+            judge = result["integrity_judge"] = json.loads(judge)
+        except json.JSONDecodeError as error:
+            raise ProfileError(f"integrity_judge is not valid JSON: {error}") from error
+    try:
+        parse_setting(judge)
+    except ValueError as error:
+        raise ProfileError(str(error)) from error
     max_edits = result.get("max_edits_per_proposal")
     if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
         raise ProfileError("max_edits_per_proposal must be a positive integer (1 is single edits)")
@@ -412,7 +425,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
         "fresh_evidence", "max_edits_per_proposal", "selection", "pool_size",
         # What the proposer is shown, not how anything is scored (optim.feedback).
-        "run_ledger", "lessons", "step_review", "structure_guidance")}
+        "run_ledger", "lessons", "step_review", "structure_guidance",
+        # Judges proposals and shows or refuses them; it scores nothing (optim.integrity).
+        "integrity_judge")}
     # A run that sets no settings sources digests as it did before the field existed,
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
@@ -501,6 +516,14 @@ SETTING_HELP = {
                    "optimizer-model call per step) and shows the verdicts; 0 off",
     "structure_guidance": "1 adds what makes a new step pay off to the request's "
                           "'How nodes compose' (default: 0, off)",
+    "integrity_judge": "off (default), on, flag or a JSON object: one optimizer-model call per "
+                       "proposal asks whether its benefit depends on how the data, grader "
+                       "or environment happen to be built. on (or veto): an exploit verdict "
+                       "is refused before evaluation (E-integrity) in every category by "
+                       "default; flag (or warn): verdicts are only shown. "
+                       "'{\"mode\": \"on\", \"policy\": {\"answer_leak\": \"off\", "
+                       "\"train_overfit\": \"warn\"}}' sets categories one by one (off, "
+                       "warn, veto); a run's setting beats the Task's declaration",
     "portfolio": "prompt+pipeline: each round asks the model proposer for one "
                  "prompt/knob-level and one pipeline-level candidate and evaluates both, "
                  "gated in that order (default: off)",
