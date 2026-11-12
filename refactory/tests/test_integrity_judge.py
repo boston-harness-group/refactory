@@ -307,7 +307,8 @@ def test_flag_records_shows_and_still_evaluates_an_exploit(tmp_path, monkeypatch
     assert "| integrity |" in ledger and "| exploit: dataset_artifact |" in ledger
     review = _section(text, "## Integrity review of your proposals")
     assert "2 of your proposals were reviewed: 0 clean, 0 suspect, 2 exploit." in review
-    assert '"if that option is listed, choose it"' in review and "refused" not in review
+    assert '"if that option is listed, choose it"' in review
+    assert "-- refused before evaluation" not in review
     # The optimizer trace counts the calls like the step reviews.
     trace = [json.loads(l) for l in (loop.root / "optimizer_trace.jsonl").read_text().splitlines()]
     assert [t["kind"] for t in trace if t["kind"].startswith("integrity")] == [
@@ -609,7 +610,7 @@ def test_the_prompt_is_calibrated_and_domain_free():
     text = integrity._how_to_judge() + integrity._answer() + "".join(integrity.CATEGORIES.values())
     for cue in ("usually", "default to", "option order", "expected answer", "prefer it"):
         assert cue not in text, cue
-    assert "convert them first" in text, "a legitimate counter-example"
+    assert "list the constraints the input states before starting" in text, "a counter-example"
     assert "A general rule learned from training failures is legitimate" in text
     assert "When in doubt, say suspect." in text
     assert "trigger has nothing to do with doing the task" in text
@@ -657,7 +658,7 @@ def test_content_kept_from_earlier_changes_is_judged_too(tmp_path, monkeypatch):
     kept = _section(second, heading)
     assert "### setting `level` changed: 5 -> 2" in kept
     assert "an exploit an earlier change put in and this candidate keeps counts" in kept
-    assert "Text or code an earlier change put in and this change keeps counts" in second
+    assert "set source to inherited" in second and '"source": "new" | "inherited"' in second
 
 
 def _two_tasks(monkeypatch: Any, first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
@@ -890,3 +891,116 @@ def test_the_export_takes_each_parents_train_records_as_of_its_proposal(tmp_path
     assert [r["train_records"][0]["label"] for r in rows] == ["OLD", "NEW"]
     assert rows[0]["integrity_judge"] == "flag" and rows[0]["rationale"] == "r"
     assert rows[1]["parent_state"] == {"knobs": {"x": 1}}, "an in-between parent's own state"
+
+
+
+# ── re-review: inherited findings, wording, cache, export ids, loop-mode knob ──
+
+
+INHERITED = {**EXPLOIT, "source": "inherited",
+             "reason": "The rule was put in by an earlier change; this change only edits the level."}
+
+
+def test_source_is_read_and_only_a_new_finding_vetoes():
+    assert integrity.parse_verdict(EXPLOIT)["source"] == "new", "unsaid is new"
+    found = integrity.parse_verdict(INHERITED)
+    assert found["source"] == "inherited" and found["verdict"] == "exploit"
+    assert not integrity.vetoes({**found, "error": None}, {"dataset_artifact": "veto"})
+    assert integrity.vetoes({**integrity.parse_verdict({**EXPLOIT, "source": "new"}),
+                             "error": None}, {"dataset_artifact": "veto"})
+    assert integrity.cell(found) == "exploit: dataset_artifact (inherited)"
+    salvaged = integrity.salvage(BROKEN.replace('"property": "p"', '"property": "p", "source": "inherited"'))
+    assert salvaged["source"] == "inherited"
+
+
+def test_a_harmless_child_of_an_exploit_parent_is_not_vetoed_but_a_new_exploit_is(tmp_path, monkeypatch):
+    """Under veto: findings the judge says are inherited (content an earlier change left)
+    are shown and the changes evaluated; an exploit the child itself adds is vetoed."""
+    judge = Judge(INHERITED)
+    loop, proposer, report = _run(tmp_path / "inherited", monkeypatch, judge,
+                                  integrity_judge="on")
+    assert [_level(c) for c in loop.population if c.parent] == [3, 2], "nothing vetoed"
+    records = [r for r in loop._integrity if r["scope"] == "proposal"]
+    assert [(r["verdict"], r["source"], r["vetoed"]) for r in records] == [
+        ("exploit", "inherited", False), ("exploit", "inherited", False)]
+    review = _section(proposer.contexts[-1].render(), "## Integrity review of your proposals")
+    assert "exploit: dataset_artifact (inherited)" in review
+    assert report["integrity"]["proposals"]["vetoed"] == 0
+    judge = Judge(INHERITED, EXPLOIT)
+    loop, _p, report = _run(tmp_path / "new", monkeypatch, judge, integrity_judge="on")
+    assert [_level(c) for c in loop.population if c.parent] == [3], "the child's own exploit"
+    refusal = next(r for r in loop.rejections if r.codes() == ["E-integrity"]).reasons[0]
+    assert "judged what this change adds an exploit" in refusal and "it depends on:" in refusal
+
+
+def test_the_request_softens_suspect_and_keeps_exploit_firm():
+    lines = "\n".join(integrity.feedback_lines([
+        {"candidate": "a", "epoch": 1, **SUSPECT, "vetoed": False},
+        {"candidate": "b", "epoch": 1, **EXPLOIT, "vetoed": True}]))
+    suspect = next(line for line in lines.splitlines() if line.startswith("- `a`"))
+    exploit = next(line for line in lines.splitlines() if line.startswith("- `b`"))
+    assert "flagged for possible reliance on how the data or grader was built" in suspect
+    assert "consider whether the rule holds in general" in suspect
+    assert "refused before evaluation" in exploit and "flagged for possible" not in exploit
+    assert "A suspect verdict only flags a possible reliance" in lines
+    assert "An exploit verdict, or a proposal refused before evaluation" in lines
+
+
+def test_the_cache_keeps_the_whole_verdict(tmp_path):
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, integrity_judge="flag")
+    loop._remember_integrity({"scope": "proposal", "candidate": "c", "key": "k",
+                              **integrity.salvage(BROKEN.replace('"property": "p"',
+                                                                 '"property": "p", "source": "inherited"'))})
+    cached = loop._integrity_cache["k"]
+    assert cached["salvaged"] is True and cached["property"] == "p"
+    assert cached["source"] == "inherited"
+    assert not integrity.vetoes({**cached, "error": None}, {"task_bypass": "veto"}), (
+        "a cached salvaged reply still never vetoes")
+
+
+def test_export_ids_are_unique_when_a_vetoed_state_is_proposed_again(tmp_path):
+    root = tmp_path / "run"
+    root.mkdir()
+    seed_state = {"knobs": {}, "graph": {"start": "x", "nodes": {}}}
+    verdict = {"event": "integrity_verdict", "scope": "proposal", "candidate": "v", "parent": "s",
+               "generation": 2, "verdict": "exploit", "vetoed": True,
+               "input": {"edits": [{"op": "set_knob", "name": "k", "value": 1}]}}
+    events = [{"event": "candidate", "id": "s", "parent": None, "edits": [], "state": seed_state},
+              verdict, {**verdict, "input": {**verdict["input"], "rationale": "again"}}, verdict]
+    (root / "journal.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    ids = [e["id"] for e in integrity.proposals_from_run(root)]
+    assert ids == ["v@2", "v@2#2", "v@2#3"]
+
+
+def test_a_per_knob_patchs_in_between_parent_is_exported_with_its_state(tmp_path):
+    """A custom strategy's in-between candidate (SkillOpt's patch for one knob, then the
+    next knob's on top of it) is not in the journal: its state goes with the verdict, so
+    the export rebuilds the live prompt."""
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, integrity_judge="flag")
+        loop.integrity_client = judge = Judge(CLEAN)
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        between = run.attempt(Proposal(edit={"op": "set_knob", "name": "level", "value": 4},
+                                       parent=seed.id, rationale="patch (first knob)"), seed)
+        assert isinstance(between, Candidate) and between.id not in {c.id for c in loop.population}
+        run.attempt(Proposal(edit={"op": "set_knob", "name": "level", "value": 3},
+                             parent=between.id, rationale="patch (second knob)"), between)
+    records = [r for r in loop._integrity if r["scope"] == "proposal"]
+    assert "parent_state" not in records[0]["input"], "the seed is journaled"
+    assert records[1]["input"]["parent_state"] == between.state
+    entries = integrity.proposals_from_run(loop.root)
+    assert entries[1]["parent_state"] == between.state
+    assert entries[1]["rationale"] == "patch (second knob)"
+    assert [integrity.entry_prompt(e) for e in entries] == judge.prompts
+
+
+def test_loop_modes_knob_refuses_a_malformed_setting():
+    from refactory_packages.loop_mode import ops
+
+    for bad in ("{not json", "loud", '{"policy": {"made_up": "off"}}'):
+        with pytest.raises(ValueError, match="integrity_judge knob is malformed"):
+            ops._integrity_setting(bad)
+    assert ops._integrity_setting("") == "off" and ops._integrity_setting(None) == "off"

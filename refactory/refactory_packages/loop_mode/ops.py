@@ -68,9 +68,19 @@ def _settings(ctx: Any) -> dict[str, Any]:
 
 
 def _integrity_setting(value: Any) -> Any:
-    """The judge's setting as the knob holds it: a bare word, or a JSON object as text."""
-    text = str(value if value is not None else "off").strip()
-    return json.loads(text) if text.startswith("{") else (text or "off")
+    """The judge's setting as the knob holds it: a bare word, or a JSON object as text,
+    checked (`optim.integrity.parse_setting`); a malformed value is refused naming the
+    knob."""
+    from refactory_dsh.optim.integrity import parse_setting
+
+    text = str(value if value is not None else "off").strip() or "off"
+    try:
+        setting = json.loads(text) if text.startswith("{") else text
+        parse_setting(setting)
+    except ValueError as exc:  # json.JSONDecodeError included
+        raise ValueError(f"the loop mode's integrity_judge knob is malformed ({text[:200]!r}): "
+                         f"{exc}") from exc
+    return setting
 
 
 def _resumed(ctx: Any) -> Loop:

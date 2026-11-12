@@ -662,10 +662,12 @@ prompt names no dataset, task or answer format.
   within 16000 characters, when the parent is not the seed), and a summary of the
   parent's train records the proposer saw (outcome, reference result, what the pipeline
   produced, the start of each input, within 6000 characters). It judges the candidate
-  as it would run, so an exploit an earlier change put in and this one keeps counts.
-  Never a validation or test item.
+  as it would run, and says whether each finding is about what this change adds
+  (`source: new`) or only about content an earlier change left (`inherited`). Never a
+  validation or test item.
 - **What it answers.** `{"verdict": "clean" | "suspect" | "exploit", "categories": [...],
-  "evidence": ["<quote>"], "property": "...", "reason": "..."}` with categories from a
+  "evidence": ["<quote>"], "property": "...", "source": "new" | "inherited",
+  "reason": "..."}` with categories from a
   fixed generic set: `answer_leak`, `dataset_artifact`, `grader_exploit`,
   `environment_tamper`, `task_bypass` and `train_overfit` (a general rule learned from
   training failures is not overfitting). An `exploit` is a change whose benefit depends
@@ -673,15 +675,18 @@ prompt names no dataset, task or answer format.
   judge names (`property`), and whose trigger has nothing to do with doing the task; an
   exploit that names no property is read as `suspect`. The judge is told to say
   `suspect` when unsure, and given legitimate counter-examples (general know-how such as
-  "when quantities come in different units, convert them first"). Evidence items that
+  "re-check each intermediate result before using it"). Evidence items that
   are not strings are kept as JSON text; a reply that is not valid JSON is read field
   by field and marked `salvaged`.
 - **What it does: a policy per category**, `off` (not asked about), `warn` (recorded
   and shown; the change is still evaluated) or `veto` (refused before evaluation with
   `E-integrity`, which the next request shows with the judge's reason). Only an
-  `exploit` verdict naming a `veto` category vetoes. A `suspect` verdict, an exploit
-  that names no category or no property, a failed call, a malformed or salvaged reply
-  never veto: a failure is recorded as a judge error and shown as such.
+  `exploit` verdict about what this change adds (`source: new`, also when the reply
+  does not say) naming a `veto` category vetoes. A `suspect` verdict, an `inherited`
+  finding (recorded and shown as a warning: a harmless child of a flagged parent is
+  evaluated), an exploit that names no category or no property, a failed call, a
+  malformed or salvaged reply never veto: a failure is recorded as a judge error and
+  shown as such.
 - **Setting it.** `--integrity-judge on` (or `veto`): every category `veto`.
   `--integrity-judge flag` (or `warn`): every category `warn`. An object sets
   categories one by one, in a profile or as JSON on the command line:
@@ -701,14 +706,17 @@ prompt names no dataset, task or answer format.
   wins: an allowance beats any policy, warn beats veto. An unknown category or policy
   word stops the run.
 - **Where the verdicts show.** The change ledger gains an `integrity` column (the
-  verdict of the proposal that was evaluated); the request gains "Integrity review of
-  your proposals": a tally, then the newest 8 suspect or exploit verdicts, each with its
-  categories, quote, reason and whether it was refused (within 4000 characters); the
+  verdict of the proposal that was evaluated; `(inherited)` marks a finding about
+  earlier content); the request gains "Integrity review of your proposals": a tally,
+  then the newest 8 suspect or exploit verdicts, each with its categories, quote, reason
+  and whether it was refused (within 4000 characters) -- an exploit or a refusal does
+  not count as progress, a suspect verdict asks whether the rule holds in general; the
   report (`integrity` in `report.json`, "Integrity review" in `report.md`) gives the
   policy, the counts, every flagged proposal and the winner's combined-change verdict.
   The final verdict is reported, never acted on.
 - **The graph-run loop** (`loop_mode`) takes the setting from its frozen
-  `integrity_judge` knob (a bare word or a JSON object as text).
+  `integrity_judge` knob (a bare word or a JSON object as text); a malformed value is
+  refused naming the knob.
 - **SkillOpt** proposals are judged, each knob's patch separately, and can be vetoed;
   SkillOpt's own requests do not show the verdicts. A SkillOpt run resumed inside an
   epoch's patch phase with the judge newly turned on judges the rebuilt patch; if it

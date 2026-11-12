@@ -5094,11 +5094,13 @@ class Loop(OuterLoop):
                   file=sys.stderr)
 
     def _remember_integrity(self, record: dict[str, Any]) -> None:
+        from refactory_dsh.optim.integrity import VERDICT_FIELDS
+
         """Keep one verdict record, and its judgement by prompt when it has one."""
         self._integrity.append(record)
         if record.get("verdict") and record.get("key"):
             self._integrity_cache[str(record["key"])] = {
-                name: record.get(name) for name in ("verdict", "categories", "evidence", "reason")}
+                name: record[name] for name in VERDICT_FIELDS if name in record}
 
     def _integrity_check(self, proposal: Proposal, parent: Candidate,
                          candidate: Candidate) -> Candidate | list[str]:
