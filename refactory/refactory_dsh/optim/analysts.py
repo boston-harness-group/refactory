@@ -64,8 +64,10 @@ INPUT_FLOOR = 1500
 TEXT_FLOOR = 40
 #: A node text or setting value in the pipeline an analyst reads, head and tail.
 PIPELINE_TEXT_CHARS = 20000
-#: Analyst calls (and merge calls of one level) that run at once.
-CONCURRENCY = 4
+#: The most calls of one analyst stage in flight at once, analysts and merges together
+#: (the two sides' merges run side by side): 8 runs SkillOpt's 35 train items (about 5
+#: or 6 batches of 8) in one wave.
+CONCURRENCY = 8
 #: The ranked findings the proposal request shows, and their room.
 SHOWN_FINDINGS = 16
 SECTION_CHARS = 30000
@@ -331,11 +333,35 @@ Rules:
 """
 
 
+def _share(group: Sequence[dict[str, Any]]) -> int:
+    """Each item's room in an analyst call: an equal share of ``ANALYST_BUDGET``."""
+    return max(ITEM_FLOOR, ANALYST_BUDGET // max(1, len(group)))
+
+
+def clipped_items(group: Sequence[dict[str, Any]]) -> int:
+    """How many of a batch's items are longer than their share and so clipped
+    (SkillOpt never clips a trace; the count is journaled and reported)."""
+    share = _share(group)
+    return sum(1 for record in group if len(item_text(record)) > share)
+
+
+def round_key(ctx: Any, model: str = "") -> str:
+    """What one proposal step's analysis is made from: the epoch, the generation, the
+    edited candidate, its train records, the stage's settings and the optimizer's model.
+    Not the lessons: a retry in the same step reuses the step's analysis."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps(
+        {"epoch": ctx.epoch, "generation": ctx.generation, "parent": ctx.parent,
+         "records": ctx.item_records, "settings": dict(ctx.analysts), "model": model},
+        sort_keys=True, default=str).encode()).hexdigest()
+
+
 def analyst_prompt(ctx: Any, kind: str, index: int, total: int,
                    group: Sequence[dict[str, Any]], pipeline: str) -> str:
     """One analyst's request: the pipeline, the changes possible, the optimizer's lessons
     and the batch's items in full (each in an equal share of ``ANALYST_BUDGET``)."""
-    share = max(ITEM_FLOOR, ANALYST_BUDGET // max(1, len(group)))
+    share = _share(group)
     body = "\n\n".join(fit_item(record, share) for record in group)
     label = "failed" if kind == "failure" else "passed"
     answer = (FAILURE_ANSWER if kind == "failure" else SUCCESS_ANSWER).replace(
@@ -601,13 +627,15 @@ def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:
 def journal_entry(analysis: Mapping[str, Any]) -> dict[str, Any]:
     """What the loop journals of one round's analysis (``analyst_findings``)."""
     batches_ = list(analysis.get("batches") or ())
-    return {"candidate": analysis.get("candidate"),
+    return {"key": analysis.get("key"), "candidate": analysis.get("candidate"),
             "failed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "failure"),
             "passed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "success"),
             "batches": [{key: b.get(key) for key in ("kind", "index", "items", "findings",
-                                                      "error")} for b in batches_],
+                                                      "clipped", "error")} for b in batches_],
+            "clipped_items": sum(int(b.get("clipped") or 0) for b in batches_),
             "merges": list(analysis.get("merges") or ()),
             "not_analysed": dict(analysis.get("not_analysed") or {}),
             "calls": int(analysis.get("calls") or 0),
             "cached": int(analysis.get("cached") or 0),
+            **({"error": analysis["error"]} if analysis.get("error") else {}),
             "findings": _for_merge(analysis.get("findings") or ())}

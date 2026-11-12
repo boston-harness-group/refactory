@@ -636,11 +636,14 @@ paired with a parent picker), on the train records the request carries:
 - **Failure analysts.** Every item not passed (answered wrong, no answer, or an error),
   each once, shuffled with the epoch as seed and cut into batches of
   `--analyst-group-size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
-  batch, up to 4 at once. Each reads the pipeline (its nodes and edges, each node in
+  batch. At most 8 calls of the stage are in flight at once, merges included (the two
+  sides' merges run side by side), so 35 train items (5 or 6 batches) take one wave of
+  analysts. Each reads the pipeline (its nodes and edges, each node in
   full with the settings bound to it, every other setting's value) and each item's full
   trace: its input, every step's input and output in the order they ran, the expected
   answer, the prediction, the score and the grader's feedback (an item longer than its
-  share of 240000 characters has its step inputs clipped first, then its outputs). It
+  share of 240000 characters, 30000 for each of 8 items, has its step inputs clipped
+  first, then its outputs; SkillOpt never clips, so the clipped items are counted). It
   writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
   (steps, edges, settings, or the structure), the change that would fix it, the items it
   covers (an id outside the batch is dropped), its impact and quotes.
@@ -659,15 +662,32 @@ paired with a parent picker), on the train records the request carries:
 - `--analyst-max-batches` (0, no limit, as SkillOpt) caps the analyst calls per round,
   failure batches first; the request says how many items went unanalysed.
 
+The analysis is made once per proposal step: it is keyed by the epoch, the generation,
+the edited candidate, its train records, the stage's settings and the optimizer's model,
+not by the lessons, so a retry after a refusal (whose request carries the lessons the
+refused answer wrote) reuses it and makes no call; the analysts and merges read the
+lessons of the step's first attempt. The step's analysis is also kept in
+`<run root>/analyst_findings/round-<key>.json` when every call of it succeeded, so a
+resumed run reuses it; a step with a failed call is made again on resume, its successful
+calls answered from their own cache.
+
 Every call is recorded in `optimizer_trace.jsonl` (kinds `analyst_failure`,
 `analyst_success`, `analyst_merge_failure`, `analyst_merge_success`,
-`analyst_merge_final`) with its parsed findings, and cached in memory and in
-`<run root>/analyst_findings/` (cleared by a fresh run), so a retry or a resumed run
-pays for none again. Each round's batches, merges, call counts and ranked findings are
-journaled (`analyst_findings`, restored on resume), and report.md's "What the analysts
-found" gives the rounds, the calls and the latest round's top 5 findings. A failed
-analyst call is shown and never fails the proposal; a spent budget stops it. The calls
-go through the optimizer's model route and count in the run's budget like the readers'.
+`analyst_merge_final`) with its parsed findings, and cached by the optimizer's model and
+its whole text, in memory and in `<run root>/analyst_findings/` (cleared by a fresh
+run). Each step's batches, merges, call counts, clipped items and ranked findings are
+journaled once (`analyst_findings`, restored on resume), also when the proposal call
+after it fails, and when a spent budget stops the stage part way (with what it paid and
+the `error`). report.md's "What the analysts found" gives the rounds, the calls, the
+clipped items and the latest round's top 5 findings. A failed analyst call is shown and
+never fails the proposal; a spent budget, a cancelled run or a missing model choice stop
+it, as in the SkillOpt port. The calls go through the optimizer's model route and count
+in the run's budget like the readers'.
+
+A run with `--analysts 1` whose optimizer asks no model (the random proposer, a parent
+policy alone) is refused when it starts. A custom strategy (`--strategy skillopt`)
+builds its own optimizer requests: setting it warns, and the stage runs only for
+proposals the strategy asks of the loop's model proposer.
 The prompts name no dataset or task, ask for nothing beyond what SkillOpt's analysts
 ask, and see train records only. Off, no call is made and every request is
 byte-identical to a run without the stage; the four settings are excluded from the
@@ -681,6 +701,14 @@ analysts and merges make. SkillOpt's rank call (it trims its merged edits to the
 budget), slow update and meta skill are not run: the proposer chooses and writes the
 edits, and its `lessons` are this loop's optimizer-side memory (they are shown to the
 analysts and merges, as SkillOpt shows its meta skill).
+
+Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
+LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
+these are generic by design (no dataset hints); SkillOpt never clips a trace (here an
+item over its share is clipped, and counted); SkillOpt shows each item's task type
+(here the item's input, and its choices when it has them); and SkillOpt's analysts never
+see an errored item (it has no conversation to show), while here it is a failure shown
+with its error.
 
 ## LiveMath skill graph (`livemath/skill_graph`)
 

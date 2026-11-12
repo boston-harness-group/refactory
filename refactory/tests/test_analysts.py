@@ -330,7 +330,9 @@ def test_a_failed_analyst_is_recorded_shown_and_never_fatal(tmp_path):
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     failed = [t for t in trace if t["kind"] == "analyst_failure" and t["error"]]
     assert len(failed) == 1 and failed[0]["items"] == ["f0"]
-    assert len(list((tmp_path / "analyst_findings").glob("*.json"))) == 1, "failures not cached"
+    stored = tmp_path / "analyst_findings"
+    assert len(list(stored.glob("[!r]*.json"))) == 1, "failures not cached"
+    assert not list(stored.glob("round-*.json")), "nor the step that had one"
 
 
 def test_a_spent_budget_during_an_analyst_stops_the_proposal():
@@ -360,15 +362,37 @@ def test_calls_are_cached_for_a_retry_and_a_resume_and_traced(tmp_path):
     assert kinds == ["analyst_failure", "analyst_failure", "analyst_merge_failure",
                      "analyst_merge_final", "analyst_success"]
     assert all(t["findings"] for t in trace if t["kind"].startswith("analyst_"))
-    optimizer.propose(ctx, 1, [])
+    first = optimizer.last_analysis
+    optimizer.propose(replace(ctx, ask_lessons=True, lessons={"text": "NEW LESSON"}), 1, [])
     assert len(client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)) == paid, "a retry pays for none"
-    assert optimizer.last_analysis["calls"] == 0 and optimizer.last_analysis["cached"] == paid
+    assert optimizer.last_analysis is first, "the step's analysis, its first lessons"
+    # Each call is cached on its own too: a fresh optimizer without the step's file
+    # answers every call from the per-call cache.
+    for held in (tmp_path / "analyst_findings").glob("round-*.json"):
+        held.rename(held.with_suffix(".bak"))
+    percall = Client()
+    alone = AutoresearchOptimizer(percall)
+    alone.trace_path = tmp_path / "optimizer_trace.jsonl"
+    alone.propose(ctx, 1, [])
+    assert percall.of(ANALYST_SYSTEMS + MERGE_SYSTEMS) == []
+    assert alone.last_analysis["calls"] == 0 and alone.last_analysis["cached"] == paid
+    for held in (tmp_path / "analyst_findings").glob("round-*.bak"):
+        held.rename(held.with_suffix(".json"))
     again = Client()
     resumed = AutoresearchOptimizer(again)  # a fresh process: only the run directory
     resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
-    resumed.propose(ctx, 1, [])
+    # A resumed run whose lessons have changed since the step's first attempt reuses
+    # the step's analysis from the run directory.
+    resumed.propose(replace(ctx, ask_lessons=True, lessons={"text": "NEW LESSON"}), 1, [])
     assert again.of(ANALYST_SYSTEMS + MERGE_SYSTEMS) == []
+    assert resumed.last_analysis["calls"] == 0 and resumed.last_analysis["cached"] == paid
     assert "## What the analysts found, ranked" in again.proposal()
+    other = Client()
+    other_model = AutoresearchOptimizer(other)
+    other_model.trace_path = tmp_path / "optimizer_trace.jsonl"
+    other_model._model_id = lambda: "another model"  # type: ignore[method-assign]
+    other_model.propose(ctx, 1, [])
+    assert len(other.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)) == paid, "keyed by the model"
 
 
 # ── the request ─────────────────────────────────────────────────────────────
@@ -666,3 +690,195 @@ def test_every_model_proposer_strategy_runs_the_stage_on_real_traces(
             assert f"Item {item} " not in prompt and f'"{item}"' not in prompt, item
     events = _journal(loop, "analyst_findings")
     assert events and sum(e["calls"] for e in events) == len(seen), "each call paid once"
+
+
+# ── review fixes: one analysis per step, journaling, limits ────────────────
+
+
+class Retrying(Client):
+    """Every proposal answer is refused (an unknown knob) and writes new lessons, so the
+    loop retries the step with a request whose lessons changed."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.answers = 0
+
+    def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+        if system in ANALYST_SYSTEMS + MERGE_SYSTEMS:
+            return super().complete(prompt, system=system, **kwargs)
+        with self.lock:
+            self.calls.append((system, prompt))
+            self.answers += 1
+            number = self.answers
+        return json.dumps({"diagnosis": "d", "lessons": f"LESSON-{number}", "proposals": [
+            {"edit": {"op": "set_knob", "name": "no_such_knob", "value": 1}}]})
+
+
+def test_retries_in_a_step_reuse_its_analysis_and_journal_it_once(tmp_path, monkeypatch):
+    client = Retrying()
+    loop = _loop_run(tmp_path, monkeypatch, client, epochs=2, attempts=3)
+    proposals = [p for s, p in client.calls if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS]
+    events = _journal(loop, "analyst_findings")
+    assert len(proposals) >= 2 * len(events), "setup: every step was retried"
+    assert any("LESSON-1" in p for p in proposals[1:]), "setup: the lessons changed"
+    assert len({e["key"] for e in events}) == len(events) == 2, "one analysis per step"
+    paid = client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)
+    assert len(paid) == sum(e["calls"] for e in events), "every call paid once"
+    assert len(paid) == len(set(paid)), "no call repeated"
+    per_step = [len(e["batches"]) + len(e["merges"]) for e in events]
+    assert len(paid) == sum(per_step)
+
+
+def test_a_failed_proposal_still_journals_the_analysis_it_paid_for(tmp_path, monkeypatch):
+    class Down(Client):
+        def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+            if system in ANALYST_SYSTEMS + MERGE_SYSTEMS:
+                return super().complete(prompt, system=system, **kwargs)
+            raise RuntimeError("503 overloaded")
+
+    client = Down()
+    loop = _loop_run(tmp_path, monkeypatch, client, epochs=1)
+    events = _journal(loop, "analyst_findings")
+    assert events and events[0]["calls"] == len(client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)) > 0
+    assert loop.optimizer.proposal_failures, "setup: the proposal call failed"
+
+
+def test_a_spent_budget_mid_stage_journals_what_was_paid(tmp_path, monkeypatch):
+    from refactory_dsh.budgets import BudgetExhausted
+
+    def analyst(system: str, prompt: str) -> str:
+        if system == analysts.SUCCESS_SYSTEM:
+            raise BudgetExhausted("tokens spent")
+        return json.dumps({"findings": [{"finding": "x", "items": _items(prompt)}]})
+
+    client = Client(analyst=analyst)
+    optimizer = AutoresearchOptimizer(client)
+    records = [_rec("f0", False), _rec("s0", True)]
+    with pytest.raises(BudgetExhausted):
+        optimizer.propose(_ctx(records, group_size=1), 1, [])
+    partial = optimizer.last_analysis
+    assert partial["calls"] == 2 and partial["error"].startswith("BudgetExhausted")
+    assert analysts.journal_entry(partial)["error"].startswith("BudgetExhausted")
+
+
+def test_the_lessons_reach_the_analysts_and_the_merges():
+    client = Client()
+    records = [_rec(f"f{i}", False) for i in range(2)] + [_rec(f"s{i}", True) for i in range(2)]
+    ctx = replace(_ctx(records, group_size=1), ask_lessons=True,
+                  lessons={"text": "LESSON-TEXT: prefer checks"})
+    AutoresearchOptimizer(client).propose(ctx, 1, [])
+    for prompt in client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS):
+        assert "## The optimizer's lessons so far" in prompt and "LESSON-TEXT" in prompt
+    unasked = Client()
+    AutoresearchOptimizer(unasked).propose(replace(ctx, ask_lessons=False), 1, [])
+    assert not any("LESSON-TEXT" in p for p in unasked.of(ANALYST_SYSTEMS + MERGE_SYSTEMS))
+
+
+def test_a_level_merge_drops_ids_no_analyst_read():
+    def merge(system: str, prompt: str) -> str:
+        return json.dumps({"findings": [{"finding": "merged", "items": ["f0", "v9", "x1"]}]})
+
+    client = Client(merge=merge)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(_ctx([_rec(f"f{i}", False) for i in range(3)], group_size=1), 1, [])
+    (found,) = optimizer.last_analysis["findings"]
+    assert found["items"] == ["f0"] and found["not_in_batch"] == ["v9", "x1"]
+    assert "v9" not in client.proposal() and "x1" not in client.proposal()
+
+
+def test_the_items_the_analysts_cite_are_shown_in_full_first():
+    """Twelve failed items that do not fit one request; the analysts cite only f9:
+    it is the first item shown in full, before f0 (first in the usual order)."""
+    def merge(system: str, prompt: str) -> str:
+        return json.dumps({"findings": [{"finding": "CITED", "items": ["f9"]}]})
+
+    client = Client(merge=merge)
+    records = [_rec(f"f{i}", False, steps={"a": (f"IN {i}", "O" * 1000)}) for i in range(12)]
+    ctx = replace(_ctx(records, group_size=4), evidence_budget=8000)
+    AutoresearchOptimizer(client).propose(ctx, 1, [])
+    request = client.proposal()
+    shown = request[request.index("### Some items in full"):]
+    assert "The items the analysts cited come first" in shown
+    assert shown.count("### Item ") >= 2, "setup: room for more than the cited item"
+    assert shown.split("### Item ")[1].startswith("f9 ")
+
+
+def test_at_most_the_concurrency_cap_of_calls_run_at_once_merges_included():
+    in_flight = {"now": 0, "most": 0}
+    lock = threading.Lock()
+    barrier = threading.Barrier(analysts.CONCURRENCY)
+    # Level-1 merges of 12 + 12 lists in pairs: 12 merge calls are asked for at once; a
+    # barrier one wider than the cap holds them until the cap would be passed.
+    merges = threading.Barrier(analysts.CONCURRENCY + 1)
+
+    class Counting(Client):
+        def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+            if system not in ANALYST_SYSTEMS + MERGE_SYSTEMS:
+                return super().complete(prompt, system=system, **kwargs)
+            with lock:
+                in_flight["now"] += 1
+                in_flight["most"] = max(in_flight["most"], in_flight["now"])
+            try:
+                try:
+                    (barrier if system in ANALYST_SYSTEMS else merges).wait(timeout=0.5)
+                except threading.BrokenBarrierError:
+                    pass
+                return super().complete(prompt, system=system, **kwargs)
+            finally:
+                with lock:
+                    in_flight["now"] -= 1
+
+    records = [_rec(f"f{i}", False) for i in range(12)] + [_rec(f"s{i}", True) for i in range(12)]
+    optimizer = AutoresearchOptimizer(Counting())
+    optimizer.propose(_ctx(records, group_size=1, merge_batch_size=2), 1, [])
+    assert in_flight["most"] == analysts.CONCURRENCY == 8
+    assert all(not b["error"] for b in optimizer.last_analysis["batches"])
+
+
+@pytest.mark.parametrize("fatal", ["cancelled", "model_choice"])
+def test_a_cancelled_run_or_a_missing_model_choice_stops_the_proposal(fatal):
+    from concurrent.futures import CancelledError
+
+    from refactory_dsh.model import ModelChoiceError
+
+    def analyst(system: str, prompt: str) -> str:
+        raise CancelledError() if fatal == "cancelled" else ModelChoiceError("no model chosen")
+
+    with pytest.raises(CancelledError if fatal == "cancelled" else ModelChoiceError):
+        AutoresearchOptimizer(Client(analyst=analyst)).propose(_ctx([_rec("f0", False)]), 1, [])
+
+
+def test_a_proposer_that_asks_no_model_is_refused_and_a_custom_strategy_warned(
+        tmp_path, monkeypatch):
+    from refactory_dsh.loop import LoopError
+    from refactory_dsh.outerloop import OuterLoop
+
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, analysts=True)  # the random proposer
+        with pytest.raises(LoopError, match="asks no model"):
+            loop.run()
+        quiet = _loop(tmp_path / "quiet")
+        with __import__("warnings").catch_warnings():
+            __import__("warnings").simplefilter("error")
+            quiet.set_custom_strategy(OuterLoop())
+        warned = _loop(tmp_path / "warned", analysts=True)
+        with pytest.warns(RuntimeWarning, match="builds its own optimizer requests"):
+            warned.set_custom_strategy(OuterLoop())
+
+
+def test_clipped_items_are_counted_journaled_and_reported(tmp_path, monkeypatch):
+    big = _rec("f0", False, steps={"a": ("I" * 40000, "O" * 40000)})
+    assert analysts.clipped_items([big]) == 0, "alone it has the whole room"
+    group = [big] + [_rec(f"f{i}", False) for i in range(1, 8)]
+    assert analysts.clipped_items(group) == 1, "one of eight: over its 30000 share"
+    client = Client()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(_ctx(group), 1, [])
+    entry = analysts.journal_entry(optimizer.last_analysis)
+    assert entry["clipped_items"] == 1 and entry["batches"][0]["clipped"] == 1
+    from refactory_dsh.loop import LoopConfig, _analysts_report, _analysts_section
+
+    report = _analysts_report([{**entry, "epoch": 1, "generation": 1}],
+                              LoopConfig(analysts=True))
+    assert report["clipped_items"] == 1
+    assert "1 item trace(s) were clipped" in "\n".join(_analysts_section(report))

@@ -500,6 +500,12 @@ class Loop(OuterLoop):
         from refactory_dsh.control import running_search
         from refactory_dsh.budgets import BudgetExhausted, RunBudget, ResourceLimits, LEDGER
 
+        if (self.config.analysts and self._custom_strategy is None
+                and not getattr(self.optimizer, "uses_model", False)):
+            # Checked here, not at construction, against the optimizer the run uses.
+            raise LoopError(f"analysts read the train items for a model proposer; the "
+                            f"{self.optimizer.name} optimizer asks no model, so they would "
+                            "never run (use --optimizer autoresearch, or --analysts 0)")
         ledger_path = self.root / LEDGER
         inherited_budget = self.budget or RunBudget.inherited(self.model)
         self._owns_resource_budget = inherited_budget is None
@@ -856,6 +862,16 @@ class Loop(OuterLoop):
         sees only ``Run``'s public API.
         """
         self._custom_strategy = strategy
+        if self.config.analysts:
+            import warnings
+
+            # Its own requests (SkillOpt's included) do not go through the model
+            # proposer, so the stage runs only where it calls ``Run.propose``.
+            warnings.warn(
+                f"analysts is on, but the {getattr(strategy, 'name', type(strategy).__name__)} "
+                "strategy builds its own optimizer requests: the analysts run only for "
+                "proposals it asks of the loop's model proposer (Run.propose), if any",
+                RuntimeWarning, stacklevel=2)
 
     # ── init ───────────────────────────────────────────────────────────────
     def _seed_ledger(self) -> None:
@@ -3026,9 +3042,13 @@ class Loop(OuterLoop):
                 self.optimizer.last_lessons = ""
             if hasattr(self.optimizer, "last_analysis"):
                 self.optimizer.last_analysis = None
-            proposals = self.optimizer.propose(context, n, parents)
+            try:
+                proposals = self.optimizer.propose(context, n, parents)
+            finally:
+                # Journaled whether or not the proposal call succeeded: the analysts'
+                # calls were paid either way.
+                self._keep_analysis()
             self._keep_lessons()
-            self._keep_analysis()
             return proposals
         except BudgetExhausted as exc:
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
@@ -4973,18 +4993,18 @@ class Loop(OuterLoop):
                         max_batches=self.config.analyst_max_batches)
 
     def _keep_analysis(self) -> None:
-        """Journal the round's analysis (``analyst_findings``) once: a retry in the same
-        generation reuses its cached calls and the same findings, and is not journaled
-        again."""
+        """Journal the step's analysis (``analyst_findings``) once per analysis key
+        (`optim.analysts.round_key`): a retry in the same step reuses the analysis and
+        is not journaled again, nor is one a resumed run reloaded. An analysis a spent
+        budget stopped is journaled with what it paid and its ``error``."""
         from refactory_dsh.optim.analysts import journal_entry
 
         analysis = getattr(self.optimizer, "last_analysis", None)
         if not self.config.analysts or not analysis:
             return
         entry = {"epoch": self.epoch, "generation": self.generation, **journal_entry(analysis)}
-        last = self._analyses[-1] if self._analyses else {}
-        if (last.get("epoch"), last.get("generation"), last.get("findings")) == (
-                entry["epoch"], entry["generation"], entry["findings"]):
+        if entry.get("key") and any(a.get("key") == entry["key"] and not a.get("error")
+                                    for a in self._analyses):
             return
         self._analyses.append(entry)
         self._journal("analyst_findings", **entry)
@@ -5643,6 +5663,8 @@ def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> 
             "cached": sum(int(a.get("cached") or 0) for a in analyses),
             "failed_batches": sum(1 for a in analyses for b in a.get("batches") or ()
                                   if b.get("error")),
+            "clipped_items": sum(int(a.get("clipped_items") or 0) for a in analyses),
+            "stopped": sum(1 for a in analyses if a.get("error")),
             "latest": dict(analyses[-1]) if analyses else None}
 
 
@@ -5659,6 +5681,10 @@ def _analysts_section(report: dict[str, Any]) -> list[str]:
                 if report.get("max_batches") else "")
              + (f"; {report['failed_batches']} batch(es) could not be analysed"
                 if report.get("failed_batches") else "")
+             + (f"; {report['clipped_items']} item trace(s) were clipped to fit an "
+                "analyst's room" if report.get("clipped_items") else "")
+             + (f"; {report['stopped']} round(s) stopped before the stage finished"
+                if report.get("stopped") else "")
              + ". Every round's findings are in journal.jsonl (`analyst_findings`) and each "
              "call in optimizer_trace.jsonl.", ""]
     latest = report.get("latest")
