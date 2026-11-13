@@ -762,9 +762,11 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
     # with its target changed during this step (#347).  Beside the existing
     # target-guard bracket.
     wt_found = ws.recorded(workdir) if ws else None
-    if wt_found is not None and ws.shared_changed(wt_found):
+    shared = ws.shared_change(wt_found) if wt_found is not None else None
+    if shared is not None:
         wt_msg = (f"the git configuration or hooks the run's worktree shares "
-                  f"with {wt_found.target} changed during {node}; check them "
+                  f"with {wt_found.target} changed during {node}"
+                  f"{f' ({shared})' if shared else ''}; check them "
                   f"before your next commit there")
         if 'also' in (record.get('target') or {}):
             # Output-only node (full snapshot with also/warn_also tracking):

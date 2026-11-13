@@ -426,7 +426,7 @@ def test_a_prepared_check_runs_its_command_without_preparing_again(tmp_path, mon
     found = SimpleNamespace(path=str(tmp_path), head="c1", target=str(tmp_path))
     monkeypatch.setattr(worktree, "recorded", lambda workdir: found)
     monkeypatch.setattr(worktree, "restore", lambda workdir: (found, []))
-    monkeypatch.setattr(worktree, "shared_changed", lambda found: False)
+    monkeypatch.setattr(worktree, "shared_change", lambda found: None)
     monkeypatch.setattr(worktree, "check_environment", lambda path, home: {"PATH": "/bin"})
 
     def no_preparation(*args, **kwargs):
