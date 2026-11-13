@@ -607,6 +607,9 @@ def shared_change(found: Worktree) -> str | None:
         # A record from before the detail: only its digest of every line can be compared.
         _write_json(record_path, {**record, **current})
         return None if record["shared"] == current["shared"] else ""
+    # Every branch ever seen stays known, so deleting a branch and making it again with
+    # an upstream is not mistaken for branch creation.
+    current["branches"] = sorted(set(record["branches"]) | set(current["branches"]))
     changes = _shared_changes(record, current)
     kept = [change for change in changes
             if not _new_tracking(change, record, snapshot["config_lines"], found.branch)]
@@ -1297,8 +1300,9 @@ def _new_tracking(change: tuple[str, str, str], before: dict, config_lines: list
         return False
     remote = next((line.partition("=")[2] for line in config_lines
                    if line.partition("=")[0] == f"branch.{name}.remote"), None)
-    return remote == "." or (remote is not None and any(
-        old.startswith(f"remote.{remote}.") for old in before["shared_config"]))
+    remotes = {key.removeprefix("remote.").rsplit(".", 1)[0]
+               for key in before["shared_config"] if key.startswith("remote.") and key.count(".") >= 2}
+    return remote == "." or remote in remotes
 
 
 def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
@@ -1314,7 +1318,7 @@ def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
     for line in snapshot["config_lines"]:
         key, _, value = line.partition("=")
         values.setdefault(key, []).append(value)
-    branches = git(target, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
+    branches = git(target, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads").split()
     return {"shared": _shared_digest(snapshot),
             "shared_config": {key: hashlib.sha256("\n".join(vals).encode()).hexdigest()
                               for key, vals in values.items()},

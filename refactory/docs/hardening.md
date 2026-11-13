@@ -774,8 +774,9 @@ shared config. Two changes followed:
   - neither its ref nor any `branch.<b>.*` key existed in the record;
   - the remote it names is `.` or was already defined in the record.
 
-  Each record keeps the target's local branches for this, and moves on to new
-  branches as they appear. Retargeting an existing branch, giving one an upstream
+  Each record keeps every local branch of the target it has ever seen, so a
+  branch that is deleted and made again with an upstream is not new. Remotes are
+  matched by their full name. Retargeting an existing branch, giving one an upstream
   with `--set-upstream-to`, and tracking a remote added during the step are still
   caught. So is every other `branch.*` key (pushRemote, rebase, mergeOptions), and
   `remote.*`, `core.*`, `alias.*` and the hooks. A record written before this
@@ -799,6 +800,9 @@ Held by `test_worktree.py` (`test_a_tracking_branch_made_in_the_person_s_checkou
 `test_a_branch_made_in_one_step_and_given_an_upstream_in_a_later_one_is_caught`,
 `test_a_new_branch_s_other_settings_are_caught`,
 `test_retargeting_config_left_by_a_deleted_branch_is_caught`,
+`test_deleting_a_branch_and_making_it_again_with_an_upstream_is_caught`,
+`test_a_remote_is_matched_by_name_not_prefix`,
+`test_a_branch_named_like_a_tag_is_known_by_its_name`,
 `test_a_shared_hook_change_is_named_by_file`,
 `test_a_record_from_before_the_detail_still_works`) and
 `test_agent_delivery.py`

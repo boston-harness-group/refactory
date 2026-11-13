@@ -1826,3 +1826,37 @@ def test_retargeting_config_left_by_a_deleted_branch_is_caught(repo, tmp_path):
     found = worktree.create(repo, "HEAD", "trkcccc0000", _run(tmp_path))
     git(repo, "config", "branch.ghost.remote", "fork")
     assert worktree.shared_change(found) == "config branch.ghost.remote changed"
+
+
+def test_deleting_a_branch_and_making_it_again_with_an_upstream_is_caught(repo, tmp_path):
+    """Re-review of #644: a branch once seen is never new again."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "branch", "feature")
+    found = worktree.create(repo, "HEAD", "trkdddd1111", _run(tmp_path))
+    git(repo, "branch", "-D", "feature")
+    assert worktree.shared_change(found) is None
+    git(repo, "branch", "--track", "feature", "fork/main")
+    assert worktree.shared_change(found) == (
+        "config branch.feature.merge added; config branch.feature.remote added")
+
+
+def test_a_remote_is_matched_by_name_not_prefix(repo, tmp_path):
+    """Re-review of #644: an existing remote `a.b` does not make remote `a` defined."""
+    git(repo, "remote", "add", "a.b", "https://example.invalid/ab.git")
+    found = worktree.create(repo, "HEAD", "trkeeee2222", _run(tmp_path))
+    git(repo, "branch", "newb")
+    git(repo, "config", "branch.newb.remote", "a")
+    git(repo, "config", "branch.newb.merge", "refs/heads/main")
+    assert worktree.shared_change(found) == (
+        "config branch.newb.merge added; config branch.newb.remote added")
+
+
+def test_a_branch_named_like_a_tag_is_known_by_its_name(repo, tmp_path):
+    """Re-review of #644: with a tag `x`, `refname:short` would list branch `x` as `heads/x`."""
+    _with_origin(repo)
+    git(repo, "tag", "x")
+    git(repo, "branch", "x")
+    found = worktree.create(repo, "HEAD", "trkffff3333", _run(tmp_path))
+    git(repo, "branch", "--set-upstream-to", "origin/main", "x")
+    assert worktree.shared_change(found) == "config branch.x.merge added; config branch.x.remote added"
