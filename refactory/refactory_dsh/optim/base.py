@@ -2417,7 +2417,9 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
     used = len("\n".join(lines))
     rest: list[list[Any]] = []
     for block, row in turns:
-        if rest or used + len(block) + 2 > budget:
+        # A block that does not fit goes to the table; a later, shorter one that does
+        # still gets its trajectories.
+        if used + len(block) + 2 > budget:
             rest.append(row)
             continue
         lines += ["", block]

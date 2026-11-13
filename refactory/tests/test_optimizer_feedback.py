@@ -274,6 +274,10 @@ def test_a_parent_picker_hands_its_proposers_lessons_through():
     assert paired.last_lessons == "FROM-PROPOSER"
     paired.last_lessons = ""
     assert proposer.last_lessons == ""
+    proposer.last_reply_problem = "BROKEN"
+    assert paired.last_reply_problem == "BROKEN", "the loop reads why an answer was unread"
+    paired.last_reply_problem = ""
+    assert proposer.last_reply_problem == ""
 
 
 def test_lessons_shown_are_bounded():
@@ -404,7 +408,7 @@ def test_each_added_step_is_reviewed_once_shown_and_kept_for_a_resume(tmp_path):
             "shared train item(s); final answer changed on 2/6 (33%; the answer the grader "
             "read); review: restates_inputs "
             '-- "THINK 4" -- It repeats the notes.') in section
-    assert "- `check` (code, added by c1" in section and "recorded no text output" in section
+    assert "- `check` (code, added by c1" in section and "its records hold no visit of it" in section
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     assert [t["verdict"] for t in trace if t["kind"] == "step_review"] == ["restates_inputs"]
     optimizer.propose(ctx, 1, [])
@@ -987,3 +991,301 @@ def test_a_rescore_after_full_slots_still_needs_room(tmp_path, monkeypatch, cap,
     assert loop.evaluations <= cap
     assert sum(1 for c in loop.population if c.parent and c.evaluated) == 4
     assert bool(rescores) == rescored
+
+
+# ── a broken answer is never read in part ───────────────────────────────────
+
+
+FIRST_EDIT = {"op": "set_knob", "name": "k", "value": 2}
+#: The shape of the D-s42 epoch-5 answer: two proposals, the first one's ``edits`` list
+#: never closed, so the outer object is not JSON; the first edit alone parses.
+BROKEN = ('{"diagnosis": "D-TEXT", "considered": "C-TEXT", "lessons": "L-NEW",\n'
+          ' "proposals": [\n'
+          '  {"edits": [' + json.dumps(FIRST_EDIT) + ',\n'
+          '    {"op": "set_knob", "name": "k2", "patch": [{"kind": "append", "content": "x"}]\n'
+          '  }, "rationale": "prompt", "confidence": 0.4},\n'
+          '  {"edits": [{"op": "insert_after", "target": "a", "node": {"id": "chk", "kind": "op",'
+          ' "call": "refactory_dsh.snippet:run", "code": "def main(i): ..."}}],'
+          ' "rationale": "structure", "confidence": 0.3}\n'
+          ' ]}')
+
+
+class _Raw(_Answering):
+    """Answers proposal requests with ``text`` as written."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__({})
+        self.text = text
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        self.proposals.append(prompt)
+        return self.text
+
+
+@pytest.mark.parametrize("text,why", [
+    (BROKEN, "Expecting ',' delimiter at line 5 column 17, here: …"),
+    (BROKEN[:200], "its object opened at character 1 is never closed (cut off?"),
+])
+def test_a_broken_answer_is_read_as_nothing_and_each_asked_proposal_counted(tmp_path, text, why):
+    from refactory_dsh.optim.base import proposal_refusal
+    from refactory_dsh.optim.random_optimizer import answer_json, extract_json
+
+    assert extract_json(BROKEN) == FIRST_EDIT, "the repro: one edit was read as the answer"
+    assert answer_json(BROKEN)[0] == {}
+    optimizer = AutoresearchOptimizer(_Raw(text))
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.last_diagnosis = optimizer.last_considered = "AN EARLIER ROUND'S"
+    proposals = optimizer.propose(ProposalContext(ask_lessons=True), 2, [])
+    assert len(proposals) == 2, "one refused stand-in per proposal asked for"
+    for proposal in proposals:
+        refused = proposal_refusal(proposal)
+        assert refused[0].startswith("E-proposal-shape: your whole answer was not valid JSON ("
+                                     + why), refused
+        assert "none of its proposals, nor its diagnosis or lessons" in refused[0]
+    assert optimizer.last_reply_problem.startswith(why)
+    assert (optimizer.last_diagnosis, optimizer.last_considered, optimizer.last_lessons) == (
+        "", "", "")
+    record = json.loads(optimizer.trace_path.read_text().splitlines()[-1])
+    assert (record["proposals"], record["unreadable"]) == (0, 2)
+    assert record["error"].startswith("malformed answer: " + why)
+
+
+def test_an_answer_after_prose_braces_is_still_read():
+    """Braces in prose before the answer are not the answer, and not a broken one."""
+    from refactory_dsh.optim.random_optimizer import answer_json
+
+    assert answer_json('I weigh {a, b} first. {"proposals": []}') == ({"proposals": []}, "")
+    assert answer_json('```json\n{"proposals": [{"edit": {"op": "x"}}]}\n```') == (
+        {"proposals": [{"edit": {"op": "x"}}]}, "")
+    with pytest.raises(ValueError):
+        answer_json("no braces at all")
+
+
+def test_lessons_not_updated_are_marked_and_cleared_by_new_ones(tmp_path, monkeypatch):
+    """An answer that could not be read keeps the lessons, says they were not updated
+    then and why; a later answer with lessons clears the mark."""
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    proposer = _BreaksAt([[(5, 7)], [(7, 8)], [(8, 9)], []])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=3, val_gate=True)
+        loop.optimizer = proposer
+        loop.run()
+    third = _section(proposer.contexts[2].render(), "## Your lessons so far")
+    assert "NOT UPDATED in epoch" in third and "BROKEN-WHY" in third and "LESSON-ONE" in third
+    assert "these are the earlier ones, unchanged" in third
+    assert loop._lessons["text"] == "LESSON-THREE" and "not_updated" not in loop._lessons
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    marked = [e for e in events if e.get("event") == "optimizer_lessons" and e.get("not_updated")]
+    assert len(marked) == 1 and marked[0]["text"] == "LESSON-ONE"
+    assert marked[0]["not_updated"]["why"] == "BROKEN-WHY"
+
+
+class _BreaksAt(Lessons):
+    """Lessons in rounds 1 and 3; the answer of round ``BREAK`` could not be read."""
+
+    WRITES = {1: "LESSON-ONE", 3: "LESSON-THREE"}
+    BREAK = 2
+
+    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+        out = super().propose(ctx, n, parents)
+        self.last_reply_problem = "BROKEN-WHY" if len(self.contexts) == self.BREAK else ""
+        return out
+
+
+def test_a_lessons_mark_survives_a_resume(tmp_path, monkeypatch):
+    class Last(_BreaksAt):
+        BREAK = 3
+        WRITES = {1: "LESSON-ONE"}
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=3, val_gate=True)
+        loop.optimizer = Last([[(5, 7)], [(7, 8)], [(8, 9)]])
+        loop.run()
+    assert loop._lessons["not_updated"]["why"] == "BROKEN-WHY"
+    again = Recording([[]])
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=4, val_gate=True, resume=True)
+        resumed.optimizer = again
+        resumed.run()
+    shown = _section(again.contexts[0].render(), "## Your lessons so far")
+    assert "NOT UPDATED in epoch" in shown and "BROKEN-WHY" in shown and "LESSON-ONE" in shown
+
+
+def test_lessons_not_updated_without_earlier_lessons_still_say_so():
+    lines = feedback.lessons_lines({"not_updated": {"epoch": 1, "generation": 0, "why": "W"}})
+    assert lines[0] == "## Your lessons so far" and "NOT UPDATED in epoch 1" in lines[1]
+    assert "you have none kept yet" in lines[1] and len(lines) == 2
+
+
+# ── code steps and gates: measured, not reviewed ────────────────────────────
+
+
+GATED_CHILD = {"graph": {"nodes": {**CHILD_STATE["graph"]["nodes"],
+                                   "g": {"id": "g", "kind": "gate"}}}}
+
+
+def _visited_records() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The pair's records, the child's with the visits of its code step ``check`` (output
+    on t1 and t4 only) and its gate ``g`` (sends t4 back once, passes the rest)."""
+    parent, child = _pair_records()
+    for record in child:
+        item = record["id"]
+        said = item in ("t1", "t4")
+        record["steps"] = [
+            {"node": "check", "kind": "op", "output": f"signal={item}" if said else "signal=''",
+             "digest": item if said else "none", "empty": not said},
+            {"node": "g", "kind": "gate", "verdict": "reloop" if item == "t4" else "proceed",
+             "reason": "look again" if item == "t4" else ""},
+            *([{"node": "g", "kind": "gate", "verdict": "proceed", "reason": ""}]
+              if item == "t4" else [])]
+    return parent, child
+
+
+def test_a_code_step_and_a_gate_show_on_which_items_they_acted_and_how_the_answer_moved():
+    """Child vs parent: t4 fixed and its answer changed, t0 broken, t5's answer changed.
+    The code step gave output on t1 and t4; the gate sent t4 back."""
+    parent, child = _visited_records()
+    code = feedback.step_evidence("check", parent_records=parent, child_records=child,
+                                  graph=GATED_CHILD)
+    assert code["samples"] == [] and "decision" not in code
+    assert code["visits"] == {
+        "kind": "op", "ran": 6, "distinct_outputs": 2, "example": "signal=t1",
+        "fired": {"items": ["t1", "t4"], "shared": 2, "changed": 1, "fixed": 1, "broken": 0},
+        "silent": {"items": ["t0", "t2", "t3", "t5"], "shared": 4, "changed": 1, "fixed": 0,
+                   "broken": 1}}
+    gate = feedback.step_evidence("g", parent_records=parent, child_records=child,
+                                  graph=GATED_CHILD)["visits"]
+    assert gate["routes"] == {
+        "proceed": {"items": ["t0", "t1", "t2", "t3", "t5"], "shared": 5, "changed": 1,
+                    "fixed": 0, "broken": 1},
+        "reloop": {"items": ["t4"], "shared": 1, "changed": 1, "fixed": 1, "broken": 0}}
+    assert gate["relooped"]["items"] == ["t4"]
+    assert feedback.visit_text(code["visits"]) == (
+        "gave output on 2 of 6 item(s) it ran on: t1, t4 (final answer changed on 1/2; "
+        '1 fixed / 0 broken), 2 distinct output(s), e.g. "signal=t1"; empty output on 4 '
+        "(final answer changed on 1/4; 0 fixed / 1 broken)")
+    assert feedback.visit_text(gate) == (
+        "ran on 6 item(s); first verdict `proceed` on 5: t0, t1, t2, t3, t5 (final answer "
+        "changed on 1/5; 0 fixed / 1 broken); `reloop` on 1: t4 (final answer changed on "
+        "1/1; 1 fixed / 0 broken); relooped (visited more than once) on 1: t4 (final answer "
+        "changed on 1/1; 1 fixed / 0 broken)")
+    assert "final answer changed" not in feedback.visit_text(gate, counts=False)
+
+
+def test_code_steps_and_gates_are_shown_measured_and_cost_no_review_call():
+    parent, child = _visited_records()
+    base = {"candidate": "c1", "parent": "p0", "kind": "added code step", "same_seed": True}
+    entries = [{**base, "node_kind": kind, **feedback.step_evidence(
+        step, parent_records=parent, child_records=child, graph=GATED_CHILD)}
+        for step, kind in (("think", "agent"), ("check", "code"), ("g", "gate"))]
+    client = _Answering({"proposals": []}, REVIEW)
+    AutoresearchOptimizer(client).propose(ProposalContext(added_steps=entries), 1, [])
+    assert len(client.reviews) == 1 and "`think`" in client.reviews[0]
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    code = next(line for line in section.splitlines() if line.startswith("- `check`"))
+    assert "gave output on 2 of 6 item(s) it ran on: t1, t4" in code
+    assert code.endswith("no reviewer (a code step or gate: the measured behaviour above)")
+    gate = next(line for line in section.splitlines() if line.startswith("- `g`"))
+    assert "first verdict `proceed` on 5" in gate and "relooped (visited more than once) on 1: t4" in gate
+    assert "A code step or gate gets no reviewer" in section
+
+
+# ── a decision step is judged by whether it follows its inputs ──────────────
+
+
+DECIDING = {"graph": {"nodes": {
+    "notes": {"id": "notes", "kind": "agent", "writes": ["notes.txt"]},
+    "decide": {"id": "decide", "kind": "agent", "reads": ["notes.txt"], "writes": ["answer.txt"],
+               "system_prompt_template": "TEMPLATE",
+               "field_bindings": [["system_prompt_template", "decide__system_prompt"]]},
+    "extract": {"id": "extract", "kind": "op", "reads": ["answer.txt"], "produces": ["label"]},
+    "check": {"id": "check", "kind": "gate", "reads": ["answer.txt"]}}},
+    "knobs": {"decide__system_prompt": {"value": "DECIDE-INSTRUCTIONS: pick one."}}}
+
+
+def _deciding_entry() -> dict[str, Any]:
+    records = [_rec(f"t{i}", True, {"notes": f"NOTES {i} recommend B", "decide": "<answer>B</answer>"},
+                    "B") for i in range(3)]
+    entry = feedback.step_evidence("decide", parent_records=[], child_records=records,
+                                   graph=DECIDING)
+    return {**entry, "candidate": "c1", "kind": "split", "node_kind": "agent", "same_seed": True}
+
+
+def test_a_step_whose_output_only_code_or_gates_read_is_a_decision_step():
+    assert feedback.decision_step(DECIDING, "decide") is True
+    assert feedback.decision_step(DECIDING, "notes") is False, "a model step reads it"
+    assert feedback.decision_step(DECIDING, "decide", [{"next_step": "notes"}]) is False
+    assert feedback.decision_step(None, "decide") is False
+    entry = _deciding_entry()
+    assert entry["decision"] is True
+    assert entry["instructions"] == "DECIDE-INSTRUCTIONS: pick one.", "the bound knob's value"
+    notes = feedback.step_evidence("notes", parent_records=[], child_records=[
+        _rec("t0", True, {"notes": "N", "decide": "D"})], graph=DECIDING)
+    assert "decision" not in notes
+
+
+DECISION_REPLY = {"items": [
+    {"item": "t0", "inputs_recommend": "B", "decided": "B", "same": True},
+    {"item": "t1", "inputs_recommend": "B", "decided": "C", "same": False},
+    {"item": "t2", "inputs_recommend": "none", "decided": "B", "same": False}],
+    "example": "I choose C", "note": "It overrode its notes once."}
+
+
+def test_a_decision_step_is_asked_whether_it_decides_as_its_inputs_recommended(tmp_path):
+    entry = _deciding_entry()
+    prompt = feedback.review_prompt(entry, "m")
+    assert prompt.startswith("# Reviewing an added decision step: `decide`")
+    assert "repeating the chosen answer is its job" in prompt
+    assert "DECIDE-INSTRUCTIONS: pick one." in prompt and "GIVEN decide t0" in prompt
+    assert '"inputs_recommend"' in prompt and "restates_inputs" not in prompt
+    client = _Answering({"proposals": []}, DECISION_REPLY)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(added_steps=[entry]), 1, [])
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert ("review: overrides_inputs (decides as its inputs recommended on 1 of 2 item(s) "
+            'where they recommended one) -- "I choose C" -- It overrode its notes once.') in section
+    again = _Answering({"proposals": []}, DECISION_REPLY)
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ProposalContext(added_steps=[entry]), 1, [])
+    assert again.reviews == [] and "decides as its inputs recommended on 1 of 2" in again.proposals[0]
+
+
+@pytest.mark.parametrize("rows,verdict,agree,of", [
+    ([{"inputs_recommend": "A", "same": True}], "follows_inputs", 1, 1),
+    ([{"inputs_recommend": "A", "same": True}, {"inputs_recommend": "A", "same": "yes"}],
+     "overrides_inputs", 1, 2),
+    ([{"inputs_recommend": "None", "same": True}, {"inputs_recommend": ""}], "no_recommendation", 0, 0),
+])
+def test_a_decision_review_counts_agreement_where_the_inputs_recommended(rows, verdict, agree, of):
+    found = feedback.parse_decision_review({"items": rows})
+    assert (found["verdict"], found["agree"], found["of"], found["items"]) == (
+        verdict, agree, of, len(rows))
+    assert feedback.parse_review(found) == found, "kept and read back for a resume"
+
+
+@pytest.mark.parametrize("payload", [{}, {"items": []}, {"verdict": "restates_inputs"}, "x"])
+def test_a_decision_review_without_items_is_refused(payload):
+    with pytest.raises(ValueError):
+        feedback.parse_decision_review(payload)
+
+
+# ── a reviewer reads the step's texts whole ─────────────────────────────────
+
+
+def test_a_review_reads_each_text_whole_and_any_cut_the_room_forces_is_said():
+    long_input = "HEAD " + "x" * 20000 + " TAIL"
+    records = [_rec("t0", True, {"a": "A", "think": "y" * 9000, "decide": "z" * 5000})]
+    records[0]["exchanges"][1]["prompt"] = long_input
+    entry = feedback.step_evidence("think", parent_records=[], child_records=records)
+    assert entry["samples"][0]["output"] == "y" * 9000
+    prompt = feedback.review_prompt({**entry, "candidate": "c", "kind": "k"})
+    assert long_input in prompt and "y" * 9000 in prompt and "z" * 5000 in prompt
+    assert "omitted" not in prompt
+    fitted = feedback.fit_samples([{"input": long_input, "output": "o" * 3000,
+                                    "next_output": "n" * 100}], room=8000)
+    assert fitted[0]["next_output"] == "n" * 100 and fitted[0]["output"] == "o" * 3000
+    assert fitted[0]["input"].startswith("HEAD ") and fitted[0]["input"].endswith(" TAIL")
+    assert "characters omitted" in fitted[0]["input"]

@@ -16,8 +16,8 @@ from typing import Any, Sequence
 from refactory_dsh.nn import edits as nn_edits
 
 from .base import (
-    READER_CONCURRENCY, Candidate, Optimizer, Proposal, ProposalContext, considered_text,
-    trajectory_groups, unreadable_proposal,
+    READER_CONCURRENCY, UNREADABLE_PROPOSAL, Candidate, Optimizer, Proposal, ProposalContext,
+    considered_text, trajectory_groups, unreadable_proposal,
 )
 
 def text_only(model: Any) -> Any:
@@ -208,6 +208,9 @@ class AutoresearchOptimizer(Optimizer):
         #: The answer's ``lessons`` (when the request asked for them), for the loop to
         #: keep and show back; empty when the answer carried none.
         self.last_lessons: str = ""
+        #: Why this round's answer could not be read (`answer_json`), empty when it could:
+        #: the loop marks the lessons it keeps as not updated this round.
+        self.last_reply_problem: str = ""
         #: This round's analysis (``ProposalContext.analysts`` on; `_analyse`), for the
         #: loop to journal; ``None`` when no analyst ran.
         self.last_analysis: dict[str, Any] | None = None
@@ -324,7 +327,8 @@ class AutoresearchOptimizer(Optimizer):
             try:
                 reply = self._client.complete(prompt, system=feedback.STEP_REVIEW_SYSTEM,
                                               **self._completion_options)
-                found = feedback.parse_review(extract_json(reply))
+                found = (feedback.parse_decision_review if entry.get("decision")
+                         else feedback.parse_review)(extract_json(reply))
             except Exception as exc:  # a failed review is shown as such, never fatal
                 from refactory_dsh.budgets import BudgetExhausted
 
@@ -643,6 +647,7 @@ class AutoresearchOptimizer(Optimizer):
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
         self.last_lessons = ""
+        self.last_reply_problem = ""
         self.last_analysis = None
         if ctx.added_steps:
             ctx = replace(ctx, added_steps=self._review_steps(ctx))
@@ -668,10 +673,26 @@ class AutoresearchOptimizer(Optimizer):
             self.record_call(**call, reply=None, proposals=0, error=f"{type(exc).__name__}: {exc}")
             raise
         try:
-            payload = extract_json(text)
+            payload, malformed = answer_json(text)
         except Exception as exc:
             self.record_call(**call, reply=text, proposals=0, error=f"{type(exc).__name__}: {exc}")
             raise
+        if malformed:
+            # Nothing of a broken answer is read: an object nested in it is a fragment
+            # (D-s42 epoch 5 read the first edit of a two-proposal answer as the whole
+            # answer, dropped the other proposal and the diagnosis, and counted nothing
+            # unreadable). One refused stand-in per proposal asked for, so the loop
+            # counts them and asks again, with why, while it has attempts left.
+            self.last_diagnosis = self.last_considered = ""
+            self.last_reply_problem = malformed
+            why = (f"your whole answer was not valid JSON ({malformed}), so nothing in it "
+                   "was read: none of its proposals, nor its diagnosis"
+                   + (" or lessons" if ctx.ask_lessons else "")
+                   + "; answer again with one valid JSON object")
+            unreadable = [Proposal(edit={UNREADABLE_PROPOSAL: why}) for _ in range(max(1, n))]
+            self.record_call(**call, reply=text, proposals=0, unreadable=len(unreadable),
+                             diagnosis="", considered="", error=f"malformed answer: {malformed}")
+            return unreadable
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
         self.last_considered = considered_text(payload.get("considered"))
         if ctx.ask_lessons:
@@ -809,6 +830,87 @@ def extract_json(text: str) -> dict[str, Any]:
         if found is not None:
             return found
     raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
+
+
+def answer_json(text: str) -> tuple[dict[str, Any], str]:
+    """A proposer's answer object, fenced or bare, and ``""``; or ``{}`` and why the
+    answer's outermost object is not valid JSON (the parser's message, where, and the
+    text there). Unlike `extract_json`, an object nested inside a broken one is never
+    taken for the answer: it is a fragment of it (one edit of one proposal), and nor is
+    an object after it. Braces in prose before the answer are skipped. No JSON object
+    at all raises ``ValueError``, as `extract_json` does."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("the model returned nothing")
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    problem = ""
+    for chunk in [*fenced, text]:
+        found, why = _outermost_object(chunk)
+        if found is not None:
+            return found, ""
+        problem = problem or why
+    if problem:
+        return {}, problem
+    raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
+
+
+#: How a JSON object starts: a brace, then a key. Braces in prose (``{a, b}``) do not.
+_JSON_START = re.compile(r"\{\s*(\"|\})")
+
+
+def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
+    """The first top-level ``{...}`` of ``text`` that is a JSON object, scanning past
+    braces in prose; else ``None`` and why. A span that starts like a JSON object but is
+    not one ends the scan: everything after it is part of the broken answer (its braces
+    may no longer pair up), so no later object is read either."""
+    start = text.find("{")
+    while start != -1:
+        end = _object_end(text, start)
+        looks_json = _JSON_START.match(text, start) is not None
+        if end is None:
+            if not looks_json:
+                start = text.find("{", start + 1)
+                continue
+            return None, (f"its object opened at character {start + 1} is never closed "
+                          f"(cut off? it ends: …{' '.join(text[-120:].split())})")
+        try:
+            loaded = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            if looks_json:
+                at = start + exc.pos
+                return None, (f"{exc.msg} at line {exc.lineno} column {exc.colno}, here: "
+                              f"…{' '.join(text[max(start, at - 120):at].split())} ⟨HERE⟩ "
+                              f"{' '.join(text[at:at + 60].split())}…")
+        else:
+            if isinstance(loaded, dict):
+                return loaded, ""
+        start = text.find("{", end + 1)
+    return None, ""
+
+
+def _object_end(text: str, start: int) -> int | None:
+    """The index of the ``}`` closing the ``{`` at ``start`` (strings skipped), or
+    ``None`` when it is never closed."""
+    depth = 0
+    in_string = escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
 
 
 def _first_object(text: str) -> dict[str, Any] | None:
