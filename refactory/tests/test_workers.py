@@ -1346,6 +1346,22 @@ def test_preflight_checks_role_and_node_routes_and_skips_other_backends(tmp_path
         claude_code_preflight(on_role.context())
 
 
+def test_preflight_skips_a_model_client_that_carries_no_route_config():
+    from refactory_dsh.workers import claude_code_preflight
+
+    class OwnClient:
+        """A ModelClient that is not DshModelClient: no context(), not a mapping."""
+        def complete(self, prompt, **_):
+            return ''
+
+    class OddContext:
+        def context(self):
+            return None
+
+    claude_code_preflight(OwnClient())
+    claude_code_preflight(OddContext())
+
+
 def test_preflight_refuses_a_missing_or_silent_chosen_executable(tmp_path):
     from refactory_dsh.workers import claude_code_preflight
     missing = DshModelClient(worker_backend='claude_code', model='claude-opus-4-6', routes_resolved=True,

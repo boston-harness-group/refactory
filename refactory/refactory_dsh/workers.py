@@ -214,7 +214,11 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
     route (as role ``worker``) are checked. Only a Claude Code problem is refused: a
     combination that is not a valid route is left for dispatch to report.
     """
-    context = model.context() if callable(getattr(model, 'context', None)) else dict(model or {})
+    # Another ModelClient (a test's fake, a library caller's own) carries no route
+    # config to read; its own readiness contract applies.
+    context = model.context() if callable(getattr(model, 'context', None)) else model
+    if not isinstance(context, dict):
+        return
     base = {key: value for key, value in context.items() if key in ROUTE_FIELDS and value}
     role_routes, node_routes = context.get('role_routes') or {}, context.get('node_routes') or {}
 
