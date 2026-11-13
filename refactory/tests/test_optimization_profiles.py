@@ -533,6 +533,17 @@ def test_a_resumed_run_recorded_with_removed_settings_says_its_behaviour_changes
     assert "recorded with max_edits_per_proposal 2" in log and "the limit is 4" in log
     assert "fresh_evidence" not in _read(root, "config.json"), "the record is rewritten"
 
+    # The old command line recorded switches as integers: ``--fresh-evidence 0`` saved ``0``.
+    code, as_int = _run(project, "int", "--optimizer", "random", "--epochs", "1",
+                        "--batch-size", "1", "--preset", "knob_only")
+    assert code == 0
+    saved = _read(as_int, "config.json")
+    (as_int / "config.json").write_text(json.dumps({**saved, "fresh_evidence": 0}))
+    code = loop_module.main([MODE, "--project", str(project), "--runs-root", str(as_int),
+                             "--resume", "--epochs", "2"])
+    assert code == 0
+    assert "recorded with fresh_evidence false" in (as_int / "strategy.log").read_text()
+
     code, same = _run(project, "same", "--optimizer", "random", "--epochs", "1",
                       "--batch-size", "1", "--preset", "knob_only")
     saved = _read(same, "config.json")

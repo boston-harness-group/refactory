@@ -1229,7 +1229,10 @@ class Loop(OuterLoop):
             return
         if not isinstance(recorded, dict):
             return
-        if recorded.get("fresh_evidence") is False:
+        # The old command line stored switches as integers, so a run launched with
+        # ``--fresh-evidence 0`` recorded ``0``; ``None`` (unset) meant the default, on.
+        fresh = recorded.get("fresh_evidence")
+        if fresh is not None and not isinstance(fresh, str) and not fresh:
             Run(_loop=self).log(
                 "resume: this run was recorded with fresh_evidence false; that setting is "
                 "gone and fresh evidence is always on, so the epochs from here on gather "
@@ -1242,8 +1245,8 @@ class Loop(OuterLoop):
                 "so the epochs from here on take proposals under that limit")
 
     def _shown(self, key: str, value: Any) -> str:
-        """A ``RESUME_KEEPS`` value as its flag takes it: an empty ``selection`` as the
-        default it resolves to."""
+        """A ``RESUME_KEEPS`` value as the run's settings hold it: an empty ``selection``
+        as the default it resolves to."""
         if key == "selection" and not value:
             return f"{self._shape_value(key, value)} (unset: the default)"
         return str(value)
