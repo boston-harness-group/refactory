@@ -1089,9 +1089,11 @@ def _materialise_directory(ctx: Any, source: Path | None, files: tuple[str, ...]
 # ── how it is checked, and reported ───────────────────────────────────────────
 def _warn_if_shared_changed(found: worktree.Worktree, when: str) -> None:
     """Report a change to the git configuration or hooks the worktree shares with its target."""
-    if worktree.shared_changed(found):
+    shared = worktree.shared_change(found)
+    if shared is not None:
         target_guard.warn(f"the git configuration or hooks the run's worktree shares with {found.target} "
-                          f"changed {when}; check them before your next commit there")
+                          f"changed {when}{f' ({shared})' if shared else ''}; "
+                          "check them before your next commit there")
 
 
 def prepare_commands(ctx: Any, found: worktree.Worktree, env: dict[str, str], home: Path, timeout: float,
