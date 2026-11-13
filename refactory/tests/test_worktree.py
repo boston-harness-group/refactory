@@ -8,6 +8,7 @@ PATH.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -1925,13 +1926,22 @@ def test_includes_are_followed_relative_conditional_nested_and_from_worktree_con
     assert worktree.shared_change(found) == f"config include:{tmp_path / 'cond.inc'} changed"
 
 
-def test_an_include_cycle_ends(repo, tmp_path):
+def test_an_include_cycle_ends_after_reading_each_file_once(repo, tmp_path, monkeypatch):
+    """An inactive includeIf may cycle (git never opens it); each file is listed once."""
     (tmp_path / "a.inc").write_text(f"[include]\n\tpath = {tmp_path / 'b.inc'}\n")
     (tmp_path / "b.inc").write_text(f"[include]\n\tpath = {tmp_path / 'a.inc'}\n")
-    (tmp_path / "x.inc").write_text(f"[include]\n\tpath = {tmp_path / 'a.inc'}\n")
-    found: dict[str, str] = {}
-    worktree._includes(repo, tmp_path / "x.inc", found)
-    assert set(found) == {str(tmp_path / "a.inc"), str(tmp_path / "b.inc")}
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "a.inc"))
+    calls: list[tuple[str, ...]] = []
+    real = worktree.git
+
+    def counted(where, *args, **kwargs):
+        calls.append(args)
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(worktree, "git", counted)
+    assert set(worktree._shared_snapshot(repo)["included"]) == {
+        str(tmp_path / "a.inc"), str(tmp_path / "b.inc")}
+    assert len(calls) == 4, "rev-parse, the shared config, a.inc and b.inc"
 
 
 def test_ordinary_work_with_includes_and_worktree_config_is_not_a_change(repo, tmp_path):
@@ -2030,3 +2040,45 @@ def test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder(repo, tmp_
         assert worktree._shared_snapshot(repo)["included"] == {str(tmp_path / "locked" / "cfg"): "missing"}
     finally:
         (tmp_path / "locked").chmod(0o700)
+
+
+def test_the_snapshot_spawns_git_twice_for_a_plain_target(repo, monkeypatch):
+    """One rev-parse and one listing of the shared config: it runs after every agent step."""
+    calls: list[tuple[str, ...]] = []
+    real = worktree.git
+
+    def counted(where, *args, **kwargs):
+        calls.append(args)
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(worktree, "git", counted)
+    worktree._shared_snapshot(repo)
+    assert len(calls) == 2, calls
+
+
+def test_the_config_lines_are_what_git_config_list_prints(repo):
+    """Read with -z, they still match `--list` line for line, so live digests do not move."""
+    common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    with (common / "config").open("a") as config:
+        config.write('[alias]\n\tbare\n\tempty =\n\tmulti = "one\\ntwo"\n')
+    listed = git(repo, "config", "--file", str(common / "config"), "--list").splitlines()
+    assert "alias.bare" in listed and "alias.empty=" in listed and "two" in listed
+    assert worktree._shared_snapshot(repo)["config_lines"] == [
+        line for line in listed if not line.lower().startswith("extensions.worktreeconfig=")]
+
+
+def test_an_include_path_is_normalised_so_a_dot_dot_loop_ends(repo, tmp_path):
+    """Review of #646: `sub/../loop` including itself made a new name at every level."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "loop").write_text("[include]\n\tpath = sub/../loop\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "sub" / ".." / "loop"))
+    assert worktree._shared_snapshot(repo)["included"] == {
+        str(tmp_path / "loop"): hashlib.sha256((tmp_path / "loop").read_bytes()).hexdigest()}
+
+
+def test_includes_are_followed_no_deeper_than_git_follows_them(repo, tmp_path):
+    for level in range(1, 13):
+        (tmp_path / f"f{level}").write_text(f"[include]\n\tpath = f{level + 1}\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "f1"))
+    assert sorted(worktree._shared_snapshot(repo)["included"]) == sorted(
+        str(tmp_path / f"f{level}") for level in range(1, 11))

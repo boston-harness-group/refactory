@@ -1250,17 +1250,20 @@ def _shared_snapshot(target: Path) -> dict:
     ``includeIf`` in either file names, whatever its condition, so a change inside an
     already-included file is seen as well as a new include line.
     """
-    common = Path(git(target, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
-    own = Path(git(target, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    # One spawn for both dirs and one listing per file: this runs after every agent step.
+    common, own = (Path(line) for line in git(
+        target, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir").splitlines())
+    shared_entries = _config_entries(target, common / "config")
+    worktree_entries = _config_entries(target, own / "config.worktree")
     config_lines = [
-        line for line in _config_lines(target, common / "config")
+        line for line in _as_lines(shared_entries)
         if not line.startswith("submodule.")
         and not line.lower().startswith("extensions.worktreeconfig=")
     ]
-    worktree_lines = _config_lines(target, own / "config.worktree")
+    worktree_lines = _as_lines(worktree_entries)
     included: dict[str, str] = {}
-    _includes(target, common / "config", included)
-    _includes(target, own / "config.worktree", included)
+    _includes(target, common / "config", shared_entries, included)
+    _includes(target, own / "config.worktree", worktree_entries, included)
     hook_files: dict[str, str] = {}
     hooks_dir = common / "hooks"
     if hooks_dir.is_dir():
@@ -1271,11 +1274,31 @@ def _shared_snapshot(target: Path) -> dict:
             "hook_files": hook_files, "hooks_dir": str(hooks_dir)}
 
 
-def _config_lines(target: Path, file: Path) -> list[str]:
-    """The ``key=value`` lines of one config file as written, without following its includes."""
+def _config_entries(target: Path, file: Path) -> list[tuple[str, str | None]]:
+    """The ``(key, value)`` entries of one config file, without following its includes.
+
+    Read with ``-z``, which puts a newline between key and value, so a key that holds
+    ``=`` (an ``includeIf`` condition may) is kept whole. A key with no value, such as
+    a bare ``[core] bare``, has the value None.
+    """
     if not file.is_file():
         return []
-    return git(target, "config", "--file", str(file), "--no-includes", "--list").splitlines()
+    listing = git(target, "config", "--file", str(file), "--no-includes", "--list", "-z")
+    entries: list[tuple[str, str | None]] = []
+    for entry in listing.split("\0"):
+        if entry:
+            key, newline, value = entry.partition("\n")
+            entries.append((key, value if newline else None))
+    return entries
+
+
+def _as_lines(entries: list[tuple[str, str | None]]) -> list[str]:
+    """The lines ``git config --list`` prints for ``entries``, which the digest is taken over."""
+    return "\n".join(key if value is None else f"{key}={value}" for key, value in entries).splitlines()
+
+
+#: How deep git follows includes before refusing; the guard follows no further.
+_INCLUDE_DEPTH = 10
 
 
 #: What a record whose ``shared_reads`` is ``SHARED_READS`` was taken with; the keys
@@ -1285,26 +1308,23 @@ SHARED_READS = ["config", "hooks", "config.worktree", "includes"]
 _READ_LATER = ("worktree:", "include:")
 
 
-def _includes(target: Path, file: Path, found: dict[str, str]) -> None:
-    """Add to ``found`` a hash of each file ``file`` includes, recursively.
+def _includes(target: Path, file: Path, entries: list[tuple[str, str | None]],
+              found: dict[str, str], depth: int = 1) -> None:
+    """Add to ``found`` a hash of each file ``entries`` (read from ``file``) include, recursively.
 
     A path is resolved as git resolves it: ``~/`` from HOME, a relative one from the
     including file's directory (``%(prefix)/`` is not expanded and reads as missing).
     A file that is not there is recorded as missing, so creating it is a change too. A
-    file already in ``found`` is not read again, so a cycle ends. An ``includeIf`` file
-    git does not read here may be unreadable or not config at all: it is recorded as
-    such, or by its bytes, and not followed further.
+    path is normalised (``sub/../x`` is ``x``) and a file already in ``found`` is not
+    read again, so a cycle ends; nothing deeper than git's own limit is followed. An
+    ``includeIf`` file git does not read here may be unreadable or not config at all:
+    it is recorded as such, or by its bytes, and not followed further.
     """
-    if not file.is_file():
-        return
-    listing = git(target, "config", "--file", str(file), "--no-includes", "--list", "-z")
-    for entry in listing.split("\0"):
-        # -z puts a newline between key and value: an includeIf condition may hold "=".
-        key, _, value = entry.partition("\n")
+    for key, value in entries:
         if not (key.startswith(("include.", "includeif.")) and key.endswith(".path")) or not value:
             continue
         path = Path(os.path.expanduser(value)) if value.startswith("~") else Path(value)
-        path = path if path.is_absolute() else file.parent / path
+        path = Path(os.path.normpath(path if path.is_absolute() else file.parent / path))
         name = str(path)
         if name in found:
             continue
@@ -1316,10 +1336,13 @@ def _includes(target: Path, file: Path, found: dict[str, str]) -> None:
         except OSError:
             found[name] = "unreadable"
             continue
+        if depth >= _INCLUDE_DEPTH:
+            continue
         try:
-            _includes(target, path, found)
+            nested = _config_entries(target, path)
         except ValueError:
             continue
+        _includes(target, path, nested, found, depth + 1)
 
 
 def _shared_digest(snapshot: dict) -> str:

@@ -823,8 +823,11 @@ by hook isolation) makes live, and an edit inside a file the config already
   file names, followed recursively and whatever the condition, named
   `include:<path>`. Paths resolve as git resolves them (`~/` from HOME, relative
   from the including file; `%(prefix)/` is not expanded). A missing file is
-  recorded as missing, so creating it counts. Include keys are read with
-  `--list -z`, since an `includeIf` condition may hold `=`. An `includeIf` file
+  recorded as missing, so creating it counts. Paths are normalised (`sub/../x`
+  is `x`) and followed no deeper than git's own limit of 10, so a self-including
+  file ends at once. Config is read with `--list -z`, since an `includeIf`
+  condition may hold `=`, and each file is listed once; one `rev-parse` gives
+  both git dirs, so a plain target costs two git spawns per check. An `includeIf` file
   git never opens for this checkout may be unreadable or not config; it is
   recorded as such, or by its bytes, rather than failing the guard.
 
@@ -839,7 +842,7 @@ goes unseen. Held by
 `test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config`,
 `test_a_change_inside_an_included_file_is_caught`,
 `test_includes_are_followed_relative_conditional_nested_and_from_worktree_config`,
-`test_an_include_cycle_ends`,
+`test_an_include_cycle_ends_after_reading_each_file_once`,
 `test_ordinary_work_with_includes_and_worktree_config_is_not_a_change`,
 `test_an_old_record_still_sees_a_worktree_config_change`,
 `test_a_record_from_644_takes_worktree_config_and_includes_as_its_baseline`,
@@ -847,7 +850,11 @@ goes unseen. Held by
 `test_an_include_whose_condition_holds_an_equals_sign_is_followed`,
 `test_an_include_git_does_not_read_here_may_be_unparsable`,
 `test_an_include_git_does_not_read_here_may_be_unreadable`,
-`test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder`).
+`test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder`,
+`test_the_snapshot_spawns_git_twice_for_a_plain_target`,
+`test_the_config_lines_are_what_git_config_list_prints`,
+`test_an_include_path_is_normalised_so_a_dot_dot_loop_ends`,
+`test_includes_are_followed_no_deeper_than_git_follows_them`).
 
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
