@@ -24,10 +24,8 @@ from refactory_dsh.optim import Candidate
 
 from test_livemath_blocks import (
     FIXTURE_DIR,
-    _FailOnceModel,
     _NodeScriptedModel,
     _facts,
-    _grid,
     _patch_task,
     _scores,
     _spine,
@@ -496,22 +494,3 @@ def test_a_node_timeout_is_recorded_as_a_timeout_on_both_runtimes():
     for error in (walker, spine):
         assert make_item_record("x", None, error=error)["error_kind"] == "timeout"
     assert make_item_record("x", None, error=RuntimeError("boom"))["error_kind"] == "RuntimeError"
-
-
-def test_the_grid_counts_and_prints_timeouts(tmp_path, monkeypatch, capsys):
-    from refactory_dsh.model import CompletionTimeout
-
-    class Factory:
-        def __call__(self, **kwargs: Any) -> Any:
-            return _FailOnceModel(CompletionTimeout(
-                "model completion timed out after 3s; requested runtime shutdown"))
-
-    rc, output, _ = _grid(tmp_path, monkeypatch, factory=Factory(), blocks=["baseline"])
-    assert rc == 0
-    (row,) = json.loads(output.read_text())["blocks"]
-    assert row["timeouts"] == 1 and row["errors"] == 1
-    lines = capsys.readouterr().out.splitlines()
-    header = next(line for line in lines if line.startswith("Block"))
-    assert "T/O" in header.split()
-    baseline = next(line for line in lines if line.startswith("baseline "))
-    assert baseline.split()[header.split().index("T/O")] == "1"

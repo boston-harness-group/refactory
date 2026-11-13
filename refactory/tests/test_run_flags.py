@@ -328,3 +328,29 @@ def test_a_claude_executable_under_home_reaches_both_runtimes_expanded(monkeypat
     expected = str(Path.home() / "bin" / "claude")
     assert _spine(monkeypatch, False, flags)["claude_executable"] == expected
     assert _walker(monkeypatch, tmp_path, False, flags)["route"]["claude_executable"] == expected
+
+
+def test_the_spine_launcher_takes_a_runs_flags_from_here(monkeypatch):
+    """`python -m refactory_dsh.interactive` declares no run flag of its own: it takes
+    `run_flags.add_run_arguments` (plus `--resume`), so its flags cannot drift from
+    `refactory ceo`'s; each one it takes reaches `interactive.run`."""
+    run_only = argparse.ArgumentParser()
+    run_flags.add_run_arguments(run_only)
+    expected = {option for action in run_only._actions for option in action.option_strings}  # noqa: SLF001
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(interactive, "run", lambda identifier, **kwargs: seen.update(kwargs) or 0)
+    taken: set[str] = set()
+    real_parse = argparse.ArgumentParser.parse_args
+
+    def spy(parser, *args, **kwargs):  # type: ignore[no-untyped-def]
+        taken.update(option for action in parser._actions for option in action.option_strings)  # noqa: SLF001
+        return real_parse(parser, *args, **kwargs)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", spy)
+    assert interactive.main(["pkg/mode", "--approve", "g=proceed", "--verdict", "h=stop",
+                             "--setting-sources", "project", "--omit-steering",
+                             "--max-elapsed-s", "60", "--resume"]) == 0
+    assert taken == expected | {"--resume"}
+    assert seen["approve"] == ["g=proceed", "h=stop"] and seen["setting_sources"] == "project"
+    assert seen["omit_steering"] is True and seen["resume"] is True
+    assert seen["resource_limits"]["max_elapsed_s"] == 60

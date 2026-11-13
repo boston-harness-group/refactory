@@ -240,7 +240,6 @@
       </div>
       <details><summary>Every option, from the command's own <code>--help</code></summary><pre><code>usage: python -m refactory_dsh.create [-h] [--brief BRIEF] [--extends EXTENDS]
                                       [--fast] [--name NAME] [--check CHECK]
-                                      [--knob NAME=VALUE] [--workdir WORKDIR]
                                       [--attempts N]
                                       [--repair-attempts REPAIR_ATTEMPTS]
                                       [--source-project SOURCE_PROJECT]
@@ -248,6 +247,7 @@
                                       [--no-worktree] [--setup SETUP]
                                       [--generate GENERATE] [--no-pr]
                                       [--refine PR] [--review-comments]
+                                      [--knob NAME=VALUE] [--workdir WORKDIR]
                                       [--worker-backend WORKER_BACKEND]
                                       [--effort EFFORT]
                                       [--setting-sources SETTING_SOURCES]
@@ -284,9 +284,6 @@ options:
                         said)
   --check CHECK         required for design; optional focused check for
                         create_fast/edit_fast
-  --knob NAME=VALUE     set one of the mode&#x27;s knobs for this run, e.g.
-                        allow_regression=1 (repeatable)
-  --workdir WORKDIR     the run directory
   --attempts N          an alias: --knob check_attempts=N for design,
                         attempts=N for create and edit, repair_attempts=N for
                         their _fast variants
@@ -319,6 +316,9 @@ options:
                         and updates it
   --review-comments     design only, with --refine: add the pull request&#x27;s
                         reviews and comments to the run&#x27;s steering
+  --knob NAME=VALUE     set one of the mode&#x27;s knobs for this run, e.g.
+                        allow_regression=1 (repeatable)
+  --workdir WORKDIR     the run directory
   --worker-backend WORKER_BACKEND
                         the backend every agent node runs on: dsh (default),
                         codex or claude_code
@@ -450,67 +450,25 @@ options:
       same catalogue as everyone else.</p>
 
       <h3>Every option</h3>
-      <table><thead><tr><th>option</th><th>what it does</th><th>default</th></tr></thead><tbody><tr><td><code>MODE</code></td><td>the mode to optimize, as `&lt;package&gt;/&lt;name&gt;`</td><td><code>—</code></td></tr><tr><td><code>--epochs</code></td><td>how many rounds of propose → validate → evaluate → select</td><td><code>2</code></td></tr><tr><td><code>--batch-size</code></td><td>candidates proposed per epoch</td><td><code>4</code></td></tr><tr><td><code>--optimizer</code></td><td>how the next candidates are proposed (table below)</td><td><code>autoresearch</code></td></tr><tr><td><code>--strategy</code></td><td>which outer loop drives the search (table below)</td><td><code>the harness&#x27;s own</code></td></tr><tr><td><code>--evaluator</code></td><td>which runtime scores a candidate: `walker` (fast) or `dsh` (ships)</td><td><code>walker</code></td></tr><tr><td><code>--preset</code></td><td>which edits the optimizer may use: `broad`, `structure`, `conservative`, `knob_only`</td><td><code>broad</code></td></tr><tr><td><code>--seed</code></td><td>the search RNG seed; model responses can still vary</td><td><code>0</code></td></tr><tr><td><code>--elite</code></td><td>how many parents each round proposes against</td><td><code>3</code></td></tr><tr><td><code>--max-evaluations</code></td><td>a hard ceiling on evaluated candidates, whatever the epochs say</td><td><code>64</code></td></tr><tr><td><code>--attempts</code></td><td>retries per batch after a refusal, before the batch is short</td><td><code>3</code></td></tr><tr><td><code>--runs-root</code></td><td>the run directory to write; read it back with `console --run &lt;this path&gt;`</td><td><code>.factory/loop/&lt;mode&gt;-&lt;time&gt;</code></td></tr><tr><td><code>--intent</code></td><td>what the run is for, in your words; seeds the intent ledger the agents read</td><td><code>empty</code></td></tr><tr><td><code>--project</code></td><td>the project root packages resolve against</td><td><code>the checkout</code></td></tr><tr><td><code>--model</code></td><td>model for proposals and agent nodes in both evaluators; inspect actual worker receipts</td><td><code>the default route</code></td></tr></tbody></table>
+      <table><thead><tr><th>option</th><th>what it does</th><th>default</th></tr></thead><tbody><tr><td><code>MODE</code></td><td>the mode to optimize, as `&lt;package&gt;/&lt;name&gt;`</td><td><code>—</code></td></tr><tr><td><code>--epochs</code></td><td>how many rounds of propose → validate → evaluate → select</td><td><code>2</code></td></tr><tr><td><code>--batch-size</code></td><td>candidates proposed per epoch</td><td><code>4</code></td></tr><tr><td><code>--optimizer</code></td><td>how the next candidates are proposed (table below)</td><td><code>autoresearch</code></td></tr><tr><td><code>--strategy</code></td><td>which outer loop drives the search (table below)</td><td><code>the harness&#x27;s own</code></td></tr><tr><td><code>--evaluator</code></td><td>which runtime scores a candidate: `walker` (fast) or `dsh` (ships)</td><td><code>walker</code></td></tr><tr><td><code>--preset</code></td><td>which edits the optimizer may use: `broad`, `structure`, `conservative`, `knob_only`</td><td><code>broad</code></td></tr><tr><td><code>--seed</code></td><td>the search RNG seed; model responses can still vary</td><td><code>0</code></td></tr><tr><td><code>--max-evaluations</code></td><td>a hard ceiling on evaluated candidates, whatever the epochs say</td><td><code>64</code></td></tr><tr><td><code>--profile</code></td><td>a saved profile: every other setting (parents per round, attempts, holdout, routes, limits, …) is set there, and its flag is refused naming the key</td><td><code>none</code></td></tr><tr><td><code>--runs-root</code></td><td>the run directory to write; read it back with `console --run &lt;this path&gt;`</td><td><code>.factory/loop/&lt;mode&gt;-&lt;time&gt;</code></td></tr><tr><td><code>--intent</code></td><td>what the run is for, in your words; seeds the intent ledger the agents read</td><td><code>empty</code></td></tr><tr><td><code>--project</code></td><td>the project root packages resolve against</td><td><code>the checkout</code></td></tr><tr><td><code>--model</code></td><td>model for proposals and agent nodes in both evaluators; inspect actual worker receipts</td><td><code>the default route</code></td></tr></tbody></table>
       <p class="muted">Proven complete against the command's own <code>--help</code> by the generator's test.</p>
-      <details><summary>The real <code>--help</code></summary><pre><code>usage: python -m refactory_dsh.loop [-h] [--epochs EPOCHS]
+      <details><summary>The real <code>--help</code></summary><pre><code>usage: python -m refactory_dsh.loop [-h] [--seed SEED] [--epochs EPOCHS]
                                     [--batch-size BATCH_SIZE]
-                                    [--optimizer OPTIMIZER]
-                                    [--preset EDIT_PRESET] [--seed SEED]
-                                    [--elite ELITE]
                                     [--max-evaluations MAX_EVALUATIONS]
-                                    [--holdout HOLDOUT]
-                                    [--parsimony PARSIMONY]
-                                    [--max-steps MAX_STEPS]
-                                    [--attempts ATTEMPTS] [--intent INTENT]
-                                    [--history-limit HISTORY_LIMIT]
-                                    [--prior-runs PRIOR_RUNS]
+                                    [--optimizer OPTIMIZER]
+                                    [--preset EDIT_PRESET]
                                     [--evaluator EVALUATOR]
-                                    [--omit-steering OMIT_STEERING]
-                                    [--dsh-timeout-s DSH_TIMEOUT_S]
-                                    [--strategy STRATEGY] [--repeats REPEATS]
-                                    [--worker-backend WORKER_BACKEND]
-                                    [--provider PROVIDER] [--model MODEL]
-                                    [--effort EFFORT]
-                                    [--permission-mode PERMISSION_MODE]
-                                    [--setting-sources SETTING_SOURCES]
-                                    [--claude-executable CLAUDE_EXECUTABLE]
-                                    [--max-elapsed-s MAX_ELAPSED_S]
-                                    [--max-tokens MAX_TOKENS]
-                                    [--validation-reserve-s VALIDATION_RESERVE_S]
-                                    [--validation-reserve-tokens VALIDATION_RESERVE_TOKENS]
-                                    [--max-rollouts MAX_ROLLOUTS]
-                                    [--max-concurrent-evaluations MAX_CONCURRENT_EVALUATIONS]
-                                    [--max-items-in-flight MAX_ITEMS_IN_FLIGHT]
-                                    [--parts-manifest PARTS_MANIFEST]
+                                    [--strategy STRATEGY] [--intent INTENT]
                                     [--seed-results SEED_RESULTS]
-                                    [--train-minibatch TRAIN_MINIBATCH]
-                                    [--allow-new-node-tools ALLOW_NEW_NODE_TOOLS]
-                                    [--allow-code-nodes ALLOW_CODE_NODES]
-                                    [--early-stop-patience EARLY_STOP_PATIENCE]
-                                    [--early-stop-at-full-val EARLY_STOP_AT_FULL_VAL]
-                                    [--parent-picker PARENT_PICKER]
-                                    [--portfolio PORTFOLIO]
-                                    [--selection SELECTION]
-                                    [--pool-size POOL_SIZE]
-                                    [--run-ledger RUN_LEDGER]
-                                    [--lessons LESSONS]
-                                    [--step-review STEP_REVIEW]
-                                    [--structure-guidance STRUCTURE_GUIDANCE]
-                                    [--analysts ANALYSTS]
-                                    [--analyst-group-size ANALYST_GROUP_SIZE]
-                                    [--analyst-merge-batch-size ANALYST_MERGE_BATCH_SIZE]
-                                    [--analyst-max-batches ANALYST_MAX_BATCHES]
-                                    [--integrity-judge INTEGRITY_JUDGE]
-                                    [--knob NAME=VALUE] [--frozen KNOB]
-                                    [--allowed-ops OP]
+                                    [--max-items-in-flight MAX_ITEMS_IN_FLIGHT]
+                                    [--provider PROVIDER] [--model MODEL]
+                                    [--effort EFFORT] [--knob NAME=VALUE]
                                     [--strategy-option KEY=VALUE]
-                                    [--role-routes ROLE_ROUTES]
-                                    [--node-routes NODE_ROUTES]
                                     [--profile PROFILE]
                                     [--profile-version PROFILE_VERSION]
-                                    [--runs-root RUNS_ROOT]
-                                    [--project PROJECT] [--verbose] [--resume]
-                                    [--parts PARTS_MANIFEST]
+                                    [--project PROJECT]
+                                    [--runs-root RUNS_ROOT] [--resume]
+                                    [--verbose]
                                     [--resolved-config RESOLVED_CONFIG]
                                     mode
 
@@ -521,134 +479,60 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --epochs EPOCHS
+  --seed SEED           seed the search, and the seed every evaluation passes
+                        its Task (default: 0)
+  --epochs EPOCHS       rounds of propose, validate, evaluate, select
+                        (default: 2)
   --batch-size BATCH_SIZE
-  --optimizer OPTIMIZER
-  --preset EDIT_PRESET
-  --seed SEED
-  --elite ELITE
+                        candidates proposed per epoch (default: 4)
   --max-evaluations MAX_EVALUATIONS
-  --holdout HOLDOUT
-  --parsimony PARSIMONY
-  --max-steps MAX_STEPS
-  --attempts ATTEMPTS
-  --intent INTENT
-  --history-limit HISTORY_LIMIT
-  --prior-runs PRIOR_RUNS
+                        a hard ceiling on evaluated candidates (default: 64)
+  --optimizer OPTIMIZER
+                        how candidates are proposed: random, hill_climb,
+                        evolutionary, archive, islands, map_elites or
+                        autoresearch (default: autoresearch)
+  --preset EDIT_PRESET  which edits are allowed: broad, structure,
+                        conservative or knob_only (default: broad)
   --evaluator EVALUATOR
-  --omit-steering OMIT_STEERING
-  --dsh-timeout-s DSH_TIMEOUT_S
-  --strategy STRATEGY
-  --repeats REPEATS
-  --worker-backend WORKER_BACKEND
-  --provider PROVIDER
-  --model MODEL
-  --effort EFFORT
-  --permission-mode PERMISSION_MODE
-  --setting-sources SETTING_SOURCES
-  --claude-executable CLAUDE_EXECUTABLE
-                        claude_code workers only: the Claude Code executable
-                        they run, an absolute path (default: the one bundled
-                        with the Agent SDK)
-  --max-elapsed-s MAX_ELAPSED_S
-  --max-tokens MAX_TOKENS
-  --validation-reserve-s VALIDATION_RESERVE_S
-  --validation-reserve-tokens VALIDATION_RESERVE_TOKENS
-  --max-rollouts MAX_ROLLOUTS
-  --max-concurrent-evaluations MAX_CONCURRENT_EVALUATIONS
-  --max-items-in-flight MAX_ITEMS_IN_FLIGHT
-  --parts-manifest PARTS_MANIFEST
+                        which runtime scores a candidate: walker (fast) or dsh
+                        (the spine) (default: walker)
+  --strategy STRATEGY   which outer loop drives the search, e.g. default or
+                        skillopt (default: default)
+  --intent INTENT       what the run is for, in your words; seeds the ledger
+                        the agents read
   --seed-results SEED_RESULTS
-  --train-minibatch TRAIN_MINIBATCH
-  --allow-new-node-tools ALLOW_NEW_NODE_TOOLS
-  --allow-code-nodes ALLOW_CODE_NODES
-  --early-stop-patience EARLY_STOP_PATIENCE
-  --early-stop-at-full-val EARLY_STOP_AT_FULL_VAL
-  --parent-picker PARENT_PICKER
-                        pair a parent picker (archive, evolutionary, islands,
-                        hill_climb, map_elites) with --optimizer: the picker
-                        chooses the candidate each step edits, the optimizer
-                        writes the edits (default: none)
-  --portfolio PORTFOLIO
-                        prompt+pipeline: each round asks the model proposer
-                        for one prompt/knob-level and one pipeline-level
-                        candidate and evaluates both, gated in that order
-                        (default: off)
-  --selection SELECTION
-                        with val items (the validation gate): pool keeps the
-                        --pool-size best candidates on validation as parents,
-                        the incumbent (the winner) changing only on a strictly
-                        higher val score; single is SkillOpt&#x27;s line, the
-                        incumbent the only parent (default: single for the
-                        default loop with a single-parent optimizer, pool
-                        otherwise)
-  --pool-size POOL_SIZE
-                        with --selection pool: how many candidates the pool
-                        keeps by val score, ties at the edge kept (default: 8)
-  --run-ledger RUN_LEDGER
-                        1 (default) shows the model proposer every candidate
-                        of the run by kind of change, with train fixed/broken
-                        counts and the gate&#x27;s word; 0 off
-  --lessons LESSONS     1 (default) lets the model proposer write lessons that
-                        are kept, survive a resume and are shown back next
-                        round; 0 off
-  --step-review STEP_REVIEW
-                        1 (default) reviews each step the last round added
-                        (train counts and one optimizer-model call per step)
-                        and shows the verdicts; 0 off
-  --structure-guidance STRUCTURE_GUIDANCE
-                        1 adds what makes a new step pay off to the request&#x27;s
-                        &#x27;How nodes compose&#x27; (default: 0, off)
-  --analysts ANALYSTS   1 runs SkillOpt&#x27;s per-round analysis before each model
-                        proposal: failure and success analysts over the edited
-                        candidate&#x27;s train items in full, one optimizer-model
-                        call per batch, merged into one ranked list of
-                        findings that replaces the readers&#x27; summaries
-                        (default: 0, off)
-  --analyst-group-size ANALYST_GROUP_SIZE
-                        with --analysts 1: train items per analyst call
-                        (default: 8, SkillOpt&#x27;s)
-  --analyst-merge-batch-size ANALYST_MERGE_BATCH_SIZE
-                        with --analysts 1: finding lists per merge call
-                        (default: 8, SkillOpt&#x27;s; at least 2)
-  --analyst-max-batches ANALYST_MAX_BATCHES
-                        with --analysts 1: the most analyst calls per round,
-                        failure batches first (default: 0, no limit, as
-                        SkillOpt)
-  --integrity-judge INTEGRITY_JUDGE
-                        off (default), on, flag or a JSON object: one
-                        optimizer-model call per proposal asks whether its
-                        benefit depends on how the data, grader or environment
-                        happen to be built. on (or veto): an exploit or
-                        suspect verdict about what the change adds is refused
-                        before evaluation (E-integrity) in every category by
-                        default (an inherited finding, a judge error or a
-                        salvaged reply never is); flag (or warn): verdicts are
-                        only shown. &#x27;{&quot;mode&quot;: &quot;on&quot;, &quot;policy&quot;: {&quot;answer_leak&quot;:
-                        &quot;off&quot;, &quot;train_overfit&quot;: &quot;warn&quot;}}&#x27; sets categories one
-                        by one (off, warn, veto); a bare value covers every
-                        category the object does not name and overrides a
-                        Task&#x27;s integrity_policy; a Task&#x27;s integrity_allowances
-                        still turn their categories off
-  --knob NAME=VALUE
-  --frozen KNOB
-  --allowed-ops OP
+                        seed results exported from an earlier run (python -m
+                        refactory_dsh.seed_cache export)
+  --max-items-in-flight MAX_ITEMS_IN_FLIGHT
+                        run-wide cap on items evaluated at once (default: the
+                        mode&#x27;s data_parallelism)
+  --provider PROVIDER   the provider route for the run&#x27;s model (default: the
+                        stored choice)
+  --model MODEL         the model id for proposals and agent nodes (default:
+                        the stored choice)
+  --effort EFFORT       the workers&#x27; reasoning effort (default: the backend&#x27;s)
+  --knob NAME=VALUE     a starting value for one of the mode&#x27;s knobs; may be
+                        repeated, and adds to a profile&#x27;s knobs
   --strategy-option KEY=VALUE
                         strategy-specific option as KEY=VALUE; may be
                         repeated, and adds to a profile&#x27;s strategy_options
-  --role-routes ROLE_ROUTES
-  --node-routes NODE_ROUTES
-  --profile PROFILE
+  --profile PROFILE     a saved profile: every setting this command line does
+                        not give comes from it
   --profile-version PROFILE_VERSION
+                        the profile&#x27;s version (default: its latest)
+  --project PROJECT     the project root packages resolve against (default:
+                        the checkout)
   --runs-root RUNS_ROOT
-  --project PROJECT
-  --verbose
-  --resume
-  --parts PARTS_MANIFEST
-                        path to a parts.json manifest with train/val/test id
-                        lists
+                        the run directory itself (default: .factory/loop)
+  --resume              continue the saved search in --runs-root
+  --verbose             print every event, and each candidate&#x27;s own run
+                        output, not only the meaningful ones
   --resolved-config RESOLVED_CONFIG
                         exact resolved snapshot prepared by the console
+
+Every other setting is set in a profile: refactory profile-save --name NAME
+--spec &#x27;{&quot;settings&quot;: {...}}&#x27;, then --profile NAME. See docs/optimization-
+profiles.md.
 </code></pre></details>
       <details><summary>What the config defaults to</summary><table><thead><tr><th>LoopConfig field</th><th>default</th></tr></thead><tbody><tr><td><code>epochs</code></td><td>default 2</td></tr><tr><td><code>batch_size</code></td><td>default 4</td></tr><tr><td><code>optimizer</code></td><td>default &#x27;autoresearch&#x27;</td></tr><tr><td><code>edit_preset</code></td><td>default &#x27;broad&#x27;</td></tr><tr><td><code>seed</code></td><td>default 0</td></tr><tr><td><code>elite</code></td><td>default 3</td></tr><tr><td><code>max_evaluations</code></td><td>default 64</td></tr><tr><td><code>attempts</code></td><td>default 3</td></tr><tr><td><code>evaluator</code></td><td>default &#x27;walker&#x27;</td></tr><tr><td><code>dsh_timeout_s</code></td><td>default 900</td></tr></tbody></table></details>
 

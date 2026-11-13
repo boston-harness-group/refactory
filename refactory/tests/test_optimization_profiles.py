@@ -81,18 +81,18 @@ def _experiment(project: Path) -> dict[str, Any]:
     }
 
 
-#: The same settings as command-line flags.
-def _experiment_flags(project: Path) -> list[str]:
+#: The experiment's settings that ``refactory optimize`` takes as flags, as flags.
+def _experiment_flags() -> list[str]:
     return [
-        "--optimizer", "random", "--strategy", "default", "--train-minibatch", "2",
-        "--repeats", "3", "--holdout", "0", "--parts", str(project / "parts.json"),
-        "--parsimony", "0.02", "--knob", "data_parallelism=3", "--epochs", "2", "--batch-size", "2",
-        "--preset", "conservative", "--allowed-ops", "set_knob", "--allow-code-nodes", "0",
-        "--max-evaluations", "12", "--max-elapsed-s", "600", "--seed", "5",
-        "--provider", "fake-provider", "--model", "task-model",
-        "--role-routes", json.dumps({"optimizer": {"model": "proposer-model"}}),
-        "--node-routes", json.dumps({"work": {"model": "task-model"}}),
+        "--optimizer", "random", "--strategy", "default", "--knob", "data_parallelism=3",
+        "--epochs", "2", "--batch-size", "2", "--preset", "conservative",
+        "--max-evaluations", "12", "--seed", "5", "--provider", "fake-provider", "--model", "task-model",
     ]
+
+
+#: The experiment's settings the flags above give.
+FLAGGED = ("optimizer", "strategy", "knobs", "epochs", "batch_size", "edit_preset",
+           "max_evaluations", "seed", "provider", "model")
 
 
 def _run(project: Path, name: str, *argv: str) -> tuple[int, Path]:
@@ -136,10 +136,14 @@ def test_every_experiment_setting_round_trips_into_the_snapshot_and_the_run(proj
                for e in c.get("edits") or [])
 
 
-def test_a_profile_run_matches_the_same_flags(project):
+def test_a_profile_run_matches_the_same_settings_given_as_flags(project):
+    """The settings ``refactory optimize`` takes as flags, given as flags over a profile
+    holding the rest, run as the profile holding all of them does."""
     profiles.save(project, "experiment", {"settings": _experiment(project)})
+    profiles.save(project, "rest", {"settings": {
+        key: value for key, value in _experiment(project).items() if key not in FLAGGED}})
     code_a, by_profile = _run(project, "profile", "--profile", "experiment")
-    code_b, by_flags = _run(project, "flags", *_experiment_flags(project))
+    code_b, by_flags = _run(project, "flags", "--profile", "rest", *_experiment_flags())
     assert code_a == code_b == 0
     a, b = _read(by_profile, profiles.SNAPSHOT), _read(by_flags, profiles.SNAPSHOT)
     assert a["settings"] == b["settings"]
@@ -151,16 +155,16 @@ def test_a_profile_run_matches_the_same_flags(project):
 def test_cli_overrides_on_a_profile_apply_and_are_recorded(project):
     profiles.save(project, "experiment", {"settings": _experiment(project)})
     code, root = _run(project, "run", "--profile", "experiment", "--epochs", "1",
-                      "--parsimony", "0.1", "--knob", "bias=0.4")
+                      "--seed", "9", "--knob", "bias=0.4")
     assert code == 0
     snapshot = _read(root, profiles.SNAPSHOT)
     assert snapshot["settings"]["epochs"] == 1
-    assert snapshot["settings"]["parsimony"] == 0.1
+    assert snapshot["settings"]["seed"] == 9
     # --knob adds to the profile's knobs; every setting not given keeps its value.
     assert snapshot["settings"]["knobs"] == {"data_parallelism": "3", "bias": "0.4"}
     assert snapshot["settings"]["parts_manifest"] == str(project / "parts.json")
     assert _read(root, "config.json")["val_gate"] is True
-    assert snapshot["overrides"] == {"epochs": 1, "parsimony": 0.1, "knob": ["bias=0.4"]}
+    assert snapshot["overrides"] == {"epochs": 1, "seed": 9, "knob": ["bias=0.4"]}
     assert _read(root, "report.json")["epochs_completed"] == 1
 
 
@@ -267,8 +271,10 @@ def test_a_switch_given_as_1_is_checked_but_kept_as_given():
 def test_a_run_written_in_the_old_form_resumes_under_the_same_context_hash(project):
     """A run started before this change (a switch stored as 1, a config without
     strategy_options) resumes: its context hash is unchanged."""
+    # A switch saved as 1, as the command line once passed it.
+    profiles.save(project, "old-form", {"settings": {"omit_steering": 1}})
     code, root = _run(project, "old", "--optimizer", "random", "--epochs", "1", "--batch-size", "1",
-                      "--preset", "knob_only", "--omit-steering", "1")
+                      "--preset", "knob_only", "--profile", "old-form")
     assert code == 0
     snapshot = _read(root, profiles.SNAPSHOT)
     before = snapshot["context_hash"]
@@ -284,8 +290,9 @@ def test_a_run_written_in_the_old_form_resumes_under_the_same_context_hash(proje
     journal = [json.loads(line) for line in (root / "journal.jsonl").read_text().splitlines()]
     resumed = [r["resolved_profile"] for r in journal if r["event"] == "resume_configuration"]
     assert resumed and resumed[-1]["context_hash"] == before
-    # The flag given on resume joins the recorded overrides.
-    assert resumed[-1]["overrides"] == {"epochs": 2}
+    # The flag given on resume joins the overrides the launch recorded over its profile.
+    assert resumed[-1]["overrides"] == {"optimizer": "random", "epochs": 2, "batch_size": 1,
+                                        "edit_preset": "knob_only"}
 
 
 def test_another_strategy_drops_the_profiles_strategy_options(project, option_probe):
@@ -434,3 +441,116 @@ def test_a_profile_with_a_parent_picker_and_a_portfolio_round_trips(project):
     assert code == 0
     assert _read(root, "config.json")["parent_picker"] == "map_elites"
     assert _read(root, "report.json")["optimizer"] == "random+map_elites"
+
+
+# ── the short command line ──────────────────────────────────────────────────
+
+
+def _parse(argv: list[str], *, cli: bool) -> Any:
+    """Parse ``refactory optimize`` (``cli``) or ``python -m refactory_dsh.loop``."""
+    import argparse
+
+    if cli:
+        from refactory_dsh.cli import build_parser
+        return build_parser().parse_args(["optimize", MODE, *argv])
+    parser = argparse.ArgumentParser(prog="python -m refactory_dsh.loop")
+    parser.add_argument("mode")
+    profiles.add_cli_arguments(parser)
+    return parser.parse_args([MODE, *argv])
+
+
+@pytest.mark.parametrize("cli", [True, False], ids=["refactory-optimize", "loop-main"])
+def test_every_other_setting_is_refused_naming_its_profile_key(cli, capsys):
+    """Every ``LoopConfig`` setting is a flag of the short list or refused with the
+    profile key that sets it and a ``profile-save`` spec, never "unrecognized"."""
+    flagged = set(profiles.CLI_SETTINGS)
+    for key in profiles.defaults():
+        if key in flagged:
+            continue
+        flag = "--" + key.replace("_", "-")
+        with pytest.raises(SystemExit) as refused:
+            _parse([flag, "1"], cli=cli)
+        assert refused.value.code == 2
+        err = capsys.readouterr().err
+        assert f"{flag} is not a command-line flag; it is the profile setting {key!r}" in err, err
+        assert "refactory profile-save --name NAME --spec" in err and "usage:" not in err
+    with pytest.raises(SystemExit):
+        _parse(["--parts", "p.json"], cli=cli)
+    err = capsys.readouterr().err
+    assert "the profile setting 'parts_manifest'" in err
+    assert '{"settings": {"parts_manifest": "p.json"}}' in err
+    with pytest.raises(SystemExit):
+        _parse(["--holdout", "0"], cli=cli)
+    assert '{"settings": {"holdout": 0}}' in capsys.readouterr().err
+
+
+def test_the_short_list_parses_and_reaches_the_overrides():
+    """The flags the short list keeps reach ``cli_overrides`` as their settings."""
+    args = _parse(["--seed", "4", "--epochs", "3", "--batch-size", "2", "--max-evaluations", "9",
+                   "--optimizer", "random", "--preset", "knob_only", "--evaluator", "walker",
+                   "--strategy", "default", "--intent", "why", "--seed-results", "s.json",
+                   "--max-items-in-flight", "6", "--provider", "p", "--model", "m",
+                   "--effort", "low", "--knob", "a=1", "--strategy-option", "b=2"], cli=False)
+    assert profiles.cli_overrides(args) == {
+        "seed": 4, "epochs": 3, "batch_size": 2, "max_evaluations": 9, "optimizer": "random",
+        "edit_preset": "knob_only", "evaluator": "walker", "strategy": "default",
+        "intent": "why", "seed_results": "s.json", "max_items_in_flight": 6, "provider": "p",
+        "model": "m", "effort": "low", "knob": ["a=1"], "strategy_option": ["b=2"]}
+
+
+def test_refactory_optimize_forwards_its_flags_to_the_loop(monkeypatch):
+    """``refactory optimize`` hands the loop exactly the flags it was given."""
+    from refactory_dsh import cli
+
+    forwarded: list[list[str]] = []
+    monkeypatch.setattr(cli, "_forward", lambda module, argv: forwarded.append([module, *argv]) or 0)
+    assert cli.main(["optimize", MODE, "--epochs", "2", "--preset", "knob_only", "--resume",
+                     "--project", "/p", "--knob", "a=1", "--knob", "b=2"]) == 0
+    module, *argv = forwarded[0]
+    assert module == "refactory_dsh.loop"
+    assert argv[0] == MODE
+    pairs = [argv[i:i + 2] for i in range(1, len(argv)) if argv[i].startswith("--")]
+    assert ["--epochs", "2"] in pairs and ["--preset", "knob_only"] in pairs
+    assert ["--project", "/p"] in pairs and "--resume" in argv
+    assert argv.count("--knob") == 2
+
+
+def test_a_resumed_run_recorded_with_removed_settings_says_its_behaviour_changes(project):
+    """A run recorded with ``fresh_evidence: false`` and ``max_edits_per_proposal: 2``
+    (both removed in #640) resumes, and its log says each now differs; one recorded at
+    today's values says nothing."""
+    code, root = _run(project, "old", "--optimizer", "random", "--epochs", "1",
+                      "--batch-size", "1", "--preset", "knob_only")
+    assert code == 0
+    saved = _read(root, "config.json")
+    (root / "config.json").write_text(json.dumps(
+        {**saved, "fresh_evidence": False, "max_edits_per_proposal": 2}))
+    code = loop_module.main([MODE, "--project", str(project), "--runs-root", str(root),
+                             "--resume", "--epochs", "2"])
+    assert code == 0
+    log = (root / "strategy.log").read_text()
+    assert "recorded with fresh_evidence false" in log
+    assert "recorded with max_edits_per_proposal 2" in log and "the limit is 4" in log
+    assert "fresh_evidence" not in _read(root, "config.json"), "the record is rewritten"
+
+    # The old command line recorded switches as integers: ``--fresh-evidence 0`` saved ``0``.
+    code, as_int = _run(project, "int", "--optimizer", "random", "--epochs", "1",
+                        "--batch-size", "1", "--preset", "knob_only")
+    assert code == 0
+    saved = _read(as_int, "config.json")
+    (as_int / "config.json").write_text(json.dumps({**saved, "fresh_evidence": 0}))
+    code = loop_module.main([MODE, "--project", str(project), "--runs-root", str(as_int),
+                             "--resume", "--epochs", "2"])
+    assert code == 0
+    assert "recorded with fresh_evidence false" in (as_int / "strategy.log").read_text()
+
+    code, same = _run(project, "same", "--optimizer", "random", "--epochs", "1",
+                      "--batch-size", "1", "--preset", "knob_only")
+    saved = _read(same, "config.json")
+    (same / "config.json").write_text(json.dumps(
+        {**saved, "fresh_evidence": True, "max_edits_per_proposal": 4}))
+    code = loop_module.main([MODE, "--project", str(project), "--runs-root", str(same),
+                             "--resume", "--epochs", "2"])
+    assert code == 0
+    log = (same / "strategy.log").read_text() if (same / "strategy.log").exists() else ""
+    assert "fresh_evidence" not in log and "max_edits_per_proposal" not in log
