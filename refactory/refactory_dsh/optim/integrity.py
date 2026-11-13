@@ -14,8 +14,8 @@ The loop uses it under ``LoopConfig.integrity_judge`` (``Loop._integrity_check``
 ``off`` (not asked about), ``warn`` (the verdict is recorded and shown; the change is
 still evaluated) or ``veto`` (an ``exploit`` or ``suspect`` verdict about what the
 change adds, naming the category, refuses it before it is evaluated, ``E-integrity``;
-`vetoes`). An ``inherited`` finding, a judge error, a malformed or salvaged reply never
-vetoes. The policy of a category, most specific first
+`vetoes`). An ``inherited`` finding (unless a quote of it is text the change added:
+`backstop`), a judge error, a malformed or salvaged reply never vetoes. The policy of a category, most specific first
 (``resolve_policy``): the run's setting for it; a Task's allowance
 (``Task.integrity_allowances``: off, and the judge is told why it is legitimate); the
 run's default -- ``veto`` for ``on``/``veto``, ``warn`` for ``flag``/``warn`` -- which
@@ -743,6 +743,70 @@ def vetoes(verdict: Mapping[str, Any], policy: Mapping[str, str]) -> bool:
     return any(policy.get(name) == "veto" for name in verdict.get("categories") or ())
 
 
+#: The cut `_clip_middle` marks in a quote it shortened: each side is matched alone.
+_OMITTED = re.compile(r"\n\[\.\.\. \d+ characters omitted \.\.\.\]\n")
+
+
+def _flat(text: str) -> str:
+    """Text as a quote is matched against it: each line's leading diff marker (``+``,
+    ``-``) dropped, whitespace runs made one space, case folded."""
+    lines = (re.sub(r"^\s*[+-]?", "", line) for line in str(text).splitlines())
+    return " ".join(" ".join(lines).split()).casefold()
+
+
+def _content(state: Mapping[str, Any] | None) -> str:
+    """Every text of a pipeline state a quote could be taken from, flattened: each
+    string or other value in it and its JSON."""
+    leaves: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+        elif value is not None:
+            leaves.append(value if isinstance(value, str) else json.dumps(value, default=str))
+
+    walk(state)
+    return _flat("\n".join(leaves) + "\n" + _dumped(state))
+
+
+def added_quote(evidence: Sequence[Any] | None, parent_state: Mapping[str, Any] | None,
+                state: Mapping[str, Any] | None) -> str | None:
+    """The first evidence quote this change added: found in the candidate's content
+    (``state``) but not in its parent's (`_flat`, so case, spacing and diff markers do
+    not matter; a quote shortened in the middle is matched side by side); ``None``
+    when every quote is absent from the candidate or was already in the parent."""
+    after, before = _content(state), _content(parent_state)
+    for quote in evidence or ():
+        for part in _OMITTED.split(str(quote)):
+            flat = _flat(part)
+            if flat and flat in after and flat not in before:
+                return str(quote)
+    return None
+
+
+def backstop(verdict: Mapping[str, Any], policy: Mapping[str, str],
+             parent_state: Mapping[str, Any] | None,
+             state: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The quote backstop on the judge's ``source``: a finding it labelled
+    ``inherited`` that would veto as ``new`` (`vetoes`), and one of whose quotes this
+    change added (`added_quote`), is ``new`` whatever the judge said, with the judge's
+    label kept as ``judged_source`` and the quote as ``added_quote``. Any other
+    verdict is returned as it is, so a warn or off category, a judge error and a
+    salvaged reply are untouched."""
+    if (_word(verdict.get("source")) != "inherited"
+            or not vetoes({**verdict, "source": "new"}, policy)):
+        return dict(verdict)
+    added = added_quote(verdict.get("evidence"), parent_state, state)
+    if added is None:
+        return dict(verdict)
+    return {**verdict, "source": "new", "judged_source": verdict.get("source"),
+            "added_quote": added}
+
+
 def key(prompt: str) -> str:
     """The cache key of a judge call: its system and prompt text."""
     return hashlib.sha256(f"{SYSTEM}\n\n{prompt}".encode()).hexdigest()
@@ -917,6 +981,19 @@ def told(allowances: Mapping[str, str] | None, policy: Mapping[str, str]) -> dic
             if name in CATEGORIES and policy.get(name) == "off"}
 
 
+def _entry_change(entry: Mapping[str, Any]) -> tuple[list[Any], dict[str, Any] | None]:
+    """A saved proposal entry's edits and the candidate's state (its ``state``, else
+    its ``parent_state`` with the edits applied)."""
+    raw = entry.get("edits", entry.get("edit"))
+    if raw is None:
+        raise ValueError("a proposal entry needs its edits (\"edits\" or \"edit\")")
+    edits = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+    state = entry.get("state")
+    if state is None:
+        state = _applied(entry.get("parent_state"), edits)
+    return edits, state
+
+
 def entry_prompt(entry: Mapping[str, Any]) -> str:
     """The judge's prompt for one saved entry (the offline input format; see ``main``)."""
     scope = str(entry.get("scope") or "proposal")
@@ -930,13 +1007,7 @@ def entry_prompt(entry: Mapping[str, Any]) -> str:
             **shown)
     if scope != "proposal":
         raise ValueError(f"unknown scope {scope!r}; expected proposal or cumulative")
-    raw = entry.get("edits", entry.get("edit"))
-    if raw is None:
-        raise ValueError("a proposal entry needs its edits (\"edits\" or \"edit\")")
-    edits = list(raw) if isinstance(raw, (list, tuple)) else [raw]
-    state = entry.get("state")
-    if state is None:
-        state = _applied(entry.get("parent_state"), edits)
+    edits, state = _entry_change(entry)
     return proposal_prompt(
         edits=edits, parent_state=entry.get("parent_state"), state=state,
         rationale=str(entry.get("rationale") or ""), prediction=str(entry.get("prediction") or ""),
@@ -961,6 +1032,9 @@ def judge_entry(entry: Mapping[str, Any], client: Any, **options: Any) -> dict[s
         return {**out, "verdict": None, "categories": [], "evidence": [], "reason": "",
                 "vetoed": False, "error": f"{type(exc).__name__}: {exc}"}
     found = {**verdict, "error": None}
+    if str(entry.get("scope") or "proposal") == "proposal":
+        # As a run checks it (``Loop._integrity_check``).
+        found = backstop(found, policy, entry.get("parent_state"), _entry_change(entry)[1])
     return {**out, **found, "vetoed": vetoes(found, policy)}
 
 

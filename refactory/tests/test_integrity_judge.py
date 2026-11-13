@@ -1080,3 +1080,96 @@ def test_a_reply_whose_first_object_is_not_the_verdict_is_salvaged():
     found, _reply = integrity.ask(Judge(exploit), "p")
     assert found["verdict"] == "exploit" and found["salvaged"]
     assert not integrity.vetoes({**found, "error": None}, {"task_bypass": "veto"})
+
+
+# ── the quote backstop on an inherited finding ─────────────────────────────
+
+
+ADDED = "If the last listed choice is present, pick it."
+CHILD_STATE = integrity._applied(PARENT_STATE, EDITS[:1])
+VETO = {"dataset_artifact": "veto"}
+
+
+def _inherited(*quotes: str, **fields: Any) -> dict[str, Any]:
+    return {**integrity.parse_verdict({**EXPLOIT, "source": "inherited",
+                                       "evidence": list(quotes)}), "error": None, **fields}
+
+
+def test_an_inherited_finding_quoting_text_the_change_added_vetoes():
+    # As the judge read it: a line of the unified diff, its case and spacing changed.
+    verdict = _inherited("Show your work.", "+if the LAST listed  choice\nis present, pick it.")
+    assert not integrity.vetoes(verdict, VETO), "the label alone spares it"
+    found = integrity.backstop(verdict, VETO, PARENT_STATE, CHILD_STATE)
+    assert found["source"] == "new" and found["judged_source"] == "inherited"
+    assert found["added_quote"] == "+if the LAST listed  choice\nis present, pick it."
+    assert integrity.vetoes(found, VETO)
+    # A quote the judge shortened in the middle is matched side by side.
+    long_text = "Solve the item.\n" + "Prefer the option marked with an asterisk. " * 20
+    long_child = {**PARENT_STATE, "knobs": {"solve__task": {"value": long_text}}}
+    clipped = _inherited(long_text)
+    assert "characters omitted" in clipped["evidence"][0]
+    assert integrity.backstop(clipped, VETO, PARENT_STATE, long_child)["source"] == "new"
+
+
+def test_a_genuinely_inherited_quote_does_not_veto():
+    for quotes in (["Show your work."], ["solve the item. show your work."],
+                   ["a quote from the rationale, in neither state"], []):
+        verdict = _inherited(*quotes)
+        found = integrity.backstop(verdict, VETO, PARENT_STATE, CHILD_STATE)
+        assert found == verdict and not integrity.vetoes(found, VETO), quotes
+    new = {**_inherited(ADDED), "source": "new"}
+    assert integrity.backstop(new, VETO, PARENT_STATE, CHILD_STATE) == new, "already new"
+    # Text the change removed is in the parent only.
+    assert integrity.backstop(_inherited(ADDED), VETO, CHILD_STATE, PARENT_STATE)[
+        "source"] == "inherited"
+
+
+def test_the_backstop_leaves_warn_off_errors_and_salvaged_replies_alone():
+    verdict = _inherited(ADDED)
+    for policy in ({"dataset_artifact": "warn"}, {"dataset_artifact": "off"}, {}):
+        found = integrity.backstop(verdict, policy, PARENT_STATE, CHILD_STATE)
+        assert found == verdict and not integrity.vetoes(found, policy), policy
+    for extra in ({"salvaged": True}, {"error": "RuntimeError: 503"}):
+        found = integrity.backstop({**verdict, **extra}, VETO, PARENT_STATE, CHILD_STATE)
+        assert found["source"] == "inherited" and "judged_source" not in found, extra
+    clean = {**verdict, "verdict": "clean"}
+    assert integrity.backstop(clean, VETO, PARENT_STATE, CHILD_STATE) == clean
+
+
+def test_the_offline_replay_applies_the_backstop(tmp_path):
+    entry = {"id": "a", "edits": EDITS[0], "parent_state": PARENT_STATE}
+    row = integrity.judge_entry(entry, Judge({**EXPLOIT, "source": "inherited",
+                                              "evidence": [ADDED]}))
+    assert row["vetoed"] and row["source"] == "new" and row["added_quote"] == ADDED
+    row = integrity.judge_entry(entry, Judge({**EXPLOIT, "source": "inherited",
+                                              "evidence": ["Show your work."]}))
+    assert not row["vetoed"] and row["source"] == "inherited"
+
+
+#: The judge calls every finding inherited and quotes the level the first proposal sets.
+QUOTES_SEVEN = {**INHERITED, "evidence": ['"value": 7']}
+
+
+def test_a_run_vetoes_an_inherited_label_on_text_the_change_added(tmp_path, monkeypatch):
+    plan = [[(5, 7)], [(5, 6)], []]
+    loop, _proposer, report = _run(tmp_path / "on", monkeypatch, Judge(QUOTES_SEVEN),
+                                   integrity_judge="on", plan=plan)
+    assert [_level(c) for c in loop.population if c.parent] == [6], "7 was refused"
+    records = [r for r in loop._integrity if r["scope"] == "proposal"]
+    assert [(r["source"], r.get("judged_source"), r["vetoed"]) for r in records] == [
+        ("new", "inherited", True), ("inherited", None, False)]
+    assert records[0]["added_quote"] == '"value": 7'
+    assert all(c["source"] == "inherited" for c in loop._integrity_cache.values()), (
+        "the cache keeps the judge's own label")
+    assert report["integrity"]["proposals"]["vetoed"] == 1
+    # A warn category and the judge turned off are untouched.
+    warn = {"mode": "on", "policy": {"dataset_artifact": "warn"}}
+    loop, _p, _r = _run(tmp_path / "warn", monkeypatch, Judge(QUOTES_SEVEN),
+                        integrity_judge=warn, plan=plan)
+    assert [_level(c) for c in loop.population if c.parent] == [7, 6]
+    records = [r for r in loop._integrity if r["scope"] == "proposal"]
+    assert [(r["source"], r["vetoed"]) for r in records] == [("inherited", False)] * 2
+    assert not any("judged_source" in r or "added_quote" in r for r in records)
+    judge = Judge(QUOTES_SEVEN)
+    loop, _p, _r = _run(tmp_path / "off", monkeypatch, judge, integrity_judge="off", plan=plan)
+    assert [_level(c) for c in loop.population if c.parent] == [7, 6] and judge.prompts == []

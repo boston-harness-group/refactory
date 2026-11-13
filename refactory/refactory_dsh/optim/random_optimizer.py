@@ -366,9 +366,10 @@ class AutoresearchOptimizer(Optimizer):
 
     def _ask(self, ctx: ProposalContext, system: str, prompt: str, fields: dict[str, Any],
              parse: Any, counts: dict[str, int], rebuild: Any = None
-             ) -> tuple[Any, str | None, bool]:
+             ) -> tuple[Any, str | None, bool, bool]:
         """One analyst-stage call (`_analyse`): ``parse(payload)`` of the reply, or
-        ``None`` and why, and whether it was retried after a context overflow. Cached by
+        ``None`` and why, whether it was retried after a context overflow, and whether
+        it was answered from the cache (nothing paid now). Cached by
         the optimizer's model and the call's whole text, in memory and in the run
         directory (``analyst_findings/``); a call is recorded in the optimizer trace with
         what it found. At most ``analysts.CONCURRENCY`` calls of a stage are in flight
@@ -411,19 +412,22 @@ class AutoresearchOptimizer(Optimizer):
                 retried = bool(held.get("context_retry"))
                 if retried and rebuild is not None:
                     rebuild(max(1, len(prompt) // 2))  # the retried request's own record
-                return found, None, retried
+                return found, None, retried, True
 
-        def attempt(text: str, retry: bool) -> tuple[Any, str | None, str | None]:
+        def attempt(text: str, retry: bool) -> tuple[Any, str | None, str | None, bool]:
+            """The call's findings, error and reply, and whether the model call itself
+            (not the reading of its reply) failed as longer than the model's context."""
             call = {**fields, "epoch": ctx.epoch, "generation": ctx.generation,
                     "system": system, "prompt": text,
                     **({"context_retry": True} if retry else {})}
-            reply = None
+            reply, answered = None, False
             with lock:
                 counts["calls"] += 1
             try:
                 with gate:
                     reply = self._client.complete(text, system=system,
                                                   **self._completion_options)
+                answered = True
                 found = parse(extract_json(reply))
                 if found is None:
                     raise ValueError('the answer has no "findings" list')
@@ -432,18 +436,20 @@ class AutoresearchOptimizer(Optimizer):
                 self.record_call(**call, reply=reply, error=error)
                 if isinstance(exc, (BudgetExhausted, CancelledError, ModelChoiceError)):
                     raise
-                return None, error, None
+                # Only a failed model call can say the prompt did not fit: an unreadable
+                # reply's error quotes the reply, whose prose may name a context window.
+                return None, error, None, not answered and analysts.context_overflow(error)
             self.record_call(**call, reply=reply, error=None, findings=found)
-            return found, None, reply
+            return found, None, reply, False
 
-        found, error, reply = attempt(prompt, False)
+        found, error, reply, overflow = attempt(prompt, False)
         retried = False
-        if found is None and rebuild is not None and analysts.context_overflow(error or ""):
+        if found is None and rebuild is not None and overflow:
             # Once, at half the length the provider refused, re-clipped the same way.
             retried = True
-            found, error, reply = attempt(rebuild(max(1, len(prompt) // 2)), True)
+            found, error, reply, _overflow = attempt(rebuild(max(1, len(prompt) // 2)), True)
         if found is None:
-            return None, error, retried
+            return None, error, retried, False
         # The answer, under the original call's key: the same call made again (a retry,
         # a resumed run) is answered from here, retried or not.
         held = {"reply": reply, **({"context_retry": True} if retried else {})}
@@ -454,7 +460,7 @@ class AutoresearchOptimizer(Optimizer):
                 (store / f"{key}.json").write_text(json.dumps(held))
             except OSError:
                 pass
-        return found, None, retried
+        return found, None, retried, False
 
     def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
         """The analysis of this proposal step, made once: keyed by the epoch, the
@@ -479,9 +485,12 @@ class AutoresearchOptimizer(Optimizer):
             except (OSError, json.JSONDecodeError):
                 saved = None
             if isinstance(saved, dict) and saved.get("key") == key:
-                # Made and journaled by an earlier process: nothing was paid now.
+                # Made and journaled by an earlier process: nothing was paid now, so no
+                # call of it counts as retried or clipped now either.
                 analysis = {**saved, "cached": saved.get("cached", 0) + saved.get("calls", 0),
-                            "calls": 0}
+                            "calls": 0,
+                            **{part: [{**entry, "cached": True} for entry in saved.get(part) or ()]
+                               for part in ("batches", "merges")}}
                 self._held_analysis = (key, analysis)
                 return analysis
         analysis = self._analyse(ctx, key)
@@ -545,7 +554,7 @@ class AutoresearchOptimizer(Optimizer):
                 clip.update(clip_used)
                 return text
 
-            found, error, retried = self._ask(
+            found, error, retried, cached = self._ask(
                 ctx, analysts.FAILURE_SYSTEM if kind == "failure" else analysts.SUCCESS_SYSTEM,
                 prompt,
                 {"kind": f"analyst_{kind}", "group": index, "items": items},
@@ -555,6 +564,7 @@ class AutoresearchOptimizer(Optimizer):
                     "findings": len(found or ()), "clipped": clip["items"],
                     "clipped_chars": clip["chars"],
                     **({"context_retry": True} if retried else {}),
+                    **({"cached": True} if cached else {}),
                     "error": error}
 
         def merge_lists(step: str, lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -573,7 +583,7 @@ class AutoresearchOptimizer(Optimizer):
                     number, chunk = numbered
                     if len(chunk) == 1:
                         return chunk[0]
-                    found, error, retried = self._ask(
+                    found, error, retried, cached = self._ask(
                         ctx, analysts.merge_system(step),
                         analysts.merge_prompt(ctx, step, chunk, level, pipeline),
                         {"kind": f"analyst_merge_{step}", "level": level, "batch": number,
@@ -585,6 +595,7 @@ class AutoresearchOptimizer(Optimizer):
                     merges.append({"step": step, "level": level, "batch": number,
                                    "lists": len(chunk), "fallback": found is None,
                                    **({"context_retry": True} if retried else {}),
+                                   **({"cached": True} if cached else {}),
                                    "error": error})
                     return found if found is not None else [f for part in chunk for f in part]
 
@@ -603,7 +614,7 @@ class AutoresearchOptimizer(Optimizer):
                                                     if b["kind"] == kind]),
                     analysts.KINDS)
             if failure_side and success_side:
-                found, error, retried = self._ask(
+                found, error, retried, cached = self._ask(
                     ctx, analysts.merge_system("final"),
                     analysts.merge_prompt(ctx, "final", [failure_side, success_side], 0,
                                           pipeline),
@@ -616,6 +627,7 @@ class AutoresearchOptimizer(Optimizer):
                 merges.append({"step": "final", "level": 0, "batch": 1, "lists": 2,
                                "fallback": found is None,
                                **({"context_retry": True} if retried else {}),
+                               **({"cached": True} if cached else {}),
                                "error": error})
                 # SkillOpt's fallback: the failure findings first, then the success ones.
                 ranked = found if found is not None else [*failure_side, *success_side]
