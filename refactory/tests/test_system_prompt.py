@@ -477,13 +477,13 @@ def test_claude_code_effort_matches_pinned_sdk_query_type():
     """The accepted values come from the pinned SDK QueryOptions type, not inference."""
     rt = Path(__file__).resolve().parent.parent.parent
     packages = list((rt / "node_modules/.pnpm").glob(
-        "@anthropic-ai+claude-agent-sdk@0.3.263*/node_modules/@anthropic-ai/claude-agent-sdk"
+        "@anthropic-ai+claude-agent-sdk@0.3.281*/node_modules/@anthropic-ai/claude-agent-sdk"
     ))
-    assert len(packages) == 1, f"Expected pinned Agent SDK 0.3.263, found {packages}"
+    assert len(packages) == 1, f"Expected pinned Agent SDK 0.3.281, found {packages}"
     sdk_types = (packages[0] / "sdk.d.ts").read_text()
     assert "export declare type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';" in sdk_types
     assert "effort?: EffortLevel;" in sdk_types
-    assert "@anthropic-ai/claude-agent-sdk@0.3.263" in (rt / "pnpm-lock.yaml").read_text()
+    assert "@anthropic-ai/claude-agent-sdk@0.3.281" in (rt / "pnpm-lock.yaml").read_text()
 
 
 def test_claude_code_effort_medium_reaches_sdk_invocation():

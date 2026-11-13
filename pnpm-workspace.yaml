@@ -26,6 +26,10 @@ overrides:
   '@deepseek-ai/schemastery': '3.18.4'
   # flock without a diagnostic report; see vendor/node-addon-system/README.md.
   '@deepseek-ai/node-addon-system': 'file:./vendor/node-addon-system'
+  # claude_code workers run the Claude Code this SDK bundles, not the person's own.
+  # dsh-subagent-claude-code pins 0.3.263 (Claude Code 2.1.263), which the API refuses
+  # claude-opus-5-5 to: it needs 2.1.280 or newer.
+  '@anthropic-ai/claude-agent-sdk': '0.3.281'
 
 peerDependencyRules:
   allowedVersions:
