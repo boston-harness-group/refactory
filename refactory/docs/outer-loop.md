@@ -350,7 +350,9 @@ sections at once; this is the default loop's equivalent.
   next request, never dropped. An empty `proposals` list proposes nothing. An answer
   whose outermost object is not valid JSON (a list left open, a reply cut off) is read
   as nothing: no object nested in it (one edit of one proposal) is taken for the
-  answer. Each proposal the request asked for is refused `E-proposal-shape`, saying
+  answer. The reply is read by its own braces first (so a code fence inside a proposed
+  prompt cannot cut it), the last top-level object with a `proposals` list being the
+  answer; a fenced object counts only when it is its fence's whole content. Each proposal the request asked for is refused `E-proposal-shape`, saying
   where the JSON broke, so the round asks again within its attempts and the refusals
   are counted; with `lessons` on, the earlier lessons are kept and the next request
   marks them not updated in that epoch, with why (journaled, restored on resume).
@@ -670,7 +672,7 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   the epoch and generation it was written in, journaled (`optimizer_lessons`), restored
   on resume and shown back in the next request; an answer without it keeps the previous
   lessons. An answer that could not be read keeps them too, marked as not updated in
-  that epoch, with why.
+  that epoch, with why; the next readable answer clears the mark.
 - **Did the added steps contribute?** (`step_review`, default `1`). For every step a
   candidate of the last round added (an insert, a split's halves, a fork's branches, a
   loop's gate; not the fork and join themselves), on the train items it shares with its
@@ -686,11 +688,13 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   to 4 train items (changed outcomes first), the step's prompt as sent, its output and
   the output of the next recorded step that reads it (through the graph's reads, inputs
   and `{{fact}}` slots, so a sibling fork branch is not taken for it), each text whole
-  unless together they pass 400000 characters (then the longest are cut head and tail
-  to one length, the cut said), and answers
+  unless together with the request's frame and instructions they pass 400000 characters
+  (then the longest are cut head and tail to one length, the cut said; a call the
+  provider refuses as too long is retried once at half its length), and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
-  quote and a note. A step that makes the decision -- no model step reads what it
-  writes, only code, gates or the grader -- is asked instead, item by item, what its
+  quote and a note. A step that makes the decision -- something reads what it writes
+  (or it ends the data pass, for the grader) but no model step does, not even one a
+  code gate's reloop hands it to -- is asked instead, item by item, what its
   inputs recommended and what it decided, and is shown as `follows_inputs`,
   `overrides_inputs` or `no_recommendation` with "decides as its inputs recommended on N
   of M item(s)": repeating the chosen answer is its job. A code step or gate gets no

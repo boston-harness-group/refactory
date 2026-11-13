@@ -5265,10 +5265,14 @@ class Loop(OuterLoop):
                 "epoch": self.epoch, "generation": self.generation, "why": problem}}
             self._journal("optimizer_lessons", **self._lessons)
             return
+        # A readable answer is the lessons' state again, whatever it carried: the mark
+        # an unread one left goes (journaled, so a resume does not bring it back).
+        cleared = self._lessons.pop("not_updated", None) is not None
         written = str(getattr(self.optimizer, "last_lessons", "") or "").strip()
-        if not written or written == self._lessons.get("text"):
+        if written and written != self._lessons.get("text"):
+            self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
+        elif not cleared:
             return
-        self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
         self._journal("optimizer_lessons", **self._lessons)
 
     def _analyst_settings(self) -> dict[str, int]:

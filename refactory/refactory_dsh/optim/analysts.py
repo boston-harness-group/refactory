@@ -90,7 +90,7 @@ SECTION_CHARS = 30000
 #: not fit ``SECTION_CHARS`` whole (`section_lines`); each cut says how much it cut.
 FINDING_FLOOR = 100
 #: The evidence quotes a finding keeps (twice SkillOpt's three, for a merged finding).
-QUOTES = 3
+EVIDENCE_PER_FINDING = 6
 ITEM_IDS = 20
 
 KINDS = ("failure", "success")
@@ -472,7 +472,7 @@ def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
             "preserve": str(raw.get("preserve") or "").strip(),
             "items": kept, "not_in_batch": [i for i in cited if i not in items],
             "support": len(kept), "impact": impact if impact in IMPACTS else "",
-            "batches": merged_from, "evidence": _strings(raw.get("evidence"))[:QUOTES * 2]}
+            "batches": merged_from, "evidence": _strings(raw.get("evidence"))[:EVIDENCE_PER_FINDING]}
 
 
 def parse_findings(payload: Any, kind: str, items: Sequence[str],

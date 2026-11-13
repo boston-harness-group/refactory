@@ -297,7 +297,7 @@ class AutoresearchOptimizer(Optimizer):
         from concurrent.futures import ThreadPoolExecutor
         from pathlib import Path
 
-        from . import feedback
+        from . import analysts, feedback
 
         cache: dict[str, dict[str, Any]] = self.__dict__.setdefault("_review_cache", {})
         store = (Path(self.trace_path).parent / "step_reviews"
@@ -319,25 +319,43 @@ class AutoresearchOptimizer(Optimizer):
                 if saved is not None:
                     cache[key] = saved
                     return index, {"review": saved}
-            call = {"kind": "step_review", "epoch": ctx.epoch, "generation": ctx.generation,
-                    "step": entry.get("step"), "candidate": entry.get("candidate"),
-                    "items": [s.get("item") for s in entry.get("samples") or ()],
-                    "system": feedback.STEP_REVIEW_SYSTEM, "prompt": prompt}
-            reply = None
-            try:
-                reply = self._client.complete(prompt, system=feedback.STEP_REVIEW_SYSTEM,
-                                              **self._completion_options)
-                found = (feedback.parse_decision_review if entry.get("decision")
-                         else feedback.parse_review)(extract_json(reply))
-            except Exception as exc:  # a failed review is shown as such, never fatal
-                from refactory_dsh.budgets import BudgetExhausted
+            parse = (feedback.parse_decision_review if entry.get("decision")
+                     else feedback.parse_review)
 
-                if isinstance(exc, BudgetExhausted):
-                    raise
-                error = f"{type(exc).__name__}: {exc}"
-                self.record_call(**call, reply=reply, error=error)
+            def attempt(text: str, retry: bool) -> tuple[Any, str | None, bool]:
+                """The review, or its error and whether the model call itself (not the
+                reading of its reply) failed as longer than the model's context."""
+                call = {"kind": "step_review", "epoch": ctx.epoch,
+                        "generation": ctx.generation, "step": entry.get("step"),
+                        "candidate": entry.get("candidate"),
+                        "items": [s.get("item") for s in entry.get("samples") or ()],
+                        "system": feedback.STEP_REVIEW_SYSTEM, "prompt": text,
+                        **({"context_retry": True} if retry else {})}
+                reply, answered = None, False
+                try:
+                    reply = self._client.complete(text, system=feedback.STEP_REVIEW_SYSTEM,
+                                                  **self._completion_options)
+                    answered = True
+                    found = parse(extract_json(reply))
+                except Exception as exc:  # a failed review is shown as such, never fatal
+                    from refactory_dsh.budgets import BudgetExhausted
+
+                    if isinstance(exc, BudgetExhausted):
+                        raise
+                    error = f"{type(exc).__name__}: {exc}"
+                    self.record_call(**call, reply=reply, error=error)
+                    return None, error, not answered and analysts.context_overflow(error)
+                self.record_call(**call, reply=reply, error=None, verdict=found["verdict"])
+                return found, None, False
+
+            found, error, overflow = attempt(prompt, False)
+            if found is None and overflow:
+                # Once, at half the length the provider refused, as an analyst is retried.
+                found, error, _overflow = attempt(
+                    feedback.review_prompt(entry, ctx.mode_name, room=max(1, len(prompt) // 2)),
+                    True)
+            if found is None:
                 return index, {"review_error": error}
-            self.record_call(**call, reply=reply, error=None, verdict=found["verdict"])
             cache[key] = found
             if store is not None:
                 try:
@@ -833,21 +851,26 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 def answer_json(text: str) -> tuple[dict[str, Any], str]:
-    """A proposer's answer object, fenced or bare, and ``""``; or ``{}`` and why the
-    answer's outermost object is not valid JSON (the parser's message, where, and the
-    text there). Unlike `extract_json`, an object nested inside a broken one is never
-    taken for the answer: it is a fragment of it (one edit of one proposal), and nor is
-    an object after it. Braces in prose before the answer are skipped. No JSON object
-    at all raises ``ValueError``, as `extract_json` does."""
+    """A proposer's answer object and ``""``; or ``{}`` and why the answer's object is
+    not valid JSON (the parser's message, where, and the text there). Unlike
+    `extract_json`, an object nested inside a broken one is never taken for the answer:
+    it is a fragment of it (one edit of one proposal). The whole reply is read first,
+    its top-level objects by their own braces (strings skipped, so a code fence inside
+    a prompt the answer proposes cannot end it); a fenced object counts only when it is
+    its fence's whole content. No JSON object at all raises ``ValueError``, as
+    `extract_json` does."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the model returned nothing")
-    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    problem = ""
-    for chunk in [*fenced, text]:
-        found, why = _outermost_object(chunk)
-        if found is not None:
-            return found, ""
-        problem = problem or why
+    found, problem = _outermost_object(text)
+    if found is not None:
+        return found, ""
+    for chunk in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
+        try:
+            loaded = json.loads(chunk.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict):
+            return loaded, ""
     if problem:
         return {}, problem
     raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
@@ -855,13 +878,22 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
 
 #: How a JSON object starts: a brace, then a key. Braces in prose (``{a, b}``) do not.
 _JSON_START = re.compile(r"\{\s*(\"|\})")
+#: The keys only a whole answer has (`_answered_proposals`).
+_ANSWER_KEYS = ("proposals", "proposal")
 
 
 def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
-    """The first top-level ``{...}`` of ``text`` that is a JSON object, scanning past
-    braces in prose; else ``None`` and why. A span that starts like a JSON object but is
-    not one ends the scan: everything after it is part of the broken answer (its braces
-    may no longer pair up), so no later object is read either."""
+    """The answer among ``text``'s top-level ``{...}`` objects (scanned by their own
+    braces, never into one), and why there is none.
+
+    The last one carrying a ``proposals`` list is the answer; without one, the first
+    object, unless a span that starts like a JSON object failed to parse: then the
+    answer is broken and no lone fragment after it (an edit, a proposal) is read. An
+    object left open ends the scan (everything after it is inside it). Braces in prose
+    (``{a, b}``) are skipped."""
+    first: dict[str, Any] | None = None
+    answer: dict[str, Any] | None = None
+    problem = ""
     start = text.find("{")
     while start != -1:
         end = _object_end(text, start)
@@ -870,21 +902,29 @@ def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
             if not looks_json:
                 start = text.find("{", start + 1)
                 continue
-            return None, (f"its object opened at character {start + 1} is never closed "
-                          f"(cut off? it ends: …{' '.join(text[-120:].split())})")
+            problem = problem or (f"its object opened at character {start + 1} is never "
+                                  f"closed (cut off? it ends: …{' '.join(text[-120:].split())})")
+            break
         try:
             loaded = json.loads(text[start:end + 1])
         except json.JSONDecodeError as exc:
             if looks_json:
                 at = start + exc.pos
-                return None, (f"{exc.msg} at line {exc.lineno} column {exc.colno}, here: "
-                              f"…{' '.join(text[max(start, at - 120):at].split())} ⟨HERE⟩ "
-                              f"{' '.join(text[at:at + 60].split())}…")
+                problem = problem or (
+                    f"{exc.msg} at line {exc.lineno} column {exc.colno}, here: "
+                    f"…{' '.join(text[max(start, at - 120):at].split())} ⟨HERE⟩ "
+                    f"{' '.join(text[at:at + 60].split())}…")
         else:
             if isinstance(loaded, dict):
-                return loaded, ""
+                first = loaded if first is None else first
+                if any(key in loaded for key in _ANSWER_KEYS):
+                    answer = loaded
         start = text.find("{", end + 1)
-    return None, ""
+    if answer is not None:
+        return answer, ""
+    if problem:
+        return None, problem
+    return first, ""
 
 
 def _object_end(text: str, start: int) -> int | None:

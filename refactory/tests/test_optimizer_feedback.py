@@ -1289,3 +1289,152 @@ def test_a_review_reads_each_text_whole_and_any_cut_the_room_forces_is_said():
     assert fitted[0]["next_output"] == "n" * 100 and fitted[0]["output"] == "o" * 3000
     assert fitted[0]["input"].startswith("HEAD ") and fitted[0]["input"].endswith(" TAIL")
     assert "characters omitted" in fitted[0]["input"]
+
+
+# ── review follow-ups: fences, repeated lessons, long reviews, handovers ────
+
+
+def test_a_code_fence_inside_a_proposed_prompt_does_not_cut_the_answer():
+    """A fenced answer whose first proposal's prompt carries its own ```python example:
+    the fence pattern stops at that inner fence, so the answer is read by its braces."""
+    from refactory_dsh.optim.random_optimizer import answer_json, extract_json
+
+    answer = {"diagnosis": "d", "proposals": [
+        {"edit": {"op": "set_knob", "name": "k", "value": "Use:\n```python\nprint(1)\n```\nDone."}},
+        {"edit": {"op": "set_knob", "name": "k2", "value": 2}}]}
+    reply = "```json\n" + json.dumps(answer, indent=1) + "\n```"
+    assert extract_json(reply) != answer, "the repro: the old reader lost the first proposal"
+    assert answer_json(reply) == (answer, "")
+    assert answer_json("Here:\n```json\n{\"proposals\": []}\n```\nthanks {") == ({"proposals": []}, "")
+    # A fenced object counts only as its fence's whole content.
+    broken = 'Plan: {"proposals": [\n```json\n{"proposals": [{"edit": 1}]} and {\n```'
+    found, why = answer_json(broken)
+    assert found == {} and "never closed" in why
+
+
+def test_of_two_whole_answers_the_last_is_read():
+    from refactory_dsh.optim.random_optimizer import answer_json
+
+    assert answer_json('Draft: {"proposals": [{"edit": 1}]}\nFinal: {"proposals": []}') == (
+        {"proposals": []}, "")
+
+
+@pytest.mark.parametrize("prose", ['I will write {"op": ...} objects.\n',
+                                   'Each edit is like {"op": "set_knob"}.\n'])
+def test_json_like_braces_in_prose_before_the_answer_are_passed_over(prose):
+    from refactory_dsh.optim.random_optimizer import answer_json
+
+    assert answer_json(prose + '{"diagnosis": "d", "proposals": []}') == (
+        {"diagnosis": "d", "proposals": []}, "")
+
+
+@pytest.mark.parametrize("writes", [{1: "LESSON-ONE", 3: "LESSON-ONE"}, {1: "LESSON-ONE"}])
+def test_a_readable_answer_clears_the_lessons_mark_even_with_the_same_lessons(
+        tmp_path, monkeypatch, writes):
+    """Round 2's answer was unread; round 3's was read but repeated (or carried no)
+    lessons: from round 4 on, no request says they were lost."""
+    class Repeats(_BreaksAt):
+        WRITES = writes
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    proposer = Repeats([[(5, 7)], [(7, 8)], [(8, 9)], [(9, 10)], []])
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=5, val_gate=True)
+        loop.optimizer = proposer
+        loop.run()
+    texts = [c.render() for c in proposer.contexts]
+    assert "NOT UPDATED" in texts[2]
+    assert all("NOT UPDATED" not in text and "LESSON-ONE" in text for text in texts[3:])
+    assert "not_updated" not in loop._lessons and loop._lessons["text"] == "LESSON-ONE"
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()
+              if '"optimizer_lessons"' in line]
+    assert "not_updated" in events[-2] and "not_updated" not in events[-1], "cleared, journaled"
+
+
+class _TooLongOnce(_Answering):
+    """Refuses the first review as longer than the model's context, then answers."""
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        if system == feedback.STEP_REVIEW_SYSTEM and not self.reviews:
+            with self.lock:
+                self.reviews.append(prompt)
+            raise RuntimeError("prompt is too long: 250000 tokens > 200000 maximum")
+        return super().complete(prompt, system=system)
+
+
+def test_a_review_too_long_for_the_context_is_retried_once_at_half_its_length(tmp_path):
+    entry = {**_added()[0], "instructions": "OWN-INSTRUCTIONS"}
+    entry["samples"] = [{**s, "input": "i" * 60000} for s in entry["samples"]]
+    client = _TooLongOnce({"proposals": []}, REVIEW)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(added_steps=[entry]), 1, [])
+    first, second = client.reviews
+    assert len(second) <= len(first) // 2 and "OWN-INSTRUCTIONS" in second
+    assert "characters omitted" in second
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert "review: restates_inputs" in section
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()
+             if '"step_review"' in line]
+    assert [bool(t.get("context_retry")) for t in trace] == [False, True]
+    assert trace[0]["error"] and trace[1]["error"] is None
+    again = _Answering({"proposals": []}, REVIEW)
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ProposalContext(added_steps=[entry]), 1, [])
+    assert again.reviews == [], "kept under the first call's key"
+
+
+def test_other_review_errors_are_not_retried():
+    client = _Answering({"proposals": []}, RuntimeError("503 overloaded"))
+    AutoresearchOptimizer(client).propose(ProposalContext(added_steps=_added()), 1, [])
+    assert len(client.reviews) == 1
+
+
+def test_a_review_keeps_its_frame_and_instructions_inside_the_room():
+    entry = {**_deciding_entry(), "instructions": "I" * 5000}
+    entry["samples"] = [{**s, "input": "x" * 50000, "output": "y" * 50000}
+                        for s in entry["samples"]]
+    for decision in (True, False):
+        prompt = feedback.review_prompt({**entry, "decision": decision}, "m", room=40000)
+        assert len(prompt) <= 40000 and "I" * 5000 in prompt and "characters omitted" in prompt
+
+
+def _handover_graph(**solver: Any) -> dict[str, Any]:
+    """``solve`` answers, ``check`` (an agent) writes its critique, a code gate reads the
+    critique and sends ``solve`` back with it; ``solve`` does not read the file itself."""
+    from refactory_dsh import nn
+
+    graph = nn.Graph()
+    graph.add(nn.Node("items", "data", subgraph_entry="solve", subgraph_exit="extract",
+                      writes=("current_item.json",)))
+    graph.add(nn.Node("solve", "agent", prompt_template="Solve.", writes=("answer.txt",), **solver))
+    graph.add(nn.Node("check", "agent", prompt_template="Check.", reads=("answer.txt",),
+                      writes=("critique.txt",)))
+    graph.add(nn.Node("gate", "gate", evaluator="loop_ops:always_proceed",
+                      reads=("critique.txt",)))
+    graph.add(nn.Node("extract", "op", call="loop_ops:noop", reads=("answer.txt",)))
+    graph.connect("solve", "check")
+    graph.connect("check", "gate")
+    graph.connect("gate", "solve", condition="reloop")
+    graph.connect("gate", "extract", condition="proceed")
+    return {"graph": graph.to_state()}
+
+
+def test_a_step_a_code_gate_hands_to_a_solver_is_not_the_decision():
+    state = _handover_graph()
+    assert feedback.handed_to(state, "check") == {"solve"}
+    assert feedback.handed_to(state, "solve") == set(), "sent back to itself: no other reader"
+    assert feedback.decision_step(state, "check") is False
+    seen = _handover_graph(reads=("critique.txt",))
+    assert feedback.handed_to(seen, "check") == set(), "a solver that reads it is no handover"
+    assert feedback.decision_step(seen, "check") is False, "it reads it: a model reader"
+
+
+def test_a_step_whose_writes_nothing_reads_is_not_the_decision_unless_it_ends_the_pass():
+    state = {"graph": {"nodes": {
+        "items": {"id": "items", "kind": "data", "subgraph_exit": "final"},
+        "side": {"id": "side", "kind": "agent", "writes": ["side.txt"]},
+        "final": {"id": "final", "kind": "agent", "writes": ["answer.txt"]}}}}
+    assert feedback.decision_step(state, "side") is False, "unread: a no_effect question"
+    assert feedback.decision_step(state, "final") is True, "the grader reads the pass's end"

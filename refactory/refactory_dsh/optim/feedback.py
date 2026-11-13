@@ -493,8 +493,11 @@ def fit_samples(samples: Sequence[Mapping[str, Any]], room: int = STEP_REVIEW_RO
     from .analysts import item_cap
 
     keys = ("input", "output", "next_output")
-    cap = item_cap([len(str(s.get(key) or "")) for s in samples for key in keys], room,
-                   floor=STEP_REVIEW_FLOOR)
+    lengths = [len(str(s.get(key) or "")) for s in samples for key in keys]
+    # Each cut says how much it left out: room for that line too.
+    marks = sum(1 for n in lengths if n) * len("\n[... 0000000 characters omitted ...]\n")
+    cap = None if sum(lengths) <= room else item_cap(lengths, room - marks,
+                                                      floor=STEP_REVIEW_FLOOR)
     if cap is None:
         return [dict(s) for s in samples]
     return [{**s, **{key: _clip_middle(s.get(key), cap) for key in keys if s.get(key)}}
@@ -503,18 +506,47 @@ def fit_samples(samples: Sequence[Mapping[str, Any]], room: int = STEP_REVIEW_RO
 
 def decision_step(graph: Mapping[str, Any] | None, step: str,
                   samples: Sequence[Mapping[str, Any]] = ()) -> bool:
-    """Whether ``step`` makes the pipeline's decision: no model step reads what it wrote,
-    directly or through other steps (by ``graph``'s data flow; only code, gates or the
-    grader do), and on the sampled items no other step's model call followed it. Its
+    """Whether ``step`` makes the pipeline's decision: something reads what it wrote (or
+    it ends the data pass, for the grader to read) but no model step does, directly,
+    through other steps (by ``graph``'s data flow) or handed it by a code gate's reloop
+    (`handed_to`), and on the sampled items no other step's model call followed it. Its
     job is to settle on an answer, so whether it repeats its inputs' wording says little;
     whether it decides as they recommended says what it adds."""
     readers = downstream(graph, step)
     if readers is None:
         return False
     nodes = ((graph or {}).get("graph") or {}).get("nodes") or {}
-    if any(_node_kind(nodes.get(reader)) == "agent" for reader in readers):
+    if not readers and not any(isinstance(node, Mapping) and node.get("kind") == "data"
+                               and node.get("subgraph_exit") == step
+                               for node in nodes.values()):
+        return False  # what it writes reaches no step and is not the pass's end
+    if any(_node_kind(nodes.get(reader)) == "agent" for reader in {*readers, *handed_to(graph, step)}):
         return False
     return all(not sample.get("next_step") for sample in samples)
+
+
+def handed_to(state: Mapping[str, Any] | None, step: str) -> set[str]:
+    """The other agents a code gate's reloop hands a file ``step`` (or a step after it)
+    wrote, though they do not read it (`nn.loops.blind_reloops`, `run.with_unseen_reads`):
+    at run time they are given what it wrote."""
+    from refactory_dsh.nn import Graph
+    from refactory_dsh.nn.loops import blind_reloops, loop_edges
+
+    try:
+        graph = Graph.from_state(dict((state or {}).get("graph") or {}))
+        knobs = {name: (spec or {}).get("value")
+                 for name, spec in ((state or {}).get("knobs") or {}).items()
+                 if isinstance(spec, Mapping)}
+        unseen = blind_reloops(graph, knobs)
+        reloops = loop_edges(graph)
+    except Exception:  # noqa: BLE001 - a graph that cannot be built hands nothing over
+        return set()
+    after = {step, *(downstream(state, step) or ())}
+    written = {name for node_id in after if node_id in graph.nodes
+               for name in graph.nodes[node_id].writes}
+    return {target for gate, target, condition in reloops
+            if target != step and written & set(
+                (unseen.get(gate) or {}).get(condition.strip().lower()) or ())}
 
 
 #: The most item ids a code step's or gate's line names per group.
@@ -563,15 +595,25 @@ STEP_REVIEW_SYSTEM = ("You review one step of an AI pipeline against what it was
                       "You reply with JSON only.")
 
 
-def review_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
-    """The review call for one added step: its input as sent, its output and the next
-    step's output on up to ``STEP_REVIEW_ITEMS`` train items, and domain-free questions.
-    A decision step (``entry["decision"]``) is asked about instead (`decision_prompt`)."""
-    if entry.get("decision"):
-        return decision_prompt(entry, mode_name)
+def review_prompt(entry: Mapping[str, Any], mode_name: str = "",
+                  room: int = STEP_REVIEW_ROOM) -> str:
+    """The review call for one added step, within ``room`` characters: its input as
+    sent, its output and the next step's output on up to ``STEP_REVIEW_ITEMS`` train
+    items, and domain-free questions. The frame and the step's own instructions are
+    counted first; the items' texts share the rest (`fit_samples`). A decision step
+    (``entry["decision"]``) is asked about instead (`decision_prompt`)."""
+    build = decision_prompt if entry.get("decision") else _review_text
+    samples = list(entry.get("samples") or ())
+    blank = [{**sample, "input": "", "output": "", "next_output": ""} for sample in samples]
+    frame = len(build(entry, mode_name, blank))
+    return build(entry, mode_name, fit_samples(samples, max(0, room - frame)))
+
+
+def _review_text(entry: Mapping[str, Any], mode_name: str,
+                 samples: Sequence[Mapping[str, Any]]) -> str:
     step = entry.get("step")
     blocks = []
-    for sample in fit_samples(entry.get("samples") or ()):
+    for sample in samples:
         block = [f"## Item {sample.get('item')}",
                  f"### What `{step}` was given (its prompt as sent)", sample.get("input") or "(empty)",
                  f"### What `{step}` wrote", sample.get("output") or "(empty)"]
@@ -616,7 +658,8 @@ def _instructions_block(entry: Mapping[str, Any]) -> list[str]:
             f"{entry['instructions']}"]
 
 
-def decision_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
+def decision_prompt(entry: Mapping[str, Any], mode_name: str,
+                    samples: Sequence[Mapping[str, Any]]) -> str:
     """The review call for an added decision step (`decision_step`): on each sampled
     item, what its inputs recommended and what it decided. Repeating the chosen answer
     is such a step's job, so the question is whether it ever decides otherwise."""
@@ -624,7 +667,7 @@ def decision_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
     blocks = [f"## Item {sample.get('item')}\n"
               f"### What `{step}` was given (its prompt as sent)\n{sample.get('input') or '(empty)'}\n"
               f"### What `{step}` wrote\n{sample.get('output') or '(empty)'}"
-              for sample in fit_samples(entry.get("samples") or ())]
+              for sample in samples]
     return "\n\n".join([
         f"# Reviewing an added decision step: `{step}`",
         (f"Mode: `{mode_name}`. " if mode_name else "")
