@@ -109,11 +109,12 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
     # Whether the target is in a work tree, and that tree's top, in one call: outside a
     # checkout, and in a `.git` directory, it fails, as `--is-inside-work-tree` alone
     # answered no there.
-    where = (_git(root, "rev-parse", "--is-inside-work-tree", "--show-toplevel") or "").splitlines()
+    # The top is everything after the first line: a checkout's path may hold any character.
+    inside, _, top_line = (_git(root, "rev-parse", "--is-inside-work-tree", "--show-toplevel") or "").partition("\n")
     # A directory an enclosing checkout ignores is not that checkout's to report on:
     # its status would list nothing there, and the guard would be off without a word.
-    if where[:1] == ["true"] and len(where) > 1 and _git(root, "check-ignore", "-q", str(root)) is None:
-        top = Path(where[1].strip() or str(root)).resolve()
+    if inside == "true" and top_line and _git(root, "check-ignore", "-q", str(root)) is None:
+        top = Path(top_line.strip() or str(root)).resolve()
         specs = [f":(exclude,literal){path.relative_to(root)}" for path in skipped if path.is_relative_to(root)]
         # HEAD, the branch and what is uncommitted, in one call.
         listing = _git(root, "status", "--porcelain=v2", "--branch", "--no-ahead-behind", "-z",
@@ -123,7 +124,7 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
         head, entries = _porcelain_v2(listing)
         paths = [os.path.relpath(top / path, root) for path in entries]
         prefix = "" if root == top else root.relative_to(top).as_posix()
-        found.update(git=True, head=head, branch=_v2_branch(listing),
+        found.update(git=True, head=head, branch=_v2_branch(listing, root),
                      # The committed content under the target alone: a commit elsewhere in
                      # the checkout, or a new branch at the same commit, leaves it as it was.
                      tree=_tree(str(top), head, prefix) if head else None)
@@ -140,10 +141,25 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
     return {**found, "changes": {path: _digest(root / path) for path in sorted(paths)}}
 
 
-@functools.lru_cache(maxsize=4096)
+#: The trees :func:`_tree` found, by checkout, commit and directory.
+_TREES: dict[tuple[str, str, str], str] = {}
+
+
 def _tree(top: str, head: str, prefix: str) -> str | None:
-    """The tree a commit holds at ``prefix``: asked once per process, a commit never changes."""
-    return (_git(Path(top), "rev-parse", "-q", "--verify", f"{head}:{prefix}") or "").strip() or None
+    """The tree a commit holds at ``prefix``: asked once per process, a commit never changes.
+
+    Only an answer is kept: a directory the commit lacks, or git failing to say, is asked
+    again next time.
+    """
+    key = (top, head, prefix)
+    if key not in _TREES:
+        found = (_git(Path(top), "rev-parse", "-q", "--verify", f"{head}:{prefix}") or "").strip()
+        if not found:
+            return None
+        if len(_TREES) >= 4096:
+            _TREES.clear()
+        _TREES[key] = found
+    return _TREES[key]
 
 
 def _read(workdir: Path) -> dict[str, Any] | None:
@@ -761,11 +777,18 @@ def _porcelain_v2(listing: str) -> tuple[str | None, list[str]]:
     return head, paths
 
 
-def _v2_branch(listing: str) -> str | None:
-    """The branch `git status --porcelain=v2 --branch -z` is on; None on a detached HEAD."""
+def _v2_branch(listing: str, root: Path) -> str | None:
+    """The branch `git status --porcelain=v2 --branch -z` is on; None on a detached HEAD.
+
+    A HEAD that names a ref outside ``refs/heads`` reads ``(null)`` there, and is asked of
+    ``symbolic-ref`` as before. One difference from ``symbolic-ref --short`` is left: a
+    branch with a tag of the same name is ``main`` here, not ``heads/main``.
+    """
     for entry in listing.split("\0"):
         if entry.startswith("# branch.head "):
             name = entry.removeprefix("# branch.head ").strip()
+            if name == "(null)":
+                return (_git(root, "symbolic-ref", "-q", "--short", "HEAD") or "").strip() or None
             return None if name == "(detached)" else name or None
     return None
 

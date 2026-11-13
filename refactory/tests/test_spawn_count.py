@@ -45,7 +45,7 @@ def test_node_processes_it_starts_are_counted_too(tmp_path):
 
 
 def test_unset_nothing_is_counted_or_changed(tmp_path):
-    env = {name: value for name, value in os.environ.items() if name != spawn_count.ENV}
+    env = {name: value for name, value in os.environ.items() if name not in (spawn_count.ENV, "NODE_OPTIONS")}
     result = subprocess.run([sys.executable, "-c", "import os, sys, refactory_dsh\n"
                              "print(os.environ.get('NODE_OPTIONS', ''))\n"
                              "print('refactory_dsh.spawn_count' in sys.modules)"],

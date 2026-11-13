@@ -65,6 +65,19 @@ def test_without_a_developer_directory_setting_the_xcode_select_choice_is_used(t
     assert git_exe.git() == str(developer / "usr/bin/git")
 
 
+def test_with_no_choice_at_all_xcode_comes_before_the_command_line_tools(tmp_path, monkeypatch):
+    _as_a_mac_with_the_trampoline(monkeypatch)
+    xcode, tools = _developer(tmp_path / "xcode"), _developer(tmp_path / "tools")
+    monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+    monkeypatch.setattr(git_exe, "SELECTED", str(tmp_path / "no-link"))
+    monkeypatch.setattr(git_exe, "DEFAULT_DEVELOPERS", (str(xcode), str(tools)))
+    assert git_exe.git() == str(xcode / "usr/bin/git")
+
+    git_exe._resolve.cache_clear()
+    monkeypatch.setattr(git_exe, "DEFAULT_DEVELOPERS", (str(tmp_path / "no-xcode"), str(tools)))
+    assert git_exe.git() == str(tools / "usr/bin/git")
+
+
 def test_a_developer_directory_with_no_git_keeps_plain_git(tmp_path, monkeypatch):
     _as_a_mac_with_the_trampoline(monkeypatch)
     monkeypatch.setenv("DEVELOPER_DIR", str(tmp_path / "empty"))

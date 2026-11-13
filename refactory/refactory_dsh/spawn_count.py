@@ -70,7 +70,8 @@ def install() -> None:
     if not path or _installed:
         return
     _installed.append(path)
-    preload = f"--require={NODE_PRELOAD}"
+    quoted = str(NODE_PRELOAD).replace("\\", "\\\\").replace('"', '\\"')
+    preload = f'--require="{quoted}"'
     if preload not in os.environ.get("NODE_OPTIONS", ""):
         os.environ["NODE_OPTIONS"] = f"{os.environ.get('NODE_OPTIONS', '')} {preload}".strip()
     pid = os.getpid()
@@ -80,10 +81,13 @@ def install() -> None:
     def hook(event: str, args: tuple) -> None:
         if event not in EVENTS:
             return
-        program, argv = _program(event, args)
-        _write(path, {"pid": os.getpid(), "kind": "launch", "runtime": "python",
-                      "program": program, "argv": argv,
-                      "callers": _callers(), "test": os.environ.get("PYTEST_CURRENT_TEST")})
+        try:
+            program, argv = _program(event, args)
+            _write(path, {"pid": os.getpid(), "kind": "launch", "runtime": "python",
+                          "program": program, "argv": argv,
+                          "callers": _callers(), "test": os.environ.get("PYTEST_CURRENT_TEST")})
+        except Exception:  # noqa: BLE001 -- a measurement never fails the launch it measures
+            pass
 
     sys.addaudithook(hook)
 
