@@ -1043,6 +1043,169 @@ def test_run_uses_the_mode_packages_analyst_prompts(tmp_path, monkeypatch):
     }
 
 
+# ── analyst_prompts: SkillOpt's generic analyst prompts ───────────────────
+
+#: sha256 of microsoft/SkillOpt skillopt/prompts/analyst_{error,success}.md at
+#: 45f65ca04f5f6713bca7b9797b495696ba812751, as ``load_prompt`` returns them.
+GENERIC_ANALYST_ERROR_SHA256 = "40eaf561c7fdbdfc1c7a1febd9f7c3540270ca6d5e7e0a8798c7c90b8d303200"
+GENERIC_ANALYST_SUCCESS_SHA256 = "0ffc8f85e13af2b14e1b9f3307a44d30ecf60e9d803ccb9190fdd9785e43fabc"
+
+
+def _generic_analyst_text(name: str) -> str:
+    from refactory_packages.skillopt.env import GENERIC_ANALYST_DIR
+
+    return (GENERIC_ANALYST_DIR / f"{name}.md").read_text(encoding="utf-8")
+
+
+def test_generic_analyst_prompts_are_skillopts_files():
+    """The shipped copies are SkillOpt's generic analyst files byte for byte, the
+    port's generic fallback text plus the file's trailing newline."""
+    error = _generic_analyst_text("analyst_error")
+    success = _generic_analyst_text("analyst_success")
+    assert hashlib.sha256(error.encode()).hexdigest() == GENERIC_ANALYST_ERROR_SHA256
+    assert hashlib.sha256(success.encode()).hexdigest() == GENERIC_ANALYST_SUCCESS_SHA256
+    assert error == prompts.FAILURE_ANALYST_SYSTEM + "\n"
+    assert success == prompts.SUCCESS_ANALYST_SYSTEM + "\n"
+    assert "the budget L" in error and "SLOW_UPDATE_START" in success
+
+
+def test_generic_option_switches_only_the_analyst_prompts():
+    """``generic`` replaces LiveMath's two analyst overrides with SkillOpt's generic
+    files; every other prompt, and ``task``, are what the package gives."""
+    from refactory_packages.skillopt.env import SkillOptEnv
+
+    task = SkillOptEnv.for_mode("livemath/solver")
+    generic = SkillOptEnv.for_mode("livemath/solver", analyst_prompts="generic")
+    assert task.analyst_prompts == "task" and generic.analyst_prompts == "generic"
+    assert hashlib.sha256(task.prompt("analyst_error").encode()).hexdigest() == (
+        LIVEMATH_ANALYST_ERROR_SHA256)
+    assert generic.prompt("analyst_error") == _generic_analyst_text("analyst_error")
+    assert generic.prompt("analyst_success") == _generic_analyst_text("analyst_success")
+    for name in ("merge_failure", "merge_success", "merge_final", "ranking",
+                 "slow_update", "meta_skill"):
+        assert generic.prompt(name) == task.prompt(name), name
+
+
+def test_generic_option_keeps_a_packages_other_overrides(tmp_path, monkeypatch):
+    """Only analyst_error and analyst_success are switched: another override the
+    package ships still wins."""
+    from refactory_packages.skillopt import env as env_mod
+
+    pkg = tmp_path / "pkg"
+    (pkg / env_mod.PROMPT_DIR).mkdir(parents=True)
+    for name in ("analyst_error", "analyst_success", "merge_failure"):
+        (pkg / env_mod.PROMPT_DIR / f"{name}.md").write_text(f"ENV {name}")
+    monkeypatch.setattr(env_mod, "_package_dir", lambda name: pkg if name == "pkg" else None)
+    generic = env_mod.SkillOptEnv("pkg", analyst_prompts="generic")
+    assert generic.prompt("analyst_error") == _generic_analyst_text("analyst_error")
+    assert generic.prompt("analyst_success") == _generic_analyst_text("analyst_success")
+    assert generic.prompt("merge_failure") == "ENV merge_failure"
+    assert env_mod.SkillOptEnv("pkg").prompt("analyst_error") == "ENV analyst_error"
+
+
+@pytest.mark.parametrize("value", ["Generic", "", "env", None, 1, True, ["generic"]])
+def test_analyst_prompts_option_refuses_other_values(value):
+    loop = SkillOptLoop()
+    with pytest.raises(ValueError, match="analyst_prompts must be one of"):
+        loop.configure(model=FakeClient(), analyst_prompts=value)
+    from refactory_packages.skillopt.env import SkillOptEnv
+
+    with pytest.raises(ValueError, match="analyst_prompts"):
+        SkillOptEnv("livemath", analyst_prompts=value)
+
+
+def _probe_analyst_package(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from refactory_packages.skillopt import env as env_mod
+
+    pkg = tmp_path / "skillopt_probe"
+    (pkg / env_mod.PROMPT_DIR).mkdir(parents=True)
+    (pkg / env_mod.PROMPT_DIR / "analyst_error.md").write_text("PROBE ERROR")
+    (pkg / env_mod.PROMPT_DIR / "analyst_success.md").write_text("PROBE SUCCESS")
+    monkeypatch.setattr(
+        env_mod, "_package_dir", lambda name: pkg if name == MODE_ID.split("/")[0] else None,
+    )
+    monkeypatch.setenv(PASS_IDS_ENV, "t1,t3")
+
+
+def test_analyst_prompts_task_is_the_default_byte_for_byte(tmp_path, monkeypatch):
+    """``analyst_prompts=task`` sends exactly the requests a run without the option
+    sends, and the analysts get the package's overrides."""
+    _probe_analyst_package(tmp_path, monkeypatch)
+    unset, explicit = FakeClient(), FakeClient()
+    loop, report = _run_loop(tmp_path / "unset", client=unset, skillopt_options={"max_epochs": 1})
+    _run_loop(tmp_path / "task", client=explicit,
+              skillopt_options={"max_epochs": 1, "analyst_prompts": "task"})
+    assert unset.calls and unset.calls == explicit.calls
+    systems = {c["call_key"][0]: c["system"] for c in unset.calls if c["call_key"]}
+    assert systems["analyst_failure"] == "PROBE ERROR"
+    assert systems["analyst_success"] == "PROBE SUCCESS"
+    assert loop.analyst_prompts == "task"
+    assert report["strategy_report"]["analyst_prompts"] == "task"
+
+
+def test_analyst_prompts_generic_sends_skillopts_generic_texts(tmp_path, monkeypatch):
+    """``generic``: the analysts' system prompts are SkillOpt's generic files; every
+    other request (user messages included) is the default run's."""
+    _probe_analyst_package(tmp_path, monkeypatch)
+    task, generic = FakeClient(), FakeClient()
+    _run_loop(tmp_path / "task", client=task, skillopt_options={"max_epochs": 1})
+    _, report = _run_loop(tmp_path / "generic", client=generic,
+                          skillopt_options={"max_epochs": 1, "analyst_prompts": "generic"})
+    assert len(task.calls) == len(generic.calls)
+    kinds = set()
+    for before, after in zip(task.calls, generic.calls):
+        assert before["call_key"] == after["call_key"]
+        assert before["prompt"] == after["prompt"]
+        kind = after["call_key"][0]
+        if kind == "analyst_failure":
+            assert after["system"] == _generic_analyst_text("analyst_error")
+        elif kind == "analyst_success":
+            assert after["system"] == _generic_analyst_text("analyst_success")
+        else:
+            assert after["system"] == before["system"], kind
+        kinds.add(kind)
+    assert {"analyst_failure", "analyst_success"} <= kinds
+    assert report["strategy_report"]["analyst_prompts"] == "generic"
+
+
+def test_optimize_cli_takes_analyst_prompts_and_records_it(tmp_path, monkeypatch):
+    """``--strategy-option analyst_prompts=generic`` reaches the analysts and is in
+    the run's config.json and report.json; another value is refused."""
+    from refactory_dsh import loop as loop_module
+    from refactory_dsh import model as model_module
+
+    _probe_analyst_package(tmp_path, monkeypatch)
+    client = FakeClient()
+
+    class ScriptedRoute:
+        def __new__(cls, **kwargs: Any) -> Any:
+            return client
+
+    monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
+    parts = _write_parts(tmp_path)
+
+    def run(value: str, root: str) -> int:
+        with _patch_mode(SkillProbe):
+            return loop_module.main([
+                MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
+                "--strategy-option", f"analyst_prompts={value}",
+                "--optimizer", "random", "--seed", "42",
+                "--runs-root", str(tmp_path / root), "--project", ".", "--parts", str(parts),
+            ])
+
+    assert run("generic", "run") == 0
+    systems = {c["call_key"][0]: c["system"] for c in client.calls if c["call_key"]}
+    assert systems["analyst_failure"] == _generic_analyst_text("analyst_error")
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    assert config["strategy_options"]["analyst_prompts"] == "generic"
+    saved = json.loads((tmp_path / "run" / "report.json").read_text())
+    assert saved["strategy_report"]["analyst_prompts"] == "generic"
+    client.calls.clear()
+    with pytest.raises(ValueError, match="analyst_prompts must be one of .* not 'generik'"):
+        run("generik", "bad")
+    assert client.calls == [] and not (tmp_path / "bad" / "report.json").exists()
+
+
 # ── rollout order seam (replay-only use) ──────────────────────────────────
 
 

@@ -959,6 +959,26 @@ model calls.
 search edits the steps between them, never the pass, the answer extraction or the run's
 end. See "Structure edits" below.
 
+## SkillOpt with its generic analyst prompts (`analyst_prompts=generic`)
+
+SkillOpt loads each prompt from the env's own `prompts/<name>.md` when it has one, else
+from its generic `skillopt/prompts/<name>.md` (`envs/base.py:278-329`). Its LiveMath env
+overrides the two analyst prompts (`analyst_error`, `analyst_success`) with
+LiveMath-specific ones, and the solver's `rollout_system`; the merge, ranking, slow
+update and meta skill prompts are always the generic ones. The port reads a mode
+package's overrides the same way (`livemath/skillopt_prompts/`).
+
+`--strategy skillopt --strategy-option analyst_prompts=generic` (or
+`"analyst_prompts": "generic"` in a profile's `strategy_options`) gives the analysts
+SkillOpt's generic prompts instead, copied byte for byte into
+`refactory_packages/skillopt/generic_prompts/`, so a run measures SkillOpt without
+per-task analyst guidance. Only the two analyst system prompts change: the user
+messages (with the edit budget L the generic prompts name), the solver side and every
+other optimizer prompt are the same. The default `task` sends exactly what it did
+before. Any other value is refused when the run starts. The value is in the run's
+`config.json` (`strategy_options`, when given) and in the report's `strategy_report`
+(`analyst_prompts`).
+
 ## SkillOpt over several text knobs
 
 `--strategy skillopt --strategy-option knobs=compare__system_prompt,precision__system_prompt,hypotheses__system_prompt,decide__system_prompt`
