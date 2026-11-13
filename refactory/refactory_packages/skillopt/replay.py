@@ -307,9 +307,13 @@ class CallMatcher:
                 break
         self._counters[key] = idx
         self.failed_attempts_replayed += len(failed)
+        cli_error = f"Claude CLI exited with code {failed[-1].rc}"
+        if attempts == 1:
+            # One of B's own attempts (trace.ask retries): SkillOpt reports a
+            # single attempt's failure as the CLI error alone.
+            raise ReplayedCallFailure(cli_error)
         raise ReplayedCallFailure(
-            f"Claude backend failed after {attempts or len(failed)} retries: "
-            f"Claude CLI exited with code {failed[-1].rc}"
+            f"Claude backend failed after {attempts or len(failed)} retries: {cli_error}"
         )
 
     def consumed_count(self) -> int:

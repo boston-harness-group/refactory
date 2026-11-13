@@ -146,6 +146,18 @@ def retry_delay(attempt: int) -> float:
 _sleep = time.sleep
 
 
+@contextmanager
+def no_retry_waits() -> Iterator[None]:
+    """Skip :func:`ask`'s waits between attempts while inside: a replay serves
+    recorded attempts, so waiting for a provider to recover buys nothing."""
+    global _sleep
+    saved, _sleep = _sleep, (lambda seconds: None)
+    try:
+        yield
+    finally:
+        _sleep = saved
+
+
 def ask(
     client: Any,
     trace: TraceRecorder,

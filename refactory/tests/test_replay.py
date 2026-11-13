@@ -2557,3 +2557,39 @@ def test_replay_client_unframes_optimizer_prompts_only_when_asked(tmp_path):
             framed, system="opt") == "r"
         with pytest.raises(ReplayMismatch):
             ReplayClient(CallMatcher(calls)).complete(framed, system="opt")
+
+
+def test_one_replayed_attempt_fails_with_the_cli_error_alone(tmp_path):
+    """Each of B's own attempts replays one of A's (``attempts=1``): its failure
+    reads as SkillOpt's single-attempt error, never "after 1 retries"."""
+    from refactory_packages.skillopt.replay import ReplayedCallFailure
+
+    matcher = CallMatcher(_calls_with_rc(tmp_path, [
+        ("s", "p", "API Error", 1), ("s", "p", "ok", 0),
+    ]))
+    with pytest.raises(ReplayedCallFailure) as caught:
+        matcher.lookup("s", "p", attempts=1)
+    assert str(caught.value) == "Claude CLI exited with code 1"
+    assert matcher.lookup("s", "p", attempts=1) == "ok"
+
+
+def test_replay_runs_the_loop_without_retry_waits():
+    """A replay serves recorded attempts, so ``trace.ask``'s 1/2/4 s waits are
+    skipped around the replayed run, and restored after it."""
+    import inspect
+
+    from refactory_packages.skillopt import replay_runner, trace
+
+    source = inspect.getsource(replay_runner.run_replay)
+    assert "with skillopt_trace.no_retry_waits():\n            loop_report = loop.run()" in source
+
+    waits: list[float] = []
+    trace._sleep, saved = waits.append, trace._sleep
+    try:
+        with trace.no_retry_waits():
+            trace._sleep(4)
+        assert waits == []
+        trace._sleep(1)
+        assert waits == [1]
+    finally:
+        trace._sleep = saved
