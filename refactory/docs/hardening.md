@@ -757,6 +757,43 @@ reported the change only at materialise, 45 minutes later.
   `test_vitest_guard_reports_inactive_when_python_missing`,
   `test_vitest_guard_reports_inactive_on_non_git_dir` (inactive guard reporting).
 
+**Follow-up (o55-dm149d, 2026-11-13).** A run's `research_director` was failed
+for a change it did not make. Another session had run
+`git worktree add -b fix/early-check-probe … origin/main` in the person's
+checkout, and git wrote `branch.fix/early-check-probe.remote` and `.merge` to the
+shared config. Two changes followed:
+
+- `shared_change` names what changed in its message: the config key or hook file,
+  as added, removed or changed. Values are never shown, since a remote URL can
+  carry a token. The record keeps a hash per key and per hook file for this, and
+  `shared_changed` stays as its boolean form.
+- The guard leaves out exactly two keys, `branch.<b>.remote` and
+  `branch.<b>.merge`. These are what `git branch --track` and `worktree add -b`
+  write. They are left out only when `<b>` is not the run's own branch, and only
+  when the remote they name is `.` or is already defined. `remote.*` lines stay
+  guarded, so tracking a remote added during the step is still caught. Every
+  other `branch.*` key (pushRemote, rebase, mergeOptions) is still guarded, as are
+  `core.*`, `alias.*` and the hooks. A record written before this change holds the
+  digest of every line; matching it still means nothing changed, so live runs
+  are not failed when they upgrade.
+
+`LEFTHOOK=0` does not stop lefthook's npm postinstall. Only a truthy `CI` without
+`LEFTHOOK` enabled does that, and `_install_env` sets `CI=true`, while
+`check_environment`, which is setup's environment, does not. A setup that runs
+`pnpm install` therefore runs `lefthook install`. Hook isolation (part 4) sends
+that install to the worktree's own hooks. When a global `core.hooksPath` is set,
+lefthook refuses the install instead.
+
+Held by `test_worktree.py` (`test_a_tracking_branch_made_in_the_person_s_checkout_is_not_a_shared_change`,
+`test_every_other_shared_config_change_is_still_caught_and_named`,
+`test_tracking_a_remote_added_meanwhile_is_caught`,
+`test_tracking_an_undefined_remote_is_caught`,
+`test_tracking_config_for_the_run_s_own_branch_is_caught`,
+`test_a_shared_hook_change_is_named_by_file`,
+`test_a_record_from_before_the_detail_still_works`) and
+`test_agent_delivery.py`
+(`test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_unaffected`).
+
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
 with isolation on. `HOOK_SUPPRESS` (`HUSKY=0`) stops husky, and `shared_changed`
