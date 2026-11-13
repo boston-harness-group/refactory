@@ -167,6 +167,30 @@ def _git_directory(root: Path) -> Path:
     return root / ".git"
 
 
+def _head_names_a_ref_outside_the_branches(root: Path) -> Path:
+    _git(root, "update-ref", "refs/remotes/origin/topic", "HEAD")
+    _git(root, "symbolic-ref", "HEAD", "refs/remotes/origin/topic")
+    return root
+
+
+def _merge_conflict(root: Path) -> Path:
+    _git(root, "checkout", "-q", "-b", "other")
+    (root / "app.py").write_text("print('other')\n")
+    _commit(root, "other")
+    _git(root, "checkout", "-q", "main")
+    (root / "app.py").write_text("print('main')\n")
+    _commit(root, "main")
+    subprocess.run(["git", "-C", str(root), "merge", "-q", "other"], capture_output=True)
+    return root
+
+
+def _checkout_path_with_a_line_break(root: Path) -> Path:
+    odd = root.parent / "odd\u2028name\nhere"
+    root.rename(odd)
+    (odd / "lib" / "util.py").write_text("x = 5\n")
+    return odd / "lib"
+
+
 def _factory_and_run_excluded(root: Path) -> Path:
     (root / ".factory").mkdir()
     (root / ".factory" / "state.json").write_text("{}\n")
@@ -178,7 +202,8 @@ def _factory_and_run_excluded(root: Path) -> Path:
 
 CASES = [_clean, _edits, _staged_rename, _worktree_rename, _detached, _unborn, _other_branch,
          _subdirectory, _subdirectory_uncommitted, _ignored_subdirectory,
-         _top_ignored_by_its_own_rules, _not_a_checkout, _git_directory, _factory_and_run_excluded]
+         _top_ignored_by_its_own_rules, _not_a_checkout, _git_directory, _factory_and_run_excluded,
+         _head_names_a_ref_outside_the_branches, _merge_conflict, _checkout_path_with_a_line_break]
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.__name__.strip("_") for case in CASES])
@@ -202,6 +227,18 @@ def test_a_commit_is_seen_after_the_tree_of_an_earlier_one_was_remembered(tmp_pa
     assert target_guard._compare(before, after, commits=False)
 
 
+def test_a_tree_git_could_not_name_is_asked_for_again(tmp_path, monkeypatch):
+    """Only an answer is remembered: a failed lookup is never kept for the commit."""
+    root = _repo(tmp_path / "repo")
+    head = _git(root, "rev-parse", "HEAD").strip()
+    target_guard._TREES.clear()
+    monkeypatch.setattr(target_guard, "_git", lambda *args: None)
+    assert target_guard._tree(str(root), head, "lib") is None
+    monkeypatch.undo()
+
+    assert target_guard._tree(str(root), head, "lib") == _git(root, "rev-parse", f"{head}:lib").strip()
+
+
 def _launches(monkeypatch) -> list[list[str]]:
     seen: list[list[str]] = []
     original = subprocess.run
@@ -218,7 +255,7 @@ def test_a_snapshot_of_a_git_target_is_three_git_commands(tmp_path, monkeypatch)
     """Three on every snapshot, and one more only the first time a commit is seen."""
     root = _repo(tmp_path / "repo")
     _edits(root)
-    target_guard._tree.cache_clear()
+    target_guard._TREES.clear()
     launches = _launches(monkeypatch)
 
     target_guard.state(root)
@@ -236,7 +273,7 @@ def test_watching_an_agent_step_launches_a_bounded_number_of_git_commands(tmp_pa
     launcher = _repo(tmp_path / "launcher")
     workdir = tmp_path / "run"
     target_guard.record(workdir, target, output_only=("emit",), also=(worktree,), warn_also=(launcher,))
-    target_guard._tree.cache_clear()
+    target_guard._TREES.clear()
     target_guard.state(target), target_guard.state(worktree), target_guard.state(launcher)
     launches = _launches(monkeypatch)
 

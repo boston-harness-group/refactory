@@ -6,7 +6,8 @@ process launches. Under an endpoint-security agent, which inspects each launch, 
 doubles the cost of the dozens of git commands every agent step runs (27 ms against
 12 ms a command on one such Mac). :func:`git` names the binary the trampoline would have
 started, found the way the trampoline finds it -- ``DEVELOPER_DIR``, else the
-``xcode-select`` choice -- and anything it cannot be sure of keeps plain ``git``.
+``xcode-select`` choice, else Xcode, else the Command Line Tools -- and anything it
+cannot be sure of keeps plain ``git``.
 
 The trampoline also hands the git it starts a compiler environment (``SDKROOT``,
 ``CPATH``, ``LIBRARY_PATH``, ``MANPATH``), which reaches whatever git itself runs: a
@@ -29,8 +30,9 @@ TRAMPOLINE = "/usr/bin/git"
 #: Where `xcode-select --switch` records the chosen developer directory.
 SELECTED = "/var/db/xcode_select_link"
 
-#: The developer directory when none was chosen: the Command Line Tools.
-DEFAULT_DEVELOPER = "/Library/Developer/CommandLineTools"
+#: The developer directories used when none was chosen, in the order xcrun tries them:
+#: Xcode, then the Command Line Tools.
+DEFAULT_DEVELOPERS = ("/Applications/Xcode.app/Contents/Developer", "/Library/Developer/CommandLineTools")
 
 
 def _developer_dir() -> Path | None:
@@ -41,7 +43,7 @@ def _developer_dir() -> Path | None:
     try:
         return Path(os.readlink(SELECTED))
     except OSError:
-        return Path(DEFAULT_DEVELOPER) if Path(DEFAULT_DEVELOPER).is_dir() else None
+        return next((Path(path) for path in DEFAULT_DEVELOPERS if Path(path).is_dir()), None)
 
 
 @functools.lru_cache(maxsize=None)
