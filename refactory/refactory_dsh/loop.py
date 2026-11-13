@@ -58,7 +58,8 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    MAX_EDITS_PER_PROPOSAL, available_before, edit_level, proposal_refusal, summarise_reasons,
+    MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
+    summarise_reasons,
 )
 from refactory_dsh.optim.memory import report as memory_report
 from refactory_dsh.optim.memory import report_lines as memory_report_lines
@@ -548,8 +549,11 @@ class Loop(OuterLoop):
 
     def run(self) -> dict[str, Any]:
         """Own strategy execution; a report-only replay does not start a search."""
+        from concurrent.futures import CancelledError
+
         from refactory_dsh.control import running_search
         from refactory_dsh.budgets import BudgetExhausted, RunBudget, ResourceLimits, LEDGER
+        from refactory_dsh.model import ModelChoiceError
 
         if (self.config.analysts and self._custom_strategy is None
                 and not getattr(self.optimizer, "uses_model", False)):
@@ -585,6 +589,14 @@ class Loop(OuterLoop):
                                         "route); turn it off or give the run a model")
                 try:
                     result = super().run()
+                except (CancelledError, ModelChoiceError) as exc:
+                    # A cancelled model client or a missing model choice ends the run,
+                    # but it still says why and leaves its report. (A person's stop,
+                    # `RunStopped`, ended the search inside ``super().run()``.)
+                    self.bound = self.bound or f"{type(exc).__name__}: {exc}"
+                    self._journal("bound", bound=self.bound)
+                    self.report()
+                    raise
                 except (BudgetExhausted, BudgetStopped) as exc:
                     # BudgetStopped: a strategy's evaluation the budget stopped
                     # (``Run.evaluate``); the bound is the budget _measure recorded.
@@ -3352,6 +3364,10 @@ class Loop(OuterLoop):
         except BudgetExhausted as exc:
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
             raise
+        except RunStopped:
+            # A person's stop during a retry wait is a stop, not a failed round: the
+            # round is made again on resume (the epoch stays open).
+            raise
         except Exception as exc:  # a proposer that is down is not a crash
             detail = f"{type(exc).__name__}: {exc}"
             self.optimizer.proposal_failures.append(detail)
@@ -5281,6 +5297,11 @@ class Loop(OuterLoop):
         return entries
 
     # ── the memory pass (``LoopConfig.lessons``; `optim.memory`) ──────────────
+    def _stopped_inside(self, exc: BaseException) -> None:
+        """Journal a person's stop met inside a step (`RunStopped`), as the stop it is."""
+        self._journal("stopped_inside_step", epoch=self.epoch, why=str(exc))
+        self._progress("control", action="stop", inside_step=True)
+
     def _stop_requested(self) -> bool:
         """Whether a person has asked this run to stop (``refactory stop``), read from the
         control file without consuming the request (`_apply_control` acts on it)."""

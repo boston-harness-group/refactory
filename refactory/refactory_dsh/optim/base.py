@@ -14,6 +14,8 @@ be a description of the repair rather than of the idea.
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+
 import hashlib
 import json
 import re
@@ -279,6 +281,15 @@ def candidate_id(state: dict[str, Any]) -> str:
         {"graph": state.get("graph"), "knobs": state.get("knobs")}, sort_keys=True, default=str
     )
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
+
+
+class RunStopped(CancelledError):
+    """A person asked the run to stop (``refactory stop``) while an optimizer call waited
+    to try again (`random_optimizer.AutoresearchOptimizer._wait`). The search ends there
+    as a stop at an epoch boundary ends it (``OuterLoop.run``): the stop is the bound,
+    the report is written, and the open epoch's step is made again on resume."""
+
+    reason = "a person asked the run to stop"
 
 
 #: How many changes one proposal may bundle: SkillOpt's edit budget, so a coordinated

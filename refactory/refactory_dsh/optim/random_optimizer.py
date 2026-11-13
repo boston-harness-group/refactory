@@ -346,9 +346,12 @@ class AutoresearchOptimizer(Optimizer):
     def _wait(self, seconds: float) -> None:
         """A retry's wait, cut short by a stop: the client's own cancellation scopes
         (``DshModelClient.with_cancellation``) or the loop's ``stop_check`` (a person's
-        stop request), checked every ``STOP_POLL_S``; a stop raises ``CancelledError``, so
+        stop request), checked every ``STOP_POLL_S``: a person's stop raises ``RunStopped``
+        (the search then ends as a stop), a cancelled scope ``CancelledError``; either way
         the call is not attempted again. With neither, ``_sleep``."""
         from concurrent.futures import CancelledError
+
+        from .base import RunStopped
 
         events = tuple(getattr(self._client, "_cancellations", ()) or ())
         check = getattr(self, "stop_check", None)
@@ -357,8 +360,11 @@ class AutoresearchOptimizer(Optimizer):
             return
         left = float(seconds)
         while True:
-            if any(event.is_set() for event in events) or (callable(check) and check()):
-                raise CancelledError("the run was stopped during an optimizer call's retry "
+            if callable(check) and check():
+                raise RunStopped("a person asked the run to stop during an optimizer call's "
+                                 "retry wait; not attempted again")
+            if any(event.is_set() for event in events):
+                raise CancelledError("the optimizer call was cancelled during its retry "
                                      "wait; not attempted again")
             if left <= 0:
                 return
@@ -973,7 +979,9 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
     a prompt the answer proposes cannot end it); the answer is the object with a
     ``proposals`` list (`_is_answer`), as the answer format says, wherever it is (a
     fenced one too). Only when no such object parses is the reply read as a top-level
-    array of proposal objects: every one of them (`_top_array`), or refused whole. When
+    array of proposal objects: every one of its last such array (`_top_array`), or
+    refused whole; with such an array, no object inside or after it is ever read alone
+    as the answer. When
     the reply's object is broken, a fenced object is read only when it is a whole
     answer: an example edit fenced before a cut-off answer is not the answer, and
     neither is an example array. No JSON object at all raises ``ValueError``, as
@@ -1014,24 +1022,51 @@ def _is_answer(loaded: Any) -> bool:
     return isinstance(loaded, dict) and isinstance(loaded.get("proposals"), list)
 
 
+def _top_spans(text: str) -> list[tuple[str, int, int | None]]:
+    """The reply's top-level JSON spans, in order, none inside another: ``("array" |
+    "object", start, end)`` for each array of objects (`_ARRAY_START`) and each object
+    (`_JSON_START`) outside them; ``end`` is ``None`` for one never closed, the last."""
+    spans: list[tuple[str, int, int | None]] = []
+    at = 0
+    while True:
+        found = [m for m in (_ARRAY_START.search(text, at), _JSON_START.search(text, at)) if m]
+        if not found:
+            return spans
+        match = min(found, key=lambda m: m.start())
+        kind = "array" if text[match.start()] == "[" else "object"
+        end = _object_end(text, match.start(), *(("[", "]") if kind == "array" else ("{", "}")))
+        spans.append((kind, match.start(), end))
+        if end is None:
+            return spans
+        at = end + 1
+
+
 def _top_array(text: str) -> tuple[list[dict[str, Any]] | None, str]:
     """The proposals of a reply whose JSON is a top-level array of objects (``[{...},
-    {...}]``, bare or fenced): every entry, or none and why the array cannot be read
-    whole. ``(None, "")`` when the reply's JSON is not such an array: its first JSON
-    object is not inside one, or a JSON object follows the array (an example array
-    before an answer is an example)."""
-    start = _ARRAY_START.search(text)
-    first = _JSON_START.search(text)
-    if start is None or (first is not None and first.start() < start.start()):
+    {...}]``, bare or fenced): every entry of its LAST such array (a draft list before a
+    final one is a draft), or none and why it cannot be read. ``(None, "")`` when the
+    reply has no such array. A JSON object after the last array leaves the answer
+    unclear, so the reply is refused rather than read as that object, or as one entry of
+    the array (an object inside an array is never the answer here)."""
+    spans = _top_spans(text)
+    arrays = [span for span in spans if span[0] == "array"]
+    if not arrays:
         return None, ""
-    end = _object_end(text, start.start(), "[", "]")
+    _kind, start, end = arrays[-1]
     if end is None:
-        return None, (f"its top-level array opened at character {start.start() + 1} is never "
+        return None, (f"its top-level array opened at character {start + 1} is never "
                       f"closed (cut off? it ends: …{' '.join(text[-120:].split())})")
-    if _JSON_START.search(text, end + 1):
-        return None, ""
+    after = [span for span in spans if span[0] == "object" and span[1] > end]
+    if after:
+        _k, at, closed = after[0]
+        if closed is None:
+            return None, (f"its object opened at character {at + 1} is never closed (cut "
+                          f"off? it ends: …{' '.join(text[-120:].split())})")
+        return None, (f"a JSON object (at character {at + 1}) follows its top-level list of "
+                      "proposals, so which one is the answer is unclear; nothing was read. "
+                      'Write one object with a "proposals" list')
     try:
-        loaded = json.loads(text[start.start():end + 1])
+        loaded = json.loads(text[start:end + 1])
     except json.JSONDecodeError as exc:
         return None, (f"its top-level array is not valid JSON ({exc.msg} at line {exc.lineno} "
                       f"column {exc.colno})")

@@ -373,10 +373,12 @@ sections at once; this is the default loop's equivalent.
   after a broken answer, a fenced object is read only when it is a whole answer (a
   fenced example edit before a cut-off answer is not the answer). Only when no object
   with a `proposals` list parses anywhere in the reply is it read as a top-level array
-  of objects (`[{"...": ...}, ...]`, bare or fenced, a bracket then a brace then a key,
-  with no JSON object after it): that many proposals, every one; an array holding
-  anything else, or left open, is refused whole. Brackets in prose (`[{op, knob}]`) and
-  an example array before an answer are not such an array. Each proposal the request asked for is refused `E-proposal-shape`, saying
+  of objects (`[{"...": ...}, ...]`, bare or fenced, a bracket then a brace then a key):
+  its LAST such list (a draft list before a final one is a draft), every entry; a list
+  holding anything else, or left open, is refused whole, and so is a reply with a JSON
+  object after its last list (which is the answer is unclear). An object inside or after
+  such a list is never read alone as the answer. Brackets in prose (`[{op, knob}]`) and
+  an example list before an answer are not such a list. Each proposal the request asked for is refused `E-proposal-shape`, saying
   where the JSON broke, so the round asks again within its attempts and the refusals
   are counted.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
@@ -669,7 +671,12 @@ stop at once. A reply is never retried, however unusable; a call refused as long
 the model's context is not tried again at the same length but once at half of it, and
 not at all when the request cannot be made shorter. A retry's wait ends early on a stop
 (the client's cancellation scope, or a person's `refactory stop` request, checked every
-0.25 s): the call is then not attempted again and the stop raises. These attempts stack
+0.25 s), and the call is not attempted again. A person's stop then ends the search as a
+stop at an epoch boundary does: the stop is the run's bound (journaled, with
+`stopped_inside_step`), report.md is written, and the open epoch's step -- the memory
+pass, or the proposal round, which is not counted as a failed one -- is made again on
+resume. A cancelled client scope or a missing model choice ends the run with its error,
+after journaling it as the bound and writing the report. These attempts stack
 on the model client's own: a `DshModelClient` completion already makes up to 3 attempts
 on a transport failure (`model.DEFAULT_ATTEMPTS`), waiting up to 60 s in all between
 them (`RETRY_WINDOW_S`), so one analyst, merge, memory or step-review call may in the
@@ -933,8 +940,8 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
   next pass that writes one clears the mark. The call is retried as every optimizer call
   is. A spent budget, a cancelled run or a missing model choice is no answer about the
-  memory: no pass is recorded and the error stops the run (a spent budget as it stops a
-  proposal), so a resume makes the pass.
+  memory: no pass is recorded, so a resume makes the pass; a spent budget or a person's
+  stop ends the search as it does elsewhere, and the run's report is written either way.
 - **Records.** The call is traced (`optimizer_trace.jsonl`, kind `memory`) and cached
   in `<run root>/analyst_findings/` like an analyst call; each pass is journaled
   (`optimizer_memory`: the two candidates, whether they are one, the sample, the items

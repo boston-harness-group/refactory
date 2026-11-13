@@ -341,10 +341,13 @@ def changes_lines(lineage: Mapping[str, Any]) -> list[str]:
     if not before:
         return [f"The current candidate descends from the start-of-epoch one; the changes "
                 "since, oldest first:", *lines(after)]
+    if not after:
+        return ["The current candidate is an earlier version of the start-of-epoch one: "
+                "these changes, oldest first, made the start-of-epoch candidate from it, and "
+                "are not in the current one:", *lines(before)]
     return [f"They are on different branches from their common ancestor `{common}`. "
             "From it to the start-of-epoch candidate:", *lines(before),
-            "From it to the current candidate:", *(lines(after) or ["(none: it is the "
-                                                                   "common ancestor)"])]
+            "From it to the current candidate:", *lines(after)]
 
 
 def state_view(state: Mapping[str, Any]) -> Any:

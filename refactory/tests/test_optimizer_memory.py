@@ -703,6 +703,10 @@ def test_the_changes_shown_start_from_the_common_ancestor():
     down = "\n".join(memory.changes_lines({"common": "a", "prev": [], "curr": [
         {"id": "b", "parent": "a", "edits": ["EB"]}]}))
     assert "descends from the start-of-epoch one" in down and "EB" in down
+    back = "\n".join(memory.changes_lines({"common": "b", "prev": [
+        {"id": "a", "parent": "b", "edits": ["EA"]}], "curr": []}))
+    assert "is an earlier version of the start-of-epoch one" in back and "EA" in back
+    assert "different branches" not in back
     apart = "\n".join(memory.changes_lines({"common": None, "prev": [], "curr": []}))
     assert "share no ancestor" in apart
 
@@ -777,9 +781,121 @@ def test_a_cancelled_memory_call_records_no_pass_so_a_resume_makes_it(tmp_path, 
     assert [a["epoch"] for a in again.asked] == [2] and resumed._memory["text"] == "NOTE-2"
 
 
+def test_a_cancelled_model_client_ends_the_run_but_leaves_its_report(tmp_path, monkeypatch):
+    with pytest.raises(CancelledError):
+        _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)]],
+             proposer=_Cancelling([[(5, 7)], [(7, 8)]]))
+    root = next((tmp_path / "run").glob("**/journal.jsonl")).parent
+    assert (root / "report.md").exists()
+    bounds = [json.loads(line) for line in (root / "journal.jsonl").read_text().splitlines()
+              if '"event": "bound"' in line]
+    assert bounds and bounds[-1]["bound"].startswith("CancelledError: the run was stopped")
+
+
 def test_every_compared_item_is_headed_by_its_question():
     prev = [_rec("q1", True, metadata={"question": "Q-ONE?"})]
     curr = [_rec("q1", True, metadata={"question": "Q-ONE?"})]
     entries, _ = memory.pairs(prev, curr, ["q1"])
     text, _ = _built(entries)
     assert "#### Task q1: Q-ONE?" in text[text.index("### Stable successes"):]
+
+
+class _StopsInItsWait(Client):
+    """Every memory and analyst call fails, so its retry waits; a person has asked to stop."""
+
+    def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+        from test_analysts import ANALYST_SYSTEMS
+
+        if system in (memory.MEMORY_SYSTEM, *ANALYST_SYSTEMS):
+            self.calls.append((system, prompt))
+            raise RuntimeError("503 overloaded")
+        return super().complete(prompt, system=system, **kwargs)
+
+
+def _stopping_run(tmp_path: Path, monkeypatch: Any, client: Any, **overrides: Any) -> Any:
+    from refactory_dsh.loop import Loop
+    from test_analysts import _with_traces
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    _passes_by_level(monkeypatch)
+    _with_traces(monkeypatch)
+    monkeypatch.setattr(Loop, "_stop_requested", lambda self: True)
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, val_gate=True, **overrides)
+        loop.optimizer = AutoresearchOptimizer(client)
+        loop.run()  # a stop, not an exception
+    monkeypatch.undo()
+    return loop
+
+
+def _resume(tmp_path: Path, monkeypatch: Any, client: Any, **overrides: Any) -> Any:
+    from test_analysts import _with_traces
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    _passes_by_level(monkeypatch)
+    _with_traces(monkeypatch)
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, val_gate=True, resume=True, **overrides)
+        resumed.optimizer = AutoresearchOptimizer(client)
+        resumed.run()
+    return resumed
+
+
+def test_a_stop_during_the_memory_pass_wait_ends_as_a_stop_and_the_pass_is_redone(
+        tmp_path, monkeypatch):
+    from refactory_dsh.optim.random_optimizer import CALL_ATTEMPTS
+
+    client = _StopsInItsWait()
+    loop = _stopping_run(tmp_path, monkeypatch, client, epochs=3)
+    assert loop.bound == "a person asked the run to stop"
+    assert (loop.root / "report.md").exists()
+    assert len(client.memory_calls()) == 1 < CALL_ATTEMPTS, "not attempted again"
+    events = [json.loads(line)["event"] for line in
+              (loop.root / "journal.jsonl").read_text().splitlines()]
+    assert "stopped_inside_step" in events and "optimizer_memory" not in events
+    assert not loop.optimizer.proposal_failures
+    again = Client()
+    resumed = _resume(tmp_path, monkeypatch, again, epochs=3)
+    assert [p["epoch"] for p in resumed._memory_passes][:1] == [2], "the pass is made"
+    assert resumed._memory_passes[0]["updated"] is True
+
+
+def test_a_stop_during_an_analyst_wait_is_a_stop_and_the_round_is_redone(
+        tmp_path, monkeypatch):
+    from test_analysts import Client as Analysts
+
+    client = _StopsInItsWait()
+    loop = _stopping_run(tmp_path, monkeypatch, client, epochs=2, analysts=True,
+                         analyst_group_size=2)
+    assert loop.bound == "a person asked the run to stop"
+    assert not loop.optimizer.proposal_failures, "not an empty failed round"
+    assert (loop.root / "report.md").exists()
+    assert "could not propose" not in (loop.root / "report.md").read_text()
+    proposed = [p for s, p in client.calls if s not in (memory.MEMORY_SYSTEM,)
+                and p.startswith("# Update request")]
+    assert proposed == [], "the round never reached its proposal"
+    again = Analysts()
+    _resume(tmp_path, monkeypatch, again, epochs=2, analysts=True, analyst_group_size=2)
+    assert "# Update request — generation 0, epoch 1" in again.proposal().splitlines()[0] or any(
+        p.startswith("# Update request — generation 0, epoch 1") for s, p in again.calls), (
+        "the stopped round is made again on resume")
+
+
+@pytest.mark.parametrize("after", [' and in prose {"op": "set_knob"}', " {}"])
+def test_a_list_followed_by_an_object_is_refused_not_read_as_its_first_entry(after):
+    one, two = {"edit": {"op": "set_knob", "name": "a", "value": 1}}, {"op": "bypass", "target": "b"}
+    found, problem = answer_json(json.dumps([one, two]) + after)
+    assert found == {} and "follows its top-level list of proposals" in problem
+    optimizer = AutoresearchOptimizer(Client())
+    optimizer._client = type("C", (), {"complete": lambda self, p, **k: json.dumps([one, two])
+                                       + after})()
+    proposals = optimizer.propose(ProposalContext(), 2, [])
+    assert len(proposals) == 2 and all(
+        proposal_refusal(p)[0].startswith("E-proposal-shape: your whole answer") for p in proposals)
+
+
+def test_of_a_draft_list_and_a_final_list_the_final_one_is_read_whole():
+    draft = [{"edit": {"op": "set_knob", "name": "a", "value": 1}}]
+    final = [{"edit": {"op": "set_knob", "name": "a", "value": 2}}, {"op": "bypass", "target": "b"}]
+    text = "Draft:\n" + json.dumps(draft) + "\nOn reflection, final:\n" + json.dumps(final)
+    assert answer_json(text) == ({"proposals": final}, "")
