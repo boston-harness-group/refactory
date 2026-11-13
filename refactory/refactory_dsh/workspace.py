@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from refactory_dsh import git_exe
 from refactory_dsh.emitted_paths import unprintable_refusal
 from refactory_dsh.nn.graph import workspace_declaration
 
@@ -658,7 +659,7 @@ def sync_back(source: Path, workspace: Path) -> list[str]:
 # ── collect ───────────────────────────────────────────────────────────────────
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, timeout=300,
+    result = subprocess.run([git_exe.program(*args), "-C", str(repo), *args], capture_output=True, timeout=300,
                             env={**os.environ, "GIT_LITERAL_PATHSPECS": "0"})
     if result.returncode != 0:
         raise WorkspaceError(f"git {' '.join(args[:3])} failed in {repo}: "

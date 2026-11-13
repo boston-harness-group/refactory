@@ -12,6 +12,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from refactory_dsh import git_exe
+
 
 #: Given to every git command that changes a worktree so hooks do not run
 #: during the operation.  ``--no-verify`` stops only pre-commit and
@@ -28,7 +30,7 @@ def _git(repo: Path, *args: str) -> str:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            [git_exe.program(*args), "-C", str(repo), *args],
             capture_output=True, text=True, timeout=300,
         )
     except (OSError, subprocess.SubprocessError) as error:
@@ -50,7 +52,7 @@ def _config_value(
     when the key is unset (exit 1), and raises ``ValueError`` on any
     other failure — matching :func:`_git`'s error contract.
     """
-    cmd = ["git", "config", "--file", str(config_file)]
+    cmd = [git_exe.git(), "config", "--file", str(config_file)]
     if boolean:
         cmd.append("--type=bool")
     cmd += ["--get", key]

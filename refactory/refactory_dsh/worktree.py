@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from refactory_dsh import git_exe
 from refactory_dsh.paths import refactory_home, venv_bin
 from refactory_dsh.run_ownership import held
 
@@ -178,7 +179,7 @@ def slot(target: Path) -> Path:
 def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
     """What a git command prints in ``repo``; a failure is refused in git's own words."""
     try:
-        result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+        result = subprocess.run([git_exe.program(*args), "-C", str(repo), *args], capture_output=True, text=True,
                                 timeout=300, env={**(env or os.environ), "GIT_LITERAL_PATHSPECS": "1"})
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"git {' '.join(args)} could not run in {repo}: {error}") from error
@@ -701,7 +702,7 @@ def committed_text(found: Worktree, relative: Path, rev: str = "") -> str | None
     if not _committed_file(found, relative, rev):
         return None
     try:
-        result = subprocess.run(["git", "-C", found.path, "cat-file", "blob", f"{rev}:{relative.as_posix()}"],
+        result = subprocess.run([git_exe.git(), "-C", found.path, "cat-file", "blob", f"{rev}:{relative.as_posix()}"],
                                 capture_output=True, timeout=300,
                                 env={**os.environ, "GIT_LITERAL_PATHSPECS": "1"})
     except (OSError, subprocess.SubprocessError) as error:
