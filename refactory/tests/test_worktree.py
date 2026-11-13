@@ -2018,3 +2018,15 @@ def test_an_include_git_does_not_read_here_may_be_unreadable(repo, tmp_path):
         assert worktree._shared_snapshot(repo)["included"] == {str(tmp_path / "locked.inc"): "unreadable"}
     finally:
         (tmp_path / "locked.inc").chmod(0o600)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads any file")
+def test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder(repo, tmp_path):
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "locked" / "cfg").write_text("[alias]\n\tst = status\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "locked" / "cfg"))
+    (tmp_path / "locked").chmod(0)
+    try:
+        assert worktree._shared_snapshot(repo)["included"] == {str(tmp_path / "locked" / "cfg"): "missing"}
+    finally:
+        (tmp_path / "locked").chmod(0o700)

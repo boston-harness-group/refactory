@@ -1279,7 +1279,8 @@ def _config_lines(target: Path, file: Path) -> list[str]:
 
 
 #: What a record whose ``shared_reads`` is ``SHARED_READS`` was taken with; the keys
-#: ``_READ_LATER`` names were not read before it.
+#: ``_READ_LATER`` names were not read before it. A further read needs its own marker
+#: value and prefix here, or older records lose these reads for one step.
 SHARED_READS = ["config", "hooks", "config.worktree", "includes"]
 _READ_LATER = ("worktree:", "include:")
 
@@ -1307,7 +1308,7 @@ def _includes(target: Path, file: Path, found: dict[str, str]) -> None:
         name = str(path)
         if name in found:
             continue
-        if not path.is_file():
+        if not os.path.isfile(path):  # unlike Path.is_file, never raises on a locked folder
             found[name] = "missing"
             continue
         try:

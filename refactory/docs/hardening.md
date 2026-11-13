@@ -846,7 +846,8 @@ goes unseen. Held by
 `test_a_digest_only_record_takes_worktree_config_as_its_baseline`,
 `test_an_include_whose_condition_holds_an_equals_sign_is_followed`,
 `test_an_include_git_does_not_read_here_may_be_unparsable`,
-`test_an_include_git_does_not_read_here_may_be_unreadable`).
+`test_an_include_git_does_not_read_here_may_be_unreadable`,
+`test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder`).
 
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
