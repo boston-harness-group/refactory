@@ -3,7 +3,8 @@
 Each line is a JSON object with ``type`` (``model_call`` or ``decision``),
 ``timestamp``, ``epoch``, ``step_type``, and an optional ``call_key`` (the
 stable 4-tuple ``[step_type, epoch, group_index, call_order]`` that names the
-call site).
+call site). A ``model_call`` made by :func:`ask` also has ``attempt`` (from 1):
+an optimizer call is retried as SkillOpt retries it, one line per attempt.
 
 The call key is never sent to the model client: an optimizer call uses the
 client protocol the walker uses, ``complete(prompt, *, system=...)``, so any
@@ -80,6 +81,7 @@ class TraceRecorder:
         *,
         call_key: tuple[str, int, int, int] | list | None = None,
         error: str | None = None,
+        attempt: int | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": "model_call",
@@ -92,6 +94,8 @@ class TraceRecorder:
         }
         if call_key is not None:
             entry["call_key"] = list(call_key)
+        if attempt is not None:
+            entry["attempt"] = attempt
         if error is not None:
             entry["error"] = error
         self._write(entry)
@@ -125,6 +129,23 @@ def _fatal() -> tuple[type[BaseException], ...]:
     return (BudgetExhausted, CancelledError, ModelChoiceError)
 
 
+#: SkillOpt's attempts per optimizer call: every analyst, merge, rank, slow-update
+#: and meta-skill call asks with ``retries=3`` (reflect.py:359, :456;
+#: aggregate.py:50, :248; clip.py:77; slow_update.py:431; meta_skill.py:67), and
+#: its Claude backend makes that many attempts (claude_backend.py:314-324).
+OPTIMIZER_ATTEMPTS = 3
+
+
+def retry_delay(attempt: int) -> float:
+    """Seconds SkillOpt's Claude backend waits after failed attempt ``attempt``
+    (0-based): ``min(2 ** attempt, 15)`` (claude_backend.py:323), so 1, 2, 4."""
+    return min(2 ** attempt, 15)
+
+
+#: How :func:`ask` waits between attempts (tests replace it).
+_sleep = time.sleep
+
+
 def ask(
     client: Any,
     trace: TraceRecorder,
@@ -134,36 +155,52 @@ def ask(
     system: str,
     call_key: tuple[str, int, int, int],
 ) -> str | None:
-    """One optimizer call, recorded in the trace; ``None`` when the call fails.
+    """One optimizer call, retried as SkillOpt retries it, every attempt recorded
+    in the trace; ``None`` when every attempt fails.
 
-    SkillOpt catches every optimizer-call failure and carries on as if the
-    response were unusable: the analysts drop the group's patch
-    (reflect.py:383-384, :467-468), the merges fall back (aggregate.py:60-64,
-    :261-265), the ranking truncates (clip.py:101-102), and the slow update and
-    meta skill produce nothing (slow_update.py:440-441, meta_skill.py:76-77).
-    Every caller here parses ``None`` the same way it parses an unusable reply.
+    SkillOpt's Claude backend makes up to ``retries=3`` attempts
+    (:data:`OPTIMIZER_ATTEMPTS`): any exception from an attempt counts as a
+    failed attempt, it waits ``min(2 ** attempt, 15)`` seconds after each one --
+    the last included -- and then raises (claude_backend.py:314-324). A reply
+    is never retried, however unusable: parsing it is the caller's
+    (reflect.py:362, aggregate.py:53).
 
-    Budget exhaustion, cancellation and a missing model choice are re-raised
-    (:func:`_fatal`): they end the run rather than read as a bad reply. Every
-    call, and every failure, goes to the trace and to ``trace.listener`` (the
-    loop counts them into the run report's proposer health).
+    SkillOpt catches that final failure and carries on as if the response were
+    unusable: the analysts drop the group's patch (reflect.py:383-384,
+    :467-468), the merges fall back (aggregate.py:60-64, :261-265), the ranking
+    truncates (clip.py:101-102), and the slow update and meta skill produce
+    nothing (slow_update.py:440-441, meta_skill.py:76-77). Every caller here
+    parses ``None`` the same way it parses an unusable reply.
+
+    Budget exhaustion, cancellation and a missing model choice are re-raised at
+    once, never retried (:func:`_fatal`): they end the run rather than read as
+    a bad reply. Every attempt is its own ``client.complete`` (so its own paid
+    worker), and every attempt, and every failure, goes to the trace (with its
+    ``attempt`` number, from 1) and to ``trace.listener`` (the loop counts them
+    into the run report's proposer health).
 
     The client is called as the walker calls it, ``complete(user, system=...)``;
     ``call_key`` goes to the trace and to :func:`current_call_key` only.
     """
-    try:
-        with optimizer_call(call_key):
-            output = client.complete(user, system=system)
-    except _fatal() as exc:
-        error = f"{type(exc).__name__}: {exc}"
-        trace.record_model_call(step_type, system, user, None, call_key=call_key, error=error)
-        trace.count_call(error)
-        raise
-    except Exception as exc:  # noqa: BLE001 - SkillOpt's own handling, cited above
-        error = f"{type(exc).__name__}: {exc}"
-        trace.record_model_call(step_type, system, user, None, call_key=call_key, error=error)
-        trace.count_call(error)
-        return None
-    trace.record_model_call(step_type, system, user, output, call_key=call_key)
-    trace.count_call(None)
-    return output
+    for attempt in range(1, OPTIMIZER_ATTEMPTS + 1):
+        try:
+            with optimizer_call(call_key):
+                output = client.complete(user, system=system)
+        except _fatal() as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            trace.record_model_call(step_type, system, user, None, call_key=call_key,
+                                    error=error, attempt=attempt)
+            trace.count_call(error)
+            raise
+        except Exception as exc:  # noqa: BLE001 - SkillOpt's own handling, cited above
+            error = f"{type(exc).__name__}: {exc}"
+            trace.record_model_call(step_type, system, user, None, call_key=call_key,
+                                    error=error, attempt=attempt)
+            trace.count_call(error)
+            _sleep(retry_delay(attempt - 1))
+            continue
+        trace.record_model_call(step_type, system, user, output, call_key=call_key,
+                                attempt=attempt)
+        trace.count_call(None)
+        return output
+    return None
