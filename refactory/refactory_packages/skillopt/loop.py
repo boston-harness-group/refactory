@@ -42,6 +42,10 @@ Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
                 skills on the test part with the run seed (trainer.py:2241-2441),
                 reported as A's summary.json names them (trainer.py:2480-2515).
                 ``eval_test=false`` skips it, and the report says so.
+  - analyst_prompts = "task" (not a SkillOpt setting: "task" uses the mode package's
+                analyst_error/analyst_success overrides, as SkillOpt's env layer does;
+                "generic" sends SkillOpt's generic analyst prompts instead, a run without
+                per-task analyst guidance -- see ``env.py``)
   - knob = "skill"          (not a SkillOpt setting: the text knob it optimizes)
   - knobs = (knob,)         (not a SkillOpt setting: several open text knobs, as a
                              comma-separated list or a list, that SkillOpt sees as
@@ -62,7 +66,7 @@ from refactory_dsh.outerloop import (
 
 from refactory_packages.skillopt import state
 from refactory_packages.skillopt.claude_backend import ClaudeBackendFraming
-from refactory_packages.skillopt.env import SkillOptEnv
+from refactory_packages.skillopt.env import SkillOptEnv, check_analyst_prompts
 from refactory_packages.skillopt.proposer import (
     SkillOptProposer, only_noop, hard_score, knob_values,
 )
@@ -96,10 +100,10 @@ class SkillOptLoop(OuterLoop):
     #: The strategy options ``configure`` reads; any other is refused
     #: (``strategies.check_options``), so a misspelled one is not silently ignored.
     accepted_options = (
-        "analyst_edit_budget", "claude_backend_wrapper", "early_stop_at_full_val",
-        "early_stop_patience", "edit_budget_max", "edit_budget_min", "eval_test",
-        "group_size", "knob", "knobs", "max_epochs", "merge_batch_size", "patch_order",
-        "rollout_order", "seed", "slow_update_samples",
+        "analyst_edit_budget", "analyst_prompts", "claude_backend_wrapper",
+        "early_stop_at_full_val", "early_stop_patience", "edit_budget_max", "edit_budget_min",
+        "eval_test", "group_size", "knob", "knobs", "max_epochs", "merge_batch_size",
+        "patch_order", "rollout_order", "seed", "slow_update_samples",
     )
 
     # ── configure (overrides OuterLoop.configure) ─────────────────────────
@@ -183,6 +187,9 @@ class SkillOptLoop(OuterLoop):
                 f"skillopt: claude_backend_wrapper must be true or false, not {wrapper!r}"
             )
         self.claude_backend_wrapper = wrapper
+        # Which analyst prompts the analysts get: the mode package's own (SkillOpt's
+        # env override) or SkillOpt's generic ones (``env.SkillOptEnv``).
+        self.analyst_prompts = check_analyst_prompts(options.get("analyst_prompts", "task"))
         knob = options.get("knob", "skill")
         if not isinstance(knob, str) or not knob:
             raise TypeError(f"skillopt: knob must name a text knob, not {knob!r}")
@@ -288,7 +295,9 @@ class SkillOptLoop(OuterLoop):
         # SkillOpt's env is the adapter the run's env names (envs/base.py:288-296
         # derives it from the adapter's module path); here it is the package that
         # holds the run's mode -- its prompt overrides and rollout rendering.
-        self.proposer.env = SkillOptEnv.for_mode(str(run.state().get("mode", "")))
+        self.proposer.env = SkillOptEnv.for_mode(
+            str(run.state().get("mode", "")), analyst_prompts=self.analyst_prompts,
+        )
         # A run that cannot do what it was told is refused before it spends.
         self.proposer.check_knobs(run.seed().state)
         if self.eval_test and not run.has_part("test"):
@@ -599,11 +608,14 @@ class SkillOptLoop(OuterLoop):
 
         ``test_eval`` says whether the post-training evaluation ran (``done``), was
         ``skipped`` or stopped ``incomplete``, and ``test_eval_reason`` why not.
+        ``analyst_prompts`` says whose analyst prompts the run used (``task`` or
+        ``generic``).
         """
         result = self.final.result
         report: dict[str, Any] = {
             "best_selection_hard": self.gate.best_score if self.gate.best_id else None,
             "test_eval": result.get("status") or "not_run",
+            "analyst_prompts": self.analyst_prompts,
         }
         if result.get("reason"):
             report["test_eval_reason"] = result["reason"]

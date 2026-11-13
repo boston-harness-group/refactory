@@ -855,9 +855,11 @@ def test_config_mapping_covers_every_configure_option():
     # ``claude_backend_wrapper`` is the runner's --claude-backend-wrapper flag.
     # ``knob`` is the runner's SKILL_KNOB, the LiveMath knob A's skill lives in;
     # ``knobs`` stays unset: A optimizes that one skill document.
+    # ``analyst_prompts`` stays unset (``task``): A's LiveMath env sends its own
+    # analyst prompts, which the default reads from livemath/skillopt_prompts/.
     mapped = set(A_CONFIG_TO_STRATEGY_OPTION.values()) | set(A_CONFIG_OPTIONAL.values()) | {
         "analyst_edit_budget", "rollout_order", "patch_order", "claude_backend_wrapper", "knob",
-        "knobs",
+        "knobs", "analyst_prompts",
     }
     assert read == mapped, (
         f"configure reads {sorted(read)} but the replay drives {sorted(mapped)}"

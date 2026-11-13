@@ -57,4 +57,4 @@ clones = "refactory_dsh.clones:prepare"
 
 [tool.setuptools.package-data]
 refactory_dsh = ["*.mjs", "patches/*.yml", "data/*.json"]
-refactory_packages = ["*/skillopt_prompts/*.md"]
+refactory_packages = ["*/skillopt_prompts/*.md", "skillopt/generic_prompts/*.md"]

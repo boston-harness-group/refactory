@@ -26,6 +26,16 @@ way SkillOpt finds its env -- from where the code lives, not from a setting:
   the record generically.
 
 Nothing here names a package: LiveMath's overrides are LiveMath's files.
+
+**Generic analysts.** The ``analyst_prompts`` strategy option ``"generic"``
+skips the package's ``analyst_error``/``analyst_success`` overrides and sends
+SkillOpt's own generic analyst prompts (:data:`GENERIC_ANALYST_PROMPTS`), as
+SkillOpt does for an env with no override, so a run measures SkillOpt without
+per-task analyst guidance. Only those two are switched: they are what SkillOpt's
+env layer overrides for the optimizer's analysis (``envs/base.py:305-329``;
+LiveMath's ``envs/livemathematicianbench/prompts/`` overrides just them and the
+solver's ``rollout_system.md``). The solver side, the merge, ranking, slow
+update and meta skill prompts are unchanged.
 """
 
 from __future__ import annotations
@@ -59,6 +69,31 @@ GENERIC_PROMPTS: dict[str, str] = {
     "meta_skill": prompts.META_SKILL_SYSTEM,
 }
 
+#: The ``analyst_prompts`` strategy option's values: ``"task"`` reads the
+#: package's ``analyst_error``/``analyst_success`` overrides (SkillOpt's
+#: ``load_prompt(name, env)``); ``"generic"`` sends SkillOpt's generic texts.
+ANALYST_PROMPTS = ("task", "generic")
+
+#: SkillOpt's generic analyst prompts, copied byte for byte (trailing newline
+#: included, as ``load_prompt`` returns them) from microsoft/SkillOpt
+#: ``skillopt/prompts/analyst_error.md`` and ``skillopt/prompts/analyst_success.md``
+#: at commit 45f65ca04f5f6713bca7b9797b495696ba812751, into this package's
+#: ``generic_prompts/``. The user message already gives the budget they name
+#: ("Produce at most L=<n> edits.", ``prompts.format_analyst_user``), as
+#: ``reflect.py:369-373`` does with either prompt.
+GENERIC_ANALYST_DIR = Path(__file__).resolve().parent / "generic_prompts"
+GENERIC_ANALYST_PROMPTS = ("analyst_error", "analyst_success")
+
+
+def check_analyst_prompts(value: Any) -> str:
+    """``value`` when it is one of :data:`ANALYST_PROMPTS`; ``ValueError`` otherwise."""
+    if not isinstance(value, str) or value not in ANALYST_PROMPTS:
+        raise ValueError(
+            f"skillopt: analyst_prompts must be one of {list(ANALYST_PROMPTS)}, not {value!r}"
+        )
+    return value
+
+
 RolloutView = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
@@ -83,14 +118,15 @@ def _package_dir(package: str) -> Path | None:
 class SkillOptEnv:
     """One mode's package, as SkillOpt's environment adapter."""
 
-    def __init__(self, package: str = "") -> None:
+    def __init__(self, package: str = "", *, analyst_prompts: str = "task") -> None:
         self.package = package
+        self.analyst_prompts = check_analyst_prompts(analyst_prompts)
         self._dir = _package_dir(package)
         self._view: RolloutView | None = self._load_view()
 
     @classmethod
-    def for_mode(cls, mode_id: str) -> "SkillOptEnv":
-        return cls(package_of(mode_id))
+    def for_mode(cls, mode_id: str, *, analyst_prompts: str = "task") -> "SkillOptEnv":
+        return cls(package_of(mode_id), analyst_prompts=analyst_prompts)
 
     # -- prompts: skillopt/prompts/__init__.py:32-58 ------------------------
 
@@ -105,7 +141,12 @@ class SkillOptEnv:
         Mirrors ``load_prompt(name, env)``: the file is used as read, with no
         stripping. Raises ``KeyError`` when neither exists, as ``load_prompt``
         raises ``FileNotFoundError``.
+
+        With ``analyst_prompts="generic"`` the two analyst prompts are SkillOpt's
+        generic files (:data:`GENERIC_ANALYST_PROMPTS`) whatever the package holds.
         """
+        if self.analyst_prompts == "generic" and name in GENERIC_ANALYST_PROMPTS:
+            return (GENERIC_ANALYST_DIR / f"{name}.md").read_text(encoding="utf-8")
         path = self.override_path(name)
         if path is not None and path.is_file():
             return path.read_text(encoding="utf-8")
