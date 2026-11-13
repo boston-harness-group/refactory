@@ -140,6 +140,17 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         return "paused · waiting for a resume or a stop"
     if step == "control":
         return _control_line(record)
+    if step == "evaluation_interrupted":
+        # Shown without --verbose: the run stops here, and the reader must not take
+        # the candidate for a failed one.
+        causes = ", ".join(f"{cause} {count}" for cause, count
+                           in sorted((record.get("causes") or {}).items()))
+        return (
+            f"epoch {epoch} · candidate {record.get('candidate', '?')} · {record.get('part', '?')} "
+            f"evaluation interrupted ({record.get('interrupted', '?')}/{record.get('items', '?')} "
+            f"items died with the run's processes" + (f": {causes}" if causes else "")
+            + ") · not scored; resume the run to evaluate it again"
+        )
     if step == "proposal_failed":
         # Shown without --verbose: a round that never reached the model must not
         # read as one that proposed nothing.

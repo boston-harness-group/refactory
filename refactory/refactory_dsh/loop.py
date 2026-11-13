@@ -109,6 +109,19 @@ class LoopError(RuntimeError):
     """The run cannot proceed. Always names what is wrong with the mode."""
 
 
+class EvaluationInterrupted(LoopError):
+    """An evaluation whose items died with the run's own processes, not on their answers.
+
+    A failed item is the candidate's result only when it ran and failed. One whose
+    process was killed, whose wire to the model kept failing, or that the run's stop
+    cancelled has an unknown outcome (`items.interrupted_item`), so the evaluation is
+    no measurement: nothing of it is recorded as the candidate's score, records or
+    val result. It is journaled (``evaluation_interrupted``) and the run stops here,
+    as it would had its own process died; the candidate stays unevaluated, so
+    ``--resume`` evaluates it again from the start.
+    """
+
+
 
 def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
     """Which items each data node of a state would read.
@@ -1664,6 +1677,9 @@ class Loop(OuterLoop):
                 return False
         batch = self._minibatch(epoch)
         workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{epoch}"
+        # A re-score of this epoch that did not count (it failed, or the run died in
+        # it) left its passes here: kept in the archive, not overwritten.
+        self._archive_unfinished(parent.id, workdir)
         if batch:
             task_module.make_manifest(workdir, train_ids=batch)
         elif self._parts_manifest is not None and (self.root / task_module.MANIFEST).exists():
@@ -1680,6 +1696,7 @@ class Loop(OuterLoop):
             if reserved:
                 raise BudgetStopped(f"the re-score of {parent.id} was stopped before it ran")
             return False
+        self._raise_if_interrupted(parent, task_module.TRAIN, result, workdir, rescore_epoch=epoch)
         expected = len(batch) if batch else len(self._train_ids())
         scored = {str(record.get("id")) for record in result.item_records}
         if not (result.exit_ok and measurements.get("complete") and len(scored) >= expected):
@@ -1777,6 +1794,11 @@ class Loop(OuterLoop):
         """
         workdir = self.root / "runs" / candidate.id
         mode = self.mode_class(state=candidate.state)
+        if not candidate.evaluated:
+            # An earlier attempt that never finished (the run was killed or its
+            # evaluation interrupted, and this is the resume) left its passes and
+            # per-item receipts here; the evaluation starts clean, so keep them.
+            self._archive_unfinished(candidate.id, workdir, keep=("occasions",))
         # Copy the loop-level manifest so select_subset finds it.
         if self._parts_manifest is not None:
             workdir.mkdir(parents=True, exist_ok=True)
@@ -1793,6 +1815,7 @@ class Loop(OuterLoop):
         )
         if measurements.get("budget_stopped"):
             self._budget_stopped(candidate, task_module.TRAIN, result, measurements)
+        self._raise_if_interrupted(candidate, task_module.TRAIN, result, workdir)
         nodes = node_count(candidate.state)
         candidate.raw_score = result.score if result.exit_ok else None
         item_scores = [float(r["score"]) for r in result.item_records
@@ -1855,6 +1878,73 @@ class Loop(OuterLoop):
         raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} evaluation: {result.error}",
                             reason=self.bound or str(result.error or ""))
 
+    def _raise_if_interrupted(self, candidate: Candidate, part: str, result: Any, workdir: Path,
+                              *, rescore_epoch: int | None = None) -> None:
+        """Stop the run when ``candidate``'s ``part`` evaluation was interrupted rather
+        than measured (`EvaluationInterrupted`): any of its items, or the run itself,
+        failed because a process of the run died (`items.interrupted_item`).
+
+        Nothing of it is recorded as a result: no score, no records, no val occasion,
+        and its rollouts are not counted (the evaluation that replaces it counts its
+        own). It is journaled (``evaluation_interrupted``), with how many items died and
+        why, and shown. A model's own failure -- a timeout, a wrong or garbled answer,
+        an output limit -- is the candidate's result and is not stopped here."""
+        from collections import Counter
+
+        from refactory_dsh.items import interrupted_cause, interrupted_item
+
+        records = list(result.item_records or ())
+        causes = Counter(cause for cause in map(interrupted_item, records) if cause)
+        interrupted = sum(causes.values())
+        if not result.exit_ok and (cause := interrupted_cause(result.error)) and not causes:
+            causes[cause] += 1  # the run's own error, outside any item
+        if not causes:
+            return
+        fields = {
+            "part": part, "interrupted": interrupted, "items": len(records),
+            "causes": dict(causes), "error": result.error,
+            **({"rescore_epoch": rescore_epoch} if rescore_epoch is not None else {}),
+        }
+        with self._state_lock:
+            self._journal("evaluation_interrupted", id=candidate.id,
+                          workdir=str(workdir.relative_to(self.root)), **fields)
+        self._progress("evaluation_interrupted", candidate=candidate.id, **fields)
+        raise EvaluationInterrupted(
+            f"{candidate.id}'s {part} evaluation was interrupted: {interrupted} of "
+            f"{len(records)} item(s) died with the run's own processes "
+            f"({', '.join(f'{c} {n}' for c, n in sorted(causes.items()))}), so it is not a "
+            "result; resume the run (--resume) to evaluate it again")
+
+    def _archive_unfinished(self, candidate_id: str, workdir: Path, *,
+                            keep: tuple[str, ...] = ()) -> Path | None:
+        """Move what an evaluation that never finished left in ``workdir`` -- its
+        per-item passes and receipts -- to the run's archive
+        (``.refactory/archive/<UTC time>/<workdir relative to the run>``), so the
+        evaluation that replaces it starts clean and nothing of the earlier one is
+        deleted. ``keep`` names entries that are not the earlier attempt's (a
+        candidate's ``occasions``). Journaled (``evaluation_archived``); returns the
+        archive folder, or None when there was nothing to move."""
+        from datetime import datetime, timezone
+
+        from refactory_dsh.run_artifacts import archive_root
+
+        if not workdir.is_dir():
+            return None
+        leftovers = sorted(path for path in workdir.iterdir() if path.name not in keep)
+        if not leftovers:
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        relative = workdir.relative_to(self.root)
+        target = archive_root(self.root, "archive") / stamp / relative
+        target.mkdir(parents=True)
+        for path in leftovers:
+            path.rename(target / path.name)
+        with self._state_lock:
+            self._journal("evaluation_archived", id=candidate_id, workdir=str(relative),
+                          archive=str(target.relative_to(self.root)),
+                          entries=[path.name for path in leftovers])
+        return target
+
     def _evaluate_part(
         self, candidate: Candidate, part: str,
         items: list[str] | None, seed: int | None,
@@ -1887,6 +1977,8 @@ class Loop(OuterLoop):
             candidate, workdir, part, seed=seed, items=items,
             item_gate=item_gate, item_slots=item_slots, stop_event=stop_event,
         )
+        if not measurements.get("budget_stopped"):
+            self._raise_if_interrupted(candidate, part, result, workdir)
         # Score-only occasion record for optimizer-facing storage (no records,
         # no workdir).
         occasion_public = {
@@ -2078,17 +2170,24 @@ class Loop(OuterLoop):
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
         other_seed = entry.get("seed") != seed
+        # A cached item that died with its run's processes is no result to replay
+        # (`items.interrupted_item`): the part is measured here instead.
+        from refactory_dsh.items import interrupted_item
+        died = any(interrupted_item(record) for trial in trials
+                   for record in trial.get("item_records") or ())
         if (set(entry.get("items") or ()) != expected_ids or other_seed
-                or len(trials) != self.config.repeats):
+                or len(trials) != self.config.repeats or died):
             # The cache's own candidate on a part it covers, measured on other items
-            # (a train minibatch) or with another rollout seed: said once per part, so
-            # the run shows why the cache was not used.
+            # (a train minibatch), with another rollout seed, or with items that died:
+            # said once per part, so the run shows why the cache was not used.
             with self._state_lock:
                 if part not in self._seed_cache_missed and part not in self._seed_cache_used:
                     self._seed_cache_missed.add(part)
                     reason = ("other items" if set(entry.get("items") or ()) != expected_ids
                               else f"rollout seed {seed}, cached {entry.get('seed')}" if other_seed
-                              else f"{len(trials)} cached trial(s), {self.config.repeats} requested")
+                              else f"{len(trials)} cached trial(s), {self.config.repeats} requested"
+                              if len(trials) != self.config.repeats
+                              else "cached items died with their run's processes")
                     self._journal("seed_cache_miss", id=candidate.id, part=part, reason=reason,
                                   cached_items=len(entry.get("items") or ()), items=len(expected_ids))
             return None

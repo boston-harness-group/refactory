@@ -443,6 +443,53 @@ def make_item_record(
     }
 
 
+#: What a failed item's text says when the process running it, not its answer, failed:
+#: the item's outcome is unknown, so it is no evidence about the candidate. Each is the
+#: cause and how the text says it, on both runtimes (the walker's
+#: ``<node>: <Kind>: <message>``, the spine worker's stderr):
+#:
+#: - ``transport``: the wire kept failing through every attempt of the model client (a
+#:   proxy or provider outage, `model.CompletionFailed` of kind ``transport``);
+#: - ``killed``: the completion's own process was killed by a signal (a negative exit,
+#:   e.g. the host's out-of-memory killer), or the product worker under it was killed
+#:   (``signal: SIGKILL`` in the product failure's facts);
+#: - ``outcome unknown``: an op's child exited before it reported (`OpOutcomeUnknown`);
+#: - ``stopped``: the completion was cancelled because the run was stopping.
+#:
+#: A model timeout, a wrong or empty answer, an output limit and a product's own failure
+#: are none of these: they are the candidate's failed answers.
+INTERRUPTED_MARKERS: tuple[tuple[str, str], ...] = (
+    ("transport", r"model completion failed on the wire"),
+    ("killed", r"model completion failed \(exit -\d+\)"),
+    ("killed", r"Product subagent failure \([^)]*\bsignal: SIGKILL\b"),
+    ("outcome unknown", r"child exited before reporting its outcome"),
+    ("stopped", r"model completion cancelled"),
+)
+
+
+def interrupted_cause(text: str | None) -> str | None:
+    """Why ``text`` (a failed item's or run's error) is an interruption, or None
+    (`INTERRUPTED_MARKERS`)."""
+    import re
+
+    if not text:
+        return None
+    return next((cause for cause, pattern in INTERRUPTED_MARKERS if re.search(pattern, str(text))),
+                None)
+
+
+def interrupted_item(record: dict[str, Any]) -> str | None:
+    """Why an item record's outcome is unknown, or None when it is the item's own result.
+
+    Read from its error, and from the error of each step it went on without (a step
+    whose retries were spent: a killed session is retried as a crash, so its item
+    reaches the record as "no answer" with the kill in ``missing_steps``)."""
+    texts = [record.get("error_text")]
+    texts += [info.get("error") for info in (record.get("missing_steps") or {}).values()
+              if isinstance(info, dict)]
+    return next((cause for cause in map(interrupted_cause, texts) if cause), None)
+
+
 def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
     """The steps a pass went on without, each with why: ``cause`` (``output_limit``,
     ``crash``, ``timeout``; ``failed`` for an optional branch), ``sessions`` (how many ran,

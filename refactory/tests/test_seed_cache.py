@@ -461,3 +461,28 @@ def test_an_ungated_run_measures_train_rather_than_reuse_a_gated_export(tmp_path
     misses = _events(root, "seed_cache_miss")
     assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 3, cached 1004")]
     assert "train" not in {h["part"] for h in _events(root, "seed_cache_hit")}
+
+
+def test_a_cached_part_with_items_that_died_is_measured(tmp_path):
+    """A cached train part one of whose items died with its run's processes (its model
+    calls kept failing on the wire) is no result to replay: train is measured here and
+    the miss says why; val is still served."""
+    with _patch_mode(PartsProbe):
+        path = _source_run(tmp_path)
+        cache = json.loads(path.read_text())
+        entry = cache["parts"]["train"]
+        records = (entry.get("trials") or [entry["result"]])[0]["item_records"]
+        records[0].update(passed=False, score=0.0, error_kind="RuntimeError",
+                          error_text="work: CompletionFailed: model completion failed on the "
+                                     "wire 3 time(s); last cause: dsh: TRANSPORT: fetch failed")
+        path.write_text(json.dumps(cache))
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(path))
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed)
+        Run(_loop=loop).evaluate(seed, part="val")
+        assert seed.raw_score == 1.0 and loop.rollouts == len(PARTS["train"])
+        misses = _events(tmp_path / "reuse", "seed_cache_miss")
+        assert [(m["part"], m["reason"]) for m in misses] == [
+            ("train", "cached items died with their run's processes")]
+        assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["val"]
