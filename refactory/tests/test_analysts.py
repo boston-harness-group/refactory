@@ -1211,3 +1211,51 @@ def test_context_retries_are_reported():
     assert report["context_retries"] == 2
     assert ("2 call(s) were too long for the model's context and retried once at half "
             "the length" in "\n".join(_analysts_section(report)))
+
+
+# ── the findings are shown whole ───────────────────────────────────────────
+
+
+LONG_CHANGE = "Rewrite the decide prompt:\n## Rules\n- line one\n- line two\n" + "c" * 1400
+#: The D-run shape: a finding and its change past the old 600-character cut, six quotes,
+#: a structure note past the old 200, and both a change and what to keep.
+FULL = {"source": "failure", "finding": "F" * 900, "change": LONG_CHANGE, "preserve": "KEEP-TOO",
+        "where": {"nodes": ["final"], "structure": "S" * 400}, "items": ["f0"],
+        "evidence": [f"QUOTE-{k} " + "q" * 300 for k in range(6)]}
+
+
+def test_a_finding_is_shown_whole_with_its_line_breaks_quotes_and_both_actions():
+    section = "\n".join(analysts.section_lines({"findings": [FULL], "batches": []}))
+    assert "F" * 900 in section and LONG_CHANGE in section, "no 600-character cut"
+    assert "## Rules\n- line one\n- line two\n" in section, "the change keeps its layout"
+    assert "S" * 400 in section
+    assert all(f"QUOTE-{k} " + "q" * 300 in section for k in range(6)), "every quote, whole"
+    assert f"-- change: {LONG_CHANGE} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
+    success = {**FULL, "source": "success"}
+    assert "-- keep: KEEP-TOO -- change: " in analysts.finding_line(1, success)
+    assert "[cut:" not in section
+
+
+def test_findings_past_the_sections_room_are_cut_to_fit_and_each_cut_is_said():
+    many = [{**FULL, "finding": f"FINDING-{k} " + "F" * 5000} for k in range(analysts.SHOWN_FINDINGS)]
+    lines = analysts.section_lines({"findings": many, "batches": []})
+    shown = [line for line in lines if __import__("re").match(r"\d+\. \[", line)]
+    assert len(shown) == analysts.SHOWN_FINDINGS, "every finding is still shown"
+    assert len("\n".join(lines)) <= analysts.SECTION_CHARS
+    assert all("FINDING-" in line and "… [cut: " in line for line in shown)
+    assert "more finding(s) not shown" not in "\n".join(lines)
+
+
+def test_the_op_catalogue_reaches_the_analysts_whole():
+    long = "Split a step into two steps " + "d" * 300 + " END."
+    ctx = replace(_ctx([_rec("f0", False)]), catalogue=[{"op": "split", "description": long}])
+    assert f"- `split`: {long}" in analysts._changes_text(ctx)
+
+
+def test_an_errored_items_error_is_said_once():
+    error = "compare: CompletionTimeout: model completion timed out after 1798s"
+    record = {**_rec("f0", False, error=error), "fail_reason": error}
+    text = analysts.item_text(record)
+    assert text.count(error) == 1 and f"Error: {error}" in text and "Grader:" not in text
+    other = analysts.item_text({**_rec("f1", False, error=error)})
+    assert "Grader: GRADER f1" in other and f"Error: {error}" in other

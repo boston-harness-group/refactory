@@ -1018,3 +1018,62 @@ def test_the_skillopt_matched_default_leaderboard_is_unchanged(tmp_path):
     board = [(c.id, round(c.score or 0.0, 6)) for c in loop.leaderboard()]
     print("LEADERBOARD", json.dumps(board))
     assert board == DEFAULT_LEADERBOARD
+
+
+# ── a broken answer is asked again, never read in part ─────────────────────
+
+
+class BreaksFirst(ComboModel):
+    """Answers the run's first proposal request as D-s42's epoch-5 answer was written:
+    the proposals as the script made them, every one written with an ``edits`` list,
+    the first one's list never closed (so only its first edit parses on its own)."""
+
+    def for_node(self, node_id: str, role: str | None = None) -> "BreaksFirst":
+        view = super().for_node(node_id, role)
+        view.__class__ = BreaksFirst
+        return view  # type: ignore[return-value]
+
+    def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+        root = getattr(self, "_root", self)
+        text = super().complete(prompt, system=system, **kwargs)
+        if not prompt.startswith("# Update request") or len(root.requests) != 1:
+            return text
+        proposals = [{"edits": p.get("edits") or [p["edit"]],
+                      **{k: v for k, v in p.items() if k not in ("edit", "edits")}}
+                     for p in json.loads(text)["proposals"]]
+        first, edits = json.dumps(proposals[0]), json.dumps(proposals[0]["edits"])
+        broken = first.replace(edits, edits[:-1], 1)
+        return ('{"diagnosis": "BROKEN-DIAGNOSIS", "proposals": ['
+                + ", ".join([broken, *(json.dumps(p) for p in proposals[1:])]) + "]}")
+
+
+@pytest.mark.parametrize("settings,asked", [
+    ({"portfolio": "prompt+pipeline", "batch_size": 1}, 2),
+    ({"batch_size": 1}, 1),
+])
+def test_a_broken_answer_is_asked_again_in_its_round_and_counted(tmp_path, settings, asked):
+    """Before: the first edit of the first proposal was read as the whole answer, the
+    other proposal dropped, nothing counted. Now nothing of it is read: one refusal per
+    proposal asked for (``E-proposal-shape``, with where the JSON broke), journaled and
+    reported, and the same round asks again with why, for the same candidates."""
+    model = BreaksFirst(portfolio if settings.get("portfolio") else fixer)
+    loop = _run("default", tmp_path, model, val_gate=True, epochs=2, **settings)
+    assert model.requests[0].wanted == asked
+    again = model.requests[1]
+    assert again.wanted == asked, "the re-ask is for every candidate the broken answer held"
+    assert "your whole answer was not valid JSON (Expecting ',' delimiter" in again.text
+    if settings.get("portfolio"):
+        assert again.levels == ["prompt_knob", "pipeline"]
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    refused = [e for e in events if e.get("event") == "rejection"
+               and any("E-proposal-shape" in reason for reason in e["reasons"])]
+    assert len(refused) == asked
+    trace = [json.loads(line) for line in (loop.root / "optimizer_trace.jsonl").read_text().splitlines()
+             if '"kind": "proposal"' in line]
+    assert (trace[0]["unreadable"], trace[0]["proposals"]) == (asked, 0)
+    assert "E-proposal-shape" in (loop.root / "report.md").read_text()
+    first_round = [c for c in _children(loop) if loop.proposals[c.id].get("epoch") == 1]
+    assert len(first_round) == asked, "the round still made every candidate it asked for"
+    if settings.get("portfolio"):
+        assert {loop.proposals[c.id]["level"] for c in first_round} == {"prompt_knob", "pipeline"}
+    assert all(loop.proposals[c.id].get("diagnosis") != "BROKEN-DIAGNOSIS" for c in first_round)

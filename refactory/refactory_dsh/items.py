@@ -328,6 +328,71 @@ def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> Non
     path.write_text(json.dumps(existing, default=str))
 
 
+#: The kinds of step visit an item's record keeps beside its model calls (``steps``):
+#: an op's output and a code gate's verdict, which no exchange records.
+STEP_KINDS = ("op", "gate")
+#: How much of an op's output or a gate's reason a step visit keeps to show.
+STEP_PREVIEW_CHARS = 600
+
+
+def _blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, dict, set)):
+        return all(_blank(v) for v in (value.values() if isinstance(value, dict) else value))
+    return False
+
+
+def op_visit(workdir: Path, node: str, produced: Any, writes: Iterable[str] = ()) -> dict[str, Any]:
+    """One op visit of an item's pass, as its record's ``steps`` keep it: the facts it
+    returned and the declared files it wrote, as a short preview, a digest of the whole
+    (two visits gave the same output when their digests match) and whether all of it was
+    empty (``empty``: the op said nothing on this item)."""
+    import hashlib
+
+    facts = dict(produced) if isinstance(produced, dict) else {}
+    files: dict[str, str] = {}
+    for name in writes:
+        try:
+            files[str(name)] = (Path(workdir) / str(name)).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+    whole = json.dumps({"facts": facts, "files": files}, sort_keys=True, default=str)
+    shown = "; ".join([*(f"{k}={json.dumps(v, default=str)}" for k, v in sorted(facts.items())),
+                       *(f"{k}: {v}" for k, v in sorted(files.items()))])
+    shown = " ".join(shown.split())
+    if len(shown) > STEP_PREVIEW_CHARS:
+        shown = shown[:STEP_PREVIEW_CHARS] + f"… [cut: {len(shown) - STEP_PREVIEW_CHARS} chars]"
+    return {"node": node, "kind": "op", "output": shown,
+            "digest": hashlib.sha256(whole.encode()).hexdigest()[:16],
+            "empty": _blank(facts) and _blank(files)}
+
+
+def gate_visit(node: str, verdict: Any) -> dict[str, Any]:
+    """One code-gate visit of an item's pass: the verdict it answered and its reason."""
+    reason = " ".join(str(getattr(verdict, "reason", "") or "").split())
+    return {"node": node, "kind": "gate", "verdict": str(verdict).strip(),
+            "reason": reason[:STEP_PREVIEW_CHARS]}
+
+
+def record_visit(workdir: Path, visit: dict[str, Any]) -> None:
+    """Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
+    beside the model calls; `make_item_record` files it under ``steps``. The spine's
+    runner calls it inside a data-node pass (the walker keeps visits in memory)."""
+    path = workdir / EXCHANGES_SIDECAR
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+    existing.append(visit)
+    path.write_text(json.dumps(existing, default=str))
+
+
 def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
     """Read per-item exchanges from the sidecar, then remove the file."""
     path = workdir / EXCHANGES_SIDECAR
@@ -392,7 +457,9 @@ def make_item_record(
     One record per item, same shape on both runtimes.  Extends F4's existing
     error_kind convention (exception class name or ``"timeout"``).  The
     ``exchanges`` list carries one ``{node, prompt, response}`` dict per agent
-    call in the item's pass, so a multi-node pass records every model call.
+    call in the item's pass, so a multi-node pass records every model call. Op and
+    code-gate visits handed in the same list (``kind`` ``op``/``gate``: `op_visit`,
+    `gate_visit`) go under ``steps`` instead, in run order; no visits, no ``steps``.
 
     **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``.
     **Failure path** (error is not None): ``{"id", "passed": False, "score": 0.0,
@@ -400,8 +467,13 @@ def make_item_record(
     **No-verdict path** (error is None, verdict is None): ``None`` — the Task chose
     not to grade this item.
     """
+    # Op and gate visits travel with the model calls (one sidecar, one in-memory list,
+    # in run order) and are kept apart here: ``exchanges`` stays one entry per model call.
+    calls = [e for e in exchanges or () if not (isinstance(e, dict) and e.get("kind") in STEP_KINDS)]
+    visits = [e for e in exchanges or () if isinstance(e, dict) and e.get("kind") in STEP_KINDS]
     base: dict[str, Any] = {
-        "exchanges": list(exchanges or []),
+        "exchanges": calls,
+        **({"steps": visits} if visits else {}),
         "prediction": prediction,
         "label": label,
         "label_text": label_text,

@@ -85,6 +85,15 @@ class PickedParent(Optimizer):
             self.proposer.last_lessons = value
 
     @property
+    def last_reply_problem(self) -> str:
+        return str(getattr(self.proposer, "last_reply_problem", "") or "")
+
+    @last_reply_problem.setter
+    def last_reply_problem(self, value: str) -> None:
+        if "proposer" in self.__dict__ and hasattr(self.proposer, "last_reply_problem"):
+            self.proposer.last_reply_problem = value
+
+    @property
     def last_analysis(self) -> dict[str, Any] | None:
         return getattr(self.proposer, "last_analysis", None)
 

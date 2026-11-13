@@ -102,14 +102,31 @@ def _spine_records_via_command_end(mode, state, workdir):
     }}
     (workdir / "declarations.json").write_text(json.dumps(decl))
 
+    # The whole graph's declarations, as the spine writes them: the body op's runner
+    # reads its own (its declared writes are part of the visit it keeps).
+    from refactory_dsh import lowering
+
+    lowering.write_declarations({"graph": graph.to_state()}, workdir)
+
     items = load_items(data_node, workdir)
     records = []
     for i, item in enumerate(items):
-        command_begin(data_node, workdir, i)
+        begun = command_begin(data_node, workdir, i)
+        _run_body_op(Path(begun["pass_dir"]))
         record = command_end(data_node, workdir, i)
         if record:
             records.append(record)
     return records
+
+
+def _run_body_op(pass_dir: Path) -> None:
+    """The body op through the runner, in the item's pass, as the spine runs it."""
+    from unittest import mock
+
+    import refactory_dsh.run
+
+    with mock.patch.object(refactory_dsh.run, "install_workspace_packages", lambda: None):
+        refactory_dsh.run.run_node("loop_ops:record_item", workdir=pass_dir, node_id="work")
 
 
 def test_records_equivalence(tmp_path):
@@ -137,7 +154,7 @@ def test_records_equivalence(tmp_path):
     assert len(spine_records) == 3, f"spine: expected 3 records, got {len(spine_records)}"
 
     # Both must have the same record keys.
-    expected_keys = {"id", "passed", "score", "exchanges", "prediction", "label",
+    expected_keys = {"id", "passed", "score", "exchanges", "steps", "prediction", "label",
                      "label_text", "fail_reason", "error_kind", "error_text", "metadata"}
     for record in walker_result.item_records:
         assert set(record.keys()) == expected_keys, f"walker unexpected keys: {set(record.keys())}"
@@ -161,6 +178,7 @@ def test_records_equivalence(tmp_path):
         assert w["error_kind"] == s["error_kind"], f"{item_id}: error_kind differs"
         assert w["fail_reason"] == s["fail_reason"], f"{item_id}: fail_reason differs"
         assert w["prediction"] == s["prediction"], f"{item_id}: prediction differs"
+        assert w["steps"] == s["steps"], f"{item_id}: the body op's visit differs"
         # Exchanges: both should be lists; for this graph (no agent nodes), both empty.
         assert isinstance(w["exchanges"], list), f"{item_id}: walker exchanges not a list"
         assert isinstance(s["exchanges"], list), f"{item_id}: spine exchanges not a list"
@@ -633,8 +651,9 @@ def test_both_runtimes_full_records(tmp_path):
         expected_keys = {"id", "passed", "score", "exchanges", "prediction", "label",
                          "label_text", "fail_reason", "error_kind", "error_text", "metadata"}
 
+        # ``steps`` (the op's visit) only where the op ran to the end: not error_item.
         for record in walker_result.item_records:
-            assert set(record.keys()) == expected_keys, (
+            assert set(record.keys()) - {"steps"} == expected_keys, (
                 f"walker {record['id']} unexpected keys: {set(record.keys())}"
             )
 
@@ -673,6 +692,10 @@ def test_both_runtimes_full_records(tmp_path):
             assert w["error_kind"] == s["error_kind"], f"{item_id}: error_kind differs"
             assert isinstance(w["exchanges"], list), f"{item_id}: walker exchanges not a list"
             assert isinstance(s["exchanges"], list), f"{item_id}: spine exchanges not a list"
+            # Each op visit the same on both runtimes (the spine's runner, the walker).
+            assert w.get("steps") == s.get("steps"), (
+                f"{item_id}: op visits differ: walker={w.get('steps')}, spine={s.get('steps')}"
+            )
             # Exchange counts should match (one per completed agent call).
             assert len(w["exchanges"]) == len(s["exchanges"]), (
                 f"{item_id}: exchange count differs: walker={len(w['exchanges'])}, spine={len(s['exchanges'])}"
