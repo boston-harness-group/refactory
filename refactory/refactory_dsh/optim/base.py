@@ -428,8 +428,8 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
                 'as {"edit": {"op": ...}} or {"edits": [{"op": ...}, ...]}, with '
                 "rationale, prediction and confidence beside it"]
     if max_edits is not None and len(steps) > max(1, int(max_edits)):
-        return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and this run "
-                f"allows at most {max(1, int(max_edits))} per proposal; split it, or "
+        return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and the limit "
+                f"is {max(1, int(max_edits))} edits per proposal; split it, or "
                 "keep the edits the fix needs together"]
     for index, step in enumerate(steps):
         if not isinstance(step, dict):

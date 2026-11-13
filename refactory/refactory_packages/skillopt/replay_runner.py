@@ -546,7 +546,7 @@ def run_replay(
         split_dir = Path(split_dir)
         report["split_dir"] = str(split_dir)
 
-        # The parts manifest is the only item channel: #558's --parts format,
+        # The parts manifest is the only item channel: #558's parts_manifest format,
         # built from A's own split so B evaluates A's 35/17/125.
         parts_path = build_parts_manifest(split_dir, output_dir)
 

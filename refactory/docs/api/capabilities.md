@@ -5859,227 +5859,6 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 }
 ```
 
-## cli:grid
-
-Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.
-
-Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
-
-```json
-{
-  "description": "run a structure-ablation grid over the LiveMath solver blocks",
-  "doc": "refactory/docs/cli.md",
-  "examples": [
-    {
-      "arguments": {
-        "parts": "parts.json"
-      },
-      "explanation": "Run a structure-ablation grid over solver blocks using the existing testeval evaluation path. Evaluates each named block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same items with the same choice shuffling. Route flags are forwarded to the evaluator."
-    }
-  ],
-  "interfaces": {
-    "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
-    "cli": "refactory grid --parts <parts.json> [--skill <path>] [--blocks ...] [--seed N] [--part val|test] [route flags]",
-    "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
-  },
-  "parameters": {
-    "blocks": {
-      "default": null,
-      "description": "which blocks (default: all)",
-      "flags": [
-        "--blocks"
-      ],
-      "nargs": "+",
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "claude_executable": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--claude-executable"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "data_parallelism": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--data-parallelism"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "data_path": {
-      "default": "",
-      "description": "override LIVEMATH_DATA_PATH",
-      "flags": [
-        "--data-path"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "effort": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--effort"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "evaluator": {
-      "default": null,
-      "description": "which evaluator: walker (default) or dsh (spine)",
-      "flags": [
-        "--evaluator"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "max_completion_tokens": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-completion-tokens"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "model": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--model"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "output": {
-      "default": "grid_results.json",
-      "description": "",
-      "flags": [
-        "--output"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "part": {
-      "default": "val",
-      "description": "",
-      "enum": [
-        "val",
-        "test"
-      ],
-      "flags": [
-        "--part"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "parts": {
-      "default": null,
-      "description": "path to parts.json manifest",
-      "flags": [
-        "--parts"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": true,
-      "type": "string"
-    },
-    "permission_mode": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--permission-mode"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "provider": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--provider"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "seed": {
-      "default": 42,
-      "description": "",
-      "flags": [
-        "--seed"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "setting_sources": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--setting-sources"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "skill": {
-      "default": "",
-      "description": "path to a skill file",
-      "flags": [
-        "--skill"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "worker_backend": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--worker-backend"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    }
-  },
-  "purpose": "Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.",
-  "reviewed_schema": "68ea34fb2dec797878e1e15d9f7840656b7121f530fe55ccf36e7e6bb0c587f0"
-}
-```
-
 ## cli:list
 
 List installed modes or packages in the terminal; JSON preserves the same catalogue consumed by chat and panel.
@@ -6188,7 +5967,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -6263,10 +6042,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "arguments": {
         "max_evaluations": 2,
         "mode": "counting_pack/fixed_step",
-        "omit_steering": true,
-        "optimizer": "random"
+        "optimizer": "random",
+        "profile": "small-search"
       },
-      "explanation": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. Set omit_steering to exclude steering from candidate model prompts without disabling correction gates or audits."
+      "explanation": "Search a scored mode through the terminal: the short list of flags (seed, epochs, batch size, evaluation cap, optimizer, preset, evaluator, strategy and its options, knobs, intent, seed results, items in flight, model route) overrides a saved profile, which holds every other setting; resume retains the saved run identity."
     }
   ],
   "interfaces": {
@@ -6275,100 +6054,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "panel": "Unavailable as a dedicated panel control; use the documented CLI or chat route."
   },
   "parameters": {
-    "allow_code_nodes": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--allow-code-nodes"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "allow_new_node_tools": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--allow-new-node-tools"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "allowed_ops": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--allowed-ops"
-      ],
-      "items": {
-        "type": "string"
-      },
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "array"
-    },
-    "analyst_group_size": {
-      "default": null,
-      "description": "with --analysts 1: train items per analyst call (default: 8, SkillOpt's)",
-      "flags": [
-        "--analyst-group-size"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "analyst_max_batches": {
-      "default": null,
-      "description": "with --analysts 1: the most analyst calls per round, failure batches first (default: 0, no limit, as SkillOpt)",
-      "flags": [
-        "--analyst-max-batches"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "analyst_merge_batch_size": {
-      "default": null,
-      "description": "with --analysts 1: finding lists per merge call (default: 8, SkillOpt's; at least 2)",
-      "flags": [
-        "--analyst-merge-batch-size"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "analysts": {
-      "default": null,
-      "description": "1 runs SkillOpt's per-round analysis before each model proposal: failure and success analysts over the edited candidate's train items in full, one optimizer-model call per batch, merged into one ranked list of findings that replaces the readers' summaries (default: 0, off)",
-      "flags": [
-        "--analysts"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "attempts": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--attempts"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "batch_size": {
       "default": null,
-      "description": "",
+      "description": "candidates proposed per epoch (default: 4)",
       "flags": [
         "--batch-size"
       ],
@@ -6377,53 +6065,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
-    "claude_executable": {
-      "default": null,
-      "description": "claude_code workers only: the Claude Code executable they run, an absolute path (default: the one bundled with the Agent SDK)",
-      "flags": [
-        "--claude-executable"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "dsh_timeout_s": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--dsh-timeout-s"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "early_stop_at_full_val": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--early-stop-at-full-val"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "early_stop_patience": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--early-stop-patience"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "edit_preset": {
       "default": null,
-      "description": "",
+      "description": "which edits are allowed: broad, structure, conservative or knob_only (default: broad)",
       "flags": [
         "--preset"
       ],
@@ -6434,7 +6078,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "effort": {
       "default": null,
-      "description": "",
+      "description": "the workers' reasoning effort (default: the backend's)",
       "flags": [
         "--effort"
       ],
@@ -6443,20 +6087,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "elite": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--elite"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "epochs": {
       "default": null,
-      "description": "",
+      "description": "rounds of propose, validate, evaluate, select (default: 2)",
       "flags": [
         "--epochs"
       ],
@@ -6467,7 +6100,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "evaluator": {
       "default": null,
-      "description": "",
+      "description": "which runtime scores a candidate: walker (fast) or dsh (the spine) (default: walker)",
       "flags": [
         "--evaluator"
       ],
@@ -6476,56 +6109,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "frozen": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--frozen"
-      ],
-      "items": {
-        "type": "string"
-      },
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "array"
-    },
-    "history_limit": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--history-limit"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "holdout": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--holdout"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "number"
-    },
-    "integrity_judge": {
-      "default": null,
-      "description": "off (default), on, flag or a JSON object: one optimizer-model call per proposal asks whether its benefit depends on how the data, grader or environment happen to be built. on (or veto): an exploit or suspect verdict about what the change adds is refused before evaluation (E-integrity) in every category by default (an inherited finding, a judge error or a salvaged reply never is); flag (or warn): verdicts are only shown. '{\"mode\": \"on\", \"policy\": {\"answer_leak\": \"off\", \"train_overfit\": \"warn\"}}' sets categories one by one (off, warn, veto); a bare value covers every category the object does not name and overrides a Task's integrity_policy; a Task's integrity_allowances still turn their categories off",
-      "flags": [
-        "--integrity-judge"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
     "intent": {
       "default": null,
-      "description": "",
+      "description": "what the run is for, in your words; seeds the ledger the agents read",
       "flags": [
         "--intent"
       ],
@@ -6536,7 +6122,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "knob": {
       "default": null,
-      "description": "",
+      "description": "a starting value for one of the mode's knobs; may be repeated, and adds to a profile's knobs",
       "flags": [
         "--knob"
       ],
@@ -6548,42 +6134,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
-    "lessons": {
-      "default": null,
-      "description": "1 (default) lets the model proposer write lessons that are kept, survive a resume and are shown back next round; 0 off",
-      "flags": [
-        "--lessons"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_concurrent_evaluations": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-concurrent-evaluations"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_elapsed_s": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-elapsed-s"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "number"
-    },
     "max_evaluations": {
       "default": null,
-      "description": "",
+      "description": "a hard ceiling on evaluated candidates (default: 64)",
       "flags": [
         "--max-evaluations"
       ],
@@ -6594,42 +6147,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "max_items_in_flight": {
       "default": null,
-      "description": "",
+      "description": "run-wide cap on items evaluated at once (default: the mode's data_parallelism)",
       "flags": [
         "--max-items-in-flight"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_rollouts": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-rollouts"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_steps": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-steps"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_tokens": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-tokens"
       ],
       "nargs": null,
       "positional": false,
@@ -6648,7 +6168,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "model": {
       "default": null,
-      "description": "",
+      "description": "the model id for proposals and agent nodes (default: the stored choice)",
       "flags": [
         "--model"
       ],
@@ -6657,31 +6177,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "node_routes": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--node-routes"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "object"
-    },
-    "omit_steering": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--omit-steering"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "optimizer": {
       "default": null,
-      "description": "",
+      "description": "how candidates are proposed: random, hill_climb, evolutionary, archive, islands, map_elites or autoresearch (default: autoresearch)",
       "flags": [
         "--optimizer"
       ],
@@ -6690,86 +6188,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "parent_picker": {
-      "default": null,
-      "description": "pair a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with --optimizer: the picker chooses the candidate each step edits, the optimizer writes the edits (default: none)",
-      "flags": [
-        "--parent-picker"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "parsimony": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--parsimony"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "number"
-    },
-    "parts_manifest": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--parts-manifest"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "permission_mode": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--permission-mode"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "pool_size": {
-      "default": null,
-      "description": "with --selection pool: how many candidates the pool keeps by val score, ties at the edge kept (default: 8)",
-      "flags": [
-        "--pool-size"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "portfolio": {
-      "default": null,
-      "description": "prompt+pipeline: each round asks the model proposer for one prompt/knob-level and one pipeline-level candidate and evaluates both, gated in that order (default: off)",
-      "flags": [
-        "--portfolio"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "prior_runs": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--prior-runs"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "profile": {
       "default": "",
-      "description": "",
+      "description": "a saved profile: every setting this command line does not give comes from it",
       "flags": [
         "--profile"
       ],
@@ -6780,7 +6201,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "profile_version": {
       "default": null,
-      "description": "",
+      "description": "the profile's version (default: its latest)",
       "flags": [
         "--profile-version"
       ],
@@ -6789,9 +6210,20 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
+    "project": {
+      "default": null,
+      "description": "the project root packages resolve against (default: the checkout)",
+      "flags": [
+        "--project"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
     "provider": {
       "default": null,
-      "description": "",
+      "description": "the provider route for the run's model (default: the stored choice)",
       "flags": [
         "--provider"
       ],
@@ -6800,20 +6232,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "repeats": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--repeats"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "resume": {
       "default": false,
-      "description": "",
+      "description": "continue the saved search in --runs-root",
       "flags": [
         "--resume"
       ],
@@ -6822,31 +6243,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "boolean"
     },
-    "role_routes": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--role-routes"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "object"
-    },
-    "run_ledger": {
-      "default": null,
-      "description": "1 (default) shows the model proposer every candidate of the run by kind of change, with train fixed/broken counts and the gate's word; 0 off",
-      "flags": [
-        "--run-ledger"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "runs_root": {
       "default": null,
-      "description": "",
+      "description": "the run directory itself (default: .factory/loop)",
       "flags": [
         "--runs-root"
       ],
@@ -6857,7 +6256,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "seed": {
       "default": null,
-      "description": "",
+      "description": "seed the search, and the seed every evaluation passes its Task (default: 0)",
       "flags": [
         "--seed"
       ],
@@ -6868,7 +6267,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "seed_results": {
       "default": null,
-      "description": "",
+      "description": "seed results exported from an earlier run (python -m refactory_dsh.seed_cache export)",
       "flags": [
         "--seed-results"
       ],
@@ -6877,42 +6276,9 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "selection": {
-      "default": null,
-      "description": "with val items (the validation gate): pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
-      "flags": [
-        "--selection"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "setting_sources": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--setting-sources"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
-    "step_review": {
-      "default": null,
-      "description": "1 (default) reviews each step the last round added (train counts and one optimizer-model call per step) and shows the verdicts; 0 off",
-      "flags": [
-        "--step-review"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "strategy": {
       "default": null,
-      "description": "",
+      "description": "which outer loop drives the search, e.g. default or skillopt (default: default)",
       "flags": [
         "--strategy"
       ],
@@ -6935,50 +6301,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "array"
     },
-    "structure_guidance": {
-      "default": null,
-      "description": "1 adds what makes a new step pay off to the request's 'How nodes compose' (default: 0, off)",
-      "flags": [
-        "--structure-guidance"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "train_minibatch": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--train-minibatch"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "validation_reserve_s": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--validation-reserve-s"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "number"
-    },
-    "validation_reserve_tokens": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--validation-reserve-tokens"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "verbose": {
       "default": false,
       "description": "print every event, and each candidate's own run output, not only the meaningful ones",
@@ -6989,21 +6311,10 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "positional": false,
       "required": false,
       "type": "boolean"
-    },
-    "worker_backend": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--worker-backend"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "4f97c8dabacd3e43a19914e9b68b07edf590c57b40687ec37710433a1b641b42"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The command line takes a short list of flags: mode, profile and profile_version, project, runs_root, resume, verbose, seed, epochs, batch_size, max_evaluations, optimizer, preset, evaluator, strategy, strategy_option, knob, intent, seed_results, max_items_in_flight, provider, model and effort. Every other setting is set only in a saved profile (profile-save, then profile); its flag is refused, naming the profile key. Profile settings: omit_steering leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
+  "reviewed_schema": "d304cb59ad79a8b06ac57db10902ec0f13c118ff65d415a66fda8567a1c76c61"
 }
 ```
 

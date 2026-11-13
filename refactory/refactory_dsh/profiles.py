@@ -558,7 +558,10 @@ SETTING_HELP = {
 
 
 def add_arguments(parser: Any) -> None:
-    """All launch surfaces parse this same optional configuration vocabulary."""
+    """Every setting as a flag, for the console's ``start`` and ``profile-resolve``: the
+    machine interface the Web panel and the CEO tool pass settings through. A person's
+    command line, ``refactory optimize``, takes the short list instead
+    (:func:`add_cli_arguments`)."""
     for key, value in defaults().items():
         flag = "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
         # provider_config travels in the project file and saved profile
@@ -578,3 +581,108 @@ def add_arguments(parser: Any) -> None:
         parser.add_argument("--" + key.replace("_", "-"), type=json.loads, default=None)
     parser.add_argument("--profile", default="")
     parser.add_argument("--profile-version", type=int, default=None)
+
+
+#: The settings ``refactory optimize`` (and ``python -m refactory_dsh.loop``, which it
+#: forwards to) takes as flags, with their ``--help``. Every other setting is set in a
+#: profile (``refactory profile-save --spec``, then ``--profile NAME``): a flag per
+#: ``LoopConfig`` field made a command line of sixty options nobody could read. These are
+#: the ones a person types to start or vary one search: the README's first search, the
+#: per-run values lab launchers vary between seeds, and the model route.
+CLI_SETTINGS: dict[str, str] = {
+    "seed": "seed the search, and the seed every evaluation passes its Task (default: 0)",
+    "epochs": "rounds of propose, validate, evaluate, select (default: 2)",
+    "batch_size": "candidates proposed per epoch (default: 4)",
+    "max_evaluations": "a hard ceiling on evaluated candidates (default: 64)",
+    "optimizer": "how candidates are proposed: random, hill_climb, evolutionary, archive, "
+                 "islands, map_elites or autoresearch (default: autoresearch)",
+    "edit_preset": "which edits are allowed: broad, structure, conservative or knob_only "
+                   "(default: broad)",
+    "evaluator": "which runtime scores a candidate: walker (fast) or dsh (the spine) "
+                 "(default: walker)",
+    "strategy": "which outer loop drives the search, e.g. default or skillopt "
+                "(default: default)",
+    "intent": "what the run is for, in your words; seeds the ledger the agents read",
+    "seed_results": "seed results exported from an earlier run "
+                    "(python -m refactory_dsh.seed_cache export)",
+    "max_items_in_flight": "run-wide cap on items evaluated at once (default: the mode's "
+                           "data_parallelism)",
+    "provider": "the provider route for the run's model (default: the stored choice)",
+    "model": "the model id for proposals and agent nodes (default: the stored choice)",
+    "effort": "the workers' reasoning effort (default: the backend's)",
+}
+
+def _flag(key: str) -> str:
+    return "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
+
+
+def removed_flag_message(flag: str, key: str, value: Any) -> str:
+    """What a command line that gives a setting only a profile takes is told: the
+    profile key, and a ``profile-save`` spec that sets it."""
+    shown: Any = value
+    if isinstance(value, str):
+        try:
+            shown = json.loads(value)
+        except ValueError:
+            shown = value
+    if key in ("frozen", "allowed_ops") and not isinstance(shown, list):
+        shown = [shown]
+    if value is None:
+        # A bare switch means "on"; a bare value-taking flag shows the default's form.
+        default = defaults().get(key)
+        shown = True if isinstance(default, bool) else default
+    spec = json.dumps({"settings": {key: shown}}, default=str)
+    return (f"{flag} is not a command-line flag; it is the profile setting {key!r}. Save it in "
+            f"a profile and run with that: refactory profile-save --name NAME --spec '{spec}', "
+            f"then --profile NAME (`refactory profile-resolve <mode> --profile NAME` shows "
+            f"every setting the run would use)")
+
+
+def add_cli_arguments(parser: Any) -> None:
+    """The short command line of ``refactory optimize`` and ``python -m
+    refactory_dsh.loop``: :data:`CLI_SETTINGS`, ``--knob``, ``--strategy-option``,
+    ``--profile``, and where and how the run is driven. Any other setting's flag is
+    refused with the profile key that sets it (:func:`removed_flag_message`)."""
+    import argparse
+
+    known = defaults()
+    integers = ("seed", "epochs", "batch_size", "max_evaluations", "max_items_in_flight")
+    for key, text in CLI_SETTINGS.items():
+        parser.add_argument(_flag(key), dest=key, type=int if key in integers else str,
+                            default=None, help=text)
+    parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE",
+                        help="a starting value for one of the mode's knobs; may be repeated, "
+                             "and adds to a profile's knobs")
+    parser.add_argument("--strategy-option", action="append", default=None, metavar="KEY=VALUE",
+                        help="strategy-specific option as KEY=VALUE; may be repeated, and adds to "
+                             "a profile's strategy_options")
+    parser.add_argument("--profile", default="", help="a saved profile: every setting this "
+                        "command line does not give comes from it")
+    parser.add_argument("--profile-version", type=int, default=None,
+                        help="the profile's version (default: its latest)")
+    parser.add_argument("--project", default=None,
+                        help="the project root packages resolve against (default: the checkout)")
+    parser.add_argument("--runs-root", default=None,
+                        help="the run directory itself (default: .factory/loop)")
+    parser.add_argument("--resume", action="store_true", help="continue the saved search in --runs-root")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print every event, and each candidate's own run output, not only "
+                             "the meaningful ones")
+
+    def profile_only(key: str) -> type:
+        class ProfileOnly(argparse.Action):
+            def __call__(self, parser: Any, namespace: Any, values: Any, option_string: Any = None) -> None:
+                # The message alone: the usage lists the flags it does take.
+                parser.exit(2, f"{parser.prog}: error: "
+                               f"{removed_flag_message(option_string or self.option_strings[0], key, values)}\n")
+        return ProfileOnly
+
+    # Hidden, and never set: giving one stops the parse with the profile key to use. The
+    # loop's old ``--parts`` reaches ``--parts-manifest`` as argparse's abbreviation of it.
+    removed = {_flag(key): key for key in known if key not in CLI_SETTINGS}
+    for flag, key in removed.items():
+        parser.add_argument(flag, action=profile_only(key), nargs="?", dest="_profile_only_" + key,
+                            default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.epilog = ("Every other setting is set in a profile: refactory profile-save --name NAME "
+                     "--spec '{\"settings\": {...}}', then --profile NAME. "
+                     "See docs/optimization-profiles.md.")

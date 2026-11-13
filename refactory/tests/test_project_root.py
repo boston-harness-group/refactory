@@ -46,7 +46,8 @@ def test_every_cli_defaults_to_the_same_project(module):
     source = getsource(importlib.import_module(module))
     # Capture to end of line: the default is `str(project_root())`, and a
     # character class stopping at a paren would cut it at `project_root(`.
-    match = re.search(r'"--project",\s*default=(.+)$', source, re.MULTILINE)
+    match = (re.search(r'"--project",\s*default=(.+)$', source, re.MULTILINE)
+             or re.search(r'set_defaults\(project=(.+)$', source, re.MULTILINE))
     assert match is not None, f"{module} declares no --project default"
     # `project_root` rather than the exact call form: what matters is that the
     # default is derived from the shared root and not from the working directory.

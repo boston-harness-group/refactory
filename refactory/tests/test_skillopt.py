@@ -261,6 +261,14 @@ def _write_parts(root: Path, *, test: bool = False) -> Path:
     return parts_path
 
 
+def _parts_profile(tmp_path: Path, **settings: Any) -> None:
+    """A profile named ``parts`` holding the run's parts manifest (and ``settings``):
+    ``refactory optimize`` takes them only from a profile."""
+    from refactory_dsh import profiles
+
+    profiles.save(tmp_path, "parts", {"settings": {
+        "parts_manifest": str(_write_parts(tmp_path)), **settings}})
+
 def _config(root: Path, **overrides: Any) -> LoopConfig:
     """Build a LoopConfig for SkillOpt tests."""
     parts_path = _write_parts(root)
@@ -1182,7 +1190,7 @@ def test_optimize_cli_takes_analyst_prompts_and_records_it(tmp_path, monkeypatch
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path)
 
     def run(value: str, root: str) -> int:
         with _patch_mode(SkillProbe):
@@ -1190,7 +1198,7 @@ def test_optimize_cli_takes_analyst_prompts_and_records_it(tmp_path, monkeypatch
                 MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
                 "--strategy-option", f"analyst_prompts={value}",
                 "--optimizer", "random", "--seed", "42",
-                "--runs-root", str(tmp_path / root), "--project", ".", "--parts", str(parts),
+                "--runs-root", str(tmp_path / root), "--project", str(tmp_path), "--profile", "parts",
             ])
 
     assert run("generic", "run") == 0
@@ -2378,13 +2386,13 @@ def test_cli_runs_skillopt_end_to_end(tmp_path, monkeypatch):
         return original(self, **kwargs)
 
     monkeypatch.setattr(SkillOptLoop, "configure", spy)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path)
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
             "--optimizer", "random", "--seed", "42",
-            "--runs-root", str(tmp_path / "run"), "--project", ".",
-            "--parts", str(parts),
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path),
+            "--profile", "parts",
         ])
 
     assert code == 0
@@ -3421,13 +3429,13 @@ def test_a_later_all_failed_epoch_exits_the_optimize_cli_non_zero(tmp_path, monk
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path)
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=2",
             "--optimizer", "random", "--seed", "42",
-            "--runs-root", str(tmp_path / "run"), "--project", ".",
-            "--parts", str(parts),
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path),
+            "--profile", "parts",
         ])
     assert code != 0
     assert [d["all_failed"] for d in _decisions(_read_trace(tmp_path), "optimizer_calls")] == [False, True]
@@ -3900,17 +3908,20 @@ def test_run_header_names_the_custom_strategy(tmp_path):
     assert events.render(init).startswith("run · optimizer skillopt · ")
 
 
-def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
-    """``refactory optimize --setting-sources user,project`` reaches the run's
-    client, as ``--effort`` does; the flag did not exist and the project file's
-    run-level field was refused ("unknown search settings: setting_sources")."""
+def test_a_profile_sets_setting_sources_and_the_cli_names_the_key(tmp_path, monkeypatch, capsys):
+    """A profile's ``setting_sources`` reaches the run's client and its config, with
+    ``--effort`` from the command line; ``refactory optimize --setting-sources`` is
+    refused, naming the profile key."""
     from refactory_dsh import cli
     from refactory_dsh import loop as loop_module
     from refactory_dsh import model as model_module
 
-    parsed = cli.build_parser().parse_args(
-        ["optimize", MODE_ID, "--setting-sources", "user,project", "--effort", "medium"])
-    assert (parsed.setting_sources, parsed.effort) == ("user,project", "medium")
+    parsed = cli.build_parser().parse_args(["optimize", MODE_ID, "--effort", "medium"])
+    assert parsed.effort == "medium"
+    with pytest.raises(SystemExit) as refused:
+        cli.build_parser().parse_args(["optimize", MODE_ID, "--setting-sources", "user,project"])
+    assert refused.value.code == 2
+    assert "the profile setting 'setting_sources'" in capsys.readouterr().err
 
     client = FakeClient()
     built: list[dict[str, Any]] = []
@@ -3921,23 +3932,22 @@ def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path, worker_backend="claude_code", setting_sources="user,project")
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
-            "--optimizer", "random", "--seed", "42", "--worker-backend", "claude_code",
-            "--effort", "medium", "--setting-sources", "user,project",
-            "--runs-root", str(tmp_path / "run"), "--project", ".", "--parts", str(parts),
+            "--optimizer", "random", "--seed", "42", "--effort", "medium",
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path), "--profile", "parts",
         ])
     assert code == 0
     assert built and all(kwargs["setting_sources"] == "user,project" for kwargs in built)
+    assert all(kwargs["effort"] == "medium" for kwargs in built)
     config = json.loads((tmp_path / "run" / "config.json").read_text())
     assert config["setting_sources"] == "user,project"
 
 
-def test_optimize_cli_takes_claude_executable_like_setting_sources(tmp_path, monkeypatch):
-    """``refactory optimize --claude-executable PATH`` reaches the run's client and its
-    recorded config; a run that leaves it unset digests as before it existed."""
+def test_a_profile_sets_claude_executable_like_setting_sources(tmp_path, monkeypatch):
+    """A profile's ``claude_executable`` reaches the run's client and its recorded config."""
     from refactory_dsh import loop as loop_module
     from refactory_dsh import model as model_module
 
@@ -3950,16 +3960,15 @@ def test_optimize_cli_takes_claude_executable_like_setting_sources(tmp_path, mon
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    expected = str(tmp_path / "bin" / "claude")
+    _parts_profile(tmp_path, worker_backend="claude_code", claude_executable=expected)
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
-            "--optimizer", "random", "--seed", "42", "--worker-backend", "claude_code",
-            "--claude-executable", "~/bin/claude",
-            "--runs-root", str(tmp_path / "run"), "--project", ".", "--parts", str(parts),
+            "--optimizer", "random", "--seed", "42",
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path), "--profile", "parts",
         ])
     assert code == 0
-    expected = str(Path.home() / "bin" / "claude")
     assert built and all(kwargs["claude_executable"] == expected for kwargs in built)
     config = json.loads((tmp_path / "run" / "config.json").read_text())
     assert config["claude_executable"] == expected
