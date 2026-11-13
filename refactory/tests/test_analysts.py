@@ -1111,6 +1111,90 @@ def test_a_merge_too_long_for_the_context_is_retried_with_its_pipeline_clipped()
     assert '"finding": "FAILURE over' in retried, "the findings stay whole"
 
 
+def test_an_unreadable_answer_that_mentions_a_context_window_is_not_retried():
+    """Only the model call's own failure says the prompt did not fit: an answer in prose
+    fails to parse, and the parse error quotes the answer, so an analyst that writes
+    "context window" must not be re-asked at half the length or counted as a retry."""
+    def prose(system: str, prompt: str) -> str:
+        return "The traces are long, but they fit my context window: the draft step drops units."
+
+    client = Client(analyst=prose)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.propose(_ctx([_rec("f0", False)]), 1, [])
+    assert len(client.of((analysts.FAILURE_SYSTEM,))) == 1, "asked once"
+    (batch,) = optimizer.last_analysis["batches"]
+    assert "no JSON object" in batch["error"] and "context window" in batch["error"]
+    assert "context_retry" not in batch
+    assert analysts.journal_entry(optimizer.last_analysis)["context_retries"] == 0
+
+
+def test_a_step_remade_after_a_resume_counts_its_cached_retry_and_clipping_once(tmp_path):
+    """The first process's step pays a context retry (4 items clipped) and fails its
+    success batch, so it is journaled incomplete; after a resume the step is remade, the
+    retried batch answered from the cache: the report counts the retry and the clipping
+    once, from the step that paid for them."""
+    from refactory_dsh.loop import LoopConfig, _analysts_report
+
+    group = [_long(f"f{i}", 60000) for i in range(4)] + [_rec("s0", True)]
+
+    class Flaky(Overflowing):
+        down = True
+
+        def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+            if system == analysts.SUCCESS_SYSTEM and self.down:
+                raise RuntimeError("503 overloaded")
+            return super().complete(prompt, system=system, **kwargs)
+
+    analyses: list[dict[str, Any]] = []
+    first = AutoresearchOptimizer(Flaky(limit=150000))
+    first.trace_path = tmp_path / "optimizer_trace.jsonl"
+    first.propose(_ctx(group, group_size=4), 1, [])
+    assert len(_keep(analyses, first.last_analysis)) == 1
+    assert analyses[0]["context_retries"] == 1 and analyses[0]["clipped_items"] == 4
+    assert not list((tmp_path / "analyst_findings").glob("round-*.json")), "incomplete"
+    again = Flaky(limit=150000)
+    again.down = False
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(_ctx(group, group_size=4), 1, [])
+    assert again.of((analysts.FAILURE_SYSTEM,)) == [], "the retried batch is cached"
+    failure = next(b for b in resumed.last_analysis["batches"] if b["kind"] == "failure")
+    assert failure["context_retry"] is True and failure["cached"] is True
+    assert failure["clipped"] == 4, "the batch still says what the analyst read"
+    assert len(_keep(analyses, resumed.last_analysis)) == 1, "the remade step is journaled"
+    assert analyses[1]["context_retries"] == 0 and analyses[1]["clipped_items"] == 0
+    report = _analysts_report(analyses, LoopConfig(analysts=True))
+    assert report["context_retries"] == 1 and report["clipped_items"] == 4
+    assert report["clipped_chars"] == analyses[0]["clipped_chars"] > 100000
+
+
+def test_an_analysis_reloaded_whole_after_a_resume_counts_no_retry_or_clipping(tmp_path):
+    group = [_long(f"f{i}", 60000) for i in range(4)]
+    first = AutoresearchOptimizer(Overflowing(limit=150000))
+    first.trace_path = tmp_path / "optimizer_trace.jsonl"
+    first.propose(_ctx(group), 1, [])
+    assert analysts.journal_entry(first.last_analysis)["context_retries"] == 1
+    resumed = AutoresearchOptimizer(Overflowing(limit=150000))
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(_ctx(group), 1, [])
+    assert resumed.last_analysis["calls"] == 0, "reloaded from the step's own record"
+    entry = analysts.journal_entry(resumed.last_analysis)
+    assert entry["context_retries"] == 0 and entry["clipped_items"] == 0
+    assert entry["batches"][0]["cached"] is True
+
+
+def test_only_paid_calls_count_their_retries_and_clipping():
+    paid = {"kind": "failure", "index": 1, "items": ["f0"], "clipped": 2, "clipped_chars": 50,
+            "context_retry": True, "error": None}
+    merge = {"step": "failure", "level": 1, "batch": 1, "context_retry": True, "error": None}
+    entry = analysts.journal_entry(_made(
+        batches=[paid, {**paid, "index": 2, "cached": True}],
+        merges=[merge, {**merge, "batch": 2, "cached": True}]))
+    assert entry["context_retries"] == 2 and entry["clipped_items"] == 2
+    assert entry["clipped_chars"] == 50
+    assert [b.get("cached") for b in entry["batches"]] == [None, True]
+
+
 @pytest.mark.parametrize("error,overflow", [
     ("prompt is too long: 212000 tokens > 200000 maximum", True),
     ("Input is too long for requested model.", True),

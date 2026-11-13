@@ -692,18 +692,22 @@ def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:
 def journal_entry(analysis: Mapping[str, Any]) -> dict[str, Any]:
     """What the loop journals of one round's analysis (``analyst_findings``)."""
     batches_ = list(analysis.get("batches") or ())
+    # Retries and clipping count only calls paid in this step: one answered from the
+    # cache (a step remade after a resume) was counted when it was paid.
+    paid = [b for b in batches_ if not b.get("cached")]
     return {"key": analysis.get("key"), "candidate": analysis.get("candidate"),
             "failed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "failure"),
             "passed_items": sum(len(b["items"]) for b in batches_ if b.get("kind") == "success"),
-            "batches": [{key: b.get(key) for key in ("kind", "index", "items", "findings",
-                                                      "clipped", "clipped_chars",
-                                                      "context_retry", "error")}
+            "batches": [{**{key: b.get(key) for key in ("kind", "index", "items", "findings",
+                                                         "clipped", "clipped_chars",
+                                                         "context_retry", "error")},
+                         **({"cached": True} if b.get("cached") else {})}
                         for b in batches_],
-            "context_retries": (sum(1 for b in batches_ if b.get("context_retry"))
+            "context_retries": (sum(1 for b in paid if b.get("context_retry"))
                                 + sum(1 for m in analysis.get("merges") or ()
-                                      if m.get("context_retry"))),
-            "clipped_items": sum(int(b.get("clipped") or 0) for b in batches_),
-            "clipped_chars": sum(int(b.get("clipped_chars") or 0) for b in batches_),
+                                      if m.get("context_retry") and not m.get("cached"))),
+            "clipped_items": sum(int(b.get("clipped") or 0) for b in paid),
+            "clipped_chars": sum(int(b.get("clipped_chars") or 0) for b in paid),
             "merges": list(analysis.get("merges") or ()),
             "not_analysed": dict(analysis.get("not_analysed") or {}),
             "calls": int(analysis.get("calls") or 0),

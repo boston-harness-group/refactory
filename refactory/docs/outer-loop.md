@@ -249,9 +249,16 @@ may say "429") never decides it.
 - **The stop.** Still interrupted after its retries, the evaluation stops the run with
   exit status **75** (`EX_TEMPFAIL`, `EXIT_INTERRUPTED`) and `"resumable": true` in the
   error JSON. Exit 2 means a refused configuration. Nothing of the evaluation is
-  recorded: no score, records, val occasion, re-score or rollouts. The candidate stays
-  unevaluated and its epoch open. `refactory optimize ... --resume` evaluates it again
-  from the start and gates it as any other.
+  recorded: no score, records, val occasion, re-score or rollouts. What `refactory
+  optimize ... --resume` does then depends on what stopped:
+  - **A train evaluation:** the candidate stays unevaluated and its epoch open, so the
+    resume evaluates it again from the start and gates it as any other.
+  - **A val or test rollout:** the candidate's train score stands. The interrupted
+    rollout is no val or test score, and the resume rolls it out again in a fresh
+    occasion.
+  - **A fresh-evidence re-score:** the parent keeps its earlier records. The resume
+    tries the re-score again only while that epoch's children are still unevaluated
+    (a known gap, listed as a follow-up).
 - **The cap.** Each stop counts for that candidate and part (a re-score counts per
   epoch), from the journal, so a resume keeps the count. An in-run retry is not a stop.
   The run stops on the first two. On the third (`INTERRUPTION_CAP`), the evaluation is
@@ -261,8 +268,12 @@ may say "429") never decides it.
 - **Receipts are kept.** When an unevaluated candidate's train evaluation or an epoch's
   re-score runs again, in a retry or after a resume, what the earlier attempt left (its
   per-item passes and receipts) is moved to `.refactory/archive/<UTC time>/runs/<id>/...`
-  inside the run (`evaluation_archived` in the journal), never deleted. A candidate's
-  `occasions/` stay in place.
+  inside the run (`evaluation_archived` in the journal), never deleted.
+  - A train attempt's archive leaves the candidate's `occasions/` in place.
+  - A val or test rollout retried in the run is archived from its own occasion folder.
+    After a resume it runs in a fresh occasion, and the interrupted occasion stays
+    where it was.
+  - A re-score's folder (`occasions/train_epoch_<n>`) is archived whole.
 - **Seed results.** A `--seed-results` part with such an item is a miss: it is
   measured instead.
 - **Runtimes.** The item records come from the same code on both runtimes, and a model
@@ -703,7 +714,11 @@ paired with a parent picker), on the train records the request carries:
   refuses as longer than the model's context ("prompt is too long", "context length",
   ...) is retried once within half the refused prompt's length, re-clipped the same
   way (a merge has its pipeline texts clipped instead; its findings stay whole); a
-  retry still too long fails the batch as any failed call does. It
+  retry still too long fails the batch as any failed call does. Only the model call's
+  own failure is read this way: an answer that cannot be read is a failed batch even
+  when its prose mentions a context window. The report counts clipped items and
+  context retries only for calls paid in that step, so a step remade after a resume,
+  whose calls come from the cache, does not count them again. It
   writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
   (steps, edges, settings, or the structure), the change that would fix it, the items it
   covers (an id outside the batch is dropped), its impact and quotes.
@@ -839,12 +854,26 @@ prompt names no dataset, task or answer format.
   `inherited`, in any case or spacing, counts), a category whose policy is `warn` or
   `off`, a verdict that names no category, a failed call, a malformed or salvaged
   reply: a failure is recorded as a judge error and shown as such.
-- **What slipped past once is not vetoed later.** A change that got through -- the
-  judge failed or its reply was salvaged, its category only warns, the judge was off
-  when it was proposed, or the finding was about inherited content -- stays in the
-  candidates built on it, and their proposals are not vetoed for it (an inherited
-  finding never vetoes). Only the final audit of the winner's combined change from the
-  seed reports it.
+- **A quote backstop on `inherited`.** The judge's own label is all that keeps an
+  `inherited` finding from vetoing, so it is checked, conservatively, since a wrong
+  flip vetoes a sound change. The finding counts as `new` whatever the judge said only
+  when all of these hold: every one of its evidence quotes found in the candidate is
+  in none of the parent's fields (a finding that also quotes text the parent had stays
+  `inherited`); quotes are matched within one field (a setting's value, a step's
+  field), never across two; at least one of them has a word of four letters or more
+  that is nowhere in the parent, so a change that only deletes or reorders text never
+  counts; and the parent's state is known. Matching folds case, collapses whitespace
+  and drops diff markers at line starts (`optim.integrity.backstop`). A flipped
+  finding vetoes if its category is `veto`; the record keeps the judge's label as
+  `judged_source` and the quote as `added_quote`. It changes nothing for a `warn` or
+  `off` category, a judge error or a salvaged reply, and an offline replay applies it
+  the same way.
+- **Anything that slipped past once is never vetoed later.** A change that got through
+  is kept in every candidate built on it, and later proposals are never vetoed for it:
+  the judge only vetoes what a proposal itself adds. It is only reported, by the final
+  audit of the winner's combined change from the seed. This holds for every way a change
+  gets through: the judge failed, its reply was salvaged, its category only warns, the
+  judge was off when it was proposed, or the judge called the finding inherited.
 - **Setting it.** `--integrity-judge on` (or `veto`): every category `veto`.
   `--integrity-judge flag` (or `warn`): every category `warn`. An object sets
   categories one by one, in a profile or as JSON on the command line:

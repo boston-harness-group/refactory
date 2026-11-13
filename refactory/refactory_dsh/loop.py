@@ -5377,8 +5377,11 @@ class Loop(OuterLoop):
 
         self._integrity.append(record)
         if record.get("verdict") and record.get("key"):
-            self._integrity_cache[str(record["key"])] = {
-                name: record[name] for name in VERDICT_FIELDS if name in record}
+            cached = {name: record[name] for name in VERDICT_FIELDS if name in record}
+            if "judged_source" in record:
+                # The judge's own label: the quote backstop is made again from the states.
+                cached["source"] = record["judged_source"]
+            self._integrity_cache[str(record["key"])] = cached
 
     def _integrity_check(self, proposal: Proposal, parent: Candidate,
                          candidate: Candidate) -> Candidate | list[str]:
@@ -5386,7 +5389,8 @@ class Loop(OuterLoop):
         strategy's proposals): ``candidate``, or an ``E-integrity`` refusal when the
         verdict is ``exploit`` or ``suspect`` about what the change adds and names a
         category whose policy is ``veto`` (`optim.integrity.vetoes`); an inherited
-        finding or a failed judgement never is.
+        finding (unless one of its quotes is text this change added,
+        `optim.integrity.backstop`) or a failed judgement never is.
         The verdict is journaled
         (``integrity_verdict``), kept for the ledger, the next request and the report.
         Off, nothing is called or recorded. A candidate an earlier judgement let through
@@ -5430,6 +5434,9 @@ class Loop(OuterLoop):
                      "key": None, "error": f"the judge's prompt could not be built: {error}"}
         else:
             found = self._judge("proposal", prompt, candidate=candidate.id, parent=parent.id)
+        # A finding labelled inherited whose quote this change added is about what it adds
+        # (`optim.integrity.backstop`): the label alone does not spare it.
+        found = integrity.backstop(found, policy, parent.state, candidate.state)
         # Only an exploit or suspect verdict about what this change adds, naming a category
         # whose policy is veto; an inherited finding or a failed judgement is shown, never
         # vetoed.
