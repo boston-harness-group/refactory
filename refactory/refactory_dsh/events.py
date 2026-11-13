@@ -141,16 +141,22 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
     if step == "control":
         return _control_line(record)
     if step == "evaluation_interrupted":
-        # Shown without --verbose: the run stops here, and the reader must not take
-        # the candidate for a failed one.
+        # Shown without --verbose: the reader must not take the candidate for a failed
+        # one, and must know whether the run waits, stops or records it failed.
         causes = ", ".join(f"{cause} {count}" for cause, count
                            in sorted((record.get("causes") or {}).items()))
-        return (
+        line = (
             f"epoch {epoch} · candidate {record.get('candidate', '?')} · {record.get('part', '?')} "
-            f"evaluation interrupted ({record.get('interrupted', '?')}/{record.get('items', '?')} "
-            f"items died with the run's processes" + (f": {causes}" if causes else "")
-            + ") · not scored; resume the run to evaluate it again"
+            f"evaluation interrupted, attempt {record.get('attempt', '?')} "
+            f"({record.get('interrupted', '?')}/{record.get('items', '?')} items died with the "
+            "run's processes" + (f": {causes}" if causes else "") + ")"
         )
+        outcome = record.get("outcome")
+        if outcome == "retrying":
+            return line + f" · not scored; trying again in {float(record.get('retry_in_s') or 0):.0f}s"
+        if outcome == "recorded_failed":
+            return line + f" · interrupted {record.get('stops', '?')} times; recorded as failed"
+        return line + " · not scored; the run stops: resume it to evaluate it again"
     if step == "proposal_failed":
         # Shown without --verbose: a round that never reached the model must not
         # read as one that proposed nothing.

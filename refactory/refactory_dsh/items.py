@@ -368,6 +368,11 @@ def error_kind(error: BaseException) -> str:
     return type(error).__name__
 
 
+#: How a record with no verdict because a step's answer was missing begins its
+#: ``fail_reason`` (`make_item_record`, `no_answer`).
+NO_ANSWER = "no answer: "
+
+
 def make_item_record(
     item_id: str,
     verdict: VerifyResult | None,
@@ -414,7 +419,7 @@ def make_item_record(
                 "score": 0.0,
                 "error_text": None,
                 "error_kind": None,
-                **{**base, "fail_reason": "no answer: " + "; ".join(
+                **{**base, "fail_reason": NO_ANSWER + "; ".join(
                     f"{step} {_spent_phrase(info)}" for step, info in unanswered.items())},
                 "missing_steps": unanswered,
             }
@@ -450,17 +455,21 @@ def make_item_record(
 #:
 #: - ``transport``: the wire kept failing through every attempt of the model client (a
 #:   proxy or provider outage, `model.CompletionFailed` of kind ``transport``);
-#: - ``killed``: the completion's own process was killed by a signal (a negative exit,
-#:   e.g. the host's out-of-memory killer), or the product worker under it was killed
-#:   (``signal: SIGKILL`` in the product failure's facts);
+#: - ``killed``: the completion's own process was killed by SIGKILL or SIGTERM (exit -9
+#:   or -15: the host's out-of-memory killer, a stop from outside), or the product worker
+#:   under it was killed (``signal: SIGKILL`` in the product failure's facts). Any other
+#:   signal -- SIGABRT from a runtime that ran out of heap, SIGSEGV -- is the candidate's
+#:   failure: what it asked for may be why;
 #: - ``outcome unknown``: an op's child exited before it reported (`OpOutcomeUnknown`);
 #: - ``stopped``: the completion was cancelled because the run was stopping.
 #:
 #: A model timeout, a wrong or empty answer, an output limit and a product's own failure
-#: are none of these: they are the candidate's failed answers.
+#: are none of these: they are the candidate's failed answers. Known gap: the spine's own
+#: worker or op process killed with no stderr reads ``exited with code null``, which
+#: names no signal, so it is not recognised there (docs/outer-loop.md).
 INTERRUPTED_MARKERS: tuple[tuple[str, str], ...] = (
     ("transport", r"model completion failed on the wire"),
-    ("killed", r"model completion failed \(exit -\d+\)"),
+    ("killed", r"model completion failed \(exit -(?:9|15)\)"),
     ("killed", r"Product subagent failure \([^)]*\bsignal: SIGKILL\b"),
     ("outcome unknown", r"child exited before reporting its outcome"),
     ("stopped", r"model completion cancelled"),
@@ -481,12 +490,17 @@ def interrupted_cause(text: str | None) -> str | None:
 def interrupted_item(record: dict[str, Any]) -> str | None:
     """Why an item record's outcome is unknown, or None when it is the item's own result.
 
-    Read from its error, and from the error of each step it went on without (a step
-    whose retries were spent: a killed session is retried as a crash, so its item
-    reaches the record as "no answer" with the kill in ``missing_steps``)."""
-    texts = [record.get("error_text")]
-    texts += [info.get("error") for info in (record.get("missing_steps") or {}).values()
-              if isinstance(info, dict)]
+    Only a record without a verdict can be: an error (read from its ``error_text``), or
+    "no answer" because a step's answer was missing (a killed session is retried as a
+    crash, then left missing, so the kill is in that step's ``missing_steps`` error). An
+    item the Task graded is its result, whatever its ``missing_steps`` say (a fork's
+    other branch may have answered)."""
+    if record.get("error_text"):
+        return interrupted_cause(record["error_text"])
+    if not str(record.get("fail_reason") or "").startswith(NO_ANSWER):
+        return None
+    texts = [info.get("error") for info in (record.get("missing_steps") or {}).values()
+             if isinstance(info, dict)]
     return next((cause for cause in map(interrupted_cause, texts) if cause), None)
 
 

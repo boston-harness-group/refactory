@@ -486,3 +486,22 @@ def test_a_cached_part_with_items_that_died_is_measured(tmp_path):
         assert [(m["part"], m["reason"]) for m in misses] == [
             ("train", "cached items died with their run's processes")]
         assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["val"]
+
+
+def test_the_export_reads_the_occasion_its_result_names(tmp_path):
+    """An interrupted val rollout took occasion 0 and left no result; the first result is
+    occasion 1, and the export reads that occasion's records, not occasion 0's."""
+    with _patch_mode(PartsProbe):
+        loop = _loop(tmp_path / "source", _manifest(tmp_path))
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        stale = tmp_path / "source" / "runs" / seed.id / "occasions" / "val_0"
+        stale.mkdir(parents=True)
+        (stale / "item_records.json").write_text(json.dumps([{"id": "stale", "score": 0.0}]))
+        loop._occasion_counters.setdefault(seed.id, {})["val"] = 1
+        run.evaluate(seed, part="val")
+        cache = seed_cache.export(tmp_path / "source", project=Path("."))
+    assert cache["parts"]["val"]["workdir"].endswith("occasions/val_1")
+    assert cache["parts"]["val"]["items"] == PARTS["val"]

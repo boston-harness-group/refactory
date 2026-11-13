@@ -460,8 +460,24 @@ def is_retryable_failure(stderr: str) -> bool:
     """Whether ``DshModelClient.complete`` retries a failed completion: a transport
     failure only. A worker that answered and then failed to clean up keeps its answer
     (`answered_before_teardown`), and anything a model, key or prompt caused is not
-    retried."""
-    return is_transport_failure(without_product_detail(stderr))
+    retried. Only the diagnostic lines decide (`diagnostic_lines`): the model's streamed
+    reasoning may say "429" or "rate limit" about the question it was solving."""
+    return is_transport_failure(without_product_detail("\n".join(diagnostic_lines(stderr))))
+
+
+def diagnostic_lines(stderr: str) -> list[str]:
+    """``stderr`` without the model's streamed reasoning: after the ``dsh: reasoning:``
+    header, only the lines ``dsh`` itself writes (``dsh: ...``) are diagnostics; every
+    other line is the model's own text."""
+    lines: list[str] = []
+    reasoning = False
+    for line in (stderr or "").splitlines():
+        stripped = line.strip()
+        if stripped == REASONING_HEADER:
+            reasoning = True
+        elif not reasoning or stripped.startswith("dsh:"):
+            lines.append(line)
+    return lines
 
 
 #: A product adapter's failure line: fixed facts in parentheses, then (since the Claude
@@ -1158,7 +1174,7 @@ class DshModelClient:
                     # Name the limit: a reader, or an optimizer, cannot weigh a
                     # shorter answer against a larger cap without the number.
                     cause = f"{cause} ({limit} tokens)"
-                if not is_retryable_failure(proc.stderr):
+                if not is_retryable_failure(proc.stderr) or failure_kind(cause) != "transport":
                     # The model answered wrongly, the key is dead, the prompt is
                     # rejected: retrying spends two more completions on the same
                     # answer. Fail now and keep the diagnosis accurate. A transport
@@ -1167,6 +1183,9 @@ class DshModelClient:
                     # not replayed here either: a replay would run outside the node's
                     # delivery bracket, unrecorded, with the same prompt. A node's retry
                     # rule runs it again as a fresh, recorded session (`node_retry`).
+                    # The cause itself must be the wire's: a session that stopped for
+                    # any other reason is not called a wire failure, whatever else its
+                    # diagnostics mention.
                     raise CompletionFailed(
                         f"model completion failed (exit {proc.returncode}): {cause}",
                         kind=failure_kind(cause))
