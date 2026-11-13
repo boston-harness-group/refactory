@@ -28,6 +28,15 @@ from refactory_packages.skillopt import schedule as sched_mod
 from refactory_packages.skillopt import prompts
 from refactory_packages.skillopt.trace import current_call_key
 
+
+@pytest.fixture(autouse=True)
+def _no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """``trace.ask`` waits 1, 2, 4 s after failed attempts, as SkillOpt does; the
+    suite records the waits instead of sleeping them."""
+    waits: list[float] = []
+    monkeypatch.setattr("refactory_packages.skillopt.trace._sleep", waits.append)
+    return waits
+
 # ── toy task & mode ────────────────────────────────────────────────────────
 
 TASK_REF = "skillopt_test_task"
@@ -1293,6 +1302,169 @@ def test_cancellation_and_model_choice_end_the_run(tmp_path, make_error):
         _run_loop(tmp_path, client=_Ending(error), skillopt_options={"max_epochs": 1})
     calls = [d for d in _read_trace(tmp_path) if d["type"] == "model_call"]
     assert calls and calls[-1]["error"].startswith(type(error).__name__)
+
+
+# ── optimizer-call retries (claude_backend.py:314-324, retries=3) ────────────
+
+#: The worker failure that cost SO-s43/SO-s44 a merge and an analyst patch.
+_TEARDOWN = "Product subagent failure (stage: teardown; exit code: 0)"
+
+
+class _FailsFirst(FakeClient):
+    """Fails the first ``n`` attempts at each call key, then answers as FakeClient."""
+
+    def __init__(self, n: int, responses: dict[tuple, str] | None = None) -> None:
+        super().__init__(responses)
+        self.n = n
+        self.attempts: dict[Any, int] = {}
+
+    def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+        response = super().complete(prompt, system=system)
+        key = current_call_key()
+        self.attempts[key] = self.attempts.get(key, 0) + 1
+        if self.attempts[key] <= self.n:
+            raise RuntimeError(_TEARDOWN)
+        return response
+
+
+def _model_calls(trace) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+    return [json.loads(line) for line in trace.path.read_text().splitlines()
+            if json.loads(line)["type"] == "model_call"]
+
+
+def test_a_failed_optimizer_call_is_retried_like_skillopt(tmp_path, _no_retry_waits):
+    """claude_backend.py:314-324 with retries=3 (reflect.py:359): an analyst call
+    that fails twice is asked a third time and its patch is kept; each attempt
+    is its own call, in the trace with its number, after waits of 1 and 2 s."""
+    from refactory_packages.skillopt import analysts
+
+    client = _FailsFirst(2)
+    trace = _trace(tmp_path)
+    heard: list[str | None] = []
+    trace.listener = heard.append
+    records = [{"id": f"r{i}", "passed": False, "score": 0.0} for i in range(3)]
+    failures, _ = analysts.reflect(
+        client, records, "SKILL", 4, "", seed=1, group_size=8, epoch=1, trace=trace,
+    )
+    assert len(failures) == 1 and failures[0]["edits"]
+    key = ("analyst_failure", 1, 0, 0)
+    assert [c["call_key"] for c in client.calls] == [key] * 3
+    assert len({c["prompt"] for c in client.calls}) == 1
+    calls = _model_calls(trace)
+    assert [(c["attempt"], c["raw_output"] is None) for c in calls] == [(1, True), (2, True), (3, False)]
+    assert all(c["call_key"] == list(key) for c in calls)
+    assert [_TEARDOWN in c.get("error", "") for c in calls] == [True, True, False]
+    assert _no_retry_waits == [1, 2]
+    assert trace.optimizer_calls == 3 and len(trace.optimizer_failures) == 2
+    assert [h is None for h in heard] == [False, False, True]
+
+
+def test_three_failed_attempts_take_the_existing_fallback(tmp_path, _no_retry_waits):
+    """aggregate.py:248 retries=3, then :261-265: a final merge whose three
+    attempts fail concatenates, failure edits first; two failures do not."""
+    from refactory_packages.skillopt import merge
+
+    trace = _trace(tmp_path / "three")
+    client = _FailsFirst(3)
+    merged = merge.hierarchical_merge(
+        client, "S", [_patch(0)], [_patch(1, "success")], "", 1, trace,
+    )
+    assert [e["content"] for e in merged["edits"]] == ["rule 0", "rule 1"]
+    assert [c["call_key"] for c in client.calls] == [("merge_final", 1, 0, 0)] * 3
+    assert [c["attempt"] for c in _model_calls(trace)] == [1, 2, 3]
+    assert all(c["raw_output"] is None for c in _model_calls(trace))
+    assert _no_retry_waits == [1, 2, 4]  # SkillOpt waits after its last failure too
+    from refactory_packages.skillopt.trace import retry_delay
+    assert [retry_delay(a) for a in range(6)] == [1, 2, 4, 8, 15, 15]  # claude_backend.py:323
+
+    _no_retry_waits.clear()
+    trace = _trace(tmp_path / "two")
+    merged = merge.hierarchical_merge(
+        _FailsFirst(2), "S", [_patch(0)], [_patch(1, "success")], "", 1, trace,
+    )
+    assert merged == json.loads(FakeClient()._default_response("merge_final", ""))
+    assert [c["attempt"] for c in _model_calls(trace)] == [1, 2, 3]
+    assert _no_retry_waits == [1, 2]
+
+
+def test_a_reply_is_never_retried(tmp_path, _no_retry_waits):
+    """SkillOpt retries only a call that raised; an unusable reply goes to the
+    caller's parse and fallback (aggregate.py:53-64) after one attempt."""
+    from refactory_packages.skillopt import merge
+    from refactory_packages.skillopt.trace import ask
+
+    client = FakeClient({("merge_final", 1, 0, 0): "I cannot merge these."})
+    trace = _trace(tmp_path)
+    merged = merge.hierarchical_merge(
+        client, "S", [_patch(0)], [_patch(1, "success")], "", 1, trace,
+    )
+    assert [e["content"] for e in merged["edits"]] == ["rule 0", "rule 1"]
+    assert len(client.calls) == 1 and _no_retry_waits == []
+    assert ask(FakeClient({("rank", 1, 0, 0): ""}), trace, "rank", "u", system="s",
+               call_key=("rank", 1, 0, 0)) == ""
+    assert [c["attempt"] for c in _model_calls(trace)] == [1, 1]
+
+
+@pytest.mark.parametrize("make_error", [
+    lambda: __import__("refactory_dsh.budgets", fromlist=["BudgetExhausted"]).BudgetExhausted("spent"),
+    lambda: __import__("concurrent.futures", fromlist=["CancelledError"]).CancelledError(),
+    lambda: __import__("refactory_dsh.model", fromlist=["ModelChoiceError"]).ModelChoiceError(),
+])
+def test_budget_cancel_and_model_choice_are_never_retried(tmp_path, _no_retry_waits, make_error):
+    from refactory_packages.skillopt.trace import ask
+
+    error = make_error()
+
+    class Stops(FakeClient):
+        def complete(self, prompt, *, system=""):  # type: ignore[no-untyped-def]
+            super().complete(prompt, system=system)
+            raise error
+
+    client = Stops()
+    trace = _trace(tmp_path)
+    with pytest.raises(type(error)):
+        ask(client, trace, "rank", "u", system="s", call_key=("rank", 1, 0, 0))
+    assert len(client.calls) == 1 and _no_retry_waits == []
+    calls = _model_calls(trace)
+    assert len(calls) == 1 and calls[0]["attempt"] == 1
+    assert calls[0]["error"].startswith(type(error).__name__)
+    assert trace.optimizer_calls == 1 and len(trace.optimizer_failures) == 1
+
+
+def test_a_resumed_phase_reads_its_cached_answer_without_asking(tmp_path, _no_retry_waits):
+    """A run resumed past its analysts uses the patches it saved (no call, so
+    nothing to retry), even with a client whose every attempt fails."""
+    client = _FailsFirst(99)
+    _run_loop(
+        tmp_path, client=client, skillopt_options={"max_epochs": 1},
+        preload_state={"epoch": 1, "phase": "analysts",
+                       "cached_failure_patches": [_patch(0), _patch(1)],
+                       "cached_success_patches": []},
+    )
+    keys = [c["call_key"] for c in client.calls]
+    assert keys and not any(k[0].startswith("analyst_") for k in keys)
+    # The merge of the cached patches is a call: made, failed and retried.
+    assert ("merge_failure", 1, 0, 1) in keys
+    assert all(n == 3 for n in client.attempts.values())
+
+
+def test_retried_attempts_reach_the_trace_and_the_run_report(tmp_path, _no_retry_waits):
+    """Each attempt is a model call the run made: the epoch's ``optimizer_calls``
+    and the run report's proposer health count every attempt and every failed
+    one, and a call that answered on its retry is not a failed epoch."""
+    client = _FailsFirst(1)
+    _, report = _run_loop(tmp_path, client=client, skillopt_options={"max_epochs": 1})
+    trace = _read_trace(tmp_path)
+    calls = [e for e in trace if e["type"] == "model_call"]
+    assert len(calls) == len(client.calls) == 2 * len(client.attempts)
+    assert [c["attempt"] for c in calls] == [1, 2] * len(client.attempts)
+    epoch = _decisions(trace, "optimizer_calls")[0]
+    assert epoch["calls"] == len(calls) and epoch["failed"] == len(calls) // 2
+    assert epoch["all_failed"] is False
+    assert report["proposer"]["rounds"] == len(calls)
+    assert report["proposer"]["failure_count"] == len(calls) // 2
+    assert report["proposer"]["all_failed"] is False
+    assert _decisions(trace, "merged_patch")
 
 
 def test_slow_update_records_skillopt_result_fields(tmp_path):

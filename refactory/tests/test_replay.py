@@ -40,6 +40,15 @@ from refactory_packages.skillopt.compare import (
 from refactory_packages.skillopt.replay_runner import load_a_config
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """``trace.ask`` waits 1, 2, 4 s after failed attempts, as SkillOpt does; the
+    suite records the waits instead of sleeping them."""
+    waits: list[float] = []
+    monkeypatch.setattr("refactory_packages.skillopt.trace._sleep", waits.append)
+    return waits
+
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
@@ -2015,17 +2024,39 @@ def test_late_answer_times_the_call_out_and_is_withheld(tmp_path):
     assert matcher.consumed_count() == 2  # the failed attempt and "second"
 
 
-def test_replay_client_gives_solver_calls_five_attempts_and_optimizer_calls_three(tmp_path):
-    """rollout.py:227 asks with retries=5; every optimizer call with retries=3."""
+def test_replay_client_gives_solver_calls_five_attempts_and_optimizer_calls_three(tmp_path, _no_retry_waits):
+    """rollout.py:227 asks with retries=5; every optimizer call with retries=3,
+    made by ``trace.ask`` one attempt per ``complete``: each of B's attempts
+    replays one of A's, so A's three failures fail B's call and A's next
+    answer goes to B's next call."""
     from refactory_packages.skillopt.replay import ReplayedCallFailure
+    from refactory_packages.skillopt.trace import TraceRecorder, ask
 
     entries = [("s", "solver", "E", 1)] * 4 + [("s", "solver", "ok", 0)]
     entries += [("s", "opt", "E", 1)] * 3 + [("s", "opt", "ok", 0)]
+    entries += [("s", "opt2", "E", 1), ("s", "opt2", "ok2", 0)]
+    entries += [("s", "raw", "E", 1), ("s", "raw", "raw ok", 0)]
     client = ReplayClient(CallMatcher(_calls_with_rc(tmp_path, entries)))
     assert client.complete("solver", system="s") == "ok"
-    with pytest.raises(ReplayedCallFailure, match="after 3 retries"), optimizer_call(("rank", 1, 0, 0)):
-        client.complete("opt", system="s")
-    assert client.match_log[-1]["a_event"].startswith("ReplayedCallFailure")
+    assert client.matcher.failed_attempts_replayed == 4
+    trace = TraceRecorder(tmp_path / "trace.jsonl")
+    assert ask(client, trace, "rank", "opt", system="s", call_key=("rank", 1, 0, 0)) is None
+    assert client.matcher.failed_attempts_replayed == 4 + 3
+    assert ask(client, trace, "rank", "opt", system="s", call_key=("rank", 1, 0, 1)) == "ok"
+    assert ask(client, trace, "rank", "opt2", system="s", call_key=("rank", 1, 0, 2)) == "ok2"
+    assert client.match_log[-2]["a_event"].startswith("ReplayedCallFailure")
+    calls = [json.loads(line) for line in trace.path.read_text().splitlines()]
+    assert [(c["call_key"][3], c["attempt"], "error" in c) for c in calls] == [
+        (0, 1, True), (0, 2, True), (0, 3, True), (1, 1, False), (2, 1, True), (2, 2, False),
+    ]
+    assert _no_retry_waits == [1, 2, 4, 1]
+    # Outside trace.ask, one optimizer complete replays exactly one of A's attempts.
+    with pytest.raises(ReplayedCallFailure), optimizer_call(("rank", 1, 0, 3)):
+        client.complete("raw", system="s")
+    with optimizer_call(("rank", 1, 0, 3)):
+        assert client.complete("raw", system="s") == "raw ok"
+    assert client.matcher.first_divergence is None
+    assert client.matcher.consumed_count() == len(entries)
 
 
 def test_late_answer_lines_found_from_a_timeout_result(tmp_path):
@@ -2389,7 +2420,7 @@ def test_run_replay_reports_a_fault_in_the_replay_client(tmp_path, monkeypatch, 
     original = replay_mod.CallMatcher.lookup
 
     def lookup(self, system, prompt, *, attempts=None):  # noqa: ANN001
-        if attempts == replay_mod.OPTIMIZER_ATTEMPTS:
+        if current_call_key() is not None:  # an optimizer call
             raise TypeError("bug in the replay")
         return original(self, system, prompt, attempts=attempts)
 
@@ -2526,3 +2557,39 @@ def test_replay_client_unframes_optimizer_prompts_only_when_asked(tmp_path):
             framed, system="opt") == "r"
         with pytest.raises(ReplayMismatch):
             ReplayClient(CallMatcher(calls)).complete(framed, system="opt")
+
+
+def test_one_replayed_attempt_fails_with_the_cli_error_alone(tmp_path):
+    """Each of B's own attempts replays one of A's (``attempts=1``): its failure
+    reads as SkillOpt's single-attempt error, never "after 1 retries"."""
+    from refactory_packages.skillopt.replay import ReplayedCallFailure
+
+    matcher = CallMatcher(_calls_with_rc(tmp_path, [
+        ("s", "p", "API Error", 1), ("s", "p", "ok", 0),
+    ]))
+    with pytest.raises(ReplayedCallFailure) as caught:
+        matcher.lookup("s", "p", attempts=1)
+    assert str(caught.value) == "Claude CLI exited with code 1"
+    assert matcher.lookup("s", "p", attempts=1) == "ok"
+
+
+def test_replay_runs_the_loop_without_retry_waits():
+    """A replay serves recorded attempts, so ``trace.ask``'s 1/2/4 s waits are
+    skipped around the replayed run, and restored after it."""
+    import inspect
+
+    from refactory_packages.skillopt import replay_runner, trace
+
+    source = inspect.getsource(replay_runner.run_replay)
+    assert "with skillopt_trace.no_retry_waits():\n            loop_report = loop.run()" in source
+
+    waits: list[float] = []
+    trace._sleep, saved = waits.append, trace._sleep
+    try:
+        with trace.no_retry_waits():
+            trace._sleep(4)
+        assert waits == []
+        trace._sleep(1)
+        assert waits == [1]
+    finally:
+        trace._sleep = saved
