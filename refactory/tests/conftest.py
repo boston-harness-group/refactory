@@ -47,6 +47,9 @@ def _isolate_refactory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatc
     monkeypatch.setenv("GH_CONFIG_DIR", str(home / "gh"))
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
         monkeypatch.delenv(name, raising=False)
+    # A person's own Claude Code choice would change every claude_code worker's route.
+    monkeypatch.delenv("REFACTORY_CLAUDE_EXECUTABLE", raising=False)
+    monkeypatch.delenv("REFACTORY_BACKGROUND_QUIET_S", raising=False)
 
 
 @pytest.fixture(autouse=True)

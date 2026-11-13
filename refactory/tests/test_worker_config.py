@@ -229,3 +229,32 @@ def test_a_run_without_setting_sources_keeps_its_evaluation_context(tmp_path, mo
     before = profiles.defaults()
     monkeypatch.setattr(profiles, 'defaults', lambda: {k: v for k, v in before.items() if k != 'setting_sources'})
     assert profiles.resolve(tmp_path, 'counting_pack/fixed_step')['context_hash'] == current
+
+
+def test_run_level_claude_executable_reaches_the_search_and_the_run(tmp_path, monkeypatch):
+    """A run-level ``claude_executable`` in the project file resolves for ``refactory
+    optimize`` and for a run, as ``setting_sources`` does, and beats the environment's."""
+    write(tmp_path, {'worker_backend': 'claude_code', 'claude_executable': '/opt/claude/bin/claude'})
+    monkeypatch.setenv('REFACTORY_CLAUDE_EXECUTABLE', '/env/claude')
+    snapshot = profiles.resolve(tmp_path, 'counting_pack/fixed_step')
+    assert snapshot['settings']['claude_executable'] == '/opt/claude/bin/claude'
+    assert snapshot['worker_configuration']['provenance']['fields']['claude_executable'] == 'project-file'
+    assert DshModelClient(project=tmp_path).route()['claude_executable'] == '/opt/claude/bin/claude'
+    client = DshModelClient(project=tmp_path, node_routes={'solve': {'claude_executable': '/node/claude'}})
+    assert client.for_node('solve').route()['claude_executable'] == '/node/claude'
+    assert client.for_node('other').route()['claude_executable'] == '/opt/claude/bin/claude'
+    # Without the file's choice, the environment's applies.
+    write(tmp_path, {'worker_backend': 'claude_code'})
+    assert DshModelClient(project=tmp_path).route()['claude_executable'] == '/env/claude'
+    with pytest.raises(ValueError, match='does not support claude_executable'):
+        profiles.resolve(tmp_path, 'counting_pack/fixed_step',
+                         overrides={'worker_backend': 'codex', 'claude_executable': '/opt/claude'})
+
+
+def test_a_run_without_claude_executable_keeps_its_evaluation_context(tmp_path, monkeypatch):
+    """A search on the bundled Claude Code digests as it did before the field existed."""
+    write(tmp_path, {'worker_backend': 'dsh'})
+    current = profiles.resolve(tmp_path, 'counting_pack/fixed_step')['context_hash']
+    before = profiles.defaults()
+    monkeypatch.setattr(profiles, 'defaults', lambda: {k: v for k, v in before.items() if k != 'claude_executable'})
+    assert profiles.resolve(tmp_path, 'counting_pack/fixed_step')['context_hash'] == current

@@ -130,12 +130,16 @@ def prepare(
     resume: bool = False,
     headless: bool = False,
     omit_steering: bool = False,
+    claude_code_checked: bool = False,
 ) -> tuple[str, Path]:
     """Lower the mode for a person to use, and leave the run ready to start.
 
     Returns the graph name the profile loads and the directory it lives in. The
     ledger is seeded **before** the lowering, because the lowering is what folds it
     into the agent prompts; seeding afterwards would produce a run nobody steered.
+
+    ``claude_code_checked`` says the caller already ran `workers.claude_code_preflight`
+    before creating anything (`run` does), so it is not run twice.
     """
     workdir = Path(workdir).expanduser().resolve()
     project = Path(project or project_root())
@@ -169,6 +173,11 @@ def prepare(
         model_context = DshModelClient(project=project, **routing_context).context()
         if calls_models(state):
             model_context = require_route(model_context)
+            if not claude_code_checked:
+                # A Claude Code too old for a node's model fails at its first call, after
+                # setup; the console's open and `run` both refuse it here instead.
+                from refactory_dsh.workers import agent_roles, claude_code_preflight
+                claude_code_preflight(model_context, roles=agent_roles(state))
     with ownership(workdir):
         if resume:
             if knobs or intent or model_context:
@@ -301,6 +310,7 @@ def run(
     effort: str = "",
     permission_mode: str = "",
     setting_sources: str = "",
+    claude_executable: str = "",
     role_routes: dict[str, Any] | None = None,
     node_routes: dict[str, Any] | None = None,
     model_context: dict[str, Any] | None = None,
@@ -370,17 +380,23 @@ def run(
             model_context = DshModelClient(project=route_project, provider=provider, model=model, worker_backend=worker_backend,
                                            effort=effort, permission_mode=permission_mode,
                                            setting_sources=setting_sources,
+                                           claude_executable=claude_executable,
                                            role_routes=role_routes, node_routes=node_routes, **timeout_kwargs).context()
-        needed = not headless or calls_models(with_knobs(registry.resolve(route_project, identifier)[1]().state_dict(),
-                                                        list(knobs or [])))
+        state = with_knobs(registry.resolve(route_project, identifier)[1]().state_dict(), list(knobs or []))
+        needed = not headless or calls_models(state)
         if needed:
             model_context = require_route(model_context, interactive=interactive)
+            # A Claude Code too old for a node's model fails at its first call, after
+            # setup and the worktrees; refuse it here, before ownership creates the run
+            # directory (`prepare` is then told it was checked).
+            from refactory_dsh.workers import agent_roles, claude_code_preflight
+            claude_code_preflight(model_context, roles=agent_roles(state))
         provider, model = ceo_route(model_context, interactive=interactive, required=not headless)
         if model_context.get("worker_backend") == "openshell":
             print(OPENSHELL_MODEL_NOTE, file=sys.stderr)
     with ownership(workdir) as owner:
         if resume:
-            if source or source_format not in ('', 'directory') or approve or knobs or intent or model_context or provider or model or bool(worker_backend) or effort or permission_mode or setting_sources or role_routes or node_routes or model_timeout_s is not None:
+            if source or source_format not in ('', 'directory') or approve or knobs or intent or model_context or provider or model or bool(worker_backend) or effort or permission_mode or setting_sources or claude_executable or role_routes or node_routes or model_timeout_s is not None:
                 raise ValueError('resume retains saved inputs, knobs, instructions and routes; changes require explicit invalidation')
             import json
 
@@ -443,7 +459,7 @@ def run(
         if not resume:
             name, graphs = prepare(
                 identifier, workdir=workdir, intent=intent, project=project, knobs=knobs, model_context=model_context, resource_limits=resource_limits, headless=headless,
-                omit_steering=omit_steering,
+                omit_steering=omit_steering, claude_code_checked=True,
             )
         for pair in list(approve or []):
             gate, separator, value = str(pair).partition("=")
@@ -713,6 +729,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--setting-sources", default="",
                         help="claude_code workers only: the Claude Code settings they load, "
                              "none or a comma list of user, project and local")
+    parser.add_argument("--claude-executable", default="", type=os.path.expanduser,
+                        help="claude_code workers only: the Claude Code executable they run, an "
+                             "absolute path (default: the one bundled with the Agent SDK)")
     parser.add_argument("--permission-mode", default="", help="worker permissions: skip (new-run default), default (native policy), or a backend-specific mode")
     parser.add_argument(
         "--model-timeout", type=int, default=None, dest="model_timeout_s",
@@ -749,7 +768,7 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             headless=args.headless, resume=args.resume, worker_backend=args.worker_backend,
             effort=args.effort, permission_mode=args.permission_mode,
-            setting_sources=args.setting_sources,
+            setting_sources=args.setting_sources, claude_executable=args.claude_executable,
             role_routes=args.role_routes, node_routes=args.node_routes,
             resource_limits=run_flags.resource_limits(args),
             omit_steering=getattr(args, 'omit_steering', False),

@@ -1118,10 +1118,12 @@ def test_grid_through_cli_forwards_skill_route_and_evaluator(tmp_path, monkeypat
         "grid", "livemath/solver", "--parts", str(_parts(tmp_path)), "--output", str(output),
         "--blocks", "baseline", "--skill", str(skill),
         "--worker-backend", "claude_code", "--model", "claude-opus-4-6",
-        "--setting-sources", "project", "--evaluator", "walker",
+        "--setting-sources", "project", "--claude-executable", "/opt/claude/bin/claude",
+        "--evaluator", "walker",
     ])
     assert rc == 0
     assert factory.routes and factory.routes[0]["setting_sources"] == "project"
+    assert factory.routes[0]["claude_executable"] == "/opt/claude/bin/claude"
     config = json.loads((tmp_path / "grid_results.runs" / "baseline" / "config.json").read_text())
     assert config["knobs"]["skill"] == "Read every option twice."
     assert config["setting_sources"] == "project"

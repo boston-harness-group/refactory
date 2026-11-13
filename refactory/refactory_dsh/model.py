@@ -587,6 +587,7 @@ class DshModelClient:
         max_completion_tokens: str = "",
         setting_sources: str = "",
         dsh_sessions: str = "",
+        claude_executable: str = "",
     ) -> None:
         from refactory_dsh.workers import session_store_choice, validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -597,7 +598,7 @@ class DshModelClient:
             selected = resolve(project or Path("."), {key: value for key, value in {
                 "worker_backend": worker_backend, "provider": provider, "model": model,
                 "effort": effort, "permission_mode": permission_mode,
-                "setting_sources": setting_sources,
+                "setting_sources": setting_sources, "claude_executable": claude_executable,
                 "role_routes": role_routes, "node_routes": node_routes,
                 "provider_config": provider_config,
             }.items() if value is not None and value != ""}, inherited=inherited)
@@ -607,6 +608,7 @@ class DshModelClient:
             # The run-level settings sources a flag or the project file names; a
             # route map's per-node entry still overrides them (`for_node`).
             setting_sources = route.get("setting_sources", "")
+            claude_executable = route.get("claude_executable", "")
             role_routes, node_routes = route["role_routes"], route["node_routes"]
             provider_config = route.get("provider_config") or None
             routing_provenance = inherited.get("routing_provenance", selected["provenance"])
@@ -647,6 +649,12 @@ class DshModelClient:
         #: Inherited only within the same product, as effort is: a DSH client in a
         #: Claude Code worker's child process must not take Claude Code's sources.
         self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
+        #: The Claude Code executable a claude_code worker runs; empty keeps the one
+        #: bundled with the Agent SDK. Inherited only within the same product, as the
+        #: settings sources are, then `workers.CLAUDE_EXECUTABLE_ENV` on claude_code.
+        self._claude_executable = claude_executable or inherited_route.get("claude_executable", "")
+        if not self._claude_executable and self._worker_backend == "claude_code":
+            self._claude_executable = os.path.expanduser(os.environ.get("REFACTORY_CLAUDE_EXECUTABLE", ""))
         #: Where each completion's DSH process keeps its sessions (`workers.session_store`),
         #: carried in `context()` when it is ``shared``, so a worker rebuilt from its spec
         #: keeps it; a context without the field falls back to `workers.SESSIONS_ENV`.
@@ -730,6 +738,8 @@ class DshModelClient:
             result["max_completion_tokens"] = self._max_completion_tokens
         if getattr(self, "_setting_sources", ""):
             result["setting_sources"] = self._setting_sources
+        if getattr(self, "_claude_executable", ""):
+            result["claude_executable"] = self._claude_executable
         return result
 
     def output_limit(self) -> int | None:
@@ -844,6 +854,7 @@ class DshModelClient:
             **({"max_completion_tokens": mct} if (mct := getattr(self, "_max_completion_tokens", ""))
                else {}),
             **({"setting_sources": ss} if (ss := getattr(self, "_setting_sources", "")) else {}),
+            **({"claude_executable": ce} if (ce := getattr(self, "_claude_executable", "")) else {}),
             # Only the non-default choice, so a default context is the bytes it was.
             **({"dsh_sessions": ds} if (ds := getattr(self, "_dsh_sessions", "run")) != "run" else {}),
         }

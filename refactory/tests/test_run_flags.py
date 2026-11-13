@@ -43,6 +43,7 @@ CASES: dict[str, tuple[bool, list[str]]] = {
     "--worker-backend, --effort, --permission-mode": (False, ["--worker-backend", "codex", "--effort", "high",
                                                               "--permission-mode", "default"]),
     "--setting-sources": (False, ["--worker-backend", "claude_code", "--setting-sources", "user,project"]),
+    "--claude-executable": (False, ["--worker-backend", "claude_code", "--claude-executable", "~/bin/claude"]),
     "--role-routes, --node-routes": (False, ["--role-routes", '{"builder": {"model": "m2"}}',
                                              "--node-routes", '{"emit": {"model": "m3"}}']),
     "--model-timeout": (False, ["--model-timeout", "90"]),
@@ -122,7 +123,7 @@ def _walker(monkeypatch, tmp_path: Path, fast: bool, flags: list[str]) -> dict[s
 def _route(spine: dict[str, Any]) -> dict[str, Any]:
     """The route the spine's launcher builds its model client from, as the walker's is given."""
     found = {key: spine[key] for key in ("provider", "model", "worker_backend", "effort", "permission_mode",
-                                         "setting_sources")
+                                         "setting_sources", "claude_executable")
              if spine.get(key)}
     found.update({key: spine[key] for key in ("role_routes", "node_routes") if spine.get(key) is not None})
     if spine.get("model_timeout_s") is not None:
@@ -318,3 +319,12 @@ def test_a_persons_own_knob_wins_over_the_one_a_flag_derives(monkeypatch, tmp_pa
     walker = _walker(monkeypatch, tmp_path, False, flags)
     assert spine["knobs"][-2:] == walker["prepared"]["knobs"][-2:] == ["check_attempts=2", "check_attempts=5"]
     assert walker["walked"]["knobs"]["check_attempts"] == 5
+
+
+def test_a_claude_executable_under_home_reaches_both_runtimes_expanded(monkeypatch, tmp_path):
+    """A route's executable must be absolute, so `~/...` is expanded where it is parsed."""
+    monkeypatch.chdir(tmp_path)
+    flags = ["--worker-backend", "claude_code", "--claude-executable", "~/bin/claude"]
+    expected = str(Path.home() / "bin" / "claude")
+    assert _spine(monkeypatch, False, flags)["claude_executable"] == expected
+    assert _walker(monkeypatch, tmp_path, False, flags)["route"]["claude_executable"] == expected

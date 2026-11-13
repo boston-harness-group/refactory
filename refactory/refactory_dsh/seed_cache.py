@@ -103,7 +103,8 @@ SEARCH_ONLY_FIELDS = {
     "max_concurrent_evaluations": "how many evaluations run at once, not what they score",
     "max_items_in_flight": "how many items run at once, not what they score",
     **dict.fromkeys(
-        ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources"),
+        ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources",
+         "claude_executable"),
         "the task model's route: in the context as the profile's resolved ``route``"),
     "resolved_profile": "the source of the mode, implementation, inputs and route entries",
     "seed_results": "the cache itself",

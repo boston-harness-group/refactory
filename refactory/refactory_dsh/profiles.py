@@ -10,6 +10,7 @@ import inspect
 import importlib
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -262,6 +263,8 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     route["permission_mode"] = result["permission_mode"]
     if result.get("setting_sources"):
         route["setting_sources"] = result["setting_sources"]
+    if result.get("claude_executable"):
+        route["claude_executable"] = result["claude_executable"]
     try:
         validate_route(route)
         for role in result["role_routes"]:
@@ -440,6 +443,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     # so a run started then still resumes; one that sets them binds its evidence to them.
     if not evaluation_fields.get("setting_sources"):
         evaluation_fields.pop("setting_sources", None)
+    # And one that keeps the bundled Claude Code as one started before it could be chosen.
+    if not evaluation_fields.get("claude_executable"):
+        evaluation_fields.pop("claude_executable", None)
     # Likewise a run that leaves code nodes on (the default) digests as one started
     # before the switch existed, so it still resumes.
     if evaluation_fields.get("allow_code_nodes", True) is True:
@@ -486,7 +492,8 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
     from refactory_dsh.model import DshModelClient
     model = model_client if callable(getattr(model_client, "route", None)) and callable(getattr(model_client, "readiness", None)) else DshModelClient(routes_resolved=True, **{key: settings[key] for key in
         ("worker_backend", "provider", "model", "effort", "permission_mode", "role_routes", "node_routes")
-        }, setting_sources=settings.get("setting_sources") or "")
+        }, setting_sources=settings.get("setting_sources") or "",
+        claude_executable=settings.get("claude_executable") or "")
     # The route is the one the client holds: a flag, a route map or the one stored
     # choice. A provider or model a readiness probe reports is never taken into it —
     # that was the profile default, the source a run must not use (dm-258).
@@ -503,6 +510,8 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
 
 #: ``--help`` text for the settings that have it.
 SETTING_HELP = {
+    "claude_executable": "claude_code workers only: the Claude Code executable they run, an "
+                         "absolute path (default: the one bundled with the Agent SDK)",
     "val_gate": "1 selects on the parts manifest's val part (the validation gate), 0 on "
                 "train scores (default: on when the manifest has val items, else train "
                 "selection with a warning)",
@@ -560,7 +569,8 @@ def add_arguments(parser: Any) -> None:
         # snapshots, not as a command-line object.
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
-        kind = float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight", "val_gate") else str
+        # A path given as ~/... is stored expanded: a route's executable is absolute.
+        kind = os.path.expanduser if key == "claude_executable" else float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight", "val_gate") else str
         parser.add_argument(flag, dest=key, type=kind, default=None, help=SETTING_HELP.get(key))
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")

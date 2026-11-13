@@ -511,13 +511,19 @@ def test_claude_code_adapter_calls_sdk_boundary_with_preset_append_and_effort(tm
 """)
     sdk_mock = tmp_path / "sdk-mock.mjs"
     sdk_mock.write_text("""export function query({ prompt, options }) {
-  globalThis.sdkCalls.push({ prompt, systemPrompt: options.systemPrompt, effort: options.effort });
+  const call = { systemPrompt: options.systemPrompt, effort: options.effort };
+  globalThis.sdkCalls.push(call);
+  // The prompt is a stream whose first message carries the task text.
+  globalThis.sdkReads.push((async () => {
+    call.prompt = (await prompt[Symbol.asyncIterator]().next()).value.message.content;
+  })());
   return { close() {}, async *[Symbol.asyncIterator]() {} };
 }
 """)
     script = tmp_path / "exercise.mjs"
     script.write_text("""import { pathToFileURL } from 'node:url';
 globalThis.sdkCalls = [];
+globalThis.sdkReads = [];
 const { apply } = await import(pathToFileURL(process.argv[2]));
 async function invoke(env) {
   let provider;
@@ -540,6 +546,7 @@ async function invoke(env) {
 }
 await invoke({ REFACTORY_SYSTEM_PROMPT: 'You are an expert', REFACTORY_MODEL_EFFORT: 'medium' });
 await invoke({ REFACTORY_MODEL_EFFORT: 'medium' });
+await Promise.all(globalThis.sdkReads);
 console.log(JSON.stringify(globalThis.sdkCalls));
 """)
     result = subprocess.run(

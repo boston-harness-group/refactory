@@ -227,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from refactory_dsh.model import DshModelClient, ModelChoiceError, require_model_choice
     from refactory_dsh.paths import project_root
+    from refactory_dsh.workers import agent_roles, claude_code_preflight
 
     try:
         # Every agent node calls a model, so the route is settled before anything runs (dm-258).
@@ -235,6 +236,17 @@ def main(argv: list[str] | None = None) -> int:
             else DshModelClient(project=project_root(), **run_flags.model_options(args)),
             interactive=sys.stdin.isatty())
     except ModelChoiceError as exc:
+        print(f"refactory: {exc}", file=sys.stderr)
+        return 1
+    try:
+        # A Claude Code too old for a node's model would fail at its first call. A resume
+        # learns its graph only from the run, so its node routes are checked as ``worker``.
+        roles = None
+        if not args.resume:
+            from refactory_dsh.fast import EditFastMode
+            roles = agent_roles((EditFastMode if args.fast else EditMode)().state_dict())
+        claude_code_preflight(client, roles=roles)
+    except ValueError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1
 
