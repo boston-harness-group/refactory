@@ -123,7 +123,17 @@ jobs:
       - name: Python suite
         env:
           REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
-        run: uv run python -m pytest refactory/tests -q -rs -n 4
+        run: uv run python -m pytest refactory/tests -q -rs -n 4 --junitxml=python-suite.xml
+
+      # Each test's time on Linux, to compare with the same test on a Mac
+      # (`refactory_dsh.spawn_count` counts the process launches behind a gap).
+      - name: Keep the Python suite's per-test times
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-suite-times
+          path: python-suite.xml
+          if-no-files-found: ignore
 
       # The harness this repository pins and the `dsh` that boots the profile
       # must agree on the version and on the strict TypertCodec contract. CI has

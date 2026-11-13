@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from refactory_dsh import git_exe
 from refactory_dsh.invocations import TARGET_RECORD as RECORD  # was: RECORD = Path(…)
 from refactory_dsh.paths import refactory_home
 
@@ -60,7 +61,7 @@ def _git(root: Path, *args: str) -> str | None:
     target never writes to it.
     """
     try:
-        result = subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
+        result = subprocess.run([git_exe.program(*args), "--no-optional-locks", "-C", str(root), *args],
                                 capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -89,27 +90,6 @@ def _digest(path: Path) -> str:
         return f"unreadable:{error.errno}"
 
 
-def _porcelain(listing: str) -> list[str]:
-    """The paths `git status --porcelain=v1 -z` names; a rename's old path is skipped.
-
-    A rename or copy is followed by its old path as a field of its own, whether it is
-    staged (`R `) or only in the work tree (` R`, after `git add -N`), so both status
-    columns are read; reading only the first takes the old path for an entry.
-    """
-    fields = listing.split("\0")
-    paths: list[str] = []
-    index = 0
-    while index < len(fields):
-        entry = fields[index]
-        index += 1
-        if len(entry) < 4:
-            continue
-        paths.append(entry[3:])
-        if "R" in entry[:2] or "C" in entry[:2]:
-            index += 1
-    return paths
-
-
 def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
     """Where the target stands: its commit, its branch, and what is uncommitted.
 
@@ -126,22 +106,27 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
     if root in skipped:
         # The run's own directory is the target: everything in it is the run's.
         return {**found, "changes": {}}
-    inside = _git(root, "rev-parse", "--is-inside-work-tree")
+    # Whether the target is in a work tree, and that tree's top, in one call: outside a
+    # checkout, and in a `.git` directory, it fails, as `--is-inside-work-tree` alone
+    # answered no there.
+    where = (_git(root, "rev-parse", "--is-inside-work-tree", "--show-toplevel") or "").splitlines()
     # A directory an enclosing checkout ignores is not that checkout's to report on:
     # its status would list nothing there, and the guard would be off without a word.
-    if inside is not None and inside.strip() == "true" and _git(root, "check-ignore", "-q", str(root)) is None:
-        top = Path((_git(root, "rev-parse", "--show-toplevel") or str(root)).strip()).resolve()
+    if where[:1] == ["true"] and len(where) > 1 and _git(root, "check-ignore", "-q", str(root)) is None:
+        top = Path(where[1].strip() or str(root)).resolve()
         specs = [f":(exclude,literal){path.relative_to(root)}" for path in skipped if path.is_relative_to(root)]
-        listing = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", *specs)
+        # HEAD, the branch and what is uncommitted, in one call.
+        listing = _git(root, "status", "--porcelain=v2", "--branch", "--no-ahead-behind", "-z",
+                       "--untracked-files=all", "--", ".", *specs)
         if listing is None:
             raise ValueError(f"git cannot report the state of the target {root}")
-        paths = [os.path.relpath(top / path, root) for path in _porcelain(listing)]
+        head, entries = _porcelain_v2(listing)
+        paths = [os.path.relpath(top / path, root) for path in entries]
         prefix = "" if root == top else root.relative_to(top).as_posix()
-        found.update(git=True, head=(_git(root, "rev-parse", "-q", "--verify", "HEAD") or "").strip() or None,
-                     branch=(_git(root, "symbolic-ref", "-q", "--short", "HEAD") or "").strip() or None,
+        found.update(git=True, head=head, branch=_v2_branch(listing),
                      # The committed content under the target alone: a commit elsewhere in
                      # the checkout, or a new branch at the same commit, leaves it as it was.
-                     tree=(_git(root, "rev-parse", "-q", "--verify", f"HEAD:{prefix}") or "").strip() or None)
+                     tree=_tree(str(top), head, prefix) if head else None)
     else:
         paths = []
         for directory, names, files in os.walk(root):
@@ -153,6 +138,12 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
     if len(paths) > LIMIT:
         return {**found, "changes": None}
     return {**found, "changes": {path: _digest(root / path) for path in sorted(paths)}}
+
+
+@functools.lru_cache(maxsize=4096)
+def _tree(top: str, head: str, prefix: str) -> str | None:
+    """The tree a commit holds at ``prefix``: asked once per process, a commit never changes."""
+    return (_git(Path(top), "rev-parse", "-q", "--verify", f"{head}:{prefix}") or "").strip() or None
 
 
 def _read(workdir: Path) -> dict[str, Any] | None:
@@ -738,15 +729,15 @@ def _source_checkout(source: str) -> str | None:
 
 
 #: How many space-separated fields come before the path in each `git status --porcelain=v2`
-#: entry of a tracked file: changed, renamed or copied (whose old path follows as a field of
-#: its own), unmerged.
-_V2_FIELDS = {"1": 8, "2": 9, "u": 10}
+#: entry: a tracked file changed, renamed or copied (whose old path follows as a field of
+#: its own), or unmerged; or an untracked one.
+_V2_FIELDS = {"1": 8, "2": 9, "u": 10, "?": 1}
 
 
 def _porcelain_v2(listing: str) -> tuple[str | None, list[str]]:
     """The HEAD commit and the paths `git status --porcelain=v2 --branch -z` names.
 
-    As :func:`_porcelain` reads v1, a rename's old path is skipped.
+    A rename or copy is followed by its old path as a field of its own, which is skipped.
     """
     fields = listing.split("\0")
     head: str | None = None
@@ -768,6 +759,15 @@ def _porcelain_v2(listing: str) -> tuple[str | None, list[str]]:
         if entry.startswith("2 "):
             index += 1
     return head, paths
+
+
+def _v2_branch(listing: str) -> str | None:
+    """The branch `git status --porcelain=v2 --branch -z` is on; None on a detached HEAD."""
+    for entry in listing.split("\0"):
+        if entry.startswith("# branch.head "):
+            name = entry.removeprefix("# branch.head ").strip()
+            return None if name == "(detached)" else name or None
+    return None
 
 
 def _checkout_state(root: Path) -> dict[str, Any]:
