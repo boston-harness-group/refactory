@@ -242,6 +242,24 @@ def test_the_comparison_stays_within_its_budget():
     assert "| c | i19 | broken |" in text
 
 
+def test_a_block_that_does_not_fit_leaves_room_for_later_ones_that_do():
+    """The first changed item is too long for what is left; the next, short one still
+    gets its trajectories rather than following it into the table."""
+    from refactory_dsh.optim.base import EDIT_CHANGE_BUDGET, _edit_change_lines
+
+    def rec(item: str, passed: bool, size: int) -> dict[str, Any]:
+        return {"id": item, "passed": passed, "score": float(passed),
+                "exchanges": [{"node": "s", "prompt": "p", "response": f"OUT-{item} " + "z" * size}]}
+
+    sizes = {"i0": EDIT_CHANGE_BUDGET // 3, "i1": EDIT_CHANGE_BUDGET // 3, "i2": 50}
+    pair = {"child": "c", "parent": "p", "edit": [],
+            "parent_records": [rec(item, False, size) for item, size in sizes.items()],
+            "child_records": [rec(item, True, size) for item, size in sizes.items()]}
+    text = "\n".join(_edit_change_lines([pair]))
+    assert "#### Item i0 -- fixed" in text and "| c | i1 | fixed |" in text
+    assert "#### Item i2 -- fixed" in text and "| c | i2 |" not in text
+
+
 def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
     """The line to the edited candidate and the latest rejected child, each with
     the rationale, prediction and diagnosis it was proposed with, the gate's

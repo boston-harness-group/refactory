@@ -1075,6 +1075,7 @@ The per-item half of a data node, from the command line.
 | function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
 | function | `error_kind` | `(error: 'BaseException') -> 'str'` |
 | function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
+| function | `gate_visit` | `(node: 'str', verdict: 'Any') -> 'dict[str, Any]'` |
 | function | `interrupted_cause` | `(text: 'str \| None') -> 'str \| None'` |
 | function | `interrupted_item` | `(record: 'dict[str, Any]') -> 'str \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
@@ -1085,10 +1086,12 @@ The per-item half of a data node, from the command line.
 | function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
 | function | `missing_steps` | `(pass_dir: 'Path') -> 'dict[str, dict[str, Any]]'` |
 | function | `no_answer` | `(pass_dir: 'Path', error_text: 'str', outputs_of: 'Callable[[str], Iterable[str]]') -> 'dict[str, dict[str, Any]]'` |
+| function | `op_visit` | `(workdir: 'Path', node: 'str', produced: 'Any', writes: 'Iterable[str]' = ()) -> 'dict[str, Any]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
 | function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
+| function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
@@ -1106,6 +1109,7 @@ The per-item half of a data node, from the command line.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
 - **`error_kind`** — A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
+- **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None
 - **`interrupted_item`** — Why an item record's outcome is unknown, or None when it is the item's own result.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
@@ -1115,10 +1119,12 @@ The per-item half of a data node, from the command line.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
 - **`missing_steps`** — The steps a pass went on without, each with why: ``cause`` (``output_limit``,
 - **`no_answer`** — The missing steps whose absent output is why a later step of the pass failed, or {}.
+- **`op_visit`** — One op visit of an item's pass, as its record's ``steps`` keep it: the facts it
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
 - **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.
 - **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+- **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.

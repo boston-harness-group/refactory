@@ -347,7 +347,15 @@ sections at once; this is the default loop's equivalent.
   or an answer with nothing to read, is refused `E-proposal-shape` with the reason: it
   is counted with the epoch's refusals (and in the refusal pressure that can add an
   attempt) and shown under "Why your last proposals were refused" in the retry and the
-  next request, never dropped. An empty `proposals` list proposes nothing.
+  next request, never dropped. An empty `proposals` list proposes nothing. An answer
+  whose outermost object is not valid JSON (a list left open, a reply cut off) is read
+  as nothing: no object nested in it (one edit of one proposal) is taken for the
+  answer. The reply is read by its own braces first (so a code fence inside a proposed
+  prompt cannot cut it), the last top-level object with a `proposals` list being the
+  answer; a fenced object counts only when it is its fence's whole content. Each proposal the request asked for is refused `E-proposal-shape`, saying
+  where the JSON broke, so the round asks again within its attempts and the refusals
+  are counted; with `lessons` on, the earlier lessons are kept and the next request
+  marks them not updated in that epoch, with why (journaled, restored on resume).
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
   `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
   them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
@@ -433,6 +441,11 @@ or `problem`, `task_description`, `instruction`, `input` or `prompt`, else the f
 step's prompt) and its `choices`. Then it shows each step's output from the record's
 `exchanges`, in the order the pass ran them (a fork's branches in branch order), then
 the expected answer (`label` and `label_text`), the prediction and the grader's reason.
+A record also keeps, under `steps` and in run order, each op visit of the item's pass
+(the facts it returned and the declared files it wrote: a 600-character preview, a
+digest and whether all of it was empty) and each code-gate visit (its verdict and
+reason); `exchanges` stays one entry per model call. Both runtimes record them (the
+spine through its runner, the walker in memory).
 
 - **Answer rules.** Built from the run's edit catalogue and the node schema, with
   placeholders only. When the run permits a structural op, the rules show a structural
@@ -580,7 +593,8 @@ optimizer, at no extra compute (train records only):
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
   rises and drops among the rest. Each changed item is shown with both trajectories, as
-  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); the rest go in a table. It also
+  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); an item that no longer fits goes
+  in a table, and a later, shorter one that still fits is shown in full. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of
@@ -657,7 +671,8 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   revising or dropping earlier lessons. The latest (at most 1500 characters) is kept with
   the epoch and generation it was written in, journaled (`optimizer_lessons`), restored
   on resume and shown back in the next request; an answer without it keeps the previous
-  lessons.
+  lessons. An answer that could not be read keeps them too, marked as not updated in
+  that epoch, with why; the next readable answer clears the mark.
 - **Did the added steps contribute?** (`step_review`, default `1`). For every step a
   candidate of the last round added (an insert, a split's halves, a fork's branches, a
   loop's gate; not the fork and join themselves), on the train items it shares with its
@@ -669,12 +684,24 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   step's median duration and tokens when its records carry them. These counts follow
   the ledger's same-round rule; without a same-round parent they are `n/a (different
   seed)`. Then one call of the optimizer's model per step that recorded
-  text output (at most 8 per request): it reads, on up to 4 train items (changed outcomes
-  first), the step's prompt as sent, its output and the output of the next recorded step
-  that reads it (through the graph's reads, inputs and `{{fact}}` slots, so a sibling
-  fork branch is not taken for it), and answers
+  text output (at most 8 per request): it reads the step's own system prompt and, on up
+  to 4 train items (changed outcomes first), the step's prompt as sent, its output and
+  the output of the next recorded step that reads it (through the graph's reads, inputs
+  and `{{fact}}` slots, so a sibling fork branch is not taken for it), each text whole
+  unless together with the request's frame and instructions they pass 400000 characters
+  (then the longest are cut head and tail to one length, the cut said; a call the
+  provider refuses as too long is retried once at half its length), and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
-  quote and a note. The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
+  quote and a note. A step that makes the decision -- something reads what it writes
+  (or it ends the data pass, for the grader) but no model step does, not even one a
+  code gate's reloop hands it to -- is asked instead, item by item, what its
+  inputs recommended and what it decided, and is shown as `follows_inputs`,
+  `overrides_inputs` or `no_recommendation` with "decides as its inputs recommended on N
+  of M item(s)": repeating the chosen answer is its job. A code step or gate gets no
+  call: from the records' `steps`, the line says on which items a code step gave
+  output (and how many distinct outputs), or which way a gate routed each item first
+  and which items it sent back, each group with how the final answer moved there
+  (changed, fixed, broken against the parent). The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
   and cached in memory and in `<run root>/step_reviews/` (cleared by a fresh run in the
   same directory, as the trace is), so a retry or a resumed run pays for none again.
   The section keeps full entries within 9000 characters; steps past that get one line
@@ -734,7 +761,13 @@ paired with a parent picker), on the train records the request carries:
   As in SkillOpt, one list is not merged, the final merge runs only when both sides
   found something, and an unreadable merge keeps every input finding (failures first).
 - **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
-  characters) before the item results, and the analysts take the readers' place: no
+  characters) before the item results. Each finding is shown whole, as SkillOpt shows
+  its analysts' edits: its text, what to change and what to keep, where (a structure
+  note too), every evidence quote, line breaks kept; only when the findings pass the
+  section's room are the longest texts cut to one length (never below 100 characters),
+  each cut marked `… [cut: N chars]`. The analysts read the edit catalogue's
+  descriptions whole. The analysts' item texts show an errored item's error once (not
+  again as the grader's reason). The analysts take the readers' place: no
   reader call runs, and when the items do not fit one request the items they cite are
   shown in full first. SkillOpt's analysts are its only reading of the trajectories, so
   running both would give this loop more analysis than SkillOpt's.

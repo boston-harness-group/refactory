@@ -5254,11 +5254,25 @@ class Loop(OuterLoop):
     def _keep_lessons(self) -> None:
         """Keep the lessons the proposer's answer carried (``LoopConfig.lessons``), with
         the epoch and generation they were written in, and journal them so a resumed run
-        shows them back; an answer without lessons keeps the previous ones."""
-        written = str(getattr(self.optimizer, "last_lessons", "") or "").strip()
-        if not self.config.lessons or not written or written == self._lessons.get("text"):
+        shows them back; an answer without lessons keeps the previous ones. An answer that
+        could not be read at all (``last_reply_problem``) keeps them too, marked as not
+        updated in this round and why, so the next request says so."""
+        if not self.config.lessons:
             return
-        self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
+        problem = str(getattr(self.optimizer, "last_reply_problem", "") or "")
+        if problem:
+            self._lessons = {**self._lessons, "not_updated": {
+                "epoch": self.epoch, "generation": self.generation, "why": problem}}
+            self._journal("optimizer_lessons", **self._lessons)
+            return
+        # A readable answer is the lessons' state again, whatever it carried: the mark
+        # an unread one left goes (journaled, so a resume does not bring it back).
+        cleared = self._lessons.pop("not_updated", None) is not None
+        written = str(getattr(self.optimizer, "last_lessons", "") or "").strip()
+        if written and written != self._lessons.get("text"):
+            self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
+        elif not cleared:
+            return
         self._journal("optimizer_lessons", **self._lessons)
 
     def _analyst_settings(self) -> dict[str, int]:
@@ -5989,7 +6003,8 @@ class Loop(OuterLoop):
                 if "state" in record:
                     self.load_strategy_state(record["state"])
             elif event == "optimizer_lessons":
-                self._lessons = {key: record.get(key) for key in ("text", "epoch", "generation")}
+                self._lessons = {key: record[key] for key in
+                                 ("text", "epoch", "generation", "not_updated") if key in record}
             elif event == "analyst_findings":
                 self._analyses.append({key: value for key, value in record.items()
                                        if key not in ("event", "at", "ts")})

@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import traceback as traceback_mod
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
@@ -1994,12 +1995,29 @@ class Executor:
             if isinstance(produced, dict):
                 for key, value in produced.items():
                     self.ctx.set_fact(key, value)
+            self._keep_visit(node, produced)
         elif node.kind == "agent":
             self._visit_agent(node)
         else:
             return self._visit_gate(node, answer)
         out = self.graph.out_edges(node.id)
         return (out[0].target if out else None), None
+
+    def _keep_visit(self, node: Node, produced: Any) -> None:
+        """Inside a data-node pass, keep what this op produced, or the verdict this code
+        gate answered, beside the item's model calls (`items.op_visit`, `items.
+        gate_visit`), as the spine's runner does (`run.record_visit`)."""
+        from refactory_dsh import items
+
+        if not (self.ctx.workdir / items.PASS_MARKER).exists():
+            return
+        try:
+            self._item_exchanges.append(
+                items.gate_visit(node.id, produced) if node.kind == "gate"
+                else items.op_visit(self.ctx.workdir, node.id, produced, node.writes))
+        except Exception as exc:  # noqa: BLE001 - the item's evidence, never its outcome
+            warnings.warn(f"could not record the visit of {node.id}: "
+                          f"{type(exc).__name__}: {exc}", RuntimeWarning, stacklevel=2)
 
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
@@ -2207,6 +2225,7 @@ class Executor:
             # Forkserver child: per-process stdout capture, thread-safe,
             # no global sys.stdout swap.
             verdict = self._run_op_timed(node.evaluator, node, timeout)
+            self._keep_visit(node, verdict)
             # A reloop to a step that cannot see what the gate read hands it those
             # files, as the spine's runner does (`run.with_unseen_reads`).
             from refactory_dsh.nn.loops import blind_reloops

@@ -54,13 +54,15 @@ LEDGER_TOUCHED = 4
 #: The most characters of lessons kept and shown.
 LESSONS_CHARS = 1500
 
-#: Steps reviewed per request, train items each review reads, and how much of each
-#: text it quotes.
+#: Steps reviewed per request and train items each review reads. A review reads each
+#: item's texts (the step's input as sent, its output, the next reader's output) whole;
+#: only when together they pass ``STEP_REVIEW_ROOM`` characters (the analysts' room,
+#: ``analysts.ANALYST_ROOM``) are the longest cut, head and tail, to one length and never
+#: below ``STEP_REVIEW_FLOOR``, each cut said (`review_prompt`).
 STEP_REVIEW_STEPS = 8
 STEP_REVIEW_ITEMS = 4
-STEP_REVIEW_INPUT_CHARS = 2500
-STEP_REVIEW_OUTPUT_CHARS = 2000
-STEP_REVIEW_NEXT_CHARS = 1200
+STEP_REVIEW_ROOM = 400000
+STEP_REVIEW_FLOOR = 2000
 STEP_REVIEW_QUOTE_CHARS = 240
 STEP_REVIEW_NOTE_CHARS = 300
 #: The most characters "Did the added steps contribute?" gives full entries; the steps
@@ -68,6 +70,9 @@ STEP_REVIEW_NOTE_CHARS = 300
 STEP_REVIEW_CHARS = 9000
 #: The verdicts a review may give.
 STEP_VERDICTS = ("adds_new_work", "restates_inputs", "contradicts_inputs", "no_effect")
+#: The verdicts of a decision step's review (`decision_step`), from how often it
+#: decided as its inputs recommended (`parse_decision_review`).
+DECISION_VERDICTS = ("follows_inputs", "overrides_inputs", "no_recommendation")
 
 
 # ── change kinds ────────────────────────────────────────────────────────────
@@ -281,16 +286,26 @@ def lessons_text(value: Any) -> str:
 
 
 def lessons_lines(lessons: Mapping[str, Any] | None) -> list[str]:
-    """"Your lessons so far": the latest lessons the optimizer wrote, with when; nothing
-    before it has written any."""
-    text = lessons_text((lessons or {}).get("text"))
-    if not text:
+    """"Your lessons so far": the latest lessons the optimizer wrote, with when, and,
+    when a later answer could not be read (``not_updated``), that they were not updated
+    then and why; nothing before it has written any or had an answer unread."""
+    lessons = lessons or {}
+    text = lessons_text(lessons.get("text"))
+    stale = lessons.get("not_updated") or {}
+    if not text and not stale:
         return []
-    return ["## Your lessons so far",
-            f"What you wrote under `lessons` in epoch {lessons.get('epoch', '?')} (generation "
-            f"{lessons.get('generation', '?')}). Check them against the results since; keep, "
-            "revise or drop them in your answer.",
-            text]
+    lines = ["## Your lessons so far"]
+    if text:
+        lines.append(f"What you wrote under `lessons` in epoch {lessons.get('epoch', '?')} "
+                     f"(generation {lessons.get('generation', '?')}). Check them against the "
+                     "results since; keep, revise or drop them in your answer.")
+    if stale:
+        lines.append(f"NOT UPDATED in epoch {stale.get('epoch', '?')} (generation "
+                     f"{stale.get('generation', '?')}): your answer then could not be read "
+                     f"({_clip(stale.get('why'), 300)}), so its lessons were lost"
+                     + ("; these are the earlier ones, unchanged." if text
+                        else "; you have none kept yet."))
+    return [*lines, *([text] if text else [])]
 
 
 # ── added steps ─────────────────────────────────────────────────────────────
@@ -399,17 +414,22 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
     # Reasoning text differs between runs on nearly every item, so the answer the grader
     # read is compared; the output text only for items that recorded no answer.
     compared = changed = text_compared = text_changed = 0
+    flipped: set[str] = set()
     for item in shared:
         before, after = _answer(parent[item]), _answer(child[item])
         if before is not None and after is not None:
             compared += 1
             changed += before != after
+            if before != after:
+                flipped.add(item)
             continue
         before, after = _final_output(parent[item]), _final_output(child[item])
         if before is None or after is None:
             continue
         text_compared += 1
         text_changed += before != after
+        if before != after:
+            flipped.add(item)
     ran = []
     for item in sorted(child):
         exchanges = [e for e in child[item].get("exchanges") or () if isinstance(e, Mapping)]
@@ -426,12 +446,15 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
         after = next((e for e in later if readers is None or e.get("node") in readers), None)
         samples.append({
             "item": item,
-            "input": _clip_middle(exchanges[at].get("prompt"), STEP_REVIEW_INPUT_CHARS),
-            "output": _clip_middle(exchanges[at].get("response"), STEP_REVIEW_OUTPUT_CHARS),
+            "input": str(exchanges[at].get("prompt") or ""),
+            "output": str(exchanges[at].get("response") or ""),
             "next_step": str(after.get("node") or "") if after else "",
-            "next_output": (_clip_middle(after.get("response"), STEP_REVIEW_NEXT_CHARS)
-                            if after else ""),
+            "next_output": str(after.get("response") or "") if after else "",
         })
+    visits = {item: [v for v in child[item].get("steps") or ()
+                     if isinstance(v, Mapping) and v.get("node") == step]
+              for item in sorted(child)}
+    visits = {item: found for item, found in visits.items() if found}
     return {
         "step": step, "shared": change["shared"], "fixed": len(change["fixed"]),
         "broken": len(change["broken"]), "compared": compared, "final_changed": changed,
@@ -440,19 +463,157 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
         "median_s": round(statistics.median(durations), 1) if durations else None,
         "median_tokens": round(statistics.median(tokens)) if tokens else None,
         "samples": samples,
+        **({"instructions": instructions} if samples and (instructions := step_instructions(
+            graph, step)) else {}),
+        **({"visits": _visit_facts(visits, set(parent), flipped, change)} if visits else {}),
+        **({"decision": True} if samples and decision_step(graph, step, samples) else {}),
     }
+
+
+def step_instructions(state: Mapping[str, Any] | None, step: str) -> str:
+    """A step's own system prompt as the candidate runs it: the value of the knob its
+    ``system_prompt_template`` is bound to, else the template; empty without one."""
+    nodes = ((state or {}).get("graph") or {}).get("nodes") or {}
+    node = nodes.get(step) if isinstance(nodes, Mapping) else None
+    if not isinstance(node, Mapping):
+        return ""
+    knobs = (state or {}).get("knobs") or {}
+    for bound, knob in node.get("field_bindings") or ():
+        value = (knobs.get(knob) or {}).get("value") if isinstance(knobs, Mapping) else None
+        if bound == "system_prompt_template" and isinstance(value, str):
+            return value.strip()
+    return str(node.get("system_prompt_template") or "").strip()
+
+
+def fit_samples(samples: Sequence[Mapping[str, Any]], room: int = STEP_REVIEW_ROOM
+                ) -> list[dict[str, Any]]:
+    """A review's samples with their texts whole when together they fit ``room``; else
+    the longest cut head and tail to one length (water-filling, `analysts.item_cap`,
+    never below ``STEP_REVIEW_FLOOR``), each cut saying how much it left out."""
+    from .analysts import item_cap
+
+    keys = ("input", "output", "next_output")
+    lengths = [len(str(s.get(key) or "")) for s in samples for key in keys]
+    # Each cut says how much it left out: room for that line too.
+    marks = sum(1 for n in lengths if n) * len("\n[... 0000000 characters omitted ...]\n")
+    cap = None if sum(lengths) <= room else item_cap(lengths, room - marks,
+                                                      floor=STEP_REVIEW_FLOOR)
+    if cap is None:
+        return [dict(s) for s in samples]
+    return [{**s, **{key: _clip_middle(s.get(key), cap) for key in keys if s.get(key)}}
+            for s in samples]
+
+
+def decision_step(graph: Mapping[str, Any] | None, step: str,
+                  samples: Sequence[Mapping[str, Any]] = ()) -> bool:
+    """Whether ``step`` makes the pipeline's decision: something reads what it wrote (or
+    it ends the data pass, for the grader to read) but no model step does, directly,
+    through other steps (by ``graph``'s data flow) or handed it by a code gate's reloop
+    (`handed_to`), and on the sampled items no other step's model call followed it. Its
+    job is to settle on an answer, so whether it repeats its inputs' wording says little;
+    whether it decides as they recommended says what it adds."""
+    readers = downstream(graph, step)
+    if readers is None:
+        return False
+    nodes = ((graph or {}).get("graph") or {}).get("nodes") or {}
+    if not readers and not any(isinstance(node, Mapping) and node.get("kind") == "data"
+                               and node.get("subgraph_exit") == step
+                               for node in nodes.values()):
+        return False  # what it writes reaches no step and is not the pass's end
+    if any(_node_kind(nodes.get(reader)) == "agent" for reader in {*readers, *handed_to(graph, step)}):
+        return False
+    return all(not sample.get("next_step") for sample in samples)
+
+
+def handed_to(state: Mapping[str, Any] | None, step: str) -> set[str]:
+    """The other agents a code gate's reloop hands a file ``step`` (or a step after it)
+    wrote, though they do not read it (`nn.loops.blind_reloops`, `run.with_unseen_reads`):
+    at run time they are given what it wrote."""
+    from refactory_dsh.nn import Graph
+    from refactory_dsh.nn.loops import blind_reloops, loop_edges
+
+    try:
+        graph = Graph.from_state(dict((state or {}).get("graph") or {}))
+        knobs = {name: (spec or {}).get("value")
+                 for name, spec in ((state or {}).get("knobs") or {}).items()
+                 if isinstance(spec, Mapping)}
+        unseen = blind_reloops(graph, knobs)
+        reloops = loop_edges(graph)
+    except Exception:  # noqa: BLE001 - a graph that cannot be built hands nothing over
+        return set()
+    after = {step, *(downstream(state, step) or ())}
+    written = {name for node_id in after if node_id in graph.nodes
+               for name in graph.nodes[node_id].writes}
+    return {target for gate, target, condition in reloops
+            if target != step and written & set(
+                (unseen.get(gate) or {}).get(condition.strip().lower()) or ())}
+
+
+#: The most item ids a code step's or gate's line names per group.
+VISIT_IDS = 8
+
+
+def _visit_facts(visits: Mapping[str, Sequence[Mapping[str, Any]]], in_parent: set[str],
+                 flipped: set[str], change: Mapping[str, Any]) -> dict[str, Any]:
+    """What an added op or code gate did on each item it ran on, from the records'
+    ``steps``: an op's items with output (``fired``) and without; a gate's items by its
+    first verdict, and the items it was visited on more than once (``relooped``). Each
+    group with its items' final-answer changes and fixed/broken against the parent (on
+    items the parent was scored on too)."""
+    fixed, broken = set(change.get("fixed") or ()), set(change.get("broken") or ())
+
+    def group(items: Sequence[str]) -> dict[str, Any]:
+        shared = [item for item in items if item in in_parent]
+        return {"items": list(items), "shared": len(shared),
+                "changed": sum(item in flipped for item in shared),
+                "fixed": sum(item in fixed for item in shared),
+                "broken": sum(item in broken for item in shared)}
+
+    kind = "gate" if any(v.get("kind") == "gate" for vs in visits.values() for v in vs) else "op"
+    out: dict[str, Any] = {"kind": kind, "ran": len(visits)}
+    if kind == "op":
+        fired = [item for item, vs in visits.items() if any(not v.get("empty") for v in vs)]
+        out["fired"] = group(fired)
+        out["silent"] = group([item for item in visits if item not in fired])
+        outputs = {v.get("digest") for vs in visits.values() for v in vs if not v.get("empty")}
+        out["distinct_outputs"] = len(outputs)
+        example = next((v.get("output") for item in fired for v in visits[item]
+                        if not v.get("empty") and v.get("output")), "")
+        if example:
+            out["example"] = _clip(example, STEP_REVIEW_QUOTE_CHARS)
+        return out
+    routes: dict[str, list[str]] = {}
+    for item, vs in visits.items():
+        routes.setdefault(str(vs[0].get("verdict") or "?"), []).append(item)
+    out["routes"] = {label: group(items) for label, items in
+                     sorted(routes.items(), key=lambda kv: (-len(kv[1]), kv[0]))}
+    out["relooped"] = group([item for item, vs in visits.items() if len(vs) > 1])
+    return out
 
 
 STEP_REVIEW_SYSTEM = ("You review one step of an AI pipeline against what it was given. "
                       "You reply with JSON only.")
 
 
-def review_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
-    """The review call for one added step: its input as sent, its output and the next
-    step's output on up to ``STEP_REVIEW_ITEMS`` train items, and domain-free questions."""
+def review_prompt(entry: Mapping[str, Any], mode_name: str = "",
+                  room: int = STEP_REVIEW_ROOM) -> str:
+    """The review call for one added step, within ``room`` characters: its input as
+    sent, its output and the next step's output on up to ``STEP_REVIEW_ITEMS`` train
+    items, and domain-free questions. The frame and the step's own instructions are
+    counted first; the items' texts share the rest (`fit_samples`). A decision step
+    (``entry["decision"]``) is asked about instead (`decision_prompt`)."""
+    build = decision_prompt if entry.get("decision") else _review_text
+    samples = list(entry.get("samples") or ())
+    blank = [{**sample, "input": "", "output": "", "next_output": ""} for sample in samples]
+    frame = len(build(entry, mode_name, blank))
+    return build(entry, mode_name, fit_samples(samples, max(0, room - frame)))
+
+
+def _review_text(entry: Mapping[str, Any], mode_name: str,
+                 samples: Sequence[Mapping[str, Any]]) -> str:
     step = entry.get("step")
     blocks = []
-    for sample in entry.get("samples") or ():
+    for sample in samples:
         block = [f"## Item {sample.get('item')}",
                  f"### What `{step}` was given (its prompt as sent)", sample.get("input") or "(empty)",
                  f"### What `{step}` wrote", sample.get("output") or "(empty)"]
@@ -469,6 +630,7 @@ def review_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
         f"`{step}` to the pipeline ({entry.get('kind')}). Below, on {len(blocks)} train "
         "item(s), is what the step was given, what it wrote, and what the next step that "
         "reads its output wrote.",
+        *_instructions_block(entry),
         "Compare the step's output with what it was given: does it contain facts, checks, "
         "computations or alternatives its inputs lacked? Then look at the next step's "
         "output: does it use what this step wrote? Judge the step's own contribution, not "
@@ -488,11 +650,77 @@ def review_prompt(entry: Mapping[str, Any], mode_name: str = "") -> str:
     ])
 
 
-def parse_review(payload: Any) -> dict[str, str]:
+def _instructions_block(entry: Mapping[str, Any]) -> list[str]:
+    """The reviewed step's own instructions (its system prompt), when it has any."""
+    if not entry.get("instructions"):
+        return []
+    return [f"## `{entry.get('step')}`'s own instructions (its system prompt)\n"
+            f"{entry['instructions']}"]
+
+
+def decision_prompt(entry: Mapping[str, Any], mode_name: str,
+                    samples: Sequence[Mapping[str, Any]]) -> str:
+    """The review call for an added decision step (`decision_step`): on each sampled
+    item, what its inputs recommended and what it decided. Repeating the chosen answer
+    is such a step's job, so the question is whether it ever decides otherwise."""
+    step = entry.get("step")
+    blocks = [f"## Item {sample.get('item')}\n"
+              f"### What `{step}` was given (its prompt as sent)\n{sample.get('input') or '(empty)'}\n"
+              f"### What `{step}` wrote\n{sample.get('output') or '(empty)'}"
+              for sample in samples]
+    return "\n\n".join([
+        f"# Reviewing an added decision step: `{step}`",
+        (f"Mode: `{mode_name}`. " if mode_name else "")
+        + f"Candidate `{entry.get('candidate')}` added the {entry.get('node_kind') or ''} step "
+        f"`{step}` to the pipeline ({entry.get('kind')}). No later model step reads what it "
+        "writes: it makes the pipeline's decision, so repeating the chosen answer is its "
+        f"job. Below, on {len(blocks)} train item(s), is what it was given and what it wrote.",
+        *_instructions_block(entry),
+        "For each item, say what its inputs recommended (the answer or decision the earlier "
+        "steps' notes in its prompt point to; \"none\" when they disagree or recommend "
+        "nothing) and what the step decided, and whether the two are the same. Judge the "
+        "step's decision against its inputs, not whether it is right, and do not solve "
+        "the items yourself.",
+        *blocks,
+        "## Answer\nWrite one JSON object and nothing else:\n\n"
+        '{"items": [{"item": "<id>", "inputs_recommend": "<answer, or none>", '
+        '"decided": "<answer>", "same": true | false}],\n'
+        ' "example": "<a short verbatim quote from the step\'s output where it departs from '
+        'its inputs, or empty>",\n'
+        ' "note": "<one sentence>"}',
+    ])
+
+
+def parse_decision_review(payload: Any) -> dict[str, Any]:
+    """A decision step's review: of the items whose inputs recommended something, on
+    how many (``agree`` of ``of``) it decided the same; its verdict from
+    ``DECISION_VERDICTS``. Raises ``ValueError`` on an answer without an items list."""
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("items"), list):
+        raise ValueError('the decision review has no "items" list')
+    rows = [row for row in payload["items"] if isinstance(row, Mapping)]
+    if not rows:
+        raise ValueError('the decision review\'s "items" list is empty')
+    clear = [row for row in rows
+             if str(row.get("inputs_recommend") or "").strip().lower() not in ("", "none")]
+    agree = sum(row.get("same") is True for row in clear)
+    verdict = ("no_recommendation" if not clear else
+               "follows_inputs" if agree == len(clear) else "overrides_inputs")
+    return {"verdict": verdict, "agree": agree, "of": len(clear), "items": len(rows),
+            "example": _clip(payload.get("example"), STEP_REVIEW_QUOTE_CHARS),
+            "note": _clip(payload.get("note"), STEP_REVIEW_NOTE_CHARS)}
+
+
+def parse_review(payload: Any) -> dict[str, Any]:
     """A review answer, checked: a verdict from ``STEP_VERDICTS`` and a bounded example
-    and note. Raises ``ValueError`` on an answer without a known verdict."""
+    and note, or a kept decision review (`parse_decision_review`) as it was stored.
+    Raises ``ValueError`` on an answer without a known verdict."""
     if not isinstance(payload, Mapping):
         raise ValueError("the review is not a JSON object")
+    if payload.get("verdict") in DECISION_VERDICTS and all(
+            isinstance(payload.get(key), int) for key in ("agree", "of", "items")):
+        return {key: payload[key] for key in ("verdict", "agree", "of", "items")} | {
+            "example": _clip(payload.get("example"), STEP_REVIEW_QUOTE_CHARS),
+            "note": _clip(payload.get("note"), STEP_REVIEW_NOTE_CHARS)}
     verdict = re.sub(r"[\s-]+", "_", str(payload.get("verdict") or "").strip().lower())
     if verdict not in STEP_VERDICTS:
         raise ValueError(f"unknown verdict {payload.get('verdict')!r}; expected one of "
@@ -514,7 +742,11 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
              "(what the grader read) changed, and a reviewer's verdict (one call per step, on up to "
              f"{STEP_REVIEW_ITEMS} train items) on whether the step's output holds facts, "
              "checks, computations or alternatives its inputs lacked. A step that only "
-             "restates its inputs adds a model call and little else."]
+             "restates its inputs adds a model call and little else. A step that makes the "
+             "decision (no later model step reads it) is judged instead by how often it "
+             "decides as its inputs recommended. A code step or gate gets no reviewer: its "
+             "measured behaviour is shown (on which items a code step gave output or a gate "
+             "routed each way or relooped, and how the final answer moved on them)."]
     used, compact = sum(len(line) + 1 for line in lines), 0
     for entry in entries:
         head = (f"- `{entry.get('step')}` ({entry.get('node_kind') or 'step'}, added by "
@@ -543,17 +775,23 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
             facts.append(f"median {entry['median_s']} s")
         if entry.get("median_tokens") is not None:
             facts.append(f"median {entry['median_tokens']} tokens")
+        if isinstance(entry.get("visits"), Mapping):
+            facts.append(visit_text(entry["visits"], entry.get("same_seed") is not False))
         review = entry.get("review")
         if isinstance(review, Mapping):
-            said = f"review: {review.get('verdict')}"
+            said = f"review: {_verdict_text(review)}"
             if review.get("example"):
                 said += f' -- "{review["example"]}"'
             if review.get("note"):
                 said += f" -- {review['note']}"
         elif entry.get("review_error"):
             said = f"review: not available ({_clip(entry['review_error'], 160)})"
+        elif entry.get("visits"):
+            said = "no reviewer (a code step or gate: the measured behaviour above)"
         elif not entry.get("ran"):
-            said = "review: none (the step recorded no text output: a code, gate, fork or join step, or it never ran)"
+            said = ("review: none (the step recorded no model call and its records hold no "
+                    "visit of it: a fork or join step, a step that never ran, or records "
+                    "made before visits were kept)")
         else:
             said = "review: none (more added steps than are reviewed per round)"
         line = head + "; ".join(facts) + "; " + said
@@ -564,7 +802,7 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
                        f"{entry.get('fixed')} fixed / {entry.get('broken')} broken")
                     + (f"; final answer changed {entry['final_changed']}/{entry['compared']}"
                        if entry.get("compared") and entry.get("same_seed") is not False else "")
-                    + (f"; review: {review.get('verdict')}" if isinstance(review, Mapping)
+                    + (f"; review: {_verdict_text(review)}" if isinstance(review, Mapping)
                        else ""))
             if not compact:
                 lines.append(f"(The section is kept within {chars} characters: the remaining "
@@ -573,6 +811,60 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
         lines.append(line)
         used += len(line) + 1
     return lines
+
+
+def _verdict_text(review: Mapping[str, Any]) -> str:
+    """A review's verdict as shown: a decision step's says how often it decided as its
+    inputs recommended."""
+    if review.get("verdict") in DECISION_VERDICTS:
+        if not review.get("of"):
+            return (f"no_recommendation (its inputs recommended no one answer on any of the "
+                    f"{review.get('items')} item(s) read)")
+        return (f"{review['verdict']} (decides as its inputs recommended on {review['agree']} "
+                f"of {review['of']} item(s) where they recommended one)")
+    return str(review.get("verdict"))
+
+
+def _ids(items: Sequence[str]) -> str:
+    shown = ", ".join(items[:VISIT_IDS])
+    return shown + (f" and {len(items) - VISIT_IDS} more" if len(items) > VISIT_IDS else "")
+
+
+def _moved(group: Mapping[str, Any], counts: bool) -> str:
+    """How the final answer moved on a group's items shared with the parent."""
+    if not counts:
+        return ""
+    if not group.get("shared"):
+        return " (none shared with the parent)"
+    return (f" (final answer changed on {group['changed']}/{group['shared']}; "
+            f"{group['fixed']} fixed / {group['broken']} broken)")
+
+
+def visit_text(visits: Mapping[str, Any], counts: bool = True) -> str:
+    """An added code step's or gate's measured behaviour (`_visit_facts`), in one clause:
+    on which items it gave output or routed each way, and how the final answer moved
+    there; ``counts`` off (a parent scored on another seed) leaves the movement out."""
+    ran = visits.get("ran", 0)
+    if visits.get("kind") == "gate":
+        routes = [f"`{label}` on {len(group['items'])}: {_ids(group['items'])}"
+                  + _moved(group, counts)
+                  for label, group in (visits.get("routes") or {}).items()]
+        relooped = visits.get("relooped") or {}
+        text = (f"ran on {ran} item(s); first verdict " + "; ".join(routes)
+                + f"; relooped (visited more than once) on {len(relooped.get('items') or ())}")
+        if relooped.get("items"):
+            text += f": {_ids(relooped['items'])}" + _moved(relooped, counts)
+        return text
+    fired, silent = visits.get("fired") or {}, visits.get("silent") or {}
+    text = f"gave output on {len(fired.get('items') or ())} of {ran} item(s) it ran on"
+    if fired.get("items"):
+        text += (f": {_ids(fired['items'])}" + _moved(fired, counts)
+                 + f", {visits.get('distinct_outputs', 0)} distinct output(s)")
+        if visits.get("example"):
+            text += f', e.g. "{visits["example"]}"'
+    if silent.get("items"):
+        text += f"; empty output on {len(silent['items'])}" + _moved(silent, counts)
+    return text
 
 
 def review_key(prompt: str) -> str:
