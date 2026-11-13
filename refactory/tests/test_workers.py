@@ -1523,10 +1523,13 @@ def test_the_optimizer_loop_refuses_an_old_claude_code_before_its_run_directory(
     from refactory_dsh.loop import Loop, LoopConfig, LoopError
     from refactory_dsh.paths import REPO_ROOT
     root = tmp_path / 'search'
-    client = DshModelClient(worker_backend='claude_code', model='claude-opus-5-5', routes_resolved=True,
-                            claude_executable=str(_fake_claude(tmp_path, '2.1.263')))
-    with pytest.raises(LoopError, match=r"Claude Code 2\.1\.263 .*model claude-opus-5-5"):
-        Loop('circle_packing/adaptive', LoopConfig(optimizer='autoresearch', runs_root=root), project=REPO_ROOT,
+    # Only the seed's `solve` node runs on the solver role's route: the run route and the
+    # proposer are DSH, so the refusal needs the seed's node-to-role map.
+    client = DshModelClient(provider='p', model='m', routes_resolved=True, role_routes={'solver': {
+        'worker_backend': 'claude_code', 'model': 'claude-opus-5-5',
+        'claude_executable': str(_fake_claude(tmp_path, '2.1.263'))}})
+    with pytest.raises(LoopError, match=r"node 'solve' \(role 'solver'\) would run Claude Code 2\.1\.263"):
+        Loop('livemath/solver', LoopConfig(optimizer='autoresearch', runs_root=root), project=REPO_ROOT,
              model=client)
     assert not root.exists()
 

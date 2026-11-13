@@ -128,4 +128,21 @@ assert.equal(aborted, 1)
 assert.equal(silent.metadata.find(data => 'background_stream_stopped' in data).background_stream_stopped, true)
 assert.equal(silent.metadata.find(data => 'background_tasks_abandoned' in data).background_tasks_abandoned, 1)
 assert.ok(!quiet.metadata.some(data => 'background_stream_stopped' in data))
+// (h) A CLI still streaming after that release is not stopped: every message restarts
+// the post-release bound too, so its last turn's result is the answer.
+let abortedWhileStreaming = 0
+const streaming = await run(async function* (released, releasedNow) {
+  yield tasks('bg-1')
+  yield result('early')
+  await releasedNow
+  for (let i = 0; i < 8; i += 1) {
+    await sleep(40)
+    yield { type: 'system', subtype: 'task_progress', task_id: 'bg-1' }
+  }
+  yield tasks()
+  yield result('FINAL')
+}, { backgroundQuietS: 0.1 }, () => { abortedWhileStreaming += 1 })
+assert.equal(streaming.value.output[0].text, 'FINAL')
+assert.equal(abortedWhileStreaming, 0)
+assert.ok(!streaming.metadata.some(data => 'background_stream_stopped' in data))
 console.log('claude code background-task waits passed')
