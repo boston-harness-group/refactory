@@ -27,8 +27,9 @@ wire.handleNotification('model/rerouted', { threadId: 'thread-one', toModel: 'ro
 assert.equal(observed.at(-1).actual_route.model, 'routed-model')
 
 const claude = readFileSync(resolve(root, 'node_modules/@deepseek-ai/dsh-subagent-claude-code/lib/index.js'), 'utf8')
-const cStart = claude.indexOf('async function consumeClaudeQuery(')
-const cEnd = claude.indexOf('\n/**', cStart)
+// From the stream helpers consumeClaudeQuery uses to its end.
+const cStart = claude.indexOf('const GIVEN_UP')
+const cEnd = claude.indexOf('\n/**', claude.indexOf('async function consumeClaudeQuery('))
 const claudeScope = { successfulResult: message => message.result }
 vm.createContext(claudeScope)
 vm.runInContext(claude.slice(cStart, cEnd), claudeScope)

@@ -365,6 +365,34 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:
         checks.append(("packages of modes", False, str(exc)))
 
+    # The Claude Code a claude_code worker runs: the one the route (a flag, the project
+    # file) or REFACTORY_CLAUDE_EXECUTABLE chooses, else the one the Agent SDK bundles.
+    try:
+        from refactory_dsh import worker_config, workers
+        from refactory_dsh.paths import dsh_root, project_root
+
+        effective = worker_config.effective(project_root())
+        chosen = effective["settings"].get("claude_executable", "")
+        origin = effective["provenance"]["fields"].get("claude_executable", "")
+        if not chosen and os.environ.get(workers.CLAUDE_EXECUTABLE_ENV):
+            chosen, origin = workers.claude_executable_choice({}), workers.CLAUDE_EXECUTABLE_ENV
+        if chosen:
+            runs = os.path.isfile(chosen) and os.access(chosen, os.X_OK)
+            found = workers.claude_code_version(chosen) if runs else ""
+            checks.append(("claude_code executable", bool(found), f"{chosen} (from {origin}): " + (
+                f"Claude Code {found}" if found else
+                "reports no version" if runs else "missing or not executable")))
+        elif (bundled := workers.bundled_claude_code(dsh_root())) is None:
+            checks.append(("claude_code executable", None,
+                           f"{workers.PACKAGES['claude_code']} is not installed (only claude_code workers need it)"))
+        else:
+            checks.append(("claude_code executable", True if bundled["path"] else None,
+                           (f"{bundled['path'] or 'no platform binary found'} (bundled with "
+                            f"{workers.CLAUDE_AGENT_SDK} {bundled['sdk_version']}): Claude Code "
+                            f"{bundled['version'] or 'unknown'}")))
+    except Exception as exc:
+        checks.append(("claude_code executable", False, str(exc)))
+
     # The run model (dm-258): the route a run here would get — a flag, the environment,
     # the project file or the one stored choice, resolved exactly as a run resolves it
     # (`refactory runtime` shows the same). Its provider's key is the one checked, never
@@ -603,6 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     grid.add_argument("--effort", default=None)
     grid.add_argument("--permission-mode", default=None)
     grid.add_argument("--setting-sources", default=None)
+    grid.add_argument("--claude-executable", default=None)
     grid.add_argument("--provider", default=None)
     grid.add_argument("--data-parallelism", type=int, default=None)
     grid.add_argument("--max-completion-tokens", type=int, default=None)
@@ -704,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
         forwarded = [args.mode]
         for flag in ("skill", "part", "seed", "output", "parts", "data_path",
                      "worker_backend", "model", "effort", "permission_mode",
-                     "setting_sources", "provider", "data_parallelism",
+                     "setting_sources", "claude_executable", "provider", "data_parallelism",
                      "max_completion_tokens", "evaluator"):
             value = getattr(args, flag, None)
             if value is not None and value != "":

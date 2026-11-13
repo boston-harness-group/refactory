@@ -3589,6 +3589,36 @@ def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
     assert config["setting_sources"] == "user,project"
 
 
+def test_optimize_cli_takes_claude_executable_like_setting_sources(tmp_path, monkeypatch):
+    """``refactory optimize --claude-executable PATH`` reaches the run's client and its
+    recorded config; a run that leaves it unset digests as before it existed."""
+    from refactory_dsh import loop as loop_module
+    from refactory_dsh import model as model_module
+
+    client = FakeClient()
+    built: list[dict[str, Any]] = []
+
+    class ScriptedRoute:
+        def __new__(cls, **kwargs: Any) -> Any:
+            built.append(kwargs)
+            return client
+
+    monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
+    parts = _write_parts(tmp_path)
+    with _patch_mode(SkillProbe):
+        code = loop_module.main([
+            MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
+            "--optimizer", "random", "--seed", "42", "--worker-backend", "claude_code",
+            "--claude-executable", "~/bin/claude",
+            "--runs-root", str(tmp_path / "run"), "--project", ".", "--parts", str(parts),
+        ])
+    assert code == 0
+    expected = str(Path.home() / "bin" / "claude")
+    assert built and all(kwargs["claude_executable"] == expected for kwargs in built)
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    assert config["claude_executable"] == expected
+
+
 def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeypatch):
     """When the epoch's candidate is rejected, the previous skill and the
     current skill are one candidate. SkillOpt still rolls it out twice

@@ -15,7 +15,7 @@ Usage::
 
 Every route flag works exactly as in a live run: ``--worker-backend``,
 ``--model``, ``--effort``, ``--permission-mode``, ``--setting-sources``,
-``--provider``, ``data_parallelism``, ``max_completion_tokens``, and the spine
+``--claude-executable``, ``--provider``, ``data_parallelism``, ``max_completion_tokens``, and the spine
 runtime (``--evaluator dsh``). With no route flag a block runs on the route
 optimize would pick (the stored model choice). ``model_calls`` counts completed
 agent calls (one recorded exchange each).
@@ -59,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--effort", default=None)
     parser.add_argument("--permission-mode", default=None)
     parser.add_argument("--setting-sources", default=None)
+    parser.add_argument("--claude-executable", default=None)
     parser.add_argument("--provider", default=None)
     parser.add_argument("--data-parallelism", type=int, default=None)
     parser.add_argument("--max-completion-tokens", type=int, default=None)
@@ -131,7 +132,7 @@ def grid_strategy(part: str, seed: int) -> Iterator[str]:
 
 #: Route flags, forwarded to ``refactory optimize``'s own parser unchanged.
 ROUTE_FLAGS = ("worker_backend", "model", "effort", "permission_mode",
-               "setting_sources", "provider")
+               "setting_sources", "claude_executable", "provider")
 #: Knob flags, forwarded as ``--knob NAME=VALUE``.
 KNOB_FLAGS = ("data_parallelism", "max_completion_tokens")
 

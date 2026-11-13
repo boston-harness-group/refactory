@@ -1342,6 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from refactory_dsh.model import DshModelClient, ModelChoiceError, require_model_choice
     from refactory_dsh.paths import project_root
+    from refactory_dsh.workers import agent_roles, claude_code_preflight
 
     if args.resume:
         problem = run_flags.resume_refusal(parser, args)
@@ -1414,6 +1415,12 @@ def main(argv: list[str] | None = None) -> int:
         client = require_model_choice(DshModelClient(project=project_root(), **run_flags.model_options(args)),
                                       interactive=sys.stdin.isatty())
     except ModelChoiceError as exc:  # dm-258
+        print(f"refactory: {exc}", file=sys.stderr)
+        return 1
+    try:
+        # A Claude Code too old for a node's model would fail at its first call.
+        claude_code_preflight(client, roles=agent_roles(mode.state_dict()))
+    except ValueError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1
     from refactory_dsh.run_ownership import ownership

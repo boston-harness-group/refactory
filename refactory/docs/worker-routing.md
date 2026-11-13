@@ -36,7 +36,34 @@ the file or a route map, or with `--setting-sources` on `refactory optimize` and
 them, or none for a node with `tool_policy="none"`; set, it replaces either default,
 and such a node still gets no tools. The worker record's `actual_route` shows the
 effort and settings sources Claude Code was started with, and `enforced_tool_policy`
-is set only once the runtime has applied the policy. Use `refactory help --topic <package/mode>` to inspect actual node
+is set only once the runtime has applied the policy.
+
+`claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
+Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code
+2.1.281). Each model needs a recent enough one: the Claude 5 family (`claude-opus-5-*`,
+`claude-sonnet-5-*`, ...) needs 2.1.280 or newer. Set it in a route map, at the run
+level of the file, with `--claude-executable` on `refactory ceo`, the walker's mains
+and `refactory optimize`, or with `REFACTORY_CLAUDE_EXECUTABLE` (a leading `~` is
+expanded). Node beats role beats run flag or file beats the variable beats the
+bundled one. `actual_route` records the executable. A run whose claude_code route cannot run its
+model is refused at launch, before its run directory or worktrees exist: a chosen
+executable that is missing, not executable or reports no `--version`, or a version
+older than the model needs; the refusal names the executable, its version, the model
+and these settings. `refactory doctor` shows which Claude Code the worker runs, its
+version and where the choice came from.
+
+A claude_code step waits for the background subagents and tasks it started before it
+finishes: a turn that ends while one still runs is not the step's answer, and Claude
+Code carries on as each reports back. Background tasks stay on, so parallel subagents
+keep their speed, and the worker record's `background_tasks_waited` counts them. A
+task that reports nothing for `REFACTORY_BACKGROUND_QUIET_S` seconds (default 600), such
+as a server or watcher, no longer holds the step: it ends with its last answer, Claude
+Code stops what is left, and `background_tasks_abandoned` counts it. A Claude Code that
+stays alive and silent after that is stopped within 30 s, and the step still finishes
+with its last answer (`background_stream_stopped`). A long
+research step may therefore need `--model-timeout` above the default 1800 s per call.
+
+Use `refactory help --topic <package/mode>` to inspect actual node
 IDs and roles; custom modes may not call their coder `emit`. `role_routes` uses
 the same objects keyed by declared worker role. Node beats role beats run.
 
@@ -73,7 +100,7 @@ workers inherit the conversation's route instead of the nested runtime's default
 For a new run the precedence is built-in defaults, environment selection, project
 file, selected immutable profile, then explicit launch options. Route maps replace
 the lower map as a whole, so explicit `{}` clears project role/node overrides.
-Switching backend clears inherited provider/model/effort, `setting_sources` and
+Switching backend clears inherited provider/model/effort, `setting_sources`, `claude_executable` and
 backend-specific permissions. Shared `default` and `skip` policies retain their meaning. Invalid
 fields, unsupported native provider/effort, unsupported permissions, and missing
 selected provider packages fail instead of falling back to DSH.

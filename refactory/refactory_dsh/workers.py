@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -18,6 +20,17 @@ CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 #: Claude Code's filesystem settings sources (the SDK's ``settingSources``), as the
 #: ``claude --setting-sources`` flag spells them; ``none`` loads none of them.
 CLAUDE_CODE_SETTING_SOURCES = frozenset({"user", "project", "local"})
+#: The oldest Claude Code each model family runs on, by model-id prefix; Claude Code
+#: refuses a newer model at its first call ("version X or newer is required"), after
+#: the run's setup. A model no prefix matches is not checked.
+CLAUDE_CODE_MINIMUM_VERSIONS = (
+    (('claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5', 'claude-fable-5'), '2.1.280'),
+)
+CLAUDE_EXECUTABLE_ENV = 'REFACTORY_CLAUDE_EXECUTABLE'
+CLAUDE_AGENT_SDK = '@anthropic-ai/claude-agent-sdk'
+ROUTE_FIELDS = frozenset({'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
+                          'openshell_gateway', 'openshell_image', 'max_completion_tokens',
+                          'setting_sources', 'claude_executable'})
 
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
@@ -58,9 +71,7 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
     route = {**route}
     backend = route.setdefault('worker_backend', 'dsh')
     capabilities(backend)
-    unknown = set(route) - {'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
-                             'openshell_gateway', 'openshell_image', 'max_completion_tokens',
-                             'setting_sources'}
+    unknown = set(route) - ROUTE_FIELDS
     if unknown:
         raise ValueError(f'unknown worker route fields: {sorted(unknown)}')
     if any(not isinstance(value, str) for value in route.values()):
@@ -80,6 +91,13 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
             accepted = ', '.join(sorted(CLAUDE_CODE_SETTING_SOURCES))
             raise ValueError(f'claude_code setting_sources must be "none" or a comma list of {accepted}; '
                              f'got {route["setting_sources"]!r}')
+    if route.get('claude_executable'):
+        if backend != 'claude_code':
+            raise ValueError(f'{backend} does not support claude_executable; only claude_code runs a Claude Code executable')
+        # A pure check: whether the file exists and runs is `claude_code_preflight`'s.
+        if not os.path.isabs(route['claude_executable']):
+            raise ValueError(f'claude_code claude_executable must be an absolute path; '
+                             f'got {route["claude_executable"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route
@@ -101,10 +119,170 @@ def resolve_route(base: dict[str, Any], *, role: str = 'worker', node: str = '',
             permission = route.get('permission_mode')
             route.update(provider='', model='', effort='',
                          permission_mode=permission if permission in ('default', 'skip') else 'skip')
-            if 'setting_sources' in route:
-                route['setting_sources'] = ''
+            for key in ('setting_sources', 'claude_executable'):
+                if key in route:
+                    route[key] = ''
         route.update(override)
     return validate_route(route)
+
+
+def claude_executable_choice(route: dict[str, Any]) -> str:
+    """The Claude Code executable a claude_code route names, else `CLAUDE_EXECUTABLE_ENV`'s;
+    empty keeps the one bundled with the Agent SDK."""
+    return route.get('claude_executable') or os.path.expanduser(os.environ.get(CLAUDE_EXECUTABLE_ENV, ''))
+
+
+def claude_code_minimum(model: str) -> str:
+    """The oldest Claude Code version ``model`` runs on, or empty when none is known.
+
+    A ``provider/`` prefix and a ``[...]`` suffix (``claude-opus-5-5[1m]``) are ignored."""
+    name = model.rsplit('/', 1)[-1].split('[', 1)[0].strip().lower()
+    for prefixes, minimum in CLAUDE_CODE_MINIMUM_VERSIONS:
+        if name.startswith(prefixes):
+            return minimum
+    return ''
+
+
+def _version_tuple(version: str) -> tuple[int, ...] | None:
+    """The leading X.Y.Z of ``version`` (``2.1.281-rc`` is 2.1.281), or None without one."""
+    match = re.match(r'\s*(\d+)\.(\d+)\.(\d+)', version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def agent_roles(state: dict[str, Any]) -> dict[str, str]:
+    """Each agent node of a mode state and the worker role it is dispatched under.
+
+    The same ``Node.role`` the walker (`nn.executor`) and the spine's lowering
+    (`lower_workflow`) pass to `DshModelClient.for_node`; a fork's branches and a data
+    pass's steps are nodes of the same graph, so every node a run dispatches is here.
+    """
+    from refactory_dsh.nn.graph import Graph
+
+    graph = Graph.from_state(state.get('graph') or {})
+    return {node.id: node.role for node in graph.nodes.values() if node.kind == 'agent'}
+
+
+def bundled_claude_code(runtime_root: Path | str) -> dict[str, str] | None:
+    """The Claude Code bundled with the Agent SDK the installed adapter resolves:
+    ``path`` (empty when no platform package holds one), ``version`` (the SDK's
+    ``claudeCodeVersion``, read without starting it) and ``sdk_version``. None when
+    the optional adapter is not installed."""
+    adapter = Path(runtime_root) / 'node_modules' / PACKAGES['claude_code']
+    if not (adapter / 'package.json').exists():
+        return None
+    # pnpm links the adapter's own dependencies beside it in its store directory.
+    sdk = adapter.resolve().parent.parent / CLAUDE_AGENT_SDK
+    try:
+        metadata = json.loads((sdk / 'package.json').read_text())
+    except (OSError, ValueError):
+        metadata = {}
+    sdk = sdk.resolve()
+    # The binary ships in a per-platform sibling package (claude-agent-sdk-darwin-arm64, ...).
+    binaries = sorted(path for path in sdk.parent.glob(sdk.name + '-*/claude') if path.is_file())
+    return {'path': str(binaries[0]) if binaries else '',
+            'version': str(metadata.get('claudeCodeVersion') or ''),
+            'sdk_version': str(metadata.get('version') or '')}
+
+
+def claude_code_version(executable: str) -> str:
+    """The X.Y.Z ``executable --version`` starts with, or empty when it says none."""
+    try:
+        done = subprocess.run([executable, '--version'], capture_output=True, text=True,
+                              timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    match = re.match(r'\s*(\d+\.\d+\.\d+)', done.stdout)
+    return match.group(1) if done.returncode == 0 and match else ''
+
+
+#: How a refusal says to choose another Claude Code.
+_CLAUDE_EXECUTABLE_FIX = (f'--claude-executable /path/to/claude, {CLAUDE_EXECUTABLE_ENV}, '
+                          f'or "claude_executable" in refactory.workers.json')
+
+
+def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
+                          roles: dict[str, str] | None = None) -> None:
+    """Refuse, before the run directory exists, a claude_code route whose Claude Code
+    cannot run its model: a chosen executable that is missing, not executable or whose
+    version is unreadable, or a version older than the model needs
+    (`CLAUDE_CODE_MINIMUM_VERSIONS`). ``model`` is a client or its `context()`. No model
+    is called.
+
+    ``roles`` maps each agent node of the run's graph to its worker role
+    (`agent_roles`): each node is checked on the route it will run on, its node route
+    over its own role's. Without a graph the run route, each role route and each node
+    route (as role ``worker``) are checked. Only a Claude Code problem is refused: a
+    combination that is not a valid route is left for dispatch to report.
+    """
+    # Another ModelClient (a test's fake, a library caller's own) carries no route
+    # config to read; its own readiness contract applies.
+    context = model.context() if callable(getattr(model, 'context', None)) else model
+    if not isinstance(context, dict):
+        return
+    base = {key: value for key, value in context.items() if key in ROUTE_FIELDS and value}
+    role_routes, node_routes = context.get('role_routes') or {}, context.get('node_routes') or {}
+
+    def resolved(where: str, role: str = 'worker', node: str = '') -> tuple[str, dict[str, Any]] | None:
+        try:
+            return where, resolve_route(base, role=role, node=node, role_routes=role_routes,
+                                        node_routes=node_routes)
+        except ValueError:
+            return None
+
+    if roles is None:
+        candidates = [resolved('the run', role=''),
+                      *(resolved(f'role {role!r}', role=role) for role in role_routes),
+                      *(resolved(f'node {node!r}', node=node) for node in node_routes)]
+    else:
+        candidates = [*(resolved(f'node {node!r} (role {role!r})', role=role, node=node)
+                        for node, role in roles.items()),
+                      # A route map entry for a node the graph does not have yet.
+                      *(resolved(f'node {node!r}', node=node) for node in node_routes if node not in roles)]
+    routes = [found for found in candidates if found is not None and found[1]['worker_backend'] == 'claude_code']
+    if not routes:
+        return
+    root = runtime_root or context.get('runtime_root')
+    if not root:
+        from refactory_dsh.paths import dsh_root
+        root = dsh_root()
+    versions: dict[str, str] = {}
+    for where, route in routes:
+        chosen = claude_executable_choice(route)
+        if chosen and not os.path.isfile(chosen):
+            raise ValueError(f'the claude_code worker for {where} is set to run Claude Code at {chosen}, '
+                             f'which does not exist; point {_CLAUDE_EXECUTABLE_FIX} at a Claude Code '
+                             f'executable')
+        if chosen and not os.access(chosen, os.X_OK):
+            raise ValueError(f'the claude_code worker for {where} is set to run Claude Code at {chosen}, '
+                             f'which is not executable; point {_CLAUDE_EXECUTABLE_FIX} at a Claude Code '
+                             f'executable')
+        model_id = route.get('model', '')
+        minimum = claude_code_minimum(model_id)
+        if not minimum:
+            continue
+        if chosen:
+            if chosen not in versions:
+                versions[chosen] = claude_code_version(chosen)
+            version, described = versions[chosen], chosen
+            if not version:
+                raise ValueError(f'the claude_code worker for {where} is set to run Claude Code at {chosen}, '
+                                 f'but `{chosen} --version` reported no version, and model {model_id} needs '
+                                 f'Claude Code {minimum} or newer. Point {_CLAUDE_EXECUTABLE_FIX} at a '
+                                 f'Claude Code executable')
+        else:
+            bundled = bundled_claude_code(root)
+            if not bundled or not bundled['version']:
+                continue  # dispatch reports a missing adapter; nothing to compare against
+            version = bundled['version']
+            described = (f'{bundled["path"] or "the Agent SDK"} (bundled with {CLAUDE_AGENT_SDK} '
+                         f'{bundled["sdk_version"]})')
+        found = _version_tuple(version)
+        if found is None:
+            continue  # a version string with no X.Y.Z says nothing to compare
+        if found < _version_tuple(minimum):
+            raise ValueError(f'the claude_code worker for {where} would run Claude Code {version} at '
+                             f'{described}, and model {model_id} needs Claude Code {minimum} or newer. '
+                             f'Choose a newer Claude Code with {_CLAUDE_EXECUTABLE_FIX}, or update it')
 
 
 def now() -> str:
@@ -336,15 +514,19 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
         if permission != 'default':
             config['permissionMode'] = SKIP_PERMISSIONS[route['worker_backend']] if permission == 'skip' else permission
         if inner_backend == 'claude_code':
-            # The Claude Code adapter takes the node's effort, system prompt, tool policy
-            # and settings sources from its own config ``env``, never from this process's
-            # environment; it strips them before starting Claude Code. Codex reads none:
-            # both runtimes refuse those for codex before dispatch (`capabilities`).
+            # The Claude Code adapter takes the node's effort, system prompt, tool policy,
+            # settings sources and executable from its own config ``env``, never from this
+            # process's environment; it strips them before starting Claude Code. Codex reads
+            # none: both runtimes refuse those for codex before dispatch (`capabilities`).
             env = {name: value for name, value in (
                 ('REFACTORY_MODEL_EFFORT', route.get('effort', '')),
                 ('REFACTORY_SYSTEM_PROMPT', system_prompt),
                 ('REFACTORY_TOOL_POLICY', tool_policy),
                 ('REFACTORY_SETTING_SOURCES', route.get('setting_sources', '')),
+                ('REFACTORY_CLAUDE_EXECUTABLE', claude_executable_choice(route)),
+                # How long a step waits on background tasks that report nothing; the
+                # adapter's default (600 s) unless this process's environment sets it.
+                ('REFACTORY_BACKGROUND_QUIET_S', os.environ.get('REFACTORY_BACKGROUND_QUIET_S', '')),
             ) if value}
             if env:
                 config['env'] = env

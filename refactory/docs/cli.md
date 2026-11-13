@@ -48,6 +48,7 @@ variants). The refusal names which argument was empty.
 | `--worker-backend dsh\|codex\|claude_code` | the explicit coding-worker runtime; DSH is the default. |
 | `--effort <value>` | DSH reasoning-effort override; external workers use native product settings. |
 | `--setting-sources <list>` | claude_code workers only: the Claude Code settings they load, `none` or a comma list of `user`, `project` and `local` (as `claude --setting-sources`); a node or role route still overrides it. |
+| `--claude-executable <path>` | claude_code workers only: the Claude Code they run, an absolute path, instead of the one bundled with the Agent SDK (2.1.281; the Claude 5 models need 2.1.280 or newer). Also `REFACTORY_CLAUDE_EXECUTABLE`, which the flag beats; a node or role route still overrides it. A route whose Claude Code cannot run its model is refused at launch. See [worker routing](worker-routing.md). |
 | `--permission-mode <value>` | New workers default to `skip` (full native permission bypass). Choose `default` for native checks, or a supported backend-specific policy. Saved runs/profiles retain their policies; see [worker permissions](models.md#model-provider-versus-coding-agent). |
 | `--model-timeout <seconds>` | seconds one model completion may take before it is called hung; default 1800 (30 min). Sets the per-completion limit for every agent step of the run. Each step's spine limit is `attempts × model-timeout + 600`. Not the same as `--timeout` (seconds to wait at a gate) or `--max-elapsed-s` (wall-clock cap on the entire run). |
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | the shared resource allocation, including nested work and validation. |
@@ -170,6 +171,7 @@ installed copy.
 | `--provider <route>` | the provider route that model is on | your settings default |
 | `--worker-backend dsh\|codex\|claude_code` | worker runtime, independent of provider choice | `dsh` |
 | `--effort <value>` / `--setting-sources <list>` | the workers' reasoning effort; claude_code workers' Claude Code settings sources (`none` or a comma list of `user`, `project`, `local`) | the backend's default |
+| `--claude-executable <path>` | the Claude Code claude_code workers run, an absolute path; else `REFACTORY_CLAUDE_EXECUTABLE` | the one bundled with the Agent SDK |
 | `--role-routes <JSON>` / `--node-routes <JSON>` | route overrides; node takes precedence over role, then run | empty |
 | `--max-elapsed-s <n>` / `--max-tokens <n>` | shared limits for proposals, trials, nested work and final validation | unlimited |
 | `--validation-reserve-s <n>` / `--validation-reserve-tokens <n>` | part of the shared allocation reserved for validation: the holdout audit and the end-of-run val/test scoring (`FinalEvaluation`); a gated search stopped at the reserve still runs that scoring | 0 |
@@ -237,7 +239,7 @@ The read verbs pass through the console's own `--project`, `--runs-root`, `--aft
 
 | command | what it does |
 |---|---|
-| `refactory doctor` | check local configuration and missing setup; this does not test authentication or quota. Doctor reports which checkout the DSH graph profile's bundle comes from. If it names a different checkout, the profile was last provisioned by that checkout's `install.sh`. Run `install.sh` from the checkout you want to use, or run the `dsh plugin --profile graph add` command that doctor names. |
+| `refactory doctor` | check local configuration and missing setup; this does not test authentication or quota. Doctor reports which checkout the DSH graph profile's bundle comes from. If it names a different checkout, the profile was last provisioned by that checkout's `install.sh`. Run `install.sh` from the checkout you want to use, or run the `dsh plugin --profile graph add` command that doctor names. Its `claude_code executable` row names the Claude Code a claude_code worker would run (the bundled one, or the chosen one and where the choice came from) and its version; it warns when the optional adapter is not installed and fails when a chosen executable cannot run. |
 | `refactory help [--topic <topic>]` | the operating guide, and the current mode and operation schemas. |
 | `refactory docs [--page <page>]` | search and read the documentation shipped with this checkout. |
 | `refactory workers` | the coding-agent worker configuration and the capabilities each backend reports. |
@@ -271,7 +273,7 @@ python -m refactory_dsh.edit --mode <pkg>/<mode> --name <n>
 
 The walker's mains take `refactory ceo`'s run flags, spelled and parsed the same way
 (`run_flags`): `--name`, `--check`, `--knob`, `--workdir`, `--target` and the other
-worktree and delivery flags, `--worker-backend`, `--effort`, `--setting-sources`, `--permission-mode`,
+worktree and delivery flags, `--worker-backend`, `--effort`, `--setting-sources`, `--claude-executable`, `--permission-mode`,
 `--role-routes`, `--node-routes`, `--model-timeout`, the resource limits, `--provider`,
 `--model` and `--approve`. A run started either way gets the same knobs and route.
 

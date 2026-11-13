@@ -467,6 +467,49 @@ def test_doctor_asks_for_the_python_the_project_declares(monkeypatch, capsys):
     assert any(row.startswith("python >= 3.11 ") for row in rows), rows
 
 
+def test_doctor_names_the_claude_code_the_claude_code_worker_runs(tmp_path, monkeypatch, capsys):
+    """The bundled Claude Code and its version, a chosen one and where it came from, a WARN
+    when the optional adapter is absent and a MISS when a chosen one cannot run."""
+    from argparse import Namespace
+
+    from refactory_dsh import workers
+    from refactory_dsh.cli import cmd_doctor
+
+    monkeypatch.setattr(
+        "refactory_dsh.sandbox.model_readiness",
+        lambda *a, **kw: {"provider": "test", "model": "test", "status": "configured"},
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+
+    def row() -> str:
+        cmd_doctor(Namespace(provider="", model="", run=None))
+        [line] = [line.strip() for line in capsys.readouterr().out.splitlines()
+                  if "claude_code executable" in line and not line.startswith("refactory doctor")]
+        return line
+
+    monkeypatch.setattr(workers, "bundled_claude_code", lambda root: {
+        "path": "/sdk/claude", "version": "2.1.263", "sdk_version": "0.3.263"})
+    bundled = row()
+    assert bundled.split()[0] == "ok"
+    assert "/sdk/claude (bundled with @anthropic-ai/claude-agent-sdk 0.3.263): Claude Code 2.1.263" in bundled
+
+    monkeypatch.setattr(workers, "bundled_claude_code", lambda root: None)
+    absent = row()
+    assert absent.split()[0] == "WARN" and "is not installed" in absent
+
+    chosen = tmp_path / "claude"
+    chosen.write_text('#!/bin/sh\necho "2.1.300 (Claude Code)"\n')
+    chosen.chmod(0o755)
+    monkeypatch.setenv("REFACTORY_CLAUDE_EXECUTABLE", str(chosen))
+    found = row()
+    assert found.split()[0] == "ok"
+    assert f"{chosen} (from REFACTORY_CLAUDE_EXECUTABLE): Claude Code 2.1.300" in found
+
+    monkeypatch.setenv("REFACTORY_CLAUDE_EXECUTABLE", str(tmp_path / "gone"))
+    assert row().split()[0] == "MISS"
+
+
 def test_require_build_passes_when_spine_lib_exists(tmp_path):
     """A checkout with a built spine is not refused."""
     from refactory_dsh.paths import require_build, SPINE_LIB

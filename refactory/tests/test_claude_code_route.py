@@ -27,36 +27,69 @@ pytestmark = pytest.mark.skipif(not ADAPTER.exists() or shutil.which("node") is 
 _FAKE_SDK = textwrap.dedent("""\
     // Stands in for @anthropic-ai/claude-agent-sdk: records the query and answers once.
     import { appendFileSync, writeFileSync } from 'node:fs'
+    // Whether the prompt stream ends (the adapter released it) within `ms`.
+    const closes = (input, ms) => Promise.race([input.next().then(step => step.done),
+                                                new Promise(resolve => setTimeout(() => resolve(false), ms).unref())])
     export function query({ prompt, options }) {
       // FAKE_SDK_CALLS: one line per query, so a test can count the sessions started.
       if (process.env.FAKE_SDK_CALLS) appendFileSync(process.env.FAKE_SDK_CALLS, 'query\\n')
       const child = options.spawnClaudeCodeProcess({
         command: process.execPath, args: ['-e', 'setTimeout(() => {}, 60000)'],
         cwd: options.cwd, env: options.env, signal: options.abortController.signal })
-      writeFileSync(process.env.FAKE_SDK_RECORD, JSON.stringify({
-        prompt, systemPrompt: options.systemPrompt, effort: options.effort ?? null,
+      const record = {
+        promptIsStream: typeof prompt !== 'string' && typeof prompt?.[Symbol.asyncIterator] === 'function',
+        systemPrompt: options.systemPrompt, effort: options.effort ?? null,
         tools: options.tools ?? null, mcpServers: options.mcpServers ?? null,
         settingSources: options.settingSources ?? null, strictMcpConfig: options.strictMcpConfig ?? null,
         permissionMode: options.permissionMode,
+        pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable ?? null,
+        backgroundTasksInChildEnv: options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
         systemPromptInChildEnv: 'REFACTORY_SYSTEM_PROMPT' in process.env,
-        controlsInChildEnv: Object.keys(options.env).filter(key => key in CONTROLS) }))
+        controlsInChildEnv: Object.keys(options.env).filter(key => key in CONTROLS) }
+      const save = () => writeFileSync(process.env.FAKE_SDK_RECORD, JSON.stringify(record))
       // FAKE_SDK_INIT_TOOLS: the tool list the SDK reports, as when it ignores `tools: []`.
       const tools = process.env.FAKE_SDK_INIT_TOOLS ? JSON.parse(process.env.FAKE_SDK_INIT_TOOLS)
         : options.tools ?? ['Bash', 'Read']
+      const usage = { 'fake-claude': { inputTokens: 3, outputTokens: 1,
+                                       cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }
       return {
         close() { child.kill?.() },
         async *[Symbol.asyncIterator]() {
+          const input = record.promptIsStream ? prompt[Symbol.asyncIterator]() : null
+          const first = input ? (await input.next()).value : null
+          record.prompt = input ? first?.message?.content : prompt
+          save()
           yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
-          // FAKE_SDK_RESULT: the result message to end with, as when Claude Code fails.
-          yield process.env.FAKE_SDK_RESULT ? JSON.parse(process.env.FAKE_SDK_RESULT)
-            : { type: 'result', subtype: 'success', is_error: false, result: 'PINEAPPLE',
-                modelUsage: { 'fake-claude': { inputTokens: 3, outputTokens: 1,
-                                                cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }
+          if (process.env.FAKE_SDK_BACKGROUND === 'hang') {
+            // A task that never reports (a server), and a CLI that stays alive and silent
+            // even once its input is closed.
+            yield { type: 'system', subtype: 'background_tasks_changed',
+                    tasks: [{ task_id: 'server', task_type: 'local_bash', description: 'serve' }] }
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'server started', modelUsage: usage }
+            await new Promise(() => {})
+          } else if (process.env.FAKE_SDK_BACKGROUND) {
+            // A turn that launches a background subagent and ends before it reports, as
+            // Claude Code does: the input must stay open, and Claude Code continues.
+            yield { type: 'system', subtype: 'background_tasks_changed',
+                    tasks: [{ task_id: 'bg-1', task_type: 'local_agent', description: 'sleep' }] }
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'still waiting', modelUsage: usage }
+            record.inputClosedWhileTasksRan = input ? await closes(input, 300) : null
+            yield { type: 'system', subtype: 'background_tasks_changed', tasks: [] }
+            yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'FINAL PINEAPPLE', modelUsage: usage }
+          } else {
+            // FAKE_SDK_RESULT: the result message to end with, as when Claude Code fails.
+            yield process.env.FAKE_SDK_RESULT ? JSON.parse(process.env.FAKE_SDK_RESULT)
+              : { type: 'result', subtype: 'success', is_error: false, result: 'PINEAPPLE', modelUsage: usage }
+          }
+          record.inputClosedAfterAnswer = input ? await closes(input, 5000) : null
+          save()
         },
       }
     }
     const CONTROLS = { REFACTORY_SYSTEM_PROMPT: 1, REFACTORY_MODEL_EFFORT: 1,
-                       REFACTORY_TOOL_POLICY: 1, REFACTORY_SETTING_SOURCES: 1 }
+                       REFACTORY_TOOL_POLICY: 1, REFACTORY_SETTING_SOURCES: 1,
+                       REFACTORY_CLAUDE_EXECUTABLE: 1, REFACTORY_BACKGROUND_QUIET_S: 1 }
 """)
 
 _HOOKS = textwrap.dedent("""\
@@ -151,9 +184,33 @@ def test_claude_code_default_route_keeps_tools_and_settings(tmp_path, fake_sdk):
     sent = json.loads(fake_sdk.read_text())
     assert sent["prompt"] == "Say a fruit"
     assert sent["tools"] is None and sent["settingSources"] is None and sent["effort"] is None
+    # The SDK's bundled Claude Code, with its background tasks left on.
+    assert sent["pathToClaudeCodeExecutable"] is None and sent["backgroundTasksInChildEnv"] is None
+    # The prompt is a stream that carries the text and is closed at the answer.
+    assert sent["promptIsStream"] is True and sent["inputClosedAfterAnswer"] is True
     receipt = _receipt(workdir)
     assert "enforced_tool_policy" not in receipt
     assert "setting_sources" not in receipt["actual_route"]
+    assert "claude_executable" not in receipt["actual_route"]
+
+
+def test_a_chosen_claude_code_executable_reaches_the_sdk(tmp_path, fake_sdk, monkeypatch):
+    """A route's `claude_executable` (`--claude-executable`) is the SDK's
+    pathToClaudeCodeExecutable, with background tasks left on;
+    REFACTORY_CLAUDE_EXECUTABLE does the same when the route names none."""
+    workdir = tmp_path / "run"
+    _client(tmp_path, claude_executable="/opt/claude/bin/claude").complete("Say a fruit", workdir=workdir)
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["pathToClaudeCodeExecutable"] == "/opt/claude/bin/claude"
+    assert sent["backgroundTasksInChildEnv"] is None
+    assert sent["controlsInChildEnv"] == []
+    assert _receipt(workdir)["actual_route"]["claude_executable"] == "/opt/claude/bin/claude"
+
+    monkeypatch.setenv("REFACTORY_CLAUDE_EXECUTABLE", "/env/claude")
+    _client(tmp_path).complete("Say a fruit", workdir=tmp_path / "env-run")
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["pathToClaudeCodeExecutable"] == "/env/claude"
+    assert sent["backgroundTasksInChildEnv"] is None
 
 
 def test_the_walker_reaches_claude_code_with_the_node_settings(tmp_path, fake_sdk):
@@ -165,13 +222,15 @@ def test_the_walker_reaches_claude_code_with_the_node_settings(tmp_path, fake_sd
                       system_prompt_template="Always answer with the word PINEAPPLE",
                       tool_policy="none", writes=("answer.txt",)))
     result = nn.execute(graph, tmp_path / "run", facts={"kind": "fruit"},
-                        model=_client(tmp_path, effort="low"))
+                        model=_client(tmp_path, effort="low", claude_executable="/opt/claude/bin/claude"))
     assert result.exit_ok, result.error
 
     sent = json.loads(fake_sdk.read_text())
     assert sent["prompt"].startswith("Say a fruit")
     assert sent["systemPrompt"]["append"] == "Always answer with the word PINEAPPLE"
     assert sent["effort"] == "low" and sent["tools"] == []
+    assert sent["pathToClaudeCodeExecutable"] == "/opt/claude/bin/claude"
+    assert sent["backgroundTasksInChildEnv"] is None
     assert _receipt(tmp_path / "run")["enforced_tool_policy"] == "none"
 
 
@@ -182,7 +241,8 @@ def test_the_spine_worker_reaches_claude_code_with_the_node_settings(tmp_path, f
 
     workdir = tmp_path / "run"
     workdir.mkdir()
-    client = _client(tmp_path, effort="low", setting_sources="user,project")
+    client = _client(tmp_path, effort="low", setting_sources="user,project",
+                     claude_executable="/opt/claude/bin/claude")
     execute({"schema_version": 1, "node_id": "solve", "reads": [], "writes": ["answer.txt"],
              "produces": [], "prompt": "Say a fruit", "tool_policy": "none",
              "system_prompt": "Always answer with the word PINEAPPLE",
@@ -193,7 +253,52 @@ def test_the_spine_worker_reaches_claude_code_with_the_node_settings(tmp_path, f
     assert sent["systemPrompt"]["append"] == "Always answer with the word PINEAPPLE"
     assert sent["effort"] == "low" and sent["tools"] == []
     assert sent["settingSources"] == ["user", "project"]
+    assert sent["pathToClaudeCodeExecutable"] == "/opt/claude/bin/claude"
+    assert sent["backgroundTasksInChildEnv"] is None
     assert _receipt(workdir)["enforced_tool_policy"] == "none"
+
+
+def test_a_step_waits_for_its_background_tasks_before_it_finishes(tmp_path, fake_sdk, monkeypatch):
+    """A turn that launches a background subagent and ends early is not the answer:
+    the prompt stays open until a result arrives with no task running, and that later
+    result is the node's output (newer Claude Code killed the task and kept the early one)."""
+    monkeypatch.setenv("FAKE_SDK_BACKGROUND", "1")
+    monkeypatch.setenv("REFACTORY_BACKGROUND_QUIET_S", "30")  # an adapter control, never Claude Code's
+    workdir = tmp_path / "run"
+    answer = _client(tmp_path).complete("Say a fruit", workdir=workdir)
+
+    assert answer.strip() == "FINAL PINEAPPLE"
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["inputClosedWhileTasksRan"] is False
+    assert sent["inputClosedAfterAnswer"] is True
+    assert sent["backgroundTasksInChildEnv"] is None
+    assert sent["controlsInChildEnv"] == []
+    assert _receipt(workdir)["background_tasks_waited"] == 1
+
+
+def test_a_silent_background_task_and_cli_end_the_step_with_its_last_answer(tmp_path, fake_sdk, monkeypatch):
+    """A task that never reports does not hold the step past REFACTORY_BACKGROUND_QUIET_S,
+    and a CLI that then stays alive is stopped: the step completes with its last answer,
+    not as aborted or failed, and the record says what was given up."""
+    monkeypatch.setenv("FAKE_SDK_BACKGROUND", "hang")
+    monkeypatch.setenv("REFACTORY_BACKGROUND_QUIET_S", "0.2")
+    workdir = tmp_path / "run"
+    answer = _client(tmp_path).complete("Start a server", workdir=workdir)
+
+    assert answer.strip() == "server started"
+    receipt = _receipt(workdir)
+    assert receipt["state"] == "completed"
+    assert receipt["background_tasks_abandoned"] == 1
+    assert receipt["background_stream_stopped"] is True
+
+
+def test_the_adapter_releases_the_prompt_only_when_no_background_task_runs():
+    """Scripted SDK streams through the patched `consumeClaudeQuery`: live tasks hold the
+    step (a repeated init does not reset them), no tasks or ambient ones do not, and an
+    error or a broken stream still releases the prompt."""
+    import subprocess
+    subprocess.run(["node", str(Path(__file__).with_name("claude_code_background_test.mjs")), str(ROOT)],
+                   check=True)
 
 
 def test_a_system_prompt_over_the_environment_limit_reaches_claude_code_whole(tmp_path, fake_sdk):

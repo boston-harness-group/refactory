@@ -252,6 +252,7 @@
                                       [--worker-backend WORKER_BACKEND]
                                       [--effort EFFORT]
                                       [--setting-sources SETTING_SOURCES]
+                                      [--claude-executable CLAUDE_EXECUTABLE]
                                       [--permission-mode PERMISSION_MODE]
                                       [--role-routes JSON]
                                       [--node-routes JSON]
@@ -331,6 +332,10 @@ options:
                         claude_code workers only: the Claude Code settings
                         they load, none or a comma list of user, project and
                         local
+  --claude-executable CLAUDE_EXECUTABLE
+                        claude_code workers only: the Claude Code executable
+                        they run, an absolute path (default: the one bundled
+                        with the Agent SDK)
   --permission-mode PERMISSION_MODE
                         worker permissions: skip (new-run default), default
                         (native policy), or a backend-specific mode
@@ -473,6 +478,7 @@ options:
                                     [--effort EFFORT]
                                     [--permission-mode PERMISSION_MODE]
                                     [--setting-sources SETTING_SOURCES]
+                                    [--claude-executable CLAUDE_EXECUTABLE]
                                     [--max-elapsed-s MAX_ELAPSED_S]
                                     [--max-tokens MAX_TOKENS]
                                     [--validation-reserve-s VALIDATION_RESERVE_S]
@@ -548,6 +554,10 @@ options:
   --effort EFFORT
   --permission-mode PERMISSION_MODE
   --setting-sources SETTING_SOURCES
+  --claude-executable CLAUDE_EXECUTABLE
+                        claude_code workers only: the Claude Code executable
+                        they run, an absolute path (default: the one bundled
+                        with the Agent SDK)
   --max-elapsed-s MAX_ELAPSED_S
   --max-tokens MAX_TOKENS
   --validation-reserve-s VALIDATION_RESERVE_S

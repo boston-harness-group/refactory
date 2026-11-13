@@ -290,6 +290,10 @@ class LoopConfig:
     #: ``none`` or a comma list of user, project and local. Empty keeps the adapter's
     #: default. claude_code only; ``node_routes``/``role_routes`` override it per node.
     setting_sources: str = ""
+    #: The Claude Code executable every claude_code worker runs (an absolute path);
+    #: empty keeps the one bundled with the Agent SDK. ``node_routes``/``role_routes``
+    #: override it per node.
+    claude_executable: str = ""
     role_routes: dict[str, Any] = dataclasses.field(default_factory=dict)
     node_routes: dict[str, Any] = dataclasses.field(default_factory=dict)
     provider_config: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -620,7 +624,7 @@ class Loop(OuterLoop):
         # clients constructed by the CLI do.
         if callable(getattr(model, "context", None)):
             client_context = model.context()
-            for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources", "role_routes", "node_routes", "provider_config"):
+            for key in ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources", "claude_executable", "role_routes", "node_routes", "provider_config"):
                 if key in client_context:
                     setattr(self.config, key, client_context[key])
         if not isinstance(self.config.repeats, int) or not 1 <= self.config.repeats <= 10:
@@ -651,6 +655,16 @@ class Loop(OuterLoop):
             raise LoopError(str(exc)) from exc
         self.package = package
         self.mode = self.mode_class()
+        if callable(getattr(model, "context", None)):
+            # A Claude Code too old for a node's model is refused here, before the run
+            # directory exists, not at the first candidate's first call: each seed node
+            # on its own role's route, and the proposer on the optimizer's.
+            from refactory_dsh.workers import agent_roles, claude_code_preflight
+            try:
+                claude_code_preflight(model.context(), roles={
+                    **agent_roles(self.mode.state_dict()), "optimizer": "optimizer"})
+            except ValueError as error:
+                raise LoopError(str(error)) from error
         self.invariants = self.mode.invariants()
         #: Nodes no edit may remove, rewire or replace (`Mode.protected_nodes`).
         self.protected = tuple(self.mode.edit_protected())
@@ -6513,7 +6527,7 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
         settings = snapshot["settings"]
         return (_client_factory or DshModelClient)(routes_resolved=True, routing_provenance=(snapshot.get("worker_configuration") or {}).get("provenance"), **{key: settings[key] for key in
             ("worker_backend", "provider", "model", "effort", "permission_mode", "setting_sources", "role_routes", "node_routes", "provider_config")
-            })
+            }, **({"claude_executable": ce} if (ce := settings.get("claude_executable")) else {}))
 
     try:
         snapshot = settle()
