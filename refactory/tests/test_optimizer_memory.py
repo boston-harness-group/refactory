@@ -914,3 +914,19 @@ def test_a_loosely_written_answer_after_a_prose_example_is_the_answer(key, value
     optimizer._client = type("C", (), {"complete": lambda self, p, **k: text})()
     (proposal,) = optimizer.propose(ProposalContext(), 1, [])
     assert proposal.steps == [value["edit"]], "one proposal, the answer's, not the example"
+
+
+@pytest.mark.parametrize("text", [
+    # An example carrying ``proposal``, then the real answer cut off at the output limit.
+    'For example {"proposal": {"edit": {"op": "bypass", "target": "x"}}}\n'
+    '{"diagnosis": "d", "proposals": [{"edit": {"op": "set_knob", "name": "a", "value": 1}}',
+    # An example, then a real answer with a trailing comma.
+    'For example {"proposal": {"edit": {"op": "bypass", "target": "x"}}}\n'
+    '{"diagnosis": "d", "proposals": [{"edit": {"op": "set_knob", "name": "a", "value": 1}},]}',
+    # A broken answer, then a fragment carrying ``proposal``.
+    '{"diagnosis": "d", "proposals": [{"edit": {"op": "set_knob", "name": "a", "value": 1}},]}\n'
+    'for instance {"proposal": {"edit": {"op": "bypass", "target": "x"}}}',
+])
+def test_a_loosely_written_object_never_stands_in_for_a_broken_answer(text):
+    found, problem = answer_json(text)
+    assert problem and not found, "the broken answer is reported, not replaced by the example"

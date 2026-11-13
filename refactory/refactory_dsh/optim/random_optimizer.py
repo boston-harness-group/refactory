@@ -1128,7 +1128,9 @@ def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
         start = text.find("{", end + 1)
     if answer is not None:
         return answer, ""
-    if keyed is not None:
+    # A loosely written answer never stands in for a broken one: an example object
+    # carrying ``proposal`` must not replace a real answer that was cut off.
+    if keyed is not None and not problem:
         return keyed, ""
     if problem:
         return None, problem
