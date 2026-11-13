@@ -1228,27 +1228,68 @@ def check_environment(path: Path, home: Path) -> dict[str, str]:
 def _shared_snapshot(target: Path) -> dict:
     """A snapshot of the git configuration and hooks the worktree shares with the target.
 
-    Returns ``{"config_lines": [...], "hook_files": {"name": "sha256hex", ...},
-    "hooks_dir": "<path>"}``.  The ``hooks_dir`` key carries the path so
-    ``_shared_digest`` can re-read raw bytes for backward-compatible hashing.
-    The exclusion rules match what ``shared_changed`` ignores: ``submodule.`` lines
-    (initialising submodules is refactory's own doing) and the
-    ``extensions.worktreeconfig=`` line ``_isolate_hooks`` sets.
+    Returns ``{"config_lines": [...], "worktree_lines": [...], "included": {"path":
+    "sha256hex", ...}, "hook_files": {"name": "sha256hex", ...}, "hooks_dir": "<path>"}``.
+    The ``hooks_dir`` key carries the path so ``_shared_digest`` can re-read raw bytes
+    for backward-compatible hashing. The exclusion rules match what ``shared_changed``
+    ignores: ``submodule.`` lines (initialising submodules is refactory's own doing) and
+    the ``extensions.worktreeconfig=`` line ``_isolate_hooks`` sets.
+
+    ``worktree_lines`` are the target checkout's own ``config.worktree``, which git
+    reads once ``_isolate_hooks`` has enabled ``extensions.worktreeConfig``; it is
+    recorded whether or not the extension is on, so enabling it later cannot bring an
+    unseen file into force. ``included`` hashes every file an ``include`` or
+    ``includeIf`` in either file names, whatever its condition, so a change inside an
+    already-included file is seen as well as a new include line.
     """
     common = Path(git(target, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
-    settings = git(target, "config", "--file", str(common / "config"), "--list").splitlines()
+    own = Path(git(target, "rev-parse", "--path-format=absolute", "--git-dir").strip())
     config_lines = [
-        line for line in settings
+        line for line in _config_lines(target, common / "config")
         if not line.startswith("submodule.")
         and not line.lower().startswith("extensions.worktreeconfig=")
     ]
+    worktree_lines = _config_lines(target, own / "config.worktree")
+    included: dict[str, str] = {}
+    _includes(target, common / "config", config_lines, included)
+    _includes(target, own / "config.worktree", worktree_lines, included)
     hook_files: dict[str, str] = {}
     hooks_dir = common / "hooks"
     if hooks_dir.is_dir():
         for item in sorted(hooks_dir.glob("*")):
             if item.is_file():
                 hook_files[item.name] = hashlib.sha256(item.read_bytes()).hexdigest()
-    return {"config_lines": config_lines, "hook_files": hook_files, "hooks_dir": str(hooks_dir)}
+    return {"config_lines": config_lines, "worktree_lines": worktree_lines, "included": included,
+            "hook_files": hook_files, "hooks_dir": str(hooks_dir)}
+
+
+def _config_lines(target: Path, file: Path) -> list[str]:
+    """The ``key=value`` lines of one config file as written, without following its includes."""
+    if not file.is_file():
+        return []
+    return git(target, "config", "--file", str(file), "--no-includes", "--list").splitlines()
+
+
+def _includes(target: Path, file: Path, lines: list[str], found: dict[str, str]) -> None:
+    """Add to ``found`` a hash of each file ``lines`` (read from ``file``) include, recursively.
+
+    A path is resolved as git resolves it: ``~/`` from HOME, a relative one from the
+    including file's directory. A file that is not there is recorded as missing, so
+    creating it is a change too. A file already in ``found`` is not read again, so a
+    cycle ends.
+    """
+    for line in lines:
+        key, _, value = line.partition("=")
+        if not (key.startswith(("include.", "includeif.")) and key.endswith(".path")) or not value:
+            continue
+        path = Path(os.path.expanduser(value)) if value.startswith("~") else Path(value)
+        path = path if path.is_absolute() else file.parent / path
+        name = str(path)
+        if name in found:
+            continue
+        found[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+        if path.is_file():
+            _includes(target, path, _config_lines(target, path), found)
 
 
 def _shared_digest(snapshot: dict) -> str:
@@ -1264,6 +1305,11 @@ def _shared_digest(snapshot: dict) -> str:
     hooks_dir = Path(snapshot["hooks_dir"])
     for name in sorted(snapshot["hook_files"]):
         digest.update(name.encode() + b"\0" + (hooks_dir / name).read_bytes())
+    # Fed only when there is any, so a target with neither keeps the digest it had.
+    for line in snapshot["worktree_lines"]:
+        digest.update(b"\0worktree\0" + line.encode())
+    for name, hashed in sorted(snapshot["included"].items()):
+        digest.update(b"\0include\0" + name.encode() + b"\0" + hashed.encode())
     return digest.hexdigest()
 
 
@@ -1311,17 +1357,21 @@ def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
     ``shared`` is the digest of every line and hook; ``shared_config`` (key -> hash of
     its values) and ``shared_hooks`` (file -> hash) let a change be named by key or
     file; ``branches`` are the target's local branches, so a branch made meanwhile can
-    be told from one that was there.
+    be told from one that was there. A key of the checkout's ``config.worktree`` is
+    named ``worktree:<key>`` and an included file ``include:<path>``.
     """
     snapshot = snapshot if snapshot is not None else _shared_snapshot(target)
     values: dict[str, list[str]] = {}
-    for line in snapshot["config_lines"]:
-        key, _, value = line.partition("=")
-        values.setdefault(key, []).append(value)
+    for prefix, lines in (("", snapshot["config_lines"]),
+                          ("worktree:", snapshot["worktree_lines"])):
+        for line in lines:
+            key, _, value = line.partition("=")
+            values.setdefault(prefix + key, []).append(value)
+    config = {key: hashlib.sha256("\n".join(vals).encode()).hexdigest() for key, vals in values.items()}
+    config.update({f"include:{name}": hashed for name, hashed in snapshot["included"].items()})
     branches = git(target, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads").split()
     return {"shared": _shared_digest(snapshot),
-            "shared_config": {key: hashlib.sha256("\n".join(vals).encode()).hexdigest()
-                              for key, vals in values.items()},
+            "shared_config": config,
             "shared_hooks": dict(snapshot["hook_files"]),
             "branches": sorted(branches)}
 

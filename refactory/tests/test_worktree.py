@@ -1860,3 +1860,99 @@ def test_a_branch_named_like_a_tag_is_known_by_its_name(repo, tmp_path):
     found = worktree.create(repo, "HEAD", "trkffff3333", _run(tmp_path))
     git(repo, "branch", "--set-upstream-to", "origin/main", "x")
     assert worktree.shared_change(found) == "config branch.x.merge added; config branch.x.remote added"
+
+
+# ── the checkout's config.worktree and included files (review of #644) ────────
+
+def test_the_checkout_s_worktree_config_is_shared_state(repo, tmp_path):
+    """`_isolate_hooks` turns on worktreeConfig, so the checkout's config.worktree takes effect."""
+    found = worktree.create(repo, "HEAD", "wtc0000aaaa", _run(tmp_path))
+    assert git(repo, "config", "extensions.worktreeConfig").strip() == "true"
+    assert worktree.shared_change(found) is None, "the run's own isolated hooks path is not a change"
+    git(repo, "config", "--worktree", "core.hooksPath", "/evil")
+    assert git(repo, "config", "core.hooksPath").strip() == "/evil"
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+    assert worktree.shared_change(found) is None, "each change is reported once"
+    git(repo, "config", "--worktree", "core.hooksPath", "/eviler")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath changed"
+
+
+def test_a_worktree_config_written_before_the_extension_is_on_is_seen(repo, tmp_path):
+    """A file git does not read yet is recorded too: turning the extension on would load it."""
+    found = worktree.create(repo, "HEAD", "wtc1111bbbb", _run(tmp_path))
+    git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    (git_dir / "config.worktree").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+
+
+def test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config(repo, tmp_path):
+    """When the target is itself a linked worktree, its own config.worktree is the one read."""
+    git(repo, "worktree", "add", "-q", "--no-track", "-b", "person", str(tmp_path / "checkout"), "HEAD")
+    checkout = tmp_path / "checkout"
+    found = worktree.create(checkout, "HEAD", "wtc2222cccc", _run(tmp_path))
+    git(checkout, "config", "--worktree", "core.hooksPath", "/evil")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+
+
+def test_a_change_inside_an_included_file_is_caught(repo, tmp_path):
+    included = tmp_path / "extra.gitconfig"
+    included.write_text("[alias]\n\tci = commit\n")
+    git(repo, "config", "include.path", str(included))
+    found = worktree.create(repo, "HEAD", "inc0000aaaa", _run(tmp_path))
+    assert worktree.shared_change(found) is None
+    included.write_text("[alias]\n\tci = commit\n[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{included} changed"
+    assert worktree.shared_change(found) is None, "each change is reported once"
+
+
+def test_includes_are_followed_relative_conditional_nested_and_from_worktree_config(repo, tmp_path):
+    """A relative path, an includeIf whatever its condition, a nested include, a missing file."""
+    git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    (git_dir / "rel.inc").write_text("[include]\n\tpath = nested.inc\n")
+    (git_dir / "nested.inc").write_text("[alias]\n\tst = status\n")
+    (tmp_path / "cond.inc").write_text("[alias]\n\tco = checkout\n")
+    git(repo, "config", "include.path", "rel.inc")
+    git(repo, "config", "includeIf.gitdir:/nowhere/.path", str(tmp_path / "cond.inc"))
+    found = worktree.create(repo, "HEAD", "inc1111bbbb", _run(tmp_path))
+    git(repo, "config", "--worktree", "include.path", str(tmp_path / "wt.inc"))
+    assert worktree.shared_change(found) == (
+        f"config include:{tmp_path / 'wt.inc'} added; config worktree:include.path added")
+    (tmp_path / "wt.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'wt.inc'} changed"
+    (git_dir / "nested.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{git_dir / 'nested.inc'} changed"
+    (tmp_path / "cond.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'cond.inc'} changed"
+
+
+def test_an_include_cycle_ends(repo, tmp_path):
+    (tmp_path / "a.inc").write_text(f"[include]\n\tpath = {tmp_path / 'b.inc'}\n")
+    (tmp_path / "b.inc").write_text(f"[include]\n\tpath = {tmp_path / 'a.inc'}\n")
+    found: dict[str, str] = {}
+    worktree._includes(repo, tmp_path / "x", [f"include.path={tmp_path / 'a.inc'}"], found)
+    assert set(found) == {str(tmp_path / "a.inc"), str(tmp_path / "b.inc")}
+
+
+def test_ordinary_work_with_includes_and_worktree_config_is_not_a_change(repo, tmp_path):
+    """Branches, commits and a tracking branch in the checkout trip nothing new."""
+    _with_origin(repo)
+    (tmp_path / "extra.gitconfig").write_text("[alias]\n\tci = commit\n")
+    git(repo, "config", "include.path", str(tmp_path / "extra.gitconfig"))
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    git(repo, "config", "--worktree", "user.name", "Person")
+    found = worktree.create(repo, "HEAD", "inc2222cccc", _run(tmp_path))
+    git(repo, "worktree", "add", "-q", "-b", "fix/thing", str(tmp_path / "session"), "origin/main")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+    worktree.commit_attempt(Path(found.run), {Path("f.txt"): "x\n"}, "attempt")
+    assert worktree.shared_change(found) is None
+
+
+def test_an_old_record_still_sees_a_worktree_config_change(repo, tmp_path):
+    """A record from before the detail compares only the digest, which covers config.worktree."""
+    found = worktree.create(repo, "HEAD", "wtc3333dddd", _run(tmp_path))
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items()
+                                       if key not in ("shared_config", "shared_hooks")}))
+    git(repo, "config", "--worktree", "core.hooksPath", "/evil")
+    assert worktree.shared_change(found) == ""

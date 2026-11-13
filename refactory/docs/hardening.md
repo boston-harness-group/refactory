@@ -808,10 +808,33 @@ Held by `test_worktree.py` (`test_a_tracking_branch_made_in_the_person_s_checkou
 `test_agent_delivery.py`
 (`test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_unaffected`).
 
-**Not yet seen by the guard** (follow-ups). The snapshot reads only the common
-`config`. It does not read the person's checkout's `config.worktree`, which
-`extensions.worktreeConfig` makes live, so `git config --worktree core.hooksPath`
-there goes unseen. It also misses changes inside a file the config `[include]`s.
+**Worktree config and includes (review of #644).** The snapshot read only the
+common `config`, so two changes went unseen: `git config --worktree
+core.hooksPath` in the person's checkout, which `extensions.worktreeConfig` (set
+by hook isolation) makes live, and an edit inside a file the config already
+`[include]`s. The snapshot now also records:
+
+- the checkout's own `config.worktree` (from its `--git-dir`, so a checkout that
+  is itself a linked worktree is read correctly), named `worktree:<key>`. It is
+  recorded whether or not the extension is on, so turning it on cannot bring an
+  unseen file into force. The run's own worktrees have their own git dirs, so
+  their isolated hooks path is not counted;
+- a hash of every file an `include.path` or `includeIf.<cond>.path` in either
+  file names, followed recursively and whatever the condition, named
+  `include:<path>`. Paths resolve as git resolves them (`~/` from HOME, relative
+  from the including file). A missing file is recorded as missing, so creating it
+  counts.
+
+Both feed the all-lines digest only when present, so a target with neither keeps
+the digest it had and live runs are not failed on upgrade. Held by
+`test_worktree.py` (`test_the_checkout_s_worktree_config_is_shared_state`,
+`test_a_worktree_config_written_before_the_extension_is_on_is_seen`,
+`test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config`,
+`test_a_change_inside_an_included_file_is_caught`,
+`test_includes_are_followed_relative_conditional_nested_and_from_worktree_config`,
+`test_an_include_cycle_ends`,
+`test_ordinary_work_with_includes_and_worktree_config_is_not_a_change`,
+`test_an_old_record_still_sees_a_worktree_config_change`).
 
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
