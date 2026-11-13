@@ -84,6 +84,15 @@ class PickedParent(Optimizer):
         if "proposer" in self.__dict__ and hasattr(self.proposer, "last_lessons"):
             self.proposer.last_lessons = value
 
+    @property
+    def last_analysis(self) -> dict[str, Any] | None:
+        return getattr(self.proposer, "last_analysis", None)
+
+    @last_analysis.setter
+    def last_analysis(self, value: dict[str, Any] | None) -> None:
+        if "proposer" in self.__dict__ and hasattr(self.proposer, "last_analysis"):
+            self.proposer.last_analysis = value
+
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         self.proposer.bind_model(model, workdir=workdir)
 

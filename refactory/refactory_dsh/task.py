@@ -37,6 +37,7 @@ import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 
@@ -82,6 +83,16 @@ class Task:
     #: nodes could find them: grader-derived, so no node outside the grader side may
     #: consume them (V17). Default: none.
     grader_outputs: tuple[str, ...] = ()
+    #: What the integrity judge (`optim.integrity`, ``LoopConfig.integrity_judge``) is to
+    #: treat as legitimate for this task: ``{category: why, in plain words}``, e.g.
+    #: ``{"answer_leak": "the task is to recall facts about these items"}``. A category
+    #: named here is off for the run (not asked about) unless the run's own setting
+    #: names it, and the judge is told the reason. Default: none.
+    integrity_allowances: Mapping[str, str] = MappingProxyType({})
+    #: The task's policy per integrity category (``off``, ``warn`` or ``veto``), where
+    #: it differs from the run's default; a run's own setting for a category wins.
+    #: Default: none.
+    integrity_policy: Mapping[str, str] = MappingProxyType({})
 
     def instances(
         self, *, part: str | None = None, seed: int | None = None,
@@ -191,6 +202,51 @@ def grader_secrets(state: dict[str, Any], *, part: str | None = None) -> set[str
             for name in hidden:
                 secrets |= strings(instance.metadata.get(name)) - visible
     return secrets
+
+
+def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """What the graph's Tasks declare for the integrity judge: ``{"policy": {...},
+    "allowances": {...}}``, from each data node's Task (``Task.integrity_policy``,
+    ``Task.integrity_allowances``). Where two Tasks disagree on a category the more
+    lenient policy holds (off, then warn, then veto), and an allowance of either beats
+    any policy (`optim.integrity.resolve_policy`); allowances are joined, each reason
+    kept. A Task that cannot be loaded declares nothing and is warned about; an unknown
+    category or policy word raises ``TaskError``."""
+    import warnings
+
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.optim.integrity import CATEGORIES, check_policy
+
+    order = {"off": 0, "warn": 1, "veto": 2}
+    policy: dict[str, str] = {}
+    allowances: dict[str, str] = {}
+    graph = Graph.from_state(state.get("graph") or {})
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    for ref in refs:
+        try:
+            task = load_task(ref)
+        except Exception as exc:  # noqa: BLE001 - an unloadable Task is another check's to report
+            warnings.warn(f"integrity judge: Task {ref!r} could not be loaded, so its "
+                          f"declaration is not read ({type(exc).__name__}: {exc})",
+                          RuntimeWarning, stacklevel=2)
+            continue
+        try:
+            declared = check_policy(dict(getattr(task, "integrity_policy", None) or {}),
+                                    f"Task {ref!r} integrity_policy")
+        except ValueError as exc:
+            raise TaskError(str(exc)) from exc
+        for name, level in declared.items():
+            if name not in policy or order[level] < order[policy[name]]:
+                policy[name] = level
+        unknown = set(dict(getattr(task, "integrity_allowances", None) or {})) - set(CATEGORIES)
+        if unknown:
+            raise TaskError(f"Task {ref!r} integrity_allowances: unknown categories "
+                            f"{', '.join(sorted(unknown))}; known: {', '.join(CATEGORIES)}")
+        for name, text in dict(getattr(task, "integrity_allowances", None) or {}).items():
+            if str(text).strip():
+                allowances[str(name)] = (f"{allowances[name]}; {text}" if name in allowances
+                                         else str(text))
+    return {"policy": policy, "allowances": allowances}
 
 
 def node_item(item: dict[str, Any], task: Task | None, knobs: dict[str, Any] | None) -> dict[str, Any]:

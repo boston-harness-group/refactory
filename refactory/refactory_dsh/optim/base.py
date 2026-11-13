@@ -729,6 +729,19 @@ class ProposalContext:
     #: Whether "How nodes compose" says what makes a new step pay off
     #: (``LoopConfig.structure_guidance``; ``feedback.STRUCTURE_GUIDANCE``).
     structure_guidance: bool = False
+    #: The analyst stage's settings (``LoopConfig.analysts``; `optim.analysts.settings`):
+    #: ``{"group_size", "merge_batch_size", "max_batches"}``; empty is off. A model
+    #: proposer then runs failure and success analysts over ``item_records`` and merges
+    #: their findings before it writes the proposal. Never rendered itself.
+    analysts: dict[str, Any] = field(default_factory=dict)
+    #: The round's analysis (`AutoresearchOptimizer._analyse`): the batches, the merges
+    #: and the ranked ``findings``, for "What the analysts found, ranked"; ``None`` when
+    #: no analyst ran.
+    analysis: dict[str, Any] | None = None
+    #: The integrity judge's verdicts on this run's proposals (``Loop._integrity``,
+    #: ``LoopConfig.integrity_judge``), for "Integrity review of your proposals"; empty
+    #: (the judge off) says nothing.
+    integrity: list[dict[str, Any]] = field(default_factory=list)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -820,11 +833,16 @@ class ProposalContext:
             sections += ["", *_edit_change_lines(self.edit_pairs)]
         if self.reasoning:
             sections += ["", *_reasoning_lines(self.reasoning)]
+        if self.analysis is not None:
+            from .analysts import section_lines
+            sections += ["", *section_lines(self.analysis)]
         if self.item_records:
             sections += ["", *_item_evidence(self.item_records)]
             sections += ["", *_trajectories(
                 self.item_records, budget=self.evidence_budget,
-                findings=self.reader_findings, failures=self.reader_failures)]
+                findings=self.reader_findings, failures=self.reader_failures,
+                analysed=(None if self.analysis is None
+                          else list(self.analysis.get("findings") or ())))]
         sections += [
             "",
             "## What this run has already tried",
@@ -890,14 +908,16 @@ class ProposalContext:
 
 def _feedback_sections(ctx: "ProposalContext") -> list[str]:
     """The run-wide feedback sections (`optim.feedback`): every change by kind, whether
-    the last round's added steps contributed, and the optimizer's own lessons; each
-    only when its field holds something."""
-    from . import feedback
+    the last round's added steps contributed, the optimizer's own lessons, and the
+    integrity judge's verdicts on its proposals (`optim.integrity`); each only when its
+    field holds something."""
+    from . import feedback, integrity
 
     out: list[str] = []
     for lines in (feedback.ledger_lines(ctx.ledger),
                   feedback.step_review_lines(ctx.added_steps),
-                  feedback.lessons_lines(ctx.lessons) if ctx.ask_lessons else []):
+                  feedback.lessons_lines(ctx.lessons) if ctx.ask_lessons else [],
+                  integrity.feedback_lines(ctx.integrity)):
         if lines:
             out += ["", *lines]
     return out
@@ -1673,7 +1693,8 @@ def _cited_items(items: Sequence[dict[str, Any]],
 
 def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                   findings: Sequence[dict[str, Any]] | None = None,
-                  failures: Sequence[dict[str, Any]] = ()) -> list[str]:
+                  failures: Sequence[dict[str, Any]] = (),
+                  analysed: Sequence[dict[str, Any]] | None = None) -> list[str]:
     """Every train item of the candidate being edited.
 
     When all of them fit ``budget`` in full, every item is shown in full here. When
@@ -1682,6 +1703,11 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     the rest of the budget holds: the items the readers cited first, one per pattern
     in turn (``_cited_items``), then failures and passes alternating. Train records
     only.
+
+    ``analysed``: the analysts' ranked findings (`optim.analysts`), shown before this
+    section, which take the readers' place: no reader findings are shown, and the
+    items they cite are shown in full first (one per finding in turn, failure findings
+    first, each kind in rank order).
     """
     items = _ordered_items(records)
     if not items:
@@ -1696,14 +1722,23 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
         return header + ["Every item in full. Read what each step produced and where it "
                          "went wrong before proposing.",
                          *(line for _id, block in groups[0] for line in ("", block))]
-    lines = header + [
-        f"They do not fit one request in full, so readers went through them in "
-        f"{len(groups)} groups of whole items. Their findings come first, then a table of "
-        "every item, then as many items in full as fit."]
-    if findings is None:
+    if analysed is not None:
+        # The analysts' findings are their own section, before this one; the items they
+        # cite are shown in full first (``_cited_items``).
+        lines = header + [
+            "They do not fit one request in full. The analysts' ranked findings above "
+            "cover them; here is a table of every item, then as many items in full as fit."]
+        findings = [{"failure_patterns": [f for f in analysed if f.get("source") != "success"],
+                     "success_patterns": [f for f in analysed if f.get("source") == "success"]}]
+    else:
+        lines = header + [
+            f"They do not fit one request in full, so readers went through them in "
+            f"{len(groups)} groups of whole items. Their findings come first, then a table "
+            "of every item, then as many items in full as fit."]
+    if analysed is None and findings is None:
         lines.append("(No reader went through these items for this request: read the "
                      "table and the items in full below.)")
-    else:
+    elif analysed is None:
         lines += ["", "### What the readers found"]
         found_lines: list[str] = []
         success_lines: list[str] = []
@@ -1760,7 +1795,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     # pattern in full; then the rest by the rule above.
     cited = _cited_items(items, findings)
     if cited:
-        examples.append("The items the readers cited come first, one per pattern in turn, "
+        examples.append(f"The items the {'analysts' if analysed is not None else 'readers'} "
+                        "cited come first, one per pattern in turn, "
                         "then the others.")
     picked = {id(record) for record in cited}
     shown = 0

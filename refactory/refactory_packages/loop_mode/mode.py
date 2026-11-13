@@ -75,12 +75,18 @@ class LoopAsMode(Mode):
                 description="the run's randomness; frozen, so a score measures the "
                             "structure rather than the draw",
             ),
+            "integrity_judge": Knob(
+                "off", "str", frozen=True,
+                description="the loop's integrity judge (LoopConfig.integrity_judge: off, "
+                            "on, flag, or a JSON object); frozen, because it guards the "
+                            "search rather than being a setting to optimize",
+            ),
         }
 
     def build(self) -> Graph:
         graph = Graph()
         settings = ("epochs", "batch_size", "optimizer", "elite", "attempts",
-                    "max_evaluations", "seed")
+                    "max_evaluations", "seed", "integrity_judge")
         graph.add(Node(
             "init", "op", call=_op("init"),
             knobs=("target", "project") + settings,

@@ -88,7 +88,9 @@ SEARCH_ONLY_FIELDS = {
          "edit_preset", "allowed_ops", "frozen", "allow_new_node_tools", "allow_code_nodes",
          "max_edits_per_proposal", "fresh_evidence", "early_stop_patience",
          "early_stop_at_full_val", "selection", "pool_size",
-         "run_ledger", "lessons", "step_review", "structure_guidance"),
+         "run_ledger", "lessons", "step_review", "structure_guidance",
+         "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches",
+         "integrity_judge"),
         "decides what is proposed, re-scored or kept, not what the seed scores"),
     "val_gate": ("decides what is kept; the train rollout seed it implies is checked "
                  "per part instead (the cached part's seed against the rollout's)"),
@@ -305,7 +307,10 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
         event = next((r for r in journal
                       if r.get("event") == "part_result" and r.get("id") == cid and r.get("part") == part), None)
         result = (event.get("result") or {}) if event else None
-        occasion = run_dir / "runs" / cid / "occasions" / f"{part}_0"
+        # The occasion the part_result names: an interrupted rollout before it took
+        # occasion 0 and left no result, so the first result may be a later occasion.
+        occasion = (run_dir / "runs" / cid / "occasions"
+                    / f"{part}_{int(result.get('occasion') or 0) if result else 0}")
         records_path = occasion / "item_records.json"
         if not result or not result.get("exit_ok") or not records_path.exists():
             continue

@@ -223,6 +223,67 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   one batch proposed and gated. Both settings need the gate (val items, or `--val-gate 1`), are saved with the
   run and are kept on resume.
 
+## An evaluation that dies with the run is not a result (exit 75, `--resume`)
+
+A failed item is the candidate's result only when it ran and failed. An item whose
+process died with the run has an unknown outcome (`items.interrupted_item`). That is
+an item whose model calls kept failing on the wire through the client's retries (a
+proxy or provider outage), whose completion process was killed by SIGKILL or SIGTERM
+(exit -9 or -15: the host's out-of-memory killer, a stop from outside), whose product
+worker was killed (`signal: SIGKILL`), whose op child exited before it reported, or
+whose model call the run's stop cancelled. Only an item with no verdict qualifies (an
+error, or "no answer" because a step's answer is missing). An item the Task graded is
+always its result. A model timeout, a wrong or garbled answer, an output limit, a
+product's own failure and any other signal (SIGABRT from a runtime out of heap,
+SIGSEGV) are the candidate's failures, as before. A wire failure is only ever called
+one when the session's last cause is the wire's. The model's streamed reasoning (which
+may say "429") never decides it.
+
+- **In-run retries.** A train evaluation, a val or test rollout or a fresh-evidence
+  re-score with such an item, or whose run failed outside any item for one of these
+  reasons, is tried again inside the run after 2 minutes, then after 5 more
+  (`INTERRUPTED_RETRY_WAITS_S`). There is no wall-clock cap: each attempt has the run's
+  usual limits. Each attempt is journaled as `evaluation_interrupted` (attempt, outcome,
+  causes, how many items died) and shown. Before an attempt runs again, the earlier
+  attempt's folder is moved to the run's archive.
+- **The stop.** Still interrupted after its retries, the evaluation stops the run with
+  exit status **75** (`EX_TEMPFAIL`, `EXIT_INTERRUPTED`) and `"resumable": true` in the
+  error JSON. Exit 2 means a refused configuration. Nothing of the evaluation is
+  recorded: no score, records, val occasion, re-score or rollouts. What `refactory
+  optimize ... --resume` does then depends on what stopped:
+  - **A train evaluation:** the candidate stays unevaluated and its epoch open, so the
+    resume evaluates it again from the start and gates it as any other.
+  - **A val or test rollout:** the candidate's train score stands. The interrupted
+    rollout is no val or test score, and the resume rolls it out again in a fresh
+    occasion.
+  - **A fresh-evidence re-score:** the parent keeps its earlier records. The resume
+    tries the re-score again only while that epoch's children are still unevaluated
+    (a known gap, listed as a follow-up).
+- **The cap.** Each stop counts for that candidate and part (a re-score counts per
+  epoch), from the journal, so a resume keeps the count. An in-run retry is not a stop.
+  The run stops on the first two. On the third (`INTERRUPTION_CAP`), the evaluation is
+  recorded as failed, with the error "`<part>` evaluation interrupted 3 times; recorded
+  as failed", and the run goes on. An evaluation that dies every time therefore cannot
+  hold a run in a stop-and-resume loop.
+- **Receipts are kept.** When an unevaluated candidate's train evaluation or an epoch's
+  re-score runs again, in a retry or after a resume, what the earlier attempt left (its
+  per-item passes and receipts) is moved to `.refactory/archive/<UTC time>/runs/<id>/...`
+  inside the run (`evaluation_archived` in the journal), never deleted.
+  - A train attempt's archive leaves the candidate's `occasions/` in place.
+  - A val or test rollout retried in the run is archived from its own occasion folder.
+    After a resume it runs in a fresh occasion, and the interrupted occasion stays
+    where it was.
+  - A re-score's folder (`occasions/train_epoch_<n>`) is archived whole.
+- **Seed results.** A `--seed-results` part with such an item is a miss: it is
+  measured instead.
+- **Runtimes.** The item records come from the same code on both runtimes, and a model
+  call fails with the same text in the spine's worker as in the walker. Known gap: when
+  the spine's own worker or op process is killed and leaves no stderr, the spine records
+  only `exited with code null`, which names no signal. Such an item is still counted as
+  the candidate's failure on the spine, where the walker counts it as interrupted.
+- **Out of scope.** An interrupted evaluation runs again from its start. Resuming inside
+  forks, loops and per-item passes is separate work.
+
 ## Train minibatches (`--train-minibatch N`)
 
 By default every candidate is scored on the whole train part. With
@@ -625,6 +686,248 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
 The readers' success patterns (what the passing items do right) have their own heading
 after the failure patterns, up to 4 per reader whatever its failure patterns, and a
 quarter of the findings' room the failure patterns cannot take.
+
+### The analyst stage: SkillOpt's per-round analysis (`--analysts`)
+
+`--analysts 1` (default `0`) gives the model proposer the analysis SkillOpt's reflect
+stage gives its patch step (`optim/analysts.py`; the SkillOpt port's `analysts.py` and
+`merge.py`). Before each proposal of `autoresearch` (alone, under `--portfolio`, or
+paired with a parent picker), on the train records the request carries:
+
+- **Failure analysts.** Every item not passed (answered wrong, no answer, or an error),
+  each once, shuffled with the epoch as seed and cut into batches of
+  `--analyst-group-size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
+  batch. At most 8 calls of the stage are in flight at once, merges included (the two
+  sides' merges run side by side), so 35 train items (5 or 6 batches) take one wave of
+  analysts. Each reads the pipeline (its nodes and edges, each node in
+  full with the settings bound to it, every other setting's value) and each item's full
+  trace: its input, every step's input and output in the order they ran, the expected
+  answer, the prediction, the score and the grader's feedback. A call's prompt has
+  400000 characters of room (`ANALYST_ROOM`): the optimizer model (Opus 4.6) reads 200k
+  tokens, of which Claude Code's own system prompt and the reserved reply take about
+  30-40k, and traces dense in notation run 2.5-3.5 characters a token, so 400000
+  characters is about 115-160k tokens. The batch's items share what the rest of the
+  prompt leaves: a batch that fits is never
+  clipped, and one that does not has its longest items cut to one common length (never
+  below 4000 characters), step inputs first, then outputs. SkillOpt never clips, so the
+  clipped items and the characters left out are counted. A call the provider still
+  refuses as longer than the model's context ("prompt is too long", "context length",
+  ...) is retried once within half the refused prompt's length, re-clipped the same
+  way (a merge has its pipeline texts clipped instead; its findings stay whole); a
+  retry still too long fails the batch as any failed call does. Only the model call's
+  own failure is read this way: an answer that cannot be read is a failed batch even
+  when its prose mentions a context window. The report counts clipped items and
+  context retries only for calls paid in that step, so a step remade after a resume,
+  whose calls come from the cache, does not count them again. It
+  writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
+  (steps, edges, settings, or the structure), the change that would fix it, the items it
+  covers (an id outside the batch is dropped), its impact and quotes.
+- **Success analysts.** The passed items likewise (seed + 1): what made them work, where
+  it comes from, and what a change must preserve.
+- **Merge and rank.** Failure findings merge level by level in batches of
+  `--analyst-merge-batch-size` lists (8), then success findings; a final merge with
+  failure priority returns one de-duplicated list ranked by items covered and impact.
+  As in SkillOpt, one list is not merged, the final merge runs only when both sides
+  found something, and an unreadable merge keeps every input finding (failures first).
+- **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
+  characters) before the item results, and the analysts take the readers' place: no
+  reader call runs, and when the items do not fit one request the items they cite are
+  shown in full first. SkillOpt's analysts are its only reading of the trajectories, so
+  running both would give this loop more analysis than SkillOpt's.
+- `--analyst-max-batches` (0, no limit, as SkillOpt) caps the analyst calls per round,
+  failure batches first; the request says how many items went unanalysed.
+
+The analysis is made once per proposal step: it is keyed by the epoch, the generation,
+the edited candidate, its train records, the stage's settings and the optimizer's model,
+not by the lessons, so a retry after a refusal (whose request carries the lessons the
+refused answer wrote) reuses it and makes no call; the analysts and merges read the
+lessons of the step's first attempt. The step's analysis is also kept in
+`<run root>/analyst_findings/round-<key>.json` when every call of it succeeded, so a
+resumed run reuses it; a step with a failed call is made again on resume, its successful
+calls answered from their own cache, and that analysis (the one its proposal sees) is
+journaled too, with the calls it paid. An analysis is journaled again for its step only
+when the earlier one was incomplete (a failed batch or merge, or stopped by the budget)
+and this one differs from it.
+
+Every call is recorded in `optimizer_trace.jsonl` (kinds `analyst_failure`,
+`analyst_success`, `analyst_merge_failure`, `analyst_merge_success`,
+`analyst_merge_final`) with its parsed findings, and cached by the optimizer's model and
+its whole text, in memory and in `<run root>/analyst_findings/` (cleared by a fresh
+run); a retried call's answer is cached under the original call, with the retry
+recorded. Each step's batches, merges, call counts, clipped items (and characters left
+out), context retries and ranked findings are journaled once (`analyst_findings`,
+restored on resume), also when the proposal call after it fails, and when a spent budget
+stops the stage part way (with what it paid and the `error`). report.md's "What the
+analysts found" gives the rounds, the calls, the clipped items, the context retries and
+the latest round's top 5 findings. A failed analyst call is shown and never fails the
+proposal; a spent budget, a cancelled run or a missing model choice stop it, as in the
+SkillOpt port. The calls go through the optimizer's model route and count in the run's
+budget like the readers'.
+
+A run with `--analysts 1` whose optimizer asks no model (the random proposer, a parent
+policy alone) is refused when it starts. A custom strategy (`--strategy skillopt`)
+builds its own optimizer requests: setting it warns, and the stage runs only for
+proposals the strategy asks of the loop's model proposer.
+
+The prompts name no dataset or task, ask for nothing beyond what SkillOpt's analysts
+ask, and see train records only. Off, no call is made and every request is
+byte-identical to a run without the stage; the four settings are excluded from the
+settings digest, so a run resumes whichever way they are set.
+
+Per round with SkillOpt's settings, for F failed and S passed train items:
+ceil(F/8) + ceil(S/8) analyst calls, then the merges (one per side with more than one
+list, at most 8 lists each, plus the final one when both sides found something), then
+the proposal: on 35 train items, about 5-6 analyst and 3 merge calls, as SkillOpt's
+analysts and merges make. SkillOpt's rank call (it trims its merged edits to the edit
+budget), slow update and meta skill are not run: the proposer chooses and writes the
+edits, and its `lessons` are this loop's optimizer-side memory (they are shown to the
+analysts and merges, as SkillOpt shows its meta skill).
+
+Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
+LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
+these are generic by design (no dataset hints); SkillOpt never clips a trace (here a
+batch over the call's room has its longest items clipped, and counted); SkillOpt shows
+each item's task type (here the item's input, and its choices when it has them); and SkillOpt's analysts never
+see an errored item (it has no conversation to show), while here it is a failure shown
+with its error.
+
+### The integrity judge (`--integrity-judge`, default `off`)
+
+An optimizer paid by a score finds whatever raises it, and some of that is not the task
+done better but a regularity of how the data, the grader or the environment happens to
+be built. The integrity judge (`optim/integrity.py`) asks one question of each
+proposal: *would this change still help if the dataset, grader or environment had been
+built differently, or does its benefit depend on how they happen to be built?* Its
+prompt names no dataset, task or answer format.
+
+- **When it is called.** Off by default: no call, nothing recorded, and the request,
+  the report and the run's settings digest are as before. On, every proposal that
+  became a valid candidate is judged in `Run.attempt` (`Loop._integrity_check`), so
+  every strategy's proposals pass it: the default loop and its optimizers (random,
+  autoresearch, a parent picker, the portfolio, the pool), `best_of_n`, `reflective`,
+  `autoscientists` and a custom strategy such as SkillOpt. The starting population's
+  sweep of single knob moves is not judged, and a state already let through is not
+  judged again. One call of the optimizer's model (its route, without tools, charged
+  to the run's token and time budgets; without a budget, the run model's optimizer
+  route) per proposal, recorded in `optimizer_trace.jsonl` (kind `integrity_proposal`),
+  and one more when the run reports (from `Loop.run` or the graph-run loop's report
+  node, never a report-only replay): the winner's combined change from the seed (kind
+  `integrity_final`), so an exploit assembled across several edits is caught. A run
+  with the judge on and no model stops at the start; a Task that cannot be loaded is
+  warned about; a failed judgement is said once on stderr and counted in the report.
+  Verdicts are journaled (`integrity_verdict`, with what the judge read), cached by
+  prompt and restored on resume.
+- **What it reads.** The proposal's edits in full (within 20000 characters), what they
+  do to the pipeline's state (each changed setting as a unified diff, each added step
+  whole, removed steps, wiring), what each setting it touches is for (the mode's own
+  description, kind, allowed values, default, old and new value, the steps that read
+  it), the optimizer's diagnosis, rationale and predicted effect (each one missing is
+  said to be missing: "no rationale given"), the pipeline before the change, everything
+  earlier changes left in the candidate (the starting pipeline against the candidate,
+  within 16000 characters, when the parent is not the seed), and a summary of the
+  parent's train records the proposer saw (outcome, reference result, what the pipeline
+  produced, the start of each input, within 6000 characters). It judges the candidate
+  as it would run, and says whether each finding is about what this change adds
+  (`source: new`) or only about content an earlier change left (`inherited`). Never a
+  validation or test item.
+- **What it answers.** `{"verdict": "clean" | "suspect" | "exploit", "categories": [...],
+  "evidence": ["<quote>"], "property": "...", "source": "new" | "inherited",
+  "reason": "..."}` with categories from a
+  fixed generic set: `answer_leak`, `dataset_artifact`, `grader_exploit`,
+  `environment_tamper`, `task_bypass` and `train_overfit` (a general rule learned from
+  training failures is not overfitting). An `exploit` is a change whose benefit depends
+  on a property of how the data, the grader or the environment was built, which the
+  judge names (`property`), and whose trigger has nothing to do with doing the task; an
+  exploit that names no property is read as `suspect`. The judge is told to say
+  `suspect` when unsure, and given legitimate counter-examples (general know-how such as
+  "re-check each intermediate result before using it"). Evidence items that
+  are not strings are kept as JSON text; a reply that is not valid JSON is read field
+  by field and marked `salvaged` -- also when the first object a reply holds is not the
+  verdict (a quoted `{}` inside a reply that is not valid JSON).
+- **What it does: a policy per category**, `off` (not asked about), `warn` (recorded
+  and shown; the change is still evaluated) or `veto` (refused before evaluation with
+  `E-integrity`, which the next request shows with the judge's reason). The veto rule:
+  the verdict is `exploit` or `suspect`, its finding is not `inherited` (a missing or
+  other `source` counts as about what this change adds), and it names a category whose
+  policy is `veto`. These never veto: an `inherited` finding (recorded and shown as a
+  warning: a harmless child of a flagged parent is evaluated; only exactly
+  `inherited`, in any case or spacing, counts), a category whose policy is `warn` or
+  `off`, a verdict that names no category, a failed call, a malformed or salvaged
+  reply: a failure is recorded as a judge error and shown as such.
+- **A quote backstop on `inherited`.** The judge's own label is all that keeps an
+  `inherited` finding from vetoing, so it is checked, conservatively, since a wrong
+  flip vetoes a sound change. The finding counts as `new` whatever the judge said only
+  when all of these hold: every one of its evidence quotes found in the candidate is
+  in none of the parent's fields (a finding that also quotes text the parent had stays
+  `inherited`); quotes are matched within one field (a setting's value, a step's
+  field), never across two; at least one of them has a word of four letters or more
+  that is nowhere in the parent, so a change that only deletes or reorders text never
+  counts; and the parent's state is known. Matching folds case, collapses whitespace
+  and drops diff markers at line starts (`optim.integrity.backstop`). A flipped
+  finding vetoes if its category is `veto`; the record keeps the judge's label as
+  `judged_source` and the quote as `added_quote`. It changes nothing for a `warn` or
+  `off` category, a judge error or a salvaged reply, and an offline replay applies it
+  the same way.
+- **Anything that slipped past once is never vetoed later.** A change that got through
+  is kept in every candidate built on it, and later proposals are never vetoed for it:
+  the judge only vetoes what a proposal itself adds. It is only reported, by the final
+  audit of the winner's combined change from the seed. This holds for every way a change
+  gets through: the judge failed, its reply was salvaged, its category only warns, the
+  judge was off when it was proposed, or the judge called the finding inherited.
+- **Setting it.** `--integrity-judge on` (or `veto`): every category `veto`.
+  `--integrity-judge flag` (or `warn`): every category `warn`. An object sets
+  categories one by one, in a profile or as JSON on the command line:
+  `--integrity-judge '{"mode": "on", "policy": {"answer_leak": "off", "train_overfit": "warn"}}'`.
+  A category's policy, most specific first: the run's setting for that category; a
+  Task's allowance for it (`off`); the run's default (a bare value, or the object's
+  `mode`/`default`), which covers every other category and overrides the Tasks'
+  policies, so no Task raises a run's `flag` to veto; and, only when the run names no
+  default (an object with just `policy`), the Tasks' policy, else `veto`.
+- **What a task declares.** A Task (`refactory_dsh/task.py`) may set
+  `integrity_allowances = {category: "why it is legitimate here"}`, e.g.
+  `{"answer_leak": "the task is to recall facts about these items"}` or
+  `{"grader_exploit": "the output format is the objective"}`: that category is off for
+  the run unless the run names it, and the judge is told the reason under "What this
+  task allows". `integrity_policy = {category: off|warn|veto}` gives a category's level
+  when the run names no default. Where two Tasks of a graph disagree, the more lenient
+  wins: an allowance beats any policy, warn beats veto. An unknown category or policy
+  word stops the run.
+- **Where the verdicts show.** The change ledger gains an `integrity` column (the
+  verdict of the proposal that was evaluated; `(inherited)` marks a finding about
+  earlier content); the request gains "Integrity review of your proposals": a tally,
+  then the newest 8 suspect or exploit verdicts, each with its categories, quote, reason
+  and whether it was refused (within 4000 characters) -- a refusal (an exploit or
+  suspect verdict about what the proposal added) does not count as progress, a verdict
+  that was only flagged (a warn category, an inherited finding) asks whether the rule
+  holds in general; the
+  report (`integrity` in `report.json`, "Integrity review" in `report.md`) gives the
+  policy, the counts, every flagged proposal and the winner's combined-change verdict.
+  The final verdict is reported, never acted on.
+- **The graph-run loop** (`loop_mode`) takes the setting from its frozen
+  `integrity_judge` knob (a bare word or a JSON object as text); a malformed value is
+  refused naming the knob.
+- **SkillOpt** proposals are judged, each knob's patch separately, and can be vetoed;
+  SkillOpt's own requests do not show the verdicts. A SkillOpt run resumed inside an
+  epoch's patch phase with the judge newly turned on judges the rebuilt patch; if it
+  vetoes it, the rebuild fails as any refused rebuild does -- resume with the setting
+  the run was started with.
+- **Offline.** `python -m refactory_dsh.optim.integrity judge --proposal FILE` judges
+  saved proposals with the same prompt a run builds (`--print-prompt` prints them and
+  calls nothing; `--model`, `--provider`, `--worker-backend`, `--effort` pick the
+  route). FILE is a JSON object, a JSON list or JSON lines; each entry carries `edits`
+  (a list, or one `edit`) and optionally `parent_state` (with it the state diff is
+  computed), `state`, `seed_state`, `rationale`, `prediction`, `diagnosis`,
+  `train_records`, `mode_name`, `parent`, `candidate`, `integrity_judge` (the run
+  setting, `on` by default), `task_policy`, `allowances`, and an `id` and `label`
+  echoed in the output. A `"scope": "cumulative"` entry carries `seed_state`, `state`,
+  `steps` (`{"id", "edits", "rationale"}` in order) and `train_records`. One JSON line
+  per entry comes out: `id`, `label`, `verdict`, `categories`, `evidence`, `property`,
+  `reason`, `vetoed`, `error`. `python -m refactory_dsh.optim.integrity export RUN_DIR`
+  writes a past run's proposals in that format: for a run with the judge on, every
+  judged proposal (vetoed ones and SkillOpt's per-knob patches included) from its
+  verdict record, with the run's setting and the Tasks' declaration, the parent's
+  train records as they stood then and the live verdict (`live`), so each entry
+  rebuilds the run's own prompt; for a run without it, the optimizer's candidates.
 
 ## LiveMath skill graph (`livemath/skill_graph`)
 
