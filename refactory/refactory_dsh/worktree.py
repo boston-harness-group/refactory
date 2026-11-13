@@ -302,7 +302,7 @@ def create(target: Path, rev: str, run_id: str, run: Path) -> Worktree:
     else:
         base = resolve_base(target, rev)
         _write_json(record_path, {"path": str(path), "branch": branch, "base": base, "target": str(target),
-                                  "run": str(run), "pid": os.getpid(), **_shared_record(target, branch),
+                                  "run": str(run), "pid": os.getpid(), **_shared_record(target),
                                   "created": datetime.now(timezone.utc).isoformat()})
         try:
             _add(target, path, branch, base)
@@ -593,21 +593,31 @@ def shared_change(found: Worktree) -> str | None:
     "sets up" hooks there changes the person's own repository. Returns None when nothing
     changed, else the config keys and hook files that changed (empty when the record
     predates the detail). Each change is reported once: the record is moved on to what
-    is there now. Values are never named, since a remote's URL can carry a token.
+    is there now. Values are never named, since a remote's URL can carry a token. The
+    tracking lines of a branch made meanwhile are not a change (`_new_tracking`).
     """
     record_path = _record_path(found)
     record = _json(record_path)
-    snapshot = _shared_snapshot(Path(found.target))
-    current = _shared_record(Path(found.target), found.branch, snapshot)
-    # A record written before own-run tracking lines were left out holds the digest of
-    # every line; that digest matching now means nothing changed at all.
-    if record.get("shared") in (None, current["shared"], _shared_digest(snapshot)):
-        if record.get("shared") is not None and record.get("shared") != current["shared"]:
-            _write_json(record_path, {**record, **current})
+    target = Path(found.target)
+    snapshot = _shared_snapshot(target)
+    current = _shared_record(target, snapshot)
+    if record.get("shared") is None:
         return None
-    detail = _describe_shared(record, current)
-    _write_json(record_path, {**record, **current})
-    return detail
+    if "shared_config" not in record or "shared_hooks" not in record or "branches" not in record:
+        # A record from before the detail: only its digest of every line can be compared.
+        _write_json(record_path, {**record, **current})
+        return None if record["shared"] == current["shared"] else ""
+    changes = _shared_changes(record, current)
+    kept = [change for change in changes
+            if not _new_tracking(change, record, snapshot["config_lines"], found.branch)]
+    if changes or record["branches"] != current["branches"]:
+        _write_json(record_path, {**record, **current})
+    if kept:
+        return "; ".join(f"{label} {name} {kind}" for label, name, kind in kept)
+    if not changes and record["shared"] != current["shared"]:
+        _write_json(record_path, {**record, **current})
+        return ""
+    return None
 
 
 def shared_changed(found: Worktree) -> bool:
@@ -1265,68 +1275,66 @@ def _shared_state(target: Path) -> str:
 _TRACKING_VARS = ("remote", "merge")
 
 
-def _tracking_lines(config_lines: list[str], own_branch: str | None) -> set[str]:
-    """The ``branch.<b>.remote`` / ``branch.<b>.merge`` lines ordinary branch creation writes.
+def _new_tracking(change: tuple[str, str, str], before: dict, config_lines: list[str],
+                  own_branch: str) -> bool:
+    """Whether ``change`` is a tracking line ordinary branch creation wrote.
 
-    Creating a tracking branch in the person's checkout or another session's worktree
-    writes these two lines to the shared config; they change nothing a commit in the
-    run's worktree does, so a run is not failed for them. They are left out only for a
-    branch other than the run's own, and only when the remote they name is ``.`` or one
-    the config already defines: ``remote.*`` lines stay guarded, so tracking a remote
-    added meanwhile still counts as a change.
+    Making a tracking branch in the person's checkout or another session's worktree
+    writes ``branch.<b>.remote`` and ``branch.<b>.merge`` to the shared config; they
+    change nothing a commit in the run's worktree does. Such a line is not a change
+    only when it was added, for a branch that is not the run's own and that neither
+    existed nor had any ``branch.<b>.*`` key in ``before``, tracking ``.`` or a remote
+    ``before`` already defined. Retargeting an existing branch, or tracking a remote
+    added meanwhile, is a change.
     """
-    remotes = {key.removeprefix("remote.").rsplit(".", 1)[0]
-               for key, _, _ in (line.partition("=") for line in config_lines)
-               if key.startswith("remote.") and key.count(".") >= 2}
-    tracked: dict[str, str] = {}
-    for line in config_lines:
-        key, _, value = line.partition("=")
-        if key.startswith("branch.") and key.endswith(".remote"):
-            tracked[key.removeprefix("branch.").removesuffix(".remote")] = value
-    left_out = {name for name, remote in tracked.items()
-                if name != own_branch and (remote == "." or remote in remotes)}
-    return {line for line in config_lines
-            if (key := line.partition("=")[0]).startswith("branch.")
-            and key.count(".") >= 2 and key.rsplit(".", 1)[1] in _TRACKING_VARS
-            and key.removeprefix("branch.").rsplit(".", 1)[0] in left_out}
+    label, key, _kind = change
+    if label != "config" or not key.startswith("branch.") or key.count(".") < 2:
+        return False
+    name, var = key.removeprefix("branch.").rsplit(".", 1)
+    if var not in _TRACKING_VARS or name == own_branch or name in before["branches"]:
+        return False
+    if any(old.startswith(f"branch.{name}.") for old in before["shared_config"]):
+        return False
+    remote = next((line.partition("=")[2] for line in config_lines
+                   if line.partition("=")[0] == f"branch.{name}.remote"), None)
+    return remote == "." or (remote is not None and any(
+        old.startswith(f"remote.{remote}.") for old in before["shared_config"]))
 
 
-def _shared_record(target: Path, own_branch: str | None,
-                   snapshot: dict | None = None) -> dict:
-    """What a worktree's record keeps of the shared state: its digest and, per item, a hash.
+def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
+    """What a worktree's record keeps of the shared state.
 
-    ``shared`` is the digest the guard compares; ``shared_config`` (key -> hash of its
-    values) and ``shared_hooks`` (file -> hash) let a change be named by key or file.
+    ``shared`` is the digest of every line and hook; ``shared_config`` (key -> hash of
+    its values) and ``shared_hooks`` (file -> hash) let a change be named by key or
+    file; ``branches`` are the target's local branches, so a branch made meanwhile can
+    be told from one that was there.
     """
     snapshot = snapshot if snapshot is not None else _shared_snapshot(target)
-    noise = _tracking_lines(snapshot["config_lines"], own_branch)
-    kept = {**snapshot, "config_lines": [line for line in snapshot["config_lines"]
-                                         if line not in noise]}
     values: dict[str, list[str]] = {}
-    for line in kept["config_lines"]:
+    for line in snapshot["config_lines"]:
         key, _, value = line.partition("=")
         values.setdefault(key, []).append(value)
-    return {"shared": _shared_digest(kept),
+    branches = git(target, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
+    return {"shared": _shared_digest(snapshot),
             "shared_config": {key: hashlib.sha256("\n".join(vals).encode()).hexdigest()
                               for key, vals in values.items()},
-            "shared_hooks": dict(snapshot["hook_files"])}
+            "shared_hooks": dict(snapshot["hook_files"]),
+            "branches": sorted(branches)}
 
 
-def _describe_shared(before: dict, after: dict) -> str:
-    """The config keys and hook files that differ between two `_shared_record`s, by name."""
-    if "shared_config" not in before or "shared_hooks" not in before:
-        return ""
-    parts: list[str] = []
+def _shared_changes(before: dict, after: dict) -> list[tuple[str, str, str]]:
+    """The config keys and hook files that differ between two `_shared_record`s."""
+    changes: list[tuple[str, str, str]] = []
     for label, field in (("config", "shared_config"), ("hook", "shared_hooks")):
         old, new = before[field], after[field]
         for name in sorted(old.keys() | new.keys()):
             if name not in old:
-                parts.append(f"{label} {name} added")
+                changes.append((label, name, "added"))
             elif name not in new:
-                parts.append(f"{label} {name} removed")
+                changes.append((label, name, "removed"))
             elif old[name] != new[name]:
-                parts.append(f"{label} {name} changed")
-    return "; ".join(parts)
+                changes.append((label, name, "changed"))
+    return changes
 
 
 def _loose(path: Path) -> set[str]:

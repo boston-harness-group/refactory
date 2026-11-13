@@ -1714,6 +1714,7 @@ def test_tracking_a_remote_added_meanwhile_is_caught(repo, tmp_path):
     git(repo, "config", "branch.other.merge", "refs/heads/main")
     change = worktree.shared_change(found)
     assert change is not None and "config remote.upstream.url added" in change
+    assert "config branch.other.remote added" in change, "the remote is judged as it was before"
 
 
 def test_tracking_an_undefined_remote_is_caught(repo, tmp_path):
@@ -1766,3 +1767,62 @@ def test_an_old_record_s_change_is_reported_without_detail(repo, tmp_path):
     git(repo, "config", "core.hooksPath", "/elsewhere")
     assert worktree.shared_change(found) == ""
     assert worktree.shared_changed(found) is False
+
+
+def _with_fork(repo: Path) -> None:
+    git(repo, "remote", "add", "fork", "https://example.invalid/fork.git")
+    git(repo, "update-ref", "refs/remotes/fork/main", "HEAD")
+
+
+def test_retargeting_the_person_s_tracked_branch_is_caught(repo, tmp_path):
+    """Review of #644: an existing branch's tracking moved to another remote is a change."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "branch", "--set-upstream-to", "origin/main", "main")
+    found = worktree.create(repo, "HEAD", "trk8888cccc", _run(tmp_path))
+    git(repo, "config", "branch.main.remote", "fork")
+    git(repo, "config", "branch.main.merge", "refs/heads/evil")
+    assert worktree.shared_change(found) == (
+        "config branch.main.merge changed; config branch.main.remote changed")
+
+
+def test_giving_an_existing_branch_an_upstream_is_caught(repo, tmp_path):
+    """Review of #644: `--set-upstream-to` on a branch that was there is not branch creation."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "branch", "feature")
+    found = worktree.create(repo, "HEAD", "trk9999dddd", _run(tmp_path))
+    git(repo, "branch", "--set-upstream-to", "fork/main", "feature")
+    assert worktree.shared_change(found) == (
+        "config branch.feature.merge added; config branch.feature.remote added")
+
+
+def test_a_branch_made_in_one_step_and_given_an_upstream_in_a_later_one_is_caught(repo, tmp_path):
+    _with_origin(repo)
+    found = worktree.create(repo, "HEAD", "trkaaaaeeee", _run(tmp_path))
+    git(repo, "branch", "later")
+    assert worktree.shared_change(found) is None
+    git(repo, "branch", "--set-upstream-to", "origin/main", "later")
+    assert worktree.shared_change(found) == (
+        "config branch.later.merge added; config branch.later.remote added")
+
+
+def test_a_new_branch_s_other_settings_are_caught(repo, tmp_path):
+    """Only a new branch's remote and merge are left out; its pushRemote is not."""
+    _with_origin(repo)
+    _with_fork(repo)
+    found = worktree.create(repo, "HEAD", "trkbbbbffff", _run(tmp_path))
+    git(repo, "worktree", "add", "-q", "-b", "newb", str(tmp_path / "session"), "origin/main")
+    git(repo, "config", "branch.newb.pushRemote", "fork")
+    assert worktree.shared_change(found) == "config branch.newb.pushremote added"
+
+
+def test_retargeting_config_left_by_a_deleted_branch_is_caught(repo, tmp_path):
+    """A branch with config but no ref is not new: its tracking lines are guarded."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "config", "branch.ghost.remote", "origin")
+    git(repo, "config", "branch.ghost.merge", "refs/heads/main")
+    found = worktree.create(repo, "HEAD", "trkcccc0000", _run(tmp_path))
+    git(repo, "config", "branch.ghost.remote", "fork")
+    assert worktree.shared_change(found) == "config branch.ghost.remote changed"

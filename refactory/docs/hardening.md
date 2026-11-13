@@ -767,15 +767,20 @@ shared config. Two changes followed:
   as added, removed or changed. Values are never shown, since a remote URL can
   carry a token. The record keeps a hash per key and per hook file for this, and
   `shared_changed` stays as its boolean form.
-- The guard leaves out exactly two keys, `branch.<b>.remote` and
-  `branch.<b>.merge`. These are what `git branch --track` and `worktree add -b`
-  write. They are left out only when `<b>` is not the run's own branch, and only
-  when the remote they name is `.` or is already defined. `remote.*` lines stay
-  guarded, so tracking a remote added during the step is still caught. Every
-  other `branch.*` key (pushRemote, rebase, mergeOptions) is still guarded, as are
-  `core.*`, `alias.*` and the hooks. A record written before this change holds the
-  digest of every line; matching it still means nothing changed, so live runs
-  are not failed when they upgrade.
+- The guard does not count the tracking lines that creating a branch writes:
+  `branch.<b>.remote` and `branch.<b>.merge`, as `git branch --track` and
+  `worktree add -b` write them. They are not counted only when all of these hold:
+  - `<b>` is not the run's own branch;
+  - neither its ref nor any `branch.<b>.*` key existed in the record;
+  - the remote it names is `.` or was already defined in the record.
+
+  Each record keeps the target's local branches for this, and moves on to new
+  branches as they appear. Retargeting an existing branch, giving one an upstream
+  with `--set-upstream-to`, and tracking a remote added during the step are still
+  caught. So is every other `branch.*` key (pushRemote, rebase, mergeOptions), and
+  `remote.*`, `core.*`, `alias.*` and the hooks. A record written before this
+  change has only its all-lines digest. It is compared on that digest once and then
+  moved on, so live runs are not failed when they upgrade.
 
 `LEFTHOOK=0` does not stop lefthook's npm postinstall. Only a truthy `CI` without
 `LEFTHOOK` enabled does that, and `_install_env` sets `CI=true`, while
@@ -789,10 +794,20 @@ Held by `test_worktree.py` (`test_a_tracking_branch_made_in_the_person_s_checkou
 `test_tracking_a_remote_added_meanwhile_is_caught`,
 `test_tracking_an_undefined_remote_is_caught`,
 `test_tracking_config_for_the_run_s_own_branch_is_caught`,
+`test_retargeting_the_person_s_tracked_branch_is_caught`,
+`test_giving_an_existing_branch_an_upstream_is_caught`,
+`test_a_branch_made_in_one_step_and_given_an_upstream_in_a_later_one_is_caught`,
+`test_a_new_branch_s_other_settings_are_caught`,
+`test_retargeting_config_left_by_a_deleted_branch_is_caught`,
 `test_a_shared_hook_change_is_named_by_file`,
 `test_a_record_from_before_the_detail_still_works`) and
 `test_agent_delivery.py`
 (`test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_unaffected`).
+
+**Not yet seen by the guard** (follow-ups). The snapshot reads only the common
+`config`. It does not read the person's checkout's `config.worktree`, which
+`extensions.worktreeConfig` makes live, so `git config --worktree core.hooksPath`
+there goes unseen. It also misses changes inside a file the config `[include]`s.
 
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
