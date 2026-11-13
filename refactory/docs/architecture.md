@@ -179,7 +179,7 @@ on purpose:
 - **`Optimizer`** — proposes. `propose()` returns `Proposal`s; the harness
   validates and evaluates them. It cannot run anything, so it cannot waste budget.
   Seven ship: `random`, `hill_climb`, `evolutionary`, `archive`, `islands`, `map_elites`, and `autoresearch` (which asks a model).
-  The five that choose parents are also **parent pickers**: `--parent-picker map_elites`
+  The five that choose parents are also **parent pickers**: `parent_picker: map_elites`
   with `--optimizer autoresearch` pairs a picker (where to search) with a proposer (what
   to write) as one optimizer (`optim.compose.PickedParent`). Each step the picker
   chooses the candidate; the request the model reads describes that candidate's
@@ -238,14 +238,14 @@ a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`;
 `autoscientists`, `best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
 and with a test part `FinalEvaluation` runs, so the held-out audit compares the winner's
 val and test scores. A round's train evaluations run concurrently, then its val
-rollouts, up to `--max-concurrent-evaluations` at once under the run-wide item limit;
+rollouts, up to `max_concurrent_evaluations` at once under the run-wide item limit;
 the gate's decisions are still taken in population order. The best on val among the accepted candidates a person has not
 rejected is the winner, in the report and for `adopt`. Without the gate every built-in strategy
 also scores the last epoch's proposals when the run ends normally (its epoch bound, or a
 curriculum's last stage), so a run of N epochs scores all N proposal rounds; strategies
 that drive their own epochs (`reflective`, `adaptive_meta`, the curricula) included.
 Under the gate those strategies now get the same ending as the default loop: the last
-proposals gated, then `FinalEvaluation`. `--early-stop-patience N` and `--early-stop-at-full-val 1` add SkillOpt's early
+proposals gated, then `FinalEvaluation`. `early_stop_patience: N` and `early_stop_at_full_val` on add SkillOpt's early
 stop (see [outer-loop.md](outer-loop.md)). SkillOpt (`refactory_packages/skillopt`)
 is built from the same pieces plus `SkillOptProposer`, its optimizer steps (analysts,
 failure-first merge, ranked edit budget, patch, slow update, meta skill) as a part
@@ -995,7 +995,7 @@ prompt/knob edits stopped beating their parents; otherwise a prompt/knob-level c
 `best_of_n` and `autoscientists` ask a model proposer for their N samples of the seed
 in one request; with `random` they keep sampling knob values.
 
-**The edit-level portfolio** (`--portfolio prompt+pipeline`, off by default). The model
+**The edit-level portfolio** (`portfolio: prompt+pipeline`, off by default). The model
 proposer, asked to choose, rates its prompt change more confident nearly every time,
 and asked for one candidate it rarely writes a structural one. So under the portfolio
 each round asks it for one candidate per edit level (`optim.base.EDIT_LEVELS`), the

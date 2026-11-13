@@ -137,6 +137,13 @@ class ReplayedCallFailure(RuntimeError):
     (skillopt/model/claude_backend.py:309-324), ``last_err`` being
     ``Claude CLI exited with code {rc}`` when the CLI wrote nothing to stderr
     (:282). A records each failed attempt in calls.jsonl with ``rc != 0``.
+
+    Two forms, by who makes the attempts. A call whose attempts the replay folds
+    (a solver call, A's rollout retrying it) raises the backend's whole message,
+    ``Claude backend failed after N retries: <CLI error>``. A single attempt
+    (``lookup(..., attempts=1)``: one of B's own optimizer attempts, which
+    ``trace.ask`` retries itself) raises the CLI error alone, as SkillOpt reports
+    one attempt's failure.
     """
 
 

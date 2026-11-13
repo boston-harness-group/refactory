@@ -20,7 +20,7 @@ parents are proposers now.
 The base class here is shared so the five differ only in the choice they make. Each
 returns parents; the sampling of an edit against a chosen parent is the same for all
 of them and is written once. Run alone (``--optimizer map_elites``) a policy samples
-random edits; paired with another proposer (``--parent-picker map_elites``, see
+random edits; paired with another proposer (the ``parent_picker`` setting, see
 :mod:`refactory_dsh.optim.compose`) it only picks, and the proposer writes.
 """
 

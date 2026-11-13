@@ -67,9 +67,9 @@ LOOP_OPTIONS: tuple[tuple[str, str, str], ...] = (
     ("--evaluator", "which runtime scores a candidate: `walker` (fast) or `dsh` (ships)", "walker"),
     ("--preset", "which edits the optimizer may use: `broad`, `structure`, `conservative`, `knob_only`", "broad"),
     ("--seed", "the search RNG seed; model responses can still vary", "0"),
-    ("--elite", "how many parents each round proposes against", "3"),
     ("--max-evaluations", "a hard ceiling on evaluated candidates, whatever the epochs say", "64"),
-    ("--attempts", "retries per batch after a refusal, before the batch is short", "3"),
+    ("--profile", "a saved profile: every other setting (parents per round, attempts, holdout, "
+                  "routes, limits, …) is set there, and its flag is refused naming the key", "none"),
     ("--runs-root", "the run directory to write; read it back with `console --run <this path>`", ".factory/loop/<mode>-<time>"),
     ("--intent", "what the run is for, in your words; seeds the intent ledger the agents read", "empty"),
     ("--project", "the project root packages resolve against", "the checkout"),

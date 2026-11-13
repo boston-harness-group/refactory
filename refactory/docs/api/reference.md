@@ -1031,6 +1031,7 @@ Versioned search recipes and immutable, resolved run snapshots.
 |---|---|---|
 | class | `ProfileError` | `` |
 | function | `add_arguments` | `(parser: 'Any') -> 'None'` |
+| function | `add_cli_arguments` | `(parser: 'Any') -> 'None'` |
 | function | `cli_overrides` | `(args: 'Any') -> 'dict[str, Any]'` |
 | function | `defaults` | `() -> 'dict[str, Any]'` |
 | function | `digest` | `(value: 'Any') -> 'str'` |
@@ -1038,14 +1039,17 @@ Versioned search recipes and immutable, resolved run snapshots.
 | function | `load` | `(project: 'Path', name: 'str', version: 'int \| None' = None) -> 'dict[str, Any]'` |
 | function | `normalize` | `(settings: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None, overrides: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
+| function | `removed_flag_message` | `(flag: 'str', key: 'str', value: 'Any') -> 'str'` |
 | function | `resolve` | `(project: 'Path', mode_id: 'str', *, name: 'str' = '', version: 'int \| None' = None, overrides: 'dict[str, Any] \| None' = None, validate_settings: 'bool' = True, recipe: 'dict[str, Any] \| None' = None, model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `runtime_identity` | `(settings: 'dict[str, Any]', project: 'Path', *, uses_models: 'bool', model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `save` | `(project: 'Path', name: 'str', spec: 'dict[str, Any]') -> 'dict[str, Any]'` |
 
 - **`ProfileError`** — A profile cannot be resolved without changing its declared contract.
-- **`add_arguments`** — All launch surfaces parse this same optional configuration vocabulary.
+- **`add_arguments`** — Every setting as a flag, for the console's ``start`` and ``profile-resolve``: the
+- **`add_cli_arguments`** — The short command line of ``refactory optimize`` and ``python -m
 - **`cli_overrides`** — The settings a command line gave explicitly, to override a profile's.
 - **`refresh`** — Recheck source/input identity without relying on a still-existing recipe.
+- **`removed_flag_message`** — What a command line that gives a setting only a profile takes is told: the
 - **`runtime_identity`** — Read nonsecret effective configuration; this is not authentication evidence.
 - **`save`** — Save a new immutable version. Editing a recipe always creates a version.
 

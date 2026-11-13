@@ -41,9 +41,9 @@ UPDATED_TESTS_LINE = _re.compile(
 #: Paired markdown emphasis, widest first.
 _EMPHASIS = ("**", "__", "*", "_")
 
-#: The reason prepare_design writes when the run is a refinement.  classify_scale
-#: recognises a refine by this constant rather than reading research_scope (which
-#: classify_scale itself writes), so a rerun reclassifies from the footprint.
+#: The reason prepare_design writes when the run is a refinement.
+#: ``route_refine_design`` recognises a refine by this constant and sends it straight
+#: to design_doc, so classify_scale never sees a refine.
 REFINE_SCOPE_REASON = "refinement of an open pull request"
 
 STAGING = "staging"

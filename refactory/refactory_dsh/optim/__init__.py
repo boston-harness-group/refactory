@@ -48,7 +48,7 @@ def names() -> list[str]:
 
 def picker_names() -> list[str]:
     """The optimizers that choose parents, and so can be paired with a proposer
-    (``--parent-picker``)."""
+    (the ``parent_picker`` setting)."""
     return sorted(name for name, cls in REGISTRY.items() if issubclass(cls, ParentSelector))
 
 
