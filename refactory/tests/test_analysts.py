@@ -663,22 +663,19 @@ def test_every_model_proposer_strategy_runs_the_stage_on_real_traces(
     its prompt and answer): every strategy asking the model proposer runs the analysts
     over the train items' real step traces, the request shows the ranked findings, and
     no val or test item reaches an analyst."""
-    from test_search_combo import GATED_STRATEGIES, TEST, VAL, ComboModel, _parts, _run
+    from test_search_combo import TEST, VAL, ComboModel, _parts, _run
 
     seen = _answering_analysts(monkeypatch)
     model = ComboModel()
-    # The parts manifest for every strategy, gated or not, so val and test items exist
-    # beside the train ones (without one every item is a train item).
-    loop = _run(name, tmp_path, model, val_gate=name in GATED_STRATEGIES, epochs=3,
+    # The parts manifest for every strategy, so val and test items exist beside the
+    # train ones (without one every item is a train item); its val items gate the run.
+    loop = _run(name, tmp_path, model, val_gate=None, epochs=3,
                 parts_manifest=str(_parts(tmp_path)), analysts=True, analyst_group_size=2,
                 **overrides)
     assert loop.optimizer.proposal_failures == []
     asked = [r for r in model.requests if "## Item results" in r.text]
-    if name in ("best_of_n", "autoscientists"):
-        # Single sampling rounds proposed before any train records exist: nothing to
-        # analyse, so no analyst runs (nor would a reader).
-        assert model.requests and not asked and seen == []
-        return
+    # Under the gate the single-round strategies (best_of_n, autoscientists) score the
+    # seed before sampling, so their one request has train evidence to analyse too.
     assert asked, f"{name}: no request carried train evidence"
     assert all("## What the analysts found, ranked" in r.text for r in asked), name
     analyst_prompts = [p for s, p in seen if s in ANALYST_SYSTEMS]

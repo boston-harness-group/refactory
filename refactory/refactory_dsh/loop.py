@@ -58,7 +58,7 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    DEFAULT_MAX_EDITS, available_before, edit_level, proposal_refusal, summarise_reasons,
+    MAX_EDITS_PER_PROPOSAL, available_before, edit_level, proposal_refusal, summarise_reasons,
 )
 from refactory_dsh.outerloop import (
     BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
@@ -328,11 +328,13 @@ class LoopConfig:
     #: strictly higher val score. Needs a manifest with a val part; a custom strategy
     #: (SkillOpt) keeps its own gate instead.
     #:
-    #: ``None`` (the default) turns it on when the parts manifest has val items and the
-    #: strategy is a built-in one, and off otherwise: a run with no validation items
-    #: selects on train scores and says so (``NO_VALIDATION``). ``True`` or ``False``
-    #: is honoured as given (``--val-gate 1``/``0``). ``Loop.init`` replaces ``None``
-    #: with the decision before anything runs, so ``config.json`` records it.
+    #: Not a setting: the run decides it (``Loop._resolve_val_gate``). On when the parts
+    #: manifest has val items and the strategy is a built-in one, off otherwise: a run
+    #: with no validation items selects on train scores and says so
+    #: (``NO_VALIDATION``). ``Loop.init`` replaces ``None`` with the decision before
+    #: anything runs, so ``config.json`` records it. A value given in code must be the
+    #: one the run decides; there is no way to turn the gate off for a run with val
+    #: items.
     val_gate: bool | None = None
     #: Train items per epoch: 0 (the default) scores every candidate on the whole train
     #: part. N > 0, when the train part has more than N items, samples N train ids each
@@ -342,19 +344,6 @@ class LoopConfig:
     #: epoch's minibatch (as SkillOpt rolls out its current candidate on each step's
     #: batch). Val and test are unaffected. Each epoch's ids are journaled.
     train_minibatch: int = 0
-    #: With ``val_gate``: at the start of each epoch's proposal step, re-score the
-    #: candidate the optimizer edits on that epoch's train sample (the whole train part,
-    #: or the ``train_minibatch`` sample) with that epoch's seed, unless its records
-    #: already come from this epoch (it was just created and scored), so the optimizer
-    #: and its readers work from fresh trajectories every epoch, as SkillOpt rolls out
-    #: its current candidate every epoch. The re-score replaces only the evidence
-    #: records: the candidate's id, train score and gate val score stay. 0 turns it
-    #: off (the minibatch re-score of ``train_minibatch`` then stays on). No effect
-    #: without ``val_gate``.
-    fresh_evidence: bool = True
-    #: The most edits one proposal may bundle (``Proposal.edits``): applied together,
-    #: in order, as one candidate the gate judges once. 1 allows single edits only.
-    max_edits_per_proposal: int = DEFAULT_MAX_EDITS
     #: Whether an agent node an edit adds may run with tools. Off by default: a new
     #: agent node runs with ``tool_policy: none``, and one that asks for tools is
     #: refused (``E-new-node-tools``).
@@ -632,9 +621,6 @@ class Loop(OuterLoop):
         minibatch = self.config.train_minibatch
         if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
             raise LoopError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
-        max_edits = self.config.max_edits_per_proposal
-        if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
-            raise LoopError("max_edits_per_proposal must be a positive integer (1 is single edits)")
         self.measurements = 0
         self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
@@ -711,8 +697,8 @@ class Loop(OuterLoop):
         #: This round's edit levels (``portfolio``) and the ones already accepted.
         self._levels_wanted: list[str] = []
         self._levels_done: list[str] = []
-        # The run's cap on edits per proposal, enforced where every proposal is applied.
-        self.optimizer.max_edits = int(self.config.max_edits_per_proposal)
+        # The cap on edits per proposal, enforced where every proposal is applied.
+        self.optimizer.max_edits = MAX_EDITS_PER_PROPOSAL
         # Whether edits may add code nodes, and what their code may never contain.
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
         self.optimizer.grader_secrets = self._grader_secrets
@@ -1113,36 +1099,31 @@ class Loop(OuterLoop):
             except seed_cache.SeedCacheError as exc:
                 raise LoopError(str(exc)) from exc
         self._check_optimizer_route()
-        if self.config.val_gate:
-            if self._custom_strategy is not None:
-                raise LoopError(
-                    f"val_gate is the default loop's gate; the {self._custom_strategy.name} "
-                    "strategy keeps its own, so turn val_gate off"
-                )
-            if not (self._parts_manifest and task_module.VAL in self._parts_manifest):
-                raise LoopError(
-                    "val_gate needs a parts manifest with a 'val' part (--parts); "
-                    "give the run one, or turn val_gate off"
-                )
-        elif (self.config.train_minibatch
-              and len(self._train_ids()) > self.config.train_minibatch):
+        # Without the gate (no val items, or a custom strategy's own gate) the run selects
+        # on train scores, which some settings cannot work with.
+        ungated = not self.config.val_gate
+        if (ungated and self.config.train_minibatch
+                and len(self._train_ids()) > self.config.train_minibatch):
             # Without the gate the winner and the parents are picked by train score,
             # and on minibatches those come from different samples.
             raise LoopError(
                 f"train_minibatch {self.config.train_minibatch} scores each epoch on a "
                 "different train sample, so train scores of different epochs cannot pick "
-                "the winner or the parents; turn val_gate on (--val-gate 1), or score the "
-                "whole train part (train_minibatch 0)")
-        elif self.config.early_stop_patience or self.config.early_stop_at_full_val:
+                "the winner or the parents; give the run val items (--parts with a val "
+                "part) so the validation gate selects, or score the whole train part "
+                "(train_minibatch 0)")
+        if ungated and (self.config.early_stop_patience or self.config.early_stop_at_full_val):
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
-                "gate's best score; turn val_gate on, or leave them off"
+                "gate's best score, and this run has no validation gate (no val items, or a "
+                "custom strategy with its own gate); give it val items (--parts with a val "
+                "part), or leave them off"
             )
-        elif self.config.selection:
+        if ungated and self.config.selection:
             raise LoopError(
                 f"selection {self.config.selection} chooses by validation score, which only "
-                "the validation gate measures, and this run has none (val_gate 0, or a "
-                "parts manifest without val items); give it val items, or leave selection "
+                "the validation gate measures, and this run has none (no val items, or a "
+                "custom strategy with its own gate); give it val items, or leave selection "
                 "empty"
             )
 
@@ -1183,7 +1164,7 @@ class Loop(OuterLoop):
 
     #: The settings that shape how a run selects, which a resumed run keeps as it
     #: recorded them (``_keep_recorded_run_shape``): the epochs already run selected so.
-    RESUME_KEEPS = ("val_gate", "selection", "pool_size")
+    RESUME_KEEPS = ("selection", "pool_size")
 
     def _keep_recorded_run_shape(self) -> None:
         """On resume, put back the run's recorded ``RESUME_KEEPS`` settings from its
@@ -1211,16 +1192,12 @@ class Loop(OuterLoop):
         defaults = LoopConfig()
         for key in self.RESUME_KEEPS:
             value = recorded.get(key)
-            if key == "val_gate" and not isinstance(value, bool):
-                continue
             if key == "selection" and value not in SELECTIONS:
                 continue
             if key == "pool_size" and (isinstance(value, bool) or not isinstance(value, int)
                                        or value < 1):
                 continue
             current = getattr(self.config, key)
-            if key == "val_gate" and current is not None:
-                current = bool(current)
             if self._shape_value(key, current) == self._shape_value(key, value):
                 continue
             given = (key in overrides if isinstance(overrides, dict)
@@ -1237,10 +1214,8 @@ class Loop(OuterLoop):
                                 f"(this launch said {current!r})")
 
     def _shown(self, key: str, value: Any) -> str:
-        """A ``RESUME_KEEPS`` value as its flag takes it: ``val_gate`` as 1 or 0, an
-        empty ``selection`` as the default it resolves to."""
-        if isinstance(value, bool):
-            return str(int(value))
+        """A ``RESUME_KEEPS`` value as its flag takes it: an empty ``selection`` as the
+        default it resolves to."""
         if key == "selection" and not value:
             return f"{self._shape_value(key, value)} (unset: the default)"
         return str(value)
@@ -1254,31 +1229,58 @@ class Loop(OuterLoop):
         return value
 
     def _resolve_val_gate(self) -> None:
-        """Decide ``val_gate`` when the run left it unset (``None``): on when the parts
-        manifest it will load has val items and the strategy is a built-in one (a
-        custom strategy such as SkillOpt keeps its own gate), off otherwise. Off for
-        want of val items, the run says it selects on train scores (``NO_VALIDATION``),
-        in its events and its strategy log now, and in its report. An explicit value is
-        kept. Runs before ``config.json`` is written, so the run records the decision."""
-        self._val_gate_basis = "explicit"
+        """Decide ``val_gate``: on when the parts manifest the run will load has val
+        items and the strategy is a built-in one (a custom strategy such as SkillOpt
+        keeps its own gate), off otherwise. Off for want of val items, the run says it
+        selects on train scores (``NO_VALIDATION``), in its events and its strategy log
+        now, and in its report. Runs before ``config.json`` is written, so the run
+        records the decision.
+
+        It is not a setting: a value given in code that differs from the decision is
+        refused, and so is resuming a run that recorded another decision -- one started
+        with the gate off although it had val items (``--val-gate 0``, the default
+        before #627), whose epochs selected on train scores."""
         self.selection_warning = ""
-        if "val_gate" in self._resumed_shape:
-            # Restored by _keep_recorded_run_shape: the epochs already run selected so.
-            self._val_gate_basis = "resumed: the run's recorded decision"
-        if self.config.val_gate is not None:
-            self.config.val_gate = bool(self.config.val_gate)
-            return
         if self._custom_strategy is not None:
-            self.config.val_gate = False
+            decided = False
             self._val_gate_basis = f"the {self._custom_strategy.name} strategy keeps its own gate"
-            return
-        has_val = bool(self._manifest_val_ids())
-        self.config.val_gate = has_val
-        self._val_gate_basis = ("default: the parts manifest has val items" if has_val
-                                else "default: no val items")
-        if not has_val:
+        else:
+            decided = bool(self._manifest_val_ids())
+            self._val_gate_basis = ("the parts manifest has val items" if decided
+                                    else "no val items")
+        recorded = self._recorded_val_gate()
+        if isinstance(recorded, bool) and recorded != decided:
+            raise LoopError(
+                f"this run recorded val_gate {str(recorded).lower()}, and the run now decides "
+                f"{str(decided).lower()} ({self._val_gate_basis}). "
+                + ("Selecting on train scores while the run has val items (--val-gate 0) "
+                   "is no longer supported" if decided else
+                   "Its validation gate cannot run without val items")
+                + "; start a new run instead of resuming this one")
+        given = self.config.val_gate
+        if given is not None and bool(given) != decided:
+            raise LoopError(
+                f"val_gate is not a setting: this run decides {str(decided).lower()} "
+                f"({self._val_gate_basis}), and {str(bool(given)).lower()} was given")
+        if isinstance(recorded, bool):
+            self._val_gate_basis = f"resumed: {self._val_gate_basis}"
+        self.config.val_gate = decided
+        if not decided and self._custom_strategy is None:
             self.selection_warning = NO_VALIDATION
             Run(_loop=self).log(f"warning: {NO_VALIDATION}")
+
+    def _recorded_val_gate(self) -> bool | None:
+        """The ``val_gate`` a resumed run recorded in its ``config.json``; ``None`` for a
+        new run or one that recorded none."""
+        saved = self.root / "config.json"
+        if not self.config.resume or not saved.exists():
+            return None
+        try:
+            recorded = json.loads(saved.read_text())
+        except (OSError, ValueError):
+            return None
+        value = recorded.get("val_gate") if isinstance(recorded, dict) else None
+        return value if isinstance(value, bool) else None
 
     def _manifest_val_ids(self) -> list[str]:
         """The val ids of the parts manifest this run will load (``parts_manifest``, else
@@ -1639,17 +1641,16 @@ class Loop(OuterLoop):
         return sample
 
     def _fresh_evidence(self) -> bool:
-        """Whether the edited candidate is re-scored each epoch on the whole train part
-        (``fresh_evidence`` under ``val_gate``, the default loop's own gate)."""
-        return bool(self.config.val_gate and self.config.fresh_evidence
-                    and self._custom_strategy is None)
+        """Whether the edited candidate is re-scored each epoch on the whole train part:
+        always under ``val_gate``, the default loop's own gate."""
+        return bool(self.config.val_gate and self._custom_strategy is None)
 
     def _refresh_edited_records(self) -> None:
         """Fresh evidence: score the edited candidate on this epoch's train sample with
         this epoch's seed when its train records come from another epoch, so the
         proposal evidence (and every reader's input) is this epoch's rollout.
 
-        On under ``val_gate`` with ``fresh_evidence`` (the whole train part, or the
+        On under ``val_gate`` (the whole train part, or the
         ``train_minibatch`` sample), and with a minibatch in any case. A candidate
         created and scored this epoch already has this epoch's records and is not
         scored again; a resumed run reads the epoch from the journal, so it does not
@@ -2880,13 +2881,8 @@ class Loop(OuterLoop):
         from refactory_dsh.optim.base import edit_level
 
         setting = self.selection_mode() or ("train" if self._custom_strategy is None else "")
-        if setting == "train":
-            val_ids = (task_module.manifest_part_ids(self._parts_manifest, task_module.VAL)
-                       if self._parts_manifest is not None else self._manifest_val_ids())
-            warning = (NO_VALIDATION if not val_ids else
-                       "val_gate 0: selecting on train scores, though the run has val items")
-        else:
-            warning = ""
+        # Without the gate a built-in strategy's run has no val items: it selects on train.
+        warning = NO_VALIDATION if setting == "train" else ""
         if setting == "pool":
             members = self._judged_ranked() if self._population_policy() else self._pool()
         elif setting == "single":
@@ -3360,7 +3356,7 @@ class Loop(OuterLoop):
                 # both E-policy hides which fix the refusal is asking for. Each edit of
                 # a compound proposal is checked, and a refusal names the one.
                 refused = proposal_refusal(proposal, permitted=self.permitted_ops(),
-                                           max_edits=self.config.max_edits_per_proposal)
+                                           max_edits=MAX_EDITS_PER_PROPOSAL)
                 level = edit_level(proposal.steps)
                 missing = [l for l in self._levels_wanted if l not in self._levels_done]
                 if not refused and self._levels_wanted and level not in missing:
@@ -5032,7 +5028,7 @@ class Loop(OuterLoop):
             structure_guidance=bool(self.config.structure_guidance),
             analysts=self._analyst_settings(),
             integrity=self._integrity_feedback(),
-            max_edits=int(self.config.max_edits_per_proposal),
+            max_edits=MAX_EDITS_PER_PROPOSAL,
             parsimony=float(self.config.parsimony),
             code_nodes=self._code_nodes_offered(sandbox),
             sandbox=sandbox,
@@ -6505,13 +6501,10 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
             for key in Loop.RESUME_KEEPS:
                 # Refused here, before the settings are checked together, with the
-                # loop's wording (``Loop._keep_recorded_run_shape``): a recorded
-                # selection with --val-gate 0 would fail that check less clearly.
+                # loop's wording (``Loop._keep_recorded_run_shape``).
                 was, asked = previous.get(key), overrides.get(key)
                 if asked is None or was in (None, ""):
                     continue
-                if key == "val_gate":
-                    was, asked = int(bool(was)), int(bool(asked))
                 if asked != was:
                     flag = "--" + key.replace("_", "-")
                     raise profiles.ProfileError(
@@ -6545,6 +6538,9 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
                 gated = client(snapshot)
             model = gated
         settings = snapshot["settings"]
+        # A snapshot written before a setting was removed still carries it; the run
+        # decides val_gate itself (``Loop._resolve_val_gate``).
+        settings = {k: v for k, v in settings.items() if k not in profiles.OBSOLETE_SETTINGS}
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
                                       "resume": args.resume, "resolved_profile": snapshot})

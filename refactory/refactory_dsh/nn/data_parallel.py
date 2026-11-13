@@ -324,7 +324,7 @@ def run_data_concurrent(
                 from refactory_dsh.task import node_item
 
                 # The nodes read the item without its grader-only fields.
-                child.ctx.write_json(CURRENT_ITEM, node_item(item, task, child.ctx.knobs))
+                child.ctx.write_json(CURRENT_ITEM, node_item(item, task))
                 child._item_exchanges = []  # noqa: SLF001
                 branch_error = child._walk_branch(  # noqa: SLF001
                     node.subgraph_entry, node.subgraph_exit,

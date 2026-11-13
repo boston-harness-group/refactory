@@ -1211,7 +1211,7 @@ class Executor:
                         # The nodes read the item without its grader-only fields.
                         from refactory_dsh.task import node_item
 
-                        _visible = node_item(item, task, self.ctx.knobs)
+                        _visible = node_item(item, task)
                         self.ctx.write_json(CURRENT_ITEM, _visible)
                         # Dual-write current_item to run-level workdir for progress (PIT-005).
                         (_run_workdir / CURRENT_ITEM).write_text(

@@ -51,16 +51,17 @@ main after #583; A's ``skills/skill_v0000.md`` is the starting skill). The run n
         --strategy-option max_epochs=10 --strategy-option seed=<seed> \
         --strategy-option early_stop_patience=3 --strategy-option early_stop_at_full_val=true \
         --strategy-option edit_budget_max=4 --strategy-option edit_budget_min=2 \
-        --strategy-option analyst_edit_budget=4 --strategy-option claude_backend_wrapper=true \
+        --strategy-option analyst_edit_budget=4 \
         --strategy-option slow_update_samples=20 --strategy-option group_size=8 \
         --strategy-option merge_batch_size=8 --verbose
 
 (the v2 seeds also passed ``--allowed-ops text_patch``, which has since been folded
-into ``set_knob``; the strategy options are A's out/config.json settings, and
-``claude_backend_wrapper`` frames every optimizer call's user message as A's Claude
-backend does -- ``History:\n- User: ...`` then ``Answer the latest user request.``
-(skillopt/claude_backend.py); off by default, ``=false`` or omitting it sends the
-bare message. The solve node always sends its question framed that way
+into ``set_knob``, and the seeds also passed ``--strategy-option
+claude_backend_wrapper=true``, now always on and no longer an option); the strategy
+options are A's out/config.json settings. The strategy frames every optimizer call's
+user message as A's Claude backend does -- ``History:\n- User: ...`` then ``Answer
+the latest user request.`` (skillopt/claude_backend.py). The solve node always sends
+its question framed that way
 (``ops.claude_backend_prompt``). The SkillOpt strategy evaluates on the manifest's
 test part after training, as A does). With that command, seeds 42-45, the best
 skills scored on the same solver over the 125 test items: B 88.2/125 (0.705, 3
@@ -146,14 +147,6 @@ class Solver(nn.Mode):
     def declare(cls) -> dict[str, nn.Knob]:
         return {
             "skill": nn.Knob("", "str", description="skill prompt injected into the system message"),
-            # SkillOpt configs/livemathematicianbench/default.yaml:21-22
-            # Frozen: an item's theorem (and its sketch) states the correct option,
-            # so a search that could turn either on would be reading the answer.
-            # SkillOpt's own runs keep both off (default.yaml:21-22).
-            "use_theorem": nn.Knob(False, "bool", frozen=True,
-                                   description="include the item's theorem as a ## Theorem section"),
-            "use_sketch": nn.Knob(False, "bool", frozen=True,
-                                   description="include the item's proof sketch as a ## Proof Sketch section"),
             # Uncapped, as arm A's solver is (``MAX_COMPLETION_TOKENS``). A run
             # setting, not a search target: frozen against the optimizer, set
             # with ``--knob max_completion_tokens=N``.

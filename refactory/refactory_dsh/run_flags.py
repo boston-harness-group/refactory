@@ -98,9 +98,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--review-comments", action="store_true",
                         help="design only, with --refine: add the pull request's reviews and comments to the "
                              "run's steering")
-    parser.add_argument("--refine-design", default=None, choices=["light", "full"],
-                        help="design only, with --refine: light (default) skips research and strategy; "
-                             "full walks the whole design phase")
     parser.add_argument("--worker-backend", default="",
                         help="the backend every agent node runs on: dsh (default), codex or claude_code")
     parser.add_argument("--effort", default="", help="the workers' reasoning effort")
@@ -204,8 +201,6 @@ def refusal(args: argparse.Namespace, mode_id: str | None, *, runtime: str, labe
         return "refactory: --refine starts from the pull request's head, so it takes no --base"
     if args.review_comments and not args.refine:
         return "refactory: --review-comments goes with --refine: they are the pull request's comments"
-    if args.refine_design and not args.refine:
-        return "refactory: --refine-design goes with --refine: it says how a refine designs its change"
     timeout = args.model_timeout_s
     if timeout is not None and not (1 <= timeout <= 7200):
         return f"refactory: --model-timeout must be between 1 and 7200 seconds, got {timeout}"
@@ -307,8 +302,6 @@ def worktree_knobs(args: argparse.Namespace, *, deliver: bool = True) -> list[st
         found.append(f"refine={args.refine}")
     if args.review_comments:
         found.append("review_comments=1")
-    if args.refine_design:
-        found.append(f"refine_design={args.refine_design}")
     return found
 
 

@@ -281,10 +281,10 @@ def candidate_id(state: dict[str, Any]) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
-#: How many edits one proposal may bundle by default (``LoopConfig.max_edits_per_proposal``):
-#: SkillOpt's edit budget, so a coordinated fix across a pipeline's steps can be one
-#: candidate rather than a chain of single edits the gate judges one by one.
-DEFAULT_MAX_EDITS = 4
+#: How many edits one proposal may bundle: SkillOpt's edit budget, so a coordinated
+#: fix across a pipeline's steps can be one candidate rather than a chain of single
+#: edits the gate judges one by one. A constant, not a run setting.
+MAX_EDITS_PER_PROPOSAL = 4
 
 
 @dataclass(frozen=True)
@@ -429,8 +429,8 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
                 "rationale, prediction and confidence beside it"]
     if max_edits is not None and len(steps) > max(1, int(max_edits)):
         return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and this run "
-                f"allows at most {max(1, int(max_edits))} per proposal "
-                "(max_edits_per_proposal); split it, or keep the edits the fix needs together"]
+                f"allows at most {max(1, int(max_edits))} per proposal; split it, or "
+                "keep the edits the fix needs together"]
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
             return [_at(f"E-op: an edit is a JSON object naming its op, not "
@@ -647,7 +647,7 @@ class ProposalContext:
     #: ``Optimizer.propose_valid`` count from 1).
     attempt: int = 0
     #: How many edits one proposal may bundle (``Proposal.edits``;
-    #: ``LoopConfig.max_edits_per_proposal``). 1 asks for single edits only, and the
+    #: ``MAX_EDITS_PER_PROPOSAL`` in a run). 1 asks for single edits only, and the
     #: request does not mention bundling.
     max_edits: int = 1
     #: The run's size cost per node (``LoopConfig.parsimony``), stated in the answer
@@ -2538,8 +2538,8 @@ class Optimizer:
     trace_path: Any = None
 
     #: The most edits one proposal may bundle (``Proposal.edits``); more is refused
-    #: with ``E-too-many-edits``. The loop sets it from ``max_edits_per_proposal``.
-    max_edits: int = DEFAULT_MAX_EDITS
+    #: with ``E-too-many-edits``.
+    max_edits: int = MAX_EDITS_PER_PROPOSAL
 
     #: Whether an edit may add a code node (`refactory_dsh.snippet`); one that does
     #: otherwise is refused with ``E-code-nodes``. The loop sets it from

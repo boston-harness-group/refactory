@@ -252,7 +252,7 @@ def exported(tmp_path, monkeypatch):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     _manifest(tmp_path)
     with _patch_mode(PartsProbe):
-        code, root = _main(tmp_path, "A", "--optimizer", "random", "--val-gate", "1",
+        code, root = _main(tmp_path, "A", "--optimizer", "random",
                            "--epochs", "1", "--batch-size", "1", "--repeats", "3")
         assert code == 0
         out = tmp_path / "seed-results.json"
@@ -261,9 +261,9 @@ def exported(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("search", [
-    ["--optimizer", "hill_climb", "--val-gate", "1", "--epochs", "2"],
-    ["--optimizer", "random", "--val-gate", "1", "--epochs", "2", "--batch-size", "2"],
-    ["--optimizer", "random", "--val-gate", "1", "--strategy", "tree_search", "--epochs", "1"],
+    ["--optimizer", "hill_climb", "--epochs", "2"],
+    ["--optimizer", "random", "--epochs", "2", "--batch-size", "2"],
+    ["--optimizer", "random", "--strategy", "tree_search", "--epochs", "1"],
 ])
 def test_runs_with_other_search_settings_reuse_the_seed_and_say_so(tmp_path, exported, search):
     with _patch_mode(PartsProbe):
@@ -282,7 +282,7 @@ def test_runs_with_other_search_settings_reuse_the_seed_and_say_so(tmp_path, exp
 
 def test_a_profile_carries_the_seed_results(tmp_path, exported):
     profiles.save(tmp_path, "reuse", {"settings": {
-        "optimizer": "random", "val_gate": True, "epochs": 1, "batch_size": 1, "repeats": 3,
+        "optimizer": "random", "epochs": 1, "batch_size": 1, "repeats": 3,
         "parts_manifest": str(tmp_path / "parts.json"), "seed_results": str(exported)}})
     with _patch_mode(PartsProbe):
         code, root = _main(tmp_path, "B", "--profile", "reuse")
@@ -452,11 +452,14 @@ def test_the_export_records_each_parts_rollout_seed(tmp_path, exported):
 
 
 def test_an_ungated_run_measures_train_rather_than_reuse_a_gated_export(tmp_path, exported):
-    """Without the gate train rollouts use the run's seed, not the gated export's
-    per-epoch one, so train is measured for real and the miss says why."""
+    """Without the gate (a run with no val items) train rollouts use the run's seed, not
+    the gated export's per-epoch one, so train is measured for real and the miss says
+    why."""
+    no_val = _manifest(tmp_path, {key: ids for key, ids in PARTS.items() if key != "val"},
+                       name="noval.json")
     with _patch_mode(PartsProbe):
         code, root = _main(tmp_path, "B", "--optimizer", "hill_climb", "--epochs", "1",
-                           "--repeats", "3", "--seed-results", str(exported), "--val-gate", "0")
+                           "--repeats", "3", "--seed-results", str(exported), manifest=no_val)
     assert code == 0
     misses = _events(root, "seed_cache_miss")
     assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 3, cached 1004")]

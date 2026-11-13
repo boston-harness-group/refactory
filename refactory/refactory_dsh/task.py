@@ -74,11 +74,6 @@ class Task:
     #: runtime (`node_item`). A node an optimizer adds can read that file, so a Task
     #: whose items hold their own answer has to say so here. Default: none.
     grader_fields: tuple[str, ...] = ()
-    #: Grader-only fields a run may still show the nodes, each behind the knob that
-    #: turns it on (``{"theorem": "use_theorem"}``). The field reaches
-    #: ``current_item.json`` only in a run whose knob is true; a mode that declares
-    #: such a knob freezes it, so no search can turn it on.
-    revealed_by: dict[str, str] = {}
     #: Facts or files ``verify`` (or a scorer the Task runs) leaves where the graph's
     #: nodes could find them: grader-derived, so no node outside the grader side may
     #: consume them (V17). Default: none.
@@ -249,20 +244,16 @@ def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
     return {"policy": policy, "allowances": allowances}
 
 
-def node_item(item: dict[str, Any], task: Task | None, knobs: dict[str, Any] | None) -> dict[str, Any]:
+def node_item(item: dict[str, Any], task: Task | None) -> dict[str, Any]:
     """The item as the graph's nodes may read it: without the Task's grader-only fields.
 
-    A grader-only field named in ``revealed_by`` stays when the run's knob for it is
-    true. Both runtimes write ``current_item.json`` through here; the grader keeps the
-    whole item (``instance_of``).
+    Both runtimes write ``current_item.json`` through here; the grader keeps the whole
+    item (``instance_of``).
     """
     hidden = set(getattr(task, "grader_fields", ()) or ())
     if not hidden:
         return item
-    revealed = getattr(task, "revealed_by", None) or {}
-    knobs = knobs or {}
-    shown = {name for name in hidden if name in revealed and bool(knobs.get(revealed[name]))}
-    return {key: value for key, value in item.items() if key not in hidden - shown}
+    return {key: value for key, value in item.items() if key not in hidden}
 
 
 def instance_of(item: dict[str, Any]) -> TaskInstance:

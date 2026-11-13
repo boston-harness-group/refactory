@@ -22,7 +22,8 @@ from refactory_dsh.outerloop import (
 )
 
 from test_skillopt import (  # the toy Task and mode SkillOpt's tests run on
-    INITIAL_SKILL, MODE_ID, TASK_REF, SkillProbe, SkillTask, _patch_mode, _write_parts,
+    INITIAL_SKILL, MODE_ID, TASK_REF, TEST_IDS, TRAIN_IDS, SkillProbe, SkillTask, _patch_mode,
+    _write_parts,
 )
 
 
@@ -104,11 +105,24 @@ def test_gate_state_round_trips_and_carry_keeps_the_score():
 # ── a strategy that is not SkillOpt, on the real loop ──────────────────────
 
 
+def _write_parts_without_val(root: Path) -> Path:
+    """A parts.json with train and test items and no val part: the run selects on train."""
+    path = root / "parts-noval.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"train": TRAIN_IDS, "test": TEST_IDS}))
+    return path
+
+
 def _loop(tmp_path: Path, strategy: OuterLoop | None = None, **overrides: Any) -> Loop:
+    """A loop on the toy mode. ``val_gate=False`` (with no ``parts_manifest`` given) runs
+    it without the gate, on a manifest with no val part: the gate is decided by whether
+    the run has val items, never set."""
+    without_gate = overrides.get("val_gate") is False and "parts_manifest" not in overrides
     base: dict[str, Any] = dict(
         epochs=2, batch_size=1, optimizer="random", seed=7, runs_root=tmp_path / "run",
         allowed_ops=("set_knob",), max_evaluations=60, holdout=0.0,
-        parts_manifest=str(_write_parts(tmp_path, test=True)),
+        parts_manifest=str(_write_parts_without_val(tmp_path) if without_gate
+                           else _write_parts(tmp_path, test=True)),
     )
     base.update(overrides)
     loop = Loop(MODE_ID, LoopConfig(**base), project=Path("."))
@@ -364,20 +378,53 @@ def test_hill_climb_runs_with_the_default_loops_val_gate(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("optimizer", ["random", "autoresearch", "hill_climb"])
-def test_val_gate_allows_single_parent_optimizers(optimizer):
+def test_val_gate_is_not_a_setting(optimizer):
+    """No flag, no profile key: a saved profile's ``val_gate`` (``false`` was the default
+    before #627) is dropped on load, and the run decides."""
+    import argparse
+
     from refactory_dsh import profiles
 
-    assert profiles.normalize({"val_gate": True, "optimizer": optimizer})["val_gate"] is True
+    for saved in (True, False):
+        assert "val_gate" not in profiles.normalize({"val_gate": saved, "optimizer": optimizer})
+    parser = argparse.ArgumentParser()
+    profiles.add_arguments(parser)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--val-gate", "0"])
 
 
-def test_val_gate_needs_a_val_part_and_the_default_loop(tmp_path):
+def test_val_gate_is_decided_by_the_val_part_and_the_strategy(tmp_path):
+    """On with val items for a built-in strategy; off without them, and off for a custom
+    strategy (it keeps its own gate). A value given in code that differs is refused."""
     no_val = tmp_path / "noval.json"
     no_val.write_text(json.dumps({"train": ["t1", "t2"]}))
     with _patch_mode(LevelProbe):
-        with pytest.raises(LoopError, match="'val' part"):
-            _loop(tmp_path, val_gate=True, parts_manifest=str(no_val)).run()
+        gated = _loop(tmp_path / "gated")
+        gated.init()
+        assert gated.config.val_gate is True
+        ungated = _loop(tmp_path / "ungated", parts_manifest=str(no_val))
+        ungated.init()
+        assert ungated.config.val_gate is False
+        with pytest.raises(LoopError, match="val_gate is not a setting"):
+            _loop(tmp_path / "on", val_gate=True, parts_manifest=str(no_val)).run()
+        with pytest.raises(LoopError, match="val_gate is not a setting"):
+            _loop(tmp_path / "off", val_gate=False, parts_manifest=_write_parts(tmp_path)).run()
         with pytest.raises(LoopError, match="keeps its own"):
             _loop(tmp_path / "custom", KeepThenDie(), val_gate=True).run()
+
+
+def test_resuming_a_run_recorded_with_the_gate_off_and_val_items_is_refused(tmp_path):
+    """A run started with ``--val-gate 0`` although it had val items (the default before
+    #627) selected on train scores; resuming it would keep doing so, so the resume is
+    refused with a clear message instead."""
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=1)
+        loop.run()
+        config = json.loads((loop.root / "config.json").read_text())
+        assert config["val_gate"] is True
+        (loop.root / "config.json").write_text(json.dumps({**config, "val_gate": False}))
+        with pytest.raises(LoopError, match="no longer supported; start a new run"):
+            _loop(tmp_path, epochs=2, resume=True).init()
 
 
 class ScriptedLevels(Optimizer):
@@ -720,24 +767,23 @@ def test_a_budget_stop_wins_over_an_early_stop_in_the_same_epoch(tmp_path, monke
 
 def test_early_stop_needs_the_val_gate(tmp_path):
     with _patch_mode(LevelProbe):
-        with pytest.raises(LoopError, match="turn val_gate on"):
+        with pytest.raises(LoopError, match="has no validation gate"):
             _loop(tmp_path, early_stop_patience=2, val_gate=False).run()
 
 
 def test_early_stop_settings_come_from_the_command_line_and_are_saved(tmp_path, monkeypatch):
-    """--early-stop-patience N --early-stop-at-full-val 1, like --val-gate 1; the
-    run's config.json keeps them, and a resume reads its settings from there."""
+    """--early-stop-patience N --early-stop-at-full-val 1; the run's config.json keeps
+    them, and a resume reads its settings from there."""
     import argparse
 
     from refactory_dsh import profiles
 
     parser = argparse.ArgumentParser()
     profiles.add_arguments(parser)
-    args = parser.parse_args(["--val-gate", "1", "--early-stop-patience", "3",
-                              "--early-stop-at-full-val", "1"])
+    args = parser.parse_args(["--early-stop-patience", "3", "--early-stop-at-full-val", "1"])
     settings = profiles.normalize({key: value for key, value in vars(args).items()
                                    if key in profiles.defaults() and value is not None})
-    assert settings["val_gate"] is True and settings["early_stop_patience"] == 3
+    assert settings["early_stop_patience"] == 3
     assert settings["early_stop_at_full_val"] is True
     for bad in ({"early_stop_patience": -1}, {"early_stop_patience": True},
                 {"early_stop_at_full_val": 2}):

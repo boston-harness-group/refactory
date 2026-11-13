@@ -70,7 +70,7 @@ def project(tmp_path, monkeypatch):
 def _experiment(project: Path) -> dict[str, Any]:
     """The default-loop settings the LiveMath experiment runs with, scaled down."""
     return {
-        "optimizer": "random", "strategy": "default", "val_gate": True, "train_minibatch": 2,
+        "optimizer": "random", "strategy": "default", "train_minibatch": 2,
         "repeats": 3, "holdout": 0.0, "parts_manifest": str(project / "parts.json"),
         "parsimony": 0.02, "knobs": {"data_parallelism": "3"}, "epochs": 2, "batch_size": 2,
         "edit_preset": "conservative", "allowed_ops": ["set_knob"], "allow_code_nodes": False,
@@ -84,7 +84,7 @@ def _experiment(project: Path) -> dict[str, Any]:
 #: The same settings as command-line flags.
 def _experiment_flags(project: Path) -> list[str]:
     return [
-        "--optimizer", "random", "--strategy", "default", "--val-gate", "1", "--train-minibatch", "2",
+        "--optimizer", "random", "--strategy", "default", "--train-minibatch", "2",
         "--repeats", "3", "--holdout", "0", "--parts", str(project / "parts.json"),
         "--parsimony", "0.02", "--knob", "data_parallelism=3", "--epochs", "2", "--batch-size", "2",
         "--preset", "conservative", "--allowed-ops", "set_knob", "--allow-code-nodes", "0",
@@ -119,6 +119,8 @@ def test_every_experiment_setting_round_trips_into_the_snapshot_and_the_run(proj
     for key, value in settings.items():
         assert snapshot["settings"][key] == value, key
         assert config[key] == value, key
+    # The manifest has val items, so the run decided on the validation gate.
+    assert config["val_gate"] is True and "val_gate" not in snapshot["settings"]
     # The run did what the profile says: the manifest's parts, three trials per
     # measurement, the starting knob, and the gate's val occasions.
     assert _read(root, "parts.json") == PARTS
@@ -157,16 +159,37 @@ def test_cli_overrides_on_a_profile_apply_and_are_recorded(project):
     # --knob adds to the profile's knobs; every setting not given keeps its value.
     assert snapshot["settings"]["knobs"] == {"data_parallelism": "3", "bias": "0.4"}
     assert snapshot["settings"]["parts_manifest"] == str(project / "parts.json")
-    assert snapshot["settings"]["val_gate"] is True
+    assert _read(root, "config.json")["val_gate"] is True
     assert snapshot["overrides"] == {"epochs": 1, "parsimony": 0.1, "knob": ["bias=0.4"]}
     assert _read(root, "report.json")["epochs_completed"] == 1
+
+
+def test_a_saved_profile_with_removed_settings_still_loads_and_runs(project):
+    """A profile saved before ``val_gate``, ``fresh_evidence`` and
+    ``max_edits_per_proposal`` were removed still loads: the keys are dropped (its
+    file is left as it was), ``val_gate: false`` (the default before #627) reads as
+    unset, and the run decides the gate from its parts manifest."""
+    old = {**_experiment(project), "val_gate": False, "fresh_evidence": False,
+           "max_edits_per_proposal": 2}
+    profiles.save(project, "old", {"settings": _experiment(project)})
+    path = project / profiles.PROFILE_ROOT / "old" / "1.json"
+    saved = json.loads(path.read_text())
+    saved["settings"].update({key: old[key] for key in profiles.OBSOLETE_SETTINGS})
+    path.write_text(json.dumps(saved))
+    loaded = profiles.load(project, "old")["settings"]
+    assert not profiles.OBSOLETE_SETTINGS & set(loaded)
+    assert json.loads(path.read_text())["settings"]["val_gate"] is False, "file untouched"
+    code, root = _run(project, "run", "--profile", "old")
+    assert code == 0
+    assert _read(root, "config.json")["val_gate"] is True
+    assert not profiles.OBSOLETE_SETTINGS & set(_read(root, profiles.SNAPSHOT)["settings"])
 
 
 def test_a_profile_alone_supplies_the_parts_manifest(project):
     """A profile's parts manifest reaches the run without --parts (it was dropped,
     and the run refused the validation gate for want of a val part)."""
     settings = {k: v for k, v in _experiment(project).items() if k in (
-        "optimizer", "val_gate", "parts_manifest", "holdout", "epochs", "batch_size", "edit_preset")}
+        "optimizer", "parts_manifest", "holdout", "epochs", "batch_size", "edit_preset")}
     profiles.save(project, "parts", {"settings": settings})
     code, root = _run(project, "run", "--profile", "parts")
     assert code == 0
@@ -385,7 +408,7 @@ def test_a_profile_with_a_parent_picker_and_a_portfolio_round_trips(project):
     resolve, change the context hash only when set, and reach the run."""
     from refactory_dsh.loop import LoopConfig
 
-    auto = {**_experiment(project), "optimizer": "autoresearch", "val_gate": False,
+    auto = {**_experiment(project), "optimizer": "autoresearch",
             "train_minibatch": 0, "parent_picker": "map_elites", "portfolio": "prompt+pipeline"}
     profiles.save(project, "combo", {"settings": auto})
     assert profiles.load(project, "combo")["settings"]["parent_picker"] == "map_elites"
@@ -404,7 +427,7 @@ def test_a_profile_with_a_parent_picker_and_a_portfolio_round_trips(project):
             profiles.normalize({**auto, **bad})
 
     # A random proposer with a picker runs from the profile, no model needed.
-    profiles.save(project, "picked", {"settings": {**_experiment(project), "val_gate": False,
+    profiles.save(project, "picked", {"settings": {**_experiment(project),
                                                    "train_minibatch": 0,
                                                    "parent_picker": "map_elites"}})
     code, root = _run(project, "picked-run", "--profile", "picked")

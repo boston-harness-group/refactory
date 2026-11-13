@@ -856,7 +856,7 @@ def test_livemath_knob_names_unchanged():
     state = Solver().state_dict()
     knob_names = set(state["knobs"].keys())
     expected = {"data_parallelism", "max_completion_tokens", "skill",
-                "use_sketch", "use_theorem", "solve__system_prompt"}
+                "solve__system_prompt"}
     assert knob_names == expected
     # The auto-knob is frozen
     assert state["knobs"]["solve__system_prompt"]["spec"]["frozen"] is True

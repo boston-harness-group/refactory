@@ -158,7 +158,7 @@ def test_a_negative_size_is_refused(tmp_path):
 def test_a_minibatch_without_the_gate_is_refused_before_any_rollout(tmp_path):
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, train_minibatch=3, val_gate=False)
-        with pytest.raises(LoopError, match="turn val_gate on"):
+        with pytest.raises(LoopError, match="give the run val items"):
             loop.run()
     assert loop.rollouts == 0 and not (loop.root / "runs").exists()
     with _patch_mode(LevelProbe):

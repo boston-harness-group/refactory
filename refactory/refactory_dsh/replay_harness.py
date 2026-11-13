@@ -54,9 +54,7 @@ def _finding_matches(finding: str, entry: dict) -> bool:
     expected_file = entry.get("expected_finding_file", "")
     terms = entry.get("expected_finding_terms", [])
     if not expected_file or not terms:
-        # Fallback to legacy single-pattern field
-        pattern = entry.get("expected_finding_pattern", "")
-        return bool(pattern and pattern.lower() in lower)
+        return False
     if expected_file.lower() not in lower:
         return False
     return any(t.lower() in lower for t in terms)

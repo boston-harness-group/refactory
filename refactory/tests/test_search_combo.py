@@ -566,8 +566,8 @@ def test_a_finished_curriculum_scores_its_last_stage(tmp_path, gated):
     (``curriculum_complete``): its last stage's batch is scored (and, under the gate,
     judged)."""
     model = ComboModel()
-    loop = _run("staged_v1", tmp_path, model, epochs=20, val_gate=gated)
-    assert loop.bound == "curriculum_complete" and len(loop.epochs) == 4
+    loop = _run("staged_curriculum", tmp_path, model, epochs=20, val_gate=gated)
+    assert loop.bound == "curriculum_complete" and len(loop.epochs) == 8
     assert loop.epochs[-1].accepted
     assert loop._unevaluated() == []
     if gated:

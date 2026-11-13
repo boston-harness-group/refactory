@@ -209,26 +209,27 @@ def test_val_test_records_never_reach_optimizer(tmp_path):
     import json as _json
 
     with _patch_mode(RecordsProbe):
-        # Write a manifest so val evaluation can find items.
+        # Write a manifest so a held-out evaluation can find items. No val part: the run
+        # selects on train, so the train leader (the seed) is the context's parent.
         manifest_path = tmp_path / "manifest.json"
         manifest_path.write_text(_json.dumps({
             "train": list(NAMES[:2]),
-            "val": list(NAMES[2:]),
+            "test": list(NAMES[2:]),
         }))
         loop = Loop(
             MODE, LoopConfig(
                 epochs=1, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
-                parts_manifest=str(manifest_path), val_gate=False,
+                parts_manifest=str(manifest_path),
             ),
             project=Path("."),
         )
         loop.init()
         loop.forward()
 
-        # Evaluate the seed on val.
+        # Evaluate the seed on test.
         seed = loop.population[0]
-        loop._evaluate_part(seed, "val", None, None)
+        loop._evaluate_part(seed, "test", None, None)
 
         ctx = loop._context()
 

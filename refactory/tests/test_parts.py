@@ -108,7 +108,6 @@ def _make_loop_with_manifest(tmp_path, manifest_dict=None):
             epochs=1, batch_size=1, optimizer="random", seed=1,
             runs_root=tmp_path / "run",
             parts_manifest=str(manifest_path),
-            val_gate=False,  # train selection: the train leader is the parent
         ),
         project=Path("."),
     )
@@ -793,7 +792,7 @@ def test_resume_replays_part_results_for_audit(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True, val_gate=False,
+                resume=True,
             ),
             project=Path("."),
         )
@@ -1077,7 +1076,7 @@ def test_resume_occasion_counter(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True, val_gate=False,
+                resume=True,
             ),
             project=Path("."),
         )
@@ -1122,7 +1121,7 @@ def test_resume_rollout_count(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True, val_gate=False,
+                resume=True,
             ),
             project=Path("."),
         )
@@ -1142,7 +1141,9 @@ def test_resume_train_records(tmp_path):
     empty after resume.
     """
     with _patch_mode(PartsProbe):
-        loop1 = _make_loop_with_manifest(tmp_path)
+        # No val items: the context's parent is the train leader, the evaluated seed.
+        loop1 = _make_loop_with_manifest(
+            tmp_path, {"train": ["alpha", "beta", "gamma", "delta"], "test": ["zeta"]})
         loop1.init()
         seed = loop1.population[0]
         run = Run(_loop=loop1)
@@ -1157,7 +1158,7 @@ def test_resume_train_records(tmp_path):
                 epochs=2, batch_size=1, optimizer="random", seed=1,
                 runs_root=tmp_path / "run",
                 parts_manifest=str(tmp_path / "source_manifest.json"),
-                resume=True, val_gate=False,
+                resume=True,
             ),
             project=Path("."),
         )
@@ -1220,7 +1221,8 @@ def test_context_follows_the_parent_between_steps(tmp_path):
     carry the new leader's train records, and the parent must not be published as
     a strategy decision.
     """
-    manifest_dict = {"train": ["alpha", "beta", "gamma"], "val": ["delta"], "test": ["zeta"]}
+    # No val items: the run selects on train scores, so the train leader is the parent.
+    manifest_dict = {"train": ["alpha", "beta", "gamma"], "test": ["zeta"]}
     with _patch_mode(PartsProbe):
         loop = _make_loop_with_manifest(tmp_path, manifest_dict)
         loop.init()
