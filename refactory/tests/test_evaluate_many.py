@@ -612,8 +612,8 @@ def test_duplicate_train_candidate_refused(tmp_path):
 def test_on_result_fires_in_completion_order(tmp_path):
     """on_result fires in completion order: fast candidate before slow.
 
-    Variable-delay solver: request 0 is slow (0.4s), request 1 is fast (0.01s).
-    The callback must fire for index 1 before index 0.
+    Request 0 cannot finish until request 1's callback has fired (an event, not
+    a sleep, so CI load cannot reorder them); the callbacks must come 1 then 0.
     """
     loop, seed, run = _make_loop_and_seed(
         tmp_path, max_concurrent_evaluations=4, max_evaluations=10)
@@ -623,21 +623,30 @@ def test_on_result_fires_in_completion_order(tmp_path):
     callback_order: list[int] = []
     lock = threading.Lock()
 
+    fast_reported = threading.Event()
+
     def on_result(index: int, candidate: Candidate) -> None:
         with lock:
             callback_order.append(index)
+        if index == 1:
+            fast_reported.set()
 
-    delays = {
-        candidates[0].id: 0.4,  # slow
-        candidates[1].id: 0.01,  # fast
-    }
-    _patch_evaluate_with_delay(loop, delays)
+    original = loop._evaluate
+    slow_waited: list[bool] = []
+
+    def patched(cand, **kw):
+        if cand.id == candidates[0].id:  # slow: finishes only after fast was reported
+            slow_waited.append(fast_reported.wait(timeout=60))
+        return original(cand, **kw)
+
+    loop._evaluate = patched
 
     requests = [EvalRequest(candidate=c, part="train") for c in candidates]
     results = run.evaluate_many(requests, on_result=on_result)
 
-    # Callback fired for both
+    # Callback fired for both, and the slow one really waited for the fast one's
     assert sorted(callback_order) == [0, 1]
+    assert slow_waited == [True]
     # Fast (index 1) should fire before slow (index 0)
     assert callback_order[0] == 1, (
         f"expected fast (index 1) to fire first, got order {callback_order}"
