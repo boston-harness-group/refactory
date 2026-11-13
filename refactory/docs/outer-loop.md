@@ -675,8 +675,9 @@ not at all when the request cannot be made shorter. A retry's wait ends early on
 stop at an epoch boundary does: the stop is the run's bound (journaled, with
 `stopped_inside_step`), report.md is written, and the open epoch's step -- the memory
 pass, or the proposal round, which is not counted as a failed one -- is made again on
-resume. A cancelled client scope or a missing model choice ends the run with its error,
-after journaling it as the bound and writing the report. These attempts stack
+resume. In the memory pass, a cancelled client scope or a missing model choice ends the
+run with its error, after journaling it as the bound and writing the report; in a
+proposal round they are counted as that round's failure, as any failed proposal is. These attempts stack
 on the model client's own: a `DshModelClient` completion already makes up to 3 attempts
 on a transport failure (`model.DEFAULT_ATTEMPTS`), waiting up to 60 s in all between
 them (`RETRY_WINDOW_S`), so one analyst, merge, memory or step-review call may in the

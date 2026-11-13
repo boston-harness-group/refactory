@@ -1017,6 +1017,13 @@ _JSON_START = re.compile(r"\{\s*(\"|\})")
 _ARRAY_START = re.compile(r"\[\s*\{\s*\"")
 
 
+def _answer_keyed(loaded: Any) -> bool:
+    """Whether an object carries an answer's key in any form (``proposals`` not a list,
+    or a single ``proposal``): read as the answer, its proposals normalised by
+    `_answered_proposals`, as the answer format's looser shapes always were."""
+    return isinstance(loaded, dict) and any(key in loaded for key in ("proposals", "proposal"))
+
+
 def _is_answer(loaded: Any) -> bool:
     """Whether a JSON value is a whole answer: an object with a ``proposals`` list."""
     return isinstance(loaded, dict) and isinstance(loaded.get("proposals"), list)
@@ -1080,13 +1087,16 @@ def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
     """The answer among ``text``'s top-level ``{...}`` objects (scanned by their own
     braces, never into one), and why there is none.
 
-    The last one carrying a ``proposals`` list is the answer; without one, the first
+    The last one carrying a ``proposals`` list is the answer; without one, the last one
+    carrying a ``proposals`` or ``proposal`` key in any form (`_answer_keyed`: an answer
+    written loosely, never an earlier prose example before it); without either, the first
     object, unless a span that starts like a JSON object failed to parse: then the
     answer is broken and no lone fragment after it (an edit, a proposal) is read. An
     object left open ends the scan (everything after it is inside it). Braces in prose
     (``{a, b}``) are skipped."""
     first: dict[str, Any] | None = None
     answer: dict[str, Any] | None = None
+    keyed: dict[str, Any] | None = None
     problem = ""
     start = text.find("{")
     while start != -1:
@@ -1113,9 +1123,13 @@ def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
                 first = loaded if first is None else first
                 if _is_answer(loaded):
                     answer = loaded
+                elif _answer_keyed(loaded):
+                    keyed = loaded
         start = text.find("{", end + 1)
     if answer is not None:
         return answer, ""
+    if keyed is not None:
+        return keyed, ""
     if problem:
         return None, problem
     return first, ""

@@ -869,6 +869,7 @@ def test_a_stop_during_an_analyst_wait_is_a_stop_and_the_round_is_redone(
                          analyst_group_size=2)
     assert loop.bound == "a person asked the run to stop"
     assert not loop.optimizer.proposal_failures, "not an empty failed round"
+    assert loop.optimizer.proposal_rounds == 0, "nor a round counted"
     assert (loop.root / "report.md").exists()
     assert "could not propose" not in (loop.root / "report.md").read_text()
     proposed = [p for s, p in client.calls if s not in (memory.MEMORY_SYSTEM,)
@@ -899,3 +900,17 @@ def test_of_a_draft_list_and_a_final_list_the_final_one_is_read_whole():
     final = [{"edit": {"op": "set_knob", "name": "a", "value": 2}}, {"op": "bypass", "target": "b"}]
     text = "Draft:\n" + json.dumps(draft) + "\nOn reflection, final:\n" + json.dumps(final)
     assert answer_json(text) == ({"proposals": final}, "")
+
+
+
+@pytest.mark.parametrize("key,value", [
+    ("proposal", {"edit": {"op": "set_knob", "name": "a", "value": 1}}),
+    ("proposals", {"edit": {"op": "set_knob", "name": "a", "value": 1}})])
+def test_a_loosely_written_answer_after_a_prose_example_is_the_answer(key, value):
+    real = {"diagnosis": "d", key: value}
+    text = 'Edit shape: {"op": "bypass", "target": "x"}\n' + json.dumps(real)
+    assert answer_json(text) == (real, "")
+    optimizer = AutoresearchOptimizer(Client())
+    optimizer._client = type("C", (), {"complete": lambda self, p, **k: text})()
+    (proposal,) = optimizer.propose(ProposalContext(), 1, [])
+    assert proposal.steps == [value["edit"]], "one proposal, the answer's, not the example"

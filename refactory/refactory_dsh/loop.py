@@ -3365,8 +3365,9 @@ class Loop(OuterLoop):
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
             raise
         except RunStopped:
-            # A person's stop during a retry wait is a stop, not a failed round: the
-            # round is made again on resume (the epoch stays open).
+            # A person's stop during a retry wait is a stop, not a failed round (nor a
+            # round counted): it is made again on resume (the epoch stays open).
+            self.optimizer.proposal_rounds -= 1
             raise
         except Exception as exc:  # a proposer that is down is not a crash
             detail = f"{type(exc).__name__}: {exc}"
