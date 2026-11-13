@@ -143,3 +143,43 @@ jobs:
       # install created.
       - name: Harness pin vs serving dsh
         run: uv run python -m refactory_dsh.harness_check
+
+  # macOS is a first-class platform, and the one where a process launch costs most: an
+  # endpoint-security agent can make each one 30 ms or more. This job runs the TypeScript
+  # suite and the Python tests that hold refactory's launch counts down
+  # (`test_launch_budget.py`, the target guard's) plus a whole design run, so a change that
+  # breaks the Mac or adds launches to the agent-step path fails here. The full Python
+  # suite stays on Linux.
+  macos:
+    name: macOS (TypeScript suite + Python launch budget)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          install: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install (fresh-checkout path)
+        run: ./install.sh
+
+      - name: TypeScript suite
+        run: pnpm test
+
+      - name: Python launch budget and target guard
+        run: >-
+          uv run python -m pytest -q -rs -n 3
+          refactory/tests/test_launch_budget.py
+          refactory/tests/test_target_guard_launches.py
+          refactory/tests/test_git_exe.py
+          refactory/tests/test_spawn_count.py
+          refactory/tests/test_target_guard.py
+          refactory/tests/test_qa_judge.py
