@@ -564,7 +564,12 @@ class SkillOptProposer:
 
     def load_state_dict(self, data: dict[str, Any]) -> None:
         saved = data.get("proposer_knobs")
-        if saved is not None and tuple(saved) != self.knobs:
+        if saved is None:
+            raise ValueError(
+                "skillopt: this run's state does not record the knobs it optimized "
+                "(proposer_knobs), as SkillOpt runs did before several knobs could be "
+                "optimized; this version cannot resume it -- start a new run")
+        if tuple(saved) != self.knobs:
             raise ValueError(
                 f"skillopt: this run optimized the knobs {list(saved)}; it cannot resume "
                 f"over {list(self.knobs)} -- give the same knobs option"

@@ -86,7 +86,7 @@ SEARCH_ONLY_FIELDS = {
     **dict.fromkeys(
         ("optimizer", "strategy", "strategy_options", "parent_picker", "portfolio",
          "edit_preset", "allowed_ops", "frozen", "allow_new_node_tools", "allow_code_nodes",
-         "max_edits_per_proposal", "fresh_evidence", "early_stop_patience",
+         "early_stop_patience",
          "early_stop_at_full_val", "selection", "pool_size",
          "run_ledger", "lessons", "step_review", "structure_guidance",
          "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches",

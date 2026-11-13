@@ -770,7 +770,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "refine": "https://github.com/owner/repository/pull/12",
         "review_comments": true
       },
-      "explanation": "Follow up an open pull request: the run starts from its branch, designs straight from the pull request (its description and diff; no research or strategy step, unless refine_design=full), goes through the full review, and pushes onto that branch, fast-forward only. The pull request's title and description are left as they are."
+      "explanation": "Follow up an open pull request: the run starts from its branch, designs straight from the pull request (its description and diff; no research or strategy step), goes through the full review, and pushes onto that branch, fast-forward only. The pull request's title and description are left as they are."
     }
   ],
   "interfaces": {
@@ -2041,7 +2041,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## profile-resolve
 
-Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The val_gate option is unset by default, which turns the gate on when the parts manifest has val items; 0 or 1 is kept as given. The selection option (with val_gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
+Preview a scored mode’s effective optimization settings, immutable contract and worker provenance without launching a search. The validation gate is on whenever the parts manifest has val items (there is no switch). The selection option (with the gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -2082,7 +2082,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "elite": 3,
     "epochs": 2,
     "evaluator": "walker",
-    "fresh_evidence": true,
     "frozen": [],
     "history_limit": 200,
     "holdout": 0.3,
@@ -2091,7 +2090,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "lessons": true,
     "max_concurrent_evaluations": 4,
-    "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
     "max_items_in_flight": null,
@@ -2123,7 +2121,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "strategy_options": {},
     "structure_guidance": false,
     "train_minibatch": 0,
-    "val_gate": null,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
     "worker_backend": "dsh"
@@ -2344,17 +2341,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "fresh_evidence": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--fresh-evidence"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "frozen": {
       "default": null,
       "description": "",
@@ -2443,17 +2429,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-concurrent-evaluations"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_edits_per_proposal": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-edits-per-proposal"
       ],
       "nargs": null,
       "positional": false,
@@ -2780,7 +2755,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "selection": {
       "default": null,
-      "description": "with --val-gate: pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
+      "description": "with val items (the validation gate): pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
       "flags": [
         "--selection"
       ],
@@ -2869,17 +2844,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
-    "val_gate": {
-      "default": null,
-      "description": "1 selects on the parts manifest's val part (the validation gate), 0 on train scores (default: on when the manifest has val items, else train selection with a warning)",
-      "flags": [
-        "--val-gate"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "validation_reserve_s": {
       "default": null,
       "description": "",
@@ -2914,8 +2878,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The val_gate option is unset by default, which turns the gate on when the parts manifest has val items; 0 or 1 is kept as given. The selection option (with val_gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "d3e1fc51ab48dfe01009a3897d1da771dbc70e9a76589c0b4cc9b02a7c18357b"
+  "purpose": "Preview a scored mode\u2019s effective optimization settings, immutable contract and worker provenance without launching a search. The validation gate is on whenever the parts manifest has val items (there is no switch). The selection option (with the gate) is single or pool; empty picks single for the default loop with a single-parent optimizer and pool otherwise, and pool_size (8) sizes the pool. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools. Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
+  "reviewed_schema": "397019f733bda1770f7c08dc7f0d725754e74a50bffdc0a11300b9bdb17d6ee6"
 }
 ```
 
@@ -3711,7 +3675,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ## start
 
-Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
+Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -3756,7 +3720,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "elite": 3,
     "epochs": 2,
     "evaluator": "walker",
-    "fresh_evidence": true,
     "frozen": [],
     "history_limit": 200,
     "holdout": 0.3,
@@ -3765,7 +3728,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "lessons": true,
     "max_concurrent_evaluations": 4,
-    "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
     "max_items_in_flight": null,
@@ -3797,7 +3759,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "strategy_options": {},
     "structure_guidance": false,
     "train_minibatch": 0,
-    "val_gate": null,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
     "worker_backend": "dsh"
@@ -4021,17 +3982,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "fresh_evidence": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--fresh-evidence"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "frozen": {
       "default": null,
       "description": "",
@@ -4120,17 +4070,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-concurrent-evaluations"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_edits_per_proposal": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-edits-per-proposal"
       ],
       "nargs": null,
       "positional": false,
@@ -4468,7 +4407,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "selection": {
       "default": null,
-      "description": "with --val-gate: pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
+      "description": "with val items (the validation gate): pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
       "flags": [
         "--selection"
       ],
@@ -4557,17 +4496,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
-    "val_gate": {
-      "default": null,
-      "description": "1 selects on the parts manifest's val part (the validation gate), 0 on train scores (default: on when the manifest has val items, else train selection with a warning)",
-      "flags": [
-        "--val-gate"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "validation_reserve_s": {
       "default": null,
       "description": "",
@@ -4602,8 +4530,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "e9012ccb0683e1dab18fdac2c136393abbc26b060d27e1bab2f424f221df9289"
+  "purpose": "Optimize a scored mode in a separate process; returns a durable run ID for status. Project defaults, profile and explicit settings resolve before launch. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
+  "reviewed_schema": "a643bbdd67ddae989c9ac9412ee263eee8e92610413d4ce7e9c3724f8ca8cf58"
 }
 ```
 
@@ -5366,7 +5294,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "review_comments": true,
         "what": "rename the --json flag to --format json, as the review asked"
       },
-      "explanation": "Follow up an open pull request: a new run starts from its branch, designs straight from the pull request (its description and diff; no research or strategy step, unless --refine-design full), goes through the full review, and pushes onto that branch, fast-forward only, leaving its title and description alone."
+      "explanation": "Follow up an open pull request: a new run starts from its branch, designs straight from the pull request (its description and diff; no research or strategy step), goes through the full review, and pushes onto that branch, fast-forward only, leaving its title and description alone."
     },
     {
       "arguments": {
@@ -5629,21 +5557,6 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
-    "refine_design": {
-      "default": null,
-      "description": "design only, with --refine: light (default) skips research and strategy; full walks the whole design phase",
-      "enum": [
-        "light",
-        "full"
-      ],
-      "flags": [
-        "--refine-design"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "string"
-    },
     "repair_attempts": {
       "default": null,
       "description": "an alias: --knob repair_attempts=N, the _fast modes' repair limit (0..3)",
@@ -5875,7 +5788,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "6e750ce986114751280094cd1faf3b23fdfe4f115848f4a51685199f14add1e6"
+  "reviewed_schema": "bdeaa4d183befc85fd6839d1946f5638c79bb8245a292ade4bcc9202eeb63059"
 }
 ```
 
@@ -5954,12 +5867,11 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
 
 ```json
 {
-  "description": "run a structure-ablation grid over solver blocks",
+  "description": "run a structure-ablation grid over the LiveMath solver blocks",
   "doc": "refactory/docs/cli.md",
   "examples": [
     {
       "arguments": {
-        "mode": "livemath/solver",
         "parts": "parts.json"
       },
       "explanation": "Run a structure-ablation grid over solver blocks using the existing testeval evaluation path. Evaluates each named block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same items with the same choice shuffling. Route flags are forwarded to the evaluator."
@@ -5967,7 +5879,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
   ],
   "interfaces": {
     "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
-    "cli": "refactory grid livemath/solver --parts <parts.json> [--skill <path>] [--blocks ...] [--seed N] [--part val|test] [route flags]",
+    "cli": "refactory grid --parts <parts.json> [--skill <path>] [--blocks ...] [--seed N] [--part val|test] [route flags]",
     "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
   },
   "parameters": {
@@ -6047,16 +5959,6 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "positional": false,
       "required": false,
       "type": "integer"
-    },
-    "mode": {
-      "default": null,
-      "description": "the mode family, e.g. livemath/solver",
-      "flags": [],
-      "nargs": null,
-      "position": 0,
-      "positional": true,
-      "required": true,
-      "type": "string"
     },
     "model": {
       "default": null,
@@ -6174,7 +6076,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a structure-ablation grid: evaluate each solver block (baseline, solve_then_verify, two_attempts_then_judge, solve_then_self_check) on the same LiveMathematicianBench items via the existing testeval evaluation path, and write a JSON table with per-block accuracy, shortcut-item split, errors/timeouts, model calls and wall time. Route flags (--worker-backend, --model, --effort, --permission-mode, --setting-sources, --provider, --data-parallelism, --max-completion-tokens) are forwarded to the evaluator.",
-  "reviewed_schema": "cb2c77d4ba66e1089a32b89e2bf68f17f7444678fc92ed2d46f6d8ebb595d838"
+  "reviewed_schema": "68ea34fb2dec797878e1e15d9f7840656b7121f530fe55ccf36e7e6bb0c587f0"
 }
 ```
 
@@ -6286,7 +6188,7 @@ Documentation: [refactory/docs/models.md](../../../refactory/docs/models.md)
 
 ## cli:optimize
 
-Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
+Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.
 
 Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs/optimization-profiles.md)
 
@@ -6313,7 +6215,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "elite": 3,
     "epochs": 2,
     "evaluator": "walker",
-    "fresh_evidence": true,
     "frozen": [],
     "history_limit": 200,
     "holdout": 0.3,
@@ -6322,7 +6223,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "knobs": {},
     "lessons": true,
     "max_concurrent_evaluations": 4,
-    "max_edits_per_proposal": 4,
     "max_elapsed_s": null,
     "max_evaluations": 64,
     "max_items_in_flight": null,
@@ -6354,7 +6254,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     "strategy_options": {},
     "structure_guidance": false,
     "train_minibatch": 0,
-    "val_gate": null,
     "validation_reserve_s": 0,
     "validation_reserve_tokens": 0,
     "worker_backend": "dsh"
@@ -6577,17 +6476,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "string"
     },
-    "fresh_evidence": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--fresh-evidence"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "frozen": {
       "default": null,
       "description": "",
@@ -6676,17 +6564,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "description": "",
       "flags": [
         "--max-concurrent-evaluations"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
-    "max_edits_per_proposal": {
-      "default": null,
-      "description": "",
-      "flags": [
-        "--max-edits-per-proposal"
       ],
       "nargs": null,
       "positional": false,
@@ -7002,7 +6879,7 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
     },
     "selection": {
       "default": null,
-      "description": "with --val-gate: pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
+      "description": "with val items (the validation gate): pool keeps the --pool-size best candidates on validation as parents, the incumbent (the winner) changing only on a strictly higher val score; single is SkillOpt's line, the incumbent the only parent (default: single for the default loop with a single-parent optimizer, pool otherwise)",
       "flags": [
         "--selection"
       ],
@@ -7080,17 +6957,6 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "required": false,
       "type": "integer"
     },
-    "val_gate": {
-      "default": null,
-      "description": "1 selects on the parts manifest's val part (the validation gate), 0 on train scores (default: on when the manifest has val items, else train selection with a warning)",
-      "flags": [
-        "--val-gate"
-      ],
-      "nargs": null,
-      "positional": false,
-      "required": false,
-      "type": "integer"
-    },
     "validation_reserve_s": {
       "default": null,
       "description": "",
@@ -7136,8 +7002,8 @@ Documentation: [refactory/docs/optimization-profiles.md](../../../refactory/docs
       "type": "string"
     }
   },
-  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The val_gate option (on by default when the parts manifest has val items, and 0 turns it off; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs val_gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). The fresh_evidence option (on by default; it acts with val_gate) re-scores the candidate the optimizer edits on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. The max_edits_per_proposal option (4 by default; 1 is single edits) lets one proposal bundle that many edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; with val_gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
-  "reviewed_schema": "75b5db54e5fac997d85aff77e17cf7f33d4c04aa7efbf8088eac6d7e6245110c"
+  "purpose": "Search a scored mode through the terminal with profile/project defaults and explicit overrides; resume retains the saved run identity. The omit_steering option leaves graph controls and correction audits active while excluding the ledger from candidate model prompts. The validation gate (on whenever the parts manifest has val items, with no switch; without val items the run selects on train scores and warns) evaluates as the SkillOpt strategy does: per-epoch train seeds, the val score is the fitness for parents, pool and winner, the incumbent changes only on a strictly higher val score, the last epoch's proposals are scored, the incumbent is the winner, and with a test part the final candidate's val check and the seed, best and final candidates' test scores are run and reported. With it, selection says how val selects: single (SkillOpt's line, the incumbent the only parent; the default for the default loop with a single-parent optimizer) or pool (the default otherwise: parents come from the pool_size, 8 by default, best candidates on val, ties at the edge kept). With it, early_stop_patience (0, off, by default) stops after that many epochs without a better best val score, and early_stop_at_full_val once the best val score is 1.0. The train_minibatch option (0, the whole train part, by default; it needs the validation gate) scores each epoch's candidates on that many train items sampled with the per-epoch seed, and the optimizer's evidence is that minibatch; val and test are not sampled. The allow_new_node_tools option (off by default) lets an agent node an edit adds run with tools; off, a new agent runs with tool_policy none and asking for tools is refused (E-new-node-tools). The allow_code_nodes option (on by default) lets an edit add a code node, an op or gate whose Python the optimizer writes, run sandboxed; off, or where the sandbox is unavailable, a new code node is refused (E-code-nodes). Under the validation gate the candidate the optimizer edits is re-scored on each epoch's train sample with that epoch's seed, unless it was scored this epoch, so its evidence is fresh; its id and scores stay. One proposal may bundle up to 4 edits, applied in order as one candidate and judged once. The strategy_option option (KEY=VALUE, repeatable) adds to a profile's strategy_options, as knob adds to its knobs; a strategy option the strategy does not read, an unknown setting or a value of the wrong type is refused. The parent_picker option (empty by default) pairs a parent picker (archive, evolutionary, islands, hill_climb, map_elites) with the optimizer: the picker chooses the candidate each step edits and the optimizer writes the edits against it; under the validation gate a population picker selects by val score under the pool selection. The portfolio option (off by default; prompt+pipeline, with the autoresearch optimizer) asks the model proposer each round for one prompt/knob-level and one pipeline-level candidate and evaluates both; the report counts the evaluations beyond batch_size. The run_ledger, lessons and step_review options (on by default) show the model proposer every candidate of the run by kind of change with train fixed/broken counts, its own carried-forward lessons (kept across a resume), and a review of each step the last round added (one optimizer-model call per step); structure_guidance (off by default) adds what makes a new step pay off. The integrity_judge option (off by default) has one optimizer-model call per proposal ask whether its benefit depends on how the data, grader or environment happen to be built: on (or veto) refuses an exploit or suspect verdict about what the change adds before evaluation (E-integrity) in every category by default (never an inherited finding, a judge error or a salvaged reply), flag (or warn) only shows the verdicts; an object with mode, default and a per-category policy (off, warn, veto) sets categories one by one; a run's per-category setting comes first, then a Task's integrity_allowances (off), then the run's default, which overrides a Task's integrity_policy. The analysts option (off by default) runs SkillOpt's per-round analysis before each model proposal: failure and success analysts read the edited candidate's train items in full in batches of analyst_group_size (8), one optimizer-model call per batch, and merges of analyst_merge_batch_size (8) lists rank their findings into one list that replaces the readers' summaries; analyst_max_batches (0, no limit) caps the analyst calls per round, failure batches first.",
+  "reviewed_schema": "4f97c8dabacd3e43a19914e9b68b07edf590c57b40687ec37710433a1b641b42"
 }
 ```
 
@@ -9439,7 +9305,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
 
 ## default_pack/design
 
-Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt — first or fix-up — runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.
+Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt — first or fix-up — runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.
 
 ```json
 {
@@ -10146,10 +10012,8 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "gate_kind": "fn",
       "id": "route_refine_design",
       "kind": "gate",
-      "knobs": [
-        "refine_design"
-      ],
-      "notes": "on a light refine, skip research and strategy and go straight to design_doc",
+      "knobs": [],
+      "notes": "on a refine, skip research and strategy and go straight to design_doc",
       "role": "ceo"
     },
     {
@@ -10522,21 +10386,6 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": "",
       "values": []
     },
-    "refine_design": {
-      "default": "light",
-      "description": "on a refine: light skips research and strategy; full walks the whole design phase",
-      "frozen": true,
-      "kind": "str",
-      "range": [
-        null,
-        null
-      ],
-      "value": "light",
-      "values": [
-        "light",
-        "full"
-      ]
-    },
     "refusal_attempts": {
       "default": 3,
       "description": "consecutive refused emissions before the run stops",
@@ -10733,7 +10582,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         }
       },
       {
-        "explanation": "Follow up an open pull request: start from its branch, design straight from the pull request (its description and diff; no research or strategy step, unless refine_design=full), run the full review, and push onto it, fast-forward only.",
+        "explanation": "Follow up an open pull request: start from its branch, design straight from the pull request (its description and diff; no research or strategy step), run the full review, and push onto it, fast-forward only.",
         "knobs": {
           "brief": "Rename the --json flag to --format json, as the review asked",
           "check": "python -m pytest -q",
@@ -10747,8 +10596,8 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "cli": "refactory ceo default_pack/design",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine by default (`refine_design=light`) skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "700d79f80297fa26002bfa8195ecccde072da6b5653c89f26e97fb8fa264f96b"
+    "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
+    "reviewed_schema": "88342866ed933a41425e2af9a5dd04439fc9829ea982d397a29fb3183ecd0187"
   }
 }
 ```
@@ -13106,7 +12955,7 @@ prove a theorem in Lean and score what the Lean checker accepted. Inspect declar
 
 ## livemath/skill_graph
 
-solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.
+solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); no knob shows an item's theorem or sketch (the theorem states the answer); 4 model calls per item. There is no skill knob.
 
 ```json
 {
@@ -13263,9 +13112,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "id": "prepare",
       "kind": "op",
       "knobs": [
-        "compare_task",
-        "use_theorem",
-        "use_sketch"
+        "compare_task"
       ],
       "notes": "",
       "role": "ceo"
@@ -13407,30 +13254,6 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       ],
       "value": "## Your Task\nUsing the notes above, apply the skill in your instructions to every option and write your analysis as notes for the final step. A final answer is not required.",
       "values": []
-    },
-    "use_sketch": {
-      "default": false,
-      "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
-    },
-    "use_theorem": {
-      "default": false,
-      "description": "include the item's theorem as a ## Theorem section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
     }
   },
   "ports": [],
@@ -13442,9 +13265,7 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
         "explanation": "Solve each LiveMathematicianBench item with the seed skill's four sections as four agent steps: compare, then precision and hypotheses in parallel, then decide. Each step's whole system prompt and its task text are knobs. Set LIVEMATH_DATA_PATH to the data directory containing qa_*_final.json files.",
         "knobs": {
           "data_parallelism": 1,
-          "max_completion_tokens": 0,
-          "use_sketch": false,
-          "use_theorem": false
+          "max_completion_tokens": 0
         }
       }
     ],
@@ -13453,15 +13274,15 @@ solve each LiveMathematicianBench item with arm A's seed skill as an explicit gr
       "cli": "refactory ceo livemath/skill_graph",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); use_theorem and use_sketch are frozen off (the theorem states the answer); 4 model calls per item. There is no skill knob.",
-    "reviewed_schema": "012e42d17c24afa13a17867ef4e24aba2e510db5d89c919571d75d85d9c63579"
+    "purpose": "solve each LiveMathematicianBench item with arm A's seed skill as an explicit graph (arm C): compare every option, check theorem-level precision and hypotheses in parallel, then decide (only decide answers; the three analysis steps write notes); graded by livemath/solver's grader. Each step has an open system-prompt knob (compare__system_prompt, ...; seeded with its skill section) and an open task-text knob (compare_task, ...); no knob shows an item's theorem or sketch (the theorem states the answer); 4 model calls per item. There is no skill knob.",
+    "reviewed_schema": "e5acb267d5f3a44301e0f6fd2662b311d3a89bbf27b3d495fbc0402a4dfb7375"
   }
 }
 ```
 
 ## livemath/solver
 
-solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt; both are frozen, because the theorem states the correct option, so a search never turns them on (--knob still sets them for a run). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
+solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. The prompt never carries the item's theorem or proof sketch (SkillOpt's use_theorem / use_sketch, off in its runs, are not ported: the theorem states the correct option). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -13505,9 +13326,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "id": "format_prompt",
       "kind": "op",
       "knobs": [
-        "skill",
-        "use_theorem",
-        "use_sketch"
+        "skill"
       ],
       "notes": "",
       "role": "ceo"
@@ -13572,30 +13391,6 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       ],
       "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
-    },
-    "use_sketch": {
-      "default": false,
-      "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
-    },
-    "use_theorem": {
-      "default": false,
-      "description": "include the item's theorem as a ## Theorem section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
     }
   },
   "ports": [],
@@ -13608,9 +13403,7 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
         "knobs": {
           "data_parallelism": 1,
           "max_completion_tokens": 0,
-          "skill": "",
-          "use_sketch": false,
-          "use_theorem": false
+          "skill": ""
         }
       }
     ],
@@ -13619,8 +13412,8 @@ solve a LiveMathematicianBench multiple-choice item with a single agent call and
       "cli": "refactory ceo livemath/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. use_theorem / use_sketch add the item's theorem or proof sketch to the prompt and are off by default, as in SkillOpt; both are frozen, because the theorem states the correct option, so a search never turns them on (--knob still sets them for a run). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
-    "reviewed_schema": "cac62937e1fe877f68556ee754f77339d56e251c38bd32bd6b7cf9175d8c9c6d"
+    "purpose": "solve a LiveMathematicianBench multiple-choice item with a single agent call and grade the answer with SkillOpt's evaluator. The prompt never carries the item's theorem or proof sketch (SkillOpt's use_theorem / use_sketch, off in its runs, are not ported: the theorem states the correct option). max_completion_tokens caps each solve-node model call (default 0 = no cap, as arm A's claude_chat solver runs; a run setting the search does not move). data_parallelism sets how many items the data node runs at once (default 1, sequential; --knob data_parallelism=24 matches arm A's workers 24). Arm-A parity: --worker-backend claude_code --permission-mode dontAsk --model claude-opus-4-6 --effort medium --setting-sources project --knob data_parallelism=24 --strategy skillopt (see the mode's docstring). Requires LIVEMATH_DATA_PATH pointing at qa_*_final.json files. Optimize only when scored; higher is better.",
+    "reviewed_schema": "1544ca7092490387bb83e18e832888ea8ac6497bc00cedfb7cd311643feb1fac"
   }
 }
 ```
@@ -13712,9 +13505,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "id": "format_prompt",
       "kind": "op",
       "knobs": [
-        "skill",
-        "use_theorem",
-        "use_sketch"
+        "skill"
       ],
       "notes": "",
       "role": "ceo"
@@ -13833,30 +13624,6 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       ],
       "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
-    },
-    "use_sketch": {
-      "default": false,
-      "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
-    },
-    "use_theorem": {
-      "default": false,
-      "description": "include the item's theorem as a ## Theorem section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
     }
   },
   "ports": [],
@@ -13869,9 +13636,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
         "knobs": {
           "data_parallelism": 1,
           "max_completion_tokens": 0,
-          "skill": "",
-          "use_sketch": false,
-          "use_theorem": false
+          "skill": ""
         }
       }
     ],
@@ -13881,7 +13646,7 @@ fork two independent solve attempts for each LiveMathematicianBench item, join t
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "fork two independent solve attempts for each LiveMathematicianBench item, join them, then let a judge agent pick the best answer. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 3 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "9a3908d9415fb605048ecd3cfffaf20e1cb296cf3e2926f1dfcd68a0c9592ffd"
+    "reviewed_schema": "5ab83fcb2e7804299411d23303b04ab17cfea1df8782daa09363422f11f28a26"
   }
 }
 ```
@@ -13942,9 +13707,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "id": "format_prompt",
       "kind": "op",
       "knobs": [
-        "skill",
-        "use_theorem",
-        "use_sketch"
+        "skill"
       ],
       "notes": "",
       "role": "ceo"
@@ -14040,30 +13803,6 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       ],
       "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
-    },
-    "use_sketch": {
-      "default": false,
-      "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
-    },
-    "use_theorem": {
-      "default": false,
-      "description": "include the item's theorem as a ## Theorem section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
     }
   },
   "ports": [],
@@ -14076,9 +13815,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
         "knobs": {
           "data_parallelism": 1,
           "max_completion_tokens": 0,
-          "skill": "",
-          "use_sketch": false,
-          "use_theorem": false
+          "skill": ""
         }
       }
     ],
@@ -14088,7 +13825,7 @@ solve each LiveMathematicianBench item then ask the same agent to re-evaluate th
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then ask the same agent to re-evaluate the answer with SkillOpt's multi-turn refinement prompt. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "532760b6702119728ddcef20c0280f3a5737b8d790a29649ae763468d70544a4"
+    "reviewed_schema": "f67f658dc6e057bc14ef0d808c67eea24fff14f4da1c01d11c13a69ed0cd1d80"
   }
 }
 ```
@@ -14149,9 +13886,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "id": "format_prompt",
       "kind": "op",
       "knobs": [
-        "skill",
-        "use_theorem",
-        "use_sketch"
+        "skill"
       ],
       "notes": "",
       "role": "ceo"
@@ -14236,30 +13971,6 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "value": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "values": []
     },
-    "use_sketch": {
-      "default": false,
-      "description": "include the item's proof sketch as a ## Proof Sketch section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
-    },
-    "use_theorem": {
-      "default": false,
-      "description": "include the item's theorem as a ## Theorem section",
-      "frozen": true,
-      "kind": "bool",
-      "range": [
-        null,
-        null
-      ],
-      "value": false,
-      "values": []
-    },
     "verify__system_prompt": {
       "default": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
       "description": "system prompt for verify (frozen; use the skill knob)",
@@ -14283,9 +13994,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
         "knobs": {
           "data_parallelism": 1,
           "max_completion_tokens": 0,
-          "skill": "",
-          "use_sketch": false,
-          "use_theorem": false
+          "skill": ""
         }
       }
     ],
@@ -14295,7 +14004,7 @@ solve each LiveMathematicianBench item then verify the answer with a second agen
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "solve each LiveMathematicianBench item then verify the answer with a second agent call. Part of the structure-ablation grid (F22): same knobs, grader and route settings as livemath/solver; 2 model calls per item. Not an optimizer target (block is a constructor parameter, not a knob).",
-    "reviewed_schema": "3e16ff41cf3becf721a0309fad89f9a72dcaf09d5845484ba685fcbb41a18f09"
+    "reviewed_schema": "827045416b3b42ea436289d95886fd2390a37822a1aa28bd732f9a32cd07622d"
   }
 }
 ```

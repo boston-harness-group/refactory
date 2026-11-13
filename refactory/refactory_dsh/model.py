@@ -243,12 +243,11 @@ NODE_PATCH = Path(__file__).resolve().parent / "patches" / "agent-node.yml"
 #: five-minute ceiling in a live create run. A caller that knows its own nodes can
 #: set `timeout_s`; the default has to cover the slowest node a shipped mode declares.
 #:
-#: Overridable via ``REFACTORY_MODEL_TIMEOUT_S`` for workloads whose nodes run much
-#: longer than the authoring modes — e.g. a node that builds a container (podman)
-#: inside its own session can exceed 30 minutes. The default stays conservative;
-#: such a workload exports the env var rather than every consumer inheriting a high
-#: ceiling. (Same env-driven pattern as REFACTORY_WORKER_BACKEND / REFACTORY_MODEL_EFFORT.)
-DEFAULT_TIMEOUT_S = int(os.environ.get("REFACTORY_MODEL_TIMEOUT_S", "1800"))
+#: A workload whose nodes run much longer (a node that builds a container inside its
+#: own session can exceed 30 minutes) says so where the run is configured: the
+#: node's own ``timeout_s``, or ``--model-timeout`` for every agent step. There is no
+#: environment override.
+DEFAULT_TIMEOUT_S = 1800
 
 #: How long a node's model session may show no sign of life before it is stopped (seconds).
 #:

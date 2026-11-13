@@ -36,7 +36,7 @@ CASES: dict[str, tuple[bool, list[str]]] = {
                                                       "--generate", "make gen"]),
     "--no-worktree": (False, ["--no-worktree"]),
     "--no-pr": (False, ["--no-pr"]),
-    "--refine": (False, ["--refine", "octo/app#3", "--review-comments", "--refine-design", "full"]),
+    "--refine": (False, ["--refine", "octo/app#3", "--review-comments"]),
     "the fast modes' --attempts": (True, ["--attempts", "2"]),
     "--repair-attempts": (True, ["--repair-attempts", "2"]),
     "--source-project": (True, ["--source-project", "src"]),
@@ -248,7 +248,7 @@ def test_each_walker_main_takes_every_run_flag_and_a_resume_refuses_them(main, t
     values = {"--knob": "a=1", "--attempts": "2", "--repair-attempts": "1", "--role-routes": "{}",
               "--node-routes": "{}", "--model-timeout": "60", "--max-elapsed-s": "100",
               "--max-tokens": "1000", "--validation-reserve-s": "1", "--validation-reserve-tokens": "1",
-              "--warn-tokens": "5", "--refine-design": "full", "--source-format": "jsonl", "--timeout": "5"}
+              "--warn-tokens": "5", "--source-format": "jsonl", "--timeout": "5"}
     switches = {"--no-worktree", "--no-pr", "--review-comments", "--headless", "--omit-steering"}
     argv = ["--resume", str(tmp_path / "run")]
     for option in sorted(_shared_options() - {"--verdict"}):

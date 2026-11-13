@@ -1,4 +1,4 @@
-"""``fresh_evidence``: under ``val_gate`` the candidate the optimizer edits is re-scored
+"""Fresh evidence: under ``val_gate`` the candidate the optimizer edits is re-scored
 on each epoch's train sample with that epoch's seed, so its evidence is fresh.
 
 As SkillOpt rolls out its current candidate on the train part every epoch with the
@@ -156,13 +156,11 @@ def test_a_rescore_counts_and_is_not_repeated_after_a_resume(tmp_path, monkeypat
     assert resumed.evaluations == sum(1 for c in resumed.population if c.evaluated) + 2
 
 
-def test_without_the_gate_or_with_it_off_nothing_is_rescored(tmp_path, monkeypatch):
+def test_without_the_gate_nothing_is_rescored(tmp_path, monkeypatch):
     measured = _tag_seeds(monkeypatch)
     loop, _ = _run(tmp_path / "nogate", monkeypatch, [[(5, 3)], [(5, 2)], []], val_gate=False)
     assert not _events(loop, "rescore")
     assert {s for _e, _c, s in measured} == {SEED}, "without the gate: the run's seed"
-    off, _ = _run(tmp_path / "off", monkeypatch, [[(5, 3)], [(5, 2)], []], fresh_evidence=False)
-    assert not _events(off, "rescore")
 
 
 class _Client:
@@ -245,23 +243,17 @@ class PairWatching(SeedWatching):
         return super().propose(ctx, n, parents)
 
 
-@pytest.mark.parametrize("fresh", [True, False])
-def test_a_child_is_compared_with_its_parent_scored_with_the_same_seed(tmp_path, monkeypatch, fresh):
-    """With fresh evidence the rejected child of epoch e (scored in epoch e+1) meets its
-    parent's epoch e+1 records; without it the pair is marked as different seeds."""
+def test_a_child_is_compared_with_its_parent_scored_with_the_same_seed(tmp_path, monkeypatch):
+    """The rejected child of epoch e (scored in epoch e+1) meets its parent's epoch e+1
+    records."""
     _tag_seeds(monkeypatch)
     proposer = PairWatching([[(5, 3)], [(5, 2)], []])
-    _run(tmp_path, monkeypatch, [], proposer=proposer, fresh_evidence=fresh)
+    _run(tmp_path, monkeypatch, [], proposer=proposer)
     epoch, pairs = proposer.pairs[1]
     pair = next(p for p in pairs if p.get("parent"))
     seeds = {r.get("prediction") for r in pair["parent_records"]}
     child = {r.get("prediction") for r in pair["child_records"]}
-    if fresh:
-        assert pair["same_seed"] is True and seeds == child == {f"seed {train_batch_seed(SEED, epoch)}"}
-    else:
-        assert pair["same_seed"] is False and seeds != child
-        from refactory_dsh.optim.base import _edit_change_lines
-        assert "different seeds" in "\n".join(_edit_change_lines([pair]))
+    assert pair["same_seed"] is True and seeds == child == {f"seed {train_batch_seed(SEED, epoch)}"}
 
 
 def test_an_older_child_is_compared_with_its_parents_records_from_its_own_epoch(tmp_path, monkeypatch):

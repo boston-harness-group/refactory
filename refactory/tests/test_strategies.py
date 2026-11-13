@@ -194,13 +194,6 @@ def test_staged_curriculum_runs_every_stage_in_order(tmp_path):
     assert positions == sorted(positions), "the stages ran out of order"
 
 
-def test_staged_v1_has_its_own_stages(tmp_path):
-    loop = _loop("staged_v1", tmp_path / "run", epochs=99)
-    loop.per_stage = 1
-    loop.run()
-    assert loop.stages_done == ["explore", "exploit"]
-
-
 def test_research_then_optimize_runs_a_pre_phase_once(tmp_path):
     loop = _loop("research_then_optimize", tmp_path / "run", epochs=2)
     loop.run()

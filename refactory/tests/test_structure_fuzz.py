@@ -123,7 +123,7 @@ def test_the_compound_generator_mixes_every_kind_of_edit():
                     kinds.add("structure")
                 else:
                     kinds.add("structure")
-    assert {2, 3, 4} <= sizes and max(sizes) > base_mod.DEFAULT_MAX_EDITS
+    assert {2, 3, 4} <= sizes and max(sizes) > base_mod.MAX_EDITS_PER_PROPOSAL
     assert kinds == {"malformed", "patch", "value", "new node's prompt knob", "structure"}, kinds
 
 
@@ -242,7 +242,7 @@ def test_mutation_protected_without_the_edit_layer_check_is_caught(monkeypatch):
 def test_mutation_grader_without_answer_free_items_is_caught(monkeypatch):
     import refactory_dsh.task as task_mod
 
-    monkeypatch.setattr(task_mod, "node_item", lambda item, task, knobs: item)
+    monkeypatch.setattr(task_mod, "node_item", lambda item, task: item)
     _finds("grader", seeds=("fuzz_data_pass", "livemath_skill_graph"), walker=True, edits=200)
 
 
@@ -350,32 +350,33 @@ def test_livemath_items_reach_the_nodes_without_the_answer(tmp_path):
     assert any(r["score"] == 1.0 for r in result.facts["item_scores"])
 
 
-def test_use_theorem_reveals_the_theorem_through_its_frozen_knob(tmp_path):
-    """The theorem reaches the nodes only in a run whose (frozen) use_theorem is on."""
-    from refactory_dsh.nn import edits as nn_edits
+def test_a_saved_state_with_the_removed_use_theorem_knob_never_shows_the_theorem(tmp_path):
+    """A state saved before ``use_theorem`` was removed may still carry it, even turned
+    on: it still runs, and the theorem (which states the answer) reaches no node."""
+    from refactory_dsh import nn
 
     seed = sf.seeds()["livemath_skill_graph"]
-    state = nn_edits.configure(seed.state(), "use_theorem", True)
-    assert state["knobs"]["use_theorem"]["spec"]["frozen"] is True
+    state = seed.state()
+    assert "use_theorem" not in state["knobs"]
+    state["knobs"]["use_theorem"] = {"value": True,
+                                     "spec": nn.Knob(False, "bool", frozen=True).spec()}
     model = sf.ScriptedModel(sf._answers(sf._graph_of(state)))
     result = sf.run_walker(seed, state, tmp_path / "run", model)
     assert result.exit_ok, result.error
     items = [json.loads(p.read_text()) for p in (tmp_path / "run").rglob("current_item.json")]
-    assert items and all("theorem" in i and "sketch" not in i for i in items)
-    assert any("## Theorem" in prompt for _node, prompt, _system in model.log)
+    assert items and all("theorem" not in i and "sketch" not in i for i in items)
+    assert not any("## Theorem\n" in prompt for _node, prompt, _system in model.log)
 
 
-def test_node_item_hides_grader_fields_unless_revealed():
+def test_node_item_hides_grader_fields():
     from refactory_dsh.task import Task, node_item
 
     class Hidden(Task):
         grader_fields = ("answer", "hint")
-        revealed_by = {"hint": "show_hint"}
 
     item = {"id": "1", "question": "q", "answer": "a", "hint": "h"}
-    assert node_item(item, Hidden(), {}) == {"id": "1", "question": "q"}
-    assert node_item(item, Hidden(), {"show_hint": True}) == {"id": "1", "question": "q", "hint": "h"}
-    assert node_item(item, Task(), {}) == item
+    assert node_item(item, Hidden()) == {"id": "1", "question": "q"}
+    assert node_item(item, Task()) == item
 
 
 def test_a_new_agent_runs_without_tools_unless_the_run_allows_them():

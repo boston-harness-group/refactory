@@ -19,8 +19,17 @@ SCHEMA_VERSION = 1
 PROFILE_ROOT = Path(".factory/profiles")
 SNAPSHOT = "resolved-profile.json"
 SELECTION_RULE = "max_valid_mean_score_minus_parsimony"
+#: ``LoopConfig`` fields that are not search settings: where and how a run is
+#: driven, and ``val_gate``, which the run decides from its parts manifest (on when
+#: it has val items, for a built-in strategy) and records in ``config.json``.
 RUNTIME_FIELDS = {"runs_root", "resume", "progress", "print_events", "verbose",
-                  "control_poll_s", "memory_global_root", "resolved_profile"}
+                  "control_poll_s", "memory_global_root", "resolved_profile", "val_gate"}
+#: Settings that no longer exist. A saved profile, a run's ``config.json`` or a
+#: resolved snapshot that holds one still loads: the key is dropped, and the run
+#: behaves as the setting's last default (``fresh_evidence`` on, at most
+#: ``MAX_EDITS_PER_PROPOSAL`` edits per proposal, ``val_gate`` decided by the parts
+#: manifest; a saved ``val_gate: false``, the default before #627, is read as unset).
+OBSOLETE_SETTINGS = frozenset({"fresh_evidence", "max_edits_per_proposal", "val_gate"})
 
 
 class ProfileError(ValueError):
@@ -102,7 +111,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     from refactory_dsh import optim, strategies
     from refactory_dsh.nn.edits import PRESETS, catalogue, removed
 
-    settings = dict(settings)
+    settings = {key: value for key, value in settings.items() if key not in OBSOLETE_SETTINGS}
     if "preset" in settings:
         settings["edit_preset"] = settings.pop("preset")
     for option, target in PAIR_OPTIONS.items():
@@ -141,11 +150,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
-    # val_gate: a switch; the command line passes it as 0 or 1. Unset (None) is the
-    # default: the run turns it on when its parts manifest has val items.
-    if result.get("val_gate") not in (True, False, 0, 1, None):
-        raise ProfileError("val_gate must be true or false (1 or 0 on the command line)")
-    result["val_gate"] = None if result.get("val_gate") is None else bool(result["val_gate"])
     # The default loop's early stop (needs val_gate): a count of stale epochs, 0 off,
     # and a switch the command line passes as 0 or 1.
     patience = result.get("early_stop_patience")
@@ -162,10 +166,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("allow_code_nodes") not in (True, False, 0, 1, None):
         raise ProfileError("allow_code_nodes must be true or false (1 or 0 on the command line)")
     result["allow_code_nodes"] = result.get("allow_code_nodes") not in (False, 0)
-    # fresh_evidence: a switch; the command line passes it as 0 or 1.
-    if result.get("fresh_evidence") not in (True, False, 0, 1):
-        raise ProfileError("fresh_evidence must be true or false (1 or 0 on the command line)")
-    result["fresh_evidence"] = bool(result.get("fresh_evidence"))
     # What the model proposer is shown (optim.feedback): switches, 0 or 1 on the command line.
     for key in ("run_ledger", "lessons", "step_review", "structure_guidance", "analysts"):
         if result.get(key) not in (True, False, 0, 1):
@@ -190,9 +190,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         parse_setting(judge)
     except ValueError as error:
         raise ProfileError(str(error)) from error
-    max_edits = result.get("max_edits_per_proposal")
-    if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
-        raise ProfileError("max_edits_per_proposal must be a positive integer (1 is single edits)")
     minibatch = result.get("train_minibatch")
     if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
@@ -201,9 +198,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if selection not in SELECTIONS:
         raise ProfileError(f"unknown selection: {selection}; known: "
                            f"{', '.join(s for s in SELECTIONS if s)}")
-    if selection and result["val_gate"] is False:
-        raise ProfileError(f"selection {selection} chooses by validation score, which only "
-                           "val_gate measures; turn val_gate on, or leave selection empty")
     result["selection"] = selection
     pool_size = result.get("pool_size")
     if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
@@ -306,6 +300,9 @@ def _read_profile(path: Path) -> dict[str, Any]:
     # immutable version or broadening its next launch to the new default.
     if not result["settings"].get("permission_mode"):
         result["settings"]["permission_mode"] = "default"
+    # Settings since removed are dropped in memory, the file left as it was.
+    for key in OBSOLETE_SETTINGS & set(result["settings"]):
+        del result["settings"][key]
     return result
 
 
@@ -376,7 +373,8 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         # The profile's strategy options belong to the profile's strategy: a launch that
         # names another strategy starts from none, and the snapshot records the drop.
         overrides["strategy_options"] = {}
-    chosen = {**profile["settings"], **overrides}
+    chosen = {key: value for key, value in {**profile["settings"], **overrides}.items()
+              if key not in OBSOLETE_SETTINGS}
     routing = None
     if recipe is None and validate_settings:
         routing = resolve_workers(project, {key: value for key, value in (overrides or {}).items() if key in FIELDS},
@@ -430,9 +428,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
-        "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
+        "max_concurrent_evaluations", "max_items_in_flight",
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
-        "fresh_evidence", "max_edits_per_proposal", "selection", "pool_size",
+        "selection", "pool_size",
         # What the proposer is shown, not how anything is scored (optim.feedback,
         # optim.analysts).
         "run_ledger", "lessons", "step_review", "structure_guidance",
@@ -512,13 +510,11 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
 SETTING_HELP = {
     "claude_executable": "claude_code workers only: the Claude Code executable they run, an "
                          "absolute path (default: the one bundled with the Agent SDK)",
-    "val_gate": "1 selects on the parts manifest's val part (the validation gate), 0 on "
-                "train scores (default: on when the manifest has val items, else train "
-                "selection with a warning)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
                      "map_elites) with --optimizer: the picker chooses the candidate each "
                      "step edits, the optimizer writes the edits (default: none)",
-    "selection": "with --val-gate: pool keeps the --pool-size best candidates on validation "
+    "selection": "with val items (the validation gate): pool keeps the --pool-size best "
+                 "candidates on validation "
                  "as parents, the incumbent (the winner) changing only on a strictly higher "
                  "val score; single is SkillOpt's line, the incumbent the only parent "
                  "(default: single for the default loop with a single-parent optimizer, "
@@ -570,7 +566,7 @@ def add_arguments(parser: Any) -> None:
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
         # A path given as ~/... is stored expanded: a route's executable is absolute.
-        kind = os.path.expanduser if key == "claude_executable" else float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight", "val_gate") else str
+        kind = os.path.expanduser if key == "claude_executable" else float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight") else str
         parser.add_argument(flag, dest=key, type=kind, default=None, help=SETTING_HELP.get(key))
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")

@@ -634,16 +634,12 @@ class ReplayClient:
     ``confine``, nothing else), so a call the live client would refuse fails
     here too (#493 G30).
 
-    A solver prompt is matched after taking off the Claude backend framing, as A's
-    recordings are indexed; an optimizer prompt too with ``unframe_optimizer``
-    (arm B's ``claude_backend_wrapper``), and otherwise exactly as B wrote it.
+    Every prompt -- a solver's and an optimizer's -- is matched after taking off the
+    Claude backend framing, as A's recordings are indexed.
     """
 
-    def __init__(self, matcher: CallMatcher, *, unframe_optimizer: bool = False) -> None:
+    def __init__(self, matcher: CallMatcher) -> None:
         self.matcher = matcher
-        #: Take the Claude backend framing off optimizer prompts too: arm B runs with
-        #: ``claude_backend_wrapper`` on.
-        self.unframe_optimizer = unframe_optimizer
         self.match_log: list[dict[str, Any]] = []
         #: The first fault of the replay itself (not a divergence, not A's event).
         self.harness_error: str | None = None
@@ -662,12 +658,11 @@ class ReplayClient:
         # Every strategy call is an optimizer call, made inside trace.ask (which
         # exposes its key); a solver call (the walker's) had the rollout's attempts.
         call_key = current_call_key()
-        if call_key is None or self.unframe_optimizer:
-            # The solve node sends the question framed as A's Claude backend framed it
-            # (livemath ``ops.claude_backend_prompt``), and so does every optimizer call
-            # with ``claude_backend_wrapper`` on; A's recordings are indexed with that
-            # framing taken off, so take it off B's prompt the same way.
-            prompt = normalize_recorded_prompt(prompt)
+        # The solve node sends the question framed as A's Claude backend framed it
+        # (livemath ``ops.claude_backend_prompt``), and so does every optimizer call
+        # (skillopt ``claude_backend``); A's recordings are indexed with that framing
+        # taken off, so take it off B's prompt the same way.
+        prompt = normalize_recorded_prompt(prompt)
         idx = self.matcher.consumed_for(system, prompt)
         attempts = OPTIMIZER_ATTEMPTS_PER_COMPLETE if call_key else SOLVER_ATTEMPTS
         entry = {

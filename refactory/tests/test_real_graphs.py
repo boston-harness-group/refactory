@@ -102,7 +102,7 @@ def test_livemath_solver_end_to_end(tmp_path):
             "format_prompt", "op",
             call=f"{OPS}:format_prompt",
             reads=(CURRENT_ITEM,),
-            knobs=("skill", "use_theorem", "use_sketch"),
+            knobs=("skill",),
             produces=("user_prompt", "solver_prompt", "skill_section"),
         ))
         # Deterministic op replacing the agent node — writes the same response

@@ -749,12 +749,12 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
     proposer = Reasoning([[(5, 7), (5, 6)], [(7, 3), (7, 2)], []])
     with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2, fresh_evidence=True,
+        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2,
                      max_concurrent_evaluations=3)
         loop.optimizer = proposer
         loop.run()
     ids = {_level(c): c.id for c in loop.population}
-    assert loop.config.fresh_evidence and loop.config.train_minibatch == 0
+    assert loop.config.train_minibatch == 0
     # Two children and three slots: the re-score runs in the children's wave.
     assert sorted(batches[0]) == [(5, 2), (6, None), (7, None)]
     assert sorted(batches[1]) == [(2, None), (3, None), (7, 3)]
@@ -775,21 +775,6 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
     assert all(rows[ids[level]]["same_seed"] for level in expected)
     table = feedback.ledger_lines(proposer.contexts[-1].ledger)[-1]
     assert table.count("| prompt/setting |") == 4 and "n/a" not in table
-
-
-def test_without_fresh_evidence_no_parent_is_scored_beside_its_children(tmp_path, monkeypatch):
-    from refactory_dsh.loop import Loop
-    from test_gate_aware_context import Reasoning
-
-    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
-    proposer = Reasoning([[(5, 7), (5, 6)], [(7, 3), (7, 2)], []])
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2, fresh_evidence=False)
-        loop.optimizer = proposer
-        loop.run()
-    assert '"rescore"' not in (loop.root / "journal.jsonl").read_text()
-    assert loop.evaluations == sum(1 for c in loop.population if c.evaluated)
 
 
 def test_the_parents_rescore_takes_one_of_the_concurrent_slots(tmp_path, monkeypatch):
@@ -840,7 +825,7 @@ def _rescore_run(tmp_path: Path, monkeypatch: Any, plan: list, **overrides: Any)
     proposer = Reasoning(plan)
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, **{"epochs": len(plan), "val_gate": True, "batch_size": 2,
-                                  "fresh_evidence": True, **overrides})
+                                  **overrides})
         loop.optimizer = proposer
         loop.run()
     events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
@@ -922,7 +907,7 @@ def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeyp
     proposer = Reasoning(plan)
     with _patch_mode(ParallelProbe):
         loop = _loop(tmp_path, epochs=2, val_gate=True, batch_size=children,
-                     fresh_evidence=True, max_concurrent_evaluations=slots,
+                     max_concurrent_evaluations=slots,
                      max_items_in_flight=2)
         loop.optimizer = proposer
         loop.run()

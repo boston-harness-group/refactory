@@ -22,21 +22,20 @@ call.  This means:
 `command_timeout_s` on each node's subprocess.  It does not use
 `enable_recovery`.
 
-## The default loop's validation gate (on by default with val items)
+## The default loop's validation gate (on whenever there are val items)
 
 When the run's parts manifest (`--parts-manifest`) has val items, the default loop
 evaluates candidates the way the SkillOpt strategy does, using the same
 `ValidationGate` and `FinalEvaluation` from `outerloop.py`; only the optimizer, where
-edit ideas come from, differs. No flag is needed: an unset `val_gate` (the command
-line's, a profile's or the library's default) turns the gate on when there are val
-items. `--val-gate 0` turns it off, and `--val-gate 1` insists on it (refused without
-val items). `config.json` records the decision, and the report's `selection` section
-says why (`val_gate_basis`).
+edit ideas come from, differs. It is not a setting: there is no flag or profile key,
+and the run decides from its manifest. `config.json` records the decision (`val_gate`),
+and the report's `selection` section says why (`val_gate_basis`). A profile saved with
+a `val_gate` key (before the switch was removed; `false` was the default then) still
+loads: the key is dropped.
 
 - **No val items.** A run with no parts manifest, or one without a val part, selects
   on train scores and says so: "no validation items: selecting on train scores", in its
-  events, its `strategy.log` and its report (`selection.warning`). With `--val-gate 0`
-  the report says the run selected on train though it had val items.
+  events, its `strategy.log` and its report (`selection.warning`).
 - **`--holdout`.** The validation set for selection is always the manifest's val part.
   The `--holdout` fraction of a Task's items (a run without a manifest) is never
   selected on: it stays the end-of-run audit's independent split. With a manifest the
@@ -45,13 +44,15 @@ says why (`val_gate_basis`).
   says that no independent check was possible (`holdout.split` is `val`,
   `holdout.independent` is false, `status` is `not_applicable`, and the report names
   the split). With a test part the audit compares val with test, which nothing selects
-  on (`split` `test`). A resumed run keeps the `val_gate`, `selection` and `pool_size`
-  its `config.json` recorded, whatever its profile or the defaults now say; a resume
+  on (`split` `test`). A resumed run keeps the `selection` and `pool_size` its
+  `config.json` recorded, whatever its profile or the defaults now say; a resume
   command that gives one of them explicitly with another value is refused, naming both.
+  A run that recorded `val_gate` false although it had val items (started with the old
+  `--val-gate 0`) is refused on resume: start a new run.
   A launch that leaves `selection` unset records the rule it resolved (`single` or
   `pool`).
-- **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
-  for them, and `--val-gate 1` is refused.
+- **Custom strategies** (SkillOpt) keep their own gate: the default loop's stays off
+  for them.
 
 Train is the proposer's feedback, validation decides every choice and test is scored
 once at the end. The validation average is the fitness for the parents, the pool and
@@ -139,8 +140,8 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   re-score (no request reads their comparison). Train records are kept per epoch, so
   "What the last edit changed", "Your earlier reasoning" and the run-wide feedback
   sections compare a child with its parent's records from the child's epoch (the same
-  seed); a pair from different epochs is marked as such. `--fresh-evidence 0`
-  turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
+  seed); a pair from different epochs is marked as such. It is always on under the
+  gate (there is no switch). On LiveMath's
   35-item train part this is one train evaluation of 35 rollouts per epoch, the epochs
   whose gate kept a child included; with 3 concurrent evaluations (two portfolio
   children and the re-score) the round's wall clock is unchanged. Every gated strategy
@@ -220,7 +221,7 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   (SkillOpt's initial val score) and is never a reason to stop. Each later epoch gates
   the batch the previous one proposed, and is checked right after that gating, before
   it proposes, as SkillOpt checks at an epoch's end; so a seed already at 1.0 still gets
-  one batch proposed and gated. Both settings need the gate (val items, or `--val-gate 1`), are saved with the
+  one batch proposed and gated. Both settings need the gate (val items), are saved with the
   run and are kept on resume.
 
 ## An evaluation that dies with the run is not a result (exit 75, `--resume`)
@@ -288,7 +289,7 @@ may say "429") never decides it.
 
 By default every candidate is scored on the whole train part. With
 `--train-minibatch N` and a train part of more than N items, each epoch samples N train
-ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs the gate (val items, or `--val-gate 1`):
+ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs the gate (val items):
 without the gate the winner and the parents are picked by train scores, which would
 then come from different samples, so the run is refused before anything is rolled
 out.
@@ -309,7 +310,7 @@ out.
 
 `0`, or a train part of N items or fewer, scores the whole train part as before.
 
-## Compound proposals (`--max-edits-per-proposal N`)
+## Compound proposals (up to 4 edits)
 
 A proposal may carry an ordered list of edits, `{"edits": [...]}`, instead of one
 `edit`. They are applied together to the parent as one candidate, which is evaluated
@@ -327,11 +328,11 @@ sections at once; this is the default loop's equivalent.
   does not depend on -- one that changes nothing, or that a later edit overwrites or
   undoes -- is refused `E-noop` with its index. A refusal about one edit names it,
   `[edit k of n: op]`, after the rule's code; one about the combined state names none. A
-  list longer than N is refused `E-too-many-edits`.
-- **Cap.** `--max-edits-per-proposal` (default 4, SkillOpt's edit budget) caps the
-  list; `1` is single edits only, as before.
-- **Who emits lists.** The `autoresearch` request says it may bundle up to N edits when a
-  fix needs coordinated changes, with a JSON example (not shown when N is 1). When it
+  list longer than the cap is refused `E-too-many-edits`.
+- **Cap.** 4 edits per proposal, SkillOpt's edit budget (`MAX_EDITS_PER_PROPOSAL`, a
+  constant, not a run setting).
+- **Who emits lists.** The `autoresearch` request says it may bundle up to 4 edits when a
+  fix needs coordinated changes, with a JSON example. When it
   asks for one proposal (one candidate per epoch), it asks that the proposal's edits
   cover every step the diagnosis names on the failure path, since an idea left for a
   separate proposal is never run; when it asks for several, separate ideas go in
@@ -949,9 +950,10 @@ Each step has two open text knobs, one per piece of text it sends:
 seeded with the solver's system prompt and that step's section, and `<step>_task`
 (`compare_task`, ...) is the task text ending its user message. The question and the
 earlier steps' notes are data, not knobs. With the defaults decide's system prompt is
-the solver's, byte for byte. `max_completion_tokens`, `data_parallelism`,
-`use_theorem` and `use_sketch` are frozen. An item's theorem states the correct option,
-so the last two stay off. Each item takes 4 model calls.
+the solver's, byte for byte. `max_completion_tokens` and `data_parallelism` are frozen.
+No knob shows an item's theorem or proof sketch (SkillOpt's `use_theorem` and
+`use_sketch` are not ported): the theorem states the correct option. Each item takes 4
+model calls.
 
 `data`, `extract_answer` and `finish` are protected (`SkillGraph.protected_nodes`): a
 search edits the steps between them, never the pass, the answer extraction or the run's
@@ -1060,9 +1062,8 @@ state is promised, on any graph shape:
 - **Items reach the nodes without their answer.** A Task names the item fields only its
   grader may see (`Task.grader_fields`, default none). `current_item.json`, the file the
   graph's nodes read, never carries them, on either runtime; the grader gets the whole
-  item. A field in `Task.revealed_by` is shown when the run's knob for it is on.
-  LiveMath hides `correct_choice`, `label`, `label_text`, `theorem` and `sketch`; its
-  frozen `use_theorem` and `use_sketch` reveal the theorem and the sketch.
+  item; no knob shows a grader-only field. LiveMath hides `correct_choice`, `label`,
+  `label_text`, `theorem` and `sketch`.
 - **New agents run without tools.** An agent node an edit adds gets `tool_policy: none`
   unless it asks for tools (`tool_policy: null` or a `tools` list), and asking is refused
   `E-new-node-tools` unless the run allows it (`LoopConfig.allow_new_node_tools`, off by

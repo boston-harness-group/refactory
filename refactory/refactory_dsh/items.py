@@ -891,13 +891,11 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
 
     # Write current_item to both pass_dir (for the subgraph) and workdir
     # (for progress tracking / PIT-005), without the Task's grader-only fields: the
-    # nodes read this file, the grader reads the whole item (`instance_of`). The knobs
-    # are the run's, as a node command reads them (`run._knobs`).
-    from refactory_dsh.run import _knobs
+    # nodes read this file, the grader reads the whole item (`instance_of`).
     from refactory_dsh.task import node_item
 
     task = _task_of(node, workdir)
-    item_json = json.dumps(node_item(item, task, _knobs()), indent=2, default=str)
+    item_json = json.dumps(node_item(item, task), indent=2, default=str)
     (pass_dir / CURRENT_ITEM).write_text(item_json)
     (workdir / CURRENT_ITEM).write_text(item_json)
 

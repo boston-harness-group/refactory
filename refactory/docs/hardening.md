@@ -2680,10 +2680,9 @@ A verdict's `consumed` field now distinguishes two terminal states:
 - `consumed: expired` — the verdict was consumed because the scope changed (design.md
   was modified between the verdict and the resume) or the label was invalid.
 
-Legacy `consumed: yes` entries from older runs are treated as `used` for backward
-compatibility.
+A `consumed: yes` entry left by a run from before these three values reads as pending.
 
-`gate_corrections_due` counts only `consumed: used` (and legacy `yes`) verdicts as
+`gate_corrections_due` counts only `consumed: used` verdicts as
 "went on", preventing double-application of corrections when a stray proceed expires.
 An expired verdict does not trigger re-application of corrections.
 
@@ -2949,8 +2948,8 @@ and in both of the CLI's prints when a run stops at a user gate.
 
 ### Light refine
 
-A design-mode refine (`--refine <PR>`) follows up an open pull request.  By
-default (`refine_design=light`), the `route_refine_design` gate skips the
+A design-mode refine (`--refine <PR>`) follows up an open pull request.  The
+`route_refine_design` gate skips the
 research, pitfalls and strategy phases and goes from `prepare` straight to
 `design_doc`.  The gate writes sentinel facts and files — research, pitfalls,
 strategy_plan, strategy — so every downstream node finds its declared inputs on
@@ -2960,19 +2959,18 @@ characters, and its diff stat and changed files from where its head left its
 base branch, with the base read from GitHub by URL (never from a
 remote-tracking branch, nor from the run's worktree, whose base is the pull
 request's head).  When the base cannot be read the design is told the diff is
-unavailable, never that it is empty, and a warning says why.  With
-`refine_design=full`, or on any non-refine run, the gate returns `proceed` and
-the existing pipeline runs unchanged.
+unavailable, never that it is empty, and a warning says why.  On any non-refine
+run the gate returns `proceed` and the existing pipeline runs unchanged.
 
 Prepare reads the refine from the task or, failing that, the `refine` knob,
 as `delivery.refine_task` does.  On the spine `refine` is a knob and a node's
 task names only the node, so the task's `refine` key, which the first version
-read alone, never fired there: every refine walked the full phase, and
-`classify_scale`'s refine shortcut never ran.
+read alone, never fired there: every refine walked the full phase.
 
-The `refine_design` knob is frozen: it cannot change after the run starts.
-The default is `light`.  The CLI flag is `--refine-design light|full`, which
-is refused without `--refine`.
+There is no way to walk the full design phase on a refine: the
+`refine_design` knob and its `--refine-design light|full` flag were removed,
+and with them `classify_scale`'s refine shortcut, which only a full refine
+reached.
 
 If the person reloops at `gate_strategy`, the existing reloop edge goes to
 `synthesize_strategy`, which gets the pull request block as its
@@ -2983,15 +2981,13 @@ research, pitfalls or `strategy_director`.
 #### Tests that hold it
 
 - `test_design_refine_spine.py::test_the_spine_takes_the_light_route_when_refine_is_a_knob`
-- `test_design_refine_spine.py::test_a_full_refine_on_the_spine_is_classified_as_a_refine`
 - `test_design_refine.py::test_a_light_refine_designs_from_the_pull_request_and_delivers_onto_it`
 - `test_design_refine.py::test_a_light_refine_says_the_diff_is_unavailable_when_the_base_cannot_be_read`
 - `test_design_refine.py::test_a_light_refine_frames_the_pull_requests_description_and_caps_it`
 - `test_design_refine.py::test_a_light_refine_relooped_at_its_gate_keeps_the_pull_request_in_the_next_design`
-- `test_design_refine.py::test_a_full_refine_walks_the_design_phase_with_no_pull_request_block`
 - `test_design_refine.py::test_non_refine_unchanged`
-- `test_delivery.py::test_the_command_line_hands_refine_design_to_the_run`
-- `test_delivery.py::test_the_design_command_applies_refine_design_and_refuses_it_without_refine`
+- `test_design_refine.py::test_route_refine_design_proceeds_only_on_a_run_that_is_not_a_refine`
+- `test_delivery.py::test_the_refine_design_flag_is_gone`
 - `graph-set.spec.ts`: `designGraphRefineLight`, and `designGraphRefineLightRelooped` for the
   person's reloop
 

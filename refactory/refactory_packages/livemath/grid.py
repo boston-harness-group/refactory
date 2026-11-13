@@ -1,6 +1,6 @@
 """Structure ablation grid: evaluate solver blocks via the existing loop path.
 
-A thin loop that, for each requested block/mode, runs ``refactory optimize``'s
+A thin loop that, for each requested LiveMath solver block, runs ``refactory optimize``'s
 own entry point (``refactory_dsh.loop.main``) with a one-shot strategy that calls
 ``Run.evaluate`` on the seed, so route resolution, the model-choice gate, the
 evaluator and the run directory are optimize's. Each block's run directory is
@@ -9,7 +9,7 @@ block.
 
 Usage::
 
-    refactory grid livemath/solver --skill skill.txt --parts parts.json \\
+    refactory grid --skill skill.txt --parts parts.json \\
         --blocks baseline solve_then_verify --seed 42 --part val \\
         --worker-backend claude_code --model claude-opus-4-6 --effort medium
 
@@ -44,7 +44,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run a structure-ablation grid over solver blocks",
     )
-    parser.add_argument("mode", help="the mode family, e.g. livemath/solver")
     parser.add_argument("--skill", default="", help="path to a skill file")
     parser.add_argument("--part", default="val", choices=["val", "test"])
     parser.add_argument("--seed", type=int, default=42)
@@ -231,11 +230,6 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
-
-    if args.mode != "livemath/solver":
-        print(f"refactory grid: only livemath/solver is supported, got {args.mode!r}",
-              file=sys.stderr)
-        return 2
 
     from .blocks import BLOCK_NAMES
 

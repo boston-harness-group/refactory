@@ -399,11 +399,6 @@ class DesignMode(Mode):
                             "backstop: it is stopped sooner after 10 minutes with no model "
                             "output and no running command); its retry gets the same",
             ),
-            "refine_design": Knob(
-                "light", "str", values=("light", "full"), frozen=True,
-                description="on a refine: light skips research and strategy; "
-                            "full walks the whole design phase",
-            ),
             **repo_change.knobs(),
             **delivery.knobs(),
         }
@@ -459,7 +454,6 @@ class DesignMode(Mode):
         graph.add(Node(
             "route_refine_design", "gate",
             evaluator=f"{OPS}:route_refine_design",
-            knobs=("refine_design",),
             writes=("research-plan.json", "pitfalls.json", "pitfalls.md",
                     "strategy-plan.json", "strategy.json",
                     "research-review.txt", "pitfalls-review.txt",
@@ -469,7 +463,7 @@ class DesignMode(Mode):
                       "pitfalls", "pitfalls_review", "pitfalls_attempts_used",
                       "pitfalls_advisory", "strategy_plan", "strategy", "refine_context"),
             max_iterations=2,
-            notes="on a light refine, skip research and strategy and go straight to design_doc",
+            notes="on a refine, skip research and strategy and go straight to design_doc",
         ))
 
         # ── design-v2's head: research, perspectives, then the design itself ──

@@ -485,11 +485,15 @@ def test_livemath_view_labels_each_step_and_shows_the_first_steps_system_prompt(
 ARM_B_PROMPTS_SHA256 = "351dfe56211ecf59bcb0dc8f7627fc8c3274eff161b1a55b3f954e5ac9f634d4"
 
 
-def test_single_knob_optimizer_prompts_are_byte_identical(tmp_path):
+def test_single_knob_optimizer_prompts_are_byte_identical(tmp_path, monkeypatch):
+    """The messages the strategy builds, before the Claude backend framing every call
+    gets (its own tests: test_skillopt, test_replay)."""
     import hashlib
 
+    from refactory_packages.skillopt.loop import SkillOptLoop
     from test_skillopt import _run_loop
 
+    monkeypatch.setattr(SkillOptLoop, "_optimizer_client", lambda self: self.model)
     client = FakeClient()
     _run_loop(tmp_path, client=client, config_overrides={"batch_size": 8},
               skillopt_options={"max_epochs": 2, "group_size": 2})
@@ -506,7 +510,6 @@ def test_single_knob_optimizer_prompts_are_byte_identical(tmp_path):
 
 @pytest.mark.parametrize("bad, message", [
     ("max_completion_tokens", "is frozen"),
-    ("use_theorem", "is frozen"),
     ("missing_skill", "no 'missing_skill'"),
 ])
 def test_frozen_missing_or_non_text_knobs_are_refused_before_spending(bad, message):
@@ -544,7 +547,8 @@ def test_a_resume_with_other_knobs_is_refused():
     with pytest.raises(ValueError, match="cannot resume"):
         SkillOptProposer().load_state_dict(saved)
     _proposer().load_state_dict(saved)
-    SkillOptProposer().load_state_dict({"meta_skill_text": "m"})  # older states load
+    with pytest.raises(ValueError, match="start a new run"):  # a state from before the record
+        SkillOptProposer().load_state_dict({"meta_skill_text": "m"})
 
 
 # ── livemath/skill_graph end to end, scripted ─────────────────────────────

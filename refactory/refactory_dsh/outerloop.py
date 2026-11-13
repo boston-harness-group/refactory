@@ -124,7 +124,7 @@ class Run:
         # Unknown and unpermitted are two facts with two fixes; see Loop._refinement.
         reason = proposal_refusal(
             proposal, permitted=self._loop.permitted_ops(),
-            max_edits=getattr(self._loop.config, "max_edits_per_proposal", None))
+            max_edits=getattr(self._loop.optimizer, "max_edits", None))
         if reason:
             self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
             return reason

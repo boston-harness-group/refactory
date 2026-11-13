@@ -616,9 +616,8 @@ def build_parser() -> argparse.ArgumentParser:
     # ── structure-ablation grid ──
     grid = sub.add_parser(
         "grid",
-        help="run a structure-ablation grid over solver blocks",
+        help="run a structure-ablation grid over the LiveMath solver blocks",
     )
-    grid.add_argument("mode", help="the mode family, e.g. livemath/solver")
     grid.add_argument("--skill", default="", help="path to a skill file")
     grid.add_argument("--part", default="val", choices=["val", "test"])
     grid.add_argument("--seed", type=int, default=42)
@@ -730,7 +729,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verb == "replay-verifier":
         return _cmd_replay_verifier(args)
     if args.verb == "grid":
-        forwarded = [args.mode]
+        forwarded: list[str] = []
         for flag in ("skill", "part", "seed", "output", "parts", "data_path",
                      "worker_backend", "model", "effort", "permission_mode",
                      "setting_sources", "claude_executable", "provider", "data_parallelism",

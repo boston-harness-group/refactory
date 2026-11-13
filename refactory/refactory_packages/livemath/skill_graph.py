@@ -42,9 +42,8 @@ Knobs: two open text knobs per step, one way to edit each piece of text.
   task knob is filled from the run's facts, as in an agent's prompt.
 
 Frozen: the ``max_completion_tokens`` / ``data_parallelism``
-run settings, as the baseline freezes them, and ``use_theorem`` / ``use_sketch``
-(off; an item's theorem states the correct option, so an optimizer edit would
-leak the answer). There is no ``skill`` knob, and no model or timeout knob.
+run settings, as the baseline freezes them. There is no ``skill`` knob, and no model
+or timeout knob.
 """
 from __future__ import annotations
 
@@ -207,11 +206,7 @@ def prepare(ctx: Any) -> dict[str, Any]:
     item and knobs, byte for byte (``ops.build_user_prompt``).
     """
     item = ctx.read_json("current_item.json", {}) or {}
-    user_prompt = build_user_prompt(
-        item,
-        use_theorem=bool(ctx.knob("use_theorem", False)),
-        use_sketch=bool(ctx.knob("use_sketch", False)),
-    )
+    user_prompt = build_user_prompt(item)
     return {
         "user_prompt": user_prompt,
         "compare_prompt": claude_backend_prompt(
@@ -320,13 +315,6 @@ class SkillGraph(nn.Mode):
                 TASKS[step], "str",
                 description=f"task text ending the {step} step's user message")
         knobs.update({
-            # Frozen: an item's theorem text states the correct option, so an open
-            # use_theorem lets the optimizer leak the answer (arm B never edits either).
-            # Set with ``--knob use_theorem=true``.
-            "use_theorem": nn.Knob(False, "bool", frozen=True,
-                                   description="include the item's theorem as a ## Theorem section"),
-            "use_sketch": nn.Knob(False, "bool", frozen=True,
-                                  description="include the item's proof sketch as a ## Proof Sketch section"),
             # Run settings, frozen as in ``Solver``.
             "max_completion_tokens": nn.Knob(
                 MAX_COMPLETION_TOKENS, "int", lo=0, frozen=True,
@@ -354,7 +342,7 @@ class SkillGraph(nn.Mode):
             ),
             _op("prepare", "prepare", reads=("current_item.json",),
                 produces=("user_prompt", "compare_prompt"),
-                knobs=(task_knob("compare"), "use_theorem", "use_sketch")),
+                knobs=(task_knob("compare"),)),
             _agent("compare", compare_notes, t),
             _op("notes_prompts", "notes_prompts", reads=(compare_notes,),
                 produces=("precision_prompt", "hypotheses_prompt"),

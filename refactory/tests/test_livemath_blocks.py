@@ -249,8 +249,9 @@ def _make_route_client():
 #: knob, and the solve node's system prompt is now a (frozen) knob, so the knob
 #: table gains ``solve__system_prompt``. The solve node's prompts are unchanged. The
 #: shakedown fixes changed it again: ``use_theorem`` and ``use_sketch`` are frozen. The
-#: solve node now carries the data pass's crash retry and ``missing_on_crash``.
-BASELINE_SNAPSHOT_SHA256 = "3ae6391a181fb45c9ccb0ab0c090fe1e1ea9ed8db86bcc30a736cdc4bf61ede1"
+#: solve node now carries the data pass's crash retry and ``missing_on_crash``. Then
+#: ``use_theorem`` and ``use_sketch`` were removed (the theorem states the answer).
+BASELINE_SNAPSHOT_SHA256 = "8627082f3bf3debab0ee70ff98987aabc434184aeeef671aaa38febc95615cb5"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -1022,7 +1023,7 @@ def _grid(tmp_path, monkeypatch, extra=(), factory=None, blocks=None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     output = tmp_path / "grid_results.json"
     rc = grid_main([
-        "livemath/solver", "--parts", str(_parts(tmp_path)), "--output", str(output),
+        "--parts", str(_parts(tmp_path)), "--output", str(output),
         "--seed", "42", "--part", "val",
         "--blocks", *(blocks or ["baseline", "solve_then_verify",
                                  "two_attempts_then_judge", "solve_then_self_check"]),
@@ -1115,7 +1116,7 @@ def test_grid_through_cli_forwards_skill_route_and_evaluator(tmp_path, monkeypat
     skill.write_text("Read every option twice.")
     output = tmp_path / "grid_results.json"
     rc = cli.main([
-        "grid", "livemath/solver", "--parts", str(_parts(tmp_path)), "--output", str(output),
+        "grid", "--parts", str(_parts(tmp_path)), "--output", str(output),
         "--blocks", "baseline", "--skill", str(skill),
         "--worker-backend", "claude_code", "--model", "claude-opus-4-6",
         "--setting-sources", "project", "--claude-executable", "/opt/claude/bin/claude",

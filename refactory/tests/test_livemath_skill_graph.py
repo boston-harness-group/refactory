@@ -148,8 +148,7 @@ def test_knobs_open_system_prompts_and_tasks_and_no_skill_knob():
                                  *(f"{s}_task" for s in AGENTS)])
     assert all(knobs[n]["spec"]["kind"] == "str" for n in open_knobs)
     frozen = sorted(n for n, e in knobs.items() if e["spec"]["frozen"])
-    assert frozen == sorted(["data_parallelism", "max_completion_tokens",
-                             "use_sketch", "use_theorem"])
+    assert frozen == sorted(["data_parallelism", "max_completion_tokens"])
     graph = nn.Graph.from_state(state["graph"])
     for step in AGENTS:
         assert knobs[f"{step}__system_prompt"]["value"] == step_system_prompt(step)
@@ -159,7 +158,7 @@ def test_knobs_open_system_prompts_and_tasks_and_no_skill_knob():
         assert graph.nodes[step].field_bindings == (("system_prompt_template", f"{step}__system_prompt"),)
         assert graph.nodes[step].bound_knob("prompt_template") == ""
         assert graph.nodes[step].knobs == ("max_completion_tokens", f"{step}__system_prompt")
-    assert graph.nodes["prepare"].knobs == ("compare_task", "use_theorem", "use_sketch")
+    assert graph.nodes["prepare"].knobs == ("compare_task",)
     assert graph.nodes["notes_prompts"].knobs == ("precision_task", "hypotheses_task")
     assert graph.nodes["decide_prompt"].knobs == ("decide_task",)
     assert graph.nodes["extract_answer"].knobs == ()
@@ -168,16 +167,16 @@ def test_knobs_open_system_prompts_and_tasks_and_no_skill_knob():
 
 
 @pytest.mark.parametrize("name", ["use_theorem", "use_sketch"])
-def test_an_optimizer_edit_to_the_theorem_or_sketch_switch_is_refused(name):
-    """An item's theorem states the correct option: the optimizer's set_knob on either
-    switch is refused, and the state keeps it off. A system-prompt knob still moves."""
+def test_there_is_no_theorem_or_sketch_switch_to_edit(name):
+    """An item's theorem states the correct option: no knob shows it, so an optimizer's
+    set_knob on the removed switches is refused. A system-prompt knob still moves."""
     from refactory_dsh.nn import edits
     from refactory_packages.livemath.skill_graph import SkillGraph
 
     state = SkillGraph().state_dict()
-    with pytest.raises(edits.EditError, match="is frozen and cannot be moved"):
+    with pytest.raises(edits.EditError, match="no knob"):
         edits.apply({"op": "set_knob", "name": name, "value": True}, state)
-    assert state["knobs"][name]["value"] is False
+    assert name not in state["knobs"]
     moved = edits.apply({"op": "set_knob", "name": "compare__system_prompt", "value": "X"}, state)
     assert moved["knobs"]["compare__system_prompt"]["value"] == "X"
 
@@ -407,17 +406,16 @@ def test_a_system_prompt_or_task_knob_reaches_only_its_step(tmp_path, monkeypatc
     from refactory_packages.livemath.skill_graph import step_system_prompt
 
     by_node = _calls(tmp_path, monkeypatch, hypotheses__system_prompt="HYP-SYSTEM-MARKER",
-                     use_theorem="true", **{f"{s}_task": f"{s.upper()}-TASK-MARKER" for s in AGENTS})
+                     **{f"{s}_task": f"{s.upper()}-TASK-MARKER" for s in AGENTS})
     for step in AGENTS:
         for message, system in by_node[step]:
             assert system == ("HYP-SYSTEM-MARKER" if step == "hypotheses"
                               else step_system_prompt(step)), step
             assert message.endswith(f"\n\n{step.upper()}-TASK-MARKER"), step
             assert message.count("-TASK-MARKER") == 1, step
-    # use_theorem reaches the question every step sees, as in the baseline (two of
-    # the five fixture items carry a theorem).
+    # No step sees a theorem (two of the five fixture items carry one).
     for step in AGENTS:
-        assert sum("## Theorem\n" in m for m, _ in by_node[step]) == 2, step
+        assert not any("## Theorem\n" in m for m, _ in by_node[step]), step
 
 
 # ── ops ───────────────────────────────────────────────────────────────────

@@ -121,11 +121,11 @@ def gate_corrections_due(workdir: Path) -> tuple[str, list[tuple[str, str]]]:
                 named = _field(entry, "id")
                 # ASK-2b: with source now always "interactive" for non-upfront
                 # verdicts, use the consumed field to distinguish pending from used.
-                # Only "used" (or legacy "yes") counts as went-on; "expired" does not,
-                # so an expired verdict's corrections are not re-applied.
+                # Only "used" counts as went-on; "expired" does not, so an expired
+                # verdict's corrections are not re-applied.
                 consumed = _field(entry, "consumed")
                 went_on = (_field(entry, "source") == "upfront"
-                           or consumed in ("yes", "used")
+                           or consumed == "used"
                            or (bool(named) and named in used))
                 # An expired verdict must never set collecting or approval,
                 # even when it is the very first verdict (no prior approval).
@@ -494,16 +494,12 @@ def _pull_request_description(pull: dict[str, Any]) -> str:
 
 
 def route_refine_design(ctx: Any) -> Any:
-    """Skip research and strategy on a light refine; a full refine or a non-refine walks them."""
+    """Skip research and strategy on a refine (it designs from the pull request); a
+    run that is not a refine walks the whole design phase."""
     from refactory_dsh.nn import Verdict
 
-    # A non-refine run always takes the full path, regardless of the knob.
     if ctx.facts.get("research_scope_reason") != REFINE_SCOPE_REASON:
         return Verdict("proceed", "not a refine: walking the full design phase")
-
-    # A refine with the full knob walks the full path too.
-    if ctx.knob("refine_design", "light") == "full":
-        return Verdict("proceed", "refine_design=full: walking the full design phase")
 
     # ── light path: write sentinel facts and files ──
     # The pull request prepare resolved (`delivery.refine_task`), as its delivery plan keeps it.
@@ -966,14 +962,8 @@ def classify_scale(ctx: Any) -> dict[str, Any]:
     `NEW_PROJECT_SCOPED_ITEMS` new items, names no existing function and no shared
     engine, and full otherwise.
     """
-    # ── refine detection ───────────────────────────────────────────────
-    # prepare writes REFINE_SCOPE_REASON for a refine run.  Detect that
-    # constant rather than reading research_scope (which we write ourselves).
-    if ctx.facts.get("research_scope_reason") == REFINE_SCOPE_REASON:
-        return {
-            "research_scope": "scoped",
-            "research_scope_reason": REFINE_SCOPE_REASON,
-        }
+    # A refine never gets here: route_refine_design sends it straight to design_doc,
+    # scoped as prepare decided.
 
     # ── read directions ────────────────────────────────────────────────
     from refactory_dsh.create_ops import _extract_json_array

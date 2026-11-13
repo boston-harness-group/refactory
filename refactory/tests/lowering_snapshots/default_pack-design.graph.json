@@ -711,7 +711,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:route_refine_design",
-      "gate_prompt": "on a light refine, skip research and strategy and go straight to design_doc",
+      "gate_prompt": "on a refine, skip research and strategy and go straight to design_doc",
       "max_iterations": 2,
       "_type": "GateNode"
     },
@@ -1130,7 +1130,6 @@
     "self_check_fixups": 2.0,
     "self_check_timeout_s": 300.0,
     "builder_timeout_s": 14400.0,
-    "refine_design": "light",
     "target": "",
     "base": "",
     "worktree": 1.0,
@@ -1301,20 +1300,6 @@
       "values": [],
       "frozen": true,
       "description": "the most wall time the builder's model session may take (a backstop: it is stopped sooner after 10 minutes with no model output and no running command); its retry gets the same",
-      "required": false
-    },
-    "refine_design": {
-      "default": "light",
-      "kind": "str",
-      "lo": null,
-      "hi": null,
-      "enum": [],
-      "values": [
-        "light",
-        "full"
-      ],
-      "frozen": true,
-      "description": "on a refine: light skips research and strategy; full walks the whole design phase",
       "required": false
     },
     "target": {

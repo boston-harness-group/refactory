@@ -69,7 +69,7 @@ from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
 from refactory_dsh.optim.base import (
-    DEFAULT_MAX_EDITS, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
+    MAX_EDITS_PER_PROPOSAL, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
 )
 
 import structure_fuzz_graphs as fg
@@ -173,7 +173,7 @@ class Applier:
         ``edit`` is one edit, or a compound proposal in its ``{"edits": [...]}`` form.
         """
         proposal = Proposal(edit=edit, parent=parent.id)
-        refused = proposal_refusal(proposal, max_edits=DEFAULT_MAX_EDITS)
+        refused = proposal_refusal(proposal, max_edits=MAX_EDITS_PER_PROPOSAL)
         if refused:
             return refused
         return self.optimizer.attempt(
@@ -1197,7 +1197,7 @@ class EditGenerator:
         rng = self.rng
         size = rng.choice((2, 2, 3, 3, 4))
         if rng.random() < 0.04:
-            size = DEFAULT_MAX_EDITS + 1
+            size = MAX_EDITS_PER_PROPOSAL + 1
         edits: list[Any] = []
         current = state
         new_agents: list[str] = []
@@ -1483,7 +1483,7 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
 def check_compound(applier: Applier, parent: Candidate, edits: list[Any],
                    outcome: Candidate | list[str]) -> list[Violation]:
     """The ``compound`` invariant for one bundle and what the attempt path made of it."""
-    if len(edits) > DEFAULT_MAX_EDITS:
+    if len(edits) > MAX_EDITS_PER_PROPOSAL:
         if isinstance(outcome, list) and outcome and outcome[0].startswith("E-too-many-edits"):
             return []
         return [Violation("compound", f"{len(edits)} edits were not refused as too many: "

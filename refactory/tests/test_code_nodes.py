@@ -862,7 +862,6 @@ def test_the_request_says_agents_read_no_files_and_where_a_fact_is_filled_in(cod
     assert "`<id>__system_prompt`" in filled and "refused (V20)" in filled
     for step in ("compare", "precision", "hypotheses", "decide"):
         assert f"`{step}_task`" in filled, step
-    assert "`use_theorem`" not in filled, "a flag the same op reads holds no slot"
     # With ops that paste their knobs as written, no knob is named.
     state = json.loads(json.dumps(_applier().seed_state))
     for node in state["graph"]["nodes"].values():

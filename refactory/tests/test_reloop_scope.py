@@ -66,7 +66,7 @@ gate: gate_strategy
 verdict: reloop
 scope: somehash
 source: steer
-consumed: yes
+consumed: used
 
 ## [2026-01-01T01:01:00+00:00] correction
 fix the typo
@@ -121,7 +121,7 @@ gate: gate_strategy
 verdict: reloop
 scope: somehash
 source: steer
-consumed: yes
+consumed: used
 
 ## [2026-01-01T01:01:00+00:00] correction
 Add the missing test for edge case X

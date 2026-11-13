@@ -663,8 +663,6 @@ class StagedCurriculum(Loop):
         "tuning": "tune prompts and settings of the current pipeline",
         "creative": "try something different: a new step, a different pipeline shape",
         "ablation": "remove or simplify a part, to learn which parts carry the score",
-        "explore": "explore: try varied changes, structural ones included",
-        "exploit": "exploit: refine what scores best so far",
     }
 
     def strategy(self, run: Run) -> None:
@@ -692,13 +690,6 @@ class StagedCurriculum(Loop):
                     run.stop("epochs")
                     return
         run.stop("curriculum_complete")
-
-
-class StagedV1(StagedCurriculum):
-    """SRF `ai_sci_v1`: the earlier staged variant."""
-
-    name = "staged_v1"
-    stages = ("explore", "exploit")
 
 
 class ResearchThenOptimize(Loop):
@@ -824,16 +815,17 @@ STRATEGIES: dict[str, type[OuterLoop]] = {
     AdaptiveMeta.name: AdaptiveMeta,
     TreeSearch.name: TreeSearch,
     StagedCurriculum.name: StagedCurriculum,
-    StagedV1.name: StagedV1,
     ResearchThenOptimize.name: ResearchThenOptimize,
     Autoscientists.name: Autoscientists,
 }
 
-#: Every SRF mode ported into this repository, counted once. Five of the thirteen are
-#: optimizers -- they choose a parent and propose, which is a search policy -- and the
-#: rest are outer loops, which change what an iteration is. Asserted by the tests, so
-#: a port can be neither quietly dropped nor filed in the wrong bucket.
-SRF_PORT_COUNT = 13
+#: Every SRF mode ported into this repository, counted once: twelve of SRF's thirteen
+#: (`ai_sci_v1`, the earlier staged variant, was deleted; `staged_curriculum` is its
+#: successor). Four of the twelve are optimizers -- they choose a parent and propose,
+#: which is a search policy -- and the rest are outer loops, which change what an
+#: iteration is. Asserted by the tests, so a port can be neither quietly dropped nor
+#: filed in the wrong bucket.
+SRF_PORT_COUNT = 12
 
 #: SRF keeps an optimizer of its own in ``srf/lab/``, beside its thirteen modes:
 #: ``map_elites.py``, a multi-emitter MAP-Elites over mode and knob space. It is not
@@ -842,10 +834,10 @@ SRF_PORT_COUNT = 13
 SRF_LAB_PORT_COUNT = 1
 
 #: SRF's *modes* that are optimizers rather than loops, by the name they register
-#: under. Four of the thirteen select a parent and propose, which is a search policy;
-#: the other nine change what an iteration is. `map_elites` is the fifth optimizer but
-#: it is not one of the thirteen -- it lives in `srf/lab/`, which is why it is counted
-#: by `SRF_LAB_PORT_COUNT` and not here.
+#: under. Four of the twelve ported select a parent and propose, which is a search
+#: policy; the other eight change what an iteration is. `map_elites` is the fifth
+#: optimizer but it is not one of SRF's modes -- it lives in `srf/lab/`, which is why
+#: it is counted by `SRF_LAB_PORT_COUNT` and not here.
 SRF_OPTIMIZER_PORTS: tuple[str, ...] = (
     "archive",        # scs
     "evolutionary",   # evox
@@ -901,10 +893,21 @@ def check_options(name: str, options: dict[str, Any] | None, project: Path | Non
     declares none itself, whatever its base class declares, is not checked, since
     nothing says what it reads.
     """
-    accepted = vars(resolve(name, project)).get("accepted_options")
+    cls = resolve(name, project)
+    accepted = vars(cls).get("accepted_options")
     if accepted is None or not options:
         return
-    unknown = sorted(set(options) - set(accepted))
+    removed = vars(cls).get("removed_options") or {}
+    for key in sorted(set(options) & set(removed)):
+        # A run or profile saved before the option was removed: the value the strategy
+        # now always behaves as is read and ignored; any other is the old behaviour.
+        if options[key] != removed[key]:
+            raise ValueError(
+                f"the {name} strategy no longer has option {key}: it always behaves as "
+                f"{key}={json.dumps(removed[key])}, and {key}={json.dumps(options[key])} is "
+                "no longer supported; drop the option (a run started with it cannot be "
+                "resumed: start a new run)")
+    unknown = sorted(set(options) - set(accepted) - set(removed))
     if unknown:
         raise ValueError(
             f"the {name} strategy has no option {', '.join(unknown)}; "
@@ -933,6 +936,9 @@ def create(
     project = kwargs.get("project")
     cls = resolve(name, Path(project) if project is not None else None)
     check_options(name, strategy_options, Path(project) if project is not None else None)
+    removed = vars(cls).get("removed_options") or {}
+    strategy_options = {key: value for key, value in (strategy_options or {}).items()
+                        if key not in removed}
     model = kwargs.pop("model", None)
     if issubclass(cls, Loop):
         # A Loop subclass: construct directly, configure with options

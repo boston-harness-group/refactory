@@ -73,7 +73,7 @@ def _format_prompt_node() -> nn.Node:
         "format_prompt", "op",
         call=f"{OPS}:format_prompt",
         reads=("current_item.json",),
-        knobs=("skill", "use_theorem", "use_sketch"),
+        knobs=("skill",),
         produces=("user_prompt", "solver_prompt", "skill_section"),
     )
 
