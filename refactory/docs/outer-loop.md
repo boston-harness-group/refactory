@@ -310,7 +310,7 @@ out.
 
 `0`, or a train part of N items or fewer, scores the whole train part as before.
 
-## Compound proposals (up to 4 edits)
+## Compound proposals (up to 4 changes)
 
 A proposal may carry an ordered list of edits, `{"edits": [...]}`, instead of one
 `edit`. They are applied together to the parent as one candidate, which is evaluated
@@ -328,11 +328,26 @@ sections at once; this is the default loop's equivalent.
   does not depend on -- one that changes nothing, or that a later edit overwrites or
   undoes -- is refused `E-noop` with its index. A refusal about one edit names it,
   `[edit k of n: op]`, after the rule's code; one about the combined state names none. A
-  list longer than the cap is refused `E-too-many-edits`.
-- **Cap.** 4 edits per proposal, SkillOpt's edit budget (`MAX_EDITS_PER_PROPOSAL`, a
-  constant, not a run setting).
-- **Who emits lists.** The `autoresearch` request says it may bundle up to 4 edits when a
-  fix needs coordinated changes, with a JSON example. When it
+  list that makes more changes than the cap is refused `E-too-many-edits`, saying how
+  many changes and edits it makes and how they are counted.
+- **Cap.** 4 changes per proposal, SkillOpt's edit budget (`MAX_EDITS_PER_PROPOSAL`, a
+  constant, not a run setting), counted by logical change (`optim/edit_count.py`): a
+  structural edit and the edits that only connect it count as ONE change -- the new (or
+  removed) step's own prompt and settings (an `add_knob`/`set_knob`/`remove_knob` of a
+  knob it binds or reads), its DIRECT neighbours' prompt lines that refer to it (a
+  `set_knob` of a knob a step one hop away binds or reads -- reading what it writes,
+  writing what it reads, or on an edge with it -- whose every changed line names the
+  step or a file or fact it writes), and edges between it and those neighbours. Every
+  other edit counts as one more, and two structural edits are two changes. Only one-hop
+  neighbours qualify, so one change cannot sprawl over the pipeline. A limit of one (a
+  caller's `max_edits=1`) still means single edits.
+- **Counts per candidate.** Each candidate's proposal record (journal `proposal`,
+  report.json `proposal_outcomes`) carries `edit_count`: its changes (`logical`), raw
+  edits (`raw`), structural and knob edits, and the knob text characters it changed
+  (the lines added and removed); report.md's "Proposal versus outcome" shows them.
+- **Who emits lists.** The `autoresearch` request says it may bundle up to 4 changes
+  when a fix needs coordinated changes, and how they are counted, with a JSON example.
+  When it
   asks for one proposal (one candidate per epoch), it asks that the proposal's edits
   cover every step the diagnosis names on the failure path, since an idea left for a
   separate proposal is never run; when it asks for several, separate ideas go in
@@ -351,11 +366,15 @@ sections at once; this is the default loop's equivalent.
   whose outermost object is not valid JSON (a list left open, a reply cut off) is read
   as nothing: no object nested in it (one edit of one proposal) is taken for the
   answer. The reply is read by its own braces first (so a code fence inside a proposed
-  prompt cannot cut it), the last top-level object with a `proposals` list being the
-  answer; a fenced object counts only when it is its fence's whole content. Each proposal the request asked for is refused `E-proposal-shape`, saying
+  prompt cannot cut it), the last top-level object with a `proposals` LIST being the
+  answer (an object whose `proposals` is not a list, or an example `proposal`, is not);
+  after a broken answer, a fenced object is read only when it is a whole answer (a
+  fenced example edit before a cut-off answer is not the answer). A reply that is a
+  top-level array of objects (`[{...}, {...}]`, bare or fenced) is read as that many
+  proposals, every one; an array holding anything else, or left open, is refused
+  whole. Each proposal the request asked for is refused `E-proposal-shape`, saying
   where the JSON broke, so the round asks again within its attempts and the refusals
-  are counted; with `lessons` on, the earlier lessons are kept and the next request
-  marks them not updated in that epoch, with why (journaled, restored on resume).
+  are counted.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
   `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
   them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
@@ -638,11 +657,17 @@ proposals are kept. The other library optimizers call no model; SkillOpt records
 calls in `skillopt_trace.jsonl`, one line per attempt (`attempt`, from 1): as SkillOpt
 does, a failed optimizer call is tried up to 3 times, waiting 1, 2 and 4 s after each
 failure, before its fallback; a spent budget, a cancellation or a missing model choice
-is never retried.
+is never retried. The loop's own analyst, merge, memory and step-review calls are
+retried the same way (`AutoresearchOptimizer._complete`): up to 3 attempts, waiting 1,
+2 and 4 s after each failed one, any exception from an attempt counting, each attempt
+traced with its `attempt`; a spent budget, a cancellation or a missing model choice
+stop at once. A reply is never retried, however unusable; a call refused as longer than
+the model's context is not tried again at the same length but once at half of it, and
+not at all when the request cannot be made shorter.
 
-### Run-wide feedback: changes by kind, lessons, added-step reviews
+### Run-wide feedback: changes by kind, the memory note, added-step reviews
 
-Three more request sections (`optim/feedback.py`) carry what the run has taught so
+Three more request sections (`optim/feedback.py`, `optim/memory.py`) carry what the run has taught so
 far, beyond the recent candidates above. Each has a switch (a profile setting, or `0`/`1`
 on the command line), none changes how anything is scored, and none reads anything but
 the graph, train records and the gate's outcome words: no answer or option is parsed,
@@ -666,13 +691,10 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   several is filed under its most specific structure. A tally line per kind comes
   first (tried, kept, best train fixed−broken). The newest 40 rows (within 9000
   characters) are listed; older ones are only in the tally.
-- **Your lessons so far** (`lessons`, default `1`). The answer format has an optional
-  `lessons` field: what the results so far teach about which changes help here, keeping,
-  revising or dropping earlier lessons. The latest (at most 1500 characters) is kept with
-  the epoch and generation it was written in, journaled (`optimizer_lessons`), restored
-  on resume and shown back in the next request; an answer without it keeps the previous
-  lessons. An answer that could not be read keeps them too, marked as not updated in
-  that epoch, with why; the next readable answer clears the mark.
+- **Optimizer memory** (`lessons`, default `1`). The memory pass's note (below, "The
+  memory pass"): the loop's cross-round memory, shown in the request, to every analyst
+  and to every merge. The proposer writes no `lessons` any more; the answer format has
+  no such field.
 - **Did the added steps contribute?** (`step_review`, default `1`). For every step a
   candidate of the last round added (an insert, a split's halves, a fork's branches, a
   loop's gate; not the fork and join themselves), on the train items it shares with its
@@ -688,9 +710,11 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   to 4 train items (changed outcomes first), the step's prompt as sent, its output and
   the output of the next recorded step that reads it (through the graph's reads, inputs
   and `{{fact}}` slots, so a sibling fork branch is not taken for it), each text whole
-  unless together with the request's frame and instructions they pass 400000 characters
-  (then the longest are cut head and tail to one length, the cut said; a call the
-  provider refuses as too long is retried once at half its length), and answers
+  unless together with the request's frame, instructions and system prompt they pass
+  400000 characters (then the longest are cut head and tail to one length, the cut said,
+  and when the step's own instructions leave the items less than 2000 characters each
+  they are cut too; a call the provider refuses as too long is retried once at half its
+  length, never when that request would be no shorter), and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
   quote and a note. A step that makes the decision -- something reads what it writes
   (or it ends the data pass, for the grader) but no model step does, not even one a
@@ -705,8 +729,11 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   and cached in memory and in `<run root>/step_reviews/` (cleared by a fresh run in the
   same directory, as the trace is), so a retry or a resumed run pays for none again.
   The section keeps full entries within 9000 characters; steps past that get one line
-  of counts each. A failed or unreadable review is recorded and the step is shown
-  without a verdict; it never fails the proposal.
+  of counts each. A failed call is retried as every optimizer call is (above); a failed
+  or unreadable review is recorded and the step is shown without a verdict; it never
+  fails the proposal. Without a data node, a step no edge leaves (the graph's own end,
+  read by the scorer) counts as ending the pass, so a final agent step added there is
+  asked the decision question.
 - **What makes a new step pay off** (`structure_guidance`, default `0`). When on,
   "How nodes compose" adds one generic paragraph: a step helps when it adds work or
   information the pipeline lacks (an independent attempt, several attempts combined by
@@ -733,7 +760,10 @@ paired with a parent picker), on the train records the request carries:
   analysts. Each reads the pipeline (its nodes and edges, each node in
   full with the settings bound to it, every other setting's value) and each item's full
   trace: its input, every step's input and output in the order they ran, the expected
-  answer, the prediction, the score and the grader's feedback. A call's prompt has
+  answer, the prediction, the score and the grader's feedback. Each item's heading
+  carries the item fields its Task declares (`Task.item_metadata`; LiveMath declares
+  `theorem_type`, the type SkillOpt's analysts see as each item's task type), never a
+  field the Task names in `grader_fields`. A call's prompt has
   400000 characters of room (`ANALYST_ROOM`): the optimizer model (Opus 4.6) reads 200k
   tokens, of which Claude Code's own system prompt and the reserved reply take about
   30-40k, and traces dense in notation run 2.5-3.5 characters a token, so 400000
@@ -744,8 +774,10 @@ paired with a parent picker), on the train records the request carries:
   clipped items and the characters left out are counted. A call the provider still
   refuses as longer than the model's context ("prompt is too long", "context length",
   ...) is retried once within half the refused prompt's length, re-clipped the same
-  way (a merge has its pipeline texts clipped instead; its findings stay whole); a
-  retry still too long fails the batch as any failed call does. Only the model call's
+  way (a merge has its pipeline texts clipped instead; its findings stay whole), and
+  not at all when that request would be no shorter; a retry still too long fails the
+  batch as any failed call does. Any other failed call is attempted up to 3 times with
+  SkillOpt's waits (above). Only the model call's
   own failure is read this way: an answer that cannot be read is a failed batch even
   when its prose mentions a context window. The report counts clipped items and
   context retries only for calls paid in that step, so a step remade after a resume,
@@ -776,9 +808,8 @@ paired with a parent picker), on the train records the request carries:
 
 The analysis is made once per proposal step: it is keyed by the epoch, the generation,
 the edited candidate, its train records, the stage's settings and the optimizer's model,
-not by the lessons, so a retry after a refusal (whose request carries the lessons the
-refused answer wrote) reuses it and makes no call; the analysts and merges read the
-lessons of the step's first attempt. The step's analysis is also kept in
+so a retry after a refusal reuses it and makes no call; the analysts and merges read the
+epoch's memory note, the same for every attempt of the step. The step's analysis is also kept in
 `<run root>/analyst_findings/round-<key>.json` when every call of it succeeded, so a
 resumed run reuses it; a step with a failed call is made again on resume, its successful
 calls answered from their own cache, and that analysis (the one its proposal sees) is
@@ -816,17 +847,86 @@ ceil(F/8) + ceil(S/8) analyst calls, then the merges (one per side with more tha
 list, at most 8 lists each, plus the final one when both sides found something), then
 the proposal: on 35 train items, about 5-6 analyst and 3 merge calls, as SkillOpt's
 analysts and merges make. SkillOpt's rank call (it trims its merged edits to the edit
-budget), slow update and meta skill are not run: the proposer chooses and writes the
-edits, and its `lessons` are this loop's optimizer-side memory (they are shown to the
-analysts and merges, as SkillOpt shows its meta skill).
+budget) and slow update are not run: the proposer chooses and writes the edits. Its
+meta skill is the memory pass (below), whose note the analysts and merges read, as
+SkillOpt's read its meta skill.
 
 Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
 LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
 these are generic by design (no dataset hints); SkillOpt never clips a trace (here a
 batch over the call's room has its longest items clipped, and counted); SkillOpt shows
-each item's task type (here the item's input, and its choices when it has them); and SkillOpt's analysts never
+each item's task type (here the fields the item's Task declares, `Task.item_metadata`,
+with its input and its choices when it has them); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
 with its error.
+
+### The memory pass: SkillOpt's meta skill (`lessons`, default `1`)
+
+Once per epoch, from epoch 2, before a model proposer (`autoresearch`, alone, under
+`portfolio` or paired with a parent picker) writes the epoch's proposal, one call of the
+optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta skill
+(`skillopt/optimizer/meta_skill.py`, `trainer.py:2088-2199`) does:
+
+- **Which two pipelines.** SkillOpt compares the previous epoch's last-step skill with
+  this epoch's. Here: the candidate current when the previous epoch proposed (journaled
+  `epoch_current`) and the one current now -- the validation gate's current, or without
+  the gate the train leader. Each epoch scores and gates what the one before proposed,
+  then the pass runs, then the proposal, so the note is read by the proposal it precedes
+  and every later one until the next pass. When nothing replaced the current, SkillOpt
+  rolls the same skill out twice; here the two rollouts are that candidate's
+  previous-epoch rollout and this epoch's (the comparison then shows run-to-run noise,
+  and the request says so).
+- **Which items.** SkillOpt's 20 (`slow_update_samples`): the train ids, sorted,
+  shuffled with `seed + epoch * 2000`, the first 20 (all of them when there are fewer).
+- **What it costs.** Each side's records come from the epoch's own rollouts with the
+  epoch's train seed (rather than SkillOpt's `seed + epoch * 2000`): under the gate the
+  edited candidate is re-scored on every epoch's train sample (fresh evidence) and the
+  epoch's children are scored on it, so on the whole train part a pass usually costs no
+  evaluation. Only sampled items a side has no record of are rolled out
+  (`memory_rollout`, an evaluation counted against the evaluation, rollout, time and
+  token budgets, journaled with its records so a resume reuses them; the candidate's own
+  records and score are untouched): with `train_minibatch` up to 20 rollouts per side,
+  and without the gate (one seed for the run) 20 rollouts when the current did not
+  change. A cap or a spent budget leaves the missing items out; the pass compares what
+  both sides hold. Plus one optimizer-model call per epoch.
+- **What the call reads.** Both pipelines (as an analyst reads one: nodes, edges, each
+  node in full, every setting) and what changed between them (each candidate on the
+  lineage with its own edits and rationale), or the one pipeline when unchanged; the
+  previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
+  comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
+  highest priority), persistent failures, improvements -- each item with both outcomes,
+  answers and grader reasons, its declared metadata and both full traces (every step's
+  input and output, as the analysts render them) -- then stable successes without
+  traces, as SkillOpt shows them. SkillOpt never clips; here the traces share 400000
+  characters with the frame and the system prompt (the analysts' room), the longest cut
+  head and tail to one length, each cut said, and a call refused as too long is retried
+  once at half the length. The prompt is SkillOpt's `meta_skill.md` for a graph: address
+  the future optimizer, what changes help or hurt here, regression risks, revise or drop
+  what did not help, no instructions for the pipeline's own steps. Domain-free; train
+  items only.
+- **What it writes.** `{"reasoning", "memory"}`. SkillOpt sets no length (its real runs
+  wrote 3.4-5.8k characters); the note is asked for and kept within 6000 characters,
+  a longer one cut with the cut said.
+- **Who reads it.** Every analyst call and every merge call (with SkillOpt's
+  `format_meta_skill_context` wording: prefer it when the evidence is ambiguous, do not
+  force it where the traces contradict it) and the proposal request ("Optimizer
+  memory"). It replaces the proposer's former `lessons`; the run ledger and the step
+  reviews stay. It never edits the graph.
+- **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
+  note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
+  next pass that writes one clears the mark. The call is retried as every optimizer call
+  is; a spent budget stops the run as it stops a proposal.
+- **Records.** The call is traced (`optimizer_trace.jsonl`, kind `memory`) and cached
+  in `<run root>/analyst_findings/` like an analyst call; each pass is journaled
+  (`optimizer_memory`: the two candidates, whether they are one, the sample, the items
+  compared and missing, the counts per category, the evaluations and rollouts it made,
+  the call's clipping and retry, and the note); a resume replays the note and the passes
+  and does not make a pass again. report.json's `optimizer_memory` and report.md's
+  "Optimizer memory" list every pass and the latest note.
+
+`lessons` `0` turns it off: no pass, no note, no section. A custom strategy (the
+SkillOpt port) keeps its own meta skill and runs no pass; an optimizer that asks no
+model (random, a parent policy alone) has none.
 
 ### The integrity judge (`integrity_judge`, default `off`)
 

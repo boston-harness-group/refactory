@@ -523,8 +523,10 @@ SETTING_HELP = {
                  "ties at the edge kept (default: 8)",
     "run_ledger": "1 (default) shows the model proposer every candidate of the run by kind "
                   "of change, with train fixed/broken counts and the gate's word; 0 off",
-    "lessons": "1 (default) lets the model proposer write lessons that are kept, survive a "
-               "resume and are shown back next round; 0 off",
+    "lessons": "1 (default) runs the memory pass: once per epoch from epoch 2 one "
+               "optimizer-model call compares the previous and current candidate on 20 "
+               "train items and writes the memory note every analyst, merge and proposal "
+               "call reads (SkillOpt's meta skill); 0 off",
     "step_review": "1 (default) reviews each step the last round added (train counts and one "
                    "optimizer-model call per step) and shows the verdicts; 0 off",
     "structure_guidance": "1 adds what makes a new step pay off to the request's "

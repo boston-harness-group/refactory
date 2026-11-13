@@ -88,6 +88,10 @@ class Task:
     #: it differs from the run's default; a run's own setting for a category wins.
     #: Default: none.
     integrity_policy: Mapping[str, str] = MappingProxyType({})
+    #: Item fields the optimizer's analysts are shown in each item's header, as
+    #: SkillOpt's analysts see each item's task type: a category of the item, never its
+    #: answer. A field also named in ``grader_fields`` is never shown. Default: none.
+    item_metadata: tuple[str, ...] = ()
 
     def instances(
         self, *, part: str | None = None, seed: int | None = None,
@@ -242,6 +246,37 @@ def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
                 allowances[str(name)] = (f"{allowances[name]}; {text}" if name in allowances
                                          else str(text))
     return {"policy": policy, "allowances": allowances}
+
+
+def item_metadata_fields(state: dict[str, Any]) -> tuple[str, ...]:
+    """The item fields the graph's Tasks declare for the analysts (``Task.item_metadata``),
+    in declaration order, less every Task's ``grader_fields``. A Task that cannot be
+    loaded declares nothing."""
+    from refactory_dsh.nn.graph import Graph
+
+    try:
+        graph = Graph.from_state(state.get("graph") or {})
+    except Exception:  # noqa: BLE001 - a graph that cannot be built declares nothing
+        return ()
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    declared: list[str] = []
+    hidden: set[str] = set()
+    for ref in refs:
+        try:
+            task = load_task(ref)
+        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
+            continue
+        hidden |= {str(name) for name in getattr(task, "grader_fields", ()) or ()}
+        for name in getattr(task, "item_metadata", ()) or ():
+            if str(name) not in declared:
+                declared.append(str(name))
+    return tuple(name for name in declared if name not in hidden and name not in ("id", "path"))
+
+
+def item_meta(record: dict[str, Any], fields: Sequence[str]) -> dict[str, Any]:
+    """The declared fields (`item_metadata_fields`) a train record's item carries."""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return {name: meta[name] for name in fields if meta.get(name) not in (None, "", [], {})}
 
 
 def node_item(item: dict[str, Any], task: Task | None) -> dict[str, Any]:

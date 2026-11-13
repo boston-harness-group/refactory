@@ -168,6 +168,9 @@ class LiveMathTask(Task):
     #: and the theorem and its sketch, which state the correct option. The grader
     #: reads them from the instance; ``current_item.json`` never carries them.
     grader_fields = ("correct_choice", "label", "label_text", "theorem", "sketch")
+    #: What the optimizer's analysts see of each item's kind, as SkillOpt's analysts see
+    #: its task type (rollout.py:132 takes the first theorem type).
+    item_metadata = ("theorem_type",)
 
     def __init__(
         self,

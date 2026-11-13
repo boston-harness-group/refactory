@@ -76,24 +76,6 @@ class PickedParent(Optimizer):
             self.proposer.last_considered = value
 
     @property
-    def last_lessons(self) -> str:
-        return str(getattr(self.proposer, "last_lessons", "") or "")
-
-    @last_lessons.setter
-    def last_lessons(self, value: str) -> None:
-        if "proposer" in self.__dict__ and hasattr(self.proposer, "last_lessons"):
-            self.proposer.last_lessons = value
-
-    @property
-    def last_reply_problem(self) -> str:
-        return str(getattr(self.proposer, "last_reply_problem", "") or "")
-
-    @last_reply_problem.setter
-    def last_reply_problem(self, value: str) -> None:
-        if "proposer" in self.__dict__ and hasattr(self.proposer, "last_reply_problem"):
-            self.proposer.last_reply_problem = value
-
-    @property
     def last_analysis(self) -> dict[str, Any] | None:
         return getattr(self.proposer, "last_analysis", None)
 
@@ -104,6 +86,13 @@ class PickedParent(Optimizer):
 
     def bind_model(self, model: Any, *, workdir: Any = None) -> None:
         self.proposer.bind_model(model, workdir=workdir)
+
+    def __getattr__(self, name: str) -> Any:
+        # The memory call (`optim.memory`) is the proposer's: a proposer without one
+        # (the random sampler) leaves the pair without one too.
+        if name == "write_memory" and "proposer" in self.__dict__:
+            return getattr(self.proposer, "write_memory")
+        raise AttributeError(name)
 
     def can_move(self, knob: Any, current: Any) -> bool:
         return self.proposer.can_move(knob, current)

@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import random
 import re
+import time
 from dataclasses import replace
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 
@@ -29,6 +30,33 @@ def text_only(model: Any) -> Any:
     """
     with_policy = getattr(model, "with_tool_policy", None)
     return with_policy("none") if callable(with_policy) else model
+
+
+#: How many times one optimizer call is attempted, and how long the loop waits after a
+#: failed attempt: SkillOpt's Claude backend (``retries=3``; ``min(2 ** attempt, 15)``
+#: seconds after each failed attempt, claude_backend.py:314-324), as the SkillOpt port
+#: (``refactory_packages/skillopt/trace.py`` ``ask``) retries it.
+CALL_ATTEMPTS = 3
+
+
+def retry_delay(attempt: int) -> float:
+    """Seconds waited after failed attempt ``attempt`` (from 0): 1, 2, 4."""
+    return min(2 ** attempt, 15)
+
+
+#: How a retry waits (tests replace it).
+_sleep = time.sleep
+
+
+def _fatal() -> tuple[type[BaseException], ...]:
+    """What ends a call at once, never retried: a spent budget, a cancelled run, a
+    missing model choice."""
+    from concurrent.futures import CancelledError
+
+    from refactory_dsh.budgets import BudgetExhausted
+    from refactory_dsh.model import ModelChoiceError
+
+    return (BudgetExhausted, CancelledError, ModelChoiceError)
 
 
 #: A reader's role: go through one group of whole trajectories and report patterns.
@@ -205,12 +233,6 @@ class AutoresearchOptimizer(Optimizer):
         self._system = system or (
             "You are the optimizer of a search over workflows. You reply with JSON only."
         )
-        #: The answer's ``lessons`` (when the request asked for them), for the loop to
-        #: keep and show back; empty when the answer carried none.
-        self.last_lessons: str = ""
-        #: Why this round's answer could not be read (`answer_json`), empty when it could:
-        #: the loop marks the lessons it keeps as not updated this round.
-        self.last_reply_problem: str = ""
         #: This round's analysis (``ProposalContext.analysts`` on; `_analyse`), for the
         #: loop to journal; ``None`` when no analyst ran.
         self.last_analysis: dict[str, Any] | None = None
@@ -287,6 +309,38 @@ class AutoresearchOptimizer(Optimizer):
         failures = [failed for _found, failed in results if failed is not None]
         return findings, failures
 
+    def _complete(self, call: dict[str, Any], text: str, system: str, gate: Any = None
+                  ) -> tuple[str | None, str | None, bool, int]:
+        """One optimizer call, retried as SkillOpt retries it (``CALL_ATTEMPTS``): the
+        reply, or ``None`` and the last error; whether the provider refused the prompt as
+        longer than the model's context; and how many attempts were made. Any exception
+        from an attempt is a failed attempt, recorded in the trace (with its ``attempt``,
+        from 1) and followed by a wait of ``retry_delay``. A spent budget, a cancelled run
+        or a missing model choice raise at once (`_fatal`). A context overflow is not
+        tried again at the same length: the caller retries it shorter. A reply is never
+        retried, however unusable: reading it is the caller's. ``gate`` (a semaphore)
+        bounds the calls in flight, not the waits."""
+        from contextlib import nullcontext
+
+        from . import analysts
+
+        error = None
+        for attempt in range(1, CALL_ATTEMPTS + 1):
+            try:
+                with gate if gate is not None else nullcontext():
+                    reply = self._client.complete(text, system=system, **self._completion_options)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                self.record_call(**call, attempt=attempt, reply=None, error=error)
+                if isinstance(exc, _fatal()):
+                    raise
+                if analysts.context_overflow(error):
+                    return None, error, True, attempt
+                _sleep(retry_delay(attempt - 1))
+                continue
+            return reply, None, False, attempt
+        return None, error, False, CALL_ATTEMPTS
+
     def _review_steps(self, ctx: ProposalContext) -> list[dict[str, Any]]:
         """Each added step (``ctx.added_steps``) with a reviewer's verdict on whether its
         output holds work its inputs lacked: one call per step that recorded text output,
@@ -324,36 +378,39 @@ class AutoresearchOptimizer(Optimizer):
 
             def attempt(text: str, retry: bool) -> tuple[Any, str | None, bool]:
                 """The review, or its error and whether the model call itself (not the
-                reading of its reply) failed as longer than the model's context."""
+                reading of its reply) failed as longer than the model's context. The
+                call is retried as every optimizer call is (`_complete`)."""
                 call = {"kind": "step_review", "epoch": ctx.epoch,
                         "generation": ctx.generation, "step": entry.get("step"),
                         "candidate": entry.get("candidate"),
                         "items": [s.get("item") for s in entry.get("samples") or ()],
                         "system": feedback.STEP_REVIEW_SYSTEM, "prompt": text,
                         **({"context_retry": True} if retry else {})}
-                reply, answered = None, False
+                reply, error, overflow, made = self._complete(
+                    call, text, feedback.STEP_REVIEW_SYSTEM)
+                if reply is None:
+                    return None, error, overflow
                 try:
-                    reply = self._client.complete(text, system=feedback.STEP_REVIEW_SYSTEM,
-                                                  **self._completion_options)
-                    answered = True
                     found = parse(extract_json(reply))
                 except Exception as exc:  # a failed review is shown as such, never fatal
-                    from refactory_dsh.budgets import BudgetExhausted
-
-                    if isinstance(exc, BudgetExhausted):
-                        raise
                     error = f"{type(exc).__name__}: {exc}"
-                    self.record_call(**call, reply=reply, error=error)
-                    return None, error, not answered and analysts.context_overflow(error)
-                self.record_call(**call, reply=reply, error=None, verdict=found["verdict"])
+                    self.record_call(**call, attempt=made, reply=reply, error=error)
+                    return None, error, False
+                self.record_call(**call, attempt=made, reply=reply, error=None,
+                                 verdict=found["verdict"])
                 return found, None, False
 
             found, error, overflow = attempt(prompt, False)
             if found is None and overflow:
-                # Once, at half the length the provider refused, as an analyst is retried.
-                found, error, _overflow = attempt(
-                    feedback.review_prompt(entry, ctx.mode_name, room=max(1, len(prompt) // 2)),
-                    True)
+                # Once, at half the length the provider refused, as an analyst is retried;
+                # not at all when the request cannot be made shorter.
+                smaller = feedback.review_prompt(entry, ctx.mode_name,
+                                                 room=max(1, len(prompt) // 2))
+                if len(smaller) < len(prompt):
+                    found, error, _overflow = attempt(smaller, True)
+                else:
+                    error = (f"{error}; the request could not be made shorter, so it was not "
+                             "tried again")
             if found is None:
                 return index, {"review_error": error}
             cache[key] = found
@@ -387,28 +444,29 @@ class AutoresearchOptimizer(Optimizer):
                               "client": type(self._client).__name__}, sort_keys=True)
 
     def _ask(self, ctx: ProposalContext, system: str, prompt: str, fields: dict[str, Any],
-             parse: Any, counts: dict[str, int], rebuild: Any = None
+             parse: Any, counts: dict[str, int], rebuild: Any = None,
+             missing: str = 'the answer has no "findings" list'
              ) -> tuple[Any, str | None, bool, bool]:
-        """One analyst-stage call (`_analyse`): ``parse(payload)`` of the reply, or
-        ``None`` and why, whether it was retried after a context overflow, and whether
+        """One analyst-stage call (`_analyse`, and the memory call, `write_memory`):
+        ``parse(payload)`` of the reply, or ``None`` and why (``missing`` when ``parse``
+        finds nothing), whether it was retried after a context overflow, and whether
         it was answered from the cache (nothing paid now). Cached by
         the optimizer's model and the call's whole text, in memory and in the run
         directory (``analyst_findings/``); a call is recorded in the optimizer trace with
         what it found. At most ``analysts.CONCURRENCY`` calls of a stage are in flight
-        at once, merges included. A call the provider refuses as longer than the model's
-        context (`analysts.context_overflow`) is retried once with ``rebuild(room)``, the
-        same request within half the failed prompt's length; its answer is cached under
+        at once, merges included. A failed call is attempted again as SkillOpt retries
+        it (`_complete`: up to ``CALL_ATTEMPTS``, waiting ``retry_delay``); an
+        unreadable reply is not. A call the provider refuses as longer than the model's
+        context (`analysts.context_overflow`) is retried with ``rebuild(room)``, the
+        same request within half the failed prompt's length, unless that is no shorter;
+        its answer is cached under
         the original call, so a retry or a resumed run pays for neither again. A spent
         budget, a cancelled run or a missing model choice stop the proposal (as the
         SkillOpt port's ``ask``); any other failure is recorded and returned, never
         raised."""
         import hashlib
         import threading
-        from concurrent.futures import CancelledError
         from pathlib import Path
-
-        from refactory_dsh.budgets import BudgetExhausted
-        from refactory_dsh.model import ModelChoiceError
 
         from . import analysts
 
@@ -442,34 +500,41 @@ class AutoresearchOptimizer(Optimizer):
             call = {**fields, "epoch": ctx.epoch, "generation": ctx.generation,
                     "system": system, "prompt": text,
                     **({"context_retry": True} if retry else {})}
-            reply, answered = None, False
-            with lock:
-                counts["calls"] += 1
             try:
-                with gate:
-                    reply = self._client.complete(text, system=system,
-                                                  **self._completion_options)
-                answered = True
-                found = parse(extract_json(reply))
-                if found is None:
-                    raise ValueError('the answer has no "findings" list')
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                self.record_call(**call, reply=reply, error=error)
-                if isinstance(exc, (BudgetExhausted, CancelledError, ModelChoiceError)):
-                    raise
+                reply, error, overflow, made = self._complete(call, text, system, gate=gate)
+            except BaseException:
+                with lock:
+                    counts["calls"] += 1
+                raise
+            with lock:
+                counts["calls"] += made
+            if reply is None:
                 # Only a failed model call can say the prompt did not fit: an unreadable
                 # reply's error quotes the reply, whose prose may name a context window.
-                return None, error, None, not answered and analysts.context_overflow(error)
-            self.record_call(**call, reply=reply, error=None, findings=found)
+                return None, error, None, overflow
+            try:
+                found = parse(extract_json(reply))
+                if found is None:
+                    raise ValueError(missing)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                self.record_call(**call, attempt=made, reply=reply, error=error)
+                return None, error, None, False
+            self.record_call(**call, attempt=made, reply=reply, error=None, findings=found)
             return found, None, reply, False
 
         found, error, reply, overflow = attempt(prompt, False)
         retried = False
         if found is None and rebuild is not None and overflow:
-            # Once, at half the length the provider refused, re-clipped the same way.
-            retried = True
-            found, error, reply, _overflow = attempt(rebuild(max(1, len(prompt) // 2)), True)
+            # Once, at half the length the provider refused, re-clipped the same way;
+            # not at all when the request cannot be made shorter.
+            smaller = rebuild(max(1, len(prompt) // 2))
+            if len(smaller) < len(prompt):
+                retried = True
+                found, error, reply, _overflow = attempt(smaller, True)
+            else:
+                error = (f"{error}; the request could not be made shorter, so it was not "
+                         "tried again")
         if found is None:
             return None, error, retried, False
         # The answer, under the original call's key: the same call made again (a retry,
@@ -484,12 +549,40 @@ class AutoresearchOptimizer(Optimizer):
                 pass
         return found, None, retried, False
 
+    def write_memory(self, *, epoch: int, generation: int,
+                     build: Callable[[int], tuple[str, dict[str, int]]]) -> dict[str, Any]:
+        """The epoch's memory call (`optim.memory`): ``build(room)`` makes the request
+        within ``room`` characters and says what it clipped. One call of the optimizer's
+        model, traced (kind ``memory``), retried and cached as an analyst call is
+        (`_ask`), retried at half size after a context overflow. Returns ``{"note"
+        ({"text", "reasoning"}) or None, "error", "context_retry", "cached", "calls",
+        "clipped_items", "clipped_chars", "prompt_chars"}``; a spent budget, a cancelled
+        run or a missing model choice raise."""
+        from . import memory
+
+        prompt, clip = build(memory.MEMORY_ROOM)
+        clip = dict(clip)
+        counts = {"calls": 0, "cached": 0}
+
+        def smaller(room: int) -> str:
+            text, used = build(room)
+            clip.update(used)
+            return text
+
+        found, error, retried, cached = self._ask(
+            ProposalContext(epoch=epoch, generation=generation), memory.MEMORY_SYSTEM, prompt,
+            {"kind": "memory"}, memory.parse_note, counts, rebuild=smaller,
+            missing='the answer has no "memory" note')
+        return {"note": found, "error": error, "context_retry": retried, "cached": cached,
+                "calls": counts["calls"], "clipped_items": int(clip.get("items") or 0),
+                "clipped_chars": int(clip.get("chars") or 0), "prompt_chars": len(prompt)}
+
     def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
         """The analysis of this proposal step, made once: keyed by the epoch, the
         generation, the edited candidate, its train records, the stage's settings and
-        the optimizer's model (`analysts.round_key`), never by the lessons, so a retry
-        in the same step reuses it (the lessons it saw are those of the step's first
-        attempt) and pays for no call. Kept in memory and in
+        the optimizer's model (`analysts.round_key`), so a retry in the same step reuses
+        it and pays for no call (the memory note it read is the epoch's, the same for
+        every attempt). Kept in memory and in
         ``analyst_findings/round-<key>.json``, so a resumed run reuses it too."""
         from pathlib import Path
 
@@ -664,8 +757,6 @@ class AutoresearchOptimizer(Optimizer):
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
-        self.last_lessons = ""
-        self.last_reply_problem = ""
         self.last_analysis = None
         if ctx.added_steps:
             ctx = replace(ctx, added_steps=self._review_steps(ctx))
@@ -702,20 +793,15 @@ class AutoresearchOptimizer(Optimizer):
             # unreadable). One refused stand-in per proposal asked for, so the loop
             # counts them and asks again, with why, while it has attempts left.
             self.last_diagnosis = self.last_considered = ""
-            self.last_reply_problem = malformed
             why = (f"your whole answer was not valid JSON ({malformed}), so nothing in it "
                    "was read: none of its proposals, nor its diagnosis"
-                   + (" or lessons" if ctx.ask_lessons else "")
-                   + "; answer again with one valid JSON object")
+                   "; answer again with one valid JSON object")
             unreadable = [Proposal(edit={UNREADABLE_PROPOSAL: why}) for _ in range(max(1, n))]
             self.record_call(**call, reply=text, proposals=0, unreadable=len(unreadable),
                              diagnosis="", considered="", error=f"malformed answer: {malformed}")
             return unreadable
         self.last_diagnosis = str(payload.get("diagnosis", "") or "")
         self.last_considered = considered_text(payload.get("considered"))
-        if ctx.ask_lessons:
-            from .feedback import lessons_text
-            self.last_lessons = lessons_text(payload.get("lessons"))
         parent_ids = {parent.id for parent in parents}
         # A proposal that names no parent belongs to the pipeline the request showed
         # ("The pipeline you may edit" is ``ctx.parent``'s). Left unset, the loop
@@ -856,11 +942,20 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
     `extract_json`, an object nested inside a broken one is never taken for the answer:
     it is a fragment of it (one edit of one proposal). The whole reply is read first,
     its top-level objects by their own braces (strings skipped, so a code fence inside
-    a prompt the answer proposes cannot end it); a fenced object counts only when it is
-    its fence's whole content. No JSON object at all raises ``ValueError``, as
+    a prompt the answer proposes cannot end it); the answer is the object with a
+    ``proposals`` list (`_is_answer`), as the answer format says. A reply that is a
+    top-level array of objects is read as that many proposals, every one of them
+    (`_top_array`), or refused whole. When the reply's object is broken, a fenced
+    object is read only when it is a whole answer: an example edit fenced before a cut-off
+    answer is not the answer. No JSON object at all raises ``ValueError``, as
     `extract_json` does."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the model returned nothing")
+    listed, problem = _top_array(text)
+    if listed is not None:
+        return {"proposals": listed}, ""
+    if problem:
+        return {}, problem
     found, problem = _outermost_object(text)
     if found is not None:
         return found, ""
@@ -869,7 +964,7 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
             loaded = json.loads(chunk.strip())
         except json.JSONDecodeError:
             continue
-        if isinstance(loaded, dict):
+        if _is_answer(loaded):
             return loaded, ""
     if problem:
         return {}, problem
@@ -878,8 +973,35 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
 
 #: How a JSON object starts: a brace, then a key. Braces in prose (``{a, b}``) do not.
 _JSON_START = re.compile(r"\{\s*(\"|\})")
-#: The keys only a whole answer has (`_answered_proposals`).
-_ANSWER_KEYS = ("proposals", "proposal")
+#: How a top-level array of objects starts: a bracket, then a brace.
+_ARRAY_START = re.compile(r"\[\s*\{")
+
+
+def _is_answer(loaded: Any) -> bool:
+    """Whether a JSON value is a whole answer: an object with a ``proposals`` list."""
+    return isinstance(loaded, dict) and isinstance(loaded.get("proposals"), list)
+
+
+def _top_array(text: str) -> tuple[list[dict[str, Any]] | None, str]:
+    """The proposals of a reply whose JSON is a top-level array of objects (``[{...},
+    {...}]``, bare or fenced): every entry, or none and why the array cannot be read
+    whole. ``(None, "")`` when the reply's first object is not inside such an array."""
+    start = _ARRAY_START.search(text)
+    if start is None or (0 <= text.find("{") < start.start()):
+        return None, ""
+    end = _object_end(text, start.start(), "[", "]")
+    if end is None:
+        return None, (f"its top-level array opened at character {start.start() + 1} is never "
+                      f"closed (cut off? it ends: …{' '.join(text[-120:].split())})")
+    try:
+        loaded = json.loads(text[start.start():end + 1])
+    except json.JSONDecodeError as exc:
+        return None, (f"its top-level array is not valid JSON ({exc.msg} at line {exc.lineno} "
+                      f"column {exc.colno})")
+    if not loaded or not all(isinstance(entry, dict) for entry in loaded):
+        return None, ("its top-level array holds something other than proposal objects; "
+                      'write one object with a "proposals" list')
+    return list(loaded), ""
 
 
 def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
@@ -917,7 +1039,7 @@ def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
         else:
             if isinstance(loaded, dict):
                 first = loaded if first is None else first
-                if any(key in loaded for key in _ANSWER_KEYS):
+                if _is_answer(loaded):
                     answer = loaded
         start = text.find("{", end + 1)
     if answer is not None:
@@ -927,9 +1049,9 @@ def _outermost_object(text: str) -> tuple[dict[str, Any] | None, str]:
     return first, ""
 
 
-def _object_end(text: str, start: int) -> int | None:
+def _object_end(text: str, start: int, opens: str = "{", closes: str = "}") -> int | None:
     """The index of the ``}`` closing the ``{`` at ``start`` (strings skipped), or
-    ``None`` when it is never closed."""
+    ``None`` when it is never closed; ``opens``/``closes`` ``[``/``]`` for an array."""
     depth = 0
     in_string = escaped = False
     for index in range(start, len(text)):
@@ -944,9 +1066,9 @@ def _object_end(text: str, start: int) -> int | None:
             continue
         if char == '"':
             in_string = True
-        elif char == "{":
+        elif char == opens:
             depth += 1
-        elif char == "}":
+        elif char == closes:
             depth -= 1
             if depth == 0:
                 return index
