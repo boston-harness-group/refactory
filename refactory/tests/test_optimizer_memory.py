@@ -98,7 +98,7 @@ def test_the_request_lists_regressions_first_with_both_traces_and_stable_ones_wi
     assert "B-BEFORE" in text and "B-NOW" in regressed and "Reason now: WHY-b" in regressed
     assert "A-BEFORE" in text and "A-NOW" in text
     stable = text[text.index("### Stable successes"):]
-    assert "#### Item d" in stable and "D-NOW" not in text and "D-BEFORE" not in text
+    assert "#### Task d: d" in stable and "D-NOW" not in text and "D-BEFORE" not in text
     assert "PIPE-START" in text and "PIPE-NOW" in text and "EDITS" in text
     assert "EARLIER-NOTE" in text and "Reflect on whether it improved or harmed" in text
     assert '"memory": "<compact optimizer-side guidance' in text
@@ -337,8 +337,12 @@ def test_without_the_gate_an_unchanged_current_is_rolled_out_again_and_counted(
     assert passes[0]["evaluated"] == 1 and passes[0]["rollouts"] == len(TRAIN_IDS)
     assert passes[1]["evaluated"] == 0, "both scored with the run's one seed"
     (rolled,) = _events(loop, "memory_rollout")
-    assert rolled["for_epoch"] == 2 and rolled["epoch"] == 1
+    assert rolled["for_epoch"] == 2 and rolled["key"] == "fresh2"
     assert len(rolled["records"]) == len(TRAIN_IDS)
+    # The earlier rollout is the one it was scored with; the fresh one is this pass's.
+    prompt = proposer.asked[0]["prompt"]
+    assert ("Start of the epoch: its rollout when it was scored (the run's seed). Now: a "
+            "rollout made for this epoch's memory pass (the run's seed).") in prompt
     assert loop.evaluations == sum(1 for c in loop.population if c.evaluated) + 1
     report = loop.report()
     assert report["optimizer_memory"]["evaluations"] == 1
@@ -447,11 +451,10 @@ def test_a_tasks_declared_fields_head_each_item_and_a_grader_field_never_does(mo
         "id": "data", "kind": "data", "task_ref": "declaring_task", "subgraph_entry": "w",
         "subgraph_exit": "w"}, "w": {"id": "w", "kind": "op", "call": "loop_ops:noop"}},
         "edges": []}}
-    fields = task_module.item_metadata_fields(state)
-    assert fields == ("kind", "tags"), "the grader field is dropped"
+    read = task_module.item_metadata_reader(state)
     record = _rec("a", False, metadata={"kind": "algebra", "answer": "42", "tags": ["x", "y"],
                                         "question": "Q?"})
-    record["item_meta"] = task_module.item_meta(record, fields)
+    record["item_meta"] = read(record)
     assert record["item_meta"] == {"kind": "algebra", "tags": ["x", "y"]}
     header = analysts.item_text(record).splitlines()[0]
     assert header.endswith("— kind: algebra; tags: x, y") and "42" not in header
@@ -459,17 +462,24 @@ def test_a_tasks_declared_fields_head_each_item_and_a_grader_field_never_does(mo
     assert "kind:" not in analysts.item_text({**record, "item_meta": {}}).splitlines()[0]
 
 
-def test_livemath_declares_its_theorem_type():
+def test_livemath_shows_skillopts_task_type_exactly():
+    """rollout.py:132: the first theorem type, else math_mcq."""
     from refactory_packages.livemath.tasks import LiveMathTask
 
-    assert LiveMathTask.item_metadata == ("theorem_type",)
-    assert "theorem_type" not in LiveMathTask.grader_fields
+    task = LiveMathTask()
+    assert task.item_meta({"theorem_type": ["inequality", "existence"]}) == {
+        "task_type": "inequality"}
+    assert task.item_meta({"theorem_type": []}) == {"task_type": "math_mcq"}
+    assert task.item_meta({}) == {"task_type": "math_mcq"}
+    assert "task_type" not in LiveMathTask.grader_fields
 
 
 def test_the_loop_hands_the_analysts_records_with_their_declared_fields(tmp_path, monkeypatch):
     from refactory_dsh.loop import Loop
 
-    monkeypatch.setattr(Loop, "_item_metadata_fields", lambda self: ("kind",))
+    monkeypatch.setattr(Loop, "_item_meta_reader",
+                        lambda self: lambda r: ({"kind": r["metadata"]["kind"]}
+                                                if "kind" in (r.get("metadata") or {}) else {}))
     original = Loop._parent_train_records
 
     def with_metadata(self, board):  # type: ignore[no-untyped-def]
@@ -649,3 +659,127 @@ def test_a_review_whose_instructions_dominate_shrinks_on_its_retry_or_is_not_res
         {**entry["samples"][0], "input": "x", "output": "y", "next_output": "z"}]}
     AutoresearchOptimizer(client).propose(ProposalContext(added_steps=[floor]), 1, [])
     assert len(client.reviews) == 1, "nothing to cut: the same request is not sent again"
+
+
+# ── the independent review's fixes ──────────────────────────────────────────
+
+
+def test_an_answer_with_a_proposals_list_wins_over_any_array():
+    answer = {"diagnosis": "d", "proposals": [{"edit": {"op": "set_knob", "name": "a", "value": 1}}]}
+    prose = ("I will send edits shaped like [{op, knob}] below.\n```json\n"
+             + json.dumps(answer) + "\n```")
+    assert answer_json(prose) == (answer, "")
+    example = 'Example: [{"op": "add_node"}] -- now my answer: ' + json.dumps(answer)
+    assert answer_json(example) == (answer, ""), "the example array is not the answer"
+    edit = {"op": "set_knob", "name": "a", "value": 1}
+    assert answer_json("Shaped like [{op, knob}]: " + json.dumps(edit)) == (edit, ""), (
+        "brackets in prose are not an array")
+    with pytest.raises(ValueError, match="no JSON object"):
+        answer_json("Nothing to change; edits would look like [{op, knob}].")
+    cut = 'Example: [{"op": "add_node"}]\n{"diagnosis": "d", "proposals": [{"edit": {'
+    found, problem = answer_json(cut)
+    assert found == {} and "never closed" in problem, "nor before a cut-off answer"
+
+
+def test_a_knob_another_step_binds_is_not_the_new_steps_own():
+    from refactory_dsh.optim.edit_count import count
+
+    shared = {"id": "check", "kind": "agent", "prompt_template": "Check.",
+              "reads": ["draft.txt"], "writes": ["check.txt"],
+              "knobs": ["final__task", "report__task", "draft__task"]}
+    edits = [{"op": "insert_after", "target": "draft", "node": shared},
+             *({"op": "set_knob", "name": name, "value": f"REWRITTEN {name}"}
+               for name in ("final__task", "report__task", "draft__task"))]
+    tally = count(edits, _graph())
+    assert (tally["logical"], tally["raw"]) == (4, 4), "three whole rewrites, each its own"
+
+
+def test_the_changes_shown_start_from_the_common_ancestor():
+    lineage = {"common": "root", "prev": [{"id": "a", "parent": "root", "edits": ["EA"]}],
+               "curr": [{"id": "b", "parent": "root", "edits": ["EB"]}]}
+    text = "\n".join(memory.changes_lines(lineage))
+    assert "different branches from their common ancestor `root`" in text
+    assert text.index("EA") < text.index("From it to the current candidate") < text.index("EB")
+    down = "\n".join(memory.changes_lines({"common": "a", "prev": [], "curr": [
+        {"id": "b", "parent": "a", "edits": ["EB"]}]}))
+    assert "descends from the start-of-epoch one" in down and "EB" in down
+    apart = "\n".join(memory.changes_lines({"common": None, "prev": [], "curr": []}))
+    assert "share no ancestor" in apart
+
+
+def test_a_sibling_current_is_compared_from_their_common_ancestor(tmp_path, monkeypatch):
+    # Ungated, a lower level scores higher: 4 (from 5) leads, then 3, also from 5.
+    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 4)], [(5, 3)], []], val_gate=False)
+    by_id = {c.id: c for c in loop.population}
+    seed = next(c.id for c in loop.population if _level(c) == 5)
+    passes = _events(loop, "optimizer_memory")
+    assert [(_level(by_id[p["prev"]]), _level(by_id[p["curr"]])) for p in passes] == [
+        (5, 4), (4, 3)]
+    assert (f"different branches from their common ancestor `{seed}`"
+            in proposer.asked[1]["prompt"])
+
+
+class _Stopped(Client):
+    def __init__(self) -> None:
+        super().__init__(RuntimeError("503 overloaded"))
+
+
+def test_a_retry_wait_ends_on_a_stop(monkeypatch):
+    waits: list[float] = []
+    monkeypatch.setattr(random_optimizer, "_sleep", waits.append)
+    client = _Stopped()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.stop_check = lambda: True
+    with pytest.raises(CancelledError):
+        optimizer.write_memory(epoch=2, generation=1, build=_build)
+    assert len(client.memory_calls()) == 1 and waits == [], "not attempted again"
+    import threading
+
+    event = threading.Event()
+    event.set()
+    scoped = AutoresearchOptimizer(_Stopped())
+    scoped._client._cancellations = (event,)  # a DshModelClient's cancellation scope
+    with pytest.raises(CancelledError):
+        scoped.write_memory(epoch=2, generation=1, build=_build)
+    patient = AutoresearchOptimizer(_Stopped())
+    patient.stop_check = lambda: False
+    patient.write_memory(epoch=2, generation=1, build=_build)
+    assert sum(waits) == 1 + 2 + 4, "no stop: SkillOpt's waits, in slices"
+
+
+def test_the_loop_hands_its_stop_request_to_the_optimizer(tmp_path, monkeypatch):
+    from refactory_dsh.control import Control
+
+    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], []])
+    assert proposer.stop_check() is False
+    monkeypatch.setattr(Control, "read_request", lambda self: {"action": "stop"})
+    assert proposer.stop_check() is True
+    monkeypatch.setattr(Control, "read_request", lambda self: {"action": "pause"})
+    assert proposer.stop_check() is False
+
+
+class _Cancelling(Remembering):
+    def write_memory(self, *, epoch, generation, build):  # type: ignore[no-untyped-def]
+        raise CancelledError("the run was stopped")
+
+
+def test_a_cancelled_memory_call_records_no_pass_so_a_resume_makes_it(tmp_path, monkeypatch):
+    with pytest.raises(CancelledError):
+        _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)]],
+             proposer=_Cancelling([[(5, 7)], [(7, 8)]]))
+    root = next((tmp_path / "run").glob("**/journal.jsonl")).parent
+    assert '"optimizer_memory"' not in (root / "journal.jsonl").read_text()
+    again = Remembering([[]])
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=2, val_gate=True, resume=True)
+        resumed.optimizer = again
+        resumed.run()
+    assert [a["epoch"] for a in again.asked] == [2] and resumed._memory["text"] == "NOTE-2"
+
+
+def test_every_compared_item_is_headed_by_its_question():
+    prev = [_rec("q1", True, metadata={"question": "Q-ONE?"})]
+    curr = [_rec("q1", True, metadata={"question": "Q-ONE?"})]
+    entries, _ = memory.pairs(prev, curr, ["q1"])
+    text, _ = _built(entries)
+    assert "#### Task q1: Q-ONE?" in text[text.index("### Stable successes"):]

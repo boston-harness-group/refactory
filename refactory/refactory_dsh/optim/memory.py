@@ -19,7 +19,8 @@ SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, 
   previous epoch proposed and the one current now (the validation gate's current, or
   without the gate the train leader). When they are one candidate (nothing kept this
   epoch), SkillOpt rolls the same skill out twice; here the two rollouts are that
-  candidate's previous-epoch rollout and this epoch's.
+  candidate's previous-epoch rollout and this epoch's under the gate, and without it its
+  rollout when it was scored and a fresh one made for the pass.
 - **Which items**: ``slow_update_samples`` (20, default.yaml:99) train items, the train
   ids shuffled with ``seed + epoch * 2000`` (trainer.py:2118-2119, as the slow update's
   sample, :1843-1844). Rolled out with the epoch's own train seed rather than SkillOpt's
@@ -52,7 +53,7 @@ import random
 from typing import Any, Mapping, Sequence
 
 from .analysts import ANALYST_ROOM, fit_item, item_cap, item_text
-from .base import _by_item, _clip, _clip_middle, _table
+from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table
 
 #: SkillOpt's ``slow_update_samples`` (``_base_/default.yaml:99``): the train items the
 #: two rollouts are compared on.
@@ -283,7 +284,8 @@ def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, 
         lines = [f"### {label}"]
         for e in listed:
             prev, curr = e["prev"], e["curr"]
-            lines += ["", f"#### Item {e['id']}{_meta_text(curr)}",
+            lines += ["", f"#### Task {e['id']}: {_task_text(curr, prev, e['id'])}"
+                          f"{_meta_text(curr)}",
                       _side_line(before, prev), _side_line(after, curr)]
             if _reason(curr) and not curr.get("passed"):
                 lines.append(f"- Reason now: {_clip(_reason(curr), 600)}")
@@ -296,6 +298,18 @@ def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, 
     return "\n\n".join(parts)
 
 
+def _task_text(curr: Mapping[str, Any], prev: Mapping[str, Any], item: str) -> str:
+    """What the item asks, as SkillOpt heads each comparison entry (slow_update.py:247,
+    :330): the question (or task description, or instruction) from its metadata, else
+    its id."""
+    for record in (curr, prev):
+        meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+        for key in ("question", "task_description", "instruction", *TRAJECTORY_INPUT_KEYS):
+            if meta.get(key):
+                return str(meta[key]).strip()
+    return item
+
+
 def _meta_text(record: Mapping[str, Any]) -> str:
     """The item's declared metadata (``item_meta``), for its heading."""
     from .analysts import metadata_text
@@ -304,18 +318,33 @@ def _meta_text(record: Mapping[str, Any]) -> str:
     return f" -- {text}" if text else ""
 
 
-def changes_lines(path: Sequence[Mapping[str, Any]]) -> list[str]:
-    """What changed from the start-of-epoch candidate to the current one: each candidate
-    on the lineage between them with its own edits, oldest first (``{"id", "parent",
-    "edits", "rationale"}``)."""
-    lines = []
-    for step in path:
-        edits = json.dumps(step.get("edits") or [], default=str)
-        lines.append(f"- `{step.get('id')}` (from `{step.get('parent')}`): "
-                     f"{_clip_middle(edits, 4000)}"
-                     + (f" -- rationale: {_clip(step.get('rationale'), 400)}"
-                        if step.get("rationale") else ""))
-    return lines
+def changes_lines(lineage: Mapping[str, Any]) -> list[str]:
+    """What separates the start-of-epoch candidate from the current one (``{"common",
+    "prev", "curr"}``, `Loop._lineage_edits`): from their common ancestor, each
+    candidate on the way to either with its own edits, oldest first; said plainly when
+    they are on different branches or share no ancestor."""
+    def lines(path: Sequence[Mapping[str, Any]]) -> list[str]:
+        out = []
+        for step in path:
+            edits = json.dumps(step.get("edits") or [], default=str)
+            out.append(f"- `{step.get('id')}` (from `{step.get('parent')}`): "
+                       f"{_clip_middle(edits, 4000)}"
+                       + (f" -- rationale: {_clip(step.get('rationale'), 400)}"
+                          if step.get("rationale") else ""))
+        return out
+
+    common, before, after = lineage.get("common"), list(lineage.get("prev") or ()), list(
+        lineage.get("curr") or ())
+    if common is None:
+        return ["They share no ancestor in this run. The start-of-epoch candidate's lineage:",
+                *lines(before), "The current candidate's lineage:", *lines(after)]
+    if not before:
+        return [f"The current candidate descends from the start-of-epoch one; the changes "
+                "since, oldest first:", *lines(after)]
+    return [f"They are on different branches from their common ancestor `{common}`. "
+            "From it to the start-of-epoch candidate:", *lines(before),
+            "From it to the current candidate:", *(lines(after) or ["(none: it is the "
+                                                                   "common ancestor)"])]
 
 
 def state_view(state: Mapping[str, Any]) -> Any:

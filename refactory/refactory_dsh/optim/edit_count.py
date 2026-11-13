@@ -4,7 +4,9 @@ Toward the per-proposal cap (``MAX_EDITS_PER_PROPOSAL``), a structural edit and 
 edits that only connect it count as ONE change:
 
 - the new (or removed) step's own prompt and settings: an ``add_knob``, ``set_knob`` or
-  ``remove_knob`` of a knob that step binds or reads;
+  ``remove_knob`` of a knob that step ALONE binds or reads (a knob another step binds or
+  reads too is that step's as well, so its edit counts on its own unless it is a
+  neighbour's line naming the step, below);
 - its DIRECT neighbours' prompt lines that refer to it: a ``set_knob`` of a knob a
   direct neighbour binds or reads (a step that reads what it writes, writes what it
   reads, or sits next to it on an edge) whose changed lines each name the step or a
@@ -133,8 +135,8 @@ def _connects(edit: Mapping[str, Any], group: Mapping[str, Any], before: Mapping
     if op in KNOB_OPS:
         name = str(edit.get("name") or "")
         held = owners(final, name) | owners(before, name) | owners(after, name)
-        if held & subject:
-            return True
+        if held and held <= subject:
+            return True  # the step's own: no other step binds or reads it
         if op != "set_knob" or not held & near:
             return False
         lines = changed_lines(_knob_value(before, name), _knob_value(after, name))

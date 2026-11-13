@@ -31,7 +31,9 @@ from .policies import ParentSelector
 #: Attributes the loop sets on its optimizer that the proposer is the one to honour.
 _FORWARDED = ("trace_path", "max_edits", "allow_code_nodes", "grader_secrets",
               # so the proposer's trace records which round each call belongs to
-              "proposal_rounds")
+              "proposal_rounds",
+              # what a retry's wait checks for a person's stop (`_wait`)
+              "stop_check")
 
 
 class PickedParent(Optimizer):

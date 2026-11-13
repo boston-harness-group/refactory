@@ -46,6 +46,8 @@ def retry_delay(attempt: int) -> float:
 
 #: How a retry waits (tests replace it).
 _sleep = time.sleep
+#: How often a retry's wait looks for a stop (`AutoresearchOptimizer._wait`).
+STOP_POLL_S = 0.25
 
 
 def _fatal() -> tuple[type[BaseException], ...]:
@@ -336,10 +338,36 @@ class AutoresearchOptimizer(Optimizer):
                     raise
                 if analysts.context_overflow(error):
                     return None, error, True, attempt
-                _sleep(retry_delay(attempt - 1))
+                self._wait(retry_delay(attempt - 1))
                 continue
             return reply, None, False, attempt
         return None, error, False, CALL_ATTEMPTS
+
+    def _wait(self, seconds: float) -> None:
+        """A retry's wait, cut short by a stop: the client's own cancellation scopes
+        (``DshModelClient.with_cancellation``) or the loop's ``stop_check`` (a person's
+        stop request), checked every ``STOP_POLL_S``; a stop raises ``CancelledError``, so
+        the call is not attempted again. With neither, ``_sleep``."""
+        from concurrent.futures import CancelledError
+
+        events = tuple(getattr(self._client, "_cancellations", ()) or ())
+        check = getattr(self, "stop_check", None)
+        if not events and not callable(check):
+            _sleep(seconds)
+            return
+        left = float(seconds)
+        while True:
+            if any(event.is_set() for event in events) or (callable(check) and check()):
+                raise CancelledError("the run was stopped during an optimizer call's retry "
+                                     "wait; not attempted again")
+            if left <= 0:
+                return
+            step = min(left, STOP_POLL_S)
+            if events:
+                events[-1].wait(step)
+            else:
+                _sleep(step)
+            left -= step
 
     def _review_steps(self, ctx: ProposalContext) -> list[dict[str, Any]]:
         """Each added step (``ctx.added_steps``) with a reviewer's verdict on whether its
@@ -943,22 +971,18 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
     it is a fragment of it (one edit of one proposal). The whole reply is read first,
     its top-level objects by their own braces (strings skipped, so a code fence inside
     a prompt the answer proposes cannot end it); the answer is the object with a
-    ``proposals`` list (`_is_answer`), as the answer format says. A reply that is a
-    top-level array of objects is read as that many proposals, every one of them
-    (`_top_array`), or refused whole. When the reply's object is broken, a fenced
-    object is read only when it is a whole answer: an example edit fenced before a cut-off
-    answer is not the answer. No JSON object at all raises ``ValueError``, as
+    ``proposals`` list (`_is_answer`), as the answer format says, wherever it is (a
+    fenced one too). Only when no such object parses is the reply read as a top-level
+    array of proposal objects: every one of them (`_top_array`), or refused whole. When
+    the reply's object is broken, a fenced object is read only when it is a whole
+    answer: an example edit fenced before a cut-off answer is not the answer, and
+    neither is an example array. No JSON object at all raises ``ValueError``, as
     `extract_json` does."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the model returned nothing")
-    listed, problem = _top_array(text)
-    if listed is not None:
-        return {"proposals": listed}, ""
-    if problem:
-        return {}, problem
     found, problem = _outermost_object(text)
-    if found is not None:
-        return found, ""
+    if _is_answer(found):
+        return found, ""  # type: ignore[return-value]
     for chunk in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
         try:
             loaded = json.loads(chunk.strip())
@@ -966,6 +990,13 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
             continue
         if _is_answer(loaded):
             return loaded, ""
+    listed, refused = _top_array(text)
+    if listed is not None:
+        return {"proposals": listed}, ""
+    if refused:
+        return {}, refused
+    if found is not None:
+        return found, ""
     if problem:
         return {}, problem
     raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
@@ -973,8 +1004,9 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
 
 #: How a JSON object starts: a brace, then a key. Braces in prose (``{a, b}``) do not.
 _JSON_START = re.compile(r"\{\s*(\"|\})")
-#: How a top-level array of objects starts: a bracket, then a brace.
-_ARRAY_START = re.compile(r"\[\s*\{")
+#: How a top-level array of objects starts: a bracket, then a brace, then a key (prose
+#: such as ``[{op, knob}]`` does not).
+_ARRAY_START = re.compile(r"\[\s*\{\s*\"")
 
 
 def _is_answer(loaded: Any) -> bool:
@@ -985,14 +1017,19 @@ def _is_answer(loaded: Any) -> bool:
 def _top_array(text: str) -> tuple[list[dict[str, Any]] | None, str]:
     """The proposals of a reply whose JSON is a top-level array of objects (``[{...},
     {...}]``, bare or fenced): every entry, or none and why the array cannot be read
-    whole. ``(None, "")`` when the reply's first object is not inside such an array."""
+    whole. ``(None, "")`` when the reply's JSON is not such an array: its first JSON
+    object is not inside one, or a JSON object follows the array (an example array
+    before an answer is an example)."""
     start = _ARRAY_START.search(text)
-    if start is None or (0 <= text.find("{") < start.start()):
+    first = _JSON_START.search(text)
+    if start is None or (first is not None and first.start() < start.start()):
         return None, ""
     end = _object_end(text, start.start(), "[", "]")
     if end is None:
         return None, (f"its top-level array opened at character {start.start() + 1} is never "
                       f"closed (cut off? it ends: …{' '.join(text[-120:].split())})")
+    if _JSON_START.search(text, end + 1):
+        return None, ""
     try:
         loaded = json.loads(text[start.start():end + 1])
     except json.JSONDecodeError as exc:

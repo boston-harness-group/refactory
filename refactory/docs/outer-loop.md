@@ -334,9 +334,11 @@ sections at once; this is the default loop's equivalent.
   constant, not a run setting), counted by logical change (`optim/edit_count.py`): a
   structural edit and the edits that only connect it count as ONE change -- the new (or
   removed) step's own prompt and settings (an `add_knob`/`set_knob`/`remove_knob` of a
-  knob it binds or reads), its DIRECT neighbours' prompt lines that refer to it (a
+  knob it ALONE binds or reads; a knob another step binds or reads too counts on its
+  own), its DIRECT neighbours' prompt lines that refer to it (a
   `set_knob` of a knob a step one hop away binds or reads -- reading what it writes,
-  writing what it reads, or on an edge with it -- whose every changed line names the
+  writing what it reads, or on an edge with it, in the graph the structural edit itself
+  leaves -- whose every changed line names the
   step or a file or fact it writes), and edges between it and those neighbours. Every
   other edit counts as one more, and two structural edits are two changes. Only one-hop
   neighbours qualify, so one change cannot sprawl over the pipeline. A limit of one (a
@@ -369,10 +371,12 @@ sections at once; this is the default loop's equivalent.
   prompt cannot cut it), the last top-level object with a `proposals` LIST being the
   answer (an object whose `proposals` is not a list, or an example `proposal`, is not);
   after a broken answer, a fenced object is read only when it is a whole answer (a
-  fenced example edit before a cut-off answer is not the answer). A reply that is a
-  top-level array of objects (`[{...}, {...}]`, bare or fenced) is read as that many
-  proposals, every one; an array holding anything else, or left open, is refused
-  whole. Each proposal the request asked for is refused `E-proposal-shape`, saying
+  fenced example edit before a cut-off answer is not the answer). Only when no object
+  with a `proposals` list parses anywhere in the reply is it read as a top-level array
+  of objects (`[{"...": ...}, ...]`, bare or fenced, a bracket then a brace then a key,
+  with no JSON object after it): that many proposals, every one; an array holding
+  anything else, or left open, is refused whole. Brackets in prose (`[{op, knob}]`) and
+  an example array before an answer are not such an array. Each proposal the request asked for is refused `E-proposal-shape`, saying
   where the JSON broke, so the round asks again within its attempts and the refusals
   are counted.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
@@ -663,7 +667,14 @@ retried the same way (`AutoresearchOptimizer._complete`): up to 3 attempts, wait
 traced with its `attempt`; a spent budget, a cancellation or a missing model choice
 stop at once. A reply is never retried, however unusable; a call refused as longer than
 the model's context is not tried again at the same length but once at half of it, and
-not at all when the request cannot be made shorter.
+not at all when the request cannot be made shorter. A retry's wait ends early on a stop
+(the client's cancellation scope, or a person's `refactory stop` request, checked every
+0.25 s): the call is then not attempted again and the stop raises. These attempts stack
+on the model client's own: a `DshModelClient` completion already makes up to 3 attempts
+on a transport failure (`model.DEFAULT_ATTEMPTS`), waiting up to 60 s in all between
+them (`RETRY_WINDOW_S`), so one analyst, merge, memory or step-review call may in the
+worst case start 9 model sessions, each up to the client's own timeout, and wait up to
+3 x 60 + 1 + 2 + 4 = 187 s between them.
 
 ### Run-wide feedback: changes by kind, the memory note, added-step reviews
 
@@ -761,8 +772,9 @@ paired with a parent picker), on the train records the request carries:
   full with the settings bound to it, every other setting's value) and each item's full
   trace: its input, every step's input and output in the order they ran, the expected
   answer, the prediction, the score and the grader's feedback. Each item's heading
-  carries the item fields its Task declares (`Task.item_metadata`; LiveMath declares
-  `theorem_type`, the type SkillOpt's analysts see as each item's task type), never a
+  carries the item fields its Task declares (`Task.item_metadata`, read by
+  `Task.item_meta`; LiveMath shows `task_type` exactly as SkillOpt's analysts see it,
+  rollout.py:132: the item's first theorem type, else `math_mcq`), never a
   field the Task names in `grader_fields`. A call's prompt has
   400000 characters of room (`ANALYST_ROOM`): the optimizer model (Opus 4.6) reads 200k
   tokens, of which Claude Code's own system prompt and the reserved reply take about
@@ -873,9 +885,11 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   the gate the train leader. Each epoch scores and gates what the one before proposed,
   then the pass runs, then the proposal, so the note is read by the proposal it precedes
   and every later one until the next pass. When nothing replaced the current, SkillOpt
-  rolls the same skill out twice; here the two rollouts are that candidate's
-  previous-epoch rollout and this epoch's (the comparison then shows run-to-run noise,
-  and the request says so).
+  rolls the same skill out twice; here the two rollouts are, under the gate, that
+  candidate's previous-epoch rollout and this epoch's, and without the gate (one seed
+  for the run) its rollout when it was scored and a fresh one made for the pass; each
+  side is labelled with which it is (the comparison then shows run-to-run noise, and the
+  request says so).
 - **Which items.** SkillOpt's 20 (`slow_update_samples`): the train ids, sorted,
   shuffled with `seed + epoch * 2000`, the first 20 (all of them when there are fewer).
 - **What it costs.** Each side's records come from the epoch's own rollouts with the
@@ -890,11 +904,14 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   change. A cap or a spent budget leaves the missing items out; the pass compares what
   both sides hold. Plus one optimizer-model call per epoch.
 - **What the call reads.** Both pipelines (as an analyst reads one: nodes, edges, each
-  node in full, every setting) and what changed between them (each candidate on the
-  lineage with its own edits and rationale), or the one pipeline when unchanged; the
+  node in full, every setting) and what changed between them: from their nearest common
+  ancestor, each candidate on the way to either with its own edits and rationale (said
+  plainly when they are on different branches, as a sibling train leader or a pool's
+  pick can be, or share no ancestor), or the one pipeline when unchanged; the
   previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
   comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
-  highest priority), persistent failures, improvements -- each item with both outcomes,
+  highest priority), persistent failures, improvements -- each item headed by what it
+  asks (SkillOpt's `Task <id>: <question>`), with both outcomes,
   answers and grader reasons, its declared metadata and both full traces (every step's
   input and output, as the analysts render them) -- then stable successes without
   traces, as SkillOpt shows them. SkillOpt never clips; here the traces share 400000
@@ -915,7 +932,9 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
 - **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
   note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
   next pass that writes one clears the mark. The call is retried as every optimizer call
-  is; a spent budget stops the run as it stops a proposal.
+  is. A spent budget, a cancelled run or a missing model choice is no answer about the
+  memory: no pass is recorded and the error stops the run (a spent budget as it stops a
+  proposal), so a resume makes the pass.
 - **Records.** The call is traced (`optimizer_trace.jsonl`, kind `memory`) and cached
   in `<run root>/analyst_findings/` like an analyst call; each pass is journaled
   (`optimizer_memory`: the two candidates, whether they are one, the sample, the items

@@ -764,12 +764,13 @@ class Loop(OuterLoop):
         #: The candidate current when each epoch proposed (``epoch_current``): the next
         #: epoch's memory pass compares it with the one current then.
         self._epoch_currents: dict[int, str] = {}
-        #: Rollouts the memory pass made for sampled items an epoch's rollouts lacked, by
-        #: (candidate, the epoch whose seed they used): ``{item id: record}``.
-        self._memory_rollouts: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
-        #: The item fields the Tasks declare for the analysts (``Task.item_metadata``),
-        #: read once (`task.item_metadata_fields`).
-        self._item_metadata: tuple[str, ...] | None = None
+        #: Rollouts the memory pass made for sampled items a side lacked, by (candidate,
+        #: side key: ``e<epoch>`` for a side read from that epoch's rollouts, ``fresh<epoch>``
+        #: for a fresh rollout of an unchanged current without the gate): ``{id: record}``.
+        self._memory_rollouts: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        #: How the Tasks' declared item metadata is read for the analysts
+        #: (`task.item_metadata_reader`), held once as a one-element tuple.
+        self._item_metadata: tuple[Any] | None = None
         #: Each round's analysis the analyst stage journaled (``LoopConfig.analysts``;
         #: `optim.analysts.journal_entry` with the epoch and generation), for report.md.
         self._analyses: list[dict[str, Any]] = []
@@ -2788,6 +2789,11 @@ class Loop(OuterLoop):
             selected = self.select_parents(1)
             self._editing_parent = selected[0].id if selected else None
         self._refresh_edited_records()
+        # A retry's wait inside an optimizer call ends early on a person's stop.
+        try:
+            self.optimizer.stop_check = self._stop_requested
+        except AttributeError:  # an optimizer that takes no attribute keeps plain waits
+            pass
         self._memory_pass()
         before = len(self.rejections)
         self._levels_wanted, self._levels_done = self._round_levels(), []
@@ -5275,6 +5281,17 @@ class Loop(OuterLoop):
         return entries
 
     # ── the memory pass (``LoopConfig.lessons``; `optim.memory`) ──────────────
+    def _stop_requested(self) -> bool:
+        """Whether a person has asked this run to stop (``refactory stop``), read from the
+        control file without consuming the request (`_apply_control` acts on it)."""
+        from refactory_dsh.control import Control
+
+        try:
+            request = Control(self.root).read_request()
+        except Exception:  # noqa: BLE001 - an unreadable request is not a stop
+            return False
+        return bool(request) and str(request.get("action")) == "stop"
+
     def _memory_on(self) -> bool:
         """Whether this run makes memory notes: the switch on, a model proposer that can
         write one, and the loop's own epochs (a custom strategy, such as the SkillOpt
@@ -5309,24 +5326,26 @@ class Loop(OuterLoop):
             return
         self._make_memory(epoch, by_id[prev], by_id[current])
 
-    def _side_records(self, cid: str, epoch: int) -> dict[str, dict[str, Any]]:
-        """``cid``'s records from the rollout of ``epoch`` (that epoch's train seed), by
-        item: the epoch's own (fresh evidence, or a candidate created then), without
-        the gate (one seed for the whole run) its current records when ``epoch`` is
-        this one, and what earlier passes rolled out for it."""
+    def _side_records(self, cid: str, epoch: int, key: str) -> dict[str, dict[str, Any]]:
+        """One side of a memory pass, by item: for a side read from the run's rollouts
+        (``key`` ``e<epoch>``), ``cid``'s records from ``epoch``'s rollout (that epoch's
+        train seed: fresh evidence, or a candidate created then), or without the gate (one
+        seed for the whole run) its records; then what memory passes rolled out for this
+        side (``key``). A fresh side (``fresh<epoch>``) holds only the latter."""
         from refactory_dsh.optim.base import _by_item
 
         found: dict[str, dict[str, Any]] = {}
-        held = (self._records_by_epoch.get(cid) or {}).get(epoch)
-        if held is None and not self.config.val_gate and epoch == self.epoch:
-            held = self._train_item_records.get(cid)
-        found.update(_by_item(held or ()))
-        for item, record in (self._memory_rollouts.get((cid, epoch)) or {}).items():
+        if not key.startswith("fresh"):
+            held = (self._records_by_epoch.get(cid) or {}).get(epoch)
+            if held is None and not self.config.val_gate:
+                held = self._train_item_records.get(cid)
+            found.update(_by_item(held or ()))
+        for item, record in (self._memory_rollouts.get((cid, key)) or {}).items():
             found.setdefault(item, record)
         return found
 
     def _memory_rollout(self, candidate: Candidate, items: list[str], epoch: int,
-                        for_epoch: int) -> int:
+                        for_epoch: int, key: str) -> int:
         """Roll ``candidate`` out on ``items`` with ``epoch``'s train seed for the memory
         pass of ``for_epoch``: counted as an evaluation, its rollouts counted, its records
         journaled (``memory_rollout``) so a resumed run reuses them; the candidate's own
@@ -5346,7 +5365,7 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 return 0
         workdir = (self.root / "runs" / candidate.id / "occasions"
-                   / f"memory_epoch_{for_epoch}_seed_epoch_{epoch}")
+                   / f"memory_epoch_{for_epoch}_{key}")
         self._archive_unfinished(candidate.id, workdir)
 
         def prepare() -> None:
@@ -5362,10 +5381,11 @@ class Loop(OuterLoop):
             self.evaluations += 1
             if not measurements.get("cached_from"):
                 self.rollouts += len(records) or 1
-            held = self._memory_rollouts.setdefault((candidate.id, epoch), {})
+            held = self._memory_rollouts.setdefault((candidate.id, key), {})
             for record in records:
                 held.setdefault(str(record.get("id")), record)
             self._journal("memory_rollout", id=candidate.id, epoch=epoch, for_epoch=for_epoch,
+                          key=key,
                           seed=self._train_seed(epoch), items=list(items),
                           exit_ok=result.exit_ok, error=result.error, records=records,
                           measurements=measurements)
@@ -5374,47 +5394,81 @@ class Loop(OuterLoop):
                        items=len(items), records=len(records), exit_ok=result.exit_ok)
         return len(records) or 1
 
-    def _lineage_edits(self, prev: Candidate, current: Candidate) -> list[dict[str, Any]]:
-        """The candidates from ``prev`` (exclusive) to ``current`` with their own edits,
-        oldest first, when ``prev`` is an ancestor; else ``current``'s whole lineage."""
+    def _lineage_edits(self, prev: Candidate, current: Candidate) -> dict[str, Any]:
+        """What separates ``prev`` from ``current``: their nearest common ancestor and the
+        candidates from it (exclusive) to each, with their own edits, oldest first
+        (``{"common", "prev", "curr"}``). ``prev`` an ancestor of ``current`` leaves
+        ``prev``'s path empty; with no common ancestor ``common`` is ``None`` and each
+        path is its candidate's whole lineage."""
         by_id = {c.id: c for c in self.population}
-        path, at = [], current
-        while at is not None and at.id != prev.id:
-            record = self.proposals.get(at.id) or {}
-            path.append({"id": at.id, "parent": at.parent, "edits": at.own_edits(),
-                         "rationale": record.get("rationale")})
-            at = by_id.get(at.parent) if at.parent else None
-        return list(reversed(path))
+
+        def chain(candidate: Candidate) -> list[Candidate]:
+            out, at, seen = [], candidate, set()
+            while at is not None and at.id not in seen:
+                seen.add(at.id)
+                out.append(at)
+                at = by_id.get(at.parent) if at.parent else None
+            return out
+
+        def entry(candidate: Candidate) -> dict[str, Any]:
+            record = self.proposals.get(candidate.id) or {}
+            return {"id": candidate.id, "parent": candidate.parent,
+                    "edits": candidate.own_edits(), "rationale": record.get("rationale")}
+
+        before, after = chain(prev), chain(current)
+        ids = {c.id for c in before}
+        common = next((c.id for c in after if c.id in ids), None)
+
+        def path(line: list[Candidate]) -> list[dict[str, Any]]:
+            upto = [c for c in line[: next((i for i, c in enumerate(line) if c.id == common),
+                                           len(line))]]
+            return [entry(c) for c in reversed(upto)]
+
+        return {"common": common, "prev": path(before), "curr": path(after)}
 
     def _make_memory(self, epoch: int, prev: Candidate, current: Candidate) -> None:
         """The pass itself (`_memory_pass`): sample, gather or roll out both sides, ask,
         keep and journal."""
+        from concurrent.futures import CancelledError
+
         from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.model import ModelChoiceError
         from refactory_dsh.optim import analysts, memory
 
         same = prev.id == current.id
-        # The two rollouts: both candidates' this epoch; one candidate's previous epoch's
-        # and this epoch's when nothing replaced it.
-        sides = [(prev, epoch - 1 if same else epoch), (current, epoch)]
+        # The two rollouts, each (candidate, the epoch whose seed it used, its key, what it
+        # is). Under the gate: both candidates' rollouts of this epoch, or, when nothing
+        # replaced the current, its previous epoch's and this epoch's. Without the gate
+        # (one seed for the run): each candidate's rollout when it was scored, or, when
+        # nothing replaced it, that rollout and a fresh one made for this pass.
+        if self.config.val_gate:
+            def gated(at: int) -> str:
+                return f"the rollout of epoch {at} (that epoch's train seed)"
+
+            sides = [(prev, epoch - 1 if same else epoch, f"e{epoch - 1 if same else epoch}",
+                      gated(epoch - 1 if same else epoch)),
+                     (current, epoch, f"e{epoch}", gated(epoch))]
+        else:
+            scored = "its rollout when it was scored (the run's seed)"
+            sides = [(prev, epoch, f"e{epoch}", scored),
+                     (current, epoch, f"fresh{epoch}" if same else f"e{epoch}",
+                      f"a rollout made for this epoch's memory pass (the run's seed)"
+                      if same else scored)]
         sample = memory.sample_ids(self._train_ids(), int(self.config.seed), epoch)
         evaluated = rolled = 0
         records = []
-        for candidate, at in sides:
-            held = self._side_records(candidate.id, at)
+        for candidate, at, key, _label in sides:
+            held = self._side_records(candidate.id, at, key)
             missing = [item for item in sample if item not in held]
             if missing:
-                made = self._memory_rollout(candidate, missing, at, epoch)
+                made = self._memory_rollout(candidate, missing, at, epoch, key)
                 evaluated += 1 if made else 0
                 rolled += made
-                held = self._side_records(candidate.id, at)
+                held = self._side_records(candidate.id, at, key)
             records.append({item: dict(rec, item_meta=self._item_meta(rec))
-                            if self._item_metadata_fields() else dict(rec)
+                            if self._item_meta_reader() is not None else dict(rec)
                             for item, rec in held.items()})
         entries, missing = memory.pairs(records[0], records[1], sample)
-        seed_word = ("the run's seed" if not self.config.val_gate else "that epoch's train seed")
-
-        def rollout(at: int) -> str:
-            return f"the rollout of epoch {at} ({seed_word})"
 
         view = {c.id: analysts.pipeline_text(memory.state_view(c.state),
                                             memory.PIPELINE_TEXT_CHARS)
@@ -5428,9 +5482,9 @@ class Loop(OuterLoop):
         def build(room: int) -> tuple[str, dict[str, int]]:
             return memory.build_prompt(
                 epoch=epoch, mode_name=self.mode_id,
-                prev={"id": prev.id, "pipeline": view[prev.id], "rollout": rollout(sides[0][1])},
+                prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
                 curr={"id": current.id, "pipeline": view[current.id],
-                      "rollout": rollout(sides[1][1])},
+                      "rollout": sides[1][3]},
                 changes=memory.changes_lines(self._lineage_edits(prev, current)),
                 previous_note=previous, entries=entries, room=room)
 
@@ -5442,9 +5496,10 @@ class Loop(OuterLoop):
             try:
                 outcome = self.optimizer.write_memory(epoch=epoch, generation=self.generation,
                                                       build=build)
-            except BudgetExhausted:
-                # Stops the run as a spent budget stops a proposal; no pass is recorded,
-                # so a resume with more budget makes it (its rollouts are journaled).
+            except (BudgetExhausted, CancelledError, ModelChoiceError):
+                # A spent budget, a cancelled run or a missing model choice is no answer
+                # about the memory: no pass is recorded, so a resume makes it (its
+                # rollouts are journaled), and the error goes where a proposal's would.
                 raise
             except Exception as exc:  # a failed pass keeps the earlier note
                 outcome = {"note": None, "error": f"{type(exc).__name__}: {exc}"}
@@ -5476,26 +5531,26 @@ class Loop(OuterLoop):
                        **({"error": str(record.get("error"))[:300]} if record.get("error")
                           else {}))
 
-    def _item_metadata_fields(self) -> tuple[str, ...]:
-        """The item fields the Tasks declare for the analysts (`task.item_metadata_fields`)."""
+    def _item_meta_reader(self) -> Any:
+        """How a record's declared metadata is read (`task.item_metadata_reader`), once;
+        ``None`` when no Task declares any."""
         if self._item_metadata is None:
-            from refactory_dsh.task import item_metadata_fields
+            from refactory_dsh.task import item_metadata_reader
 
             try:
-                self._item_metadata = item_metadata_fields(self.mode.state_dict())
+                self._item_metadata = (item_metadata_reader(self.mode.state_dict()),)
             except Exception:  # noqa: BLE001 - a mode that cannot say declares nothing
-                self._item_metadata = ()
-        return self._item_metadata
+                self._item_metadata = (None,)
+        return self._item_metadata[0]
 
     def _item_meta(self, record: dict[str, Any]) -> dict[str, Any]:
-        from refactory_dsh.task import item_meta
-
-        return item_meta(record, self._item_metadata_fields())
+        read = self._item_meta_reader()
+        return read(record) if read is not None else {}
 
     def _with_item_meta(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Train records with their declared metadata (``item_meta``) for the item headers
         the analysts and the proposal's evidence show; unchanged when none is declared."""
-        if not self._item_metadata_fields():
+        if self._item_meta_reader() is None:
             return records
         return [{**record, "item_meta": self._item_meta(record)} for record in records]
 
@@ -6249,7 +6304,8 @@ class Loop(OuterLoop):
                 rescores += 1
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
                 held = self._memory_rollouts.setdefault(
-                    (str(record.get("id")), int(record.get("epoch") or 0)), {})
+                    (str(record.get("id")),
+                     str(record.get("key") or f"e{int(record.get('epoch') or 0)}")), {})
                 for item in record.get("records") or ():
                     held.setdefault(str(item.get("id")), dict(item))
             elif event == "analyst_findings":
