@@ -26,7 +26,8 @@ def parser_operations(parser: argparse.ArgumentParser) -> dict[str, Any]:
         parameters = {}
         position = 0
         for action in command._actions:
-            if action.dest == 'help':
+            # A hidden flag is no parameter: it only refuses with what to use instead.
+            if action.dest == 'help' or action.help == argparse.SUPPRESS:
                 continue
             kind = ('boolean' if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction))
                     else 'integer' if action.type is int else 'number' if action.type is float

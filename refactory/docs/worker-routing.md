@@ -31,8 +31,8 @@ a native model. DSH also accepts `provider` and `effort`; `claude_code` accepts
 `effort` but not `provider`, and Codex rejects both. `claude_code` alone accepts
 `setting_sources`: `none` or a comma list of `user`, `project` and `local`, the
 Claude Code settings it loads (as `claude --setting-sources`), at the run level of
-the file or a route map, or with `--setting-sources` on `refactory optimize` and
-`refactory ceo`. Unset, it loads all of
+the file or a route map, in an optimization profile's `setting_sources`, or with
+`--setting-sources` on `refactory ceo`. Unset, it loads all of
 them, or none for a node with `tool_policy="none"`; set, it replaces either default,
 and such a node still gets no tools. The worker record's `actual_route` shows the
 effort and settings sources Claude Code was started with, and `enforced_tool_policy`

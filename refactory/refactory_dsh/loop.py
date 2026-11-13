@@ -550,7 +550,7 @@ class Loop(OuterLoop):
             # Checked here, not at construction, against the optimizer the run uses.
             raise LoopError(f"analysts read the train items for a model proposer; the "
                             f"{self.optimizer.name} optimizer asks no model, so they would "
-                            "never run (use --optimizer autoresearch, or --analysts 0)")
+                            "never run (use --optimizer autoresearch, or analysts off)")
         ledger_path = self.root / LEDGER
         inherited_budget = self.budget or RunBudget.inherited(self.model)
         self._owns_resource_budget = inherited_budget is None
@@ -1018,6 +1018,7 @@ class Loop(OuterLoop):
         self.root.mkdir(parents=True, exist_ok=True)
         from refactory_dsh import profiles
         self._keep_recorded_run_shape()
+        self._note_removed_settings()
         settings = {k: v for k, v in self.config.to_dict().items() if k not in profiles.RUNTIME_FIELDS}
         snapshot = profiles.refresh(self.project, self.mode_id, settings, self.config.resolved_profile, model_client=self.model) if self.config.resolved_profile else profiles.resolve(
             self.project, self.mode_id, overrides=settings, validate_settings=False, model_client=self.model)
@@ -1109,15 +1110,15 @@ class Loop(OuterLoop):
             raise LoopError(
                 f"train_minibatch {self.config.train_minibatch} scores each epoch on a "
                 "different train sample, so train scores of different epochs cannot pick "
-                "the winner or the parents; give the run val items (--parts with a val "
-                "part) so the validation gate selects, or score the whole train part "
+                "the winner or the parents; give the run val items (a parts_manifest with a "
+                "val part) so the validation gate selects, or score the whole train part "
                 "(train_minibatch 0)")
         if ungated and (self.config.early_stop_patience or self.config.early_stop_at_full_val):
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
                 "gate's best score, and this run has no validation gate (no val items, or a "
-                "custom strategy with its own gate); give it val items (--parts with a val "
-                "part), or leave them off"
+                "custom strategy with its own gate); give it val items (a parts_manifest with "
+                "a val part), or leave them off"
             )
         if ungated and self.config.selection:
             raise LoopError(
@@ -1203,19 +1204,49 @@ class Loop(OuterLoop):
             given = (key in overrides if isinstance(overrides, dict)
                      else current != getattr(defaults, key))
             if given:
-                flag = "--" + key.replace("_", "-")
                 raise LoopError(
                     f"this run was started with {key} {self._shown(key, value)} and this "
                     f"resume asks for {key} {self._shown(key, current)}; resume it without "
-                    f"{flag} (or with {flag} {self._shown(key, value)}), or start a new run")
+                    f"setting {key} (or with {key} {self._shown(key, value)}), or start a new run")
             setattr(self.config, key, value)
             self._resumed_shape[key] = value
             Run(_loop=self).log(f"resume: keeping the run's recorded {key} {value!r} "
                                 f"(this launch said {current!r})")
 
+    def _note_removed_settings(self) -> None:
+        """On resume, say in the run's log when its recorded ``config.json`` held a
+        removed setting at a value other than the one every run now uses (#640):
+        ``fresh_evidence`` false, or ``max_edits_per_proposal`` other than
+        ``MAX_EDITS_PER_PROPOSAL``. The resumed epochs run as every run now does, so the
+        run behaves differently from here on; the log is where a reader of its results
+        finds out."""
+        saved = self.root / "config.json"
+        if not self.config.resume or not saved.exists():
+            return
+        try:
+            recorded = json.loads(saved.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(recorded, dict):
+            return
+        # The old command line stored switches as integers, so a run launched with
+        # ``--fresh-evidence 0`` recorded ``0``; ``None`` (unset) meant the default, on.
+        fresh = recorded.get("fresh_evidence")
+        if fresh is not None and not isinstance(fresh, str) and not fresh:
+            Run(_loop=self).log(
+                "resume: this run was recorded with fresh_evidence false; that setting is "
+                "gone and fresh evidence is always on, so the epochs from here on gather "
+                "fresh evidence where the earlier ones did not")
+        edits = recorded.get("max_edits_per_proposal")
+        if edits is not None and edits != MAX_EDITS_PER_PROPOSAL:
+            Run(_loop=self).log(
+                f"resume: this run was recorded with max_edits_per_proposal {edits!r}; that "
+                f"setting is gone and the limit is {MAX_EDITS_PER_PROPOSAL} edits per proposal, "
+                "so the epochs from here on take proposals under that limit")
+
     def _shown(self, key: str, value: Any) -> str:
-        """A ``RESUME_KEEPS`` value as its flag takes it: an empty ``selection`` as the
-        default it resolves to."""
+        """A ``RESUME_KEEPS`` value as the run's settings hold it: an empty ``selection``
+        as the default it resolves to."""
         if key == "selection" and not value:
             return f"{self._shape_value(key, value)} (unset: the default)"
         return str(value)
@@ -4447,7 +4478,7 @@ class Loop(OuterLoop):
         if manifest is not None:
             # The parts manifest decides the parts: the search ran its train ids,
             # the audit runs its val ids, and its test ids are never touched here.
-            # The fraction then only says whether to audit: --holdout 0 turns it off.
+            # The fraction then only says whether to audit: holdout 0 turns it off.
             held = (task_module.manifest_part_ids(manifest, task_module.HOLDOUT) or ()
                     if self.config.holdout > 0 else ())
             instances: dict[str, int | None] = {
@@ -4630,10 +4661,10 @@ class Loop(OuterLoop):
         (``task.manifest_part_ids``): under ``val_gate`` that is the part the search
         selected on, so the audit is not independent, and the report says so rather
         than present it as a check on unseen items. Without a manifest they are the
-        Task's ``--holdout`` fraction, which nothing selects on."""
+        Task's ``holdout`` fraction, which nothing selects on."""
         if self._parts_manifest is None:
             return {"split": task_module.HOLDOUT, "independent": True,
-                    "split_note": "the --holdout fraction of the Task's items, which nothing "
+                    "split_note": "the holdout fraction of the Task's items, which nothing "
                                   "selected on"}
         if self._custom_strategy is not None:
             return {"split": task_module.VAL, "independent": None,
@@ -6483,13 +6514,9 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
     )
     parser.add_argument("mode", help="the mode to optimize, as <package>/<name>")
     from refactory_dsh import profiles, strategies
-    profiles.add_arguments(parser)
-    parser.add_argument("--runs-root", default=".factory/loop")
-    parser.add_argument("--project", default=str(project_root()))
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--parts", default=None, dest="parts_manifest",
-                        help="path to a parts.json manifest with train/val/test id lists")
+    # `refactory optimize`'s own short list: every other setting comes from a profile.
+    profiles.add_cli_arguments(parser)
+    parser.set_defaults(project=str(project_root()), runs_root=".factory/loop")
     parser.add_argument("--resolved-config", default="", help="exact resolved snapshot prepared by the console")
     args = parser.parse_args(argv)
     project = Path(args.project)
@@ -6501,8 +6528,8 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if snapshot.get("mode") != args.mode:
                 raise profiles.ProfileError("resolved snapshot belongs to another mode")
             return snapshot
-        # `--parts`, `--strategy-option` and `--knob` are overrides like any other: a
-        # setting the command line leaves out keeps the profile's value.
+        # `--strategy-option` and `--knob` are overrides like any other: a setting the
+        # command line leaves out keeps the profile's value.
         overrides = profiles.cli_overrides(args)
         prior_path = Path(args.runs_root) / "config.json"
         if args.resume and not args.profile and prior_path.exists():
@@ -6510,18 +6537,7 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if previous.get("mode") != args.mode:
                 raise profiles.ProfileError("the resume directory belongs to another mode")
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
-            for key in Loop.RESUME_KEEPS:
-                # Refused here, before the settings are checked together, with the
-                # loop's wording (``Loop._keep_recorded_run_shape``).
-                was, asked = previous.get(key), overrides.get(key)
-                if asked is None or was in (None, ""):
-                    continue
-                if asked != was:
-                    flag = "--" + key.replace("_", "-")
-                    raise profiles.ProfileError(
-                        f"this run was started with {key} {was} and this resume asks for "
-                        f"{key} {asked}; resume it without {flag} (or with {flag} {was}), "
-                        "or start a new run")
+            # The recorded ``RESUME_KEEPS`` settings stay: no flag of this command sets one.
             return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}),
                                     previous.get("resolved_profile") or {}, overrides=overrides)
         return profiles.resolve(project, args.mode, name=args.profile,

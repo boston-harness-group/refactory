@@ -1113,31 +1113,34 @@ def test_a_seed_that_wins_is_scored_on_test_once_and_its_delta_is_zero(tmp_path,
 # ── resume keeps the run's selection ───────────────────────────────────────
 
 
-def _cli(tmp_path: Path, *argv: str, profile: bool = True) -> int:
+def _cli(tmp_path: Path, *argv: str, profile: str = "pool-probe") -> int:
     from refactory_dsh import loop as loop_module
 
     with _patch_mode(FitProbe):
         return loop_module.main([MODE_ID, "--project", str(tmp_path), "--runs-root",
                                  str(tmp_path / "run"),
-                                 *(["--profile", "pool-probe"] if profile else []), *argv])
+                                 *(["--profile", profile] if profile else []), *argv])
 
 
 @pytest.fixture
 def pool_profile(tmp_path, monkeypatch):
-    """A saved profile (selection left to its default, single) and a run launched from
-    it with ``--selection pool --pool-size 3`` for one epoch."""
+    """A saved profile (selection left to its default, single) and a run launched for
+    one epoch from another that says selection pool, pool size 3."""
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     _scores(monkeypatch, {}, {})
-    profiles.save(tmp_path, "pool-probe", {"settings": {
+    settings = {
         "optimizer": "random", "allowed_ops": ["set_knob"], "seed": 7,
         "holdout": 0.0, "batch_size": 1, "max_evaluations": 50,
-        "parts_manifest": str(_write_parts(tmp_path, test=True))}})
-    assert _cli(tmp_path, "--epochs", "1", "--selection", "pool", "--pool-size", "3") == 0
+        "parts_manifest": str(_write_parts(tmp_path, test=True))}
+    profiles.save(tmp_path, "pool-probe", {"settings": settings})
+    profiles.save(tmp_path, "pool-launch", {"settings": {**settings, "selection": "pool",
+                                                         "pool_size": 3}})
+    assert _cli(tmp_path, "--epochs", "1", profile="pool-launch") == 0
     return tmp_path / "run"
 
 
 def test_a_resume_keeps_the_selection_and_pool_size_its_launch_gave(tmp_path, pool_profile):
-    """Resumed with the profile and ``--resume`` only: the run keeps the selection and
+    """Resumed with another profile and ``--resume``: the run keeps the selection and
     pool size it was launched with (the profile says single and 8), in its config, its
     gate state and its report."""
     assert _cli(tmp_path, "--epochs", "2", "--resume") == 0
@@ -1147,20 +1150,29 @@ def test_a_resume_keeps_the_selection_and_pool_size_its_launch_gave(tmp_path, po
     assert report["selection"]["setting"] == "pool" and report["selection"]["pool_size"] == 3
 
 
-@pytest.mark.parametrize("profile", [True, False])
-@pytest.mark.parametrize("flag,named", [
-    (("--pool-size", "5"), "pool_size 3 and this resume asks for pool_size 5"),
-    (("--selection", "single"), "selection pool and this resume asks for selection single"),
-])
-def test_a_resume_that_names_another_selection_is_refused(
-        tmp_path, pool_profile, capsys, flag, named, profile):
-    """A resume command, with its profile or without one, that gives a different
-    selection or pool size explicitly is refused, as a different
-    train_minibatch is, naming both values; the recorded run is left as it was."""
+@pytest.mark.parametrize("flag", ["--pool-size", "--selection"])
+def test_a_resume_cannot_name_another_selection_on_the_command_line(
+        tmp_path, pool_profile, capsys, flag):
+    """``--selection`` and ``--pool-size`` are profile settings: a resume that gives one
+    is refused naming the profile key, and the recorded run is left as it was."""
     before = (pool_profile / "config.json").read_text()
-    assert _cli(tmp_path, "--epochs", "2", "--resume", *flag, profile=profile) == 2
-    assert named in capsys.readouterr().err
+    with pytest.raises(SystemExit) as refused:
+        _cli(tmp_path, "--epochs", "2", "--resume", flag, "5")
+    assert refused.value.code == 2
+    key = flag[2:].replace("-", "_")
+    assert f"it is the profile setting {key!r}" in capsys.readouterr().err
     assert (pool_profile / "config.json").read_text() == before
+
+
+def test_a_loop_whose_launch_names_another_selection_on_resume_is_refused(tmp_path, monkeypatch):
+    """A resumed loop whose launch gave another pool size explicitly (here, in code) is
+    refused naming both values, as a different train_minibatch is."""
+    _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
+    _run(tmp_path, monkeypatch, POOL_PLAN[:1], epochs=1, batch_size=3,
+         selection="pool", pool_size=2)
+    with pytest.raises(LoopError, match="pool_size 2 and this resume asks for pool_size 5"):
+        _run(tmp_path, monkeypatch, POOL_PLAN[1:], epochs=3, batch_size=3, resume=True,
+             selection="pool", pool_size=5)
 
 
 def test_a_launch_records_the_selection_it_resolved(tmp_path, monkeypatch):

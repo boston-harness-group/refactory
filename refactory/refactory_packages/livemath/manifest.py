@@ -2,7 +2,7 @@
 
 Reads train/val/test id lists from split_dir (the same layout as
 ~/skillopt/data/livemathematicianbench_id_split) and writes a parts.json
-manifest in the format the outer loop's --parts takes (#558).
+manifest in the format the outer loop's ``parts_manifest`` setting takes (#558).
 """
 from __future__ import annotations
 
