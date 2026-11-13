@@ -18,6 +18,8 @@ from pathlib import Path
 import re
 import sys
 
+import pytest
+
 from refactory_dsh.design import DesignMode
 from refactory_dsh.design_ops import (
     REFINE_SCOPE_REASON,
@@ -696,21 +698,28 @@ def test_plan_output_on_existing_research_fixture():
 
 # ── end-to-end tests ──────────────────────────────────────────────────────────
 
-def _design_run(tmp_path, brief, answers, *, task_extra=None):
+def _design_run(tmp_path, brief, answers, *, task_extra=None, sizer=None, to_gate=False,
+                state_edit=None):
+    """A design run on a checkout holding app.py, the sizer answering from ``sizer``;
+    with ``to_gate`` it stops at the approval gate."""
     from tests_support import FakeModel, git_repo
 
     repo = git_repo(tmp_path / "repo")
-    model = FakeModel(answers)
+    model = FakeModel(answers, sizer=sizer)
     mode = DesignMode()
     state = mode.state_dict()
     state["knobs"]["pr"]["value"] = False
+    if state_edit is not None:
+        state_edit(state)
     mode.load_state_dict(state)
     task = {"name": "scale_tool", "brief": brief,
             "check": f"{sys.executable} tool.py", "target": str(repo)}
     if task_extra:
         task.update(task_extra)
-    run = mode.run(tmp_path / "run", model=model, verdicts={"gate_strategy": "proceed"},
-                   task=task)
+    run = mode.run(tmp_path / "run", model=model,
+                   verdicts={} if to_gate else {"gate_strategy": "proceed"}, task=task)
+    if to_gate:
+        assert run.gate_stop == "gate_strategy", run.error
     return run, model
 
 
@@ -999,3 +1008,577 @@ def test_the_gate_card_is_plain_text_summary_review_scale_advisories_then_pitfal
     assert card.split("\n\n")[-1] == ("Pitfalls: 2\n- PIT-001 (high): not mentioned\n"
                                        "- PIT-002 (low): not mentioned")
     assert not any(line.startswith("#") for line in card.splitlines()), "no markdown heading"
+
+
+# ── sizing before research ──────────────────────────────────────────────────────
+#
+# A bounded agent (size_change) reads the code the change touches before research, and
+# presize_scale turns its verdict into the research scope with classify_scale's rule
+# (scale_from_footprints). A lean research whose footprint reaches further is widened
+# once (widen_research). The scales are context for the directors, never caps.
+
+from refactory_dsh.design import SIZER_PROMPT, SIZER_TIMEOUT_S  # noqa: E402
+from refactory_dsh.design_ops import (  # noqa: E402
+    PLANNING_STEPS,
+    RESEARCH_LEAN,
+    SCOPED_FUNCTIONS,
+    SIZER_MARK,
+    clear_sizing,
+    presize_scale,
+    scale_from_footprints,
+    widen_research,
+)
+from refactory_dsh.model import CompletionTimeout  # noqa: E402
+from refactory_dsh.nn.executor import RunContext  # noqa: E402
+from test_delivery import (  # noqa: E402,F401  (the fake GitHub's fixtures, for a full refine)
+    _opened_golden,
+    _stage,
+    opened_pull,
+)
+from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER, RESEARCH_ANSWER,  # noqa: E402
+                           SCOPED_RESEARCH_ANSWER)
+
+RESEARCH_DIRECTOR = "You are the research director."
+PITFALLS_RESEARCHER = "You are the pitfalls researcher."
+STRATEGY_DIRECTOR = "You are the strategy director."
+SIZED_SCOPED = "Sized before research by reading the code: scoped"
+FULL_RESEARCH_GUIDANCE = "between three and five questions for a full design"
+#: What a scoped change's one question covers, and how its subagent answers it.
+SCOPED_QUESTION = ("For a scoped change, the question covers the changed function, every "
+                   "caller of it and the tests that pin its current behaviour")
+READ_DONT_SURVEY = "not to survey the repository or search the web"
+#: The scoped reason a sizer's one cited function in the test checkout gets.
+ONE_FUNCTION = "touches 1 existing function(s) (main at app.py:1), adds nothing new, no shared engine"
+
+
+def _footprint(fns=(), new=(), engine=()):
+    return {"existing_functions": list(fns), "new_items": list(new), "shared_engine": list(engine)}
+
+
+def _sizing(size="scoped", why="one function, app.py:1", *, fns=("app.py:1 main",), new=(),
+            engine=(), cross=()):
+    return json.dumps([{"size": size, "why": why, "footprint": _footprint(fns, new, engine),
+                        "cross_cutting": list(cross)}])
+
+
+def _plan(**footprint):
+    return json.dumps([{"focus": "q1", "slug": "s1", "finding": "f1", "ids": [],
+                        "footprint": _footprint(**footprint)}])
+
+
+#: Research answers for the test checkout (git_repo: app.py).
+SCOPED_PLAN = _plan(fns=["app.py:1 main"])
+ENGINE_PLAN = _plan(fns=["app.py:1 main"], engine=["app.py:1"])
+NEW_ITEMS_PLAN = _plan(fns=["app.py:1 main"], new=["helper in app.py:2"])
+
+
+def _asked(model, mark):
+    return [prompt for prompt in model.prompts if mark in prompt]
+
+
+# ── the shared rule ─────────────────────────────────────────────────────────────
+
+_RULE_PLANS = [
+    [],
+    [{"focus": "q", "slug": "s", "finding": "f", "ids": []}],
+    ["not an object"],
+    [{"footprint": {"existing_functions": []}}],
+    [{"footprint": _footprint(fns=["a.py:10 parse"])}],
+    [{"footprint": _footprint(fns=["a.py parse"])}],
+    [{"footprint": _footprint(fns=["a.py:10 parse", "b.py:20 parse", "c.py:30 parse"])}],
+    [{"footprint": _footprint(new=["x in a.py:1"])}],
+    [{"footprint": _footprint(engine=["run.py:5"])}],
+    [{"footprint": _footprint(new=["x in a.py:1"], engine=["run.py:5"])}],
+    [{"footprint": _footprint()}, {"footprint": _footprint(fns=["a.py:1 f", "b.py:2 g"])}],
+]
+
+
+@pytest.mark.parametrize("plan", _RULE_PLANS)
+def test_scale_from_footprints_matches_classify_scale(plan):
+    """classify_scale is the shared rule applied to the research plan: one rule, not two."""
+    result = classify_scale(_scale_ctx(plan))
+    scale = scale_from_footprints(plan, "")
+    assert (result["research_scope"], result["research_scope_reason"]) == (scale.scope, scale.reason)
+    assert (scale.scope == "full") == bool(scale.breaks)
+
+
+def test_breaks_name_every_failed_part():
+    both = scale_from_footprints([{"footprint": _footprint(new=["x in a.py:1"], engine=["run.py:5"])}], "")
+    assert both.reason.startswith("adds new items: ")
+    assert set(both.breaks) >= {"new_items", "engine"}
+    three = scale_from_footprints(
+        [{"footprint": _footprint(fns=["a.py:1 f", "a.py:2 g", "a.py:3 h"], engine=["run.py:5"])}], "")
+    assert set(three.breaks) == {"functions", "engine"}
+    assert SCOPED_FUNCTIONS == 2
+    assert three.reason == "touches 3 existing functions (max 2 for scoped): f, g, h"
+
+
+# ── presize_scale ───────────────────────────────────────────────────────────────
+
+def _presize_ctx(tmp_path, name, *, sizing=None, missing=None, facts=None, source=None):
+    from tests_support import git_repo
+
+    checkout = tmp_path / "checkout"
+    if not checkout.exists():
+        git_repo(checkout)
+    run = tmp_path / name
+    run.mkdir()
+    if sizing is not None:
+        (run / "sizing.json").write_text(sizing)
+    if missing is not None:
+        (run / "reviews").mkdir()
+        (run / "reviews" / "size_change-missing.txt").write_text(missing)
+    given = {"research_scope": "full", "research_scope_reason": "",
+             "source": str(checkout) if source is None else source, **(facts or {})}
+    return RunContext(run, knobs={}, facts=given, task={})
+
+
+def _full(reason):
+    return {"research_scope": "full", "research_scope_reason": reason,
+            "presize_scope": "full", "presize_scope_reason": reason}
+
+
+def test_presize_decision_table(tmp_path):
+    """Every row of presize_scale, first match wins; only the last is scoped."""
+    rows = [
+        # 0: a refine keeps its scale.
+        (dict(sizing=_sizing(), facts={"research_scope": "scoped",
+                                        "research_scope_reason": REFINE_SCOPE_REASON}), {}),
+        (dict(sizing=_sizing(), source=""), _full("no checkout to check the sizer's citations against")),
+        (dict(sizing=_sizing(), missing="CompletionTimeout: wall\nmore"),
+         _full("the sizer did not finish: CompletionTimeout: wall")),
+        (dict(), _full("no sizing verdict")),
+        (dict(sizing="not json"), _full("the sizing verdict is not a JSON array")),
+        (dict(sizing=json.dumps([{"size": "scoped"}])),
+         _full("the sizing verdict is not [{size, why, footprint, cross_cutting}]")),
+        (dict(sizing=json.dumps(json.loads(_sizing()) * 2)),
+         _full("the sizing verdict is not [{size, why, footprint, cross_cutting}]")),
+        (dict(sizing=_sizing("full", "three modules\nand more")),
+         _full("the sizer judged it full: three modules")),
+        (dict(sizing=_sizing("unknown", "cause not located")),
+         _full("the sizer judged it unknown: cause not located")),
+        (dict(sizing=_sizing("banana", "who knows")), _full("the sizer judged it banana: who knows")),
+        (dict(sizing=_sizing(cross=["a caller in b.py:3 relies on it", "x", "y", "z"])),
+         _full("cross-cutting signs: a caller in b.py:3 relies on it; x; y")),
+        (dict(sizing=_sizing(fns=())), _full("the verdict cites no code")),
+        (dict(sizing=_sizing(fns=("missing.py:1 main",))),
+         _full("footprint without evidence: 'missing.py:1 main'")),
+        (dict(sizing=_sizing(fns=("app.py:1 a", "app.py:2 b", "app.py:3 c"))),
+         _full("touches 3 existing functions (max 2 for scoped): a, b, c")),
+        (dict(sizing=_sizing(engine=("app.py:1",))), _full("changes a shared engine: app.py:1")),
+        (dict(sizing=_sizing(new=("helper in app.py:2",))), _full("adds new items: helper in app.py:2")),
+        (dict(sizing=_sizing()), {"research_scope": "scoped", "research_scope_reason": ONE_FUNCTION,
+                                  "presize_scope": "scoped", "presize_scope_reason": ONE_FUNCTION}),
+    ]
+    for n, (given, expected) in enumerate(rows):
+        result = presize_scale(_presize_ctx(tmp_path, f"row{n}", **given))
+        assert result == expected, (n, result)
+        assert REFINE_SCOPE_REASON not in result.values()
+
+
+def test_clear_sizing_removes_a_stale_verdict(tmp_path):
+    class NoBrief(RunContext):
+        def read_text(self, name):
+            assert name != "brief.json", "the sizing ops never read the brief"
+            return super().read_text(name)
+
+    run = tmp_path / "run"
+    (run / "reviews").mkdir(parents=True)
+    (run / "brief.json").write_text(json.dumps({"brief": "a one-line scoped fix"}))
+    (run / "sizing.json").write_text(_sizing())
+    (run / "reviews" / "size_change-missing.txt").write_text("TimeoutError\n")
+    ctx = NoBrief(run, knobs={}, facts={"source": str(tmp_path)}, task={})
+    assert clear_sizing(ctx) == {}
+    assert not (run / "sizing.json").exists()
+    assert not (run / "reviews" / "size_change-missing.txt").exists()
+    assert presize_scale(ctx)["presize_scope_reason"] == "no sizing verdict"
+
+
+def test_presize_resolves_only_against_source(tmp_path):
+    """A citation that only the run directory holds is no evidence: the target's checkout is
+    the source fact, never ctx.workdir."""
+    ctx = _presize_ctx(tmp_path, "run", sizing=_sizing(fns=("decoy.py:1 main",)))
+    (ctx.workdir / "decoy.py").write_text("def main():\n    pass\n")
+    assert presize_scale(ctx) == _full("footprint without evidence: 'decoy.py:1 main'")
+
+
+def test_presize_uncited_answer_on_a_scoped_sounding_brief_is_full(tmp_path):
+    """The brief's word is no evidence, and nor is the sizer's: a scoped answer citing no
+    code is full, and so is a sizer that answers nothing."""
+    brief = "A one-line scoped fix: a small change to app.py."
+    for name, sizer in (("uncited", [_sizing(fns=())]), ("silent", [])):
+        run, model = _run_head(tmp_path / name, brief, sizer)
+        assert run.facts["presize_scope"] == "full", name
+        assert len(_asked(model, SIZER_MARK)) == 1
+        [research] = _asked(model, RESEARCH_DIRECTOR)
+        assert "## Research scope\nfull\n" in research
+        assert SIZED_SCOPED not in research
+        if name == "uncited":
+            assert run.facts["presize_scope_reason"] == "the verdict cites no code"
+
+
+def _run_head(tmp_path, brief, sizer, research=RESEARCH_ANSWER, **kw):
+    """A design run to the approval gate with a full-scale research answer."""
+    answers = [research, PITFALLS_ANSWER, "perspectives", "one plan", DESIGN_DOC_ANSWER]
+    return _design_run(tmp_path, brief, answers, sizer=sizer, to_gate=True, **kw)
+
+
+# ── widen_research ──────────────────────────────────────────────────────────────
+
+def _widen_ctx(tmp_path, name, plan, **facts):
+    ctx = _presize_ctx(tmp_path, name, facts={
+        "presize_scope": "scoped", "presize_scope_reason": ONE_FUNCTION,
+        "research_scope": "full", "research_scope_reason": "from the research", **facts})
+    (ctx.workdir / "research-plan.json").write_text(plan)
+    return ctx
+
+
+def test_widen_research_cases(tmp_path):
+    cases = [
+        ("engine", ENGINE_PLAN, {}, "reloop"),
+        ("new_items", NEW_ITEMS_PLAN, {}, "proceed"),
+        ("new_and_engine", _plan(new=["x in app.py:2"], engine=["app.py:1"]), {}, "reloop"),
+        ("unparseable", "not json", {}, "reloop"),
+        ("unresolved", _plan(fns=["missing.py:1 main"]), {}, "reloop"),
+        ("three", _plan(fns=["app.py:1 a", "app.py:2 b", "app.py:3 c"]), {}, "reloop"),
+        ("scoped", SCOPED_PLAN, {}, "proceed"),
+        ("full_presize", ENGINE_PLAN, {"presize_scope": "full"}, "proceed"),
+        ("no_presize", ENGINE_PLAN, {"presize_scope": None}, "proceed"),
+        ("refine", ENGINE_PLAN, {"research_scope": "scoped",
+                                 "research_scope_reason": REFINE_SCOPE_REASON}, "proceed"),
+        ("attempts_spent", ENGINE_PLAN, {"research_attempts_used": 1}, "reloop"),
+    ]
+    for name, plan, facts, expected in cases:
+        ctx = _widen_ctx(tmp_path, name, plan, **facts)
+        if facts.get("presize_scope", "") is None:
+            ctx.facts.pop("presize_scope")
+        assert widen_research(ctx) == expected, name
+        if expected == "reloop":
+            # One round, counted in code: the second visit proceeds.
+            assert ctx.facts["research_widenings_used"] == 1
+            assert widen_research(ctx) == "proceed", name
+            assert ctx.facts["research_widenings_used"] == 1
+        else:
+            assert "research_widenings_used" not in ctx.facts, name
+
+    # After widening: full scope, the reason in the review, the lean notes set aside.
+    ctx = _widen_ctx(tmp_path, "aside", ENGINE_PLAN)
+    (ctx.workdir / "research").mkdir()
+    (ctx.workdir / "research" / "s1.md").write_text("### FND-s1-1 — lean\n")
+    assert widen_research(ctx) == "reloop"
+    assert ctx.facts["research_scope"] == "full"
+    assert ctx.facts["research_scope_reason"] == "widened after lean research: changes a shared engine: app.py:1"
+    assert ctx.facts["research_widened"] == "changes a shared engine: app.py:1"
+    review = (ctx.workdir / "research-review.txt").read_text()
+    assert f"research ran lean ({ONE_FUNCTION}) but its footprint shows cross-cutting impact" in review
+    assert ctx.facts["research_review"] == review.strip()
+    assert (ctx.workdir / RESEARCH_LEAN / "s1.md").read_text() == "### FND-s1-1 — lean\n"
+    assert list((ctx.workdir / "research").glob("*.md")) == []
+    # The lean plan too: the full round's plan is a fresh delivery, even with the same bytes.
+    assert (ctx.workdir / RESEARCH_LEAN / "research-plan.json").read_text() == ENGINE_PLAN
+    assert not (ctx.workdir / "research-plan.json").exists()
+
+
+def test_widening_bound_is_in_code(tmp_path):
+    """With the gate's iteration limit raised, the one widening round is still the only one."""
+    def raise_limit(state):
+        state["graph"]["nodes"]["widen_research"]["max_iterations"] = 5
+
+    run, model = _design_run(tmp_path, "Change main in app.py.",
+                             [ENGINE_PLAN, ENGINE_PLAN, ENGINE_PLAN, PITFALLS_ANSWER, "perspectives",
+                              "one plan", DESIGN_DOC_ANSWER],
+                             sizer=[_sizing()], to_gate=True, state_edit=raise_limit)
+    assert len(_asked(model, RESEARCH_DIRECTOR)) == 2
+    assert run.facts["research_widenings_used"] == 1
+    assert len(_asked(model, PITFALLS_RESEARCHER)) == 1
+
+
+# ── the sizer node ──────────────────────────────────────────────────────────────
+
+def test_sizer_node_bounds(tmp_path):
+    from refactory_dsh import lowering, workers
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S, DshModelClient
+
+    graph = DesignMode().build()
+    node = graph.nodes["size_change"]
+    assert node.kind == "agent" and node.tool_policy is None and node.tools == ()
+    assert node.timeout_s == SIZER_TIMEOUT_S == 600
+    assert node.retry is None and node.workspace is None
+    assert node.reads == ("brief.json",) and node.writes == ("sizing.json",)
+    assert "size_change" in PLANNING_STEPS
+    assert graph.nodes["fork_size"].optional_targets == ("size_change",)
+    workflow = lowering.to_workflow(DesignMode().state_dict())
+    lowered = workers.lower_workflow(workflow, tmp_path, DshModelClient().context(),
+                                     lowering.node_declarations(DesignMode().state_dict()))
+    sizer = lowered.nodes["size_change"]
+    assert sizer.command_timeout_s == 600 + NODE_DISPATCH_OVERHEAD_S
+    spec = json.loads(open(sizer.dispatch_command.rsplit(" ", 1)[1].strip("'")).read())
+    assert spec["model_context"]["node_wall_s"] == 600
+    assert spec.get("optional") is True
+
+
+def test_sizer_prompt_investigates_the_checkout(tmp_path):
+    from refactory_dsh.nn.executor import render
+
+    ctx = RunContext(tmp_path, knobs={}, task={},
+                     facts={"name": "n", "brief": "the parser drops a field", "source": "/the/checkout"})
+    prompt = render(SIZER_PROMPT, ctx)
+    assert prompt.startswith(SIZER_MARK)
+    assert "/the/checkout" in prompt and "{{" not in prompt
+    for clause in ("For a bug, locate where the behaviour lives; for a feature, find where the change "
+                   "plugs in.", "trace its callers with grep", "look at the tests that pin its current "
+                   "behaviour", "do not survey the repository",
+                   "Read only: change nothing in /the/checkout.", "Spawn no subagents.", "No web",
+                   "Cite every claim as path:line from code you read.",
+                   "When the cause of a bug is not located, or a feature's reach is not clear from the "
+                   "code read within the time, answer `unknown`.",
+                   "Test files, test functions and docs are neither touched functions nor added items",
+                   "claim to check against the code, never a footprint",
+                   "is a cross-cutting sign"):
+        assert clause in prompt, clause
+    for mark in ("research director", "strategy director", "pitfalls researcher",
+                 "Write intent-audit.json as", "Write the design document",
+                 "Compile the perspectives into one plan"):
+        assert mark not in prompt
+
+
+# ── walker runs ─────────────────────────────────────────────────────────────────
+
+def test_one_function_brief_is_sized_scoped_before_research(tmp_path):
+    run, model = _design_run(tmp_path, "main in app.py prints the wrong word.",
+                             [SCOPED_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER],
+                             sizer=[_sizing()], to_gate=True)
+    [sizer] = _asked(model, SIZER_MARK)
+    assert model.prompts.index(sizer) == 0, "the sizer runs before research"
+    assert (run.facts["presize_scope"], run.facts["presize_scope_reason"]) == ("scoped", ONE_FUNCTION)
+    [research] = _asked(model, RESEARCH_DIRECTOR)
+    assert "## Research scope\nscoped\n" in research
+    assert f"{SIZED_SCOPED} — {ONE_FUNCTION}. This is context" in research
+    assert SCOPED_QUESTION in research and READ_DONT_SURVEY in research
+    assert "The research scope is the one given above; a sizing step may set it before research." in research
+
+
+@pytest.mark.parametrize("sizing", [
+    _sizing(engine=("app.py:1",)),
+    _sizing("full", "three modules: app.py:1, b.py:2, c.py:3"),
+    _sizing(fns=("app.py:1 a", "app.py:2 b", "app.py:3 c")),
+], ids=["engine", "full", "many"])
+def test_shared_engine_or_many_modules_sizing_is_full(tmp_path, sizing):
+    run, model = _run_head(tmp_path, "Rework the executor in app.py and its callers.", [sizing])
+    assert run.facts["presize_scope"] == "full"
+    [research] = _asked(model, RESEARCH_DIRECTOR)
+    assert "## Research scope\nfull\n" in research
+    assert FULL_RESEARCH_GUIDANCE in research
+    assert SIZED_SCOPED not in research
+    assert "Sized before research by reading the code: full" in research
+
+
+@pytest.mark.parametrize("sizing", ["not json", _sizing(fns=())], ids=["unparseable", "uncited"])
+def test_unparseable_or_uncited_sizer_is_full(tmp_path, sizing):
+    run, model = _run_head(tmp_path, "Fix main in app.py.", [sizing])
+    assert (run.facts["research_scope"], run.facts["presize_scope"]) == ("full", "full")
+    assert run.facts["presize_scope_reason"] in ("the sizing verdict is not a JSON array",
+                                                 "the verdict cites no code")
+    [research] = _asked(model, RESEARCH_DIRECTOR)
+    assert "## Research scope\nfull\n" in research and SIZED_SCOPED not in research
+
+
+def test_unknown_size_on_a_bug_brief_naming_no_file_is_full(tmp_path):
+    brief = "Sometimes the report comes out empty. Fix it."
+    run, model = _run_head(tmp_path, brief, [_sizing("unknown", "cause not located", fns=())])
+    assert run.facts["presize_scope"] == "full"
+    assert run.facts["presize_scope_reason"] == "the sizer judged it unknown: cause not located"
+    [research] = _asked(model, RESEARCH_DIRECTOR)
+    assert "## Research scope\nfull\n" in research and FULL_RESEARCH_GUIDANCE in research
+    assert "Sized before research by reading the code: full — the sizer judged it unknown" in research
+    # Research then sized it: the post-research scale is classify_scale's.
+    assert run.facts["research_scope"] == "full"
+
+
+def test_scoped_answer_with_an_unresolvable_citation_is_full(tmp_path):
+    run, model = _run_head(tmp_path, "Fix main.", [_sizing(fns=("missing.py:1 main",))])
+    assert run.facts["presize_scope"] == "full"
+    assert run.facts["presize_scope_reason"] == "footprint without evidence: 'missing.py:1 main'"
+    assert SIZED_SCOPED not in _asked(model, RESEARCH_DIRECTOR)[0]
+
+
+def test_timed_out_sizer_is_full_and_the_run_continues(tmp_path):
+    run, model = _run_head(tmp_path, "Fix main in app.py.", [CompletionTimeout("wall")])
+    assert (run.workdir / "reviews" / "size_change-missing.txt").exists()
+    assert run.facts["presize_scope"] == "full"
+    assert run.facts["presize_scope_reason"].startswith("the sizer did not finish")
+    assert len(_asked(model, RESEARCH_DIRECTOR)) == 1
+
+
+def test_stale_verdict_cannot_pass(tmp_path):
+    """A scoped verdict left by an earlier visit is gone before the sizer runs again."""
+    from tests_support import FakeModel
+
+    class Stale(FakeModel):
+        def _answer(self, prompt, workdir):
+            if SIZER_MARK in prompt:
+                self.seen_stale = (Path(workdir) / "sizing.json").exists()
+            return super()._answer(prompt, workdir)
+
+    from tests_support import git_repo
+
+    repo = git_repo(tmp_path / "repo")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "sizing.json").write_text(_sizing())
+    model = Stale([RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan", DESIGN_DOC_ANSWER],
+                  sizer=[CompletionTimeout("wall")])
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    run = mode.run(run_dir, model=model, task={"name": "scale_tool", "brief": "Fix main in app.py.",
+                                               "check": f"{sys.executable} tool.py", "target": str(repo)})
+    assert run.gate_stop == "gate_strategy", run.error
+    assert model.seen_stale is False
+    assert run.facts["presize_scope"] == "full"
+    assert run.facts["presize_scope_reason"].startswith("the sizer did not finish")
+
+
+def test_lean_research_with_an_engine_widens_once(tmp_path):
+    run, model = _design_run(tmp_path, "Change main in app.py.",
+                             [ENGINE_PLAN, RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
+                              DESIGN_DOC_ANSWER], sizer=[_sizing()], to_gate=True)
+    first, second = _asked(model, RESEARCH_DIRECTOR)
+    assert "## Research scope\nscoped\n" in first
+    assert "## Research scope\nfull\n" in second
+    assert "research ran lean" in second and "changes a shared engine: app.py:1" in second
+    assert run.facts["research_widenings_used"] == 1
+    assert run.facts["research_widened"] == "changes a shared engine: app.py:1"
+    assert len(_asked(model, PITFALLS_RESEARCHER)) == 1
+    # The lean round's notes are set aside; the full round's are in research/.
+    assert sorted(p.name for p in (run.workdir / RESEARCH_LEAN).glob("*.md")) == ["s1.md"]
+
+
+@pytest.mark.parametrize("sizer, research", [
+    ([_sizing()], SCOPED_PLAN),
+    ([_sizing(engine=("app.py:1",))], RESEARCH_ANSWER),
+    ([_sizing("unknown", "cause not located", fns=())], RESEARCH_ANSWER),
+    ([CompletionTimeout("wall")], RESEARCH_ANSWER),
+    ([_sizing()], ENGINE_PLAN),
+], ids=["scoped", "full", "unknown", "missing", "widened"])
+def test_pitfalls_runs_at_every_scale(tmp_path, sizer, research):
+    answers = [research, *([RESEARCH_ANSWER] if research == ENGINE_PLAN else []), PITFALLS_ANSWER,
+               *([] if research == SCOPED_PLAN else ["perspectives"]), "one plan", DESIGN_DOC_ANSWER]
+    run, model = _design_run(tmp_path, "Fix main in app.py.", answers, sizer=sizer, to_gate=True)
+    assert len(_asked(model, PITFALLS_RESEARCHER)) == 1
+    assert run.facts["pitfalls"]
+
+
+def test_strategy_director_gets_both_scales(tmp_path):
+    # Sized scoped, then research adds an item: full after research, not widened.
+    run, model = _design_run(tmp_path / "full", "Fix main in app.py.",
+                             [NEW_ITEMS_PLAN, PITFALLS_ANSWER, "perspectives", "one plan", DESIGN_DOC_ANSWER],
+                             sizer=[_sizing()], to_gate=True)
+    [strategy] = _asked(model, STRATEGY_DIRECTOR)
+    assert f"Before research: scoped — {ONE_FUNCTION}\n" in strategy
+    assert "After research: full — adds new items: helper in app.py:2\n" in strategy
+    assert "A small, contained change usually needs few perspectives, and short ones" in strategy
+    assert "Research was widened" not in strategy
+    assert not re.findall(r"\{\{\s*[A-Za-z_]\w*\s*\}\}", strategy) and "{%" not in strategy
+    addition = strategy.split("A small, contained change", 1)[1].split("You are the strategy director")[0]
+    assert not re.search(r"\d", addition)
+
+    # Scoped before and after research: the perspectives step is skipped, as today.
+    run, model = _design_run(tmp_path / "scoped", "Fix main in app.py.",
+                             [SCOPED_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER],
+                             sizer=[_sizing()], to_gate=True)
+    assert _asked(model, STRATEGY_DIRECTOR) == []
+    from refactory_dsh.design_ops import SCOPED_STRATEGY_PLAN
+
+    assert run.facts["strategy_plan"] == SCOPED_STRATEGY_PLAN
+    assert run.facts["research_scope"] == "scoped"
+
+
+def test_card_shows_both_scales(tmp_path):
+    base = {"design_review_attempts_used": 1, "design_review_findings": "",
+            "research_scope": "full", "research_scope_reason": "adds new items: x"}
+    cases = [
+        ({"research_scope": "scoped", "research_scope_reason": ONE_FUNCTION,
+          "presize_scope": "scoped", "presize_scope_reason": ONE_FUNCTION},
+         f"Scale: scoped — {ONE_FUNCTION} (before research: scoped — {ONE_FUNCTION})"),
+        ({"research_scope_reason": "no usable footprint in the research",
+          "presize_scope": "scoped", "presize_scope_reason": ONE_FUNCTION,
+          "research_widened": "changes a shared engine: app.py:1"},
+         f"Scale: full — no usable footprint in the research (before research: scoped — {ONE_FUNCTION}; "
+         "widened after lean research: changes a shared engine: app.py:1)"),
+        ({"presize_scope": "full", "presize_scope_reason": "the sizer judged it unknown: cause not located"},
+         "Scale: full — adds new items: x (before research: full — the sizer judged it unknown: "
+         "cause not located)"),
+        ({"presize_scope": "full", "presize_scope_reason": "the sizer did not finish: CompletionTimeout: wall"},
+         "Scale: full — adds new items: x (before research: full — the sizer did not finish: "
+         "CompletionTimeout: wall)"),
+        ({}, "Scale: full — adds new items: x"),
+    ]
+    from refactory_dsh.design_ops import design_card
+
+    for extra, line in cases:
+        facts = {**base, **extra}
+        assert design_review_status(facts).splitlines()[1] == line
+        assert line in design_card(facts).split("\n\n")
+
+    # And on a run: the card the person approves shows both.
+    run, _model = _design_run(tmp_path, "Fix main in app.py.",
+                              [SCOPED_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER],
+                              sizer=[_sizing()], to_gate=True)
+    assert f"(before research: scoped — {ONE_FUNCTION})" in run.facts["design_card"]
+
+
+def test_full_refine_through_the_chain_stays_a_refine(opened_pull, tmp_path):
+    """refine_design=full passes the sizing chain: a scoped verdict leaves the refine's scale,
+    and the widening gate never widens it."""
+    from test_delivery import NAME
+
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["refine_design"]["value"] = "full"
+    mode.load_state_dict(state)
+    from tests_support import FakeModel
+
+    model = FakeModel([ENGINE_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER], sizer=[_sizing()])
+    run = mode.run(tmp_path / "refine", model=model,
+                   task={"name": NAME, "brief": "Add more.py that prints two.",
+                         "check": "python tool.py", "refine": opened_pull.url})
+    assert run.gate_stop == "gate_strategy", run.error
+    assert len(_asked(model, SIZER_MARK)) == 1
+    assert len(_asked(model, RESEARCH_DIRECTOR)) == 1
+    assert (run.facts["research_scope"], run.facts["research_scope_reason"]) == (
+        "scoped", REFINE_SCOPE_REASON)
+    assert "presize_scope" not in run.facts and "research_widenings_used" not in run.facts
+
+
+def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
+    from refactory_dsh.nn.validate import validate_state
+
+    sizing_nodes = ("clear_sizing", "fork_size", "size_change", "join_size", "presize_scale",
+                    "widen_research")
+
+    def without_sizer(state):
+        graph = state["graph"]
+        for node in sizing_nodes:
+            del graph["nodes"][node]
+        graph["edges"] = [edge for edge in graph["edges"]
+                          if edge["source"] not in sizing_nodes and edge["target"] not in sizing_nodes]
+        graph["edges"] += [
+            {"source": "route_refine_design", "target": "research_director", "condition": "proceed"},
+            {"source": "classify_scale", "target": "pitfalls_researcher", "condition": None}]
+        # The sizer's own knobs (its system prompt) go with it.
+        for knob in [knob for knob in state["knobs"] if knob.startswith("size_change__")]:
+            del state["knobs"][knob]
+        assert validate_state(state) == []
+
+    run, model = _design_run(tmp_path, "Fix main in app.py.",
+                             [RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan", DESIGN_DOC_ANSWER],
+                             sizer=[_sizing()], to_gate=True, state_edit=without_sizer)
+    assert _asked(model, SIZER_MARK) == []
+    [research] = _asked(model, RESEARCH_DIRECTOR)
+    assert "## Research scope\nfull\n" in research and "Sized before research" not in research
+    [strategy] = _asked(model, STRATEGY_DIRECTOR)
+    assert "Before research:" not in strategy and "A small, contained change" not in strategy
+    assert "After research: full — no usable footprint in the research\n" in strategy
+    assert "presize_scope" not in run.facts

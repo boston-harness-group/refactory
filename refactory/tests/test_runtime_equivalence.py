@@ -101,6 +101,12 @@ def _files(files: dict[str, str]) -> str:
 
 #: What each agent node answers, by node id, visit by visit (`parity_dsh.py`).
 SCRIPT: dict[str, list[Any]] = {
+    # The sizer sizes it scoped; the research then names no footprint, so the lean research
+    # is widened once (`widen_research`), and research_director answers again.
+    "size_change": [json.dumps([{"size": "scoped", "why": "one line: tool.py:1",
+                                 "footprint": {"existing_functions": ["tool.py:1 VERSION"],
+                                               "new_items": [], "shared_engine": []},
+                                 "cross_cutting": []}])],
     "research_director": [RESEARCH_ANSWER],
     "pitfalls_researcher": [{"text": PITFALLS_ANSWER, "files": {"pitfalls.md": "# Pitfalls\n\n(scripted)\n"}}],
     "strategy_director": [{"text": "perspectives", "files": {
@@ -713,6 +719,9 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
     assert any("prepare_check:" in line and "reloop" in line for line in visits), visits
     assert "delivery_gate: proceed" in visits, visits
     assert any(line.startswith("fork_qa branches:") for line in visits), visits
+    # Sized scoped before research, the lean research is widened once, then the run goes on.
+    assert any("widen_research:" in line and "reloop" in line for line in visits), visits
+    assert visits.count("research_director: completed") == 2, visits
     assert "NAME constant" in observed["artifacts"]["design.md"]
     [patch] = observed["commits"].values()
     assert "+VERSION = 2" in patch and "+NAME = 'tool'" in patch and "assert tool.VERSION == 2" in patch

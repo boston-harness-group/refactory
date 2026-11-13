@@ -322,21 +322,23 @@ def _design_answers(emit: list[str]) -> list[str]:
 
 def test_the_design_graph_is_a_different_shape_from_a_package_one():
     graph = DesignMode().graph()
+    # The sizing chain and the widening gate (clear_sizing, fork_size, join_size,
+    # presize_scale, size_change, widen_research) were added on purpose.
     assert sorted(graph.nodes) == [
         "apply_corrections", "audit_corrections", "check", "check_design_claims",
-        "classify_reloop", "classify_scale", "code_reviewer", "deliver",
+        "classify_reloop", "classify_scale", "clear_sizing", "code_reviewer", "deliver",
         "delivery_gate", "design_doc", "done",
-        "early_asks_check", "emit", "fork_qa",
+        "early_asks_check", "emit", "fork_qa", "fork_size",
         "gate_check", "gate_design_review", "gate_overwatch",
         "gate_pitfalls", "gate_qa", "gate_research", "gate_strategy",
-        "health_checker", "join_qa",
+        "health_checker", "join_qa", "join_size",
         "materialise", "overwatch", "pick_corrections", "pitfalls_researcher",
-        "prepare", "prepare_check", "qa_director", "qa_director_rerun",
+        "prepare", "prepare_check", "presize_scale", "qa_director", "qa_director_rerun",
         "qa_judge", "record_findings",
         "report", "rerun_probes", "research_director", "route_refine_design",
         "route_strategy",
-        "scope_reloop", "strategy_director", "synthesize_qa",
-        "synthesize_strategy", "verifier",
+        "scope_reloop", "size_change", "strategy_director", "synthesize_qa",
+        "synthesize_strategy", "verifier", "widen_research",
     ], "the graph is design-v2's phases, not v1's"
     assert graph.nodes["check"].call.endswith("check_beside_reviews")
     assert "register" not in graph.nodes, "an artifact is not a package"

@@ -53,7 +53,8 @@ describe('graph shape invariants', () => {
 
 describe('designGraphRefineLightRelooped', () => {
   const shape = designGraphRefineLightRelooped
-  const research = ['research_director', 'record_findings', 'gate_research', 'classify_scale',
+  const research = ['clear_sizing', 'fork_size', 'size_change', 'join_size', 'presize_scale',
+    'research_director', 'record_findings', 'gate_research', 'classify_scale', 'widen_research',
     'pitfalls_researcher', 'gate_pitfalls', 'route_strategy', 'strategy_director']
 
   seededOrders(shape, 42, 20).forEach((result, i) => {
