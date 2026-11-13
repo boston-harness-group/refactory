@@ -620,7 +620,10 @@ call that failed. A resumed
 run appends to the file; a fresh run in the same directory starts it over, as it does
 the journal. A trace line that cannot be written (a full disk) is a warning; the
 proposals are kept. The other library optimizers call no model; SkillOpt records its own
-calls in `skillopt_trace.jsonl`.
+calls in `skillopt_trace.jsonl`, one line per attempt (`attempt`, from 1): as SkillOpt
+does, a failed optimizer call is tried up to 3 times, waiting 1, 2 and 4 s after each
+failure, before its fallback; a spent budget, a cancellation or a missing model choice
+is never retried.
 
 ### Run-wide feedback: changes by kind, lessons, added-step reviews
 

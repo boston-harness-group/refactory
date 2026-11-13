@@ -168,7 +168,10 @@ class _Recording:
 #: (reflect.py:359, :456; aggregate.py:50, :248; clip.py:77;
 #: slow_update.py:431; meta_skill.py:67).
 SOLVER_ATTEMPTS = 5
-OPTIMIZER_ATTEMPTS = 3
+#: B makes an optimizer call's attempts itself (``trace.ask``, ``retries=3`` as
+#: ``trace.OPTIMIZER_ATTEMPTS``), one ``complete`` each, so each of B's attempts
+#: replays one of A's.
+OPTIMIZER_ATTEMPTS_PER_COMPLETE = 1
 
 
 class CallMatcher:
@@ -304,9 +307,13 @@ class CallMatcher:
                 break
         self._counters[key] = idx
         self.failed_attempts_replayed += len(failed)
+        cli_error = f"Claude CLI exited with code {failed[-1].rc}"
+        if attempts == 1:
+            # One of B's own attempts (trace.ask retries): SkillOpt reports a
+            # single attempt's failure as the CLI error alone.
+            raise ReplayedCallFailure(cli_error)
         raise ReplayedCallFailure(
-            f"Claude backend failed after {attempts or len(failed)} retries: "
-            f"Claude CLI exited with code {failed[-1].rc}"
+            f"Claude backend failed after {attempts or len(failed)} retries: {cli_error}"
         )
 
     def consumed_count(self) -> int:
@@ -662,7 +669,7 @@ class ReplayClient:
             # framing taken off, so take it off B's prompt the same way.
             prompt = normalize_recorded_prompt(prompt)
         idx = self.matcher.consumed_for(system, prompt)
-        attempts = OPTIMIZER_ATTEMPTS if call_key else SOLVER_ATTEMPTS
+        attempts = OPTIMIZER_ATTEMPTS_PER_COMPLETE if call_key else SOLVER_ATTEMPTS
         entry = {
             "key": (system[:80], prompt[:80]),
             "index": idx,
