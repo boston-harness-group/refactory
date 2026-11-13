@@ -603,21 +603,29 @@ def shared_change(found: Worktree) -> str | None:
     current = _shared_record(target, snapshot)
     if record.get("shared") is None:
         return None
+    # A record from before the checkout's config.worktree and included files were read
+    # is compared without them once, and they become its baseline: a live run is not
+    # failed on upgrade for a file that was there all along.
+    compared = current if record.get("shared_reads") == SHARED_READS else {
+        **current, "shared": _shared_digest({**snapshot, "worktree_lines": [], "included": {}}),
+        "shared_config": {key: value for key, value in current["shared_config"].items()
+                          if not key.startswith(_READ_LATER)}}
     if "shared_config" not in record or "shared_hooks" not in record or "branches" not in record:
         # A record from before the detail: only its digest of every line can be compared.
         _write_json(record_path, {**record, **current})
-        return None if record["shared"] == current["shared"] else ""
+        return None if record["shared"] == compared["shared"] else ""
     # Every branch ever seen stays known, so deleting a branch and making it again with
     # an upstream is not mistaken for branch creation.
     current["branches"] = sorted(set(record["branches"]) | set(current["branches"]))
-    changes = _shared_changes(record, current)
+    compared["branches"] = current["branches"]
+    changes = _shared_changes(record, compared)
     kept = [change for change in changes
             if not _new_tracking(change, record, snapshot["config_lines"], found.branch)]
-    if changes or record["branches"] != current["branches"]:
+    if changes or record["branches"] != current["branches"] or compared is not current:
         _write_json(record_path, {**record, **current})
     if kept:
         return "; ".join(f"{label} {name} {kind}" for label, name, kind in kept)
-    if not changes and record["shared"] != current["shared"]:
+    if not changes and record["shared"] != compared["shared"]:
         _write_json(record_path, {**record, **current})
         return ""
     return None
@@ -1251,8 +1259,8 @@ def _shared_snapshot(target: Path) -> dict:
     ]
     worktree_lines = _config_lines(target, own / "config.worktree")
     included: dict[str, str] = {}
-    _includes(target, common / "config", config_lines, included)
-    _includes(target, own / "config.worktree", worktree_lines, included)
+    _includes(target, common / "config", included)
+    _includes(target, own / "config.worktree", included)
     hook_files: dict[str, str] = {}
     hooks_dir = common / "hooks"
     if hooks_dir.is_dir():
@@ -1270,16 +1278,28 @@ def _config_lines(target: Path, file: Path) -> list[str]:
     return git(target, "config", "--file", str(file), "--no-includes", "--list").splitlines()
 
 
-def _includes(target: Path, file: Path, lines: list[str], found: dict[str, str]) -> None:
-    """Add to ``found`` a hash of each file ``lines`` (read from ``file``) include, recursively.
+#: What a record whose ``shared_reads`` is ``SHARED_READS`` was taken with; the keys
+#: ``_READ_LATER`` names were not read before it.
+SHARED_READS = ["config", "hooks", "config.worktree", "includes"]
+_READ_LATER = ("worktree:", "include:")
+
+
+def _includes(target: Path, file: Path, found: dict[str, str]) -> None:
+    """Add to ``found`` a hash of each file ``file`` includes, recursively.
 
     A path is resolved as git resolves it: ``~/`` from HOME, a relative one from the
-    including file's directory. A file that is not there is recorded as missing, so
-    creating it is a change too. A file already in ``found`` is not read again, so a
-    cycle ends.
+    including file's directory (``%(prefix)/`` is not expanded and reads as missing).
+    A file that is not there is recorded as missing, so creating it is a change too. A
+    file already in ``found`` is not read again, so a cycle ends. An ``includeIf`` file
+    git does not read here may be unreadable or not config at all: it is recorded as
+    such, or by its bytes, and not followed further.
     """
-    for line in lines:
-        key, _, value = line.partition("=")
+    if not file.is_file():
+        return
+    listing = git(target, "config", "--file", str(file), "--no-includes", "--list", "-z")
+    for entry in listing.split("\0"):
+        # -z puts a newline between key and value: an includeIf condition may hold "=".
+        key, _, value = entry.partition("\n")
         if not (key.startswith(("include.", "includeif.")) and key.endswith(".path")) or not value:
             continue
         path = Path(os.path.expanduser(value)) if value.startswith("~") else Path(value)
@@ -1287,9 +1307,18 @@ def _includes(target: Path, file: Path, lines: list[str], found: dict[str, str])
         name = str(path)
         if name in found:
             continue
-        found[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
-        if path.is_file():
-            _includes(target, path, _config_lines(target, path), found)
+        if not path.is_file():
+            found[name] = "missing"
+            continue
+        try:
+            found[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            found[name] = "unreadable"
+            continue
+        try:
+            _includes(target, path, found)
+        except ValueError:
+            continue
 
 
 def _shared_digest(snapshot: dict) -> str:
@@ -1373,7 +1402,8 @@ def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
     return {"shared": _shared_digest(snapshot),
             "shared_config": config,
             "shared_hooks": dict(snapshot["hook_files"]),
-            "branches": sorted(branches)}
+            "branches": sorted(branches),
+            "shared_reads": SHARED_READS}
 
 
 def _shared_changes(before: dict, after: dict) -> list[tuple[str, str, str]]:

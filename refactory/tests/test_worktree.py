@@ -1928,8 +1928,9 @@ def test_includes_are_followed_relative_conditional_nested_and_from_worktree_con
 def test_an_include_cycle_ends(repo, tmp_path):
     (tmp_path / "a.inc").write_text(f"[include]\n\tpath = {tmp_path / 'b.inc'}\n")
     (tmp_path / "b.inc").write_text(f"[include]\n\tpath = {tmp_path / 'a.inc'}\n")
+    (tmp_path / "x.inc").write_text(f"[include]\n\tpath = {tmp_path / 'a.inc'}\n")
     found: dict[str, str] = {}
-    worktree._includes(repo, tmp_path / "x", [f"include.path={tmp_path / 'a.inc'}"], found)
+    worktree._includes(repo, tmp_path / "x.inc", found)
     assert set(found) == {str(tmp_path / "a.inc"), str(tmp_path / "b.inc")}
 
 
@@ -1956,3 +1957,64 @@ def test_an_old_record_still_sees_a_worktree_config_change(repo, tmp_path):
                                        if key not in ("shared_config", "shared_hooks")}))
     git(repo, "config", "--worktree", "core.hooksPath", "/evil")
     assert worktree.shared_change(found) == ""
+
+
+def test_a_record_from_644_takes_worktree_config_and_includes_as_its_baseline(repo, tmp_path):
+    """A live run's record from before they were read is not failed on upgrade, only after."""
+    (tmp_path / "extra.gitconfig").write_text("[alias]\n\tci = commit\n")
+    git(repo, "config", "include.path", str(tmp_path / "extra.gitconfig"))
+    found = worktree.create(repo, "HEAD", "upg0000aaaa", _run(tmp_path))
+    git(repo, "config", "--worktree", "core.sparseCheckout", "true")  # as `sparse-checkout init`
+    record_path = worktree._record_path(found)
+    snapshot = worktree._shared_snapshot(repo)
+    legacy = worktree._shared_digest({**snapshot, "worktree_lines": [], "included": {}})
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({
+        **{key: value for key, value in record.items() if key != "shared_reads"},
+        "shared": legacy,
+        "shared_config": {key: value for key, value in record["shared_config"].items()
+                          if not key.startswith(("worktree:", "include:"))}}))
+    assert worktree.shared_change(found) is None
+    (tmp_path / "extra.gitconfig").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'extra.gitconfig'} changed"
+
+
+def test_a_digest_only_record_takes_worktree_config_as_its_baseline(repo, tmp_path):
+    found = worktree.create(repo, "HEAD", "upg1111bbbb", _run(tmp_path))
+    git(repo, "config", "--worktree", "core.sparseCheckout", "true")
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items()
+                                       if key not in ("shared_config", "shared_hooks", "shared_reads")}))
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "--worktree", "core.hooksPath", "/evil")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+
+
+def test_an_include_whose_condition_holds_an_equals_sign_is_followed(repo, tmp_path):
+    (tmp_path / "eq.inc").write_text("[alias]\n\tst = status\n")
+    git(repo, "config", "includeIf.onbranch:a=b.path", str(tmp_path / "eq.inc"))
+    found = worktree.create(repo, "HEAD", "inc3333dddd", _run(tmp_path))
+    (tmp_path / "eq.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'eq.inc'} changed"
+
+
+def test_an_include_git_does_not_read_here_may_be_unparsable(repo, tmp_path):
+    """An includeIf for another checkout is never opened by git, so it need not be config."""
+    (tmp_path / "other.inc").write_text("not [ config\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "other.inc"))
+    found = worktree.create(repo, "HEAD", "inc4444eeee", _run(tmp_path))
+    assert worktree.shared_change(found) is None
+    (tmp_path / "other.inc").write_text("still not [ config\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'other.inc'} changed"
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads any file")
+def test_an_include_git_does_not_read_here_may_be_unreadable(repo, tmp_path):
+    (tmp_path / "locked.inc").write_text("[alias]\n\tst = status\n")
+    (tmp_path / "locked.inc").chmod(0)
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "locked.inc"))
+    try:
+        assert worktree._shared_snapshot(repo)["included"] == {str(tmp_path / "locked.inc"): "unreadable"}
+    finally:
+        (tmp_path / "locked.inc").chmod(0o600)

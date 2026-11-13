@@ -822,11 +822,18 @@ by hook isolation) makes live, and an edit inside a file the config already
 - a hash of every file an `include.path` or `includeIf.<cond>.path` in either
   file names, followed recursively and whatever the condition, named
   `include:<path>`. Paths resolve as git resolves them (`~/` from HOME, relative
-  from the including file). A missing file is recorded as missing, so creating it
-  counts.
+  from the including file; `%(prefix)/` is not expanded). A missing file is
+  recorded as missing, so creating it counts. Include keys are read with
+  `--list -z`, since an `includeIf` condition may hold `=`. An `includeIf` file
+  git never opens for this checkout may be unreadable or not config; it is
+  recorded as such, or by its bytes, rather than failing the guard.
 
 Both feed the all-lines digest only when present, so a target with neither keeps
-the digest it had and live runs are not failed on upgrade. Held by
+the digest it had. A record now says what it read (`shared_reads`). A record
+without that, from a run live at upgrade, is compared once without the new keys,
+which then become its baseline: a sparse checkout's `config.worktree` or an
+existing include does not fail the run, though a change to them in that one step
+goes unseen. Held by
 `test_worktree.py` (`test_the_checkout_s_worktree_config_is_shared_state`,
 `test_a_worktree_config_written_before_the_extension_is_on_is_seen`,
 `test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config`,
@@ -834,7 +841,12 @@ the digest it had and live runs are not failed on upgrade. Held by
 `test_includes_are_followed_relative_conditional_nested_and_from_worktree_config`,
 `test_an_include_cycle_ends`,
 `test_ordinary_work_with_includes_and_worktree_config_is_not_a_change`,
-`test_an_old_record_still_sees_a_worktree_config_change`).
+`test_an_old_record_still_sees_a_worktree_config_change`,
+`test_a_record_from_644_takes_worktree_config_and_includes_as_its_baseline`,
+`test_a_digest_only_record_takes_worktree_config_as_its_baseline`,
+`test_an_include_whose_condition_holds_an_equals_sign_is_followed`,
+`test_an_include_git_does_not_read_here_may_be_unparsable`,
+`test_an_include_git_does_not_read_here_may_be_unreadable`).
 
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
