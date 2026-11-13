@@ -794,14 +794,19 @@ prompt names no dataset, task or answer format.
   `off`, a verdict that names no category, a failed call, a malformed or salvaged
   reply: a failure is recorded as a judge error and shown as such.
 - **A quote backstop on `inherited`.** The judge's own label is all that keeps an
-  `inherited` finding from vetoing, so it is checked: when any of the finding's evidence
-  quotes is in the candidate's content but not in its parent's (this change added that
-  text), the finding counts as `new` whatever the judge said, and vetoes if its category
-  is `veto`. The match is a plain substring match after folding case, collapsing
-  whitespace and dropping diff markers at line starts (`optim.integrity.backstop`); the
-  record keeps the judge's label as `judged_source` and the quote as `added_quote`. It
-  changes nothing for a `warn` or `off` category, a judge error or a salvaged reply,
-  and an offline replay applies it the same way.
+  `inherited` finding from vetoing, so it is checked, conservatively, since a wrong
+  flip vetoes a sound change. The finding counts as `new` whatever the judge said only
+  when all of these hold: every one of its evidence quotes found in the candidate is
+  in none of the parent's fields (a finding that also quotes text the parent had stays
+  `inherited`); quotes are matched within one field (a setting's value, a step's
+  field), never across two; at least one of them has a word of four letters or more
+  that is nowhere in the parent, so a change that only deletes or reorders text never
+  counts; and the parent's state is known. Matching folds case, collapses whitespace
+  and drops diff markers at line starts (`optim.integrity.backstop`). A flipped
+  finding vetoes if its category is `veto`; the record keeps the judge's label as
+  `judged_source` and the quote as `added_quote`. It changes nothing for a `warn` or
+  `off` category, a judge error or a salvaged reply, and an offline replay applies it
+  the same way.
 - **Anything that slipped past once is never vetoed later.** A change that got through
   is kept in every candidate built on it, and later proposals are never vetoed for it:
   the judge only vetoes what a proposal itself adds. It is only reported, by the final

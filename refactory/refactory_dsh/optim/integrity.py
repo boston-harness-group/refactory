@@ -754,10 +754,15 @@ def _flat(text: str) -> str:
     return " ".join(" ".join(lines).split()).casefold()
 
 
-def _content(state: Mapping[str, Any] | None) -> str:
-    """Every text of a pipeline state a quote could be taken from, flattened: each
-    string or other value in it and its JSON."""
-    leaves: list[str] = []
+#: A word the backstop counts: four letters or more (digits and punctuation apart).
+_WORD = re.compile(r"[^\W\d_]{4,}")
+
+
+def _fields(state: Mapping[str, Any]) -> list[str]:
+    """Each text of a pipeline state a quote could be taken from, one per field (a
+    string, or any other value as JSON), flattened (`_flat`): a quote is matched
+    within one field, never across two."""
+    fields: list[str] = []
 
     def walk(value: Any) -> None:
         if isinstance(value, Mapping):
@@ -767,33 +772,46 @@ def _content(state: Mapping[str, Any] | None) -> str:
             for item in value:
                 walk(item)
         elif value is not None:
-            leaves.append(value if isinstance(value, str) else json.dumps(value, default=str))
+            fields.append(_flat(value if isinstance(value, str)
+                                else json.dumps(value, default=str)))
 
     walk(state)
-    return _flat("\n".join(leaves) + "\n" + _dumped(state))
+    return fields
 
 
 def added_quote(evidence: Sequence[Any] | None, parent_state: Mapping[str, Any] | None,
                 state: Mapping[str, Any] | None) -> str | None:
-    """The first evidence quote this change added: found in the candidate's content
-    (``state``) but not in its parent's (`_flat`, so case, spacing and diff markers do
-    not matter; a quote shortened in the middle is matched side by side); ``None``
-    when every quote is absent from the candidate or was already in the parent."""
-    after, before = _content(state), _content(parent_state)
+    """A quote of the finding that shows the finding is about text this change added,
+    or ``None``. Deliberately conservative, since a wrong answer vetoes a sound change:
+    every quote found in one of the candidate's fields (`_fields`: case, spacing and
+    diff markers do not matter; a quote shortened in the middle is matched side by
+    side) must be in none of the parent's, and one of them must hold a word of four
+    letters or more that is nowhere in the parent. So a finding that also quotes text
+    the parent had, text only deletion or reordering made (a new join of old words),
+    and a parent whose state is unknown never count."""
+    if not isinstance(parent_state, Mapping) or not isinstance(state, Mapping):
+        return None
+    after, before = _fields(state), _fields(parent_state)
+    known = {word for field in before for word in _WORD.findall(field)}
+    added, new_word = None, False
     for quote in evidence or ():
         for part in _OMITTED.split(str(quote)):
             flat = _flat(part)
-            if flat and flat in after and flat not in before:
-                return str(quote)
-    return None
+            if not flat or not any(flat in field for field in after):
+                continue  # not the candidate's text (the rationale, a diff header)
+            if any(flat in field for field in before):
+                return None  # the finding is also about text the parent had
+            added = added or str(quote)
+            new_word = new_word or any(word not in known for word in _WORD.findall(flat))
+    return added if new_word else None
 
 
 def backstop(verdict: Mapping[str, Any], policy: Mapping[str, str],
              parent_state: Mapping[str, Any] | None,
              state: Mapping[str, Any] | None) -> dict[str, Any]:
     """The quote backstop on the judge's ``source``: a finding it labelled
-    ``inherited`` that would veto as ``new`` (`vetoes`), and one of whose quotes this
-    change added (`added_quote`), is ``new`` whatever the judge said, with the judge's
+    ``inherited`` that would veto as ``new`` (`vetoes`), and whose quotes show it is
+    about text this change added (`added_quote`), is ``new`` whatever the judge said, with the judge's
     label kept as ``judged_source`` and the quote as ``added_quote``. Any other
     verdict is returned as it is, so a warn or off category, a judge error and a
     salvaged reply are untouched."""
@@ -1162,7 +1180,7 @@ def proposals_from_run(run_dir: Path) -> list[dict[str, Any]]:
                 "allowances": dict(policy.get("allowances") or {}),
                 "live": {name: record.get(name) for name in
                          ("verdict", "categories", "evidence", "reason", "property", "source",
-                          "salvaged", "vetoed", "error")},
+                          "judged_source", "added_quote", "salvaged", "vetoed", "error")},
             })
         return out
     declared = _task_declaration(seed_state)
